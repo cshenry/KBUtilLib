@@ -1,0 +1,50 @@
+# KBUtilLib Configuration File
+# This file demonstrates the configuration format expected by SharedEnvironment
+
+# KBase Configuration
+kbase:
+  url: "https://kbase.us/services"
+  auth_token: "" # Set via environment variable KB_AUTH_TOKEN
+
+# Service URLs
+urls:
+  kbase_api: "https://kbase.us/services"
+  narrative: "https://narrative.kbase.us"
+  search: "https://search.kbase.us"
+
+# SDK Configuration
+sdk:
+  module_dir: "/kb/module"
+  callback_url: "" # Set via environment variable SDK_CALLBACK_URL
+
+# Workspace Configuration
+workspace-url: "https://kbase.us/services/ws"
+max_retry: 3
+scratch: "/tmp"
+
+# Mass Spectrometry Settings
+ms:
+  default_ppm_tolerance: 10.0
+  default_da_tolerance: 0.01
+
+# Notebook Settings
+notebook:
+  auto_display: true
+  max_display_rows: 100
+  max_display_cols: 20
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Model Analysis Settings
+modeling:
+  default_objective: "bio1"
+  fba_timeout: 300
+
+# File Paths
+paths:
+  data_dir: "./data"
+  output_dir: "./output"
+  cache_dir: "./cache"

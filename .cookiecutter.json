@@ -1,0 +1,19 @@
+{
+  "_checkout": null,
+  "_output_dir": "/Users/chenry/acode/KBUtilLib",
+  "_repo_dir": ".",
+  "_template": ".",
+  "author": "Christopher Henry",
+  "copyright_year": "2025",
+  "development_status": "Development Status :: 2 - Pre-Alpha",
+  "email": "chenry@anl.gov",
+  "friendly_name": "KBUtilLib",
+  "github_user": "cshenry",
+  "license": "MIT",
+  "package_name": "kbutillib",
+  "project_name": "KBUtilLib",
+  "use_docker": "true",
+  "use_fastapi": "false",
+  "use_notebooks": "false",
+  "version": "0.0.0"
+}

@@ -1,6 +1,9 @@
 """Notebook utility functions for Jupyter environments and interactive development."""
 
-from typing import Any, Dict, Optional
+import json
+import os
+from genericpath import exists
+from typing import Any, Optional
 
 from .base_utils import BaseUtils
 
@@ -19,7 +22,6 @@ class NotebookUtils(BaseUtils):
             **kwargs: Additional keyword arguments passed to BaseUtil
         """
         super().__init__(**kwargs)
-
         self.notebook_folder = notebook_folder
         self.data_dir = os.path.join(notebook_folder, "data")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -88,7 +90,7 @@ class NotebookUtils(BaseUtils):
         except ImportError:
             print(df)
 
-    def display_json(self, data: Dict[str, Any], indent: int = 2) -> None:
+    def display_json(self, data: dict[str, Any], indent: int = 2) -> None:
         """Display JSON data with proper formatting in notebook.
 
         Args:
@@ -223,11 +225,13 @@ class NotebookUtils(BaseUtils):
         with open(filename, "w") as f:
             json.dump(data, f, indent=4, skipkeys=True)
 
-    def load(self, name: str, default: Any = None, kb_type: str = None) -> Any:
+    def load(
+        self, name: str, default: Any = None, kb_type: Optional[str] = None
+    ) -> Any:
         """Load data from a JSON file in the notebook data directory."""
         filename = self.datacache_dir + "/" + name + ".json"
         if not exists(filename):
-            if default == None:
+            if default is None:
                 self.log_error(
                     "Requested data " + name + " doesn't exist at " + filename
                 )
@@ -239,7 +243,7 @@ class NotebookUtils(BaseUtils):
             return default
         with open(filename) as f:
             data = json.load(f)
-        if kb_type != None:
+        if kb_type is not None:
             data = self.kb_object_factory._build_object(kb_type, data, None, None)
         return data
 

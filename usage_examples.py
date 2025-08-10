@@ -12,13 +12,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from kbutillib import (
-    KBaseAPI,
     KBGenomeUtils,
-    KBModelUtil,
+    KBModelUtils,
     KBSDKUtils,
-    MSBiochemUtil,
-    MSUtils,
-    SharedEnvironment,
+    MSBiochemUtils,
+    SharedEnvUtils,
 )
 from kbutillib.examples import (
     FullUtilityStack,
@@ -33,19 +31,20 @@ def example_basic_usage():
     print("\n=== Example 1: Basic Individual Module Usage ===")
 
     # Initialize shared environment
-    env = SharedEnvironment(config_file="config.yaml")
-    print(f"Loaded configuration with {len(env._config)} settings")
+    env = SharedEnvUtils(config_file="config.yaml")
+    print(f"Loaded configuration with {len(env._config_hash)} settings")
 
     # Use individual utilities
     genome_utils = KBGenomeUtils()
-    ms_utils = MSUtils()
+    biochem_utils = MSBiochemUtils()
 
-    # Example with MS utilities
-    test_spectrum = [(100.0, 1000), (101.0, 500), (200.0, 800)]
-    peaks = ms_utils.find_peaks(
-        [m for m, i in test_spectrum], [i for m, i in test_spectrum]
-    )
-    print(f"Found {len(peaks)} peaks in test spectrum")
+    # Example with biochemistry utilities
+    try:
+        glucose_results = biochem_utils.search_compounds("glucose", max_results=3)
+        print(f"Found {len(glucose_results)} glucose compounds")
+    except Exception as e:
+        print(f"Biochemistry search example failed: {e}")
+        print("This is normal if modelseedpy is not installed")
 
     # Example with genome utilities
     test_sequence = "ATGAAAGCCTAG"
@@ -74,40 +73,32 @@ def example_custom_composition():
     print("\n=== Example 3: Custom Utility Composition ===")
 
     # Create a custom combination using multiple inheritance
-    class MyAnalysisTools(KBaseAPI, MSUtils, SharedEnvironment):
+    class MyAnalysisTools(MSBiochemUtils, SharedEnvUtils):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.log_info("Custom analysis tools initialized")
 
-        def combined_analysis(self, mass_data, kbase_data):
+        def combined_analysis(self, compound_query):
             """Custom method combining multiple utilities."""
-            # Use MS utilities
-            if mass_data:
-                peaks = self.find_peaks(mass_data["mz"], mass_data["intensity"])
-                self.log_info(f"Processed {len(peaks)} peaks")
-
-            # Use KBase utilities
-            if kbase_data and self.auth_token:
+            # Use biochemistry utilities
+            if compound_query:
                 try:
-                    # This would work if we had valid auth token
-                    # status = self.get_service_status('ws')
-                    self.log_info("Would check KBase service status")
-                except:
-                    self.log_info("KBase API call would happen here")
-
-            return {"peaks_found": len(peaks) if mass_data else 0}
+                    results = self.search_compounds(compound_query, max_results=5)
+                    self.log_info(
+                        f"Found {len(results)} compounds for '{compound_query}'"
+                    )
+                    return results
+                except Exception as e:
+                    self.log_error(f"Compound search failed: {e}")
+                    return []
+            return []
 
     # Use the custom class
     custom_tools = MyAnalysisTools(config_file="config.yaml")
 
-    # Example data
-    test_ms_data = {
-        "mz": [100.0, 101.0, 102.0, 200.0, 201.0],
-        "intensity": [1000, 800, 200, 1500, 400],
-    }
-
-    result = custom_tools.combined_analysis(test_ms_data, {})
-    print(f"Custom analysis result: {result}")
+    # Example compound query
+    results = custom_tools.combined_analysis("glucose")
+    print(f"Custom analysis result: {results}")
 
 
 def example_environment_management():
@@ -115,14 +106,14 @@ def example_environment_management():
     print("\n=== Example 4: Environment Management ===")
 
     # Create shared environment
-    env = SharedEnvironment()
+    env = SharedEnvUtils()
 
-    # Set some secrets
-    env.set_secret("my_api_key", "secret_value_here")
-    env.set_secret("database_password", "another_secret")
+    # Set some tokens
+    env.set_token("my_api_key", "secret_value_here")
+    env.set_token("database_password", "another_secret")
 
     # Try to get auth tokens (will return None without real tokens)
-    kbase_token = env.get_auth_token("kbase")
+    kbase_token = env.get_token("kbase")
     print(f"KBase token available: {kbase_token is not None}")
 
     # Export environment state (without exposing secrets)
@@ -186,45 +177,34 @@ def example_genome_analysis():
     print(f"GC content: {gc_content:.3f}")
 
 
-def example_ms_analysis():
-    """Example 6: Mass spectrometry analysis workflows."""
-    print("\n=== Example 6: Mass Spectrometry Analysis ===")
+def example_biochemistry_analysis():
+    """Example 6: Biochemistry database analysis workflows."""
+    print("\n=== Example 6: Biochemistry Database Analysis ===")
 
-    ms_utils = MSUtils()
+    try:
+        biochem_utils = MSBiochemUtils()
 
-    # Example spectrum data
-    mz_values = [100.0, 100.5, 101.0, 101.5, 150.0, 200.0, 200.5, 201.0]
-    intensities = [1000, 200, 800, 150, 300, 1500, 400, 600]
+        # Search for compounds
+        glucose_results = biochem_utils.search_compounds("glucose", max_results=3)
+        print(f"Found {len(glucose_results)} glucose compounds")
 
-    # Find peaks
-    peaks = ms_utils.find_peaks(mz_values, intensities)
-    print(f"Found {len(peaks)} peaks")
+        for result in glucose_results[:3]:  # Show top 3 results
+            print(
+                f"  - {result['compound_id']}: {result['name']} ({result['formula']})"
+            )
 
-    # Normalize spectrum
-    normalized = ms_utils.normalize_spectrum(intensities, method="max")
-    print(f"Normalized intensities (first 3): {normalized[:3]}")
-
-    # Calculate molecular formula mass
-    mass = ms_utils.calculate_molecular_formula_mass("C6H12O6")  # Glucose
-    print(f"Glucose molecular mass: {mass:.6f} Da")
-
-    # Predict adducts
-    adducts = ms_utils.predict_adducts(mass, "positive")
-    print(f"Predicted adducts: {list(adducts.keys())[:3]}")
-
-    # Check mass match
-    observed_mass = 181.070
-    theoretical_mass = 181.071
-    is_match = ms_utils.is_mass_match(observed_mass, theoretical_mass, tolerance_ppm=10)
-    ppm_error = ms_utils.calculate_ppm_error(observed_mass, theoretical_mass)
-    print(f"Mass match (10 ppm): {is_match}, Error: {ppm_error:.2f} ppm")
+    except Exception as e:
+        print(f"Biochemistry analysis example failed: {e}")
+        print(
+            "This is normal if modelseedpy is not installed or database not available"
+        )
 
 
 def example_model_analysis():
     """Example 7: Metabolic model analysis."""
     print("\n=== Example 7: Metabolic Model Analysis ===")
 
-    model_utils = KBModelUtil()
+    model_utils = KBModelUtils()
 
     # Example model data (simplified structure)
     example_model = {
@@ -292,7 +272,7 @@ def example_biochem_database():
 
     try:
         # Initialize biochemistry utilities
-        biochem_utils = MSBiochemUtil(auto_download=True)
+        biochem_utils = MSBiochemUtils()
 
         # Search for compounds by name
         glucose_results = biochem_utils.search_compounds("glucose", max_results=5)
@@ -423,7 +403,7 @@ def main():
         example_custom_composition()
         example_environment_management()
         example_genome_analysis()
-        example_ms_analysis()
+        example_biochemistry_analysis()
         example_biochem_database()
         example_model_analysis()
         example_sdk_utilities()

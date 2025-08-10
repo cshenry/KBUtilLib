@@ -1,7 +1,14 @@
 """Implementation of KBase Annotation Ontology API within these utilities, which enables its use outside the SDK"""
 
-# from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from .kb_ws_utils import *
+import hashlib
+import json
+import os
+import re
+from typing import Any
+
+import pandas as pd
+
+from .kb_ws_utils import KBWSUtils
 
 source_hash = {"MetaCyc": "META", "KEGG": "RO", "BiGG": "BIGG", "Rhea": "RHEA"}
 
@@ -61,7 +68,7 @@ class KBAnnotationUtils(KBWSUtils):
         self.ontologies_present = {}
         # Loading filtered reactions
         self.filtered_rxn = {}
-        filename = self.annoontology_dir + "/data/FilteredReactions.csv"
+        filename = self.annoontology_dir / "data/FilteredReactions.csv"
         filtered_reaction_df = pd.read_csv(filename, sep="\t")
         for index, row in filtered_reaction_df.iterrows():
             self.filtered_rxn[row["id"]] = row["reason"]
@@ -103,13 +110,13 @@ class KBAnnotationUtils(KBWSUtils):
 
     def get_alias_hash(self, namespace):
         if "MSRXN" not in self.alias_hash:
-            filename = self.annoontology_dir + "/data/msrxn_hash.json"
+            filename = self.annoontology_dir / "data/msrxn_hash.json"
             with open(filename) as json_file:
                 self.alias_hash["MSRXN"] = json.load(json_file)
         if namespace not in self.alias_hash:
             self.alias_hash[namespace] = {}
             if namespace == "EC":
-                filename = self.annoontology_dir + "/data/EC_translation.tsv"
+                filename = self.annoontology_dir / "data/EC_translation.tsv"
                 data = ""
                 with open(filename) as file:
                     data = file.read()
@@ -130,9 +137,7 @@ class KBAnnotationUtils(KBWSUtils):
                 or namespace == "BIGG"
                 or namespace == "RHEA"
             ):
-                filename = (
-                    self.annoontology_dir + "/data/ModelSEED_Reaction_Aliases.txt"
-                )
+                filename = self.annoontology_dir / "data/ModelSEED_Reaction_Aliases.txt"
                 data = ""
                 with open(filename) as file:
                     data = file.read()
@@ -155,7 +160,7 @@ class KBAnnotationUtils(KBWSUtils):
                                 modelseed
                             )
             elif namespace == "KO":
-                filename = self.annoontology_dir + "/data/kegg_95_0_ko_seed.tsv"
+                filename = self.annoontology_dir / "data/kegg_95_0_ko_seed.tsv"
                 data = ""
                 with open(filename) as file:
                     data = file.read()
@@ -179,7 +184,7 @@ class KBAnnotationUtils(KBWSUtils):
                             id_hash[modelseed] = 1
             elif namespace == "SSO":
                 sso_template = dict()
-                filename = self.annoontology_dir + "/data/SSO_reactions.json"
+                filename = self.annoontology_dir / "data/SSO_reactions.json"
                 with open(filename) as json_file:
                     sso_template = json.load(json_file)
                 for sso in sso_template:
@@ -195,7 +200,7 @@ class KBAnnotationUtils(KBWSUtils):
                         id_hash[modelseed] = 1
             elif namespace == "GO":
                 go_translation = dict()
-                filename = self.annoontology_dir + "/data/GO_ontology_translation.json"
+                filename = self.annoontology_dir / "data/GO_ontology_translation.json"
                 with open(filename) as json_file:
                     go_translation = json.load(json_file)
                 for term in go_translation["translation"]:
@@ -861,7 +866,7 @@ class KBAnnotationUtils(KBWSUtils):
         if "SEED_ROLE" not in self.alias_hash:
             self.alias_hash["SEED_ROLE"] = {}
             sso_ontology = dict()
-            with open(self.annoontology_dir + "/data/SSO_dictionary.json") as json_file:
+            with open(self.annoontology_dir / "data/SSO_dictionary.json") as json_file:
                 sso_ontology = json.load(json_file)
             for term in sso_ontology["term_hash"]:
                 name = self.convert_role_to_searchrole(
@@ -892,7 +897,7 @@ class KBAnnotationUtils(KBWSUtils):
                 "PTHR",
             ]:
                 with open(
-                    self.annoontology_dir + "/data/" + type + "_dictionary.json"
+                    self.annoontology_dir / "data" / f"{type}_dictionary.json"
                 ) as json_file:
                     ontology = json.load(json_file)
                     for term in ontology["term_hash"]:

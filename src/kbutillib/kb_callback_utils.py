@@ -1,6 +1,12 @@
 """KBase API utilities for interacting with KBase services and data."""
 
+import os
+import uuid
+from os.path import exists
+from pathlib import Path
 from typing import Any, Optional, Union
+
+import requests
 
 from .shared_env_utils import SharedEnvUtils
 

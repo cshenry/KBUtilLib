@@ -1,12 +1,11 @@
 """Shared environment management for configuration and secrets."""
 
-# from genericpath import exists
-# import os
-# from pathlib import Path
-# from typing import Any, Dict, Optional, Union
+import os
 from configparser import ConfigParser
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
-from .base_utils import *
+from .base_utils import BaseUtils
 
 
 class SharedEnvUtils(BaseUtils):
@@ -26,11 +25,10 @@ class SharedEnvUtils(BaseUtils):
     ) -> None:
         """Initialize the shared environment which manages configurations and authentication tokens."""
         super().__init__(**kwargs)
-
         # Reading config file is specified
         self._config_hash = {}
         self._config_file = None
-        if config_file and exists(config_file):
+        if config_file and Path(config_file).exists():
             self._config_file = config_file
             self._config_hash = self.read_config()
 
@@ -39,9 +37,10 @@ class SharedEnvUtils(BaseUtils):
         self._env_vars = {}
         self._token_file = token_file
         self._kbase_token_file = kbase_token_file
-        if token_file and exists(token_file):
+        if (token_file and Path(token_file).exists()) or (
+            kbase_token_file and Path(kbase_token_file).exists()
+        ):
             self._token_hash = self.read_token_file()
-
         # Loading environment variables
         self.load_environment_variables()
 
@@ -135,8 +134,8 @@ class SharedEnvUtils(BaseUtils):
             if "kbase" in self._token_hash:
                 if self._kbase_token_file is not None:
                     directory = Path(self._kbase_token_file).parent
-                    if not exists(str(directory)):
-                        os.makedirs(str(directory))
+                    if not directory.exists():
+                        directory.mkdir(parents=True, exist_ok=True)
                 with open(self._kbase_token_file, "w") as fh:
                     fh.write(self._token_hash["kbase"])
             self.log_info(f"Saved {len(self._token_hash)} tokens to {token_file}")

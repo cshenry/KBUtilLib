@@ -95,16 +95,12 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         }
 
         # Setting ATP media
-        if (
-            "ATP_media_workspace" not in self.config
-            or not self.config["ATP_media_workspace"]
-        ):
-            if self.kb_version == "prod":
-                self.config["ATP_media_workspace"] = "94026"
-            elif self.kb_version == "dev":
-                self.config["ATP_media_workspace"] = "68393"
-            else:
-                self.log_critical("KBase version not set up for modeling!")
+        if self.kb_version == "prod":
+            self.ATP_media_workspace = "94026"
+        elif self.kb_version == "dev":
+            self.ATP_media_workspace = "68393"
+        else:
+            self.log_critical("KBase version not set up for modeling!")
 
     #################Utility functions#####################
     def process_media_list(self, media_list, default_media, workspace):
@@ -441,7 +437,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             if workspace:
                 self.set_ws(workspace)
             # Setting provenance and saving model using workspace API
-            mdlutl.create_kb_gapfilling_data(data, self.config["ATP_media_workspace"])
+            mdlutl.create_kb_gapfilling_data(data, self.ATP_media_workspace)
             params = {
                 "id": self.ws_id,
                 "objects": [

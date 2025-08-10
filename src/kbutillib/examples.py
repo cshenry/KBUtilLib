@@ -2,34 +2,35 @@
 
 from .kb_callback_utils import KBCallbackUtils
 from .kb_genome_utils import KBGenomeUtils
-from .kb_model_utils import KBModelUtild
+from .kb_model_utils import KBModelUtils
 from .kb_sdk_utils import KBSDKUtils
-from .ms_utils import MSUtils
+from .ms_biochem_utils import MSBiochemUtils
 from .notebook_utils import NotebookUtils
 from .shared_env_utils import SharedEnvUtils
 
 
 class KBaseWorkbench(
-    KBCallbackUtils, KBGenomeUtils, KBModelUtild, KBSDKUtils, SharedEnvUtils
+    KBCallbackUtils, KBGenomeUtils, KBModelUtils, KBSDKUtils, SharedEnvUtils
 ):
     """Composite utility class for comprehensive KBase workflows.
 
     Combines KBase API access, genome utilities, model utilities, SDK utilities,
     and shared environment management for complete KBase data analysis workflows.
+
+    Initialize the KBase workbench with all utilities.
     """
 
     def __init__(self, **kwargs):
-        """Initialize the KBase workbench with all utilities."""
         super().__init__(**kwargs)
         self.log_info(
             "KBase Workbench initialized with API, genome, model, and SDK utilities"
         )
 
 
-class KBaseSDKWorkflow(KBSDKUtils, KBaseAPI, SharedEnvironment):
+class KBaseSDKWorkflow(KBSDKUtils, SharedEnvUtils):
     """Composite utility class for KBase SDK development workflows.
 
-    Combines SDK utilities, KBase API access, and shared environment management
+    Combines SDK utilities and shared environment management
     for developing and testing KBase SDK applications.
     """
 
@@ -39,12 +40,11 @@ class KBaseSDKWorkflow(KBSDKUtils, KBaseAPI, SharedEnvironment):
         self.log_info("KBase SDK Workflow initialized")
 
 
-class NotebookAnalysis(NotebookUtils, MSUtils, MSBiochemUtils, SharedEnvUtils):
+class NotebookAnalysis(NotebookUtils, MSBiochemUtils, SharedEnvUtils):
     """Composite utility class for interactive notebook-based analysis.
 
-    Combines notebook display utilities, mass spectrometry analysis tools,
-    ModelSEED biochemistry database search, and shared environment management
-    for interactive data analysis.
+    Combines notebook display utilities, biochemistry database analysis tools,
+    and shared environment management for interactive data analysis.
     """
 
     def __init__(self, **kwargs):
@@ -53,12 +53,10 @@ class NotebookAnalysis(NotebookUtils, MSUtils, MSBiochemUtils, SharedEnvUtils):
         self.log_info("Notebook Analysis environment initialized")
 
 
-class GenomeMetabolismWorkflow(
-    KBaseAPI, KBGenomeUtils, KBModelUtils, KBSDKUtils, SharedEnvUtils
-):
+class GenomeMetabolismWorkflow(KBGenomeUtils, KBModelUtils, KBSDKUtils, SharedEnvUtils):
     """Composite utility class for genome-to-model workflows.
 
-    Combines KBase API access, genome analysis, metabolic modeling, SDK utilities,
+    Combines genome analysis, metabolic modeling, SDK utilities,
     and shared environment for complete genome-to-metabolism workflows.
     """
 
@@ -102,9 +100,7 @@ class GenomeMetabolismWorkflow(
 
 
 class FullUtilityStack(
-    KBaseAPI,
     KBGenomeUtils,
-    MSUtils,
     MSBiochemUtils,
     KBModelUtils,
     KBSDKUtils,
@@ -124,7 +120,7 @@ class FullUtilityStack(
 
 
 # Example of how users can create their own custom combinations
-class MyCustomUtils(KBaseAPI, MSUtils, MSBiochemUtils, KBSDKUtils, SharedEnvUtils):
+class MyCustomUtils(MSBiochemUtils, KBSDKUtils, SharedEnvUtils):
     """Example of a user-defined custom utility combination.
 
     Users can inherit from any combination of utility classes to create

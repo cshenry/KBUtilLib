@@ -36,6 +36,11 @@ except ImportError:
     KBSDKUtils = None
 
 try:
+    from .argo_utils import ArgoUtils
+except ImportError:
+    ArgoUtils = None
+
+try:
     from .kb_annotation_utils import KBAnnotationUtils
 except ImportError:
     KBAnnotationUtils = None
@@ -49,13 +54,13 @@ except ImportError:
 examples = None
 
 __all__ = [
+    "ArgoUtilsMSBiochemUtils",
     "BaseUtils",
     "KBAnnotationUtils",
     "KBGenomeUtils",
     "KBModelUtils",
     "KBSDKUtils",
     "KBWSUtils",
-    "MSBiochemUtils",
     "NotebookUtils",
     "SharedEnvUtils",
     "examples",

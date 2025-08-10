@@ -14,17 +14,18 @@
 
 > **A modular utility framework for scientific computing and bioinformatics**
 >
-> KBUtilLib provides a flexible, composable set of utilities for working with KBase data, genomics, metabolomics, mass spectrometry, and interactive notebook environments.
+> KBUtilLib provides a flexible, composable set of utilities for working with KBase data, genomics, biochemistry databases, metabolic modeling, and interactive notebook environments.
 
 ## Features
 
 - **Modular Architecture**: Inherit from only the utility modules you need
 - **Composable Design**: Create custom utility combinations via multiple inheritance
 - **Shared Environment**: Centralized configuration and secret management
-- **KBase Integration**: Complete API access and data manipulation tools
-- **Genomics Utilities**: Sequence analysis, ORF finding, translation, and more
-- **Mass Spectrometry**: Peak detection, spectrum analysis, and metabolite identification
+- **KBase Integration**: Workspace access, SDK utilities, and data manipulation tools
+- **Genomics Utilities**: Sequence analysis, ORF finding, translation, and genome annotation
+- **Biochemistry Database**: ModelSEED biochemistry search and analysis utilities
 - **Metabolic Modeling**: Model analysis, FBA preparation, and pathway utilities
+- **Annotation Tools**: Gene and protein annotation workflows and utilities
 - **Notebook Support**: Enhanced display and interactive features for Jupyter
 
 ## Quick Start
@@ -32,7 +33,7 @@
 ### Basic Usage
 
 ```python
-from kbutillib import KBaseAPI, KBGenomeUtils, SharedEnvironment
+from kbutillib import KBGenomeUtils, SharedEnvUtils
 
 # Use individual utilities
 genome_utils = KBGenomeUtils()
@@ -41,22 +42,22 @@ protein = genome_utils.translate_sequence(dna_sequence)
 print(f"Translated: {dna_sequence} -> {protein}")
 
 # Use with shared configuration
-env = SharedEnvironment(config_file="config.yaml")
-kbase_api = KBaseAPI(auth_token=env.get_auth_token("kbase"))
+env = SharedEnvUtils(config_file="config.yaml")
+token = env.get_token("kbase")
 ```
 
 ### Composable Design
 
 ```python
-from kbutillib import KBaseAPI, KBGenomeUtils, SharedEnvironment
+from kbutillib import KBWSUtils, KBGenomeUtils, SharedEnvUtils
 
 # Create custom utility combinations
-class MyWorkflow(KBaseAPI, KBGenomeUtils, SharedEnvironment):
+class MyWorkflow(KBWSUtils, KBGenomeUtils, SharedEnvUtils):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     def analyze_genome(self, genome_ref, workspace_id):
-        # Get genome data via KBase API
+        # Get genome data via KBase workspace
         genome_data = self.get_object(workspace_id, genome_ref)
 
         # Analyze with genome utilities
@@ -86,13 +87,17 @@ notebook_env.display_dataframe(my_dataframe)
 
 ### Core Modules
 
-- **`BaseUtils`**: Foundation class with logging and configuration
-- **`SharedEnvironment`**: Configuration file loading and secret management
-- **`NotebookUtils`**: Jupyter notebook integration and display utilities
-- **`KBaseAPI`**: Complete KBase service API access
-- **`KBGenomeUtils`**: Genomic sequence analysis and manipulation
-- **`MSUtils`**: Mass spectrometry data processing
-- **`KBModelUtil`**: Metabolic model analysis and FBA preparation
+- **`BaseUtils`**: Foundation class with logging, configuration, and dependency management
+- **`SharedEnvUtils`**: Configuration file loading and authentication token management
+- **`NotebookUtils`**: Jupyter notebook integration and enhanced display utilities
+- **`KBWSUtils`**: KBase workspace service API access and object management
+- **`KBGenomeUtils`**: Genomic sequence analysis, translation, and feature extraction
+- **`MSBiochemUtils`**: ModelSEED biochemistry database search and compound analysis
+- **`KBModelUtils`**: Metabolic model analysis, FBA preparation, and pathway utilities
+- **`KBSDKUtils`**: KBase SDK development tools and utility functions
+- **`KBAnnotationUtils`**: Gene and protein annotation workflows and utilities
+- **`KBCallbackUtils`**: Callback handling for KBase SDK applications
+- **`ArgoUtils`**: Language model integration and inference utilities
 
 ### Design Philosophy
 
@@ -100,17 +105,58 @@ The framework follows a composable design where you can inherit from any combina
 
 ```python
 # Minimal combination
-class SimpleTools(KBaseAPI, SharedEnvironment):
+class SimpleTools(KBWSUtils, SharedEnvUtils):
     pass
 
 # Complete analysis suite
-class FullWorkbench(KBaseAPI, KBGenomeUtils, MSUtils, KBModelUtil, NotebookUtils, SharedEnvironment):
+class FullWorkbench(KBWSUtils, KBGenomeUtils, MSBiochemUtils, KBModelUtils, NotebookUtils, SharedEnvUtils):
     pass
 
 # Domain-specific combination
-class MetabolomicsTools(MSUtils, KBModelUtil, NotebookUtils):
+class BiochemistryTools(MSBiochemUtils, KBModelUtils, NotebookUtils):
     pass
 ```
+
+## Module Documentation
+
+Comprehensive documentation is available for each utility module:
+
+### Core Foundation Modules
+
+- **[BaseUtils](docs/modules/base_utils.md)** - Base class with logging, error handling, and dependency management
+- **[SharedEnvUtils](docs/modules/shared_env_utils.md)** - Configuration and authentication token management
+
+### Data Access and Workspace Modules
+
+- **[KBWSUtils](docs/modules/kb_ws_utils.md)** - KBase workspace operations and object management
+- **[MSBiochemUtils](docs/modules/ms_biochem_utils.md)** - ModelSEED biochemistry database access and search
+
+### Analysis and Processing Modules
+
+- **[KBGenomeUtils](docs/modules/kb_genome_utils.md)** - Genome analysis, feature extraction, and sequence operations
+- **[KBAnnotationUtils](docs/modules/kb_annotation_utils.md)** - Gene and protein annotation workflows
+- **[KBModelUtils](docs/modules/kb_model_utils.md)** - Metabolic modeling and flux balance analysis
+
+### Development and Integration Modules
+
+- **[KBSDKUtils](docs/modules/kb_sdk_utils.md)** - KBase SDK development tools and workflows
+- **[KBCallbackUtils](docs/modules/kb_callback_utils.md)** - Callback service management for SDK applications
+- **[ArgoUtils](docs/modules/argo_utils.md)** - Language model integration and inference utilities
+
+### Interactive and Visualization Modules
+
+- **[NotebookUtils](docs/modules/notebook_utils.md)** - Jupyter notebook enhancements and interactive displays
+
+Each module documentation includes:
+
+- **Overview and Key Features** - What the module does and its main capabilities
+- **Class Definition and Constructor** - How to initialize and configure the module
+- **Core Methods** - Essential methods and their usage
+- **Advanced Features** - Specialized functionality and integration options
+- **Usage Examples** - Practical code examples and common patterns
+- **Configuration Options** - Customization and setup parameters
+- **Error Handling** - Common issues and troubleshooting guidance
+- **Dependencies** - Required packages and integration requirements
 
 - **Modern Python Development**: Built with `uv` for fast dependency management and packaging
 - **Code Quality**: Comprehensive linting with `ruff`, type checking with `mypy`, and testing with `pytest`

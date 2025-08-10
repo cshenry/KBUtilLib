@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-import requests  # Imported here because many inherited libraries need it
+import requests
 
 requests.packages.urllib3.disable_warnings()
 

@@ -1,10 +1,11 @@
-"""ModelSEED Biochemistry Database utilities for searching compounds and reactions."""
+"""ModelSEED Biochemistry Database utilities for compound and reaction searches."""
 
-# import os
-# import subprocess
-# import re
-# from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from .shared_env_utils import *
+import os
+import re
+import subprocess
+from typing import Any, Optional
+
+from .shared_env_utils import SharedEnvUtils
 
 
 class MSBiochemUtils(SharedEnvUtils):
@@ -105,7 +106,7 @@ class MSBiochemUtils(SharedEnvUtils):
 
             # Clone the repository
             self.log_info(f"Cloning ModelSEED database from {git_url}")
-            result = subprocess.run(
+            subprocess.run(
                 ["git", "clone", git_url, self.modelseed_db_path],
                 capture_output=True,
                 text=True,
@@ -136,7 +137,7 @@ class MSBiochemUtils(SharedEnvUtils):
 
         try:
             self.log_info("Updating ModelSEED database...")
-            result = subprocess.run(
+            subprocess.run(
                 ["git", "pull"],
                 cwd=self.modelseed_db_path,
                 capture_output=True,
@@ -158,11 +159,11 @@ class MSBiochemUtils(SharedEnvUtils):
     def search_compounds(
         self,
         query: str,
-        search_fields: Optional[List[str]] = None,
+        search_fields: Optional[list[str]] = None,
         exact_match: bool = False,
         case_sensitive: bool = False,
         max_results: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Search for compounds in the ModelSEED database.
 
         Args:
@@ -183,13 +184,11 @@ class MSBiochemUtils(SharedEnvUtils):
 
         # Compile regex for partial matching
         if exact_match:
-            pattern = re.compile(
+            re.compile(
                 f"^{re.escape(query)}$", re.IGNORECASE if not case_sensitive else 0
             )
         else:
-            pattern = re.compile(
-                re.escape(query), re.IGNORECASE if not case_sensitive else 0
-            )
+            re.compile(re.escape(query), re.IGNORECASE if not case_sensitive else 0)
 
         for compound in self.biochem_db.compounds:
             match_score = 0
@@ -295,11 +294,11 @@ class MSBiochemUtils(SharedEnvUtils):
     def search_reactions(
         self,
         query: str,
-        search_fields: Optional[List[str]] = None,
+        search_fields: Optional[list[str]] = None,
         exact_match: bool = False,
         case_sensitive: bool = False,
         max_results: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Search for reactions in the ModelSEED database.
 
         Args:
@@ -428,7 +427,7 @@ class MSBiochemUtils(SharedEnvUtils):
         except:
             return None
 
-    def get_database_statistics(self) -> Dict[str, Any]:
+    def get_database_statistics(self) -> dict[str, Any]:
         """Get statistics about the ModelSEED database.
 
         Returns:

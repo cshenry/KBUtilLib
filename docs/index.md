@@ -16,6 +16,7 @@ maxdepth: 1
 
 usage
 reference
+modules/index
 contributing
 Code of Conduct <codeofconduct>
 License <license>

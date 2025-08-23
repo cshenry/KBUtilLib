@@ -2,7 +2,6 @@
 
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -20,7 +19,6 @@ nox.options.sessions = (
     "tests",
     "typeguard",
     "xdoctest",
-    "docs-build",
 )
 
 
@@ -210,48 +208,3 @@ def xdoctest(session: nox.Session) -> None:
     session.install("-e", ".")
     session.run("python", "-m", "xdoctest", package, *args)
 
-
-@nox.session(name="docs-build", python=python_versions[1])
-def docs_build(session: nox.Session) -> None:
-    """Build the documentation."""
-    args = session.posargs or ["docs", "docs/_build"]
-    if not session.posargs and "FORCE_COLOR" in os.environ:
-        args.insert(0, "--color")
-    session.run(
-        "uv",
-        "sync",
-        "--group",
-        "dev",
-        "--group",
-        "docs",
-        external=True,
-    )
-
-    session.install("sphinx", "sphinx-mermaid", "sphinx-click", "myst_parser", "furo")
-    session.install("-e", ".")
-
-    build_dir = Path("docs", "_build")
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-
-    session.run("sphinx-build", *args)
-
-
-@nox.session(python=python_versions[0])
-def docs(session: nox.Session) -> None:
-    """Build and serve the documentation with live reloading on file changes."""
-    args = session.posargs or ["--open-browser", "docs", "docs/_build"]
-    session.run(
-        "uv",
-        "sync",
-        "--group",
-        "docs",
-        external=True,
-        env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
-    )
-
-    build_dir = Path("docs", "_build")
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-
-    session.run("sphinx-autobuild", *args)

@@ -4,7 +4,9 @@ import json
 import logging
 import subprocess
 import sys
+import os
 import time
+from genericpath import exists
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,6 +14,8 @@ import requests
 
 requests.packages.urllib3.disable_warnings()
 
+script_path = os.path.abspath(__file__)
+script_dir = os.path.dirname(script_path)
 
 class BaseUtils:
     """Base class for all utility modules in the KBUtilLib framework.
@@ -33,6 +37,8 @@ class BaseUtils:
 
         self.version = "0.0.0"
         self.name = name
+        self.util_directory = script_dir+"/../../"
+        self.data_directory = self.util_directory+"/data/"
 
         # Initialize attributes for tracking provenance on primary method calls
         # self.obj_created = []
@@ -99,6 +105,7 @@ class BaseUtils:
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
         logger.setLevel(getattr(logging, log_level.upper()))
+        logger.propagate = False  # <- stop bubbling to root which causes log messages to show up twice in jupyter notebooks
 
         # Only add handler if none exists to prevent duplicate logs
         if not logger.handlers:
@@ -319,3 +326,31 @@ class BaseUtils:
         for key in key_list:
             if key in api_output:
                 output[key] = api_output[key]
+
+    def save_util_data(self, name: str, data: Any) -> None:
+        """Save data to a JSON file in the notebook data directory."""
+        filename = self.data_directory + "/" + name + ".json"
+        dir = os.path.dirname(filename)
+        os.makedirs(dir, exist_ok=True)
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=4, skipkeys=True)
+
+    def load_util_data(
+        self, name: str, default: Any = None
+    ) -> Any:
+        """Load data from a JSON file in the notebook data directory."""
+        filename = self.data_directory + "/" + name + ".json"
+        if not exists(filename):
+            if default is None:
+                self.log_error(
+                    "Requested data " + name + " doesn't exist at " + filename
+                )
+                raise (
+                    ValueError(
+                        "Requested data " + name + " doesn't exist at " + filename
+                    )
+                )
+            return default
+        with open(filename) as f:
+            data = json.load(f)
+        return data

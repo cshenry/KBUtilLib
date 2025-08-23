@@ -8,11 +8,13 @@ The `NotebookUtils` class provides utilities specifically designed for Jupyter n
 
 ## Key Features
 
+- **Enhanced DataFrame Display**: Interactive tables with pagination, search, and filtering
 - **Interactive Visualizations**: Rich plotting and charting capabilities
 - **Progress Tracking**: Real-time progress bars and status updates
-- **Data Display**: Enhanced data frame and object rendering
+- **Flexible Data Display**: Support for various data formats with automatic optimization
 - **Export Utilities**: Save notebooks, figures, and data outputs
 - **Widget Integration**: Support for interactive Jupyter widgets
+- **Environment Detection**: Automatic detection of notebook vs. non-notebook environments
 
 ## Class Definition
 
@@ -37,9 +39,113 @@ def __init__(self, notebook_folder: str, **kwargs: Any) -> None:
     """
 ```
 
-## Visualization Methods
+## Data Display Methods
 
-### Basic Plotting
+### Enhanced DataFrame Display
+
+```python
+def display_dataframe(
+    self,
+    df: Any,
+    max_rows: Optional[int] = None,
+    max_cols: Optional[int] = None,
+    use_interactive: bool = True,
+    page_size: int = 25,
+    show_search: bool = True,
+    show_info: bool = True,
+    scrollable: bool = True,
+    height: Optional[str] = None,
+) -> None:
+    """Display DataFrame with enhanced interactive features including pagination and search.
+    
+    Args:
+        df: DataFrame to display (pandas, polars, etc.)
+        max_rows: Maximum number of rows to display (None for all)
+        max_cols: Maximum number of columns to display (None for all)
+        use_interactive: Use interactive table with pagination and search
+        page_size: Number of rows per page when using interactive display
+        show_search: Show search functionality
+        show_info: Show table information (row count, etc.)
+        scrollable: Make table scrollable for large content
+        height: Fixed height for the table (e.g., "400px")
+    """
+```
+
+The enhanced `display_dataframe` method provides two clear display modes:
+
+1. **Interactive Tables**: Uses `itables` for modern interactive display with pagination and search
+2. **Sortable HTML**: Enhanced HTML tables with clickable column sorting (no dependencies needed)
+
+#### Interactive Features:
+- **Full Experience**: Install `itables` for pagination, search, and advanced table features
+- **Basic Sorting**: Always available with clickable column headers and visual feedback
+- **Clear Guidance**: Helpful messages guide users to install `itables` when needed
+- **Smart Data Types**: Automatic numeric vs. text sorting in all modes
+
+#### Features:
+- **Search and Filter**: Real-time search across all columns
+- **Pagination**: Configurable page sizes with navigation controls
+- **Sorting**: Click column headers to sort data (even in HTML fallback mode)
+- **Responsive**: Adapts to available screen space
+- **Graceful Fallbacks**: Works even without optional dependencies
+- **Smart Data Types**: Automatic numeric vs. text sorting
+- **Visual Feedback**: Sort indicators, hover effects, and row highlighting
+
+#### Example Usage:
+
+```python
+from kbutillib import NotebookUtils
+import pandas as pd
+
+# Initialize
+nb_utils = NotebookUtils(notebook_folder=".")
+
+# Create sample data
+df = pd.DataFrame({
+    'Name': ['Alice', 'Bob', 'Charlie', 'Diana'],
+    'Age': [25, 30, 35, 28],
+    'City': ['New York', 'London', 'Tokyo', 'Paris']
+})
+
+# Basic enhanced display
+nb_utils.display_dataframe(df)
+
+# Customized display
+nb_utils.display_dataframe(
+    df,
+    page_size=10,
+    height="300px",
+    show_search=True
+)
+
+# Simple display without interactive features
+nb_utils.display_dataframe(df, use_interactive=False)
+```
+
+### Other Display Methods
+
+```python
+def display_json(self, data: dict[str, Any], indent: int = 2) -> None:
+    """Display JSON data with proper formatting in notebook."""
+
+def display_markdown(self, text: str) -> None:
+    """Display markdown text in notebook."""
+
+def display_html(self, html: str) -> None:
+    """Display HTML content in notebook."""
+```
+
+### Progress Tracking
+
+```python
+def create_progress_bar(self, total: int, description: str = "") -> Any:
+    """Create a progress bar for long-running operations."""
+
+def update_progress(self, progress_bar: Any, current: int) -> None:
+    """Update progress bar with current value."""
+```
+
+## Visualization Methods
 
 - `plot_line(data, **options)`: Create line plots with customization
 - `plot_scatter(x, y, **options)`: Generate scatter plots

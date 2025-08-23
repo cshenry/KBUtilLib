@@ -3,7 +3,9 @@
 import os
 import re
 import subprocess
-from typing import Any, Optional
+import string
+from typing import Any, Optional, Dict
+from collections import defaultdict
 
 from .shared_env_utils import SharedEnvUtils
 
@@ -49,6 +51,9 @@ class MSBiochemUtils(SharedEnvUtils):
         self.modelseed_db_path = modelseed_db_path
         self.auto_download = auto_download
         self._biochem_db = None
+        self._identifier_hash = None
+        self._structure_hash = None
+        self._element_hashes = None
 
         # Initialize database
         self._ensure_database_available()
@@ -59,6 +64,88 @@ class MSBiochemUtils(SharedEnvUtils):
         if self._biochem_db is None:
             self._ensure_database_available()
         return self._biochem_db
+    
+    @property
+    def identifier_hash(self) -> Dict:
+        """Index the biochemistry compounds by their identifiers."""
+        if self._identifier_hash is None:
+            self._identifier_hash = {}
+            for cpd in self._biochem_db.compounds:
+                if cpd.is_obsolete == False:
+                    item = self._standardize_string(cpd.id)
+                    self._identifier_hash.setdefault(item, {"type": "msid", "ids": []})
+                    self._identifier_hash[item]["ids"].append(cpd.id)
+                    item = self._standardize_string(cpd.name)
+                    self._identifier_hash.setdefault(item, {"type": "name", "ids": []})
+                    self._identifier_hash[item]["ids"].append(cpd.id)   
+                    for name in cpd.names:
+                        name = self._standardize_string(str(name))
+                        self._identifier_hash.setdefault(name, {"type": "synonym", "ids": []})
+                        self._identifier_hash[name]["ids"].append(cpd.id)
+                    for anno_type in cpd.annotation:
+                        if isinstance(cpd.annotation[anno_type], set):
+                            for item in cpd.annotation[anno_type]:
+                                item = self._standardize_string(item)
+                                self._identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
+                                self._identifier_hash[item]["ids"].append(cpd.id)
+        return self._identifier_hash
+
+    @property
+    def structure_hash(self) -> Dict:
+        """Index the biochemistry compounds by their structures."""
+        if self._structure_hash is None:
+            self._structure_hash = {}
+            for cpd in self._biochem_db.compounds:
+                if cpd.is_obsolete == False:
+                    #All structures are unified in a single hash, and we store the type and ids for each struct in the hash values
+                    if "InChI" in cpd.annotation:
+                        self._structure_hash.setdefault(cpd.annotation["InChI"], {"type": "InChI", "ids": []})
+                        self._structure_hash[cpd.annotation["InChI"]]["ids"].append(cpd.id)
+                    if "SMILE" in cpd.annotation:
+                        self._structure_hash.setdefault(cpd.annotation["SMILE"], {"type": "SMILE", "ids": []})
+                        self._structure_hash[cpd.annotation["SMILE"]]["ids"].append(cpd.id)
+                    if "InChIKey" in cpd.annotation:
+                        key = cpd.annotation["InChIKey"]
+                        self._structure_hash.setdefault(key, {"type": "InChIKey", "ids": []})
+                        self._structure_hash[key]["ids"].append(cpd.id)
+                        key_components = key.split("-")
+                        self._structure_hash.setdefault(key_components[0], {"type": "InChIKeyBaseOne", "ids": []})
+                        self._structure_hash[key_components[0]]["ids"].append(cpd.id)
+                        self._structure_hash.setdefault(key_components[0]+"-"+key_components[1], {"type": "InChIKeyBaseTwo", "ids": []})
+                        self._structure_hash[key_components[0]+"-"+key_components[1]]["ids"].append(cpd.id)
+        return self._structure_hash
+
+    @property
+    def element_hashes(self) -> Dict:
+        """Index the biochemistry compounds by the elements they contain."""
+        if self._element_hashes is None:
+            self._element_hashes = {"element_hash":{},"element_count":{},"cpd_elements":{}}
+            for cpd in self._biochem_db.compounds:
+                if cpd.is_obsolete == False and cpd.formula is not None and len(cpd.formula) > 0:
+                    elements = self._parse_formula(cpd.formula)
+                    self._element_hashes["cpd_elements"][cpd.id] = elements
+                    self._element_hashes["element_count"][cpd.id] = len(elements)
+                    if "H" in elements:
+                        self._element_hashes["element_count"][cpd.id] += -1
+                    for element, count in elements.items():
+                        self._element_hashes["element_hash"].setdefault(element, {})
+                        self._element_hashes["element_hash"][element].setdefault(count, [])
+                        self._element_hashes["element_hash"][element][count].append(cpd.id)
+        return self._element_hashes
+
+    def _standardize_string(self, input_string: str) -> str:
+        """Standardize a string by lowercasing and stripping whitespace."""
+        input_string = input_string.translate(str.maketrans('', '', string.punctuation + string.whitespace))
+        return input_string.lower().strip()
+
+    def _parse_formula(self,formula: str) -> dict:
+        # Match elements (capital letter + optional lowercase letters) followed by optional digits
+        tokens = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
+        
+        counts = defaultdict(int)
+        for element, num in tokens:
+            counts[element] += int(num) if num else 1
+        return dict(counts)
 
     def _ensure_database_available(self) -> None:
         """Ensure ModelSEED database is available, using dependency management."""
@@ -154,142 +241,54 @@ class MSBiochemUtils(SharedEnvUtils):
         except subprocess.CalledProcessError as e:
             error_msg = f"Failed to update ModelSEED database: {e.stderr}"
             self.log_error(error_msg)
-            raise RuntimeError(error_msg)
+            raise RuntimeError(error_msg)          
 
     def search_compounds(
         self,
-        query: str,
-        search_fields: Optional[list[str]] = None,
-        exact_match: bool = False,
-        case_sensitive: bool = False,
-        max_results: Optional[int] = None,
+        query_identifiers: list[str] = [],
+        query_structures: list[str] = [],
+        query_formula: str = None
     ) -> list[dict[str, Any]]:
-        """Search for compounds in the ModelSEED database.
-
-        Args:
-            query: Search query string
-            search_fields: Fields to search in ['name', 'formula', 'aliases', 'smiles', 'inchi']
-            exact_match: Whether to require exact matches
-            case_sensitive: Whether search should be case sensitive
-            max_results: Maximum number of results to return
-
-        Returns:
-            List of compound dictionaries with match information
-        """
-        if search_fields is None:
-            search_fields = ["name", "aliases", "formula"]
-
-        results = []
-        query_lower = query.lower() if not case_sensitive else query
-
-        # Compile regex for partial matching
-        if exact_match:
-            re.compile(
-                f"^{re.escape(query)}$", re.IGNORECASE if not case_sensitive else 0
-            )
-        else:
-            re.compile(re.escape(query), re.IGNORECASE if not case_sensitive else 0)
-
-        for compound in self.biochem_db.compounds:
-            match_score = 0
-            matched_fields = []
-
-            # Search in compound name
-            if "name" in search_fields and compound.name:
-                search_text = compound.name if case_sensitive else compound.name.lower()
-                if exact_match:
-                    if search_text == query_lower:
-                        match_score += 10
-                        matched_fields.append("name")
-                else:
-                    if query_lower in search_text:
-                        match_score += 10
-                        matched_fields.append("name")
-
-            # Search in aliases
-            if "aliases" in search_fields and hasattr(compound, "aliases"):
-                for alias in compound.aliases:
-                    search_text = alias if case_sensitive else alias.lower()
-                    if exact_match:
-                        if search_text == query_lower:
-                            match_score += 8
-                            matched_fields.append("aliases")
-                    else:
-                        if query_lower in search_text:
-                            match_score += 8
-                            matched_fields.append("aliases")
-
-            # Search in formula
-            if "formula" in search_fields and compound.formula:
-                search_text = (
-                    compound.formula if case_sensitive else compound.formula.lower()
-                )
-                if exact_match:
-                    if search_text == query_lower:
-                        match_score += 15
-                        matched_fields.append("formula")
-                else:
-                    if query_lower in search_text:
-                        match_score += 5
-                        matched_fields.append("formula")
-
-            # Search in SMILES
-            if (
-                "smiles" in search_fields
-                and hasattr(compound, "smiles")
-                and compound.smiles
-            ):
-                search_text = (
-                    compound.smiles if case_sensitive else compound.smiles.lower()
-                )
-                if query_lower in search_text:
-                    match_score += 3
-                    matched_fields.append("smiles")
-
-            # Search in InChI
-            if (
-                "inchi" in search_fields
-                and hasattr(compound, "inchi")
-                and compound.inchi
-            ):
-                search_text = (
-                    compound.inchi if case_sensitive else compound.inchi.lower()
-                )
-                if query_lower in search_text:
-                    match_score += 3
-                    matched_fields.append("inchi")
-
-            if match_score > 0:
-                result = {
-                    "compound_id": compound.id,
-                    "name": compound.name,
-                    "formula": compound.formula,
-                    "charge": getattr(compound, "charge", None),
-                    "mass": getattr(compound, "mass", None),
-                    "match_score": match_score,
-                    "matched_fields": list(set(matched_fields)),
-                    "compound_object": compound,
-                }
-
-                # Add additional attributes if available
-                if hasattr(compound, "aliases"):
-                    result["aliases"] = compound.aliases
-                if hasattr(compound, "smiles"):
-                    result["smiles"] = compound.smiles
-                if hasattr(compound, "inchi"):
-                    result["inchi"] = compound.inchi
-
-                results.append(result)
-
-        # Sort by match score (highest first)
-        results.sort(key=lambda x: x["match_score"], reverse=True)
-
-        # Limit results if specified
-        if max_results:
-            results = results[:max_results]
-
-        self.log_info(f"Found {len(results)} compounds matching '{query}'")
-        return results
+        """Search for compounds in the ModelSEED database."""
+        identifier_hash = self.identifier_hash
+        element_hashes = self.element_hashes
+        structure_hash = self.structure_hash
+        matches = {}
+        for item in query_identifiers:
+            item = self._standardize_string(item)
+            if item in identifier_hash:
+                for hit in identifier_hash[item]["ids"]:
+                    matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {},"structure_hits": {}})
+                    matches[hit]["identifier_hits"][item] = 1 * identifier_hash[item]["type"]
+                    matches[hit]["score"] += 10
+        for item in query_structures:
+            if item in structure_hash:
+                for hit in structure_hash[item]["ids"]:
+                    matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {},"structure_hits": {}})
+                    matches[hit]["structure_hits"][item] = 1 * structure_hash[item]["type"]
+                    matches[hit]["score"] += 8
+        if query_formula is not None and len(query_formula) > 0:
+            elements = self._parse_formula(query_formula)
+            accumulated_hits = {}
+            element_count = 0
+            for element in elements:
+                if element != "H":
+                    element_count += 1
+                    if element in element_hashes["element_hash"] and elements[element] in element_hashes["element_hash"][element]:
+                        for hit in element_hashes["element_hash"][element][elements[element]]:
+                            accumulated_hits.setdefault(hit, 0)
+                            accumulated_hits[hit] += 1
+            #Checking if the hits have the same number of elements and the same number of instances of each element
+            for hit in accumulated_hits:
+                if accumulated_hits[hit] == element_count and element_hashes["element_count"][hit] == element_count:
+                    matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {}, "structure_hits": {}})
+                    hittype = "No H"
+                    matches[hit]["score"] += 2
+                    if "H" in elements and "H" in element_hashes["cpd_elements"][hit] and elements["H"] == element_hashes["cpd_elements"][hit]["H"]:
+                        hittype = "H match"
+                        matches[hit]["score"] += 2
+                    matches[hit]["formula_hits"][query_formula+":"+self.biochem_db.compounds.get_by_id(hit).formula] = hittype
+        return matches
 
     def search_reactions(
         self,

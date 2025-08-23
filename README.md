@@ -5,7 +5,6 @@
 [![Python Version](https://img.shields.io/pypi/pyversions/KBUtilLib)][pypi status]
 [![License](https://img.shields.io/pypi/l/KBUtilLib)][license]
 
-[![Read the documentation at https://KBUtilLib.readthedocs.io/](https://img.shields.io/readthedocs/KBUtilLib/latest.svg?label=Read%20the%20Docs)][read the docs]
 [![Tests](https://github.com/cshenry/KBUtilLib/workflows/Tests/badge.svg)][tests]
 [![Codecov](https://codecov.io/gh/cshenry/KBUtilLib/branch/main/graph/badge.svg)][codecov]
 
@@ -188,6 +187,22 @@ You can install _KBUtilLib_ via [pip] from [PyPI]:
 $ pip install KBUtilLib
 ```
 
+### Notebook Support
+
+For enhanced Jupyter notebook features (interactive tables with pagination and search):
+
+```console
+$ pip install "KBUtilLib[notebook]"
+# or with uv:
+$ uv add "KBUtilLib[notebook]"
+```
+
+This installs optional dependencies for interactive DataFrame display:
+- `itables` - Modern interactive tables with pagination and search
+- `ipywidgets` - Interactive widgets
+- `pandas` - DataFrame support  
+- `tqdm` - Progress bars
+
 ### Development Installation
 
 For development, clone the repository and install with development dependencies:
@@ -242,7 +257,6 @@ which is based on [@cjolowicz]'s [uv hypermodern python cookiecutter] template.
 [@cjolowicz]: https://github.com/cjolowicz
 [pypi]: https://pypi.org/
 [pypi status]: https://pypi.org/project/KBUtilLib/
-[read the docs]: https://KBUtilLib.readthedocs.io/
 [tests]: https://github.com/cshenry/KBUtilLib/actions?workflow=Tests
 [codecov]: https://app.codecov.io/gh/cshenry/KBUtilLib
 [pre-commit]: https://github.com/pre-commit/pre-commit
@@ -257,4 +271,3 @@ which is based on [@cjolowicz]'s [uv hypermodern python cookiecutter] template.
 
 [license]: https://github.com/cshenry/KBUtilLib/blob/main/LICENSE
 [contributor guide]: https://github.com/cshenry/KBUtilLib/blob/main/CONTRIBUTING.md
-[command-line reference]: https://KBUtilLib.readthedocs.io/en/latest/usage.html

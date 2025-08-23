@@ -4,6 +4,7 @@ import json
 import os
 from genericpath import exists
 from typing import Any, Optional
+import pandas as pd
 
 from .base_utils import BaseUtils
 
@@ -57,36 +58,152 @@ class NotebookUtils(BaseUtils):
             return False
 
     def display_dataframe(
-        self, df: Any, max_rows: Optional[int] = None, max_cols: Optional[int] = None
+        self,
+        df: Any,
+        max_rows: Optional[int] = None,
+        max_cols: Optional[int] = None,
+        use_interactive: bool = True,
+        page_size: int = 25,
+        show_search: bool = True,
+        show_info: bool = True,
+        scrollable: bool = True,
+        height: Optional[str] = None,
     ) -> None:
-        """Display a DataFrame with notebook-optimized formatting.
+        """Display a DataFrame with enhanced interactive features including pagination and search.
 
         Args:
             df: DataFrame to display (pandas, polars, etc.)
-            max_rows: Maximum number of rows to display
-            max_cols: Maximum number of columns to display
+            max_rows: Maximum number of rows to display (None for all)
+            max_cols: Maximum number of columns to display (None for all)
+            use_interactive: Use interactive table with pagination and search
+            page_size: Number of rows per page when using interactive display
+            show_search: Show search functionality
+            show_info: Show table information (row count, etc.)
+            scrollable: Make table scrollable for large content
+            height: Fixed height for the table (e.g., "400px")
         """
         if not self.in_notebook:
             print(df)
             return
 
+        # Convert to pandas if not already
+        if not isinstance(df, pd.DataFrame):
+            try:
+                # Try to convert other dataframe types to pandas
+                if hasattr(df, "to_pandas"):
+                    df = df.to_pandas()
+                elif hasattr(df, "toPandas"):
+                    df = df.toPandas()
+                else:
+                    df = pd.DataFrame(df)
+            except Exception:
+                # Fallback to simple display
+                try:
+                    from IPython.display import display
+
+                    display(df)
+                except ImportError:
+                    print(df)
+                return
+
+        # Apply row/column limits if specified
+        if max_rows and len(df) > max_rows:
+            df = df.head(max_rows)
+            self.log_info(f"Displaying first {max_rows} rows of {len(df)} total")
+
+        if max_cols and len(df.columns) > max_cols:
+            df = df.iloc[:, :max_cols]
+            self.log_info(f"Displaying first {max_cols} columns of {len(df.columns)} total")
+
+        if use_interactive and len(df) > page_size:
+            self._display_interactive_dataframe(
+                df, page_size, show_search, show_info, scrollable, height
+            )
+        else:
+            self._display_simple_dataframe(df)
+
+    def _display_interactive_dataframe(
+        self,
+        df: Any,
+        page_size: int,
+        show_search: bool,
+        show_info: bool,
+        scrollable: bool,
+        height: Optional[str],
+    ) -> None:
+        """Display DataFrame with interactive features using itables."""
         try:
+            # Use itables for interactive display
+            import itables
             from IPython.display import display
 
-            # Set display options temporarily if specified
-            if hasattr(df, "style"):  # pandas DataFrame
-                styled_df = df
-                if max_rows or max_cols:
-                    # Truncate if needed
-                    if max_rows and len(df) > max_rows:
-                        styled_df = df.head(max_rows)
-                    if max_cols and len(df.columns) > max_cols:
-                        styled_df = styled_df.iloc[:, :max_cols]
+            # Configure itables options
+            itables.options.lengthMenu = [10, 25, 50, 100, -1]
+            itables.options.pageLength = page_size
+            itables.options.searching = show_search
+            itables.options.info = show_info
+            itables.options.scrollCollapse = True
+            itables.options.scrollX = scrollable
+            
+            # Configure table width and text wrapping
+            itables.options.style = "width:100%; table-layout: fixed;"
+            itables.options.columnDefs = [
+                {
+                    "targets": "_all",
+                    "className": "text-wrap"
+                }
+            ]
+            
+            if height:
+                itables.options.scrollY = height
 
-                display(styled_df)
-            else:
-                display(df)
+            # Display with itables (remove conflicting nowrap class)
+            display(itables.show(df, classes="display"))
+            
+            # Add custom CSS for better text wrapping
+            from IPython.display import HTML
+            display(HTML("""
+            <style>
+            .dataTable td {
+                word-wrap: break-word;
+                word-break: break-word;
+                white-space: normal !important;
+                max-width: 200px;
+            }
+            .dataTable th {
+                word-wrap: break-word;
+                word-break: break-word;
+                white-space: normal !important;
+            }
+            .text-wrap {
+                white-space: normal !important;
+            }
+            </style>
+            """))
+            return
 
+        except ImportError:
+            # Clear error message about missing itables
+            self.log_error(
+                "Interactive table features require 'itables'. "
+                "Install with: pip install itables"
+            )
+            print("\n" + "="*60)
+            print("INTERACTIVE FEATURES UNAVAILABLE")
+            print("="*60)
+            print("To enable interactive tables with pagination and search:")
+            print("  pip install itables")
+            print("\nAlternatively, use: pip install \"KBUtilLib[notebook]\"")
+            print("="*60 + "\n")
+            
+            # Fall back to simple display
+            self._display_simple_dataframe(df)
+
+    def _display_simple_dataframe(self, df: Any) -> None:
+        """Display DataFrame using basic IPython display."""
+        try:
+            from IPython.display import display
+            display(df)
         except ImportError:
             print(df)
 

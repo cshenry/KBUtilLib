@@ -2,12 +2,23 @@
 
 import pickle
 from typing import Any
+import pandas as pd
+import re
+import json
 
 from .kb_annotation_utils import KBAnnotationUtils
 from .ms_biochem_utils import MSBiochemUtils
 
 # TODO: Two issues presently exist with this module: (1) if a genome isn't RAST annotated, the call the reannotate it with RAST doesn't work unless we get callbacks to work; and (2) currently the system wants to call the annotation ontology API which won't work without callbacks or local installation
-
+compartment_types = {
+    "cytosol":"c",
+    "extracellar":"e",
+    "extraorganism":"e",
+    "periplasm":"p",
+    "c":"c",
+    "p":"p",
+    "e":"e"
+}
 
 class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
     """Utilities for working with KBase metabolic models and constraint-based modeling.
@@ -101,6 +112,33 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             self.ATP_media_workspace = "68393"
         else:
             self.log_critical("KBase version not set up for modeling!")
+
+    def _check_and_convert_model(self, model):
+        """Check if the model is a MSModelUtil and convert if necessary."""
+        if not isinstance(model, self.MSModelUtil):
+            model = self.MSModelUtil(model)
+        return model
+
+    def _parse_id(self, object_or_id):
+        #Check if input is a string or object and if it's an object, set id to object.id
+        if isinstance(object_or_id, str):
+            id = object_or_id
+        else:
+            id = object_or_id.id
+        id = id.replace("_DASH_", "-")
+        if re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
+            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
+            baseid = m[1]
+            compartment = m[2]
+            index = m[3]
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized")
+            else:
+                #Standardizing the compartment when it's recognizable
+                compartment = compartment_types[compartment.lower()]
+            return (baseid, compartment, index)
+        self.log_warning(f"Compound ID '{id}' cannot be parsed")
+        return (id,None,None)
 
     #################Utility functions#####################
     def process_media_list(self, media_list, default_media, workspace):
@@ -402,6 +440,9 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return gs_template
 
     def get_template(self, template_id, ws=None):
+        """Retrieve a template from KBase workspace."""
+        if ws is None and "/" not in template_id and template_id in self.templates:
+            template_id = self.templates[template_id]
         template = self.kbase_api.get_from_ws(template_id, ws)
         # template = self.kbase_api.get_object(template_id,ws)
         # info = self.kbase_api.get_object_info(template_id,ws)
@@ -517,3 +558,202 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             self.obj_created.append(
                 {"ref": self.create_ref(fbaid, self.ws_name), "description": ""}
             )
+
+    def model_standardization(
+        self, model_or_mdlutl, template="gp"
+    ):
+        """Standardize a model or MSModelUtil object."""
+        mdlutl = self._check_and_convert_model(model_or_mdlutl)
+        template = self.get_template(
+            self.templates[template], mdlutl.wsid
+        )
+
+
+    def match_model_compounds_to_db(
+        self, model_or_mdlutl, template="gp", create_dataframe=True
+    ):  
+        """Searching all compounds in a model against the ModelSEEDDatabase and a template"""
+        #Getting template
+        template = self.get_template(template)
+        mdlutl = self._check_and_convert_model(model_or_mdlutl)
+        results = {"matches": {}, "df": None}
+        in_template = {}
+        for cpd in mdlutl.model.metabolites:
+            #First let's break this compound down into a base ID and compartment
+            [base_id, compartment, index] = self._parse_id(cpd)
+            in_template[cpd.id] = True
+            cpdcomp = cpd.compartment
+            if cpdcomp in compartment_types:
+                cpdcomp = compartment_types[cpdcomp]
+            if compartment != cpdcomp:
+                self.log_warning(
+                    f"Compound {cpd.id} has compartment {cpdcomp} but ID indicates {compartment}"
+                )
+            #Now we query by ID, alias, formula, charge and score the matches
+            matches = {}
+            identifiers = [base_id,cpd.name]
+            structures = []
+            for anno_type in cpd.annotation:
+                if isinstance(cpd.annotation[anno_type], set):
+                    for item in cpd.annotation[anno_type]:
+                        if item not in identifiers:
+                            identifiers.append(item)
+                elif lower(anno_type) in ["smiles","inchi","structure","inchikey"]:
+                    structures.append(cpd.annotation[anno_type])
+            results["matches"][cpd.id] = self.search_compounds(
+                query_identifiers=identifiers,
+                query_structures=structures,
+                query_formula=cpd.formula
+            )
+            hits_to_remove = []
+            for hit in results["matches"][cpd.id]:
+                results["matches"][cpd.id][hit]["base_id"] = base_id
+                results["matches"][cpd.id][hit]["compartment"] = compartment
+                results["matches"][cpd.id][hit]["index"] = index
+                results["matches"][cpd.id][hit]["match_name"] = self.biochem_db.compounds.get_by_id(hit).name
+                if hit not in template.compounds:
+                    hits_to_remove.append(hit)
+            if len(hits_to_remove) < len(results["matches"][cpd.id]):
+                for hit in hits_to_remove:
+                    del results["matches"][cpd.id][hit]
+            else:
+                in_template[cpd.id] = False
+                self.log_warning(f"None of the hits for {cpd.id} were in the model template! Leaving all hits in.")
+
+        #Now let's create a dataframe showing all the matches for all the compounds
+        if create_dataframe:
+            df_data = []
+            for model_cpd_id, matches in results["matches"].items():
+                count = len(matches)
+                for matched_cpd_id, match_info in matches.items():
+                    df_data.append({
+                        "model_compound_id": model_cpd_id,
+                        "base_id": match_info["base_id"],
+                        "matach_count": count,
+                        "compartment": match_info["compartment"],
+                        "index": match_info["index"],
+                        "matched_compound_id": matched_cpd_id,
+                        "matched_compound_name": match_info["match_name"],
+                        "score": match_info["score"],
+                        "id_match": str(match_info["identifier_hits"]),
+                        "formula_match": str(match_info["formula_hits"]),
+                        "structure_match": str(match_info["structure_hits"]),
+                        "in template": in_template[model_cpd_id]
+                    })
+            results["df"] = pd.DataFrame(df_data)
+            # Sort by model compound ID and then by score (descending)
+            if not results["df"].empty:
+                results["df"] = results["df"].sort_values(
+                    ["model_compound_id", "score"], 
+                    ascending=[True, False]
+                ).reset_index(drop=True)
+        return results
+    
+    def model_reaction_to_string(self,reaction):
+        """Converts reaction into string representation."""
+        [base_id, compartment, index] = self._parse_id(reaction)
+        name = re.sub(r'\s*\[[a-zA-Z0-9]+\]$', '', reaction.name)
+        output = {"rxnstring": base_id + "(" + name + ")"}
+        if compartment != None and compartment != "c":
+            output["rxnstring"] += "[" + str(compartment) + "]"
+        equation = reaction.build_reaction_string(use_metabolite_names=True)
+        if "<--" in equation:
+            array = equation.split("<--")
+            equation = array[1] + " --> " + array[0]
+            output["reversed"] = True
+        output["rxnstring"] += ": " + equation
+        print(output["rxnstring"])
+        return output
+
+    def reaction_directionality_from_bounds(self, reaction, tol=1e-9):
+        """
+        Classify directionality from a Reaction's bounds only.
+
+        Returns one of: 'forward', 'reverse', 'reversible', 'blocked'.
+        """
+        lb, ub = reaction.lower_bound, reaction.upper_bound
+
+        # Treat tiny bounds as zero
+        if abs(lb) < tol:
+            lb = 0.0
+        if abs(ub) < tol:
+            ub = 0.0
+
+        if lb < 0 and ub > 0:
+            return "reversible"
+        if lb >= 0 and ub > 0:
+            return "forward"
+        if lb < 0 and ub <= 0:
+            return "reverse"
+        return "blocked"
+
+    def ai_analysis_of_model_reactions(self, model):
+        """Analyzes model reactions for stoichiometric correctness and directionality."""
+        system = """
+        You are an expert in biochemistry and molecular biology. 
+        You will receive a biochemical reaction and must evaluate it for stoichiometric 
+        correctness and biological directionality.
+
+        Respond strictly in valid JSON with **no text outside the JSON**. 
+        All keys and string values must use double quotes. 
+        Use only plain ASCII characters.
+        """
+
+        shared_prompt = """Analyze the following reaction for stoichiometric correctness and 
+        directionality in vivo. 
+
+        Return a JSON object in this exact format:
+
+        {
+        "errors": ["error 1", "error 2"],
+        "directionality": "forward|reverse|reversible|uncertain",
+        "other_comments": "Brief general comments about the reaction so I know you understood the input.",
+        "confidence": "high|medium|low|none"
+        }
+
+        Reaction:
+        """
+        result = self.load_util_data("model_reaction_review")
+        direction_conversion = {
+            "":"None",
+            "forward": ">",
+            "reverse": "<",
+            "reversible": "=",
+            "uncertain": "?"
+        }
+        output = []
+        for rxn in model.model.reactions:
+            if rxn.id[0:3] not in ["EX_","SK_","DM_","bio"]:
+                if rxn.id not in result:
+                    rxn_output = self.model_reaction_to_string(rxn)
+                    prompt = shared_prompt + rxn_output["rxnstring"]
+                    ai_output = self.chat(prompt=prompt, system=system)
+                    result[rxn.id] = json.loads(ai_output)
+                    if "reversed" in rxn_output:
+                        result[rxn.id]["other_comments"] += " Reaction was inverted to avoid AI confusion, but AI directionality was corrected after the AI analysis was concluded."
+                        if result[rxn.id]["directionality"] == "forward":
+                            result[rxn.id]["directionality"] = "reverse"
+                        elif result[rxn.id]["directionality"] == "reverse":
+                            result[rxn.id]["directionality"] = "forward"
+                    self.save_util_data("model_reaction_review",result)
+                model_direction = self.reaction_directionality_from_bounds(rxn)
+                biochem_direction = ""
+                if rxn.id.split("_c")[0] in self.biochem_db.reactions:
+                    biochem_direction = self.reaction_directionality_from_bounds(self.biochem_db.reactions.get_by_id(rxn.id.split("_c")[0]))
+                ai_direction = result[rxn.id]["directionality"]
+                record = {
+                    "reaction_id": rxn.id,
+                    "name": rxn.name,
+                    "equation": rxn.build_reaction_string(use_metabolite_names=True),
+                    "model_direction": direction_conversion[model_direction],
+                    "ai_direction": direction_conversion[ai_direction],
+                    "biochem_reversibility": direction_conversion[biochem_direction],
+                    "combined": (
+                            f"{direction_conversion[model_direction]}|"
+                            f"{direction_conversion[ai_direction]}|"
+                            f"{direction_conversion[biochem_direction]}"
+                        )
+                    }
+                output.append(record)
+        output = pd.DataFrame.from_records(output)
+        return output

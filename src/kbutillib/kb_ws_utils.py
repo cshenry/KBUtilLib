@@ -139,45 +139,6 @@ class KBWSUtils(SharedEnvUtils):
                     fhandle.write(chunk)
         return file_path
 
-    def run_narrative_method(
-        self,
-        method_name: str,
-        parameters: Dict[str, Any],
-        workspace_id: Union[int, str],
-    ) -> Dict[str, Any]:
-        """Run a KBase narrative method (app).
-
-        Args:
-            method_name: Name of the method to run
-            parameters: Method parameters
-            workspace_id: Workspace ID where method should run
-
-        Returns:
-            Method execution result
-        """
-        url = f"{self.kbase_url}/narrative_method_store/rpc"
-
-        data = {
-            "version": "1.1",
-            "method": "NarrativeMethodStore.run_method",
-            "params": [
-                {
-                    "method": method_name,
-                    "params": parameters,
-                    "workspace_id": workspace_id,
-                }
-            ],
-        }
-
-        response = self._make_request("POST", url, data=data)
-        result = response.json()
-
-        if "error" in result:
-            raise Exception(f"Narrative Method error: {result['error']}")
-
-        self.log_info(f"Method '{method_name}' executed successfully")
-        return result["result"][0]
-
     def save_ws_object(self, objid, workspace, obj_json, obj_type):
         self.set_ws(workspace)
         params = {
@@ -317,3 +278,18 @@ class KBWSUtils(SharedEnvUtils):
         if isinstance(ws, int):
             ws = str(ws)
         return ws + "/" + id_or_ref
+
+    def object_url(self, id_or_ref, ws=None):
+        """Get the data viewer URL for a KBase object.
+
+        Args:
+            id_or_ref: Object ID or reference
+            ws: Workspace ID (optional)
+
+        Returns:
+            Object URL
+        """
+        if ws != None:
+            return f"https://narrative.kbase.us/legacy/dataview/{ws}/{id_or_ref}"
+        else:
+            return f"https://narrative.kbase.us/legacy/dataview/{id_or_ref}"

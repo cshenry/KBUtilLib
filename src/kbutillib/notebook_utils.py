@@ -115,12 +115,12 @@ class NotebookUtils(BaseUtils):
             df = df.iloc[:, :max_cols]
             self.log_info(f"Displaying first {max_cols} columns of {len(df.columns)} total")
 
-        if use_interactive and len(df) > page_size:
-            self._display_interactive_dataframe(
-                df, page_size, show_search, show_info, scrollable, height
-            )
-        else:
-            self._display_simple_dataframe(df)
+        #if use_interactive and len(df) > page_size:
+        self._display_interactive_dataframe(
+            df, page_size, show_search, show_info, scrollable, height
+        )
+        #else:
+        #    self._display_simple_dataframe(df)
 
     def _display_interactive_dataframe(
         self,

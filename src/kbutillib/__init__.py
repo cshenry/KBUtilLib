@@ -31,6 +31,11 @@ except ImportError:
     KBModelUtils = None
 
 try:
+    from .ms_fba_utils import MSFBAUtils
+except ImportError:
+    MSFBAUtils = None
+
+try:
     from .kb_sdk_utils import KBSDKUtils
 except ImportError:
     KBSDKUtils = None
@@ -39,6 +44,11 @@ try:
     from .argo_utils import ArgoUtils
 except ImportError:
     ArgoUtils = None
+
+try:
+    from .ai_curation_utils import AICurationUtils
+except ImportError:
+    AICurationUtils = None
 
 try:
     from .kb_annotation_utils import KBAnnotationUtils
@@ -61,6 +71,8 @@ __all__ = [
     "KBModelUtils",
     "KBSDKUtils",
     "KBWSUtils",
+    "MSFBAUtils",
+    "MSBiochemUtils",
     "NotebookUtils",
     "SharedEnvUtils",
     "examples",

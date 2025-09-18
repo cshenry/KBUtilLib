@@ -354,3 +354,7 @@ class BaseUtils:
         with open(filename) as f:
             data = json.load(f)
         return data
+
+    ### Constant functions ###
+    def const_util_rxn_prefixes(self):
+        return ["EXF","EX_","SK_","DM_","bio"]

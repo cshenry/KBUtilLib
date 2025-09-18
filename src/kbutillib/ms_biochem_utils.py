@@ -4,8 +4,11 @@ import os
 import re
 import subprocess
 import string
+import json
 from typing import Any, Optional, Dict
 from collections import defaultdict
+
+from matplotlib.pylab import less
 
 from .shared_env_utils import SharedEnvUtils
 
@@ -54,6 +57,8 @@ class MSBiochemUtils(SharedEnvUtils):
         self._identifier_hash = None
         self._structure_hash = None
         self._element_hashes = None
+        self._rxn_identifier_hash = None
+        self._rxn_stoichiometry_hash = None
 
         # Initialize database
         self._ensure_database_available()
@@ -89,6 +94,67 @@ class MSBiochemUtils(SharedEnvUtils):
                                 self._identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
                                 self._identifier_hash[item]["ids"].append(cpd.id)
         return self._identifier_hash
+    
+    @property
+    def rxn_identifier_hash(self) -> Dict:
+        """Index the biochemistry reactions by their identifiers."""
+        if self._rxn_identifier_hash is None:
+            self._rxn_identifier_hash = {}
+            for rxn in self._biochem_db.reactions:
+                if rxn.is_obsolete == False:
+                    item = self._standardize_string(rxn.id)
+                    self._rxn_identifier_hash.setdefault(item, {"type": "msid", "ids": []})
+                    self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+                    item = self._standardize_string(rxn.name)
+                    self._rxn_identifier_hash.setdefault(item, {"type": "name", "ids": []})
+                    self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+                    for name in rxn.names:
+                        name = self._standardize_string(str(name))
+                        self._rxn_identifier_hash.setdefault(name, {"type": "synonym", "ids": []})
+                        self._rxn_identifier_hash[name]["ids"].append(rxn.id)
+                    for anno_type in rxn.annotation:
+                        if isinstance(rxn.annotation[anno_type], set):
+                            for item in rxn.annotation[anno_type]:
+                                if anno_type != "ec-code":
+                                    item = self._standardize_string(item)
+                                else:
+                                    array = item.split(".")
+                                    self._rxn_identifier_hash.setdefault(array[0]+"."+array[1]+"."+array[2], {"type": "3rd-lvl-"+anno_type, "ids": []})
+                                    self._rxn_identifier_hash[array[0]+"."+array[1]+"."+array[2]]["ids"].append(rxn.id)
+                                self._rxn_identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
+                                self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+        return self._rxn_identifier_hash
+    
+    @property
+    def rxn_stoichiometry_hash(self) -> Dict:#TODO: This is AI code currently - need to revise this
+        """Index the biochemistry reactions by their stoichiometry."""
+        if self._rxn_stoichiometry_hash is None:
+            self._rxn_stoichiometry_hash = {"proton_stoichiometry": {},"transport_stoichiometry":{},"metabolite_hash":{},"rxn_hash":{}}
+            for rxn in self._biochem_db.reactions:
+                if rxn.is_obsolete == False:
+                    base_cpd_hash = {}
+                    transport_hash = {}
+                    for metabolite in rxn.metabolites:
+                        base_id = metabolite.id[0:-2]
+                        compartment = metabolite.id[-1:]
+                        if str(compartment) == "1":
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"].setdefault(base_id, {})
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"][base_id].setdefault(rxn.metabolites[metabolite], [])
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"][base_id][rxn.metabolites[metabolite]].append(rxn.id)
+                            transport_hash[base_id] = rxn.metabolites[metabolite]
+                        base_cpd_hash.setdefault(base_id, 0)
+                        base_cpd_hash[base_id] += rxn.metabolites[metabolite]
+                    self._rxn_stoichiometry_hash["rxn_hash"][rxn.id] = {"metabolite_hash": base_cpd_hash,"transport_hash":transport_hash,"proton_stoichiometry":0,"equation":rxn.build_reaction_string(),"id":rxn.id,"name":rxn.name}
+                    self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = 0
+                    for base_id in base_cpd_hash:    
+                        if base_id == "cpd00067":
+                            self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = base_cpd_hash[base_id]
+                            self._rxn_stoichiometry_hash["rxn_hash"][rxn.id]["proton_stoichiometry"] = base_cpd_hash[base_id]
+                        elif base_cpd_hash[base_id] != 0:
+                            self._rxn_stoichiometry_hash["metabolite_hash"].setdefault(base_id, {})
+                            self._rxn_stoichiometry_hash["metabolite_hash"][base_id].setdefault(base_cpd_hash[base_id], [])
+                            self._rxn_stoichiometry_hash["metabolite_hash"][base_id][base_cpd_hash[base_id]].append(rxn.id)
+        return self._rxn_stoichiometry_hash
 
     @property
     def structure_hash(self) -> Dict:
@@ -135,6 +201,8 @@ class MSBiochemUtils(SharedEnvUtils):
 
     def _standardize_string(self, input_string: str) -> str:
         """Standardize a string by lowercasing and stripping whitespace."""
+        input_string = input_string.replace("_DASH_", "-")
+        input_string = input_string.replace("_COLON_", ":")
         input_string = input_string.translate(str.maketrans('', '', string.punctuation + string.whitespace))
         return input_string.lower().strip()
 
@@ -292,111 +360,152 @@ class MSBiochemUtils(SharedEnvUtils):
 
     def search_reactions(
         self,
-        query: str,
-        search_fields: Optional[list[str]] = None,
-        exact_match: bool = False,
-        case_sensitive: bool = False,
-        max_results: Optional[int] = None,
+        query_identifiers: Optional[list[str]] = [],
+        query_ec: Optional[list[str]] = [],
+        query_stoichiometry: Optional[dict[str, Any]] = None,
+        cpd_hits: Optional[dict[str, Any]] = None,
+        default_missing_count: Optional[float] = 1
     ) -> list[dict[str, Any]]:
-        """Search for reactions in the ModelSEED database.
-
-        Args:
-            query: Search query string
-            search_fields: Fields to search in ['name', 'equation', 'ec_numbers', 'aliases']
-            exact_match: Whether to require exact matches
-            case_sensitive: Whether search should be case sensitive
-            max_results: Maximum number of results to return
-
-        Returns:
-            List of reaction dictionaries with match information
-        """
-        if search_fields is None:
-            search_fields = ["name", "equation", "aliases"]
-
-        results = []
-        query_lower = query.lower() if not case_sensitive else query
-
-        for reaction in self.biochem_db.reactions:
-            match_score = 0
-            matched_fields = []
-
-            # Search in reaction name
-            if "name" in search_fields and reaction.name:
-                search_text = reaction.name if case_sensitive else reaction.name.lower()
-                if exact_match:
-                    if search_text == query_lower:
-                        match_score += 10
-                        matched_fields.append("name")
-                else:
-                    if query_lower in search_text:
-                        match_score += 10
-                        matched_fields.append("name")
-
-            # Search in equation
-            if "equation" in search_fields and hasattr(reaction, "equation"):
-                search_text = (
-                    reaction.equation if case_sensitive else reaction.equation.lower()
-                )
-                if exact_match:
-                    if search_text == query_lower:
-                        match_score += 15
-                        matched_fields.append("equation")
-                else:
-                    if query_lower in search_text:
-                        match_score += 8
-                        matched_fields.append("equation")
-
-            # Search in aliases
-            if "aliases" in search_fields and hasattr(reaction, "aliases"):
-                for alias in reaction.aliases:
-                    search_text = alias if case_sensitive else alias.lower()
-                    if exact_match:
-                        if search_text == query_lower:
-                            match_score += 8
-                            matched_fields.append("aliases")
-                    else:
-                        if query_lower in search_text:
-                            match_score += 8
-                            matched_fields.append("aliases")
-
-            # Search in EC numbers
-            if "ec_numbers" in search_fields and hasattr(reaction, "ec_numbers"):
-                for ec in reaction.ec_numbers:
-                    if query_lower in ec.lower():
-                        match_score += 12
-                        matched_fields.append("ec_numbers")
-
-            if match_score > 0:
-                result = {
-                    "reaction_id": reaction.id,
-                    "name": reaction.name,
-                    "equation": getattr(reaction, "equation", ""),
-                    "direction": getattr(reaction, "direction", ""),
-                    "reversibility": getattr(reaction, "reversibility", ""),
-                    "match_score": match_score,
-                    "matched_fields": list(set(matched_fields)),
-                    "reaction_object": reaction,
-                }
-
-                # Add additional attributes if available
-                if hasattr(reaction, "aliases"):
-                    result["aliases"] = reaction.aliases
-                if hasattr(reaction, "ec_numbers"):
-                    result["ec_numbers"] = reaction.ec_numbers
-                if hasattr(reaction, "pathways"):
-                    result["pathways"] = reaction.pathways
-
-                results.append(result)
-
-        # Sort by match score (highest first)
-        results.sort(key=lambda x: x["match_score"], reverse=True)
-
-        # Limit results if specified
-        if max_results:
-            results = results[:max_results]
-
-        self.log_info(f"Found {len(results)} reactions matching '{query}'")
-        return results
+        """Search for reactions in the ModelSEED database."""
+        identifier_hash = self.rxn_identifier_hash
+        stoichiometry_hash = self.rxn_stoichiometry_hash
+        matches = {}
+        for item in query_identifiers:
+            item = self._standardize_string(item)
+            if item in identifier_hash:
+                for hit in identifier_hash[item]["ids"]:
+                    matches.setdefault(hit, {"score": 10, "identifier_hits": {}, "ec_hits": {},"transport_scores":{},"equation_scores":{},"proton_matches":[]})
+                    matches[hit]["identifier_hits"][item] = 1 * identifier_hash[item]["type"]
+        full_hits = {}
+        third_lvl_hits = {}
+        for item in query_ec:
+            if item in identifier_hash:
+                for hit in identifier_hash[item]["ids"]:
+                    matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "ec_hits": {},"transport_scores":{},"equation_scores":{},"proton_matches":[]})
+                    matches[hit]["ec_hits"][item] = 1 * identifier_hash[item]["type"]
+                    full_hits[hit] = 1
+            else:
+                array = item.split(".")
+                item = array[0]+"."+array[1]+"."+array[2]
+                if item in identifier_hash:
+                    for hit in identifier_hash[item]["ids"]:
+                        matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "ec_hits": {}, "transport_scores": {}, "equation_scores": {}, "proton_matches":[]})
+                        matches[hit]["ec_hits"][item] = 1 * identifier_hash[item]["type"]
+                        third_lvl_hits[hit] = 1
+        for hit in full_hits:
+            matches[hit]["score"] += 8
+        for hit in third_lvl_hits:
+            if hit not in full_hits:
+                matches[hit]["score"] += 6
+        if query_stoichiometry is not None and len(query_stoichiometry) > 0:
+            #Checking for best base equation match
+            signs = [-1,1]
+            missing_count = default_missing_count
+            if len(query_stoichiometry["metabolite_hash"]) <= 2:
+                missing_count = 0
+            for sign in signs:
+                highest_hit_scores = {}
+                highest_hit_score = 0
+                highest_hit = None
+                hit_counts = {}
+                unmatch_cpd = {}
+                unmatch_db_cpd = {}
+                for base_id in query_stoichiometry["metabolite_hash"]:
+                    querystoich = sign*query_stoichiometry["metabolite_hash"][base_id]
+                    if base_id not in cpd_hits:
+                        cpd_hits[base_id] = self.search_compounds(query_identifiers=[base_id])
+                        if len(cpd_hits[base_id]) == 0:
+                            cpd_hits[base_id] = {base_id: {}}
+                    for cpdmatch in cpd_hits[base_id]:
+                        if cpdmatch in stoichiometry_hash["metabolite_hash"]:
+                            if querystoich in stoichiometry_hash["metabolite_hash"][cpdmatch]:
+                                for hit in stoichiometry_hash["metabolite_hash"][cpdmatch][querystoich]:
+                                    hit_counts.setdefault(hit, {})
+                                    hit_counts[hit].setdefault(base_id, {})
+                                    hit_counts[hit][base_id].setdefault(cpdmatch, 0)
+                                    hit_counts[hit][base_id][cpdmatch] += 1
+                                    highest_hit_scores[hit] = len(hit_counts[hit])/len(query_stoichiometry["metabolite_hash"])
+                                    if highest_hit_scores[hit] > highest_hit_score:
+                                        highest_hit = hit
+                                        highest_hit_score = highest_hit_scores[hit]
+                    for hit in hit_counts:
+                        if base_id not in hit_counts[hit]:
+                            unmatch_cpd.setdefault(hit, {})
+                            unmatch_cpd[hit][base_id] = querystoich
+                for hit in hit_counts:
+                    unmatch_cpd.setdefault(hit, {})
+                    unmatch_db_cpd.setdefault(hit, {})
+                    for cpdmatch in stoichiometry_hash["rxn_hash"][hit]["metabolite_hash"]:
+                        found = False
+                        for base_id in hit_counts[hit]:
+                            if cpdmatch in hit_counts[hit][base_id]:
+                                found = True
+                        if not found and cpdmatch != "cpd00067":
+                            unmatch_db_cpd[hit][cpdmatch] = stoichiometry_hash["rxn_hash"][hit]["metabolite_hash"][cpdmatch]
+                if highest_hit != None:
+                    for hit in highest_hit_scores:
+                        if hit in matches or (highest_hit_scores[hit] >= (len(query_stoichiometry["metabolite_hash"])-missing_count)/len(query_stoichiometry["metabolite_hash"]) and len(query_stoichiometry["metabolite_hash"]) == len(stoichiometry_hash["rxn_hash"][hit]["metabolite_hash"])):
+                            matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "ec_hits": {},"transport_scores":{},"equation_scores":{},"proton_matches":[]})
+                            matches[hit]["score"] += 20*highest_hit_scores[hit]
+                            matches[hit]["equation_scores"] = (highest_hit_scores[hit], len(hit_counts[hit]), sign,unmatch_cpd[hit],unmatch_db_cpd[hit])
+                            for base_id in hit_counts[hit]:
+                                for cpdmatch in hit_counts[hit][base_id]:
+                                    cpd_hits[base_id][cpdmatch].setdefault("equation_hits", {})
+                                    cpd_hits[base_id][cpdmatch]["equation_hits"][hit] = highest_hit_scores[hit]
+                #Checking for best transport match from the previous hits
+                highest_hit_scores = {}
+                highest_hit_score = 0
+                highest_hit = None
+                hit_counts = {}
+                unmatch_cpd = {}
+                unmatch_db_cpd = {}
+                for base_id in query_stoichiometry["transport_stoichiometry"]:
+                    querystoich = sign*query_stoichiometry["transport_stoichiometry"][base_id]
+                    if base_id not in cpd_hits:
+                        cpd_hits[base_id] = self.search_compounds(query_identifiers=[base_id])
+                        if len(cpd_hits[base_id]) == 0:
+                            cpd_hits[base_id] = {base_id: {}}
+                    for cpdmatch in cpd_hits[base_id]:
+                        if cpdmatch in stoichiometry_hash["transport_stoichiometry"]:
+                            if querystoich in stoichiometry_hash["transport_stoichiometry"][cpdmatch]:
+                                for hit in stoichiometry_hash["transport_stoichiometry"][cpdmatch][querystoich]:
+                                    hit_counts.setdefault(hit, {})
+                                    hit_counts[hit].setdefault(base_id, {})
+                                    hit_counts[hit][base_id].setdefault(cpdmatch, 0)
+                                    hit_counts[hit][base_id][cpdmatch] += 1
+                                    highest_hit_scores[hit] = len(hit_counts[hit])/len(query_stoichiometry["transport_stoichiometry"])
+                                    if highest_hit_scores[hit] > highest_hit_score:
+                                        highest_hit = hit
+                                        highest_hit_score = highest_hit_scores[hit]
+                    for hit in hit_counts:
+                        unmatch_cpd[hit] = {}
+                        if base_id not in hit_counts[hit]:
+                            unmatch_cpd[hit][base_id] = querystoich
+                for hit in hit_counts:
+                    unmatch_db_cpd[hit] = {}
+                    for cpdmatch in stoichiometry_hash["rxn_hash"][hit]["transport_hash"]:
+                        found = False
+                        for base_id in hit_counts[hit]:
+                            if cpdmatch in hit_counts[hit][base_id]:
+                                found = True
+                        if not found:
+                            unmatch_db_cpd[hit][cpdmatch] = stoichiometry_hash["rxn_hash"][hit]["transport_hash"][cpdmatch]
+                if highest_hit != None:
+                    for hit in highest_hit_scores:
+                        if highest_hit_scores[hit] >= 1:
+                            if hit in matches:
+                                matches[hit]["score"] += highest_hit_scores[hit]*10*len(hit_counts[hit])
+                                matches[hit]["transport_scores"] = (highest_hit_scores[hit], len(hit_counts[hit]), sign,unmatch_cpd[hit],unmatch_db_cpd[hit])
+                                for base_id in hit_counts[hit]:
+                                    for cpdmatch in hit_counts[hit][base_id]:
+                                        cpd_hits[base_id][cpdmatch].setdefault("transport_hits", {})
+                                        cpd_hits[base_id][cpdmatch]["transport_hits"][hit] = highest_hit_scores[hit]
+                #Increasing hit scores if the proton stoichiometry matches
+                for hit in matches:
+                    if hit in stoichiometry_hash["proton_stoichiometry"] and sign*query_stoichiometry["proton_stoichiometry"] == stoichiometry_hash["proton_stoichiometry"][hit]:
+                        matches[hit]["score"] += 2
+                        matches[hit]["proton_matches"].append(hit)
+        return matches
 
     def get_compound_by_id(self, compound_id: str) -> Optional[Any]:
         """Get a compound by its ModelSEED ID.
@@ -473,3 +582,75 @@ class MSBiochemUtils(SharedEnvUtils):
         stats["reversibility_distribution"] = reversibility_stats
 
         return stats
+    
+    def reaction_to_string(self,reaction):
+        """Converts reaction into string representation."""
+        [base_id, compartment, index] = self._parse_id(reaction)
+        name = re.sub(r'\s*\[[a-zA-Z0-9]+\]$', '', reaction.name)
+        output = {"rxnstring": base_id + "(" + name + ")","base_id": base_id,"compartment": compartment,"index": index}
+        if compartment != None and compartment != "c":
+            output["rxnstring"] += "[" + str(compartment) + "]"
+        equation = reaction.build_reaction_string(use_metabolite_names=True)
+        if "<--" in equation:
+            array = equation.split("<--")
+            equation = array[1] + " --> " + array[0]
+            output["reversed"] = True
+        output["rxnstring"] += ": " + equation
+        return output
+
+    def reaction_id_to_msid(self,reaction_id):
+        """Converts reaction ID into ModelSEED ID if possible."""
+        pattern = re.compile(r"rxn\d+")
+        match = pattern.search(reaction_id)
+        if match:
+            return match.group()
+        return None
+
+    def reaction_to_msid(self,reaction):
+        """Converts reaction into ModelSEED ID if possible."""
+        pattern = re.compile(r"rxn\d+")
+        idstring = None
+        if isinstance(reaction, str):
+            idstring = reaction
+        else:
+            idstring = reaction.id
+        match = pattern.search(idstring)
+        if match:
+            return match.group()
+        if not isinstance(reaction, str):
+            for anno_type in reaction.annotation:
+                if isinstance(reaction.annotation[anno_type], set):
+                    for alias in reaction.annotation[anno_type]:
+                        match = pattern.search(alias)
+                        if match:
+                            return match.group()
+        return None
+
+    def reaction_directionality_from_bounds(self, reaction, tol=1e-9):
+        """
+        Classify directionality from a Reaction's bounds only.
+
+        Returns one of: 'forward', 'reverse', 'reversible', 'blocked'.
+        """
+        lb, ub = reaction.lower_bound, reaction.upper_bound
+
+        # Treat tiny bounds as zero
+        if abs(lb) < tol:
+            lb = 0.0
+        if abs(ub) < tol:
+            ub = 0.0
+
+        if lb < 0 and ub > 0:
+            return "reversible"
+        if lb >= 0 and ub > 0:
+            return "forward"
+        if lb < 0 and ub <= 0:
+            return "reverse"
+        return "blocked"
+
+    def reaction_biochem_directionality(self,reaction):
+        """Determines the directionalities of a reaction in the ModelSEED biochemistry database."""
+        rxnobj = self.get_reaction_by_id(reaction)
+        if rxnobj is None:
+            return None
+        return self.reaction_directionality_from_bounds(rxnobj)

@@ -132,9 +132,12 @@ class ArgoUtils(SharedEnvUtils):
                 "http://": f"socks5://127.0.0.1:{proxy_port}",
                 "https://": f"socks5://127.0.0.1:{proxy_port}",
             }
-        self.cli = httpx.Client(
-            proxies=proxies, timeout=self.timeout, follow_redirects=True
-        )
+        if proxies is None:
+            self.cli = httpx.Client(timeout=self.timeout, follow_redirects=True)
+        else:
+            self.cli = httpx.Client(
+                proxies=proxies, timeout=self.timeout, follow_redirects=True
+            )
 
         # headers (api key optional)
         self.headers = {"Content-Type": "application/json"}
@@ -206,7 +209,7 @@ class ArgoUtils(SharedEnvUtils):
         }
 
     # ------------------------------------------------------------------
-    def chat(self, prompt: str, *, system: str = "") -> str:
+    def chat(self, prompt: str, *, system: str = "") -> str:#Don't change this function in a reverse incompatible way
         """Send a chat request to the Argo LLM service.
 
         Args:

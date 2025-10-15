@@ -392,6 +392,85 @@ def example_sdk_composite_workflow():
     print(f"Full stack has MS utils: {hasattr(full_stack, 'find_peaks')}")
 
 
+def example_workspace_type_management():
+    """Example 10: Workspace Type Management."""
+    print("\n=== Example 10: Workspace Type Management ===")
+
+    try:
+        from kbutillib.kb_ws_utils import KBWSUtils
+
+        # Initialize workspace utils
+        ws_utils = KBWSUtils(kb_version='prod')
+
+        # Example 1: Simple usage - List all available types
+        print("\n--- Example 1: List All Available Types ---")
+        all_types = ws_utils.list_all_types()
+        print(f"Total types available: {len(all_types)}")
+        print(f"First 5 types: {all_types[:5]}")
+
+        # Example 2: List types including empty modules
+        print("\n--- Example 2: Include Empty Modules ---")
+        all_types_with_empty = ws_utils.list_all_types(include_empty_modules=True)
+        print(f"Total types (with empty modules): {len(all_types_with_empty)}")
+
+        # Example 3: Filter types by module name
+        print("\n--- Example 3: Filter Types ---")
+        genome_types = [t for t in all_types if 'Genome' in t]
+        print(f"Genome-related types: {genome_types[:5]}")
+
+        # Example 4: Get detailed specifications for specific types
+        print("\n--- Example 4: Get Type Specifications ---")
+        types_of_interest = ['KBaseGenomes.Genome', 'KBaseFBA.FBAModel']
+        try:
+            specs = ws_utils.get_type_specs(types_of_interest)
+
+            for type_name, spec in specs.items():
+                print(f"\nType: {type_name}")
+                print(f"  Definition: {spec.get('type_def', 'N/A')}")
+                print(f"  Description: {spec.get('description', 'N/A')[:100]}...")
+                print(f"  Has JSON schema: {'json_schema' in spec}")
+
+        except Exception as e:
+            print(f"Could not retrieve specs: {e}")
+            print("This may happen if the types don't exist or workspace is unavailable")
+
+        # Example 5: Practical workflow - Find and inspect types
+        print("\n--- Example 5: Practical Workflow ---")
+        # Step 1: List all types
+        all_types = ws_utils.list_all_types()
+
+        # Step 2: Filter for types of interest
+        assembly_types = [t for t in all_types if 'Assembly' in t]
+        print(f"Found {len(assembly_types)} assembly-related types")
+
+        # Step 3: Get specifications for the filtered types
+        if assembly_types:
+            assembly_specs = ws_utils.get_type_specs(assembly_types[:3])  # Get first 3
+            print(f"Retrieved specifications for {len(assembly_specs)} assembly types")
+
+            for type_name in assembly_specs:
+                print(f"  - {type_name}")
+
+        # Example 6: With provenance tracking (optional)
+        print("\n--- Example 6: With Provenance Tracking ---")
+        types_with_prov = ws_utils.list_all_types(track_provenance=True)
+        print(f"Retrieved {len(types_with_prov)} types with provenance tracking")
+
+        # Example 7: Error handling
+        print("\n--- Example 7: Error Handling ---")
+        try:
+            # Try to get specs for non-existent type
+            invalid_specs = ws_utils.get_type_specs(['NonExistent.Type'])
+        except ValueError as e:
+            print(f"ValueError caught: {e}")
+        except Exception as e:
+            print(f"Expected error for non-existent type: {e}")
+
+    except Exception as e:
+        print(f"Workspace type management example failed: {e}")
+        print("This is normal if KBase workspace is not accessible or credentials not configured")
+
+
 def main():
     """Run all examples."""
     print("KBUtilLib Usage Examples")
@@ -408,6 +487,7 @@ def main():
         example_model_analysis()
         example_sdk_utilities()
         example_sdk_composite_workflow()
+        example_workspace_type_management()
 
         print("\n" + "=" * 50)
         print("All examples completed successfully!")

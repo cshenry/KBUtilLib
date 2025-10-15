@@ -19,7 +19,13 @@ class KBWSUtils(SharedEnvUtils):
     Knowledgebase) APIs and services.
 
     Provides methods for authentication, data retrieval, workspace operations,
-    and other KBase-specific functionality.
+    type discovery, and other KBase-specific functionality.
+
+    Key features:
+    - Workspace object retrieval and storage
+    - Type discovery and specification retrieval
+    - Handle service integration for file downloads
+    - Provenance tracking and logging
     """
 
     def __init__(
@@ -278,6 +284,124 @@ class KBWSUtils(SharedEnvUtils):
         if isinstance(ws, int):
             ws = str(ws)
         return ws + "/" + id_or_ref
+
+    def list_all_types(self, include_empty_modules: bool = False, track_provenance: bool = False) -> List[str]:
+        """List all released types from all modules in the KBase Workspace.
+
+        Retrieves a complete list of all available datatypes in the KBase type system,
+        returning them as a flat list of type strings in the format "Module.TypeName".
+
+        Args:
+            include_empty_modules (bool): If True, include modules with no released types.
+                                          Defaults to False.
+            track_provenance (bool): If True, track this operation in provenance.
+                                    Defaults to False.
+
+        Returns:
+            list: List of type strings (e.g., ['KBaseGenomes.Genome',
+                  'KBaseGenomeAnnotations.Assembly', 'KBaseFBA.FBAModel', ...])
+
+        Raises:
+            Exception: If workspace API call fails or authentication is invalid
+
+        Example:
+            >>> utils = KBWSUtils()
+            >>> all_types = utils.list_all_types()
+            >>> print(f"Found {len(all_types)} types")
+            >>> # Filter for genome-related types
+            >>> genome_types = [t for t in all_types if 'Genome' in t]
+        """
+        if track_provenance:
+            self.initialize_call("list_all_types", {"include_empty_modules": include_empty_modules})
+
+        self.logger.info(f"Retrieving all types from workspace (include_empty_modules={include_empty_modules})")
+        try:
+            # Call the workspace API to retrieve all types
+            # Convert boolean to integer (0 or 1) as the API expects a Long type
+            result = self._ws_client.list_all_types({'with_empty_modules': 1 if include_empty_modules else 0})
+            self.logger.debug(f"Workspace API returned {len(result)} modules")
+
+            # Transform nested dict to flat list of type strings
+            type_list = []
+            for module, types in result.items():
+                for typename, version in types.items():
+                    type_list.append(f"{module}.{typename}")
+
+            self.logger.info(f"Successfully retrieved {len(type_list)} types")
+            return type_list
+        except Exception as e:
+            raise Exception(f"Failed to list all types from workspace: {str(e)}")
+
+    def get_type_specs(self, type_list: List[str], track_provenance: bool = False) -> Dict[str, Any]:
+        """Retrieve detailed specifications for specific datatypes.
+
+        Fetches complete type information including JSON schemas, descriptions,
+        and metadata for a list of KBase datatypes.
+
+        Args:
+            type_list (list): List of type strings to retrieve specs for.
+                             Can be with or without versions (e.g., ['KBaseGenomes.Genome',
+                             'KBaseGenomeAnnotations.Assembly-5.0'])
+            track_provenance (bool): If True, track this operation in provenance.
+                                    Defaults to False.
+
+        Returns:
+            dict: Dictionary mapping type strings to their full specifications.
+                  Each specification includes:
+                  - type_def: Type definition string
+                  - description: Type description
+                  - spec_def: KIDL specification text
+                  - json_schema: JSON schema for validation
+                  - module_vers: List of module versions
+                  - type_vers: List of type versions
+                  - Other metadata from get_type_info
+
+        Raises:
+            ValueError: If type_list is empty or not a list
+            Exception: If any type doesn't exist or API call fails
+
+        Example:
+            >>> utils = KBWSUtils()
+            >>> specs = utils.get_type_specs(['KBaseGenomes.Genome', 'KBaseFBA.FBAModel'])
+            >>> genome_spec = specs['KBaseGenomes.Genome']
+            >>> print(genome_spec['description'])
+            >>> print(genome_spec['json_schema'])
+        """
+        # Validate input parameters
+        if not isinstance(type_list, list):
+            raise ValueError("type_list must be a list")
+        if len(type_list) == 0:
+            raise ValueError("type_list cannot be empty")
+
+        if track_provenance:
+            self.initialize_call("get_type_specs", {"type_list": type_list})
+
+        self.logger.info(f"Retrieving type specifications for {len(type_list)} types")
+
+        # Initialize empty result dictionary
+        specs = {}
+
+        try:
+            # Implement loop: for each type_string, call get_type_info and store in specs dict
+            for type_string in type_list:
+                try:
+                    self.logger.debug(f"Retrieving spec for type: {type_string}")
+                    type_info = self._ws_client.get_type_info(type_string)
+                    specs[type_string] = type_info
+                    self.logger.debug(f"Successfully retrieved spec for: {type_string}")
+                except Exception as e:
+                    # Provide clear error message indicating which type failed
+                    raise Exception(f"Failed to retrieve spec for type '{type_string}': {str(e)}")
+
+            self.logger.info(f"Successfully retrieved {len(specs)} type specifications")
+            return specs
+        except Exception as e:
+            if "Failed to retrieve spec for type" in str(e):
+                # Re-raise the specific error from the loop
+                raise
+            else:
+                # Wrap other errors with context
+                raise Exception(f"Failed to retrieve type specifications: {str(e)}")
 
     def object_url(self, id_or_ref, ws=None):
         """Get the data viewer URL for a KBase object.

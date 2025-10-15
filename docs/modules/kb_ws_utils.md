@@ -10,6 +10,8 @@ The `KBWSUtils` class provides utilities for interacting with KBase (Department 
 
 - **Workspace Operations**: Complete workspace management (create, list, delete)
 - **Object Management**: Save, retrieve, and manipulate KBase objects
+- **Type Discovery**: List and inspect available KBase datatypes
+- **Type Specifications**: Retrieve detailed type schemas and metadata
 - **Authentication**: Integrated KBase authentication and token management
 - **Multi-environment Support**: Support for prod, dev, and CI environments
 - **Retry Logic**: Built-in retry mechanisms for network operations
@@ -178,6 +180,45 @@ def download_blob_file(self, handle_id: str, file_path: str) -> Optional[str]:
     """
 ```
 
+### Type Discovery and Management
+
+```python
+def list_all_types(
+    self,
+    include_empty_modules: bool = False,
+    track_provenance: bool = False
+) -> List[str]:
+    """List all released types from all modules in the KBase Workspace.
+
+    Args:
+        include_empty_modules: If True, include modules with no released types
+        track_provenance: If True, track this operation in provenance
+
+    Returns:
+        List of type strings (e.g., ['KBaseGenomes.Genome', 'KBaseFBA.FBAModel'])
+    """
+
+def get_type_specs(
+    self,
+    type_list: List[str],
+    track_provenance: bool = False
+) -> Dict[str, Any]:
+    """Retrieve detailed specifications for specific datatypes.
+
+    Args:
+        type_list: List of type strings to retrieve specs for
+        track_provenance: If True, track this operation in provenance
+
+    Returns:
+        Dictionary mapping type strings to their full specifications
+        (includes type_def, description, json_schema, spec_def, etc.)
+
+    Raises:
+        ValueError: If type_list is empty or not a list
+        Exception: If any type doesn't exist or API call fails
+    """
+```
+
 ### Environment Configuration
 
 ```python
@@ -261,6 +302,40 @@ dev_kb = KBWSUtils(kb_version="appdev")
 
 # CI environment
 ci_kb = KBWSUtils(kb_version="ci")
+```
+
+### Type Discovery and Specifications
+
+```python
+# List all available types
+all_types = kb.list_all_types()
+print(f"Total types: {len(all_types)}")
+print(f"Sample types: {all_types[:5]}")
+
+# List types including empty modules
+all_types_with_empty = kb.list_all_types(include_empty_modules=True)
+
+# Filter types by pattern
+genome_types = [t for t in all_types if 'Genome' in t]
+print(f"Genome-related types: {genome_types}")
+
+# Get detailed specifications for specific types
+type_specs = kb.get_type_specs(['KBaseGenomes.Genome', 'KBaseFBA.FBAModel'])
+
+for type_name, spec in type_specs.items():
+    print(f"\nType: {type_name}")
+    print(f"  Definition: {spec['type_def']}")
+    print(f"  Description: {spec['description']}")
+    print(f"  Has JSON schema: {'json_schema' in spec}")
+
+# Practical workflow: Find and inspect types
+all_types = kb.list_all_types()
+assembly_types = [t for t in all_types if 'Assembly' in t]
+assembly_specs = kb.get_type_specs(assembly_types[:3])
+
+# With provenance tracking
+types = kb.list_all_types(track_provenance=True)
+specs = kb.get_type_specs(['KBaseGenomes.Genome'], track_provenance=True)
 ```
 
 ## Environment URLs

@@ -55,6 +55,11 @@ try:
 except ImportError:
     KBAnnotationUtils = None
 
+try:
+    from .patric_ws_utils import PatricWSUtils
+except ImportError:
+    PatricWSUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -74,6 +79,7 @@ __all__ = [
     "MSFBAUtils",
     "MSBiochemUtils",
     "NotebookUtils",
+    "PatricWSUtils",
     "SharedEnvUtils",
     "examples",
 ]

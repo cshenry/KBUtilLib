@@ -55,6 +55,11 @@ try:
 except ImportError:
     KBAnnotationUtils = None
 
+try:
+    from .kb_report_utils import KBReportUtils
+except ImportError:
+    KBReportUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -64,11 +69,13 @@ except ImportError:
 examples = None
 
 __all__ = [
+    "AICurationUtils",
     "ArgoUtilsMSBiochemUtils",
     "BaseUtils",
     "KBAnnotationUtils",
     "KBGenomeUtils",
     "KBModelUtils",
+    "KBReportUtils",
     "KBSDKUtils",
     "KBWSUtils",
     "MSFBAUtils",

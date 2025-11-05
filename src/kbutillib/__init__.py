@@ -55,6 +55,11 @@ try:
 except ImportError:
     KBAnnotationUtils = None
 
+try:
+    from .kb_reads_utils import KBReadsUtils
+except ImportError:
+    KBReadsUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -69,6 +74,7 @@ __all__ = [
     "KBAnnotationUtils",
     "KBGenomeUtils",
     "KBModelUtils",
+    "KBReadsUtils",
     "KBSDKUtils",
     "KBWSUtils",
     "MSFBAUtils",

@@ -51,6 +51,11 @@ except ImportError:
     AICurationUtils = None
 
 try:
+    from .escher_utils import EscherUtils
+except ImportError:
+    EscherUtils = None
+
+try:
     from .kb_annotation_utils import KBAnnotationUtils
 except ImportError:
     KBAnnotationUtils = None
@@ -75,6 +80,7 @@ __all__ = [
     "MSBiochemUtils",
     "NotebookUtils",
     "SharedEnvUtils",
+    "EscherUtils",
     "examples",
 ]
 

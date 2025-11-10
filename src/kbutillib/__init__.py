@@ -60,6 +60,11 @@ try:
 except ImportError:
     KBAnnotationUtils = None
 
+try:
+    from .kb_plm_utils import KBPLMUtils
+except ImportError:
+    KBPLMUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -74,6 +79,7 @@ __all__ = [
     "KBAnnotationUtils",
     "KBGenomeUtils",
     "KBModelUtils",
+    "KBPLMUtils",
     "KBSDKUtils",
     "KBWSUtils",
     "MSFBAUtils",

@@ -129,7 +129,7 @@
   },
   "artifacts": {
     "prd_filename": "escher-utils-refactor",
-    "git_commit": null
+    "git_commit": "d3367162dae4149d33eda0f21de48f90e452f864"
   },
   "queries_for_user": [],
   "comments": [

@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,6 +42,7 @@ class KBPLMUtils(KBGenomeUtils):
         super().__init__(**kwargs)
         self.plm_api_url = plm_api_url.rstrip("/")
         self.plm_search_endpoint = f"{self.plm_api_url}/search"
+        self.plm_result_endpoint = f"{self.plm_api_url}/result"
         self.plm_sequence_endpoint = f"{self.plm_api_url}/sequences"
 
         # Check if BLAST is available
@@ -76,15 +78,23 @@ class KBPLMUtils(KBGenomeUtils):
         query_sequences: List[Dict[str, str]],
         max_hits: int = 100,
         similarity_threshold: float = 0.0,
-        return_embeddings: bool = False
+        return_embeddings: bool = False,
+        poll_interval: float = 2.0,
+        max_wait_time: float = 300.0
     ) -> Dict[str, Any]:
         """Query the PLM API for protein homologs.
+
+        This function submits a job to the PLM API and polls for results.
+        The API returns a job_id immediately, then the function polls the
+        result endpoint until the job completes.
 
         Args:
             query_sequences: List of dicts with 'id' and 'sequence' keys
             max_hits: Maximum number of hits to return per query (1-100)
             similarity_threshold: Minimum similarity score threshold
             return_embeddings: Whether to return embeddings for hits
+            poll_interval: Time in seconds between polling attempts (default: 2.0)
+            max_wait_time: Maximum time in seconds to wait for results (default: 300.0)
 
         Returns:
             Dict containing API response with hits for each query
@@ -92,6 +102,7 @@ class KBPLMUtils(KBGenomeUtils):
         Raises:
             ValueError: If input validation fails
             requests.RequestException: If API request fails
+            TimeoutError: If job doesn't complete within max_wait_time
         """
         # Validate inputs
         if not query_sequences:
@@ -115,25 +126,114 @@ class KBPLMUtils(KBGenomeUtils):
             f"requesting up to {max_hits} hits per sequence"
         )
 
+        # Step 1: Submit the job to the search endpoint
         try:
             response = requests.post(
                 self.plm_search_endpoint,
                 json=payload,
-                timeout=300,  # 5 minute timeout for large requests
+                timeout=30,  # Short timeout for job submission
                 verify=False  # Following the pattern in base_utils.py
             )
             response.raise_for_status()
 
-            result = response.json()
-            self.log_info(f"Successfully retrieved hits from PLM API")
-            return result
+            job_response = response.json()
+
+            # Extract job_id from response
+            if "job_id" not in job_response:
+                raise ValueError(
+                    f"Expected 'job_id' in response, got: {job_response.keys()}"
+                )
+
+            job_id = job_response["job_id"]
+            self.log_info(f"PLM job submitted successfully with job_id: {job_id}")
 
         except requests.exceptions.Timeout:
-            self.log_error("PLM API request timed out")
+            self.log_error("PLM API job submission timed out")
             raise
         except requests.exceptions.RequestException as e:
-            self.log_error(f"PLM API request failed: {str(e)}")
+            self.log_error(f"PLM API job submission failed: {str(e)}")
             raise
+
+        # Step 2: Poll the result endpoint for job completion
+        # Note: The result endpoint requires POST with job_id in the body, not GET
+        elapsed_time = 0.0
+
+        self.log_info(
+            f"Polling for results at {self.plm_result_endpoint} for job {job_id} "
+            f"(interval: {poll_interval}s, max_wait: {max_wait_time}s)"
+        )
+
+        while elapsed_time < max_wait_time:
+            try:
+                time.sleep(poll_interval)
+                elapsed_time += poll_interval
+
+                result_response = requests.post(
+                    self.plm_result_endpoint,
+                    json={"job_id": job_id},
+                    timeout=30,
+                    verify=False
+                )
+
+                # Check if job is complete
+                if result_response.status_code == 200:
+                    response_json = result_response.json()
+
+                    # API returns: {"status": "done|pending|running|failed", "result": {...}, "error": ...}
+                    status = response_json.get("status", "unknown")
+
+                    if status == "done":
+                        # Job completed successfully - return the result field
+                        result = response_json.get("result")
+                        if result is None:
+                            raise RuntimeError("PLM job completed but result is None")
+
+                        self.log_info(
+                            f"PLM job completed successfully after {elapsed_time:.1f}s"
+                        )
+                        return result
+
+                    elif status == "failed":
+                        error_msg = response_json.get("error", "Unknown error")
+                        raise RuntimeError(f"PLM job failed: {error_msg}")
+
+                    elif status in ["pending", "running"]:
+                        self.log_debug(
+                            f"Job still {status} after {elapsed_time:.1f}s"
+                        )
+                        continue
+
+                    else:
+                        # Unknown status - log and continue polling
+                        self.log_warning(
+                            f"Unknown job status '{status}' after {elapsed_time:.1f}s"
+                        )
+                        continue
+
+                elif result_response.status_code == 202:
+                    # Job still processing
+                    self.log_debug(
+                        f"Job still processing (HTTP 202) after {elapsed_time:.1f}s"
+                    )
+                    continue
+                elif result_response.status_code == 404:
+                    raise RuntimeError(f"Job {job_id} not found (HTTP 404)")
+                else:
+                    result_response.raise_for_status()
+
+            except requests.exceptions.Timeout:
+                self.log_warning(
+                    f"Timeout while polling for results (elapsed: {elapsed_time:.1f}s)"
+                )
+                continue
+            except requests.exceptions.RequestException as e:
+                self.log_error(f"Error polling for results: {str(e)}")
+                raise
+
+        # If we've exhausted max_wait_time
+        raise TimeoutError(
+            f"PLM job {job_id} did not complete within {max_wait_time}s"
+        )
 
     def get_uniprot_sequences(
         self,

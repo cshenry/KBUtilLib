@@ -65,6 +65,11 @@ try:
 except ImportError:
     KBPLMUtils = None
 
+try:
+    from .kb_uniprot_utils import KBUniProtUtils
+except ImportError:
+    KBUniProtUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -81,6 +86,7 @@ __all__ = [
     "KBModelUtils",
     "KBPLMUtils",
     "KBSDKUtils",
+    "KBUniProtUtils",
     "KBWSUtils",
     "MSFBAUtils",
     "MSBiochemUtils",

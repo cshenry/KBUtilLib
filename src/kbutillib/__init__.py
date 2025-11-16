@@ -70,6 +70,11 @@ try:
 except ImportError:
     KBUniProtUtils = None
 
+try:
+    from .kb_skani_utils import KBSKANIUtils
+except ImportError:
+    KBSKANIUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -86,6 +91,7 @@ __all__ = [
     "KBModelUtils",
     "KBPLMUtils",
     "KBSDKUtils",
+    "KBSKANIUtils",
     "KBUniProtUtils",
     "KBWSUtils",
     "MSFBAUtils",

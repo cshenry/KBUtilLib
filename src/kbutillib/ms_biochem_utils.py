@@ -8,8 +8,6 @@ import json
 from typing import Any, Optional, Dict
 from collections import defaultdict
 
-from matplotlib.pylab import less
-
 from .shared_env_utils import SharedEnvUtils
 
 
@@ -654,3 +652,241 @@ class MSBiochemUtils(SharedEnvUtils):
         if rxnobj is None:
             return None
         return self.reaction_directionality_from_bounds(rxnobj)
+
+    def get_compound_deltag(self, compound_id: str) -> Optional[float]:
+        """Get the standard Gibbs free energy of formation for a compound.
+
+        Retrieves deltaG value from:
+        1. ModelSEED compound object deltag attribute
+        2. Compound annotations if available
+
+        Args:
+            compound_id: ModelSEED compound ID (e.g., 'cpd00001')
+
+        Returns:
+            Standard Gibbs free energy of formation in kJ/mol, or None if not available
+
+        Raises:
+            ValueError: If compound not found in ModelSEED database and no deltag in annotations
+        """
+        # Get the compound object from ModelSEED database
+        compound = self.get_compound_by_id(compound_id)
+
+        if compound is None:
+            raise ValueError(
+                f"Compound '{compound_id}' not found in ModelSEED database"
+            )
+
+        # First, try to get deltaG from the compound object's deltag attribute
+        if hasattr(compound, 'deltag') and compound.deltag is not None:
+            # Check if it's a valid value (ModelSEED uses 10000000 for unknown)
+            if abs(compound.deltag) < 10000000:
+                return float(compound.deltag)
+
+        # Try to get from annotations
+        if hasattr(compound, 'annotation') and compound.annotation:
+            if 'deltag' in compound.annotation:
+                deltag_val = compound.annotation['deltag']
+                if isinstance(deltag_val, (int, float)) and abs(deltag_val) < 10000000:
+                    return float(deltag_val)
+                elif isinstance(deltag_val, str):
+                    try:
+                        val = float(deltag_val)
+                        if abs(val) < 10000000:
+                            return val
+                    except ValueError:
+                        pass
+
+        # If we get here, no valid deltaG was found
+        return None
+
+    def get_reaction_deltag_from_formation(
+        self,
+        reaction_id: str,
+        require_all_compounds: bool = True
+    ) -> Dict[str, Any]:
+        """Calculate standard free energy change for a reaction from compound formation energies.
+
+        Computes ΔG°rxn = Σ(νi × ΔG°f,products) - Σ(νi × ΔG°f,reactants)
+
+        Args:
+            reaction_id: ModelSEED reaction ID (e.g., 'rxn00001')
+            require_all_compounds: If True, raises error if any compound lacks deltaG.
+                                  If False, returns partial calculation with warnings.
+
+        Returns:
+            Dictionary containing:
+                - 'deltag': Calculated standard free energy change in kJ/mol
+                - 'deltag_error': Propagated error if available
+                - 'reaction_id': The reaction ID
+                - 'equation': Reaction equation string
+                - 'compound_contributions': Dict mapping compound IDs to their contributions
+                - 'missing_compounds': List of compounds without deltaG values
+                - 'warnings': List of warning messages
+
+        Raises:
+            ValueError: If reaction not found or if require_all_compounds=True and
+                       any compound lacks valid deltaG values
+        """
+        # Get the reaction object
+        reaction = self.get_reaction_by_id(reaction_id)
+
+        if reaction is None:
+            raise ValueError(
+                f"Reaction '{reaction_id}' not found in ModelSEED database"
+            )
+
+        # Initialize result structure
+        result = {
+            'deltag': None,
+            'deltag_error': None,
+            'reaction_id': reaction_id,
+            'equation': reaction.build_reaction_string() if hasattr(reaction, 'build_reaction_string') else str(reaction),
+            'compound_contributions': {},
+            'missing_compounds': [],
+            'warnings': []
+        }
+
+        # Calculate deltaG from stoichiometry
+        deltag_sum = 0.0
+        deltag_error_sum = 0.0  # Sum of squared errors for error propagation
+        missing_compounds = []
+        compound_contributions = {}
+
+        # Iterate through metabolites (compounds) in the reaction
+        for metabolite, stoichiometry in reaction.metabolites.items():
+            # Get base compound ID (remove compartment suffix)
+            compound_id = metabolite.id
+
+            # Extract base ModelSEED ID (remove compartment suffix like _c0, _e0)
+            base_cpd_id = re.sub(r'_[a-z]\d*$', '', compound_id)
+
+            try:
+                # Get deltaG for this compound
+                deltag_f = self.get_compound_deltag(base_cpd_id)
+
+                if deltag_f is None:
+                    missing_compounds.append({
+                        'compound_id': base_cpd_id,
+                        'stoichiometry': stoichiometry,
+                        'name': metabolite.name if hasattr(metabolite, 'name') else base_cpd_id
+                    })
+                    continue
+
+                # Calculate contribution: stoichiometry × ΔG°f
+                contribution = stoichiometry * deltag_f
+                compound_contributions[base_cpd_id] = {
+                    'deltag_f': deltag_f,
+                    'stoichiometry': stoichiometry,
+                    'contribution': contribution
+                }
+
+                deltag_sum += contribution
+
+                # Try to get error for error propagation
+                compound = self.get_compound_by_id(base_cpd_id)
+                if compound and hasattr(compound, 'deltagerr') and compound.deltagerr is not None:
+                    if abs(compound.deltagerr) < 10000000:
+                        # Error propagation: σ² = Σ(νi² × σi²)
+                        deltag_error_sum += (stoichiometry ** 2) * (compound.deltagerr ** 2)
+
+            except ValueError as e:
+                missing_compounds.append({
+                    'compound_id': base_cpd_id,
+                    'stoichiometry': stoichiometry,
+                    'error': str(e)
+                })
+
+        # Check if we have missing compounds
+        if missing_compounds:
+            result['missing_compounds'] = missing_compounds
+
+            if require_all_compounds:
+                compound_list = [f"{c['compound_id']} (stoich: {c['stoichiometry']})"
+                               for c in missing_compounds]
+                raise ValueError(
+                    f"Reaction '{reaction_id}' contains compounds without valid deltaG values: "
+                    f"{', '.join(compound_list)}. These compounds are either not in ModelSEED "
+                    f"database or do not have deltaG values in their annotations."
+                )
+            else:
+                result['warnings'].append(
+                    f"Partial calculation: {len(missing_compounds)} compound(s) missing deltaG values"
+                )
+
+        # Set the calculated values
+        result['deltag'] = deltag_sum
+        result['compound_contributions'] = compound_contributions
+
+        # Calculate propagated error
+        if deltag_error_sum > 0:
+            result['deltag_error'] = deltag_error_sum ** 0.5
+
+        return result
+
+    def calculate_reaction_deltag(
+        self,
+        reaction,
+        use_compound_formation: bool = True,
+        require_all_compounds: bool = True
+    ) -> Dict[str, Any]:
+        """Calculate standard free energy change for a reaction.
+
+        This method can use either:
+        1. Compound formation energies (recommended, more accurate)
+        2. Reaction's stored deltaG value if available
+
+        Args:
+            reaction: Either a ModelSEED reaction ID (str) or a reaction object
+            use_compound_formation: If True, calculate from compound formation energies.
+                                   If False, use reaction's stored deltaG if available.
+            require_all_compounds: Only used if use_compound_formation=True.
+                                  If True, raises error if any compound lacks deltaG.
+
+        Returns:
+            Dictionary with calculation results (see get_reaction_deltag_from_formation)
+
+        Raises:
+            ValueError: If reaction not found or if calculation requirements not met
+        """
+        # Get reaction ID
+        if isinstance(reaction, str):
+            reaction_id = reaction
+            reaction_obj = self.get_reaction_by_id(reaction_id)
+        else:
+            reaction_obj = reaction
+            reaction_id = reaction_obj.id if hasattr(reaction_obj, 'id') else str(reaction)
+
+        if reaction_obj is None:
+            raise ValueError(f"Reaction '{reaction_id}' not found in ModelSEED database")
+
+        if use_compound_formation:
+            # Calculate from compound formation energies
+            return self.get_reaction_deltag_from_formation(
+                reaction_id,
+                require_all_compounds=require_all_compounds
+            )
+        else:
+            # Use reaction's stored deltaG
+            result = {
+                'deltag': None,
+                'deltag_error': None,
+                'reaction_id': reaction_id,
+                'equation': reaction_obj.build_reaction_string() if hasattr(reaction_obj, 'build_reaction_string') else str(reaction_obj),
+                'source': 'reaction_attribute',
+                'warnings': []
+            }
+
+            if hasattr(reaction_obj, 'deltag') and reaction_obj.deltag is not None:
+                if abs(reaction_obj.deltag) < 10000000:
+                    result['deltag'] = float(reaction_obj.deltag)
+                else:
+                    result['warnings'].append("Reaction deltaG value is unknown (10000000)")
+            else:
+                result['warnings'].append("Reaction has no stored deltaG value")
+
+            if hasattr(reaction_obj, 'deltagerr') and reaction_obj.deltagerr is not None:
+                if abs(reaction_obj.deltagerr) < 10000000:
+                    result['deltag_error'] = float(reaction_obj.deltagerr)
+
+            return result

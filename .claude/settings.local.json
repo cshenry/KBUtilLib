@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git log:*)",
+      "Bash(python:*)",
+      "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python:*)",
+      "Bash(curl:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base_utils import BaseUtils
 
@@ -322,7 +322,7 @@ class KBSKANIUtils(BaseUtils):
 
     def query_genomes(
         self,
-        query_fasta: str | List[str],
+        query_fasta: Union[str, List[str]],
         database_name: str = "default",
         min_ani: float = 0.0,
         max_results: Optional[int] = None,

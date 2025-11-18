@@ -6,7 +6,8 @@
       "Bash(git log:*)",
       "Bash(python:*)",
       "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(src/kbutillib/kb_model_standardization_utils.py)"
     ],
     "deny": [],
     "ask": []

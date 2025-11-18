@@ -73,7 +73,7 @@ class MSBiochemUtils(SharedEnvUtils):
         """Index the biochemistry compounds by their identifiers."""
         if self._identifier_hash is None:
             self._identifier_hash = {}
-            for cpd in self._biochem_db.compounds:
+            for cpd in self.biochem_db.compounds:
                 if cpd.is_obsolete == False:
                     item = self._standardize_string(cpd.id)
                     self._identifier_hash.setdefault(item, {"type": "msid", "ids": []})
@@ -98,7 +98,7 @@ class MSBiochemUtils(SharedEnvUtils):
         """Index the biochemistry reactions by their identifiers."""
         if self._rxn_identifier_hash is None:
             self._rxn_identifier_hash = {}
-            for rxn in self._biochem_db.reactions:
+            for rxn in self.biochem_db.reactions:
                 if rxn.is_obsolete == False:
                     item = self._standardize_string(rxn.id)
                     self._rxn_identifier_hash.setdefault(item, {"type": "msid", "ids": []})
@@ -128,7 +128,7 @@ class MSBiochemUtils(SharedEnvUtils):
         """Index the biochemistry reactions by their stoichiometry."""
         if self._rxn_stoichiometry_hash is None:
             self._rxn_stoichiometry_hash = {"proton_stoichiometry": {},"transport_stoichiometry":{},"metabolite_hash":{},"rxn_hash":{}}
-            for rxn in self._biochem_db.reactions:
+            for rxn in self.biochem_db.reactions:
                 if rxn.is_obsolete == False:
                     base_cpd_hash = {}
                     transport_hash = {}
@@ -159,7 +159,7 @@ class MSBiochemUtils(SharedEnvUtils):
         """Index the biochemistry compounds by their structures."""
         if self._structure_hash is None:
             self._structure_hash = {}
-            for cpd in self._biochem_db.compounds:
+            for cpd in self.biochem_db.compounds:
                 if cpd.is_obsolete == False:
                     #All structures are unified in a single hash, and we store the type and ids for each struct in the hash values
                     if "InChI" in cpd.annotation:
@@ -184,7 +184,7 @@ class MSBiochemUtils(SharedEnvUtils):
         """Index the biochemistry compounds by the elements they contain."""
         if self._element_hashes is None:
             self._element_hashes = {"element_hash":{},"element_count":{},"cpd_elements":{}}
-            for cpd in self._biochem_db.compounds:
+            for cpd in self.biochem_db.compounds:
                 if cpd.is_obsolete == False and cpd.formula is not None and len(cpd.formula) > 0:
                     elements = self._parse_formula(cpd.formula)
                     self._element_hashes["cpd_elements"][cpd.id] = elements
@@ -234,8 +234,7 @@ class MSBiochemUtils(SharedEnvUtils):
         # Load the database
         try:
             from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
-
-            self._biochem_db = ModelSEEDBiochem.get(path=self.modelseed_db_path)
+            self._biochem_db =  ModelSEEDBiochem.get(path=self.modelseed_db_path)
             self.log_info(f"ModelSEED database loaded from {self.modelseed_db_path}")
         except Exception as e:
             self.log_error(f"Failed to load ModelSEED database: {e}")

@@ -26,6 +26,11 @@ except ImportError:
     MSBiochemUtils = None
 
 try:
+    from .kb_model_standardization_utils import ModelStandardizationUtils
+except ImportError:
+    ModelStandardizationUtils = None
+
+try:
     from .kb_model_utils import KBModelUtils
 except ImportError:
     KBModelUtils = None
@@ -88,6 +93,7 @@ __all__ = [
     "BaseUtils",
     "KBAnnotationUtils",
     "KBGenomeUtils",
+    "ModelStandardizationUtils",
     "KBModelUtils",
     "KBPLMUtils",
     "KBSDKUtils",

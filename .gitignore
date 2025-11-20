@@ -32,8 +32,6 @@ test_*.py
 *_test.py
 DEPENDENCY_MANAGEMENT_SUMMARY.md
 OPTIONAL_IMPORTS_SUMMARY.md
-# Dependencies directory (contains symbolic links and cloned repos)
-src/kbutillib/dependencies/
 # Cursor workspace files
 *.code-workspace
 # Jupyter Notebook

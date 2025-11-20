@@ -9,6 +9,7 @@ from typing import Any, Optional, Dict
 from collections import defaultdict
 
 from .shared_env_utils import SharedEnvUtils
+from .dependency_manager import get_data_path
 
 
 class MSBiochemUtils(SharedEnvUtils):
@@ -43,11 +44,15 @@ class MSBiochemUtils(SharedEnvUtils):
             if config_path:
                 modelseed_db_path = config_path
             else:
-                # Use dependencies directory by default
-                from pathlib import Path
-
-                dependencies_dir = Path(__file__).parent / "dependencies"
-                modelseed_db_path = str(dependencies_dir / "ModelSEEDDatabase")
+                # Use dependency manager to get the ModelSEEDDatabase path
+                db_path = get_data_path("ModelSEEDDatabase")
+                if db_path:
+                    modelseed_db_path = str(db_path)
+                else:
+                    # Fallback to default location if not found
+                    from pathlib import Path
+                    repo_root = Path(__file__).parent.parent.parent
+                    modelseed_db_path = str(repo_root / "dependencies" / "ModelSEEDDatabase")
 
         self.modelseed_db_path = modelseed_db_path
         self.auto_download = auto_download

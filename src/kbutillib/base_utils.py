@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 import requests
 
+from .dependency_manager import get_dependency_manager
+
 requests.packages.urllib3.disable_warnings()
 
 script_path = os.path.abspath(__file__)
@@ -27,7 +29,7 @@ class BaseUtils:
 
     def __init__(self, name="Unknown", log_level: str = "INFO", **kwargs: Any) -> None:
         """Initialize the base utility class."""
-        # Add dependencies directory to Python path first thing
+        # Initialize dependency manager and set up paths
         self._setup_dependencies_path()
         self.logger = self._setup_logger(log_level)
 
@@ -119,124 +121,45 @@ class BaseUtils:
         return logger
 
     def _setup_dependencies_path(self) -> None:
-        """Add the dependencies directory to Python path if it exists.
-        Also adds specific repository paths for symbolic links.
+        """Initialize the dependency manager and set up Python paths.
+
+        Uses the new dependency manager to handle all external dependencies
+        via git submodules and configuration.
         """
-        # Get the directory containing this module
-        current_dir = Path(__file__).parent
-        self.dependencies_dir = current_dir / "dependencies"
+        # Initialize the dependency manager (this sets up all paths)
+        self.dep_manager = get_dependency_manager()
 
-        if self.dependencies_dir.exists():
-            dependencies_str = str(self.dependencies_dir)
-            if dependencies_str not in sys.path:
-                sys.path.insert(0, dependencies_str)
-
-            # Also add specific paths for repositories that might be symbolic links
-            # Add ModelSEEDpy if it exists (the repo root contains the package)
-            modelseedpy_path = self.dependencies_dir / "modelseedpy"
-            if modelseedpy_path.is_symlink():
-                target_repo = str(
-                    modelseedpy_path.resolve()
-                )  # The ModelSEEDpy repo root
-                if target_repo not in sys.path:
-                    sys.path.insert(0, target_repo)
-
-            # Add cobrakbase if it exists (need the parent containing the cobrakbase repo)
-            cobrakbase_path = self.dependencies_dir / "cobrakbase"
-            if cobrakbase_path.is_symlink():
-                # cobrakbase symlink points to /Users/chenry/code/cobrakbase/cobrakbase
-                # We need /Users/chenry/code/cobrakbase in the path
-                target_pkg = cobrakbase_path.resolve()  # Points to the package dir
-                target_repo = str(target_pkg.parent)  # The repo root
-                if target_repo not in sys.path:
-                    sys.path.insert(0, target_repo)
+        # For backward compatibility, provide dependencies_dir attribute
+        # pointing to the default dependencies directory
+        repo_root = Path(__file__).parent.parent.parent
+        self.dependencies_dir = repo_root / "dependencies"
 
     def _ensure_git_dependency(
         self, module_name: str, git_url: str, branch: str = "master"
     ) -> bool:
-        """Ensure a git-based dependency is available in the dependencies directory.
+        """Ensure a git-based dependency is available.
+
+        This is a compatibility method that now uses the dependency manager.
 
         Args:
             module_name: Name of the module to check for
-            git_url: Git URL to clone from if module is missing
-            branch: Git branch to checkout (default: master)
+            git_url: Git URL (ignored, uses config)
+            branch: Git branch (ignored, uses config)
 
         Returns:
             bool: True if module is available, False if failed to obtain
         """
-        module_dir = self.dependencies_dir / module_name
-
-        # Check if module is already available and importable
+        # Try to import the module
         try:
             __import__(module_name)
-            self.log_debug(f"Module {module_name} already available and importable")
+            self.log_debug(f"Module {module_name} is available")
             return True
         except ImportError as e:
-            self.log_debug(f"Module {module_name} not importable: {e}")
+            self.log_warning(f"Module {module_name} not importable: {e}")
             # Check if it's due to missing dependencies vs missing module
             if "No module named" in str(e) and module_name not in str(e):
                 # Module exists but has missing dependencies
                 self.log_warning(f"Module {module_name} has missing dependencies: {e}")
-                # For now, return False but could be enhanced to install dependencies
-                return False
-
-        # Check if module exists in dependencies directory
-        if module_dir.exists():
-            # Module directory exists, try importing again
-            try:
-                __import__(module_name)
-                return True
-            except ImportError:
-                # Directory exists but module not working, try updating
-                self.log_warning(
-                    f"Module {module_name} directory exists but import failed, attempting git pull"
-                )
-                try:
-                    result = subprocess.run(
-                        ["git", "pull"],
-                        cwd=module_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if result.returncode == 0:
-                        try:
-                            __import__(module_name)
-                            return True
-                        except ImportError:
-                            pass
-                except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-                    self.log_warning(f"Git pull failed for {module_name}: {e}")
-
-        # Module not available, try to clone it
-        self.log_info(f"Cloning {module_name} from {git_url}")
-        try:
-            # Ensure dependencies directory exists
-            self.dependencies_dir.mkdir(exist_ok=True)
-
-            # Clone the repository
-            result = subprocess.run(
-                ["git", "clone", "-b", branch, git_url, str(module_dir)],
-                capture_output=True,
-                text=True,
-                timeout=120,  # Increased timeout for large repositories
-            )
-
-            if result.returncode == 0:
-                self.log_info(f"Successfully cloned {module_name}")
-                # Try importing the module
-                try:
-                    __import__(module_name)
-                    return True
-                except ImportError as e:
-                    self.log_error(f"Cloned {module_name} but import still failed: {e}")
-                    return False
-            else:
-                self.log_error(f"Failed to clone {module_name}: {result.stderr}")
-                return False
-
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-            self.log_error(f"Error cloning {module_name}: {e}")
             return False
 
     def ensure_modelseed_database(self) -> bool:

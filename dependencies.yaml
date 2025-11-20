@@ -1,0 +1,41 @@
+# KBUtilLib Dependencies Configuration
+#
+# This file specifies external dependencies managed as git submodules.
+# Each dependency can be configured with:
+#   - git_url: The repository URL
+#   - commit: Specific commit hash to checkout (optional, uses branch/tag if not specified)
+#   - branch: Branch or tag to use (default: main or master depending on repo)
+#   - path: Local path where the dependency should be located
+#           - Can be absolute or relative (relative paths are from project root)
+#           - Default: dependencies/<repo_name>
+#
+# To use a different location for a dependency, modify the 'path' field.
+# Examples:
+#   path: "../ModelSEEDpy"  # Use a sibling directory
+#   path: "/absolute/path/to/ModelSEEDpy"  # Use an absolute path
+#   path: "dependencies/ModelSEEDpy"  # Use default submodules location (default)
+
+dependencies:
+  modelseedpy:
+    git_url: "https://github.com/ModelSEED/ModelSEEDpy.git"
+    branch: "main"
+    commit: null  # If null, uses the branch head; set to specific commit hash to pin
+    path: "dependencies/ModelSEEDpy"
+
+  ModelSEEDDatabase:
+    git_url: "https://github.com/ModelSEED/ModelSEEDDatabase.git"
+    branch: "master"
+    commit: null
+    path: "dependencies/ModelSEEDDatabase"
+
+  cobrakbase:
+    git_url: "https://github.com/Fxe/cobrakbase.git"
+    branch: "master"
+    commit: null
+    path: "dependencies/cobrakbase"
+
+  cb_annotation_ontology_api:
+    git_url: "https://github.com/kbaseapps/cb_annotation_ontology_api.git"
+    branch: "main"
+    commit: null
+    path: "dependencies/cb_annotation_ontology_api"

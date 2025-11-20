@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .kb_ws_utils import KBWSUtils
+from .dependency_manager import get_data_path
 
 source_hash = {"MetaCyc": "META", "KEGG": "RO", "BiGG": "BIGG", "Rhea": "RHEA"}
 
@@ -52,7 +53,16 @@ class KBAnnotationUtils(KBWSUtils):
 
         # Ensure required dependencies are available
         self._ensure_dependencies()
-        self.annoontology_dir = self.dependencies_dir / "cb_annotation_ontology_api"
+
+        # Get the cb_annotation_ontology_api directory from dependency manager
+        ontology_path = get_data_path("cb_annotation_ontology_api")
+        if ontology_path:
+            self.annoontology_dir = ontology_path
+        else:
+            # Fallback to default location
+            from pathlib import Path
+            repo_root = Path(__file__).parent.parent.parent
+            self.annoontology_dir = repo_root / "dependencies" / "cb_annotation_ontology_api"
 
         self.object = None
         self.objectinfo = None

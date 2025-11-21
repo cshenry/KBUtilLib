@@ -485,51 +485,52 @@ class NotebookUtils(BaseUtils):
 
     def save(
         self,
+        name_or_meta: Union[str, dict],
         data: Any,
-        name: Optional[str] = None,
-        meta: Optional[dict] = None,
     ) -> Optional[DataObject]:
         """Save data to a JSON file in the notebook data directory.
 
-        If meta is provided, creates a DataObject with standardized naming.
-        If meta is not provided, saves raw data with the given name (backwards compatible).
+        If name_or_meta is a string, saves raw data with that filename (backwards compatible).
+        If name_or_meta is a dict, creates a DataObject with standardized naming.
 
         Args:
-            data: The data to save
-            name: Filename (without extension) for simple saves (ignored if meta provided)
-            meta: Optional metadata dictionary with fields:
+            name_or_meta: Either a filename (string, without extension) or a
+                metadata dictionary with fields:
                 - prefix: str (required) - prefix for standardized filename
                 - source_file: str (optional) - source file in data/ directory
                 - number_type: str (optional) - one of 'NR', 'AA', 'Log2'
                 - data_type: str (optional) - one of 'TRANS', 'PROT', 'MGR'
                 - kb_metadata: list (optional) - metadata from KBase objects
                 - name: str (optional) - human-readable name for the data
+            data: The data to save
 
         Returns:
-            DataObject if meta was provided, None otherwise
+            DataObject if meta dict was provided, None otherwise
 
         Raises:
-            ValueError: If neither name nor meta is provided, or if meta is invalid
+            ValueError: If name_or_meta is invalid type or meta dict is missing required fields
         """
-        if meta is not None:
+        if isinstance(name_or_meta, dict):
             # Create DataObject with metadata
-            data_obj = self._create_dataobject_from_meta(data, meta)
+            data_obj = self._create_dataobject_from_meta(data, name_or_meta)
             filename = self.datacache_dir + "/" + data_obj.generate_filename() + ".json"
             dir_path = os.path.dirname(filename)
             os.makedirs(dir_path, exist_ok=True)
             with open(filename, "w") as f:
                 json.dump(data_obj.to_dict(), f, indent=4, skipkeys=True)
             return data_obj
-        else:
+        elif isinstance(name_or_meta, str):
             # Backwards compatible simple save
-            if name is None:
-                raise ValueError("Either 'name' or 'meta' must be provided to save()")
-            filename = self.datacache_dir + "/" + name + ".json"
+            filename = self.datacache_dir + "/" + name_or_meta + ".json"
             dir_path = os.path.dirname(filename)
             os.makedirs(dir_path, exist_ok=True)
             with open(filename, "w") as f:
                 json.dump(data, f, indent=4, skipkeys=True)
             return None
+        else:
+            raise ValueError(
+                f"name_or_meta must be a string or dict, got: {type(name_or_meta)}"
+            )
 
     def _create_dataobject_from_meta(self, data: Any, meta: dict) -> DataObject:
         """Create a DataObject from data and metadata dictionary.

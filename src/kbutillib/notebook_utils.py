@@ -2,11 +2,160 @@
 
 import json
 import os
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 from genericpath import exists
-from typing import Any, Optional
+from typing import Any, Optional, Union
 import pandas as pd
 
 from .base_utils import BaseUtils
+
+
+class NumberType(Enum):
+    """Enumeration of valid number types for data objects."""
+    NR = "NR"
+    AA = "AA"
+    LOG2 = "Log2"
+
+
+class DataType(Enum):
+    """Enumeration of valid data types for data objects."""
+    TRANS = "TRANS"
+    PROT = "PROT"
+    MGR = "MGR"
+
+
+@dataclass
+class DataObject:
+    """Data object with metadata for standardized naming and provenance tracking.
+
+    Attributes:
+        name: Human-readable name for the data object
+        prefix: Required prefix for filename generation
+        data: The actual data content
+        source_file: Optional source file path (must be in data/ directory)
+        number_type: Optional number type (NR, AA, Log2)
+        data_type: Optional data type (TRANS, PROT, MGR)
+        kb_metadata: Optional metadata from KBase objects
+    """
+    prefix: str
+    data: Any
+    name: Optional[str] = None
+    source_file: Optional[str] = None
+    number_type: Optional[NumberType] = None
+    data_type: Optional[DataType] = None
+    kb_metadata: list = field(default_factory=list)
+
+    # Class attribute to identify DataObject JSON
+    _dataobject_marker: str = field(default="DataObject_v1", init=False)
+
+    def to_dict(self) -> dict:
+        """Convert DataObject to a dictionary suitable for JSON serialization.
+
+        Returns:
+            Dictionary representation of the DataObject
+        """
+        return {
+            "_dataobject_marker": self._dataobject_marker,
+            "name": self.name,
+            "prefix": self.prefix,
+            "source_file": self.source_file,
+            "number_type": self.number_type.value if self.number_type else None,
+            "data_type": self.data_type.value if self.data_type else None,
+            "kb_metadata": self.kb_metadata,
+            "data": self.data,
+        }
+
+    def to_json(self, indent: int = 4) -> str:
+        """Serialize DataObject to JSON string.
+
+        Args:
+            indent: Indentation level for pretty printing
+
+        Returns:
+            JSON string representation
+        """
+        return json.dumps(self.to_dict(), indent=indent, skipkeys=True)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DataObject":
+        """Create DataObject from a dictionary.
+
+        Args:
+            data: Dictionary containing DataObject fields
+
+        Returns:
+            DataObject instance
+
+        Raises:
+            ValueError: If required fields are missing
+        """
+        if "prefix" not in data:
+            raise ValueError("DataObject requires 'prefix' field")
+        if "data" not in data:
+            raise ValueError("DataObject requires 'data' field")
+
+        # Convert string enum values back to enum types
+        number_type = None
+        if data.get("number_type"):
+            number_type = NumberType(data["number_type"])
+
+        data_type = None
+        if data.get("data_type"):
+            data_type = DataType(data["data_type"])
+
+        return cls(
+            name=data.get("name"),
+            prefix=data["prefix"],
+            source_file=data.get("source_file"),
+            number_type=number_type,
+            data_type=data_type,
+            kb_metadata=data.get("kb_metadata", []),
+            data=data["data"],
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "DataObject":
+        """Deserialize DataObject from JSON string.
+
+        Args:
+            json_str: JSON string representation
+
+        Returns:
+            DataObject instance
+        """
+        return cls.from_dict(json.loads(json_str))
+
+    @staticmethod
+    def is_dataobject_dict(data: Any) -> bool:
+        """Check if a dictionary represents a DataObject.
+
+        Args:
+            data: Data to check
+
+        Returns:
+            True if data is a dict with DataObject marker and required fields
+        """
+        if not isinstance(data, dict):
+            return False
+        return (
+            data.get("_dataobject_marker") == "DataObject_v1"
+            and "prefix" in data
+            and "data" in data
+        )
+
+    def generate_filename(self) -> str:
+        """Generate standardized filename from metadata.
+
+        Returns:
+            Filename string (without .json extension)
+        """
+        parts = [self.prefix]
+        if self.number_type:
+            parts.append(self.number_type.value)
+        if self.data_type:
+            parts.append(self.data_type.value)
+        return "-".join(parts)
 
 
 class NotebookUtils(BaseUtils):
@@ -334,35 +483,214 @@ class NotebookUtils(BaseUtils):
             self.log_warning("ipywidgets not available for interactive widgets")
             return None
 
-    def save(self, name: str, data: Any) -> None:
-        """Save data to a JSON file in the notebook data directory."""
-        filename = self.datacache_dir + "/" + name + ".json"
-        dir = os.path.dirname(filename)
-        os.makedirs(dir, exist_ok=True)
-        with open(filename, "w") as f:
-            json.dump(data, f, indent=4, skipkeys=True)
+    def save(
+        self,
+        data: Any,
+        name: Optional[str] = None,
+        meta: Optional[dict] = None,
+    ) -> Optional[DataObject]:
+        """Save data to a JSON file in the notebook data directory.
+
+        If meta is provided, creates a DataObject with standardized naming.
+        If meta is not provided, saves raw data with the given name (backwards compatible).
+
+        Args:
+            data: The data to save
+            name: Filename (without extension) for simple saves (ignored if meta provided)
+            meta: Optional metadata dictionary with fields:
+                - prefix: str (required) - prefix for standardized filename
+                - source_file: str (optional) - source file in data/ directory
+                - number_type: str (optional) - one of 'NR', 'AA', 'Log2'
+                - data_type: str (optional) - one of 'TRANS', 'PROT', 'MGR'
+                - kb_metadata: list (optional) - metadata from KBase objects
+                - name: str (optional) - human-readable name for the data
+
+        Returns:
+            DataObject if meta was provided, None otherwise
+
+        Raises:
+            ValueError: If neither name nor meta is provided, or if meta is invalid
+        """
+        if meta is not None:
+            # Create DataObject with metadata
+            data_obj = self._create_dataobject_from_meta(data, meta)
+            filename = self.datacache_dir + "/" + data_obj.generate_filename() + ".json"
+            dir_path = os.path.dirname(filename)
+            os.makedirs(dir_path, exist_ok=True)
+            with open(filename, "w") as f:
+                json.dump(data_obj.to_dict(), f, indent=4, skipkeys=True)
+            return data_obj
+        else:
+            # Backwards compatible simple save
+            if name is None:
+                raise ValueError("Either 'name' or 'meta' must be provided to save()")
+            filename = self.datacache_dir + "/" + name + ".json"
+            dir_path = os.path.dirname(filename)
+            os.makedirs(dir_path, exist_ok=True)
+            with open(filename, "w") as f:
+                json.dump(data, f, indent=4, skipkeys=True)
+            return None
+
+    def _create_dataobject_from_meta(self, data: Any, meta: dict) -> DataObject:
+        """Create a DataObject from data and metadata dictionary.
+
+        Args:
+            data: The actual data content
+            meta: Metadata dictionary
+
+        Returns:
+            DataObject instance
+
+        Raises:
+            ValueError: If required fields are missing or invalid
+        """
+        if "prefix" not in meta:
+            raise ValueError("meta dictionary requires 'prefix' field")
+
+        # Validate source_file if provided
+        source_file = meta.get("source_file")
+        if source_file is not None:
+            # Check that source_file is in the data/ directory
+            expected_prefix = "data/"
+            if not source_file.startswith(expected_prefix):
+                raise ValueError(
+                    f"source_file must be in data/ directory, got: {source_file}"
+                )
+            # Optionally verify file exists
+            full_path = os.path.join(self.notebook_folder, source_file)
+            if not exists(full_path):
+                self.log_warning(f"source_file does not exist: {full_path}")
+
+        # Parse number_type
+        number_type = None
+        if meta.get("number_type"):
+            try:
+                number_type = NumberType(meta["number_type"])
+            except ValueError:
+                raise ValueError(
+                    f"Invalid number_type: {meta['number_type']}. "
+                    f"Must be one of: NR, AA, Log2"
+                )
+
+        # Parse data_type
+        data_type = None
+        if meta.get("data_type"):
+            try:
+                data_type = DataType(meta["data_type"])
+            except ValueError:
+                raise ValueError(
+                    f"Invalid data_type: {meta['data_type']}. "
+                    f"Must be one of: TRANS, PROT, MGR"
+                )
+
+        return DataObject(
+            prefix=meta["prefix"],
+            data=data,
+            name=meta.get("name"),
+            source_file=source_file,
+            number_type=number_type,
+            data_type=data_type,
+            kb_metadata=meta.get("kb_metadata", []),
+        )
 
     def load(
-        self, name: str, default: Any = None, kb_type: Optional[str] = None
-    ) -> Any:
-        """Load data from a JSON file in the notebook data directory."""
-        filename = self.datacache_dir + "/" + name + ".json"
+        self,
+        name_or_meta: Union[str, dict],
+        default: Any = None,
+        kb_type: Optional[str] = None,
+    ) -> Union[Any, DataObject]:
+        """Load data from a JSON file in the notebook data directory.
+
+        Automatically detects if the loaded data is a DataObject and returns
+        the appropriate type.
+
+        Args:
+            name_or_meta: Either a filename (string, without extension) or a
+                metadata dictionary with fields used to construct the filename:
+                - prefix: str (required)
+                - number_type: str (optional) - one of 'NR', 'AA', 'Log2'
+                - data_type: str (optional) - one of 'TRANS', 'PROT', 'MGR'
+            default: Default value to return if file doesn't exist
+            kb_type: Optional KBase type for object factory construction
+
+        Returns:
+            DataObject if the loaded data is a DataObject, otherwise raw data
+            (or the kb_type constructed object if kb_type is specified)
+
+        Raises:
+            ValueError: If file doesn't exist and no default provided,
+                or if meta dict is missing required fields
+        """
+        # Determine filename based on input type
+        if isinstance(name_or_meta, dict):
+            filename = self._filename_from_meta(name_or_meta)
+        elif isinstance(name_or_meta, str):
+            filename = self.datacache_dir + "/" + name_or_meta + ".json"
+        else:
+            raise ValueError(
+                f"name_or_meta must be a string or dict, got: {type(name_or_meta)}"
+            )
+
         if not exists(filename):
             if default is None:
-                self.log_error(
-                    "Requested data " + name + " doesn't exist at " + filename
-                )
-                raise (
-                    ValueError(
-                        "Requested data " + name + " doesn't exist at " + filename
-                    )
-                )
+                self.log_error(f"Requested data doesn't exist at {filename}")
+                raise ValueError(f"Requested data doesn't exist at {filename}")
             return default
+
         with open(filename) as f:
             data = json.load(f)
+
+        # Check if data is a DataObject
+        if DataObject.is_dataobject_dict(data):
+            return DataObject.from_dict(data)
+
+        # Apply kb_type if specified (backwards compatible)
         if kb_type is not None:
             data = self.kb_object_factory._build_object(kb_type, data, None, None)
+
         return data
+
+    def _filename_from_meta(self, meta: dict) -> str:
+        """Generate full file path from metadata dictionary.
+
+        Args:
+            meta: Metadata dictionary with prefix, number_type, data_type
+
+        Returns:
+            Full file path
+
+        Raises:
+            ValueError: If prefix is missing
+        """
+        if "prefix" not in meta:
+            raise ValueError("meta dictionary requires 'prefix' field")
+
+        parts = [meta["prefix"]]
+
+        if meta.get("number_type"):
+            # Validate number_type
+            try:
+                nt = NumberType(meta["number_type"])
+                parts.append(nt.value)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid number_type: {meta['number_type']}. "
+                    f"Must be one of: NR, AA, Log2"
+                )
+
+        if meta.get("data_type"):
+            # Validate data_type
+            try:
+                dt = DataType(meta["data_type"])
+                parts.append(dt.value)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid data_type: {meta['data_type']}. "
+                    f"Must be one of: TRANS, PROT, MGR"
+                )
+
+        filename = "-".join(parts)
+        return self.datacache_dir + "/" + filename + ".json"
 
     def list(self):
         """List all JSON files in the notebook data directory."""

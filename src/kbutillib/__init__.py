@@ -6,9 +6,12 @@ from .shared_env_utils import SharedEnvUtils
 
 # Optional modules - wrapped in try-except to handle missing dependencies
 try:
-    from .notebook_utils import NotebookUtils
+    from .notebook_utils import NotebookUtils, DataObject, NumberType, DataType
 except ImportError:
     NotebookUtils = None
+    DataObject = None
+    NumberType = None
+    DataType = None
 
 try:
     from .kb_ws_utils import KBWSUtils
@@ -91,6 +94,8 @@ examples = None
 __all__ = [
     "ArgoUtilsMSBiochemUtils",
     "BaseUtils",
+    "DataObject",
+    "DataType",
     "KBAnnotationUtils",
     "KBGenomeUtils",
     "ModelStandardizationUtils",
@@ -103,6 +108,7 @@ __all__ = [
     "MSFBAUtils",
     "MSBiochemUtils",
     "NotebookUtils",
+    "NumberType",
     "SharedEnvUtils",
     "EscherUtils",
     "examples",

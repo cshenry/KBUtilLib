@@ -10590,5 +10590,301 @@
         "directionality": "forward",
         "other_comments": "The reaction is stoichiometrically balanced and represents the conversion of CTP and phosphatidate to CDP-diacylglycerol and PPi. In vivo, rapid hydrolysis of PPi by pyrophosphatases drives the reaction forward, making the net direction effectively forward.",
         "confidence": "high"
+    },
+    "rxn01087": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction shows a phosphate transfer from ATP to ceramide, producing ADP and ceramide phosphate. The atoms and charges are balanced in this formulation. In vivo, this kinase reaction is highly exergonic, driving the reaction in the forward direction.",
+        "confidence": "high"
+    },
+    "rxn03234": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction represents a hydrolysis of aminoimidazole, where water is used to remove an amino group yielding imidazolone along with ammonia and a proton. The atoms and charge are balanced as written, and hydrolytic deamination reactions such as this are effectively irreversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn01734": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction shows proper stoichiometry for a CoA-transferase reaction. A proton is included to balance charges when the CoA group is transferred from succinyl-CoA to itaconate, producing succinate and itaconyl-CoA. The reversible arrow and the reaction mechanism suggest that the reaction is reversible in vivo under appropriate conditions.",
+        "confidence": "high"
+    },
+    "rxn02282": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced with one molecule of water reacting with one molecule of N-Formimino-L-aspartate to yield one molecule of ammonia and one molecule of N-Formyl-L-aspartate. As a hydrolytic reaction that removes an imino group as ammonia, it is generally driven in the forward direction in vivo.",
+        "confidence": "high"
+    },
+    "rxn02241": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced. Aromadendrin (a dihydroflavonol) is oxidized to luteolin with concomitant decarboxylation of 2-oxoglutarate to succinate and CO2, a typical irreversible oxygenase reaction in vivo.",
+        "confidence": "high"
+    },
+    "rxn09471": {
+        "errors": [
+            "There appears to be an imbalance in oxygen\u2010containing species (H2O, O2, and H2O2) and protons that suggests the reaction is not fully elementally balanced",
+            "The explicit addition of extra water and CoA to yield the predicted acetyl-CoA count may not fully account for the detailed atomic balancing of the nucleotide and coenzyme groups"
+        ],
+        "directionality": "forward",
+        "other_comments": "The reaction seems to represent a peroxisomal fatty acid oxidation step for a tetradecenoyl chain where 7 acetyl-CoA are produced from a 14-carbon substrate. Although the overall carbon splitting is plausible, the stoichiometry of small molecules (water, oxygen, hydrogen peroxide, and protons) does not appear to be rigorously balanced. In vivo the reaction in peroxisomes is essentially irreversible due to production of H2O2.",
+        "confidence": "medium"
+    },
+    "rxn05704": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction describes a proton coupled symport of monomethylamine between the extracellular and cytosolic compartments. The reaction is stoichiometrically balanced and written as reversible, although in vivo the direction may be influenced by the proton gradient.",
+        "confidence": "high"
+    },
+    "rxn02637": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction is stoichiometrically balanced. It represents a typical dehydrogenase reaction, where chlordecone alcohol is oxidized to a ketone (Kepone) with concomitant reduction of NADP+ to NADPH and release of a proton. Although dehydrogenase reactions can in principle be reversible, in vivo the oxidation of the alcohol is usually favored.",
+        "confidence": "high"
+    },
+    "rxn10496": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction transfers one methyl group from dimethylamine to coenzyme M, producing methyl-CoM and monomethylamine. Atom counts and methyl group distribution appear balanced. Although the reaction is part of methanogenic metabolism, the methyl transfer step is generally bidirectional in vivo.",
+        "confidence": "high"
+    },
+    "rxn05994": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction is stoichiometrically balanced, with two hydrogen equivalents removed from the acyl-carrier protein thioester (one as a hydride to reduce NAD+ to NADH and one as a free proton) resulting in the formation of a trans double bond. Note that the substrate is listed as NAD, but in context it is understood to be NAD+; if interpreted this way the reaction is correct. In vivo the actual net flux may be determined by the NAD+/NADH ratio, but the arrow is drawn reversibly.",
+        "confidence": "high"
+    },
+    "rxn07431": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction transfers an acyl group from the 2-Methyl-1-hydroxypropyl-TPP intermediate to lipoamide, forming dihydrolipoamide and regenerating TPP. The stoichiometry is balanced and consistent with the acyltransfer reaction catalyzed by dihydrolipoyl transacylases in branched-chain dehydrogenase complexes. Although the isolated acyl transfer might be reversible, under in vivo conditions the reaction is driven forward through subsequent oxidation of dihydrolipoamide.",
+        "confidence": "high"
+    },
+    "rxn11746": {
+        "errors": [
+            "Reactant NAD is missing its positive charge, it should be NAD+ for clarity."
+        ],
+        "directionality": "forward",
+        "other_comments": "The reaction couples dehydrogenation and decarboxylation. The decarboxylation makes the reaction thermodynamically driven in the forward direction in vivo, and aside from the NAD+ notation the stoichiometry appears balanced.",
+        "confidence": "high"
+    },
+    "rxn03805": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction shows a one\u2010to\u2010one conversion between two deoxythymidine diphosphate linked sugars. At the level of description provided, the atoms appear balanced and the enzyme is known in streptose biosynthesis to channel the reaction in the direction of dihydrostreptose formation. It is understood that in vivo additional cofactors or bound water may be involved, but the simplified reaction is correct as given.",
+        "confidence": "medium"
+    },
+    "rxn02209": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically correct. It represents the oxidation of (R)-1,2-propanediol to D-lactaldehyde via NAD+ reduction, with the removal of two hydrogen atoms (one to form NADH and one released as a proton). In vivo conditions (high NAD+/NADH ratio and subsequent metabolism of lactaldehyde) typically favor the forward oxidation direction.",
+        "confidence": "high"
+    },
+    "rxn08977": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced with NADPH donating two electrons and a proton to reduce ubiquinone-8 to ubiquinol-8, while NADPH is oxidized to NADP. In vivo, the redox potentials favor the forward reduction, making the reaction effectively irreversible.",
+        "confidence": "high"
+    },
+    "rxn11291": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction represents an interconversion between two anomers of maltose catalyzed by aldose 1-epimerase. The stoichiometry is balanced and the process is reversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn06636": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction transfers a carbamoyl group from carbamoyl phosphate to the cephalosporin precursor with phosphate released. The stoichiometry is balanced and the reaction represents a committed step in cephalosporin biosynthesis, hence it proceeds in the forward direction in vivo.",
+        "confidence": "high"
+    },
+    "rxn03760": {
+        "errors": [],
+        "directionality": "uncertain",
+        "other_comments": "The reaction appears stoichiometrically balanced when one considers the overall transfer of hydrogen equivalents between the substrate and the coenzyme. The conversion of 4-hydroxy-6-methylpretetramide to 4-dedimethylamino-4-oxo-anhydrotetracycline by reduction of NADP to NADPH (with water as a co\u2010substrate and 2 protons released) is consistent with redox chemistry in tetracycline biosynthesis. Although the written equation is reversible, the actual in vivo direction may depend on enzyme kinetics and cellular conditions.",
+        "confidence": "medium"
+    },
+    "rxn03946": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is a methyl transfer from SAM to N-Acetyl-O-demethylpuromycin yielding SAH, H+ and N-Acetylpuromycin. The atom balance appears correct and typical energetics favor the forward reaction in vivo.",
+        "confidence": "high"
+    },
+    "rxn08180": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction appears stoichiometrically balanced. One molecule of S-adenosyl-L-methionine (which contains a sulfur atom) plus an additional sulfur (S) provide the two sulfur atoms that end up in L-methionine (retaining the sulfur from SAM) and biotin (which gains the missing sulfur compared to dethiobiotin). In vivo, biotin synthase catalyzes this radical SAM reaction in an essentially irreversible manner.",
+        "confidence": "high"
+    },
+    "rxn01503": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction depicts a CoA-transfer from Succinyl-CoA to the substrate Meglutol (a representation of 3-hydroxy-3-methylglutarate), yielding Succinate and HMG-CoA. The stoichiometry is balanced and the reaction is typically reversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn04735": {
+        "errors": [
+            "The oxygen reduction is not balanced. The half reaction O2 + 4H+ + 4e- -> 2H2O requires 4 electrons, but only 2 electrons are provided by a single NADH oxidation.",
+            "As written, the reaction does not conserve electrons. Either an additional NADH (or 2 molecules total) should be included or the product should be hydrogen peroxide (H2O2) to match the 2-electron reduction."
+        ],
+        "directionality": "forward",
+        "other_comments": "The reaction seems intended to be an oxygenase conversion of 2-methylnaphthalene to (2-naphthyl)methanol with NADH as reductant. However, the oxygen reduction part is inconsistent with known redox stoichiometry in vivo, rendering the reaction stoichiometrically incorrect.",
+        "confidence": "high"
+    },
+    "rxn07360": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is a typical SAM-dependent methyltransferase step. The methyl group is transferred from S-Adenosyl-L-methionine to the carotenoid substrate (3',4'-Dihydrorhodovibrin), yielding S-Adenosyl-homocysteine, a proton, and the methylated carotenoid (3,4,3',4'-Tetrahydrospirilloxanthin). The stoichiometry appears balanced and in vivo the reaction is highly favored in the forward direction due to the energetic properties of SAM usage.",
+        "confidence": "high"
+    },
+    "rxn03720": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction represents a hydrolytic ring opening of 4-Sulfolactone into maleylacetate with concomitant release of sulfite and a proton. Elementally and charge-wise, the reaction appears balanced when one assumes that 4-Sulfolactone contains a sulfonated moiety that is split into sulfite and that maleylacetate is produced in its deprotonated form. In vivo, once water adds and the ring is opened, the reaction is driven forward by downstream consumption of sulfite and maleylacetate, rendering the process effectively irreversible.",
+        "confidence": "high"
+    },
+    "rxn08230": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction is a transesterification where two phosphatidylglycerol molecules yield cardiolipin with four acyl chains and a free glycerol. The acyl chains and headgroups are balanced, and the reaction is biochemically reversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn09044": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction shows a balanced incorporation of one oxygen atom (via 0.5 O2) to form a hydroxyl group on the aromatic ring of 2-Octaprenylphenol. Although cofactors or electron donors (common in hydroxylation reactions) are not shown, the stoichiometry as written is balanced and the reaction is typically irreversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn00749": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced. Acetaldehyde is oxidized to acetate with water providing the extra oxygen, and PQQ is reduced to PQQH2, with a proton generated to balance charge. In vivo, this reaction is driven in the forward direction.",
+        "confidence": "high"
+    },
+    "rxn10791": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced, with GTP containing three phosphates being split into GMP (retaining one phosphate) and two free phosphate groups, along with generation of three protons. Hydrolysis by two water molecules is consistent with the cleavage of two phosphate bonds. Under in vivo conditions, such hydrolysis reactions are typically irreversible.",
+        "confidence": "high"
+    },
+    "rxn02674": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is balanced in terms of stoichiometry. The phosphorylation of hygromycin B by ATP to yield ADP and 7''-O-phosphohygromycin is typical of antibiotic resistance enzymes and is irreversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn10568": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced. Methanol (CH3OH) transfers its methyl group to coenzyme M (HS-CoM) to form methyl-coenzyme M (CH3-S-CoM) and water, which matches known methanogenic processes. Although the written reaction is reversible, in vivo the direction is effectively forward as methanol is consumed to initiate the methanogenesis pathway.",
+        "confidence": "high"
+    },
+    "rxn11891": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction is stoichiometrically correct. The oxidation of 11-cis-retinol to 11-cis-retinal is balanced by the reduction of NADP+ to NADPH with the release of a proton. In vivo the enzyme can catalyze the reaction in both directions, although the net flux depends on the cellular redox state.",
+        "confidence": "high"
+    },
+    "rxn08709": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is balanced with ATP donating a phosphate group to the lipidA derivative, producing ADP and a proton. The phosphorylation reaction is typical of kinase mechanisms and is effectively irreversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn11567": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction involves the hydrolysis of LacCer to yield galactose and glucocerebroside. The stoichiometry is balanced with one water molecule consumed. In vivo, such hydrolase reactions are typically irreversible under lysosomal acidic conditions.",
+        "confidence": "high"
+    },
+    "rxn05521": {
+        "errors": [],
+        "directionality": "uncertain",
+        "other_comments": "The reaction is stoichiometrically balanced, with one proton, one citrate, and one nickel ion on each side. It represents a transport of citrate complexed with Ni2+ across the membrane, accompanied by a proton. Although the reaction is written as reversible, in vivo the direction of transport is determined by electrochemical gradients and membrane potential, making the effective direction uncertain.",
+        "confidence": "high"
+    },
+    "rxn12005": {
+        "errors": [],
+        "directionality": "reverse",
+        "other_comments": "The provided reaction describes the vitamin K-dependent carboxylation of a protein precursor. In this process, CO2 is incorporated to form gamma-carboxyglutamate residues while the reduced form of vitamin K (here denoted as phytonadiol) is oxidized to vitamin K1 oxide. Overall, the one\u2010to\u2010one stoichiometry for substrates and products is consistent with the accepted mechanism, although detailed proton balances in such enzyme reactions are sometimes context dependent. The reaction is considered essentially irreversible in vivo. Reaction was inverted to avoid AI confusion, but AI directionality was corrected after the AI analysis was concluded.",
+        "confidence": "high"
+    },
+    "rxn00877": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction is an intramolecular rearrangement converting isobutyryl-CoA to butyryl-CoA. The stoichiometry is balanced with one molecule converting to one molecule, and the isomerase type reaction is generally reversible in vivo.",
+        "confidence": "high"
+    },
+    "rxn11625": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is written with one substrate converting to one product with no apparent imbalance in atoms or cofactors. Although the arrow is bidirectional, in vivo carotenoid cyclization reactions such as this (catalyzed by a beta-end group lyase) are thought to proceed essentially in the forward (biosynthetic) direction.",
+        "confidence": "high"
+    },
+    "rxn00613": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction appears stoichiometrically balanced with respect to atoms and charge. It converts one molecule each of NADP and glycerol-3-phosphate into NADPH, a proton, and glyceraldehyde-3-phosphate. Note that many glycerol-3-phosphate oxidoreductase reactions yield dihydroxyacetone phosphate, which is in equilibrium with glyceraldehyde-3-phosphate via triose phosphate isomerase. In vivo directionality may be influenced by cellular NADP/NADPH ratios, but the reaction itself is reversible.",
+        "confidence": "high"
+    },
+    "rxn12564": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced. It describes a biuret transporter that couples proton influx with biuret uptake. In vivo, the proton motive force typically drives the influx of H+ along with biuret into the cell, suggesting the forward direction under physiological conditions.",
+        "confidence": "high"
+    },
+    "rxn09126": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction represents the hydrolytic cleavage of the sn-1 acyl chain from 1,2-dihexadecanoyl-sn-glycerol 3-phosphate by a phospholipase A1 enzyme. Water is consumed and palmitate is released along with the 2-acyl-glycerol 3-phosphate product, with the production of a proton. Although the reversible arrow is shown, in vivo the hydrolysis is strongly favored in the forward direction.",
+        "confidence": "high"
+    },
+    "rxn03505": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is balanced when the formula of methylenediurea is interpreted as C3H6N4O2. The conversion of methylenediurea to CO2, ammonia, and N-(hydroxymethyl)urea involves a hydrolytic cleavage with decarboxylation and ammonia release. Such reactions are typically irreversible in vivo, and the stoichiometry, including the added water and protons, is consistent with the observed products.",
+        "confidence": "high"
+    },
+    "rxn01185": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction transfers the adenylyl group from APS to ammonia. The reactants and products are balanced when accounting for the sulfate leaving group and the extra two protons. Although the reaction is mechanistically symmetrical, cellular concentrations of APS, ammonia, and products may bias the flux. In vivo, the reaction is generally reversible.",
+        "confidence": "high"
+    },
+    "rxn02367": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The reaction describes the methylation of a catechol (homoprotocatechuate) by S-Adenosyl-L-methionine catalyzed by catechol O-methyltransferase. The methyl group is transferred from SAM to the substrate, yielding S-Adenosyl-homocysteine, a proton, and the methylated product homovanillate. The stoichiometry is balanced and all species are adequately accounted for. In vivo, while the enzyme generally functions in the forward direction, the reaction is thermodynamically reversible, with its direction largely determined by the relative concentrations of substrates and products.",
+        "confidence": "high"
+    },
+    "rxn00603": {
+        "errors": [],
+        "directionality": "reversible",
+        "other_comments": "The stoichiometry is balanced with proper oxidation of Sorbitol 6-phosphate to D-glucose-6-phosphate, using NADP+ to produce NADPH and a proton. In vivo, the reaction is generally considered reversible depending on the cellular environment.",
+        "confidence": "high"
+    },
+    "rxn13549": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is a typical phosphatase hydrolysis of a trehalose-monomycolate phosphate, where water is consumed to release phosphate, H+ and the dephosphorylated sugar. The stoichiometry is balanced and the in vivo reaction is driven forward by the energetics of phosphate ester hydrolysis.",
+        "confidence": "high"
+    },
+    "rxn11807": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction depicts the spontaneous decomposition of aldophosphamide into propenal (acrolein) and phosphamide mustard, with the release of a proton. This conversion is stoichiometrically balanced in terms of atoms and charge, and in vivo the decomposition is effectively irreversible.",
+        "confidence": "high"
+    },
+    "rxn06671": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is a glycosyl transfer where a glucose moiety is moved from UDP-glucose to a monoglucosyl-diacylglycerol substrate, producing UDP and diglucosyl-diacylglycerol. Stoichiometrically the substrates and products are balanced. Although the chemical mechanism is reversible, in vivo UDP is rapidly removed by subsequent metabolism, effectively driving the reaction in the forward (biosynthetic) direction.",
+        "confidence": "high"
+    },
+    "rxn00359": {
+        "errors": [],
+        "directionality": "forward",
+        "other_comments": "The reaction is stoichiometrically balanced with water used to hydrolytically cleave 3-phosphoadenylylsulfate into adenosine 3-5-bisphosphate, sulfate, and the release of two protons. In vivo the hydrolytic release of sulfate and protons makes the forward reaction strongly favored.",
+        "confidence": "high"
     }
 }

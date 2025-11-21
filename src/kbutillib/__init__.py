@@ -80,6 +80,11 @@ try:
 except ImportError:
     KBSKANIUtils = None
 
+try:
+    from .kb_reads_utils import KBReadsUtils
+except ImportError:
+    KBReadsUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -96,6 +101,7 @@ __all__ = [
     "ModelStandardizationUtils",
     "KBModelUtils",
     "KBPLMUtils",
+    "KBReadsUtils",
     "KBSDKUtils",
     "KBSKANIUtils",
     "KBUniProtUtils",

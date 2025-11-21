@@ -18,11 +18,17 @@ from .ms_biochem_utils import MSBiochemUtils
 compartment_types = {
     "cytosol":"c",
     "extracellar":"e",
+    "extracellular":"e",
     "extraorganism":"e",
     "periplasm":"p",
+    "membrane":"m",
+    "mitochondria":"m",
+    "environment":"e",
+    "env":"e",
     "c":"c",
     "p":"p",
-    "e":"e"
+    "e":"e",
+    "m":"m"
 }
 
 direction_conversion = {
@@ -53,6 +59,60 @@ class ModelStandardizationUtils(MSBiochemUtils):
             **kwargs: Additional keyword arguments passed to MSBiochemUtils
         """
         super().__init__(**kwargs)
+
+    def _parse_id(self, object_or_id):
+        """Parse a compound or reaction ID to extract base ID, compartment, and index.
+
+        Supports two notation styles:
+        - Bracket notation: "adp[c]", "h[e]", "cpd00001[c]"
+        - Underscore notation: "cpd01024_c0", "rxn00001_c"
+
+        Args:
+            object_or_id: Either a string ID or an object with an .id attribute
+
+        Returns:
+            Tuple of (base_id, compartment, index) where:
+            - base_id: The compound/reaction ID without compartment
+            - compartment: Single letter compartment code (c, e, p, m)
+            - index: Compartment index (usually "" or "0")
+        """
+        # Check if input is a string or object and if it's an object, set id to object.id
+        if isinstance(object_or_id, str):
+            id = object_or_id
+        else:
+            id = object_or_id.id
+
+        # Try bracket notation first (e.g., "adp[c]" or "h[e]")
+        bracket_match = re.search(r"(.+)\[([a-zA-Z]+)\]$", id)
+        if bracket_match:
+            baseid = bracket_match[1]
+            compartment = bracket_match[2]
+            index = ""  # Bracket notation doesn't have index
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized in bracket notation. Using default 'c'.")
+                compartment = "c"
+            else:
+                compartment = compartment_types[compartment.lower()]
+            return (baseid, compartment, index)
+
+        # Try underscore notation (e.g., "cpd01024_c0")
+        if re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
+            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
+            baseid = m[1]
+            compartment = m[2]
+            index = m[3]
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized. Readding compartment to base ID.")
+                baseid = baseid+"_"+compartment
+                compartment = "c"
+            else:
+                # Standardizing the compartment when it's recognizable
+                compartment = compartment_types[compartment.lower()]
+            return (baseid, compartment, index)
+
+        # If no compartment notation found, default to cytosol "c"
+        self.log_warning(f"ID '{id}' cannot be parsed - using ID as base and defaulting to compartment 'c'")
+        return (id, "c", "")
 
     def remove_model_periplasm_compartment(self, model_or_mdlutl):
         """Remove the periplasm compartment from a model."""
@@ -658,13 +718,43 @@ class ModelStandardizationUtils(MSBiochemUtils):
         iteration_log = []
 
         # Step 4: Translate compounds with unique matches
+        # Consider a compound "unique" if:
+        # 1. It has only one match, OR
+        # 2. It has one strong match (ID/name/structure) and all other matches are formula-only
         self.log_info("Step 1: Translating compounds with unique matches")
         unique_cpd_count = 0
         for model_cpd_id, matches in cpd_matches.items():
             if len(matches) == 1:
+                # Simple case: only one match
                 ms_cpd_id = list(matches.keys())[0]
                 cpd_translations[model_cpd_id] = ms_cpd_id
                 unique_cpd_count += 1
+            elif len(matches) > 1:
+                # Check if there's one strong match and all others are formula-only
+                strong_matches = []
+                formula_only_matches = []
+
+                for ms_cpd_id, match_info in matches.items():
+                    # A match is "formula-only" if it has formula hits but no ID or structure hits
+                    has_id_match = match_info.get("identifier_hits", []) and len(match_info["identifier_hits"]) > 0
+                    has_structure_match = match_info.get("structure_hits", []) and len(match_info["structure_hits"]) > 0
+                    has_formula_match = match_info.get("formula_hits", []) and len(match_info["formula_hits"]) > 0
+
+                    if has_id_match or has_structure_match:
+                        strong_matches.append(ms_cpd_id)
+                    elif has_formula_match:
+                        formula_only_matches.append(ms_cpd_id)
+
+                # If exactly one strong match and all others are formula-only, treat as unique
+                if len(strong_matches) == 1:
+                    ms_cpd_id = strong_matches[0]
+                    cpd_translations[model_cpd_id] = ms_cpd_id
+                    unique_cpd_count += 1
+                    if len(formula_only_matches) > 0:
+                        self.log_info(
+                            f"Compound {model_cpd_id} has one strong match ({ms_cpd_id}) "
+                            f"and {len(formula_only_matches)} formula-only matches - treating as unique"
+                        )
 
         iteration_log.append({
             "iteration": 0,
@@ -672,7 +762,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             "compounds_translated": unique_cpd_count,
             "reactions_translated": 0
         })
-        self.log_info(f"Translated {unique_cpd_count} compounds with unique matches")
+        self.log_info(f"Translated {unique_cpd_count} compounds with unique or effectively-unique matches")
 
         # Step 5: Iterative reaction matching
         iteration = 1
@@ -695,7 +785,8 @@ class ModelStandardizationUtils(MSBiochemUtils):
                     model_rxn,
                     matches,
                     cpd_translations,
-                    template
+                    template,
+                    cpd_matches
                 )
 
                 if perfect_match:
@@ -765,7 +856,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             "rxn_matches": rxn_matches
         }
 
-    def _find_perfect_reaction_match(self, model_rxn, matches, cpd_translations, template):
+    def _find_perfect_reaction_match(self, model_rxn, matches, cpd_translations, template, cpd_matches):
         """Find a perfect reaction match from candidates.
 
         A perfect match means:
@@ -778,6 +869,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             matches: Dict of potential MS reaction matches
             cpd_translations: Current compound translations
             template: Model template
+            cpd_matches: Compound match results from match_model_compounds_to_db
 
         Returns:
             Tuple of (ms_rxn_id, direction, new_cpd_mappings) or None if no perfect match
@@ -804,7 +896,8 @@ class ModelStandardizationUtils(MSBiochemUtils):
                     ms_rxn,
                     cpd_translations,
                     direction,
-                    is_transport
+                    is_transport,
+                    cpd_matches
                 )
 
                 if result and result["is_perfect"]:
@@ -812,7 +905,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
 
         return None
 
-    def _check_reaction_stoich_match(self, model_rxn, ms_rxn, cpd_translations, direction, is_transport):
+    def _check_reaction_stoich_match(self, model_rxn, ms_rxn, cpd_translations, direction, is_transport, cpd_matches):
         """Check if a model reaction matches an MS reaction stoichiometrically.
 
         Args:
@@ -821,18 +914,20 @@ class ModelStandardizationUtils(MSBiochemUtils):
             cpd_translations: Current compound translations
             direction: "forward" or "reverse"
             is_transport: Whether the reaction is a transport reaction
+            cpd_matches: Compound match results to verify untranslated compounds
 
         Returns:
             Dict with is_perfect flag and new_cpd_mappings, or None if not a match
         """
         # Get MS reaction stoichiometry
-        ms_stoich = {}
+        # For transport reactions, same compound in different compartments should be tracked separately
+        ms_stoich = {}  # Maps (base_id, compartment) -> coefficient
         ms_compartments = set()
         for met, coef in ms_rxn.metabolites.items():
             [base_id, compartment, index] = self._parse_id(met)
             if direction == "reverse":
                 coef = -coef
-            ms_stoich[base_id] = (coef, compartment)
+            ms_stoich[(base_id, compartment)] = coef
             ms_compartments.add(compartment)
 
         # Check transport consistency
@@ -842,6 +937,8 @@ class ModelStandardizationUtils(MSBiochemUtils):
 
         # Try to match each model metabolite
         new_cpd_mappings = {}
+        used_ms_compounds = set()  # Track which MS compounds have been matched
+
         for model_met, model_coef in model_rxn.metabolites.items():
             [model_base_id, model_compartment, model_index] = self._parse_id(model_met)
 
@@ -849,47 +946,81 @@ class ModelStandardizationUtils(MSBiochemUtils):
             if model_met.id in cpd_translations:
                 ms_cpd_id = cpd_translations[model_met.id]
                 ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
+                # Extract compartment from the MS compound ID
+                if "_" in ms_cpd_id:
+                    ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
+                else:
+                    ms_compartment = model_compartment  # Fallback to model compartment
 
                 # Check if this compound is in the MS reaction with correct stoichiometry
-                if ms_base_id not in ms_stoich:
+                ms_key = (ms_base_id, ms_compartment)
+                if ms_key not in ms_stoich:
                     return None
 
-                ms_coef, ms_comp = ms_stoich[ms_base_id]
+                ms_coef = ms_stoich[ms_key]
                 if abs(model_coef - ms_coef) > 1e-6:  # Allow small floating point differences
                     return None
 
-                # For transport, compartments don't need to match exactly,
-                # but we track the mapping
-                if not is_transport and model_compartment != ms_comp:
-                    return None
+                used_ms_compounds.add(ms_key)
             else:
                 # No translation yet - need to find a match
-                # Look for an MS compound in the reaction with matching stoichiometry
+                # Get the compound matches for this model compound
+                if model_met.id not in cpd_matches:
+                    return None  # Can't match this compound at all
+
+                compound_match_dict = cpd_matches[model_met.id]
+
+                # Look for an MS compound in the reaction that:
+                # 1. Has matching stoichiometry and compartment
+                # 2. Is in the compound matches for this model compound
+                # 3. Hasn't been used by another model compound yet
                 found_match = False
-                for ms_base_id, (ms_coef, ms_comp) in ms_stoich.items():
-                    if abs(model_coef - ms_coef) < 1e-6:
-                        # Potential match - construct full MS compound ID
-                        ms_cpd_id = f"{ms_base_id}_{model_compartment}0"
-                        new_cpd_mappings[model_met.id] = ms_cpd_id
-                        found_match = True
-                        break
+                for (ms_base_id, ms_comp), ms_coef in ms_stoich.items():
+                    ms_key = (ms_base_id, ms_comp)
+                    if ms_key in used_ms_compounds:
+                        continue  # Already matched to a different model compound
+
+                    # For transport reactions, compartment can be different
+                    # For non-transport, compartment must match
+                    compartment_ok = is_transport or (ms_comp == model_compartment)
+
+                    if compartment_ok and abs(model_coef - ms_coef) < 1e-6:
+                        # Check if this MS compound is a potential match for the model compound
+                        if ms_base_id in compound_match_dict:
+                            # Valid match! Construct full MS compound ID
+                            ms_cpd_id = f"{ms_base_id}_{model_compartment}0"
+                            new_cpd_mappings[model_met.id] = ms_cpd_id
+                            used_ms_compounds.add(ms_key)
+                            found_match = True
+                            break
 
                 if not found_match:
                     return None
 
         # Check that all MS metabolites are accounted for
-        model_base_ids = set()
+        # Track (base_id, compartment) pairs to handle transport reactions correctly
+        model_keys = set()
         for model_met in model_rxn.metabolites:
             if model_met.id in cpd_translations:
                 ms_cpd_id = cpd_translations[model_met.id]
                 ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
-                model_base_ids.add(ms_base_id)
+                # Extract compartment from the MS compound ID
+                if "_" in ms_cpd_id:
+                    ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
+                else:
+                    [_, ms_compartment, _] = self._parse_id(model_met)
+                model_keys.add((ms_base_id, ms_compartment))
 
         for ms_cpd_id in new_cpd_mappings.values():
             ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
-            model_base_ids.add(ms_base_id)
+            # Extract compartment from the MS compound ID
+            if "_" in ms_cpd_id:
+                ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
+            else:
+                ms_compartment = "c"  # Default fallback
+            model_keys.add((ms_base_id, ms_compartment))
 
-        if len(model_base_ids) != len(ms_stoich):
+        if len(model_keys) != len(ms_stoich):
             return None
 
         return {
@@ -1004,18 +1135,52 @@ class ModelStandardizationUtils(MSBiochemUtils):
 
         # Apply compound translations
         self.log_info("Applying compound translations")
+
+        # First pass: identify which compounds will have the same new ID (duplicates)
+        # Build a mapping of new_cpd_id -> list of original model_cpd_ids
+        new_id_to_originals = {}
         for model_cpd_id, ms_cpd_id in cpd_translations.items():
             if model_cpd_id in mdlutl.model.metabolites:
                 cpd = mdlutl.model.metabolites.get_by_id(model_cpd_id)
-
-                # Parse the original compound to get compartment and index
                 [base_id, compartment, index] = self._parse_id(cpd)
-
-                # Construct new compound ID with compartment
-                # ms_cpd_id is just the base ID (e.g., "cpd01024")
-                # We need to add compartment suffix (e.g., "cpd01024_c0")
                 new_cpd_id = f"{ms_cpd_id}_{compartment}{index if index else '0'}"
 
+                if new_cpd_id not in new_id_to_originals:
+                    new_id_to_originals[new_cpd_id] = []
+                new_id_to_originals[new_cpd_id].append(model_cpd_id)
+
+        # Second pass: rename compounds, skipping duplicates
+        for model_cpd_id, ms_cpd_id in cpd_translations.items():
+            if model_cpd_id not in mdlutl.model.metabolites:
+                continue
+
+            cpd = mdlutl.model.metabolites.get_by_id(model_cpd_id)
+            [base_id, compartment, index] = self._parse_id(cpd)
+            new_cpd_id = f"{ms_cpd_id}_{compartment}{index if index else '0'}"
+
+            # Check if this new ID would create a duplicate
+            originals_for_new_id = new_id_to_originals[new_cpd_id]
+            if len(originals_for_new_id) > 1:
+                # Multiple compounds map to the same new ID
+                # Keep the first one and skip the rest
+                if model_cpd_id == originals_for_new_id[0]:
+                    # This is the first one - rename it
+                    cpd.id = new_cpd_id
+                    stats["compounds_renamed"] += 1
+                else:
+                    # This is a duplicate - log and skip
+                    self.log_warning(
+                        f"Skipping rename of '{model_cpd_id}' to '{new_cpd_id}' - "
+                        f"already renamed '{originals_for_new_id[0]}' to this ID"
+                    )
+            elif new_cpd_id in mdlutl.model.metabolites and new_cpd_id != model_cpd_id:
+                # The new ID already exists in the model (but not in our translation list)
+                self.log_warning(
+                    f"Skipping rename of '{model_cpd_id}' to '{new_cpd_id}' - "
+                    f"ID already exists in model"
+                )
+            else:
+                # Safe to rename
                 cpd.id = new_cpd_id
                 stats["compounds_renamed"] += 1
 

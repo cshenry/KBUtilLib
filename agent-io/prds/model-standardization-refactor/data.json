@@ -3,7 +3,7 @@
   "status": "complete",
   "session_id": "model-standardization-refactor-20251118",
   "parent_session_id": "plm-api-job-polling-20251111",
-  "session_summary": "Successfully refactored model translation and matching functions from kb_model_utils.py (1611 lines) into new ModelStandardizationUtils module. Extracted 10 functions (997 lines). Corrected architecture so both ModelStandardizationUtils and KBModelUtils independently inherit from MSBiochemUtils. Renamed class to remove KB prefix since it's not KBase-specific. Fixed 5 critical bugs discovered during testing. KBModelUtils reduced to 614 lines (62% reduction).",
+  "session_summary": "Successfully refactored model translation and matching functions from kb_model_utils.py (1611 lines) into new ModelStandardizationUtils module. Extracted 10 functions (997 lines). Corrected architecture so both ModelStandardizationUtils and KBModelUtils independently inherit from MSBiochemUtils. Renamed class to remove KB prefix since it's not KBase-specific. Fixed 9 critical bugs discovered during testing, including 2 new critical bugs (missing _parse_id method and transport reaction stoichiometry corruption) that completely broke reaction matching for transport reactions. KBModelUtils reduced to 614 lines (62% reduction).",
   "tasks": [
     {
       "task_id": "1.0",
@@ -88,6 +88,41 @@
       "status": "completed",
       "parent_task_id": null,
       "notes": "Fixed ValueError: 'The model already contains a metabolite with the id: cpd01024' by ensuring compartment suffix is added when renaming compounds. Lines 1011-1019: Parse original compound to extract compartment and index, then construct new_cpd_id as '{ms_cpd_id}_{compartment}{index}' (e.g., 'cpd01024_c0' for cytosol, 'cpd01024_e0' for extracellular). This prevents multiple compounds in different compartments from colliding when they map to the same ModelSEED base ID."
+    },
+    {
+      "task_id": "13.0",
+      "description": "Fix _parse_id method to handle bracket notation and avoid None compartments",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Fixed ValueError: 'The model already contains a metabolite with the id: cpd01024_None0' by updating _parse_id in kb_model_utils.py to: (1) Handle bracket notation like 'adp[c]' and 'h[e]' in addition to underscore notation 'cpd01024_c0', (2) Default to compartment 'c' (cytosol) when ID cannot be parsed instead of returning None. Lines 123-134: Added bracket notation regex pattern. Line 153: Changed default from (id, None, None) to (id, 'c', ''). Line 12: Added import of compartment_types from kb_model_standardization_utils."
+    },
+    {
+      "task_id": "14.0",
+      "description": "Fix ValueError in apply_translation_to_model - duplicate compound IDs after translation",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Fixed ValueError: 'The model already contains a metabolite with the id: cpd00067_c0' when multiple different original compound IDs map to the same ModelSEED compound ID in the same compartment. Lines 1008-1054: Added two-pass algorithm: First pass builds mapping of new_cpd_id to list of original model_cpd_ids. Second pass renames only the first compound for each new ID and skips duplicates with warning messages. Also checks if new ID already exists in model before renaming."
+    },
+    {
+      "task_id": "15.0",
+      "description": "Add additional compartment types - membrane and environment",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Added 'm' (membrane/mitochondria) and 'env' (environment/extracellular) as accepted compartment types. Lines 18-32: Updated compartment_types dictionary to include 'membrane':'m', 'mitochondria':'m', 'environment':'e', 'env':'e', 'm':'m', and 'extracellular':'e'. This allows models with membrane/mitochondrial compartments and environment compartment notation to be properly parsed."
+    },
+    {
+      "task_id": "16.0",
+      "description": "Fix critical bug - missing _parse_id method in ModelStandardizationUtils",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Fixed AttributeError caused by ModelStandardizationUtils calling _parse_id (10 times throughout the code) but not having the method defined. Lines 63-115: Added complete _parse_id implementation to ModelStandardizationUtils class, supporting both bracket notation (adp[c]) and underscore notation (cpd01024_c0). This method is essential for parsing compound and reaction IDs to extract base ID, compartment, and index. The refactoring had moved functions to ModelStandardizationUtils but left _parse_id in KBModelUtils only, breaking the module when used standalone."
+    },
+    {
+      "task_id": "17.0",
+      "description": "Fix critical bug - transport reaction stoichiometry corruption in _check_reaction_stoich_match",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Fixed major bug where transport reactions couldn't match because ms_stoich dictionary used base_id as keys, causing same compounds in different compartments to overwrite each other. Lines 922-931: Changed ms_stoich from dict[base_id] = (coef, compartment) to dict[(base_id, compartment)] = coef. Lines 945-964: Updated code that checks already-translated compounds to use (base_id, compartment) tuple keys. Lines 966-998: Updated code that matches untranslated compounds to iterate over (base_id, compartment) pairs and properly handle transport vs non-transport compartment matching. Lines 1000-1024: Updated final validation to track (base_id, compartment) pairs instead of just base_ids. This fix enables transport reactions (CO2 transport, H+ gradients, etc.) to match correctly - previously they would fail because cpd00067_c0 and cpd00067_e0 would collapse to a single cpd00067 entry."
     }
   ],
   "files": {
@@ -116,7 +151,7 @@
     "modified": [
       {
         "path": "src/kbutillib/kb_model_utils.py",
-        "changes": "Line 11: Import remains MSBiochemUtils (both classes independently inherit from MSBiochemUtils). Line 16: Class inherits from MSBiochemUtils only. Removed lines 15-32 (compartment_types and direction_conversion constants). Removed lines 589-1585 (10 extracted functions, 997 lines). File reduced from 1611 to 614 lines."
+        "changes": "Line 11: Import remains MSBiochemUtils (both classes independently inherit from MSBiochemUtils). Line 12: Added import of compartment_types from kb_model_standardization_utils. Line 16: Class inherits from MSBiochemUtils only. Removed lines 15-32 (compartment_types and direction_conversion constants). Removed lines 589-1585 (10 extracted functions, 997 lines). Lines 116-153: Updated _parse_id method to handle bracket notation (e.g., 'adp[c]') and default to compartment 'c' instead of None. File reduced from 1611 to 614 lines."
       },
       {
         "path": "src/kbutillib/__init__.py",
@@ -124,7 +159,7 @@
       },
       {
         "path": "src/kbutillib/kb_model_standardization_utils.py",
-        "changes": "Line 38: Renamed class from KBModelStandardizationUtils to ModelStandardizationUtils to remove KB prefix since module is not KBase-specific. Line 440: Fixed lower(anno_type) to anno_type.lower(). Lines 539-542: Added initialization of gene matching fields (msmodel, gene_mismatches, gene_matches, ms_gene_mismatches) for all reaction hits to prevent KeyError when msmodel is not provided. Lines 1007-1020: Replaced non-existent mdlutl.model.metabolites.rename() call with manual renaming loop that directly sets cpd.id for each metabolite. Lines 1011-1019: Added compartment suffix preservation when renaming compounds to prevent ID collisions (e.g., cpd01024_c0, cpd01024_e0)."
+        "changes": "Lines 18-32: Updated compartment_types dictionary to add new compartment types: 'membrane':'m', 'mitochondria':'m', 'environment':'e', 'env':'e', 'm':'m', and 'extracellular':'e'. Line 44: Renamed class from KBModelStandardizationUtils to ModelStandardizationUtils to remove KB prefix since module is not KBase-specific. Lines 63-115: CRITICAL FIX - Added complete _parse_id implementation to ModelStandardizationUtils class (was missing, causing AttributeError). Supports both bracket notation (adp[c]) and underscore notation (cpd01024_c0). Lines 440: Fixed lower(anno_type) to anno_type.lower(). Lines 539-542: Added initialization of gene matching fields (msmodel, gene_mismatches, gene_matches, ms_gene_mismatches) for all reaction hits to prevent KeyError when msmodel is not provided. Lines 922-1024: CRITICAL FIX - Changed ms_stoich dictionary structure from dict[base_id]=(coef,compartment) to dict[(base_id,compartment)]=coef to fix transport reaction stoichiometry corruption. Updated all ms_stoich references throughout _check_reaction_stoich_match. Lines 1005-1054: Replaced non-existent mdlutl.model.metabolites.rename() call with two-pass manual renaming algorithm that handles duplicate IDs. Lines 1008-1019: First pass builds mapping of new_cpd_id to original model_cpd_ids. Lines 1022-1054: Second pass renames compounds, skipping duplicates with warnings."
       },
       {
         "path": "src/kbutillib/ms_biochem_utils.py",
@@ -164,7 +199,27 @@
     "Bug 5 root cause: Multiple compounds in different compartments were being renamed to the same base ID (e.g., 'cpd01024'), causing COBRApy ValueError",
     "Bug 5 fix: Added compartment suffix preservation - parse original compound to extract compartment, construct new_cpd_id as '{ms_cpd_id}_{compartment}{index}' (e.g., 'cpd01024_c0', 'cpd01024_e0')",
     "Bug 5 prevents ID collisions when compounds in different compartments map to the same ModelSEED base compound",
-    "All 5 bugs discovered during user testing of translation functionality"
+    "BUG FIX 6: Fixed _parse_id method to handle bracket notation and avoid None compartments",
+    "Bug 6 root cause: _parse_id only handled underscore notation (cpd01024_c0), not bracket notation (adp[c]), causing compartment to be None and IDs like 'cpd01024_None0'",
+    "Bug 6 fix: Updated _parse_id in kb_model_utils.py to: (1) Try bracket notation regex first with pattern (.+)\\[([a-zA-Z]+)\\], (2) Fall back to underscore notation, (3) Default to compartment 'c' instead of None when parsing fails",
+    "Bug 6 eliminates warnings like 'ID adp[c] cannot be parsed' and prevents None compartments in renamed IDs",
+    "BUG FIX 7: Fixed ValueError in apply_translation_to_model - duplicate compound IDs after translation",
+    "Bug 7 root cause: Multiple different compounds (e.g., 'adp[c]' and 'atp[c]') mapping to same ModelSEED ID (e.g., 'cpd00067') in same compartment creates duplicate final IDs (e.g., 'cpd00067_c0')",
+    "Bug 7 fix: Added two-pass algorithm in apply_translation_to_model: (1) First pass identifies which new IDs will have duplicates, (2) Second pass renames only first compound for each new ID, skips duplicates with warnings",
+    "Bug 7 prevents COBRApy ValueError when trying to rename to an ID that already exists in the model",
+    "BUG FIX 8: Fixed critical bug - missing _parse_id method in ModelStandardizationUtils",
+    "Bug 8 root cause: Refactoring moved model standardization functions to ModelStandardizationUtils but left _parse_id in KBModelUtils only",
+    "Bug 8 impact: ModelStandardizationUtils called _parse_id in 10 different locations, causing AttributeError when module used standalone",
+    "Bug 8 fix: Added complete _parse_id implementation to ModelStandardizationUtils (lines 63-115) with support for bracket and underscore notation",
+    "BUG FIX 9: Fixed critical bug - transport reaction stoichiometry corruption in _check_reaction_stoich_match",
+    "Bug 9 root cause: ms_stoich dictionary used base_id as keys, so compounds in different compartments (e.g., cpd00067_c0 and cpd00067_e0) would overwrite each other",
+    "Bug 9 impact: Transport reactions (CO2 transport, H+ gradients, etc.) could not match - they would always fail the perfect match check",
+    "Bug 9 fix: Changed ms_stoich to use (base_id, compartment) tuple keys instead of just base_id (lines 922-1024)",
+    "Bug 9 fix details: (1) Lines 922-931: Build ms_stoich with tuple keys, (2) Lines 945-964: Update translated compound checking, (3) Lines 966-998: Update untranslated compound matching with compartment awareness, (4) Lines 1000-1024: Update final validation to compare tuple sets",
+    "All 9 bugs discovered during development and user testing of translation functionality",
+    "COMPARTMENT TYPES UPDATE: Added 'm' (membrane/mitochondria) and 'env' (environment) as accepted compartment types after successful testing",
+    "Final compartment_types includes: cytosol(c), extracellular/extraorganism/environment/env(e), periplasm(p), membrane/mitochondria(m)",
+    "These additions support models with mitochondrial compartments and alternative environment notation"
   ],
   "context": "This refactoring addresses code organization concerns where the KBModelUtils class had become too large (1611 lines) with extensive model translation and matching functionality. Extracting these functions into a dedicated module improves maintainability while preserving all functionality through inheritance.",
   "metrics": {

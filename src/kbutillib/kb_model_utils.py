@@ -9,6 +9,7 @@ import json
 
 from .kb_annotation_utils import KBAnnotationUtils
 from .ms_biochem_utils import MSBiochemUtils
+from .kb_model_standardization_utils import compartment_types
 
 # TODO: One issue exists with this module: (1) if a genome isn't RAST annotated, the call to reannotate it with RAST doesn't work unless we get callbacks to work
 
@@ -68,11 +69,13 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             from modelseedpy.core.msgenomeclassifier import MSGenomeClassifier
             from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
             from modelseedpy.core.msmodelutl import MSModelUtil
+            from modelseedpy.core.msmedia import MSMedia
 
             # Store modules as instance attributes for later use
             self.cobrakbase = cobrakbase
             self.MSModelUtil = MSModelUtil
             self.MSFBA = MSFBA
+            self.MSMedia = MSMedia
             self.AnnotationOntology = AnnotationOntology
             self.MSGrowthPhenotypes = MSGrowthPhenotypes
             self.MSGenomeClassifier = MSGenomeClassifier
@@ -118,6 +121,21 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             id = object_or_id
         else:
             id = object_or_id.id
+
+        # Try bracket notation first (e.g., "adp[c]" or "h[e]")
+        bracket_match = re.search(r"(.+)\[([a-zA-Z]+)\]$", id)
+        if bracket_match:
+            baseid = bracket_match[1]
+            compartment = bracket_match[2]
+            index = ""  # Bracket notation doesn't have index
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized in bracket notation. Using default 'c'.")
+                compartment = "c"
+            else:
+                compartment = compartment_types[compartment.lower()]
+            return (baseid, compartment, index)
+
+        # Try underscore notation (e.g., "cpd01024_c0")
         if re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
             m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
             baseid = m[1]
@@ -131,8 +149,10 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                 #Standardizing the compartment when it's recognizable
                 compartment = compartment_types[compartment.lower()]
             return (baseid, compartment, index)
-        self.log_warning(f"ID '{id}' cannot be parsed")
-        return (id,None,None)
+
+        # If no compartment notation found, default to cytosol "c"
+        self.log_warning(f"ID '{id}' cannot be parsed - using ID as base and defaulting to compartment 'c'")
+        return (id, "c", "")
 
     def _parse_rxn_stoichiometry(self,rxn) -> Dict:
         """Parse reaction stoichiometry into protons, transport, and transformation"""        
@@ -274,10 +294,12 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         self.input_objects.append(genome.info.reference)
         return genome
 
-    def get_media(self, id_or_ref, ws=None):
+    def get_media(self, id_or_ref, ws=None,msmedia=False):
         media = self.kbase_api.get_from_ws(id_or_ref, ws)
         media.id = media.info.id
         self.input_objects.append(media.info.reference)
+        if msmedia:
+            media = self.MSMedia.from_kbase_object(media)
         return media
 
     def get_phenotypeset(

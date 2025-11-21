@@ -23,7 +23,7 @@ class MSFBAUtils(KBModelUtils):
         """
         super().__init__(**kwargs)
 
-    def _set_model_media(self, model, media):
+    def set_media(self, model, media):
         """Sets the media for the model"""
         if media is None:
             return
@@ -48,22 +48,24 @@ class MSFBAUtils(KBModelUtils):
         model = self._check_and_convert_model(model)
         model.pkgmgr.getpkg("ObjConstPkg").build_package(lower_bound, upper_bound)
 
-    def constrain_objective_to_fraction_of_optimum(self, model, objective=None, fraction=0.9):
+    def constrain_objective_to_fraction_of_optimum(self, model, fraction=0.9, media=None, objective=None):
         """Constrains the current objective to a fraction of the optimum"""
         model = self._check_and_convert_model(model)
+        self.set_media(model,media)
         self.set_objective_from_string(model,objective)
-        model = self._check_and_convert_model(model)
         objective_value = model.model.slim_optimize()
+        lower_bound = objective_value*fraction
+        upper_bound = None
         if model.model.objective_direction == "min":
-            fraction = 1.0 / fraction
-            model.pkgmgr.getpkg("ObjConstPkg").build_package(lower_bound=None,upper_bound=objective_value*fraction)
-        else:
-            self.constrain_objective(model,lower_bound=objective_value*fraction,upper_bound=None)
+            lower_bound = None
+            upper_bound = objective_value/fraction
+        self.constrain_objective(model,lower_bound=lower_bound,upper_bound=upper_bound)
+        return objective_value
 
     def run_fba(self,model,media=None,objective=None,run_pfba=True):
         """Run FBA on a model with a specified media and objective"""
         model = self._check_and_convert_model(model)
-        self._set_model_media(model,media)
+        self.set_media(model,media)
         self.set_objective_from_string(model,objective)    
         #Optimizing the model
         solution = model.model.optimize()
@@ -75,7 +77,7 @@ class MSFBAUtils(KBModelUtils):
     
     def run_fva(self,model,media=None,objective=None,fraction_of_optimum=0.9):
         model = self._check_and_convert_model(model)
-        self._set_model_media(model,media)
+        self.set_media(model,media)
         self.set_objective_from_string(model,objective)
         self.constrain_objective_to_fraction_of_optimum(model, fraction=fraction_of_optimum)
         original_objective = model.model.objective

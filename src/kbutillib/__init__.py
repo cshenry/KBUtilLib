@@ -88,6 +88,32 @@ try:
 except ImportError:
     KBReadsUtils = None
 
+try:
+    from .kb_transyt_utils import KBTransyTUtils
+except ImportError:
+    KBTransyTUtils = None
+
+try:
+    from .cobra_to_kbase_utils import (
+        convert_to_kbase_reaction,
+        convert_cobra_model_to_kbase,
+        build_model_compound,
+        build_model_compartment,
+        get_compartmets_references,
+        get_compounds_references,
+        parse_gpr_string,
+        build_model_reaction_proteins,
+    )
+except ImportError:
+    convert_to_kbase_reaction = None
+    convert_cobra_model_to_kbase = None
+    build_model_compound = None
+    build_model_compartment = None
+    get_compartmets_references = None
+    get_compounds_references = None
+    parse_gpr_string = None
+    build_model_reaction_proteins = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -103,6 +129,7 @@ __all__ = [
     "DataType",
     "KBAnnotationUtils",
     "KBGenomeUtils",
+    "KBTransyTUtils",
     "ModelStandardizationUtils",
     "KBModelUtils",
     "KBPLMUtils",
@@ -118,6 +145,15 @@ __all__ = [
     "SharedEnvUtils",
     "EscherUtils",
     "examples",
+    # COBRA to KBase conversion utilities
+    "convert_to_kbase_reaction",
+    "convert_cobra_model_to_kbase",
+    "build_model_compound",
+    "build_model_compartment",
+    "get_compartmets_references",
+    "get_compounds_references",
+    "parse_gpr_string",
+    "build_model_reaction_proteins",
 ]
 
 __version__ = "0.1.0"

@@ -7,6 +7,7 @@ This module provides utilities for:
 - Standardizing model structure and compartments
 """
 
+from email.policy import default
 import re
 from typing import Any, Dict, List, Optional
 
@@ -555,7 +556,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
         return results
 
     def match_model_reactions_to_db(
-        self, model_or_mdlutl, template="gp", create_dataframe=True,msmodel=None,filter_based_on_template=True
+        self, model_or_mdlutl, template="gp", create_dataframe=True,msmodel=None,filter_based_on_template=True,cpd_match_hits=None
     ):  
         """Searching all reactions in a model against the ModelSEEDDatabase and a template"""
         EC_PATTERN = re.compile(r'^(?:EC\s*)?(?:[1-7])\.(?:\d+|-)\.(?:\d+|-)\.(?:\d+|-)$', re.I)
@@ -564,7 +565,8 @@ class ModelStandardizationUtils(MSBiochemUtils):
             template = self.get_template(template)
         mdlutl = self._check_and_convert_model(model_or_mdlutl)
         results = {"cpd_matches": {}, "rxn_matches": {}, "rxndf": None, "cpddf": None}
-        cpd_match_hits = self.match_model_compounds_to_db(mdlutl, template, filter_based_on_template=filter_based_on_template)
+        if cpd_match_hits is None:
+            cpd_match_hits = self.match_model_compounds_to_db(mdlutl, template, filter_based_on_template=filter_based_on_template)
         results["cpd_matches"] = cpd_match_hits["matches"]
         results["cpddf"] = cpd_match_hits["df"]
         for rxn in mdlutl.model.reactions:
@@ -663,6 +665,139 @@ class ModelStandardizationUtils(MSBiochemUtils):
                 ).reset_index(drop=True)
         return results
 
+    def check_for_perfect_matches(self, matches, cpd_translations):
+        """Check for perfect matches in reaction matching results.
+
+        Evaluates both equation-based matches and transport reaction matches.
+        A perfect match is one where all compounds match (or only H+ differs).
+
+        Args:
+            matches: Dict of {ms_rxn_id: match_info} from reaction search
+            cpd_translations: Dict of {model_cpd_id: [ms_cpd_id, info]} translations
+
+        Returns:
+            [ms_rxn_id, match_type] if a single best match found, None otherwise
+        """
+        output = None
+        perfect_matches = {}
+
+        for ms_rxn_id, match_info in matches.items():
+            is_perfect = False
+            match_type = "equation"
+
+            # Check equation-based matches
+            if "equation_scores" in match_info and len(match_info["equation_scores"]) > 3:
+                unmatched = match_info["equation_scores"][3]
+                if len(unmatched) == 0:
+                    is_perfect = True
+                elif len(unmatched) == 1:
+                    # Allow if only H+ is unmatched
+                    unmatched_id = list(unmatched.keys())[0]
+                    if unmatched_id in cpd_translations and cpd_translations[unmatched_id][0] == "cpd00067":
+                        is_perfect = True
+                    elif unmatched_id == "h" or unmatched_id == "cpd00067":
+                        is_perfect = True
+
+            # Check transport reaction matches
+            if "transport_scores" in match_info and len(match_info["transport_scores"]) > 0:
+                transport_scores = match_info["transport_scores"]
+                # transport_scores format: [match_fraction, num_compounds, direction_match, unmatched_substrates, unmatched_products]
+                if len(transport_scores) >= 3:
+                    match_fraction = transport_scores[0]
+                    # Perfect transport match: fraction is 1.0 (all compounds matched)
+                    if match_fraction == 1.0:
+                        # Check for unmatched compounds in positions 3 and 4 if they exist
+                        has_unmatched = False
+                        if len(transport_scores) > 3 and transport_scores[3] and len(transport_scores[3]) > 0:
+                            has_unmatched = True
+                        if len(transport_scores) > 4 and transport_scores[4] and len(transport_scores[4]) > 0:
+                            has_unmatched = True
+                        if not has_unmatched:
+                            is_perfect = True
+                            match_type = "transport"
+
+            if is_perfect:
+                perfect_matches[ms_rxn_id] = match_info
+
+        if len(perfect_matches) == 1:
+            ms_rxn_id = list(perfect_matches.keys())[0]
+            output = [ms_rxn_id, "only_match"]
+        elif len(perfect_matches) > 1:
+            # Multiple perfect matches - pick the best one based on cpd translations, score, and template
+            best_hit = None
+            least_mismatches = None
+            most_matches = None
+            best_score = None
+            best_template = None
+
+            for ms_rxn_id, match_info in perfect_matches.items():
+                cpd_translation_match = 0
+                cpd_mismatch = 0
+
+                # Check equation_scores for compound matches
+                if "equation_scores" in match_info and len(match_info["equation_scores"]) > 4:
+                    for model_cpd_id in match_info["equation_scores"][4]:
+                        ms_cpd_id = match_info["equation_scores"][4][model_cpd_id]
+                        if model_cpd_id in cpd_translations:
+                            if isinstance(cpd_translations[model_cpd_id], list):
+                                if cpd_translations[model_cpd_id][0] == ms_cpd_id:
+                                    cpd_translation_match += 1
+                                else:
+                                    cpd_mismatch += 1
+                            elif cpd_translations[model_cpd_id] == ms_cpd_id:
+                                cpd_translation_match += 1
+                            else:
+                                cpd_mismatch += 1
+                        else:
+                            cpd_mismatch += 1
+
+                # Get the original match score for tiebreaking
+                current_score = matches[ms_rxn_id].get("score", 0)
+
+                # Scoring logic: prefer fewer mismatches, then more matches, then higher score, then template
+                if least_mismatches is None or cpd_mismatch < least_mismatches:
+                    least_mismatches = cpd_mismatch
+                    most_matches = cpd_translation_match
+                    best_score = current_score
+                    best_hit = ms_rxn_id
+                    best_template = matches[ms_rxn_id].get("template", False)
+                elif cpd_mismatch == least_mismatches:
+                    if most_matches is None or cpd_translation_match > most_matches:
+                        most_matches = cpd_translation_match
+                        best_score = current_score
+                        best_hit = ms_rxn_id
+                        best_template = matches[ms_rxn_id].get("template", False)
+                    elif cpd_translation_match == most_matches:
+                        # Use match score as tiebreaker
+                        if best_score is None or current_score > best_score:
+                            best_score = current_score
+                            best_hit = ms_rxn_id
+                            best_template = matches[ms_rxn_id].get("template", False)
+                        elif current_score == best_score:
+                            # Prefer template reactions as final tiebreaker
+                            if matches[ms_rxn_id].get("template", False) and not best_template:
+                                best_hit = ms_rxn_id
+                                best_template = True
+
+            if best_hit:
+                output = [best_hit, str(most_matches or 0) + "/" + str(least_mismatches or 0)]
+
+        return output
+
+    def analyze_compound_matches(self, matches):
+        strong_matches = []
+        formula_only_matches = []
+        for ms_cpd_id, match_info in matches.items():
+            has_id_match = match_info.get("identifier_hits", []) and len(match_info["identifier_hits"]) > 0
+            has_structure_match = match_info.get("structure_hits", []) and len(match_info["structure_hits"]) > 0
+            has_formula_match = match_info.get("formula_hits", []) and len(match_info["formula_hits"]) > 0
+            if has_id_match or has_structure_match:
+                strong_matches.append(ms_cpd_id)
+            elif has_formula_match:
+                formula_only_matches.append(ms_cpd_id)
+        return strong_matches, formula_only_matches
+    
+    
     def translate_model_to_ms_namespace(
         self,
         model_or_mdlutl,
@@ -701,525 +836,323 @@ class ModelStandardizationUtils(MSBiochemUtils):
         if isinstance(template, str):
             template = self.get_template(template)
 
-        # Step 3: Match compounds and reactions
-        self.log_info("Matching compounds and reactions to database")
-        match_results = self.match_model_reactions_to_db(
+        # Step 3: Match compounds
+        cpd_matches = self.match_model_compounds_to_db(
             mdlutl,
             template=template,
-            filter_based_on_template=True
+            filter_based_on_template=True,
+            create_dataframe=False
         )
-
-        cpd_matches = match_results["cpd_matches"]
-        rxn_matches = match_results["rxn_matches"]
-
-        # Initialize tracking structures
-        cpd_translations = {}  # {model_cpd_id: ms_cpd_id}
-        rxn_translations = {}  # {model_rxn_id: (ms_rxn_id, direction)}
-        iteration_log = []
-
-        # Step 4: Translate compounds with unique matches
-        # Consider a compound "unique" if:
-        # 1. It has only one match, OR
-        # 2. It has one strong match (ID/name/structure) and all other matches are formula-only
-        self.log_info("Step 1: Translating compounds with unique matches")
-        unique_cpd_count = 0
+        cpd_matches = cpd_matches["matches"]
+        #Removing formula-only matches when strong matches exist
         for model_cpd_id, matches in cpd_matches.items():
-            if len(matches) == 1:
-                # Simple case: only one match
-                ms_cpd_id = list(matches.keys())[0]
-                cpd_translations[model_cpd_id] = ms_cpd_id
-                unique_cpd_count += 1
-            elif len(matches) > 1:
-                # Check if there's one strong match and all others are formula-only
-                strong_matches = []
-                formula_only_matches = []
+            if matches is not None and len(matches) > 1:
+                strong_matches, formula_only_matches = self.analyze_compound_matches(matches)
 
-                for ms_cpd_id, match_info in matches.items():
-                    # A match is "formula-only" if it has formula hits but no ID or structure hits
-                    has_id_match = match_info.get("identifier_hits", []) and len(match_info["identifier_hits"]) > 0
-                    has_structure_match = match_info.get("structure_hits", []) and len(match_info["structure_hits"]) > 0
-                    has_formula_match = match_info.get("formula_hits", []) and len(match_info["formula_hits"]) > 0
+                # If we have strong matches, remove formula-only matches from cpd_matches
+                if len(strong_matches) > 0 and len(formula_only_matches) > 0:
+                    for formula_cpd_id in formula_only_matches:
+                        del matches[formula_cpd_id]
+                    self.log_info(
+                        f"Compound {model_cpd_id}: Removed {len(formula_only_matches)} formula-only matches, "
+                        f"keeping {len(strong_matches)} strong matches"
+                    )
 
-                    if has_id_match or has_structure_match:
-                        strong_matches.append(ms_cpd_id)
-                    elif has_formula_match:
-                        formula_only_matches.append(ms_cpd_id)
-
-                # If exactly one strong match and all others are formula-only, treat as unique
-                if len(strong_matches) == 1:
-                    ms_cpd_id = strong_matches[0]
-                    cpd_translations[model_cpd_id] = ms_cpd_id
-                    unique_cpd_count += 1
-                    if len(formula_only_matches) > 0:
-                        self.log_info(
-                            f"Compound {model_cpd_id} has one strong match ({ms_cpd_id}) "
-                            f"and {len(formula_only_matches)} formula-only matches - treating as unique"
-                        )
-
-        iteration_log.append({
-            "iteration": 0,
-            "type": "unique_compounds",
-            "compounds_translated": unique_cpd_count,
-            "reactions_translated": 0
-        })
-        self.log_info(f"Translated {unique_cpd_count} compounds with unique or effectively-unique matches")
-
-        # Step 5: Iterative reaction matching
-        iteration = 1
-        while iteration <= max_iterations:
-            self.log_info(f"Iteration {iteration}: Matching perfect reactions")
-
-            rxns_translated_this_iteration = 0
-            cpds_translated_this_iteration = 0
-
-            for model_rxn_id, matches in rxn_matches.items():
-                # Skip if already translated
-                if model_rxn_id in rxn_translations:
-                    continue
-
-                # Get the model reaction
-                model_rxn = mdlutl.model.reactions.get_by_id(model_rxn_id)
-
-                # Try to find a perfect match
-                perfect_match = self._find_perfect_reaction_match(
-                    model_rxn,
-                    matches,
-                    cpd_translations,
-                    template,
-                    cpd_matches
-                )
-
-                if perfect_match:
-                    ms_rxn_id, direction, new_cpd_mappings = perfect_match
-                    rxn_translations[model_rxn_id] = (ms_rxn_id, direction)
-                    rxns_translated_this_iteration += 1
-
-                    # Add any new compound translations discovered
-                    for model_cpd_id, ms_cpd_id in new_cpd_mappings.items():
-                        if model_cpd_id not in cpd_translations:
-                            cpd_translations[model_cpd_id] = ms_cpd_id
-                            cpds_translated_this_iteration += 1
-
-            iteration_log.append({
-                "iteration": iteration,
-                "type": "perfect_reactions",
-                "compounds_translated": cpds_translated_this_iteration,
-                "reactions_translated": rxns_translated_this_iteration
-            })
-
-            self.log_info(
-                f"Iteration {iteration}: Translated {rxns_translated_this_iteration} reactions, "
-                f"{cpds_translated_this_iteration} new compounds"
+        # Step 4: Match reactions
+        # Initialize tracking structures  # {model_cpd_id: ms_cpd_id}
+        rxn_translations = {}  # {model_rxn_id: (ms_rxn_id, direction)}
+        cpd_translations = {}
+        conflicts = {}
+        iteration_log = []
+        iterate = True
+        while (iterate == True):
+            new_cpd_matchs = 0
+            new_rxn_matchs = 0
+            for model_cpd_id, matches in cpd_matches.items():
+                if matches is not None and len(matches) >= 1:
+                    strong_matches, formula_only_matches = self.analyze_compound_matches(matches)
+                    if len(strong_matches) == 1:
+                       if model_cpd_id not in cpd_translations:
+                           cpd_translations[model_cpd_id] = [strong_matches[0],{"only strong match": True,"equation_match": []}]
+                           cpd_translations[matches[strong_matches[0]]["base_id"]] = [strong_matches[0],{"only strong match": True,"equation_match": []}]
+                           new_cpd_matchs += 1
+            rxn_translation_count = 0
+            rxn_matches = self.match_model_reactions_to_db(
+                mdlutl,
+                template=template,
+                filter_based_on_template=True,
+                cpd_match_hits={"matches":cpd_matches,"df":None},
+                create_dataframe=False
             )
-
-            # Stop if no progress made
-            if rxns_translated_this_iteration == 0:
-                break
-
-            iteration += 1
-
-        # Step 6: Identify proposed matches for remaining reactions
-        self.log_info("Identifying proposed matches for remaining reactions")
-        proposed_matches = self._identify_proposed_matches(
-            mdlutl,
-            rxn_matches,
-            rxn_translations,
-            cpd_translations,
-            cpd_matches,
-            template
-        )
-
-        # Step 7: Compute statistics
-        match_stats = {
-            "total_compounds": len(mdlutl.model.metabolites),
-            "compounds_translated": len(cpd_translations),
-            "compounds_with_matches": len(cpd_matches),
-            "total_reactions": len([r for r in mdlutl.model.reactions if r.id[0:3] not in self.const_util_rxn_prefixes()]),
-            "reactions_translated": len(rxn_translations),
-            "reactions_with_matches": len(rxn_matches),
-            "proposed_matches_count": len(proposed_matches),
-            "iterations_used": iteration - 1
-        }
-
-        self.log_info(
-            f"Translation complete: {match_stats['compounds_translated']}/{match_stats['total_compounds']} "
-            f"compounds, {match_stats['reactions_translated']}/{match_stats['total_reactions']} reactions"
-        )
-
-        return {
-            "cpd_translations": cpd_translations,
-            "rxn_translations": rxn_translations,
-            "proposed_matches": proposed_matches,
-            "iteration_log": iteration_log,
-            "match_stats": match_stats,
-            "cpd_matches": cpd_matches,
-            "rxn_matches": rxn_matches
-        }
-
-    def _find_perfect_reaction_match(self, model_rxn, matches, cpd_translations, template, cpd_matches):
-        """Find a perfect reaction match from candidates.
-
-        A perfect match means:
-        - All reactants match (either forward or reverse)
-        - All stoichiometric coefficients match
-        - Transport reactions match (same number of compartments)
-
-        Args:
-            model_rxn: The model reaction object
-            matches: Dict of potential MS reaction matches
-            cpd_translations: Current compound translations
-            template: Model template
-            cpd_matches: Compound match results from match_model_compounds_to_db
-
-        Returns:
-            Tuple of (ms_rxn_id, direction, new_cpd_mappings) or None if no perfect match
-        """
-        # Parse model reaction stoichiometry
-        model_stoich = {}
-        model_compartments = set()
-        for met, coef in model_rxn.metabolites.items():
-            [base_id, compartment, index] = self._parse_id(met)
-            model_stoich[met.id] = coef
-            model_compartments.add(compartment)
-
-        is_transport = len(model_compartments) > 1
-
-        # Try each potential match
-        for ms_rxn_id, match_info in matches.items():
-            # Get the MS reaction
-            ms_rxn = self.biochem_db.reactions.get_by_id(ms_rxn_id)
-
-            # Check both forward and reverse directions
-            for direction in ["forward", "reverse"]:
-                result = self._check_reaction_stoich_match(
-                    model_rxn,
-                    ms_rxn,
-                    cpd_translations,
-                    direction,
-                    is_transport,
-                    cpd_matches
-                )
-
-                if result and result["is_perfect"]:
-                    return (ms_rxn_id, direction, result["new_cpd_mappings"])
-
-        return None
-
-    def _check_reaction_stoich_match(self, model_rxn, ms_rxn, cpd_translations, direction, is_transport, cpd_matches):
-        """Check if a model reaction matches an MS reaction stoichiometrically.
-
-        Args:
-            model_rxn: Model reaction object
-            ms_rxn: ModelSEED reaction object
-            cpd_translations: Current compound translations
-            direction: "forward" or "reverse"
-            is_transport: Whether the reaction is a transport reaction
-            cpd_matches: Compound match results to verify untranslated compounds
-
-        Returns:
-            Dict with is_perfect flag and new_cpd_mappings, or None if not a match
-        """
-        # Get MS reaction stoichiometry
-        # For transport reactions, same compound in different compartments should be tracked separately
-        ms_stoich = {}  # Maps (base_id, compartment) -> coefficient
-        ms_compartments = set()
-        for met, coef in ms_rxn.metabolites.items():
-            [base_id, compartment, index] = self._parse_id(met)
-            if direction == "reverse":
-                coef = -coef
-            ms_stoich[(base_id, compartment)] = coef
-            ms_compartments.add(compartment)
-
-        # Check transport consistency
-        ms_is_transport = len(ms_compartments) > 1
-        if is_transport != ms_is_transport:
-            return None
-
-        # Try to match each model metabolite
-        new_cpd_mappings = {}
-        used_ms_compounds = set()  # Track which MS compounds have been matched
-
-        for model_met, model_coef in model_rxn.metabolites.items():
-            [model_base_id, model_compartment, model_index] = self._parse_id(model_met)
-
-            # Check if we already have a translation
-            if model_met.id in cpd_translations:
-                ms_cpd_id = cpd_translations[model_met.id]
-                ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
-                # Extract compartment from the MS compound ID
-                if "_" in ms_cpd_id:
-                    ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
-                else:
-                    ms_compartment = model_compartment  # Fallback to model compartment
-
-                # Check if this compound is in the MS reaction with correct stoichiometry
-                ms_key = (ms_base_id, ms_compartment)
-                if ms_key not in ms_stoich:
-                    return None
-
-                ms_coef = ms_stoich[ms_key]
-                if abs(model_coef - ms_coef) > 1e-6:  # Allow small floating point differences
-                    return None
-
-                used_ms_compounds.add(ms_key)
-            else:
-                # No translation yet - need to find a match
-                # Get the compound matches for this model compound
-                if model_met.id not in cpd_matches:
-                    return None  # Can't match this compound at all
-
-                compound_match_dict = cpd_matches[model_met.id]
-
-                # Look for an MS compound in the reaction that:
-                # 1. Has matching stoichiometry and compartment
-                # 2. Is in the compound matches for this model compound
-                # 3. Hasn't been used by another model compound yet
-                found_match = False
-                for (ms_base_id, ms_comp), ms_coef in ms_stoich.items():
-                    ms_key = (ms_base_id, ms_comp)
-                    if ms_key in used_ms_compounds:
-                        continue  # Already matched to a different model compound
-
-                    # For transport reactions, compartment can be different
-                    # For non-transport, compartment must match
-                    compartment_ok = is_transport or (ms_comp == model_compartment)
-
-                    if compartment_ok and abs(model_coef - ms_coef) < 1e-6:
-                        # Check if this MS compound is a potential match for the model compound
-                        if ms_base_id in compound_match_dict:
-                            # Valid match! Construct full MS compound ID
-                            ms_cpd_id = f"{ms_base_id}_{model_compartment}0"
-                            new_cpd_mappings[model_met.id] = ms_cpd_id
-                            used_ms_compounds.add(ms_key)
-                            found_match = True
-                            break
-
-                if not found_match:
-                    return None
-
-        # Check that all MS metabolites are accounted for
-        # Track (base_id, compartment) pairs to handle transport reactions correctly
-        model_keys = set()
-        for model_met in model_rxn.metabolites:
-            if model_met.id in cpd_translations:
-                ms_cpd_id = cpd_translations[model_met.id]
-                ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
-                # Extract compartment from the MS compound ID
-                if "_" in ms_cpd_id:
-                    ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
-                else:
-                    [_, ms_compartment, _] = self._parse_id(model_met)
-                model_keys.add((ms_base_id, ms_compartment))
-
-        for ms_cpd_id in new_cpd_mappings.values():
-            ms_base_id = ms_cpd_id.rsplit("_", 1)[0] if "_" in ms_cpd_id else ms_cpd_id
-            # Extract compartment from the MS compound ID
-            if "_" in ms_cpd_id:
-                ms_compartment = ms_cpd_id.split("_")[-1][0]  # e.g., "c0" -> "c"
-            else:
-                ms_compartment = "c"  # Default fallback
-            model_keys.add((ms_base_id, ms_compartment))
-
-        if len(model_keys) != len(ms_stoich):
-            return None
-
-        return {
-            "is_perfect": True,
-            "new_cpd_mappings": new_cpd_mappings
-        }
-
-    def _identify_proposed_matches(self, mdlutl, rxn_matches, rxn_translations, cpd_translations, cpd_matches, template):
-        """Identify proposed matches for reactions that don't have perfect matches.
-
-        This prioritizes matches that:
-        1. Are in the model template
-        2. Have high match scores
-        3. Don't have unmatchable compounds
-
-        Args:
-            mdlutl: Model utility object
-            rxn_matches: All reaction matches from match_model_reactions_to_db
-            rxn_translations: Already translated reactions
-            cpd_translations: Already translated compounds
-            cpd_matches: All compound matches
-            template: Model template
-
-        Returns:
-            List of proposed matches with analysis
-        """
-        proposed = []
-
-        for model_rxn_id, matches in rxn_matches.items():
-            # Skip already translated reactions
-            if model_rxn_id in rxn_translations:
-                continue
-
-            model_rxn = mdlutl.model.reactions.get_by_id(model_rxn_id)
-
-            # Check if any reactants are completely unmatchable
-            has_unmatchable = False
-            for met in model_rxn.metabolites:
-                if met.id not in cpd_matches or len(cpd_matches[met.id]) == 0:
-                    has_unmatchable = True
-                    break
-
-            if has_unmatchable:
-                continue
-
-            # Find best match, prioritizing template matches
-            best_match = None
-            best_score = -float('inf')
-
-            for ms_rxn_id, match_info in matches.items():
-                # Bonus for being in template
-                score = match_info["score"]
-                if match_info.get("template", False):
-                    score += 50
-
-                if score > best_score:
-                    best_score = score
-                    best_match = (ms_rxn_id, match_info)
-
-            if best_match:
-                ms_rxn_id, match_info = best_match
-                proposed.append({
-                    "model_rxn_id": model_rxn_id,
-                    "model_equation": model_rxn.build_reaction_string(use_metabolite_names=True),
-                    "proposed_ms_rxn_id": ms_rxn_id,
-                    "ms_equation": match_info["match_equation"],
-                    "score": best_score,
-                    "in_template": match_info.get("template", False),
-                    "match_info": match_info
-                })
-
-        # Sort by score descending
-        proposed.sort(key=lambda x: x["score"], reverse=True)
-
-        return proposed
+            rxn_matches = rxn_matches["rxn_matches"]
+            #Removing formula-only matches when strong matches exist
+            for model_rxn_id, matches in rxn_matches.items():
+                if model_rxn_id not in rxn_translations and matches is not None:
+                    output = self.check_for_perfect_matches(matches,cpd_translations)
+                    if output is not None:
+                        new_rxn_matchs += 1
+                        rxn_translations[model_rxn_id] = output
+                        match_info = matches[output[0]]
+                        if "equation_scores" in match_info and len(match_info["equation_scores"]) > 4:
+                            for model_cpd_id in match_info["equation_scores"][4]:
+                                if model_cpd_id not in cpd_translations:
+                                    cpd_translations[model_cpd_id] = match_info["equation_scores"][4][model_cpd_id]
+                                    new_cpd_matchs += 1
+                                    #Removing all other matching compounds to reduce ambiguity
+                                    if model_cpd_id in cpd_matches:
+                                        mdlcpdmatches = cpd_matches[model_cpd_id]
+                                        for mdlcpd_id, mdlcpd_matches in mdlcpdmatches.items():
+                                            if mdlcpd_id != match_info["equation_scores"][4][model_cpd_id]:
+                                                del mdlcpdmatches[mdlcpd_id]
+            if (new_cpd_matchs == 0 and new_rxn_matchs == 0):
+                iterate = False
+        return (cpd_translations,rxn_translations,cpd_matches,rxn_matches)
 
     def apply_translation_to_model(
         self,
         model_or_mdlutl,
         translation_results,
-        user_approved_matches=None
+        user_approved_matches=None,
+        organism_indices=None
     ):
         """Apply ModelSEED namespace translations to a model.
 
         This function renames compounds and reactions in the model based on
         the translation results from translate_model_to_ms_namespace.
 
+        Naming conventions:
+        - Metabolites: h[c] -> cpd00067_c0, h[env] -> cpd00067_e0
+        - Reactions: ANME_1 -> rxn05467_c1, SRB_3 -> rxn08173_c2
+        - Compartment index is based on organism (1 for ANME, 2 for SRB by default)
+        - Stoichiometry is NOT changed - only IDs are updated
+
         Args:
             model_or_mdlutl: Model or MSModelUtil object to modify
-            translation_results: Results dict from translate_model_to_ms_namespace
+            translation_results: Tuple from translate_model_to_ms_namespace:
+                (cpd_translations, rxn_translations, cpd_matches, rxn_matches)
             user_approved_matches: Optional dict of user-approved proposed matches
-                                   {model_rxn_id: (ms_rxn_id, direction)}
+                {model_rxn_id: [ms_rxn_id, match_type]}
+            organism_indices: Dict mapping organism prefix to compartment index
+                Default: {"ANME": "1", "SRB": "2"}
 
         Returns:
             Dict with statistics about what was changed
         """
         mdlutl = self._check_and_convert_model(model_or_mdlutl)
 
-        cpd_translations = translation_results["cpd_translations"]
-        rxn_translations = translation_results["rxn_translations"]
+        # Handle both tuple format (from translate_model_to_ms_namespace) and dict format
+        if isinstance(translation_results, tuple):
+            cpd_translations = translation_results[0]
+            rxn_translations = translation_results[1]
+        else:
+            cpd_translations = translation_results.get("cpd_translations", translation_results.get(0, {}))
+            rxn_translations = translation_results.get("rxn_translations", translation_results.get(1, {}))
+
+        # Default organism indices
+        if organism_indices is None:
+            organism_indices = {"ANME": "1", "SRB": "2"}
 
         # Add user-approved matches if provided
         if user_approved_matches:
-            for model_rxn_id, (ms_rxn_id, direction) in user_approved_matches.items():
-                rxn_translations[model_rxn_id] = (ms_rxn_id, direction)
+            for model_rxn_id, match_info in user_approved_matches.items():
+                if isinstance(match_info, (list, tuple)):
+                    rxn_translations[model_rxn_id] = match_info
+                else:
+                    rxn_translations[model_rxn_id] = [match_info, "user_approved"]
+
+        # Count total compounds and reactions in model for fraction calculation
+        total_compounds = len(mdlutl.model.metabolites)
+        total_reactions = len(mdlutl.model.reactions)
 
         stats = {
             "compounds_renamed": 0,
             "reactions_renamed": 0,
-            "reactions_reversed": 0
+            "reactions_reversed": 0,
+            "compound_mapping": {},
+            "reaction_mapping": {},
+            "total_compounds": total_compounds,
+            "total_reactions": total_reactions,
+            "compound_fraction": 0.0,
+            "reaction_fraction": 0.0,
+            "untranslated_compounds": [],
+            "untranslated_reactions": []
+        }
+
+        # Track which metabolites and reactions have translations
+        translated_cpd_ids = set()
+        translated_rxn_ids = set()
+
+        # Map compartments to ModelSEED style
+        compartment_map = {
+            "c": "c",
+            "e": "e",
+            "p": "p",
+            "m": "m",
+            "env": "e",  # environment -> extracellular
         }
 
         # Apply compound translations
         self.log_info("Applying compound translations")
 
-        # First pass: identify which compounds will have the same new ID (duplicates)
-        # Build a mapping of new_cpd_id -> list of original model_cpd_ids
+        # First pass: build mapping of new IDs to handle duplicates
         new_id_to_originals = {}
-        for model_cpd_id, ms_cpd_id in cpd_translations.items():
-            if model_cpd_id in mdlutl.model.metabolites:
-                cpd = mdlutl.model.metabolites.get_by_id(model_cpd_id)
-                [base_id, compartment, index] = self._parse_id(cpd)
-                new_cpd_id = f"{ms_cpd_id}_{compartment}{index if index else '0'}"
-
-                if new_cpd_id not in new_id_to_originals:
-                    new_id_to_originals[new_cpd_id] = []
-                new_id_to_originals[new_cpd_id].append(model_cpd_id)
-
-        # Second pass: rename compounds, skipping duplicates
-        for model_cpd_id, ms_cpd_id in cpd_translations.items():
+        for model_cpd_id in cpd_translations:
             if model_cpd_id not in mdlutl.model.metabolites:
                 continue
 
             cpd = mdlutl.model.metabolites.get_by_id(model_cpd_id)
             [base_id, compartment, index] = self._parse_id(cpd)
-            new_cpd_id = f"{ms_cpd_id}_{compartment}{index if index else '0'}"
 
-            # Check if this new ID would create a duplicate
-            originals_for_new_id = new_id_to_originals[new_cpd_id]
-            if len(originals_for_new_id) > 1:
-                # Multiple compounds map to the same new ID
-                # Keep the first one and skip the rest
-                if model_cpd_id == originals_for_new_id[0]:
-                    # This is the first one - rename it
-                    cpd.id = new_cpd_id
-                    stats["compounds_renamed"] += 1
-                else:
-                    # This is a duplicate - log and skip
-                    self.log_warning(
-                        f"Skipping rename of '{model_cpd_id}' to '{new_cpd_id}' - "
-                        f"already renamed '{originals_for_new_id[0]}' to this ID"
-                    )
-            elif new_cpd_id in mdlutl.model.metabolites and new_cpd_id != model_cpd_id:
-                # The new ID already exists in the model (but not in our translation list)
+            # Get the ModelSEED compound ID
+            ms_cpd_info = cpd_translations[model_cpd_id]
+            if isinstance(ms_cpd_info, list):
+                ms_cpd_id = ms_cpd_info[0]
+            else:
+                ms_cpd_id = ms_cpd_info
+
+            # Map compartment to ModelSEED style
+            ms_compartment = compartment_map.get(compartment.lower(), compartment)
+
+            # Build new ID: cpd00067_c0 (compartment index is 0 for metabolites)
+            new_cpd_id = f"{ms_cpd_id}_{ms_compartment}0"
+
+            if new_cpd_id not in new_id_to_originals:
+                new_id_to_originals[new_cpd_id] = []
+            new_id_to_originals[new_cpd_id].append(model_cpd_id)
+
+        # Second pass: rename compounds
+        for model_cpd_id in cpd_translations:
+            if model_cpd_id not in mdlutl.model.metabolites:
+                continue
+
+            cpd = mdlutl.model.metabolites.get_by_id(model_cpd_id)
+            [base_id, compartment, index] = self._parse_id(cpd)
+
+            ms_cpd_info = cpd_translations[model_cpd_id]
+            if isinstance(ms_cpd_info, list):
+                ms_cpd_id = ms_cpd_info[0]
+            else:
+                ms_cpd_id = ms_cpd_info
+
+            ms_compartment = compartment_map.get(compartment.lower(), compartment)
+            new_cpd_id = f"{ms_cpd_id}_{ms_compartment}0"
+
+            # Handle duplicates
+            originals_for_new_id = new_id_to_originals.get(new_cpd_id, [])
+            if len(originals_for_new_id) > 1 and model_cpd_id != originals_for_new_id[0]:
+                self.log_warning(
+                    f"Skipping rename of '{model_cpd_id}' to '{new_cpd_id}' - "
+                    f"already renamed '{originals_for_new_id[0]}' to this ID"
+                )
+                continue
+
+            if new_cpd_id in mdlutl.model.metabolites and new_cpd_id != model_cpd_id:
                 self.log_warning(
                     f"Skipping rename of '{model_cpd_id}' to '{new_cpd_id}' - "
                     f"ID already exists in model"
                 )
-            else:
-                # Safe to rename
-                cpd.id = new_cpd_id
-                stats["compounds_renamed"] += 1
+                continue
+
+            # Rename the compound
+            old_id = cpd.id
+            cpd.id = new_cpd_id
+            cpd.compartment = ms_compartment
+            stats["compounds_renamed"] += 1
+            stats["compound_mapping"][old_id] = new_cpd_id
+            translated_cpd_ids.add(old_id)
+
+        # Track untranslated compounds
+        for met in mdlutl.model.metabolites:
+            # Check if this metabolite was already renamed or is in the original model
+            if met.id not in stats["compound_mapping"].values():
+                # Check if original ID was translated
+                original_id_found = False
+                for orig_id, new_id in stats["compound_mapping"].items():
+                    if new_id == met.id:
+                        original_id_found = True
+                        break
+                if not original_id_found and met.id not in translated_cpd_ids:
+                    stats["untranslated_compounds"].append(met.id)
 
         # Apply reaction translations
         self.log_info("Applying reaction translations")
-        for model_rxn_id, (ms_rxn_id, direction) in rxn_translations.items():
+        for model_rxn_id, rxn_info in rxn_translations.items():
             if model_rxn_id not in mdlutl.model.reactions:
                 continue
 
             rxn = mdlutl.model.reactions.get_by_id(model_rxn_id)
 
-            # Parse model reaction compartment
-            [base_id, compartment, index] = self._parse_id(rxn)
+            # Get the ModelSEED reaction ID
+            if isinstance(rxn_info, list):
+                ms_rxn_id = rxn_info[0]
+            else:
+                ms_rxn_id = rxn_info
 
-            # Construct new reaction ID with compartment
-            new_rxn_id = f"{ms_rxn_id}_{compartment}{index if index else '0'}"
+            # Determine organism index from reaction ID prefix
+            org_index = "0"
+            for prefix, idx in organism_indices.items():
+                if model_rxn_id.startswith(prefix):
+                    org_index = idx
+                    break
 
-            # Reverse reaction if needed
-            if direction == "reverse":
-                # Reverse the reaction stoichiometry
-                new_metabolites = {}
-                for met, coef in rxn.metabolites.items():
-                    new_metabolites[met] = -coef
-                rxn.subtract_metabolites(rxn.metabolites)
-                rxn.add_metabolites(new_metabolites)
+            # Determine the primary compartment for the reaction
+            # Use 'c' (cytosol) as default, but check reaction metabolites
+            primary_compartment = "c"
+            compartments_in_rxn = set()
+            for met in rxn.metabolites:
+                [_, met_comp, _] = self._parse_id(met)
+                compartments_in_rxn.add(met_comp)
 
-                # Swap bounds
-                rxn.lower_bound, rxn.upper_bound = -rxn.upper_bound, -rxn.lower_bound
+            # If reaction only has cytosolic metabolites, use 'c'
+            # If it's a transport reaction (multiple compartments), still use 'c' as base
+            if "c" in compartments_in_rxn:
+                primary_compartment = "c"
+            elif len(compartments_in_rxn) == 1:
+                primary_compartment = list(compartments_in_rxn)[0]
 
-                stats["reactions_reversed"] += 1
+            # Build new reaction ID: rxn05467_c1 (compartment + organism index)
+            new_rxn_id = f"{ms_rxn_id}_{primary_compartment}{org_index}"
 
-            # Rename the reaction
+            # Check for duplicate reaction IDs
+            if new_rxn_id in mdlutl.model.reactions and new_rxn_id != model_rxn_id:
+                self.log_warning(
+                    f"Skipping rename of '{model_rxn_id}' to '{new_rxn_id}' - "
+                    f"ID already exists in model"
+                )
+                continue
+
+            # Rename the reaction (DO NOT change stoichiometry)
+            old_id = rxn.id
             rxn.id = new_rxn_id
             stats["reactions_renamed"] += 1
+            stats["reaction_mapping"][old_id] = new_rxn_id
+            translated_rxn_ids.add(old_id)
+
+        # Track untranslated reactions
+        for rxn in mdlutl.model.reactions:
+            if rxn.id not in stats["reaction_mapping"].values():
+                original_id_found = False
+                for orig_id, new_id in stats["reaction_mapping"].items():
+                    if new_id == rxn.id:
+                        original_id_found = True
+                        break
+                if not original_id_found and rxn.id not in translated_rxn_ids:
+                    stats["untranslated_reactions"].append(rxn.id)
+
+        # Calculate fractions
+        if total_compounds > 0:
+            stats["compound_fraction"] = stats["compounds_renamed"] / total_compounds
+        if total_reactions > 0:
+            stats["reaction_fraction"] = stats["reactions_renamed"] / total_reactions
 
         self.log_info(
-            f"Translation applied: {stats['compounds_renamed']} compounds, "
-            f"{stats['reactions_renamed']} reactions "
-            f"({stats['reactions_reversed']} reversed)"
+            f"Translation applied: {stats['compounds_renamed']}/{total_compounds} compounds "
+            f"({stats['compound_fraction']*100:.1f}%), "
+            f"{stats['reactions_renamed']}/{total_reactions} reactions "
+            f"({stats['reaction_fraction']*100:.1f}%)"
         )
+
+        if stats["untranslated_reactions"]:
+            self.log_info(f"Untranslated reactions: {stats['untranslated_reactions']}")
 
         return stats

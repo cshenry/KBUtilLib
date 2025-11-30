@@ -205,3 +205,83 @@ class AICurationUtils(ArgoUtils):
         cache[rxn.id][genedata["ID"]] = json.loads(ai_output)
         self._save_cached_curation("GeneAssociation",cache)
         return cache[rxn.id][genedata["ID"]]
+
+    def analyze_reaction_stoichiometry(self, rxn) -> dict[str, Any]:
+        """Use AI to analyze and categorize reaction stoichiometry into primary, cofactor, and minor components.
+
+        This function breaks down a reaction's stoichiometry into three categories:
+        - Primary stoichiometry: Main compounds and carbon backbone chemistry
+        - Cofactor stoichiometry: Cofactors like NAD, NADH, ATP, ADP, etc.
+        - Minor stoichiometry: Minor substrates like protons, water, CO2, etc.
+
+        Args:
+            rxn: A reaction object with standard attributes (id, name, build_reaction_string, etc.)
+
+        Returns:
+            Dict with keys:
+                - primary_stoichiometry: Dict mapping compound names to their stoichiometric coefficients
+                - cofactor_stoichiometry: Dict mapping cofactor names to their stoichiometric coefficients
+                - minor_stoichiometry: Dict mapping minor compound names to their stoichiometric coefficients
+                - primary_chemistry: Brief description of the main chemistry occurring
+                - confidence: "high|medium|low|none"
+                - other_comments: General comments about the categorization
+        """
+        system = """
+        You are an expert in biochemistry and molecular biology.
+        You will receive a biochemical reaction and must analyze its stoichiometry,
+        categorizing the compounds into three groups:
+
+        1. PRIMARY STOICHIOMETRY - The main compounds involved in the core chemistry
+           (e.g., the carbon backbone transformations, main substrates and products)
+        2. COFACTOR STOICHIOMETRY - Cofactors and coenzymes involved
+           (e.g., NAD, NADH, ATP, ADP, FAD, FADH2, CoA derivatives)
+        3. MINOR STOICHIOMETRY - Minor compounds and prosthetic groups
+           (e.g., H+, H2O, CO2, NH3, phosphate, small inorganic ions)
+
+        Respond strictly in valid JSON with **no text outside the JSON**.
+        All keys and string values must use double quotes.
+        Use only plain ASCII characters.
+        """
+
+        shared_prompt = """Analyze the following reaction and categorize its stoichiometry
+        into primary, cofactor, and minor components.
+
+        Return a JSON object in this exact format:
+
+        {
+        "primary_stoichiometry": {"compound_name": coefficient, ...},
+        "cofactor_stoichiometry": {"cofactor_name": coefficient, ...},
+        "minor_stoichiometry": {"minor_compound_name": coefficient, ...},
+        "primary_chemistry": "Brief description of the main chemical transformation",
+        "other_comments": "Brief comments about the categorization decisions.",
+        "confidence": "high|medium|low|none"
+        }
+
+        Notes:
+        - Use positive coefficients for products and negative for reactants
+        - If a compound's role is ambiguous, use your best judgment and note it in other_comments
+        - The primary_chemistry should describe the core transformation (e.g., "oxidation of alcohol to aldehyde",
+          "phosphorylation of glucose", "decarboxylation of amino acid")
+
+        Reaction:
+        """
+        cache = self._load_cached_curation("ReactionStoichiometry")
+        if rxn.id[0:3] in self.const_util_rxn_prefixes():
+            return None
+        rxn_output = self.reaction_to_string(rxn)
+        if rxn_output["base_id"] not in cache:
+            self.log_warning(f"Querying AI with {rxn_output['base_id']}")
+            prompt = shared_prompt + rxn_output["rxnstring"]
+            ai_output = self.chat(prompt=prompt, system=system)
+            cache[rxn_output["base_id"]] = json.loads(ai_output)
+            if "reversed" in rxn_output:
+                # If the reaction was reversed for AI analysis, flip all stoichiometric coefficients back
+                cache[rxn_output["base_id"]]["other_comments"] += " Reaction was inverted to avoid AI confusion, and stoichiometric coefficients were inverted after analysis."
+                for category in ["primary_stoichiometry", "cofactor_stoichiometry", "minor_stoichiometry"]:
+                    if category in cache[rxn_output["base_id"]]:
+                        for compound in cache[rxn_output["base_id"]][category]:
+                            cache[rxn_output["base_id"]][category][compound] *= -1
+            self._save_cached_curation("ReactionStoichiometry",cache)
+        else:
+            print("ReactionStoichiometry-cached")
+        return cache[rxn_output["base_id"]]

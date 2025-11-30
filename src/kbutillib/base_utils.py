@@ -30,7 +30,6 @@ class BaseUtils:
     def __init__(self, name="Unknown", log_level: str = "INFO", **kwargs: Any) -> None:
         """Initialize the base utility class."""
         # Initialize dependency manager and set up paths
-        self._setup_dependencies_path()
         self.logger = self._setup_logger(log_level)
 
         # Allow subclasses to pass additional initialization parameters
@@ -43,12 +42,6 @@ class BaseUtils:
         self.data_directory = self.util_directory+"/data/"
 
         # Initialize attributes for tracking provenance on primary method calls
-        # self.obj_created = []
-        # self.input_objects = []
-        # self.method = None
-        # self.params = {}
-        # self.initialized = False
-        # self.timestamp = None
         self.reset_attributes()
 
     def reset_attributes(self):
@@ -119,76 +112,6 @@ class BaseUtils:
             logger.addHandler(handler)
 
         return logger
-
-    def _setup_dependencies_path(self) -> None:
-        """Initialize the dependency manager and set up Python paths.
-
-        Uses the new dependency manager to handle all external dependencies
-        via git submodules and configuration.
-        """
-        # Initialize the dependency manager (this sets up all paths)
-        self.dep_manager = get_dependency_manager()
-
-        # For backward compatibility, provide dependencies_dir attribute
-        # pointing to the default dependencies directory
-        repo_root = Path(__file__).parent.parent.parent
-        self.dependencies_dir = repo_root / "dependencies"
-
-    def _ensure_git_dependency(
-        self, module_name: str, git_url: str, branch: str = "master"
-    ) -> bool:
-        """Ensure a git-based dependency is available.
-
-        This is a compatibility method that now uses the dependency manager.
-
-        Args:
-            module_name: Name of the module to check for
-            git_url: Git URL (ignored, uses config)
-            branch: Git branch (ignored, uses config)
-
-        Returns:
-            bool: True if module is available, False if failed to obtain
-        """
-        # Try to import the module
-        try:
-            __import__(module_name)
-            self.log_debug(f"Module {module_name} is available")
-            return True
-        except ImportError as e:
-            self.log_warning(f"Module {module_name} not importable: {e}")
-            # Check if it's due to missing dependencies vs missing module
-            if "No module named" in str(e) and module_name not in str(e):
-                # Module exists but has missing dependencies
-                self.log_warning(f"Module {module_name} has missing dependencies: {e}")
-            return False
-
-    def ensure_modelseed_database(self) -> bool:
-        """Ensure ModelSEEDDatabase is available."""
-        return self._ensure_git_dependency(
-            "ModelSEEDDatabase",
-            "https://github.com/ModelSEED/ModelSEEDDatabase.git",
-            "master",
-        )
-
-    def ensure_modelseed_py(self) -> bool:
-        """Ensure ModelSEEDpy is available."""
-        return self._ensure_git_dependency(
-            "modelseedpy", "https://github.com/ModelSEED/ModelSEEDpy.git", "main"
-        )
-
-    def ensure_cobra_kbase(self) -> bool:
-        """Ensure CobraKBase is available."""
-        return self._ensure_git_dependency(
-            "cobrakbase", "https://github.com/Fxe/cobrakbase.git", "master"
-        )
-
-    def ensure_annotation_ontology_api(self) -> bool:
-        """Ensure Annotation Ontology API is available."""
-        return self._ensure_git_dependency(
-            "cb_annotation_ontology_api",
-            "https://github.com/kbaseapps/cb_annotation_ontology_api.git",
-            "main",
-        )
 
     def log_info(self, message: str) -> None:
         """Log an info message."""

@@ -29,32 +29,12 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         """
         super().__init__(**kwargs)
 
-        # Ensure required dependencies are available
-        self._ensure_dependencies()
-
         # Import required modules after ensuring dependencies
         self._import_modules()
 
         # Configuring cobrakbase API
         self.kbase_api = self.cobrakbase.KBaseAPI()
         self.kbase_api.ws_client = self.ws_client()
-
-    def _ensure_dependencies(self) -> None:
-        """Ensure all required dependencies are available."""
-        dependencies_ok = True
-
-        if not self.ensure_cobra_kbase():
-            self.log_error("Failed to obtain CobraKBase dependency")
-            dependencies_ok = False
-
-        if not self.ensure_modelseed_py():
-            self.log_error("Failed to obtain ModelSEEDpy dependency")
-            dependencies_ok = False
-
-        if not dependencies_ok:
-            raise ImportError(
-                "Required dependencies for KBModelUtils are not available"
-            )
 
     def _import_modules(self) -> None:
         """Import required modules after dependencies are ensured."""
@@ -155,18 +135,84 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return (id, "c", "")
 
     def _parse_rxn_stoichiometry(self,rxn) -> Dict:
-        """Parse reaction stoichiometry into protons, transport, and transformation"""        
-        output = {"metabolite_hash":{},"transport_stoichiometry":{},"equation":rxn.build_reaction_string()}
+        """Parse reaction stoichiometry into protons, transport, and transformation.
+
+        For transport reactions, we track:
+        - metabolite_hash: sum of stoichiometry per base compound (0 for pure transport)
+        - transport_stoichiometry: net transport coefficient per base compound
+          (positive = into cytoplasm, negative = out of cytoplasm)
+        - is_pure_transport: True if metabolite_hash has all zeros
+        - compartments: set of compartments involved
+        """
+        output = {
+            "metabolite_hash": {},
+            "transport_stoichiometry": {},
+            "equation": rxn.build_reaction_string(),
+            "is_pure_transport": False,
+            "compartments": set()
+        }
+
+        # Track stoichiometry per compartment for transport detection
+        compartment_stoich = {}  # {base_id: {compartment: coef}}
+
         for metabolite in rxn.metabolites:
             (base_id, compartment, index) = self._parse_id(metabolite.id)
-            if str(compartment) != "c":
-                output["transport_stoichiometry"][base_id] = rxn.metabolites[metabolite]
+            coef = rxn.metabolites[metabolite]
+
+            output["compartments"].add(compartment)
+
+            # Track per-compartment stoichiometry
+            compartment_stoich.setdefault(base_id, {})
+            compartment_stoich[base_id][compartment] = coef
+
+            # Sum for metabolite_hash (transformation stoichiometry)
             output["metabolite_hash"].setdefault(base_id, 0)
-            output["metabolite_hash"][base_id] += rxn.metabolites[metabolite]
+            output["metabolite_hash"][base_id] += coef
+
+        # Calculate transport stoichiometry
+        # For each compound that appears in multiple compartments,
+        # calculate the net transport coefficient
+        for base_id, comp_dict in compartment_stoich.items():
+            if len(comp_dict) > 1:
+                # This compound appears in multiple compartments - it's being transported
+                # For transport matching, we use the coefficient in the "most external" compartment
+                # Priority: env > e > p > m > c (most external first)
+                compartment_priority = {"env": 0, "e": 1, "p": 2, "m": 3, "c": 4}
+
+                # Find the most external compartment
+                most_external = None
+                most_external_priority = 999
+                for comp in comp_dict:
+                    priority = compartment_priority.get(comp, 5)
+                    if priority < most_external_priority:
+                        most_external_priority = priority
+                        most_external = comp
+
+                if most_external and most_external != "c":
+                    # Use the coefficient from the most external compartment
+                    output["transport_stoichiometry"][base_id] = comp_dict[most_external]
+            elif "c" not in comp_dict:
+                # Single compartment that's not cytoplasm - still mark as transport
+                # This handles edge cases where a compound only appears in one non-c compartment
+                comp = list(comp_dict.keys())[0]
+                output["transport_stoichiometry"][base_id] = comp_dict[comp]
+
+        # Determine if this is a pure transport reaction
+        # (all metabolite_hash values are 0 or near 0)
+        non_zero_transformation = False
+        for base_id, coef in output["metabolite_hash"].items():
+            if base_id != "cpd00067" and abs(coef) > 0.001:  # Ignore H+ and tiny values
+                non_zero_transformation = True
+                break
+
+        if not non_zero_transformation and len(output["transport_stoichiometry"]) > 0:
+            output["is_pure_transport"] = True
+
         output["proton_stoichiometry"] = 0
         for base_id in output["metabolite_hash"]:
             if base_id == "cpd00067":
                 output["proton_stoichiometry"] += output["metabolite_hash"][base_id]
+
         return output
 
     #################Utility functions#####################

@@ -327,6 +327,7 @@ class KBReadsUtils(KBWSUtils):
         # Build reads library object
         reads_obj = self._build_reads_object(
             reads=reads,
+            shock_ids=shock_ids,
             handle_ids=handle_ids,
             sequencing_tech=sequencing_tech,
             insert_size_mean=insert_size_mean,
@@ -397,9 +398,11 @@ class KBReadsUtils(KBWSUtils):
         files = {}
         handle_ids = {}
 
-        # Download forward reads
-        if "lib" in reads_data and "file" in reads_data["lib"]:
-            fwd_handle = reads_data["lib"]["file"]
+        # Download forward reads - handle both "lib" and "lib1" formats
+        # "lib" is the standard format, "lib1" is used by some older objects
+        lib_key = "lib" if "lib" in reads_data else "lib1" if "lib1" in reads_data else None
+        if lib_key and "file" in reads_data[lib_key]:
+            fwd_handle = reads_data[lib_key]["file"]
             handle_ids["fwd"] = fwd_handle.get("hid")
             fwd_file = self._download_from_handle(
                 fwd_handle, download_dir, f"{obj_name}_fwd.fastq"
@@ -514,16 +517,26 @@ class KBReadsUtils(KBWSUtils):
         # Upload to Shock
         headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
 
+        # Get file size for Content-Length
+        file_size = os.path.getsize(filepath)
+        filename = os.path.basename(filepath)
+
         with open(filepath, "rb") as f:
-            files = {"upload": f}
-            attributes = json.dumps({"filename": os.path.basename(filepath)})
-            data = {"attributes": attributes}
+            # Use multipart form with file and explicit content-type/size
+            # The tuple format is (filename, fileobj, content_type, headers)
+            files = {
+                "upload": (
+                    filename,
+                    f,
+                    "application/octet-stream",
+                    {"Content-Length": str(file_size)}
+                )
+            }
 
             r = requests.post(
                 self.shock_url + "/node",
                 headers=headers,
                 files=files,
-                data=data,
                 allow_redirects=True,
             )
 
@@ -611,6 +624,7 @@ class KBReadsUtils(KBWSUtils):
     def _build_reads_object(
         self,
         reads: Reads,
+        shock_ids: Dict[str, str],
         handle_ids: Dict[str, str],
         sequencing_tech: str,
         insert_size_mean: Optional[float] = None,
@@ -621,6 +635,7 @@ class KBReadsUtils(KBWSUtils):
 
         Args:
             reads: Reads object with metadata
+            shock_ids: Dictionary of Shock IDs for files
             handle_ids: Dictionary of handle IDs for files
             sequencing_tech: Sequencing technology
             insert_size_mean: Mean insert size
@@ -637,24 +652,36 @@ class KBReadsUtils(KBWSUtils):
 
         # Add forward reads handle
         if "fwd" in handle_ids:
+            fwd_file_path = reads.files.get("fwd", "")
+            fwd_file_size = os.path.getsize(fwd_file_path) if fwd_file_path and os.path.exists(fwd_file_path) else 0
             obj["lib"] = {
                 "file": {
                     "hid": handle_ids["fwd"],
-                    "file_name": os.path.basename(reads.files.get("fwd", "")),
+                    "id": shock_ids.get("fwd", ""),
+                    "file_name": os.path.basename(fwd_file_path),
                     "type": "shock",
                     "url": self.shock_url,
-                }
+                },
+                "encoding": "ascii",
+                "type": "fq",
+                "size": fwd_file_size,
             }
 
         # Add reverse reads handle for paired-end
         if reads.read_type == "paired" and "rev" in handle_ids:
+            rev_file_path = reads.files.get("rev", "")
+            rev_file_size = os.path.getsize(rev_file_path) if rev_file_path and os.path.exists(rev_file_path) else 0
             obj["lib2"] = {
                 "file": {
                     "hid": handle_ids["rev"],
-                    "file_name": os.path.basename(reads.files.get("rev", "")),
+                    "id": shock_ids.get("rev", ""),
+                    "file_name": os.path.basename(rev_file_path),
                     "type": "shock",
                     "url": self.shock_url,
-                }
+                },
+                "encoding": "ascii",
+                "type": "fq",
+                "size": rev_file_size,
             }
 
             # Add paired-end specific metadata

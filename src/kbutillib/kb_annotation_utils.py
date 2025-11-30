@@ -51,9 +51,6 @@ class KBAnnotationUtils(KBWSUtils):
         """Initialize KBase annotation utilities."""
         super().__init__(**kwargs)
 
-        # Ensure required dependencies are available
-        self._ensure_dependencies()
-
         # Get the cb_annotation_ontology_api directory from dependency manager
         ontology_path = get_data_path("cb_annotation_ontology_api")
         if ontology_path:
@@ -82,19 +79,6 @@ class KBAnnotationUtils(KBWSUtils):
         filtered_reaction_df = pd.read_csv(filename, sep="\t")
         for index, row in filtered_reaction_df.iterrows():
             self.filtered_rxn[row["id"]] = row["reason"]
-
-    def _ensure_dependencies(self) -> None:
-        """Ensure all required dependencies are available."""
-        dependencies_ok = True
-
-        if not self.ensure_annotation_ontology_api():
-            self.log_error("Failed to obtain Annotation Ontology API dependency")
-            dependencies_ok = False
-
-        if not dependencies_ok:
-            raise ImportError(
-                "Required dependencies for KBAnnotationUtils are not available"
-            )
 
     def reset_attributes(self):
         """Resetting annotation elements related to a new method call."""

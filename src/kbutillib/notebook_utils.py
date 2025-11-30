@@ -23,6 +23,9 @@ class DataType(Enum):
     TRANS = "TRANS"
     PROT = "PROT"
     MGR = "MGR"
+    RXNTRANS = "RxnTRANS"
+    RXNPROT = "RxnPROT"
+    RXNMGR = "RxnMGR"
 
 
 @dataclass
@@ -155,7 +158,8 @@ class DataObject:
             parts.append(self.number_type.value)
         if self.data_type:
             parts.append(self.data_type.value)
-        return "-".join(parts)
+        self.name = "-".join(parts)
+        return self.name
 
 
 class NotebookUtils(BaseUtils):
@@ -551,14 +555,8 @@ class NotebookUtils(BaseUtils):
         # Validate source_file if provided
         source_file = meta.get("source_file")
         if source_file is not None:
-            # Check that source_file is in the data/ directory
-            expected_prefix = "data/"
-            if not source_file.startswith(expected_prefix):
-                raise ValueError(
-                    f"source_file must be in data/ directory, got: {source_file}"
-                )
             # Optionally verify file exists
-            full_path = os.path.join(self.notebook_folder, source_file)
+            full_path = os.path.join(self.notebook_folder, "data/"+source_file)
             if not exists(full_path):
                 self.log_warning(f"source_file does not exist: {full_path}")
 
@@ -581,13 +579,13 @@ class NotebookUtils(BaseUtils):
             except ValueError:
                 raise ValueError(
                     f"Invalid data_type: {meta['data_type']}. "
-                    f"Must be one of: TRANS, PROT, MGR"
+                    f"Must be one of: TRANS, PROT, MGR, RxnTRANS, RxnPROT, RxnMGR"
                 )
 
         return DataObject(
             prefix=meta["prefix"],
             data=data,
-            name=meta.get("name"),
+            name=None,
             source_file=source_file,
             number_type=number_type,
             data_type=data_type,

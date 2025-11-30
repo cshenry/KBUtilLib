@@ -219,23 +219,6 @@ class MSBiochemUtils(SharedEnvUtils):
         return dict(counts)
 
     def _ensure_database_available(self) -> None:
-        """Ensure ModelSEED database is available, using dependency management."""
-        # First ensure ModelSEEDpy is available
-        if not self.ensure_modelseed_py():
-            raise ImportError("Failed to obtain ModelSEEDpy dependency")
-
-        # Ensure ModelSEEDDatabase is available
-        if not self.ensure_modelseed_database():
-            if self.auto_download:
-                self.log_warning(
-                    "Failed to automatically obtain ModelSEEDDatabase, falling back to manual download"
-                )
-                self._download_database_manual()
-            else:
-                raise FileNotFoundError(
-                    "ModelSEED database not found and auto_download is disabled"
-                )
-
         # Load the database
         try:
             from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
@@ -449,11 +432,12 @@ class MSBiochemUtils(SharedEnvUtils):
                         if hit in matches or (highest_hit_scores[hit] >= (len(query_stoichiometry["metabolite_hash"])-missing_count)/len(query_stoichiometry["metabolite_hash"]) and len(query_stoichiometry["metabolite_hash"]) == len(stoichiometry_hash["rxn_hash"][hit]["metabolite_hash"])):
                             matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "ec_hits": {},"transport_scores":{},"equation_scores":{},"proton_matches":[]})
                             matches[hit]["score"] += 20*highest_hit_scores[hit]
-                            matches[hit]["equation_scores"] = (highest_hit_scores[hit], len(hit_counts[hit]), sign,unmatch_cpd[hit],unmatch_db_cpd[hit])
+                            matches[hit]["equation_scores"] = (highest_hit_scores[hit], len(hit_counts[hit]), sign,unmatch_cpd[hit],unmatch_db_cpd[hit],{})
                             for base_id in hit_counts[hit]:
                                 for cpdmatch in hit_counts[hit][base_id]:
-                                    cpd_hits[base_id][cpdmatch].setdefault("equation_hits", {})
+                                    cpd_hits[base_id][cpdmatch].setdefault("equation_hits", {})#HERE
                                     cpd_hits[base_id][cpdmatch]["equation_hits"][hit] = highest_hit_scores[hit]
+                                    matches[hit]["equation_scores"][4][base_id] = cpdmatch
                 #Checking for best transport match from the previous hits
                 highest_hit_scores = {}
                 highest_hit_score = 0
@@ -495,7 +479,10 @@ class MSBiochemUtils(SharedEnvUtils):
                 if highest_hit != None:
                     for hit in highest_hit_scores:
                         if highest_hit_scores[hit] >= 1:
-                            if hit in matches:
+                            # For pure transport reactions (no transformation), add even without identifier match
+                            is_pure_transport = query_stoichiometry.get("is_pure_transport", False)
+                            if hit in matches or is_pure_transport:
+                                matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "ec_hits": {},"transport_scores":{},"equation_scores":{},"proton_matches":[]})
                                 matches[hit]["score"] += highest_hit_scores[hit]*10*len(hit_counts[hit])
                                 matches[hit]["transport_scores"] = (highest_hit_scores[hit], len(hit_counts[hit]), sign,unmatch_cpd[hit],unmatch_db_cpd[hit])
                                 for base_id in hit_counts[hit]:

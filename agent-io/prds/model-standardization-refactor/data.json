@@ -123,6 +123,13 @@
       "status": "completed",
       "parent_task_id": null,
       "notes": "Fixed major bug where transport reactions couldn't match because ms_stoich dictionary used base_id as keys, causing same compounds in different compartments to overwrite each other. Lines 922-931: Changed ms_stoich from dict[base_id] = (coef, compartment) to dict[(base_id, compartment)] = coef. Lines 945-964: Updated code that checks already-translated compounds to use (base_id, compartment) tuple keys. Lines 966-998: Updated code that matches untranslated compounds to iterate over (base_id, compartment) pairs and properly handle transport vs non-transport compartment matching. Lines 1000-1024: Updated final validation to track (base_id, compartment) pairs instead of just base_ids. This fix enables transport reactions (CO2 transport, H+ gradients, etc.) to match correctly - previously they would fail because cpd00067_c0 and cpd00067_e0 would collapse to a single cpd00067 entry."
+    },
+    {
+      "task_id": "18.0",
+      "description": "Enhancement - Remove formula-only matches when strong matches exist to reduce ambiguity",
+      "status": "completed",
+      "parent_task_id": null,
+      "notes": "Enhanced compound match filtering in translate_model_to_ms_namespace. Lines 720-762: Before translating, now categorizes each compound's matches as 'strong' (ID or structure match) vs 'formula-only'. If a compound has any strong matches, all formula-only matches are removed from cpd_matches. This reduces ambiguity for downstream reaction matching since fewer candidate MS compounds need to be considered. After filtering, compounds with exactly one remaining match are translated. Logs removed matches for debugging."
     }
   ],
   "files": {

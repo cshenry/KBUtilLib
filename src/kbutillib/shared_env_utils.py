@@ -1,11 +1,16 @@
 """Shared environment management for configuration and secrets."""
 
 import os
+import shutil
 from configparser import ConfigParser
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from .base_utils import BaseUtils
+
+# Standard kbutillib directory
+KBUTILLIB_DIR = Path.home() / ".kbutillib"
+DEFAULT_CONFIG_FILE = KBUTILLIB_DIR / "config.yaml"
 
 
 class SharedEnvUtils(BaseUtils):
@@ -13,6 +18,11 @@ class SharedEnvUtils(BaseUtils):
 
     Provides centralized access to configuration files, environment variables,
     authentication tokens, and other shared resources across utility modules.
+
+    Configuration priority order:
+    1. Explicitly provided config_file parameter
+    2. ~/.kbutillib/config.yaml (user config)
+    3. Project root config.yaml (repository default)
     """
 
     def __init__(
@@ -23,14 +33,24 @@ class SharedEnvUtils(BaseUtils):
         token: Optional[Union[str, Dict[str, str]]] = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize the shared environment which manages configurations and authentication tokens."""
+        """Initialize the shared environment which manages configurations and authentication tokens.
+
+        Args:
+            config_file: Optional explicit config file path. If None, uses priority order.
+            token_file: Path to token file (default: ~/.tokens)
+            kbase_token_file: Path to KBase token file (default: ~/.kbase/token)
+            token: Optional token(s) to set (string or dict)
+            **kwargs: Additional arguments passed to BaseUtils
+        """
         super().__init__(**kwargs)
-        # Reading config file is specified
+
+        # Determine config file using priority order
         self._config_hash = {}
-        self._config_file = None
-        if config_file and Path(config_file).exists():
-            self._config_file = config_file
+        self._config_file = self._find_config_file(config_file)
+
+        if self._config_file:
             self._config_hash = self.read_config()
+            self.log_info(f"Loaded configuration from: {self._config_file}")
 
         # Reading token file
         self._token_hash = {}
@@ -54,40 +74,157 @@ class SharedEnvUtils(BaseUtils):
                 for key, value in token.items():
                     self.set_token(value, key)
 
-    # Reading config file in standard config format
+    def _find_config_file(self, explicit_path: Optional[Union[str, Path]] = None) -> Optional[Path]:
+        """Find the configuration file using priority order.
+
+        Priority:
+        1. Explicitly provided path
+        2. ~/.kbutillib/config.yaml (user config)
+        3. Project root config.yaml (repository default)
+
+        Args:
+            explicit_path: Optional explicit config file path
+
+        Returns:
+            Path to config file, or None if not found
+        """
+        # Priority 1: Explicit path
+        if explicit_path:
+            explicit = Path(explicit_path)
+            if explicit.exists():
+                return explicit
+            else:
+                self.log_warning(f"Explicit config file not found: {explicit_path}")
+                return None
+
+        # Priority 2: User config in ~/.kbutillib/
+        if DEFAULT_CONFIG_FILE.exists():
+            return DEFAULT_CONFIG_FILE
+
+        # Priority 3: Project root config.yaml
+        # Try to find project root by looking for config.yaml in parent directories
+        current = Path.cwd()
+        for _ in range(5):  # Search up to 5 levels
+            project_config = current / "config.yaml"
+            if project_config.exists():
+                return project_config
+            current = current.parent
+
+        self.log_debug("No configuration file found")
+        return None
+
+    # Reading config file - supports both YAML and INI formats
     def read_config(
         self, config_file: Optional[Union[str, Path]] = None
     ) -> Dict[str, Any]:
-        """Read configuration from a file."""
+        """Read configuration from a file.
+
+        Supports both YAML (.yaml, .yml) and INI formats.
+
+        Args:
+            config_file: Optional path to config file. Uses self._config_file if None.
+
+        Returns:
+            Configuration dictionary
+
+        Raises:
+            Exception: If config file cannot be read or parsed
+        """
         if config_file is None:
             config_file = self._config_file
+
+        if config_file is None:
+            return {}
+
         config_path = Path(config_file)
         confighash = {}
+
         try:
-            if config_path.exists():
+            if not config_path.exists():
+                self.log_warning(f"Config file not found: {config_path}")
+                return confighash
+
+            # Determine format from file extension
+            if config_path.suffix in ['.yaml', '.yml']:
+                # YAML format
+                try:
+                    import yaml
+                    with open(config_path, 'r') as f:
+                        confighash = yaml.safe_load(f) or {}
+                    self.log_debug(f"Loaded YAML config from {config_path}")
+                except ImportError:
+                    self.log_error(
+                        "PyYAML not installed. Install with: pip install pyyaml"
+                    )
+                    raise
+            else:
+                # INI format (ConfigParser)
                 config = ConfigParser()
                 config.read(config_path)
                 for section in config.sections():
                     confighash[section] = {}
                     for nameval in config.items(section):
                         confighash[section][nameval[0]] = nameval[1]
-                return confighash
-            else:
-                self.log_warning(f"Config file not found: {config_path}")
+                self.log_debug(f"Loaded INI config from {config_path}")
+
+            return confighash
+
         except Exception as e:
-            self.log_error(f"Error parsing config file: {e}")
+            self.log_error(f"Error parsing config file {config_path}: {e}")
             raise
-        return confighash
 
     def get_config(self, section, key, default=None):
-        """Get a configuration value."""
+        """Get a configuration value from section.key format.
+
+        Deprecated: Use get_config_value() with dot notation instead.
+
+        Args:
+            section: Configuration section
+            key: Configuration key
+            default: Default value if not found
+
+        Returns:
+            Configuration value or default
+        """
         if section not in self._config_hash:
-            self.log_warning(f"Section '{section}' not found in config")
+            self.log_debug(f"Section '{section}' not found in config")
             return default
         if key not in self._config_hash[section]:
-            self.log_warning(f"Key '{key}' not found in section '{section}'")
+            self.log_debug(f"Key '{key}' not found in section '{section}'")
             return default
         return self._config_hash.get(section).get(key)
+
+    def get_config_value(self, key_path: str, default: Any = None) -> Any:
+        """Get a configuration value using dot notation.
+
+        Supports nested dictionary access with dot-separated keys.
+
+        Args:
+            key_path: Dot-separated path to config value (e.g., "skani.executable")
+            default: Default value if key not found
+
+        Returns:
+            Configuration value or default
+
+        Examples:
+            >>> util.get_config_value("skani.executable")
+            'skani'
+            >>> util.get_config_value("skani.cache_file")
+            '~/.kbutillib/skani_databases.json'
+            >>> util.get_config_value("paths.data_dir", default="./data")
+            './data'
+        """
+        keys = key_path.split('.')
+        value = self._config_hash
+
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                self.log_debug(f"Config key '{key_path}' not found, using default: {default}")
+                return default
+
+        return value
 
     def read_token_file(
         self, token_file: Optional[Union[str, Path]] = None
@@ -192,3 +329,98 @@ class SharedEnvUtils(BaseUtils):
             if self._token_hash
             else [],  # Don't expose secret values
         }
+
+    @staticmethod
+    def initialize_environment(
+        source_config: Optional[Union[str, Path]] = None,
+        force: bool = False
+    ) -> Dict[str, Any]:
+        """Initialize the ~/.kbutillib environment directory and configuration.
+
+        Creates the ~/.kbutillib directory and copies the default config.yaml
+        from the project root if it doesn't exist.
+
+        Args:
+            source_config: Optional path to config file to copy. If None, searches
+                          for config.yaml in the current working directory and parent dirs.
+            force: If True, overwrites existing config file in ~/.kbutillib/
+
+        Returns:
+            Dict with status information:
+            {
+                "success": bool,
+                "directory_created": bool,
+                "config_copied": bool,
+                "config_path": str,
+                "message": str
+            }
+
+        Examples:
+            >>> # Initialize with default config from project
+            >>> SharedEnvUtils.initialize_environment()
+
+            >>> # Initialize with specific config file
+            >>> SharedEnvUtils.initialize_environment(source_config="/path/to/config.yaml")
+
+            >>> # Force overwrite existing config
+            >>> SharedEnvUtils.initialize_environment(force=True)
+        """
+        result = {
+            "success": False,
+            "directory_created": False,
+            "config_copied": False,
+            "config_path": str(DEFAULT_CONFIG_FILE),
+            "message": ""
+        }
+
+        # Create ~/.kbutillib directory if it doesn't exist
+        if not KBUTILLIB_DIR.exists():
+            try:
+                KBUTILLIB_DIR.mkdir(parents=True, exist_ok=True)
+                result["directory_created"] = True
+                result["message"] = f"Created directory: {KBUTILLIB_DIR}"
+            except Exception as e:
+                result["message"] = f"Failed to create directory {KBUTILLIB_DIR}: {e}"
+                return result
+        else:
+            result["message"] = f"Directory already exists: {KBUTILLIB_DIR}"
+
+        # Handle config file
+        if DEFAULT_CONFIG_FILE.exists() and not force:
+            result["success"] = True
+            result["message"] += f"\nConfig file already exists: {DEFAULT_CONFIG_FILE}"
+            return result
+
+        # Find source config file
+        if source_config:
+            source_path = Path(source_config)
+            if not source_path.exists():
+                result["message"] += f"\nSource config not found: {source_config}"
+                return result
+        else:
+            # Search for config.yaml in current directory and parent directories
+            source_path = None
+            current = Path.cwd()
+            for _ in range(5):  # Search up to 5 levels
+                candidate = current / "config.yaml"
+                if candidate.exists():
+                    source_path = candidate
+                    break
+                current = current.parent
+
+            if source_path is None:
+                result["message"] += "\nNo source config.yaml found in project. Skipping config copy."
+                result["success"] = True
+                return result
+
+        # Copy config file
+        try:
+            shutil.copy2(source_path, DEFAULT_CONFIG_FILE)
+            result["config_copied"] = True
+            result["success"] = True
+            result["message"] += f"\nCopied config from {source_path} to {DEFAULT_CONFIG_FILE}"
+        except Exception as e:
+            result["message"] += f"\nFailed to copy config file: {e}"
+            return result
+
+        return result

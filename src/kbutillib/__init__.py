@@ -29,7 +29,7 @@ except ImportError:
     MSBiochemUtils = None
 
 try:
-    from .kb_model_standardization_utils import ModelStandardizationUtils
+    from .model_standardization_utils import ModelStandardizationUtils
 except ImportError:
     ModelStandardizationUtils = None
 
@@ -79,14 +79,18 @@ except ImportError:
     KBUniProtUtils = None
 
 try:
-    from .kb_skani_utils import KBSKANIUtils
+    from .skani_utils import SKANIUtils
 except ImportError:
-    KBSKANIUtils = None
+    SKANIUtils = None
 
 try:
-    from .kb_reads_utils import KBReadsUtils
+    from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError:
     KBReadsUtils = None
+    Assembly = None
+    AssemblySet = None
+    Reads = None
+    ReadSet = None
 
 # Import example composite classes
 # Temporarily disabled for testing core functionality
@@ -98,6 +102,8 @@ examples = None
 
 __all__ = [
     "ArgoUtilsMSBiochemUtils",
+    "Assembly",
+    "AssemblySet",
     "BaseUtils",
     "DataObject",
     "DataType",
@@ -108,7 +114,9 @@ __all__ = [
     "KBPLMUtils",
     "KBReadsUtils",
     "KBSDKUtils",
-    "KBSKANIUtils",
+    "Reads",
+    "ReadSet",
+    "SKANIUtils",
     "KBUniProtUtils",
     "KBWSUtils",
     "MSFBAUtils",

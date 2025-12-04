@@ -1,4 +1,4 @@
-"""KBase SKANI utilities for fast genome distance computation and sketching.
+"""SKANI utilities for fast genome distance computation and sketching.
 
 This module provides utilities for using SKANI to compute genome distances
 and manage sketch databases for efficient genome comparison.
@@ -12,10 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .base_utils import BaseUtils
+from .shared_env_utils import SharedEnvUtils
 
 
-class KBSKANIUtils(BaseUtils):
+class SKANIUtils(SharedEnvUtils):
     """Utilities for genome distance computation using SKANI.
 
     This class provides methods to:
@@ -27,27 +27,42 @@ class KBSKANIUtils(BaseUtils):
 
     def __init__(
         self,
-        cache_dir: Optional[str] = None,
+        cache_file: Optional[str] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize KBase SKANI utilities.
+        """Initialize SKANI utilities.
 
         Args:
-            cache_dir: Directory for storing sketch databases.
-                      Defaults to ~/.kbutillib/skani_cache/
-            **kwargs: Additional keyword arguments passed to BaseUtils
+            cache_file: Path to JSON file for tracking sketch databases.
+                       Defaults to config value or ~/.kbutillib/skani_databases.json
+            **kwargs: Additional keyword arguments passed to SharedEnvUtils
         """
-        super().__init__(name="KBSKANIUtils", **kwargs)
+        super().__init__(**kwargs)
 
-        # Set up cache directory
-        if cache_dir is None:
-            home = Path.home()
-            self.cache_dir = home / ".kbutillib" / "skani_cache"
-        else:
-            self.cache_dir = Path(cache_dir)
+        # Get skani executable path from config
+        self.skani_executable = self.get_config_value(
+            "skani.executable",
+            default="skani"
+        )
 
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.log_info(f"SKANI cache directory: {self.cache_dir}")
+        # Set up cache file path
+        if cache_file is None:
+            default_cache = self.get_config_value(
+                "skani.cache_file",
+                default="~/.kbutillib/skani_databases.json"
+            )
+            cache_file = os.path.expanduser(default_cache)
+
+        self.cache_file = Path(cache_file)
+
+        # Ensure cache file directory exists
+        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialize cache file if it doesn't exist
+        if not self.cache_file.exists():
+            self._save_cache({})
+
+        self.log_info(f"SKANI database cache: {self.cache_file}")
 
         # Check if SKANI is available
         self._check_skani_availability()
@@ -60,7 +75,7 @@ class KBSKANIUtils(BaseUtils):
         """
         try:
             result = subprocess.run(
-                ["skani", "--version"],
+                [self.skani_executable, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -68,7 +83,7 @@ class KBSKANIUtils(BaseUtils):
             if result.returncode == 0:
                 version = result.stdout.strip()
                 self.skani_available = True
-                self.log_info(f"SKANI is available: {version}")
+                self.log_info(f"SKANI is available: {version} (executable: {self.skani_executable})")
                 return True
             else:
                 self.skani_available = False
@@ -85,74 +100,58 @@ class KBSKANIUtils(BaseUtils):
             "SKANI not found. Install SKANI to use this functionality:\n"
             "  Via conda: conda install -c bioconda skani\n"
             "  Via cargo: cargo install skani\n"
-            "  From source: https://github.com/bluenote-1577/skani"
+            "  From source: https://github.com/bluenote-1577/skani\n"
+            f"  Or set 'skani.executable' in config.yaml to the full path"
         )
 
-    def _get_database_path(self, database_name: str) -> Path:
-        """Get the path to a sketch database.
-
-        Args:
-            database_name: Name of the database
+    def _load_cache(self) -> Dict[str, Dict[str, Any]]:
+        """Load the sketch database cache from JSON file.
 
         Returns:
-            Path to the database directory
+            Dictionary mapping database names to their metadata
         """
-        return self.cache_dir / database_name
-
-    def _get_metadata_file(self, database_name: str) -> Path:
-        """Get the path to a database's metadata file.
-
-        Args:
-            database_name: Name of the database
-
-        Returns:
-            Path to the metadata JSON file
-        """
-        return self._get_database_path(database_name) / "metadata.json"
-
-    def _load_metadata(self, database_name: str) -> Optional[Dict[str, Any]]:
-        """Load metadata for a sketch database.
-
-        Args:
-            database_name: Name of the database
-
-        Returns:
-            Metadata dictionary, or None if not found
-        """
-        metadata_file = self._get_metadata_file(database_name)
-        if not metadata_file.exists():
-            return None
-
         try:
-            with open(metadata_file, 'r') as f:
+            with open(self.cache_file, 'r') as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            self.log_error(f"Failed to load metadata for {database_name}: {e}")
-            return None
+            self.log_error(f"Failed to load cache file: {e}")
+            return {}
 
-    def _save_metadata(self, database_name: str, metadata: Dict[str, Any]) -> bool:
-        """Save metadata for a sketch database.
+    def _save_cache(self, cache: Dict[str, Dict[str, Any]]) -> bool:
+        """Save the sketch database cache to JSON file.
 
         Args:
-            database_name: Name of the database
-            metadata: Metadata dictionary to save
+            cache: Dictionary mapping database names to their metadata
 
         Returns:
             bool: True if successful, False otherwise
         """
-        metadata_file = self._get_metadata_file(database_name)
         try:
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            with open(self.cache_file, 'w') as f:
+                json.dump(cache, f, indent=2)
             return True
         except IOError as e:
-            self.log_error(f"Failed to save metadata for {database_name}: {e}")
+            self.log_error(f"Failed to save cache file: {e}")
             return False
+
+    def _get_database_info(self, database_name: str) -> Optional[Dict[str, Any]]:
+        """Get information about a database from cache.
+
+        Args:
+            database_name: Name of the database
+
+        Returns:
+            Database metadata dictionary, or None if not found
+        """
+        cache = self._load_cache()
+        return cache.get(database_name)
 
     def sketch_genome_directory(
         self,
         fasta_directory: str,
         database_name: str = "default",
+        database_path: Optional[str] = None,
+        description: Optional[str] = None,
         marker: Optional[str] = None,
         force_rebuild: bool = False,
         threads: int = 1
@@ -162,6 +161,9 @@ class KBSKANIUtils(BaseUtils):
         Args:
             fasta_directory: Directory containing FASTA files to sketch
             database_name: Name for this sketch database (default: "default")
+            database_path: Path where sketch database will be stored.
+                          If None, uses ~/.kbutillib/skani_sketches/<database_name>
+            description: Optional description of this database
             marker: Marker mode for skani (e.g., --marker-compression)
             force_rebuild: If True, rebuild even if database exists
             threads: Number of threads to use for sketching
@@ -178,18 +180,6 @@ class KBSKANIUtils(BaseUtils):
             RuntimeError: If SKANI is not available
             ValueError: If fasta_directory doesn't exist or has no FASTA files
         """
-        self.initialize_call(
-            "sketch_genome_directory",
-            {
-                "fasta_directory": fasta_directory,
-                "database_name": database_name,
-                "marker": marker,
-                "force_rebuild": force_rebuild,
-                "threads": threads
-            },
-            print_params=True
-        )
-
         if not self.skani_available:
             raise RuntimeError(
                 "SKANI is not available. Please install SKANI first."
@@ -213,32 +203,39 @@ class KBSKANIUtils(BaseUtils):
 
         self.log_info(f"Found {len(fasta_files)} FASTA files to sketch")
 
-        # Create database directory
-        db_path = self._get_database_path(database_name)
-        db_path.mkdir(parents=True, exist_ok=True)
+        # Load existing cache
+        cache = self._load_cache()
 
+        # Determine database path
+        if database_path is None:
+            sketch_dir = Path.home() / ".kbutillib" / "skani_sketches"
+            sketch_dir.mkdir(parents=True, exist_ok=True)
+            db_path = sketch_dir / database_name
+        else:
+            db_path = Path(database_path)
+
+        db_path.mkdir(parents=True, exist_ok=True)
         sketch_db = db_path / "sketch_db"
 
-        # Check if database exists and force_rebuild is False
-        if sketch_db.exists() and not force_rebuild:
-            metadata = self._load_metadata(database_name)
-            if metadata:
-                self.log_info(
-                    f"Database '{database_name}' already exists with "
-                    f"{metadata.get('genome_count', 0)} genomes. "
-                    f"Use force_rebuild=True to recreate."
-                )
-                return {
-                    "success": True,
-                    "database_name": database_name,
-                    "database_path": str(db_path),
-                    "genome_count": metadata.get("genome_count", 0),
-                    "genomes": metadata.get("genomes", []),
-                    "rebuilt": False
-                }
+        # Check if database exists in cache and force_rebuild is False
+        if database_name in cache and not force_rebuild:
+            existing_info = cache[database_name]
+            self.log_info(
+                f"Database '{database_name}' already exists with "
+                f"{existing_info.get('genome_count', 0)} genomes. "
+                f"Use force_rebuild=True to recreate."
+            )
+            return {
+                "success": True,
+                "database_name": database_name,
+                "database_path": existing_info.get("path", str(db_path)),
+                "genome_count": existing_info.get("genome_count", 0),
+                "genomes": existing_info.get("genomes", []),
+                "rebuilt": False
+            }
 
         # Build the skani sketch command
-        cmd = ["skani", "sketch"]
+        cmd = [self.skani_executable, "sketch"]
 
         # Add input files
         for fasta_file in fasta_files:
@@ -275,7 +272,7 @@ class KBSKANIUtils(BaseUtils):
 
             self.log_info("Sketch database created successfully")
 
-            # Create metadata
+            # Create genome metadata
             genomes = []
             for fasta_file in fasta_files:
                 genomes.append({
@@ -285,16 +282,24 @@ class KBSKANIUtils(BaseUtils):
                     "sketched_date": datetime.now().isoformat()
                 })
 
-            metadata = {
-                "database_name": database_name,
+            # Create database entry for cache
+            db_entry = {
+                "path": str(db_path),
+                "description": description or f"Sketch database from {fasta_directory}",
                 "created": datetime.now().isoformat(),
                 "updated": datetime.now().isoformat(),
                 "genome_count": len(genomes),
+                "source_directory": str(fasta_dir.absolute()),
                 "genomes": genomes,
-                "sketch_file": str(sketch_db)
+                "metadata": {
+                    "marker": marker,
+                    "threads": threads
+                }
             }
 
-            self._save_metadata(database_name, metadata)
+            # Update cache
+            cache[database_name] = db_entry
+            self._save_cache(cache)
 
             return {
                 "success": True,
@@ -319,6 +324,67 @@ class KBSKANIUtils(BaseUtils):
                 "error": str(e),
                 "database_name": database_name
             }
+
+    def add_skani_database(
+        self,
+        database_name: str,
+        database_path: str,
+        description: str = "",
+        genome_count: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Add a new SKANI sketch database to the cache.
+
+        This allows you to register existing sketch databases that were created
+        outside of this utility or manually.
+
+        Args:
+            database_name: Name to register the database under
+            database_path: Path to the directory containing the sketch database
+            description: Optional description of the database
+            genome_count: Number of genomes in the database (optional)
+            metadata: Additional metadata to store (optional)
+
+        Returns:
+            bool: True if successful, False if database_name already exists
+
+        Example:
+            >>> util = SKANIUtils()
+            >>> util.add_skani_database(
+            ...     "gtdb_bacteria",
+            ...     "/data/gtdb/bacteria_sketches",
+            ...     description="GTDB bacterial representatives r214"
+            ... )
+        """
+        cache = self._load_cache()
+
+        if database_name in cache:
+            self.log_warning(
+                f"Database '{database_name}' already exists in cache. "
+                f"Use a different name or remove the existing entry first."
+            )
+            return False
+
+        db_path = Path(database_path)
+        if not db_path.exists():
+            self.log_warning(f"Database path does not exist: {database_path}")
+
+        # Create database entry
+        db_entry = {
+            "path": str(db_path),
+            "description": description,
+            "created": datetime.now().isoformat(),
+            "updated": datetime.now().isoformat(),
+            "genome_count": genome_count or 0,
+            "metadata": metadata or {}
+        }
+
+        # Update cache
+        cache[database_name] = db_entry
+        self._save_cache(cache)
+
+        self.log_info(f"Added database '{database_name}' to cache at {database_path}")
+        return True
 
     def query_genomes(
         self,
@@ -371,14 +437,21 @@ class KBSKANIUtils(BaseUtils):
                 "SKANI is not available. Please install SKANI first."
             )
 
-        # Check database exists
-        db_path = self._get_database_path(database_name)
-        sketch_db = db_path / "sketch_db"
+        # Check database exists in cache
+        db_info = self._get_database_info(database_name)
+        if not db_info:
+            raise ValueError(
+                f"Sketch database '{database_name}' not found in cache. "
+                f"Create it first with sketch_genome_directory() or add it with add_skani_database()."
+            )
+
+        db_path = Path(db_info["path"])
+        sketch_db = db_path
 
         if not sketch_db.exists():
             raise ValueError(
-                f"Sketch database '{database_name}' not found. "
-                f"Create it first with sketch_genome_directory()."
+                f"Sketch database file not found: {sketch_db}. "
+                f"The database may have been moved or deleted."
             )
 
         # Handle single file or list of files
@@ -400,7 +473,7 @@ class KBSKANIUtils(BaseUtils):
 
         try:
             # Build skani search command
-            cmd = ["skani", "search"]
+            cmd = [self.skani_executable, "search"]
 
             # Add query files
             for qfile in query_files:
@@ -534,37 +607,29 @@ class KBSKANIUtils(BaseUtils):
         return results_by_query
 
     def list_databases(self) -> List[Dict[str, Any]]:
-        """List all available sketch databases.
+        """List all available sketch databases from cache.
 
         Returns:
-            List of database info dictionaries
+            List of database info dictionaries with keys:
+                - name: Database name
+                - path: Path to database directory
+                - description: Database description
+                - genome_count: Number of genomes
+                - created: Creation timestamp
+                - updated: Last update timestamp
         """
+        cache = self._load_cache()
         databases = []
 
-        if not self.cache_dir.exists():
-            return databases
-
-        for db_dir in self.cache_dir.iterdir():
-            if db_dir.is_dir():
-                metadata = self._load_metadata(db_dir.name)
-                if metadata:
-                    databases.append({
-                        "name": db_dir.name,
-                        "path": str(db_dir),
-                        "genome_count": metadata.get("genome_count", 0),
-                        "created": metadata.get("created", "unknown"),
-                        "updated": metadata.get("updated", "unknown")
-                    })
-                else:
-                    # Directory exists but no metadata
-                    databases.append({
-                        "name": db_dir.name,
-                        "path": str(db_dir),
-                        "genome_count": 0,
-                        "created": "unknown",
-                        "updated": "unknown",
-                        "note": "No metadata found"
-                    })
+        for db_name, db_info in cache.items():
+            databases.append({
+                "name": db_name,
+                "path": db_info.get("path", ""),
+                "description": db_info.get("description", ""),
+                "genome_count": db_info.get("genome_count", 0),
+                "created": db_info.get("created", "unknown"),
+                "updated": db_info.get("updated", "unknown")
+            })
 
         return databases
 
@@ -577,31 +642,43 @@ class KBSKANIUtils(BaseUtils):
         Returns:
             Database metadata dictionary, or None if not found
         """
-        return self._load_metadata(database_name)
+        return self._get_database_info(database_name)
 
-    def clear_database(self, database_name: str) -> bool:
-        """Delete a sketch database and its metadata.
+    def remove_database(self, database_name: str, delete_files: bool = False) -> bool:
+        """Remove a sketch database from the cache.
 
         Args:
-            database_name: Name of the database to delete
+            database_name: Name of the database to remove
+            delete_files: If True, also delete the database files from disk
 
         Returns:
             bool: True if successful, False otherwise
         """
-        db_path = self._get_database_path(database_name)
+        cache = self._load_cache()
 
-        if not db_path.exists():
-            self.log_warning(f"Database '{database_name}' does not exist")
+        if database_name not in cache:
+            self.log_warning(f"Database '{database_name}' not found in cache")
             return False
 
-        try:
-            import shutil
-            shutil.rmtree(db_path)
-            self.log_info(f"Deleted database '{database_name}'")
-            return True
-        except Exception as e:
-            self.log_error(f"Failed to delete database '{database_name}': {e}")
-            return False
+        db_info = cache[database_name]
+
+        # Optionally delete files
+        if delete_files:
+            db_path = Path(db_info["path"])
+            if db_path.exists():
+                try:
+                    import shutil
+                    shutil.rmtree(db_path)
+                    self.log_info(f"Deleted database files at {db_path}")
+                except Exception as e:
+                    self.log_error(f"Failed to delete database files: {e}")
+                    return False
+
+        # Remove from cache
+        del cache[database_name]
+        self._save_cache(cache)
+        self.log_info(f"Removed database '{database_name}' from cache")
+        return True
 
     def compute_pairwise_distances(
         self,
@@ -650,7 +727,7 @@ class KBSKANIUtils(BaseUtils):
 
         try:
             # Build skani dist command
-            cmd = ["skani", "dist"]
+            cmd = [self.skani_executable, "dist"]
 
             # Add files
             for fasta_file in fasta_files:

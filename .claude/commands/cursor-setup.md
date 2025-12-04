@@ -51,23 +51,32 @@ You will receive a request file containing:
    - Preserve any existing settings from .vscode/settings.json
    - Document all settings added
 
-### Phase 3: Validate and Document
+### Phase 3: Register with ClaudeCommands
 
-5. **Validate Workspace File**
+5. **Add Project to ClaudeCommands Database**
+   - Run the command: claude-commands addproject .
+   - This registers the project directory in the ClaudeCommands tracking system
+   - Installs the latest Claude commands and SYSTEM-PROMPT.md to the project
+   - Document the registration in comments
+   - If the command fails, note the error but continue with workspace setup
+
+### Phase 4: Validate and Document
+
+6. **Validate Workspace File**
    - Verify JSON structure is valid
    - Ensure all paths are relative to workspace file location
    - Check that workspace file can be opened in Cursor
    - Document workspace structure
 
-6. **Create Documentation**
+7. **Create Documentation**
    - Document workspace file location
    - Explain workspace structure
    - List any workspace-specific settings
    - Provide usage instructions
 
-### Phase 4: Save Structured Output
+### Phase 5: Save Structured Output
 
-7. **Save JSON Tracking File**
+8. **Save JSON Tracking File**
    - Document workspace file creation
    - List all settings configured
    - Note any issues or recommendations
@@ -194,6 +203,13 @@ The workspace file should follow this structure:
     "extensions_recommended": 3
   },
 
+  "claude_commands": {
+    "registered": true,
+    "command_run": "claude-commands addproject .",
+    "commands_installed": 5,
+    "system_prompt_installed": true
+  },
+
   "files": {
     "created": [
       {
@@ -214,7 +230,9 @@ The workspace file should follow this structure:
     "Created workspace file with name prefix '!' for top sorting",
     "Configured Python-specific settings for project",
     "Added file exclusions for __pycache__ and .pyc files",
-    "Workspace can be opened in Cursor via File > Open Workspace"
+    "Workspace can be opened in Cursor via File > Open Workspace",
+    "Registered project with ClaudeCommands database",
+    "Installed 5 Claude commands to .claude/commands/"
   ],
 
   "queries_for_user": [],
@@ -232,6 +250,7 @@ The workspace file should follow this structure:
 - `session_summary`: Brief summary of workspace creation
 - `project`: Project name and workspace details
 - `workspace`: Configuration details
+- `claude_commands`: Registration status with ClaudeCommands database
 - `files`: Workspace file created
 - `artifacts`: Path to workspace file
 - `comments`: Notes about workspace configuration
@@ -276,6 +295,8 @@ Before marking complete, verify:
 - ✅ Extension recommendations included (if applicable)
 - ✅ All paths are relative to workspace file location
 - ✅ Workspace file can be opened in Cursor
+- ✅ Project registered with ClaudeCommands (claude-commands addproject .)
+- ✅ Claude commands and SYSTEM-PROMPT installed to .claude/ directory
 - ✅ Documentation includes usage instructions
 
 ## Error Handling
@@ -287,6 +308,7 @@ Handle these scenarios gracefully:
 3. **Invalid Characters in Name**: Sanitize project name for filename
 4. **Unknown Project Type**: Use generic workspace template
 5. **Permission Issues**: Document if unable to write file
+6. **ClaudeCommands Not Found**: Note error in comments, continue with workspace setup
 
 ## Usage Instructions
 

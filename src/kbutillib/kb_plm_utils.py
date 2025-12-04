@@ -235,6 +235,122 @@ class KBPLMUtils(KBGenomeUtils):
             f"PLM job {job_id} did not complete within {max_wait_time}s"
         )
 
+    def query_plm_api_batch(
+        self,
+        query_sequences: List[Dict[str, str]],
+        max_hits: int = 100,
+        similarity_threshold: float = 0.0,
+        return_embeddings: bool = False,
+        batch_size: int = 50,
+        poll_interval: float = 2.0,
+        max_wait_time: float = 300.0
+    ) -> Dict[str, Any]:
+        """Query the PLM API with automatic batching for large sequence sets.
+
+        This method wraps query_plm_api to handle batching automatically. It processes
+        sequences in batches, tracks progress, handles errors per batch, and aggregates
+        results. This simplifies code that needs to query many sequences by eliminating
+        manual batch management.
+
+        Args:
+            query_sequences: List of dicts with 'id' and 'sequence' keys
+            max_hits: Maximum number of hits to return per query (1-100)
+            similarity_threshold: Minimum similarity score threshold
+            return_embeddings: Whether to return embeddings for hits
+            batch_size: Number of sequences to process per batch (default: 50)
+            poll_interval: Time in seconds between polling attempts (default: 2.0)
+            max_wait_time: Maximum time in seconds to wait for results per batch (default: 300.0)
+
+        Returns:
+            Dict with aggregated results and summary statistics:
+            {
+                "hits": List of all hits across all batches,
+                "total_queries": Total number of queries processed,
+                "successful_queries": Number of queries that completed successfully,
+                "failed_batches": Number of batches that failed,
+                "errors": List of error messages from failed batches
+            }
+
+        Example:
+            >>> util = KBPLMUtils()
+            >>> sequences = [{"id": f"gene_{i}", "sequence": seq} for i, seq in enumerate(seqs)]
+            >>> results = util.query_plm_api_batch(sequences, max_hits=5, batch_size=50)
+            >>> print(f"Processed {results['successful_queries']} queries")
+            >>> for hit_data in results['hits']:
+            ...     query_id = hit_data['query_id']
+            ...     hits = hit_data['hits']
+            ...     print(f"{query_id}: {len(hits)} hits")
+        """
+        if not query_sequences:
+            raise ValueError("query_sequences cannot be empty")
+
+        total_queries = len(query_sequences)
+        total_batches = (total_queries + batch_size - 1) // batch_size
+
+        self.log_info(
+            f"Starting batch PLM query: {total_queries} sequences in {total_batches} batches "
+            f"(batch_size={batch_size})"
+        )
+
+        # Results aggregation
+        all_hits = []
+        successful_queries = 0
+        failed_batches = 0
+        errors = []
+
+        # Process each batch
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, total_queries)
+            batch = query_sequences[start_idx:end_idx]
+
+            batch_num = batch_idx + 1
+            self.log_info(
+                f"Processing batch {batch_num}/{total_batches} "
+                f"({len(batch)} sequences)"
+            )
+
+            try:
+                # Query this batch
+                batch_results = self.query_plm_api(
+                    batch,
+                    max_hits=max_hits,
+                    similarity_threshold=similarity_threshold,
+                    return_embeddings=return_embeddings,
+                    poll_interval=poll_interval,
+                    max_wait_time=max_wait_time
+                )
+
+                # Aggregate results
+                batch_hits = batch_results.get("hits", [])
+                all_hits.extend(batch_hits)
+                successful_queries += len(batch)
+
+                self.log_info(
+                    f"Batch {batch_num}/{total_batches} completed successfully: "
+                    f"{len(batch_hits)} query results"
+                )
+
+            except Exception as e:
+                error_msg = f"Batch {batch_num}/{total_batches} failed: {str(e)}"
+                self.log_error(error_msg)
+                errors.append(error_msg)
+                failed_batches += 1
+
+        # Summary
+        self.log_info(
+            f"Batch processing complete: {successful_queries}/{total_queries} queries successful, "
+            f"{failed_batches} batches failed"
+        )
+
+        return {
+            "hits": all_hits,
+            "total_queries": total_queries,
+            "successful_queries": successful_queries,
+            "failed_batches": failed_batches,
+            "errors": errors
+        }
+
     def get_uniprot_sequences(
         self,
         uniprot_ids: List[str]

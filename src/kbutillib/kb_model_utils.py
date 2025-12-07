@@ -9,7 +9,7 @@ import json
 
 from .kb_annotation_utils import KBAnnotationUtils
 from .ms_biochem_utils import MSBiochemUtils
-from .kb_model_standardization_utils import compartment_types
+from .model_standardization_utils import compartment_types
 
 # TODO: One issue exists with this module: (1) if a genome isn't RAST annotated, the call to reannotate it with RAST doesn't work unless we get callbacks to work
 

@@ -8,7 +8,8 @@
       "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python:*)",
       "Bash(curl:*)",
       "Bash(src/kbutillib/kb_model_standardization_utils.py)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python3:*)"
     ],
     "deny": [],
     "ask": []

@@ -1,27 +1,183 @@
 """KBase model utilities for constraint-based metabolic modeling."""
 
 import pickle
-from typing import Any, Dict
-import pandas as pd
+from typing import Any, Dict, Optional
 import re
 import json
+import subprocess
+import tempfile
+import os
+from pathlib import Path
 
-from cobra.flux_analysis import flux_variability_analysis
-from cobra.flux_analysis import pfba 
+# Optional imports - only needed for FBA analysis, not for AI curation
+try:
+    import pandas as pd
+    from cobra.flux_analysis import flux_variability_analysis
+    from cobra.flux_analysis import pfba
+    HAS_COBRA = True
+except ImportError:
+    HAS_COBRA = False
 
 from .argo_utils import ArgoUtils
 
 class AICurationUtils(ArgoUtils):
-    """Tools for running a wide range of FBA analysis on metabolic models in KBase
+    """Tools for running AI-powered curation using either Argo or Claude Code backends.
+
+    Configuration (in config.yaml):
+        ai_curation:
+            backend: 'argo'  # or 'claude-code'
+            claude_code_executable: 'claude-code'  # Full path if not in PATH
     """
 
-    def __init__(self, **kwargs: Any) -> None:
-        """Initialize MS model utilities
+    def __init__(self, backend: Optional[str] = None, **kwargs: Any) -> None:
+        """Initialize AI curation utilities.
 
         Args:
-            **kwargs: Additional keyword arguments passed to SharedEnvironment
+            backend: Override backend choice ('argo' or 'claude-code').
+                    If not specified, uses config value or defaults to 'argo'
+            **kwargs: Additional keyword arguments passed to SharedEnvironment/ArgoUtils
         """
         super().__init__(**kwargs)
+
+        # Determine backend from parameter, config, or default
+        if backend is not None:
+            self.ai_backend = backend
+        else:
+            self.ai_backend = self.get_config_value(
+                "ai_curation.backend",
+                default="argo"
+            )
+
+        # Get Claude Code executable path from config if using that backend
+        if self.ai_backend == "claude-code":
+            self.claude_code_executable = self.get_config_value(
+                "ai_curation.claude_code_executable",
+                default="claude-code"
+            )
+            self._verify_claude_code_available()
+
+        self.log_info(f"AICurationUtils initialized with backend: {self.ai_backend}")
+
+    def _verify_claude_code_available(self) -> None:
+        """Verify that claude-code executable is available."""
+        try:
+            result = subprocess.run(
+                [self.claude_code_executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                self.log_debug(f"Claude Code available: {result.stdout.strip()}")
+            else:
+                self.log_warning(
+                    f"Claude Code executable found but returned non-zero: {self.claude_code_executable}"
+                )
+        except FileNotFoundError:
+            self.log_error(
+                f"Claude Code executable not found: {self.claude_code_executable}\n"
+                "Please install Claude Code or set 'ai_curation.claude_code_executable' in config.yaml"
+            )
+            raise
+        except Exception as e:
+            self.log_warning(f"Could not verify Claude Code: {e}")
+
+    def _chat_via_claude_code(self, prompt: str, system: str = "") -> str:
+        """Send a chat request via Claude Code CLI.
+
+        Args:
+            prompt: The user prompt/question to send
+            system: System message for context
+
+        Returns:
+            The AI response text from output.json
+        """
+        # Create temporary directory for this query
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            input_file = tmpdir_path / "input.json"
+            output_file = tmpdir_path / "output.json"
+
+            # Write input data to JSON file
+            input_data = {"prompt_data": prompt}
+            with open(input_file, 'w') as f:
+                json.dump(input_data, f, indent=2)
+
+            # Build full prompt with system message and instructions
+            full_prompt = f"""{system}
+
+Read the input data from input.json and respond to the prompt contained within.
+
+IMPORTANT: You must write your response as valid JSON to output.json in the current directory.
+Your response should be pure JSON with no additional text or formatting outside the JSON structure.
+
+The input file is: {input_file.name}
+"""
+
+            # Call claude-code with the prompt
+            try:
+                self.log_debug(f"Calling Claude Code in {tmpdir}")
+                cmd = [
+                    self.claude_code_executable,
+                    "-p", full_prompt,
+                    "--read", str(input_file),
+                    "--write", str(output_file)
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+
+                if result.returncode != 0:
+                    self.log_error(f"Claude Code failed: {result.stderr}")
+                    raise RuntimeError(f"Claude Code returned non-zero exit code: {result.returncode}")
+
+                # Read response from output.json
+                if not output_file.exists():
+                    self.log_error(f"Output file not created: {output_file}")
+                    self.log_debug(f"stdout: {result.stdout}")
+                    self.log_debug(f"stderr: {result.stderr}")
+                    raise FileNotFoundError(f"Claude Code did not create output.json")
+
+                with open(output_file, 'r') as f:
+                    response_data = json.load(f)
+
+                # Return as JSON string if it's a dict, otherwise return as-is
+                if isinstance(response_data, dict):
+                    return json.dumps(response_data)
+                else:
+                    return str(response_data)
+
+            except subprocess.TimeoutExpired:
+                self.log_error("Claude Code timed out after 5 minutes")
+                raise
+            except Exception as e:
+                self.log_error(f"Error calling Claude Code: {e}")
+                raise
+
+    def chat(self, prompt: str, *, system: str = "") -> str:
+        """Send a chat request to the configured AI backend (Argo or Claude Code).
+
+        This overrides the parent chat() method to route to different backends
+        based on configuration.
+
+        Args:
+            prompt: The user prompt/question to send
+            system: Optional system message for context
+
+        Returns:
+            The AI response text
+        """
+        if self.ai_backend == "claude-code":
+            return self._chat_via_claude_code(prompt, system)
+        elif self.ai_backend == "argo":
+            return super().chat(prompt, system=system)
+        else:
+            raise ValueError(f"Unknown AI backend: {self.ai_backend}. Must be 'argo' or 'claude-code'")
 
     def _load_cached_curation(self,cache_name) -> dict[str, Any]:
         """Load cached curation data"""

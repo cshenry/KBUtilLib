@@ -22,6 +22,89 @@ This directory contains Jupyter notebooks demonstrating KBUtilLib functionality 
 - Troubleshooting configuration issues
 - Migrating to user-specific config
 
+### [BVBRCGenomeConversion.ipynb](BVBRCGenomeConversion.ipynb)
+
+**Purpose**: Fetch and convert genome data from BV-BRC (formerly PATRIC)
+
+**Topics Covered**:
+- Fetching genome data from BV-BRC API
+- Converting BV-BRC format to KBase Genome objects
+- Loading genomes from local BV-BRC files
+- Creating synthetic genomes from multiple sources
+- Aggregating taxonomies across genome sets
+
+**When to Use**:
+- Importing genomes from BV-BRC database
+- Creating composite/synthetic genomes
+- Taxonomy analysis across genome collections
+- Building KBase genome objects from external data
+
+### [AssemblyUploadDownload.ipynb](AssemblyUploadDownload.ipynb)
+
+**Purpose**: Upload and download genome assemblies in KBase
+
+**Topics Covered**:
+- Creating Assembly and AssemblySet objects
+- Uploading FASTA files to KBase workspace
+- Downloading assemblies from KBase
+- Managing assembly collections
+- JSON serialization of assembly metadata
+
+**When to Use**:
+- Uploading genome assemblies to KBase
+- Downloading assemblies for local analysis
+- Managing collections of genomes
+- Working with assembly metadata
+
+### [SKANIGenomeDistance.ipynb](SKANIGenomeDistance.ipynb)
+
+**Purpose**: Fast genome sketching and ANI calculation with SKANI
+
+**Topics Covered**:
+- Creating sketch databases from genome directories
+- Querying genomes for similarity
+- Computing Average Nucleotide Identity (ANI)
+- Managing multiple sketch databases
+- Fast genome distance computation
+
+**When to Use**:
+- Taxonomic identification of genomes
+- Finding similar genomes quickly
+- Building reference genome databases
+- Computing genome relatedness
+
+### [ProteinLanguageModels.ipynb](ProteinLanguageModels.ipynb)
+
+**Purpose**: Batch querying of protein language models
+
+**Topics Covered**:
+- Preparing protein sequences for analysis
+- Batch querying PLM models
+- Processing protein embeddings
+- Integration with KBase protein data
+
+**When to Use**:
+- Protein function prediction
+- Analyzing protein sequences with AI models
+- Batch processing of proteomes
+- Feature extraction from proteins
+
+### [StoichiometryAnalysis.ipynb](StoichiometryAnalysis.ipynb)
+
+**Purpose**: AI-powered metabolic reaction stoichiometry analysis
+
+**Topics Covered**:
+- Analyzing reaction stoichiometry
+- Detecting mass and charge imbalances
+- AI-suggested corrections
+- Batch analysis of metabolic models
+
+**When to Use**:
+- Curating metabolic models
+- Quality control of reaction databases
+- Correcting stoichiometry errors
+- Model reconstruction and refinement
+
 ## Getting Started
 
 1. **Launch Jupyter**:

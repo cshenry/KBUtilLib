@@ -53,3 +53,8 @@ paths:
 skani:
   executable: "skani"  # Path to skani executable, or "skani" if in PATH
   cache_file: "~/.kbutillib/skani_databases.json"  # JSON file tracking sketch databases
+
+# AI Curation Configuration
+ai_curation:
+  backend: "argo"  # AI backend: "argo" or "claude-code"
+  claude_code_executable: "claude-code"  # Path to claude-code executable if using claude-code backend

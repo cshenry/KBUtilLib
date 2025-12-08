@@ -92,6 +92,16 @@ except ImportError:
     Reads = None
     ReadSet = None
 
+try:
+    from .bvbrc_utils import BVBRCUtils
+except ImportError:
+    BVBRCUtils = None
+
+try:
+    from .patric_ws_utils import PatricWSUtils
+except ImportError:
+    PatricWSUtils = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -106,6 +116,7 @@ __all__ = [
     "Assembly",
     "AssemblySet",
     "BaseUtils",
+    "BVBRCUtils",
     "DataObject",
     "DataType",
     "EscherUtils",
@@ -122,6 +133,7 @@ __all__ = [
     "MSFBAUtils",
     "NotebookUtils",
     "NumberType",
+    "PatricWSUtils",
     "Reads",
     "ReadSet",
     "SharedEnvUtils",

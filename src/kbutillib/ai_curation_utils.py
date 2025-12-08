@@ -441,3 +441,240 @@ The input file is: {input_file.name}
         else:
             print("ReactionStoichiometry-cached")
         return cache[rxn_output["base_id"]]
+
+    def build_reaction_from_functional_roles(self, functional_roles: set[str]) -> dict[str, Any]:
+        """Use AI to construct biochemical reactions from protein functional role strings.
+
+        This function takes a set of protein function strings and uses AI to propose
+        biochemical reactions for each function, returning detailed reaction information
+        including stoichiometry, compounds, and database references.
+
+        Args:
+            functional_roles: A set of strings, where each string describes a protein function
+                            (e.g., "FMNH2-dependent alkanesulfonate monooxygenase (EC 1.14.14.5)")
+
+        Returns:
+            Dict mapping each function string to a reaction dictionary with keys:
+                - reaction_name: Short descriptive name
+                - ec_number: EC number as string or null
+                - dbxrefs: List of reaction database IDs
+                - reactants: List of compound dicts with stoichiometry, name, formula, smiles/inchi, dbxrefs
+                - comments: Free-text comments about assumptions and references
+                - confidence: "high" | "medium" | "low"
+        """
+        system = """
+        You are an expert biochemical curator and metabolic modeler. Your task is to take a JSON-formatted list of protein function strings and, for each function, propose a single biochemical reaction and return the results in a strict JSON format.
+
+        ## Input
+
+        You will be given **only** a JSON list of function strings, for example:
+
+        ```json
+        [
+          "FMNH2-dependent alkanesulfonate monooxygenase (EC 1.14.14.5)",
+          "DNA-directed RNA polymerase subunit beta'",
+          "Serine protease (EC 3.4.21.-)"
+        ]
+        ```
+
+        Each element is a single function string, possibly including an EC number in parentheses.
+
+        ## Your Task
+
+        For **each** function string, you must create **one** reaction entry and return a **single JSON object** (dictionary) where:
+
+        - **Keys** are the original function strings (exactly as provided).
+        - **Values** are dictionaries describing the proposed reaction.
+
+        Do **not** skip any input function. Every function must appear as a key in the output JSON.
+
+        ## Output Format (Schema)
+
+        Your entire response must be valid JSON, with no extra commentary or text, and must follow this structure:
+
+        ```json
+        {
+          "<function_string_1>": {
+            "reaction_name": "<short descriptive reaction name>",
+            "ec_number": "<EC number as string or null>",
+            "dbxrefs": [
+              "<reaction_db_id_1>",
+              "<reaction_db_id_2>"
+            ],
+            "reactants": [
+              {
+                "stoichiometry": -1,
+                "name": "<compound_name>",
+                "formula": "<chemical_formula_or_null>",
+                "smiles/inchi": "<SMILES_or_InChI_or_null>",
+                "dbxrefs": [
+                  "<compound_db_id_1>",
+                  "<compound_db_id_2>"
+                ]
+              },
+              {
+                "stoichiometry": 1,
+                "name": "<compound_name>",
+                "formula": "<chemical_formula_or_null>",
+                "smiles/inchi": "<SMILES_or_InChI_or_null>",
+                "dbxrefs": [
+                  "<compound_db_id_1>",
+                  "<compound_db_id_2>"
+                ]
+              }
+              // more reactants/products as needed
+            ],
+            "comments": "<free-text comments about assumptions, ambiguities, or references>",
+            "confidence": "high" | "medium" | "low"
+          },
+
+          "<function_string_2>": {
+            ...
+          }
+        }
+        ```
+
+        ### Important Field Conventions
+
+        - **`reaction_name`**
+          - A concise human-readable name (e.g., `"FMNH2-dependent alkanesulfonate monooxygenase"`).
+
+        - **`ec_number`**
+          - The EC number as a **string** if known (e.g., `"1.14.14.5"`).
+          - If no EC number is given or confidently inferable, use `null`.
+
+        - **`dbxrefs` (reaction-level)**
+          - A list of database identifiers for the reaction if you know them (e.g. KEGG, MetaCyc, ModelSEED, Rhea).
+          - Example: `["RHEA:12345", "RXN-1234", "rxn08469"]`.
+          - If none are known, use an empty list: `[]`.
+
+        - **`reactants`**
+          - A list of compounds and their stoichiometries.
+          - **Reactants** (substrates) must have **negative** stoichiometry (e.g., `-1`, `-2`).
+          - **Products** must have **positive** stoichiometry (e.g., `1`, `2`).
+          - Use integers where possible; use decimals if needed (e.g., `-0.5` for half-reactions).
+
+        - **`name` (for each reactant)**
+          - Use a clear biochemical name, preferably the most standard/common name (e.g., `"oxygen"`, `"FMNH2"`, `"ethanesulfonate"`).
+
+        - **`formula`**
+          - Molecular formula if you know it (e.g., `"O2"`, `"C2H6O3S"`).
+          - If unknown, use `null`.
+
+        - **`smiles/inchi`**
+          - A SMILES or InChI string if you know one.
+          - If unknown, use `null`.
+
+        - **`dbxrefs` (compound-level)**
+          - Known identifiers, e.g. from KEGG (e.g., `"C00007"`), ChEBI, MetaCyc, ModelSEED (e.g., `"cpd00007"`), etc.
+          - If none are known, use an empty list: `[]`.
+
+        - **`comments`**
+          - A short free-text note about any assumptions, uncertainties, alternative stoichiometries, or special conditions (e.g., cofactors, electron acceptors).
+
+        - **`confidence`**
+          - `"high"`: Reaction is well-defined, well-known, and you are confident in stoichiometry and participants.
+          - `"medium"`: General reaction is clear but stoichiometry, cofactors, or some details are uncertain.
+          - `"low"`: Only a rough guess; substrate or product identities are uncertain.
+
+        ## Special Cases
+
+        ### 1. Non-metabolic Functions
+
+        If a function clearly describes a **non-metabolic** biological activity (e.g., DNA binding proteins, transcription factors, structural proteins, secretion systems, chaperones without a clear chemical transformation):
+
+        Set:
+
+        ```json
+        "reaction_name": null,
+        "ec_number": null,
+        "dbxrefs": [],
+        "reactants": [],
+        "comments": "nonmetabolic",
+        "confidence": "low"
+        ```
+
+        ### 2. Unclear Reactions
+
+        If the function is too vague to determine a chemical reaction, or you genuinely cannot infer a plausible reaction:
+
+        Set:
+
+        ```json
+        "reaction_name": null,
+        "ec_number": null,
+        "dbxrefs": [],
+        "reactants": [],
+        "comments": "reaction is unclear from specified function",
+        "confidence": "low"
+        ```
+
+        ### 3. Metabolic but Ambiguous
+
+        If the function is metabolic but ambiguous (e.g., incomplete EC number, multiple possible substrates):
+
+        - Propose one **most plausible** reaction.
+        - Be explicit in `comments` about any assumptions (e.g., assumed electron acceptor, assumed specific substrate).
+        - Set `confidence` to `"medium"` or `"low"` depending on how speculative it is.
+
+        ## Reaction Construction Guidelines
+
+        For functions that describe metabolic enzymes or transporters:
+
+        1. **Interpret the function and EC number**
+           - Use the EC number, substrate names, and enzyme class to determine the chemical transformation.
+           - Include typical cofactors and co-substrates (e.g., NAD⁺/NADH, NADP⁺/NADPH, ATP/ADP/Pi, FMN/FMNH2, FAD/FADH2, O₂, H₂O, protons) if they are normally part of that reaction class.
+
+        2. **Balance the reaction as well as possible**
+           - Aim for approximate mass and charge balance.
+           - If balancing is difficult or uncertain, provide the best plausible stoichiometry, and explain the uncertainty in `comments`.
+
+        3. **Compound details**
+           - For each metabolite:
+             - Provide `name`, and when possible `formula`, `smiles/inchi`, and `dbxrefs`.
+             - Prefer well-known identifiers (e.g., KEGG, ChEBI, MetaCyc, ModelSEED).
+           - If you are not reasonably confident about an identifier or structure, leave that field as `null` or an empty list rather than guessing wildly.
+
+        4. **Transport reactions**
+           - For pure transporters with no chemical transformation (just movement across a membrane), you may still represent them as:
+             - The same compound on both sides with different "compartment" annotations in the `comments`, or
+             - You may consider these as nonmetabolic if there is truly no chemical transformation and the requested use-case focuses only on metabolic conversions.
+           - Explain your choice in `comments` and set an appropriate `confidence`.
+
+        ## General Output Rules
+
+        - **Return only JSON**. Do not include explanation, Markdown, or prose outside the JSON object.
+        - The top-level value must be a single JSON object whose keys are exactly the input function strings.
+        - Every function string in the input list must appear as a key in the output.
+        - Fields that are unknown should be set to `null` (for single values) or `[]` (for lists), not omitted.
+        - Double-check that the JSON is syntactically valid (no trailing commas, properly quoted strings, etc.).
+
+        Respond strictly in valid JSON with **no text outside the JSON**.
+        All keys and string values must use double quotes.
+        Use only plain ASCII characters.
+        """
+
+        user_prompt = """When you are ready, I will provide the JSON list of function strings; you will then respond with only the JSON object described above.
+
+        Here is the JSON list of function strings:
+
+        """
+
+        cache = self._load_cached_curation("ReactionFromFunctionalRoles")
+
+        # Convert set to sorted list for consistent ordering and JSON serialization
+        role_list = sorted(list(functional_roles))
+
+        # Create a cache key from the sorted list
+        cache_key = json.dumps(role_list)
+
+        if cache_key not in cache:
+            self.log_warning(f"Querying AI to build reactions from {len(role_list)} functional roles")
+            prompt = user_prompt + json.dumps(role_list, indent=2)
+            ai_output = self.chat(prompt=prompt, system=system)
+            cache[cache_key] = json.loads(ai_output)
+            self._save_cached_curation("ReactionFromFunctionalRoles", cache)
+        else:
+            print("ReactionFromFunctionalRoles-cached")
+
+        return cache[cache_key]

@@ -105,6 +105,28 @@ This directory contains Jupyter notebooks demonstrating KBUtilLib functionality 
 - Correcting stoichiometry errors
 - Model reconstruction and refinement
 
+### [AICuration.ipynb](AICuration.ipynb)
+
+**Purpose**: AI-powered reaction curation with multiple backends
+
+**Topics Covered**:
+- Configuring AI backends (Argo vs Claude Code)
+- Analyzing reaction directionality
+- Categorizing reaction stoichiometry
+- Evaluating reaction equivalence
+- Assessing gene-reaction associations
+- Batch processing multiple reactions
+- Cache management
+- Backend comparison and performance
+
+**When to Use**:
+- AI-powered metabolic model curation
+- Reaction directionality prediction
+- Stoichiometry validation and categorization
+- Comparing reactions across databases
+- Validating gene-reaction associations
+- Testing different AI backends
+
 ## Getting Started
 
 1. **Launch Jupyter**:

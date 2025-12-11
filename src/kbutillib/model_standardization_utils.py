@@ -1062,17 +1062,12 @@ class ModelStandardizationUtils(MSBiochemUtils):
             translated_cpd_ids.add(old_id)
 
         # Track untranslated compounds
+        # After renaming, any metabolite whose ID is NOT in compound_mapping.values()
+        # (the new ModelSEED IDs) is untranslated
+        translated_new_ids = set(stats["compound_mapping"].values())
         for met in mdlutl.model.metabolites:
-            # Check if this metabolite was already renamed or is in the original model
-            if met.id not in stats["compound_mapping"].values():
-                # Check if original ID was translated
-                original_id_found = False
-                for orig_id, new_id in stats["compound_mapping"].items():
-                    if new_id == met.id:
-                        original_id_found = True
-                        break
-                if not original_id_found and met.id not in translated_cpd_ids:
-                    stats["untranslated_compounds"].append(met.id)
+            if met.id not in translated_new_ids:
+                stats["untranslated_compounds"].append(met.id)
 
         # Apply reaction translations
         self.log_info("Applying reaction translations")
@@ -1129,15 +1124,12 @@ class ModelStandardizationUtils(MSBiochemUtils):
             translated_rxn_ids.add(old_id)
 
         # Track untranslated reactions
+        # After renaming, any reaction whose ID is NOT in reaction_mapping.values()
+        # (the new ModelSEED IDs) is untranslated
+        translated_rxn_new_ids = set(stats["reaction_mapping"].values())
         for rxn in mdlutl.model.reactions:
-            if rxn.id not in stats["reaction_mapping"].values():
-                original_id_found = False
-                for orig_id, new_id in stats["reaction_mapping"].items():
-                    if new_id == rxn.id:
-                        original_id_found = True
-                        break
-                if not original_id_found and rxn.id not in translated_rxn_ids:
-                    stats["untranslated_reactions"].append(rxn.id)
+            if rxn.id not in translated_rxn_new_ids:
+                stats["untranslated_reactions"].append(rxn.id)
 
         # Calculate fractions
         if total_compounds > 0:

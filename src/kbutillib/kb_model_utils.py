@@ -35,6 +35,32 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         # Configuring cobrakbase API
         self.kbase_api = self.cobrakbase.KBaseAPI()
         self.kbase_api.ws_client = self.ws_client()
+        self._msrecon = None
+
+    @property
+    def msrecon(self):
+        if self._msrecon is None:
+            from ModelSEEDReconstruction.modelseedrecon import ModelSEEDRecon
+            self._msrecon = ModelSEEDRecon(
+                {
+                    "kbase-endpoint":None,
+                    "job-service-url":None,
+                    "workspace-url":None,
+                    "shock-url":None,
+                    "handle-service-url":None,
+                    "srv-wiz-url":None,
+                    "njsw-url":None,
+                    "auth-service-url":None,
+                    "auth-service-url-allow-insecure":None,
+                    "scratch":self.get_config("KB-ModelSEED","working_dir"),
+                    "data":self.get_config("KB-ModelSEED","module_dir")+"/data",
+                },
+                module_dir=self.get_config("KB-ModelSEED","module_dir"),
+                working_dir=self.get_config("KB-ModelSEED","working_dir"),
+                token=self.get_token("kbase"),
+                clients={"Workspace":self.ws_client(),"cb_annotation_ontology_api":self},
+                callback=self.get_config("KB-ModelSEED","callback"))
+        return self._msrecon
 
     def _import_modules(self) -> None:
         """Import required modules after dependencies are ensured."""

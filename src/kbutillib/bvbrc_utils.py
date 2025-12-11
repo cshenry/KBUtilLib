@@ -17,9 +17,9 @@ from collections import defaultdict, Counter
 from pathlib import Path
 
 from .kb_genome_utils import KBGenomeUtils
+from .kb_annotation_utils import KBAnnotationUtils
 
-
-class BVBRCUtils(KBGenomeUtils):
+class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
     """Utilities for working with BV-BRC (formerly PATRIC) genome data.
 
     Provides methods for fetching genome data from the BV-BRC API,
@@ -143,7 +143,8 @@ class BVBRCUtils(KBGenomeUtils):
         for i in range(0, len(md5_hashes), batch_size):
             batch = md5_hashes[i:i+batch_size]
             md5_list = ",".join(batch)
-            url = f"{self.base_url}/feature_sequence/?in(md5,({md5_list}))&http_accept=application/json"
+            # Note: BV-BRC API has a default limit of 25, so we must specify limit >= batch_size
+            url = f"{self.base_url}/feature_sequence/?in(md5,({md5_list}))&limit({batch_size})&http_accept=application/json"
 
             try:
                 response = self.session.get(url)
@@ -169,7 +170,6 @@ class BVBRCUtils(KBGenomeUtils):
     def build_kbase_genome_from_api(
         self,
         genome_id: str,
-        add_ontology_events: bool = False,
         workspace_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """Build complete KBase genome object from BV-BRC API.
@@ -309,60 +309,39 @@ class BVBRCUtils(KBGenomeUtils):
                      f"{len(cdss)} CDS, {total_dna_size:,} bp")
 
         # Add ontology events if requested
-        if add_ontology_events:
-            if not workspace_name:
-                self.log_warning("add_ontology_events=True but no workspace_name provided. "
-                               "Skipping ontology event creation.")
-            else:
-                self.log_info("Creating ontology events from collected annotations...")
+        self.log_info("Creating ontology events from collected annotations...")
+        # Create ontology events from collected ontologies
+        ontology_events = []
+        for ontology_type, gene_terms in ontologies.items():
+            # Skip empty ontologies
+            if not gene_terms:
+                continue
 
-                # Import here to avoid circular dependency
-                from .kb_annotation_utils import KBAnnotationUtils
+            # Build ontology event structure
+            ontology_terms = {}
+            for gene_id, terms in gene_terms.items():
+                ontology_terms[gene_id] = [{"term": term} for term in terms.keys()]
 
-                annotation_utils = KBAnnotationUtils(
-                    workspace_url=self.ws_url,
-                    token=self.token,
-                    callback_url=self.callback_url
-                )
+            event = {
+                "description": f"{ontology_type} annotations imported from BV-BRC",
+                "ontology_id": ontology_type,
+                "method": "BVBRCUtils-build_kbase_genome_from_api",
+                "method_version": "1.0",
+                "timestamp": datetime.now().isoformat(),
+                "ontology_terms": ontology_terms
+            }
+            ontology_events.append(event)
+            self.log_debug(f"Created {ontology_type} event with {len(ontology_terms)} genes")
+        self.save("test_genome",genome)
+        # Add events to genome
+        output = self.add_ontology_events(
+            object=genome,
+            type="KBaseGenomes.Genome",
+            events=ontology_events,
+            overwrite_matching=True
+        )
 
-                # Create ontology events from collected ontologies
-                ontology_events = []
-                for ontology_type, gene_terms in ontologies.items():
-                    # Skip empty ontologies
-                    if not gene_terms:
-                        continue
-
-                    # Build ontology event structure
-                    ontology_terms = {}
-                    for gene_id, terms in gene_terms.items():
-                        ontology_terms[gene_id] = [{"term": term} for term in terms.keys()]
-
-                    event = {
-                        "description": f"{ontology_type} annotations imported from BV-BRC",
-                        "ontology_id": ontology_type,
-                        "method": "BVBRCUtils-build_kbase_genome_from_api",
-                        "method_version": "1.0",
-                        "timestamp": datetime.now().isoformat(),
-                        "ontology_terms": ontology_terms
-                    }
-                    ontology_events.append(event)
-                    self.log_debug(f"Created {ontology_type} event with {len(ontology_terms)} genes")
-
-                # Add events to genome
-                if ontology_events:
-                    try:
-                        genome = annotation_utils.add_annotation_ontology_events(
-                            genome=genome,
-                            events=ontology_events,
-                            workspace_name=workspace_name
-                        )
-                        self.log_info(f"Added {len(ontology_events)} ontology events to genome")
-                    except Exception as e:
-                        self.log_warning(f"Failed to add ontology events: {e}")
-                else:
-                    self.log_info("No ontology terms found to create events")
-
-        return genome
+        return output["object"]
 
     def _convert_bvbrc_feature(
         self,
@@ -387,11 +366,12 @@ class BVBRCUtils(KBGenomeUtils):
         patric_id = feature.get('patric_id', '')
 
         # Get sequences
+        # BV-BRC API uses 'NA' for nucleic acid and 'AA' for amino acid sequences
         na_md5 = feature.get('na_sequence_md5', '')
         aa_md5 = feature.get('aa_sequence_md5', '')
 
-        na_sequence = sequences.get(na_md5, {}).get('dna', '') if na_md5 else ''
-        aa_sequence = sequences.get(aa_md5, {}).get('protein', '') if aa_md5 else ''
+        na_sequence = sequences.get(na_md5, {}).get('NA', '') if na_md5 else ''
+        aa_sequence = sequences.get(aa_md5, {}).get('AA', '') if aa_md5 else ''
 
         # Get contig ID
         sequence_id = feature.get('sequence_id', '')
@@ -475,8 +455,9 @@ class BVBRCUtils(KBGenomeUtils):
                 if feature_id not in ontologies['GO']:
                     ontologies['GO'][feature_id] = {}
                 # GO terms might be comma-separated
-                for term in go_terms.split(','):
+                for term in go_terms:
                     term = term.strip()
+                    term = term.split('|')[0]
                     if term:
                         ontologies['GO'][feature_id][term] = 1
 

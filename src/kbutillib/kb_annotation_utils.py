@@ -286,40 +286,17 @@ class KBAnnotationUtils(KBWSUtils):
                         self.integrate_terms_from_ftr(id, subfeature)
         return output
 
-    def add_annotation_ontology_events(self, params):
-        self.initialize_call(
-            "add_annotation_ontology_events",
-            params,
-            True,
-            no_print=["events", "object"],
-            no_prov_params=["object", "events", "feature_object"],
-        )
-        params = self.validate_args(
-            params,
-            ["output_workspace", "events"],
-            {
-                "provenance": [],
-                "overwrite_matching": True,
-                "object": None,
-                "type": None,
-                "input_ref": None,
-                "input_workspace": None,
-                "output_name": None,
-                "save": 1,
-            },
-        )
-        self.process_object(params)
-        if not params["output_name"]:
-            if self.objectinfo:
-                params["output_name"] = self.objectinfo[1]
-            else:
-                params["output_name"] = self.object["id"]
-        if "clear_existing" in params and params["clear_existing"] == 1:
+    def add_ontology_events(self, object, type,events, overwrite_matching=True,clear_existing=False):
+        self.process_object({
+            "object": object,
+            "type": type,
+        })
+        if clear_existing:
             self.eventarray = []
         output = {"ftrs_not_found": [], "ftrs_found": 0, "terms_not_found": []}
         # Scrolling through new events, stadardizing, and checking for matches
         new_events = []
-        for event in params["events"]:
+        for event in events:
             new_event = self.standardize_event(event)
             new_events.append(new_event)
             match = False
@@ -327,7 +304,7 @@ class KBAnnotationUtils(KBWSUtils):
                 # If an existing event has a matching event ID, we overwrite it
                 if existing_event["event_id"] == new_event["event_id"]:
                     match = True
-                    if params["overwrite_matching"]:
+                    if overwrite_matching:
                         self.eventarray[i] = new_event
             if not match:
                 self.eventarray.append(new_event)
@@ -356,15 +333,75 @@ class KBAnnotationUtils(KBWSUtils):
         output["ftrs_found"] = len(feature_found_hash)
         for term in terms_not_found:
             output["terms_not_found"].append(term)
+        output["object"] = self.object
+        return output
+
+    def add_annotation_ontology_events(self, params):
+        """This function is meant to be called by KBase apps and wraps some kbase specific functionality"""
+        self.initialize_call(
+            "add_annotation_ontology_events",
+            params,
+            True,
+            no_print=["events", "object"],
+            no_prov_params=["object", "events", "feature_object"],
+        )
+        params = self.validate_args(
+            params,
+            ["output_workspace", "events"],
+            {
+                "provenance": [],
+                "overwrite_matching": True,
+                "clear_existing": False,
+                "object": None,
+                "type": None,
+                "input_ref": None,
+                "input_workspace": None,
+                "output_name": None,
+                "save": 1,
+            },
+        )
+        #Retrieving the object from workspace if it is not provided directly
+        if params.get("object") is None:
+            res = None
+            if "input_workspace" not in params:
+                res = self.ws_client().get_objects2(
+                    {"objects": [self.process_ws_ids(params["input_ref"], None)]}
+                )
+            else:
+                res = self.ws_client().get_objects2(
+                    {
+                        "objects": [
+                            self.process_ws_ids(
+                                params["input_ref"], params["input_workspace"]
+                            )
+                        ]
+                    }
+                )
+            params["object"] = res["data"][0]["data"]
+            params["type"] = res["data"][0]["info"][2]
+            self.objectinfo = res["data"][0]["info"]
+            self.ref = self.wsinfo_to_ref(self.objectinfo)
+        output =self.add_ontology_events(
+            object=params["object"],
+            type=params["type"],
+            events=params["events"],
+            overwrite_matching=params["overwrite_matching"],
+            clear_existing=params["clear_existing"]
+        )
+        if not params["output_name"]:
+            if self.objectinfo:
+                params["output_name"] = self.objectinfo[1]
+            else:
+                params["output_name"] = self.object["id"]
         # Saving object if requested but not if it's an AMA
         if params["save"] == 1:
             save_output = self.save_object(params)
+            #Deleting full object from output since the object is being saved to workspace
+            del output["object"]
             for key in save_output:
                 output[key] = save_output[key]
         else:
             # Returning object if save not requested
-            output["object"] = self.object
-            output["type"] = self.type
             if "feature_object" in params:
                 output["feature_object"] = params["feature_object"]
         return output

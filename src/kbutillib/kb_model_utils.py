@@ -360,6 +360,12 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                 )
         return expression_objs
 
+    def get_msgenome_from_dict(self, genome_data):
+        from cobrakbase.core.kbase_object_factory import KBaseObjectFactory
+        factory = KBaseObjectFactory()
+        genome = factory._build_object("KBaseGenomes.Genome", genome_data, [], {})
+        return genome
+    
     def get_msgenome(self, id_or_ref, ws=None):
         genome = self.kbase_api.get_from_ws(id_or_ref, ws)
         genome.id = genome.info.id

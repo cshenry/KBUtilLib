@@ -145,6 +145,69 @@ class KBWSUtils(SharedEnvUtils):
                     fhandle.write(chunk)
         return file_path
 
+    def upload_blob_file(self, filepath):
+        """Upload a file to Shock and get handle.
+
+        Args:
+            filepath: Path to file to upload
+
+        Returns:
+            Tuple of (shock_id, handle_id)
+        """
+        self.log_info(f"Uploading file to Shock: {filepath}")
+
+        # Upload to Shock
+        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
+
+        # Get file size for Content-Length
+        file_size = os.path.getsize(filepath)
+        filename = os.path.basename(filepath)
+
+        with open(filepath, "rb") as f:
+            # Use multipart form with file and explicit content-type/size
+            # The tuple format is (filename, fileobj, content_type, headers)
+            files = {
+                "upload": (
+                    filename,
+                    f,
+                    "application/octet-stream",
+                    {"Content-Length": str(file_size)},
+                )
+            }
+
+            r = requests.post(
+                self.shock_url + "/node",
+                headers=headers,
+                files=files,
+                allow_redirects=True,
+            )
+
+            if not r.ok:
+                error_msg = r.text
+                try:
+                    error_data = r.json()
+                    error_msg = error_data.get("error", [r.text])[0]
+                except:
+                    pass
+                raise RuntimeError(f"Failed to upload file to Shock: {error_msg}")
+
+            shock_node = r.json()["data"]
+            shock_id = shock_node["id"]
+
+        # Create handle
+        hs = self.hs_client
+        handle = hs.persist_handle(
+            {
+                "id": shock_id,
+                "type": "shock",
+                "url": self.shock_url,
+            }
+        )
+        handle_id = handle
+
+        self.log_info(f"File uploaded to Shock: {shock_id}, Handle: {handle_id}")
+        return shock_id, handle_id
+
     def save_ws_object(self, objid, workspace, obj_json, obj_type):
         self.set_ws(workspace)
         params = {
@@ -285,7 +348,9 @@ class KBWSUtils(SharedEnvUtils):
             ws = str(ws)
         return ws + "/" + id_or_ref
 
-    def list_all_types(self, include_empty_modules: bool = False, track_provenance: bool = False) -> List[str]:
+    def list_all_types(
+        self, include_empty_modules: bool = False, track_provenance: bool = False
+    ) -> List[str]:
         """List all released types from all modules in the KBase Workspace.
 
         Retrieves a complete list of all available datatypes in the KBase type system,
@@ -312,13 +377,19 @@ class KBWSUtils(SharedEnvUtils):
             >>> genome_types = [t for t in all_types if 'Genome' in t]
         """
         if track_provenance:
-            self.initialize_call("list_all_types", {"include_empty_modules": include_empty_modules})
+            self.initialize_call(
+                "list_all_types", {"include_empty_modules": include_empty_modules}
+            )
 
-        self.logger.info(f"Retrieving all types from workspace (include_empty_modules={include_empty_modules})")
+        self.logger.info(
+            f"Retrieving all types from workspace (include_empty_modules={include_empty_modules})"
+        )
         try:
             # Call the workspace API to retrieve all types
             # Convert boolean to integer (0 or 1) as the API expects a Long type
-            result = self._ws_client.list_all_types({'with_empty_modules': 1 if include_empty_modules else 0})
+            result = self._ws_client.list_all_types(
+                {"with_empty_modules": 1 if include_empty_modules else 0}
+            )
             self.logger.debug(f"Workspace API returned {len(result)} modules")
 
             # Transform nested dict to flat list of type strings
@@ -332,7 +403,9 @@ class KBWSUtils(SharedEnvUtils):
         except Exception as e:
             raise Exception(f"Failed to list all types from workspace: {str(e)}")
 
-    def get_type_specs(self, type_list: List[str], track_provenance: bool = False) -> Dict[str, Any]:
+    def get_type_specs(
+        self, type_list: List[str], track_provenance: bool = False
+    ) -> Dict[str, Any]:
         """Retrieve detailed specifications for specific datatypes.
 
         Fetches complete type information including JSON schemas, descriptions,
@@ -391,7 +464,9 @@ class KBWSUtils(SharedEnvUtils):
                     self.logger.debug(f"Successfully retrieved spec for: {type_string}")
                 except Exception as e:
                     # Provide clear error message indicating which type failed
-                    raise Exception(f"Failed to retrieve spec for type '{type_string}': {str(e)}")
+                    raise Exception(
+                        f"Failed to retrieve spec for type '{type_string}': {str(e)}"
+                    )
 
             self.logger.info(f"Successfully retrieved {len(specs)} type specifications")
             return specs
@@ -417,3 +492,104 @@ class KBWSUtils(SharedEnvUtils):
             return f"https://narrative.kbase.us/legacy/dataview/{ws}/{id_or_ref}"
         else:
             return f"https://narrative.kbase.us/legacy/dataview/{id_or_ref}"
+
+    # Function to register a typespec (requires admin permissions)
+    def register_typespec_dryrun(self, typespec, new_types, dryrun=True):
+        """Register a typespec module with the workspace.
+
+        Args:
+            ws_client: Workspace client
+            typespec: KIDL typespec string
+            new_types: List of type names to make available
+            dryrun: If True, only test compilation without saving
+
+        Returns:
+            JSON schemas for the types if successful
+        """
+        print("Note: Registering new typespecs requires:")
+        print("  1. Module ownership (request via request_module_ownership)")
+        print("  2. Admin approval for new modules")
+        print("  3. Valid KIDL syntax")
+        params = {
+            "spec": typespec,
+            "new_types": new_types,
+            "dryrun": 1 if dryrun else 0,
+        }
+
+        try:
+            result = self._ws_client.register_typespec(params)
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def request_module_ownership(self, module_name):
+        """Request ownership of a module name.
+
+        Args:
+            ws_client: Workspace client
+            module_name: Name of the module to request
+
+        Returns:
+            Success status
+        """
+        try:
+            self._ws_client.request_module_ownership(module_name)
+            return {
+                "status": "success",
+                "message": f"Requested ownership of {module_name}",
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_module_versions(self, module_name):
+        """List all versions of a module.
+
+        Args:
+            ws_client: Workspace client
+            module_name: Module name
+
+        Returns:
+            Module version information
+        """
+        try:
+            result = self._ws_client.list_module_versions({"mod": module_name})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_module_info(self, module_name, version=None):
+        """Get detailed information about a module.
+
+        Args:
+            ws_client: Workspace client
+            module_name: Module name
+            version: Optional specific version
+
+        Returns:
+            Module information including spec and types
+        """
+        params = {"mod": module_name}
+        if version:
+            params["ver"] = version
+
+        try:
+            result = self._ws_client.get_module_info(params)
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def release_module(self, module_name):
+        """Release a module for general use.
+
+        Args:
+            ws_client: Workspace client
+            module_name: Module name to release
+
+        Returns:
+            List of released types
+        """
+        try:
+            result = self._ws_client.release_module(module_name)
+            return {"status": "success", "released_types": result}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}

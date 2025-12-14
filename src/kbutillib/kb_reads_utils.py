@@ -402,7 +402,9 @@ class AssemblySet:
         if assembly.name:
             self.assemblies[assembly.name] = assembly
         else:
-            raise ValueError("Assembly object must have a name to be added to AssemblySet")
+            raise ValueError(
+                "Assembly object must have a name to be added to AssemblySet"
+            )
 
     def get_assembly(self, name: str) -> Optional[Assembly]:
         """Get an Assembly object by name.
@@ -441,7 +443,9 @@ class AssemblySet:
         return {
             "name": self.name,
             "description": self.description,
-            "assemblies": {name: asm.to_dict() for name, asm in self.assemblies.items()},
+            "assemblies": {
+                name: asm.to_dict() for name, asm in self.assemblies.items()
+            },
         }
 
     def to_json(self, filepath: Optional[str] = None) -> str:
@@ -552,7 +556,7 @@ class KBReadsUtils(KBWSUtils):
             fwd_file = reads.files["fwd"]
             if not os.path.exists(fwd_file):
                 raise FileNotFoundError(f"Forward reads file not found: {fwd_file}")
-            shock_id, handle_id = self._upload_file_to_shock(fwd_file)
+            shock_id, handle_id = self.upload_blob_file(fwd_file)
             shock_ids["fwd"] = shock_id
             handle_ids["fwd"] = handle_id
 
@@ -561,7 +565,7 @@ class KBReadsUtils(KBWSUtils):
             rev_file = reads.files["rev"]
             if not os.path.exists(rev_file):
                 raise FileNotFoundError(f"Reverse reads file not found: {rev_file}")
-            shock_id, handle_id = self._upload_file_to_shock(rev_file)
+            shock_id, handle_id = self.upload_blob_file(rev_file)
             shock_ids["rev"] = shock_id
             handle_ids["rev"] = handle_id
 
@@ -641,7 +645,9 @@ class KBReadsUtils(KBWSUtils):
 
         # Download forward reads - handle both "lib" and "lib1" formats
         # "lib" is the standard format, "lib1" is used by some older objects
-        lib_key = "lib" if "lib" in reads_data else "lib1" if "lib1" in reads_data else None
+        lib_key = (
+            "lib" if "lib" in reads_data else "lib1" if "lib1" in reads_data else None
+        )
         if lib_key and "file" in reads_data[lib_key]:
             fwd_handle = reads_data[lib_key]["file"]
             handle_ids["fwd"] = fwd_handle.get("hid")
@@ -653,7 +659,11 @@ class KBReadsUtils(KBWSUtils):
             files["fwd"] = fwd_file
 
         # Download reverse reads if paired
-        if read_type == "paired" and "lib2" in reads_data and "file" in reads_data["lib2"]:
+        if (
+            read_type == "paired"
+            and "lib2" in reads_data
+            and "file" in reads_data["lib2"]
+        ):
             rev_handle = reads_data["lib2"]["file"]
             handle_ids["rev"] = rev_handle.get("hid")
             rev_file = self._download_from_handle(
@@ -744,69 +754,6 @@ class KBReadsUtils(KBWSUtils):
 
         return readset
 
-    def _upload_file_to_shock(self, filepath: str) -> tuple:
-        """Upload a file to Shock and get handle.
-
-        Args:
-            filepath: Path to file to upload
-
-        Returns:
-            Tuple of (shock_id, handle_id)
-        """
-        self.log_info(f"Uploading file to Shock: {filepath}")
-
-        # Upload to Shock
-        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
-
-        # Get file size for Content-Length
-        file_size = os.path.getsize(filepath)
-        filename = os.path.basename(filepath)
-
-        with open(filepath, "rb") as f:
-            # Use multipart form with file and explicit content-type/size
-            # The tuple format is (filename, fileobj, content_type, headers)
-            files = {
-                "upload": (
-                    filename,
-                    f,
-                    "application/octet-stream",
-                    {"Content-Length": str(file_size)}
-                )
-            }
-
-            r = requests.post(
-                self.shock_url + "/node",
-                headers=headers,
-                files=files,
-                allow_redirects=True,
-            )
-
-            if not r.ok:
-                error_msg = r.text
-                try:
-                    error_data = r.json()
-                    error_msg = error_data.get("error", [r.text])[0]
-                except:
-                    pass
-                raise RuntimeError(f"Failed to upload file to Shock: {error_msg}")
-
-            shock_node = r.json()["data"]
-            shock_id = shock_node["id"]
-
-        # Create handle
-        hs = self.hs_client
-        handle = hs.persist_handle(
-            {
-                "id": shock_id,
-                "type": "shock",
-                "url": self.shock_url,
-            }
-        )
-        handle_id = handle
-
-        self.log_info(f"File uploaded to Shock: {shock_id}, Handle: {handle_id}")
-        return shock_id, handle_id
-
     def _download_from_handle(
         self, handle: Union[str, Dict], download_dir: str, filename: str
     ) -> str:
@@ -894,7 +841,11 @@ class KBReadsUtils(KBWSUtils):
         # Add forward reads handle
         if "fwd" in handle_ids:
             fwd_file_path = reads.files.get("fwd", "")
-            fwd_file_size = os.path.getsize(fwd_file_path) if fwd_file_path and os.path.exists(fwd_file_path) else 0
+            fwd_file_size = (
+                os.path.getsize(fwd_file_path)
+                if fwd_file_path and os.path.exists(fwd_file_path)
+                else 0
+            )
             obj["lib"] = {
                 "file": {
                     "hid": handle_ids["fwd"],
@@ -911,7 +862,11 @@ class KBReadsUtils(KBWSUtils):
         # Add reverse reads handle for paired-end
         if reads.read_type == "paired" and "rev" in handle_ids:
             rev_file_path = reads.files.get("rev", "")
-            rev_file_size = os.path.getsize(rev_file_path) if rev_file_path and os.path.exists(rev_file_path) else 0
+            rev_file_size = (
+                os.path.getsize(rev_file_path)
+                if rev_file_path and os.path.exists(rev_file_path)
+                else 0
+            )
             obj["lib2"] = {
                 "file": {
                     "hid": handle_ids["rev"],
@@ -954,9 +909,7 @@ class KBReadsUtils(KBWSUtils):
         return obj
 
     def download_assembly(
-        self,
-        assembly_refs: List[str],
-        output_dir: str
+        self, assembly_refs: List[str], output_dir: str
     ) -> AssemblySet:
         """Download Assembly or AssemblySet objects from KBase workspace.
 
@@ -979,16 +932,15 @@ class KBReadsUtils(KBWSUtils):
         output_path.mkdir(parents=True, exist_ok=True)
 
         assembly_set = AssemblySet(
-            name="downloaded_assemblies",
-            description=f"Downloaded from {assembly_refs}"
+            name="downloaded_assemblies", description=f"Downloaded from {assembly_refs}"
         )
 
         for ref in assembly_refs:
             try:
                 # Get object info to determine type
-                obj_info = self._ws_client.get_object_info3({
-                    "objects": [{"ref": ref}]
-                })["infos"][0]
+                obj_info = self._ws_client.get_object_info3(
+                    {"objects": [{"ref": ref}]}
+                )["infos"][0]
                 obj_type = obj_info[2]
 
                 if "Assembly" in obj_type and "AssemblySet" not in obj_type:
@@ -999,9 +951,9 @@ class KBReadsUtils(KBWSUtils):
 
                 elif "AssemblySet" in obj_type:
                     # AssemblySet object - download all assemblies in set
-                    obj_data = self._ws_client.get_objects2({
-                        "objects": [{"ref": ref}]
-                    })["data"][0]["data"]
+                    obj_data = self._ws_client.get_objects2(
+                        {"objects": [{"ref": ref}]}
+                    )["data"][0]["data"]
 
                     if "items" in obj_data:
                         for item in obj_data["items"]:
@@ -1024,7 +976,7 @@ class KBReadsUtils(KBWSUtils):
 
         # Save metadata JSON for all assemblies
         metadata_file = output_path / "assemblies_metadata.json"
-        with open(metadata_file, 'w') as f:
+        with open(metadata_file, "w") as f:
             json.dump(assembly_set.to_dict(), f, indent=2)
 
         self.log_info(
@@ -1048,9 +1000,9 @@ class KBReadsUtils(KBWSUtils):
         try:
             # Get assembly object data
             print("Reference: ", assembly_ref)
-            obj_data = self._ws_client.get_objects2({
-                "objects": [{"ref": assembly_ref}]
-            })["data"][0]
+            obj_data = self._ws_client.get_objects2(
+                {"objects": [{"ref": assembly_ref}]}
+            )["data"][0]
 
             data = obj_data["data"]
             info = obj_data["info"]
@@ -1071,7 +1023,7 @@ class KBReadsUtils(KBWSUtils):
                     "type": data.get("type", "Unknown"),
                     "external_source": data.get("external_source", "User"),
                     "external_source_id": data.get("external_source_id"),
-                }
+                },
             )
             assembly.workspace_ref = assembly_ref
 
@@ -1087,7 +1039,11 @@ class KBReadsUtils(KBWSUtils):
                     )
 
                     assembly.fasta_file = fasta_file
-                    assembly.handle_id = fasta_handle if isinstance(fasta_handle, str) else fasta_handle.get("hid")
+                    assembly.handle_id = (
+                        fasta_handle
+                        if isinstance(fasta_handle, str)
+                        else fasta_handle.get("hid")
+                    )
 
                     self.log_info(f"Downloaded assembly {assembly_id} to {fasta_file}")
                 except Exception as e:
@@ -1106,7 +1062,7 @@ class KBReadsUtils(KBWSUtils):
         assembly_id_map: Optional[Dict[str, str]] = None,
         assemblyset_id: Optional[str] = None,
         taxon_ref: Optional[str] = None,
-        assembly_type: str = "Unknown"
+        assembly_type: str = "Unknown",
     ) -> Dict[str, Any]:
         """Upload Assembly objects to KBase workspace.
 
@@ -1156,7 +1112,10 @@ class KBReadsUtils(KBWSUtils):
             elif path.is_dir():
                 # Scan directory for FASTA files
                 for fasta_file in path.iterdir():
-                    if fasta_file.is_file() and fasta_file.suffix.lower() in fasta_extensions:
+                    if (
+                        fasta_file.is_file()
+                        and fasta_file.suffix.lower() in fasta_extensions
+                    ):
                         fasta_files.append(fasta_file)
             else:
                 self.log_warning(f"Path not found: {path_str}")
@@ -1186,12 +1145,14 @@ class KBReadsUtils(KBWSUtils):
                     assembly_id=assembly_id,
                     workspace_name=workspace_name,
                     taxon_ref=taxon_ref,
-                    assembly_type=assembly_type
+                    assembly_type=assembly_type,
                 )
 
                 if assembly_ref:
                     uploaded_refs.append(assembly_ref)
-                    self.log_info(f"Uploaded {filename} as {assembly_id}: {assembly_ref}")
+                    self.log_info(
+                        f"Uploaded {filename} as {assembly_id}: {assembly_ref}"
+                    )
 
             except Exception as e:
                 self.log_error(f"Failed to upload {fasta_path}: {e}")
@@ -1205,7 +1166,7 @@ class KBReadsUtils(KBWSUtils):
                 assemblyset_ref = self._create_assemblyset(
                     assemblyset_id=assemblyset_id,
                     assembly_refs=uploaded_refs,
-                    workspace_name=workspace_name
+                    workspace_name=workspace_name,
                 )
                 result["assemblyset_ref"] = assemblyset_ref
                 self.log_info(
@@ -1222,7 +1183,7 @@ class KBReadsUtils(KBWSUtils):
         assembly_id: str,
         workspace_name: str,
         taxon_ref: Optional[str] = None,
-        assembly_type: str = "Unknown"
+        assembly_type: str = "Unknown",
     ) -> Optional[str]:
         """Upload a single assembly to KBase workspace.
 
@@ -1256,7 +1217,7 @@ class KBReadsUtils(KBWSUtils):
             dna_size = 0
             gc_count = 0
 
-            with open(fasta_path, 'r') as f:
+            with open(fasta_path, "r") as f:
                 sequence = ""
                 for line in f:
                     line = line.strip()
@@ -1264,7 +1225,9 @@ class KBReadsUtils(KBWSUtils):
                         if sequence:
                             # Process previous sequence
                             dna_size += len(sequence)
-                            gc_count += sequence.upper().count('G') + sequence.upper().count('C')
+                            gc_count += sequence.upper().count(
+                                "G"
+                            ) + sequence.upper().count("C")
                             sequence = ""
                         num_contigs += 1
                     else:
@@ -1273,7 +1236,9 @@ class KBReadsUtils(KBWSUtils):
                 # Process last sequence
                 if sequence:
                     dna_size += len(sequence)
-                    gc_count += sequence.upper().count('G') + sequence.upper().count('C')
+                    gc_count += sequence.upper().count("G") + sequence.upper().count(
+                        "C"
+                    )
 
             gc_content = (gc_count / dna_size * 100) if dna_size > 0 else 0.0
 
@@ -1292,14 +1257,18 @@ class KBReadsUtils(KBWSUtils):
                 assembly_obj["taxon_ref"] = taxon_ref
 
             # Save to workspace
-            save_result = self._ws_client.save_objects({
-                "workspace": workspace_name,
-                "objects": [{
-                    "type": "KBaseGenomeAnnotations.Assembly",
-                    "data": assembly_obj,
-                    "name": assembly_id
-                }]
-            })
+            save_result = self._ws_client.save_objects(
+                {
+                    "workspace": workspace_name,
+                    "objects": [
+                        {
+                            "type": "KBaseGenomeAnnotations.Assembly",
+                            "data": assembly_obj,
+                            "name": assembly_id,
+                        }
+                    ],
+                }
+            )
 
             obj_info = save_result[0]
             assembly_ref = f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"
@@ -1311,10 +1280,7 @@ class KBReadsUtils(KBWSUtils):
             return None
 
     def _create_assemblyset(
-        self,
-        assemblyset_id: str,
-        assembly_refs: List[str],
-        workspace_name: str
+        self, assemblyset_id: str, assembly_refs: List[str], workspace_name: str
     ) -> Optional[str]:
         """Create an AssemblySet object containing multiple assemblies.
 
@@ -1331,29 +1297,30 @@ class KBReadsUtils(KBWSUtils):
             items = []
             for ref in assembly_refs:
                 # Get assembly info
-                obj_info = self._ws_client.get_object_info3({
-                    "objects": [{"ref": ref}]
-                })["infos"][0]
+                obj_info = self._ws_client.get_object_info3(
+                    {"objects": [{"ref": ref}]}
+                )["infos"][0]
 
-                items.append({
-                    "ref": ref,
-                    "label": obj_info[1]  # Object name
-                })
+                items.append({"ref": ref, "label": obj_info[1]})  # Object name
 
             assemblyset_obj = {
                 "description": f"Assembly set containing {len(items)} assemblies",
-                "items": items
+                "items": items,
             }
 
             # Save to workspace
-            save_result = self._ws_client.save_objects({
-                "workspace": workspace_name,
-                "objects": [{
-                    "type": "KBaseSets.AssemblySet",
-                    "data": assemblyset_obj,
-                    "name": assemblyset_id
-                }]
-            })
+            save_result = self._ws_client.save_objects(
+                {
+                    "workspace": workspace_name,
+                    "objects": [
+                        {
+                            "type": "KBaseSets.AssemblySet",
+                            "data": assemblyset_obj,
+                            "name": assemblyset_id,
+                        }
+                    ],
+                }
+            )
 
             obj_info = save_result[0]
             assemblyset_ref = f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"

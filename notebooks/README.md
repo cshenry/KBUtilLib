@@ -127,6 +127,29 @@ This directory contains Jupyter notebooks demonstrating KBUtilLib functionality 
 - Validating gene-reaction associations
 - Testing different AI backends
 
+### [KBaseWorkspaceUtilities.ipynb](KBaseWorkspaceUtilities.ipynb)
+
+**Purpose**: KBase Workspace Service operations and datatype management
+
+**Topics Covered**:
+- Retrieving all KBase datatypes with `list_all_types()`
+- Organizing datatypes by module
+- Fetching type specifications with `get_type_specs()`
+- Batch retrieval of all type specs
+- Generating markdown documentation from type specs
+- KIDL (KBase Interface Description Language) typespec format
+- Module ownership request workflow
+- Module version management
+- Releasing modules to production
+
+**When to Use**:
+- Exploring available KBase datatypes
+- Generating datatype documentation
+- Creating new typespec modules
+- Registering modules with KBase workspace
+- Understanding KBase data structures
+- Managing workspace module lifecycle
+
 ## Getting Started
 
 1. **Launch Jupyter**:

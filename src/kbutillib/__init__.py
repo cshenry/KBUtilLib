@@ -39,6 +39,11 @@ except ImportError:
     KBModelUtils = None
 
 try:
+    from .ms_reconstruction_utils import MSReconstructionUtils
+except ImportError:
+    MSReconstructionUtils = None
+
+try:
     from .ms_fba_utils import MSFBAUtils
 except ImportError:
     MSFBAUtils = None
@@ -84,6 +89,11 @@ except ImportError:
     SKANIUtils = None
 
 try:
+    from .thermo_utils import ThermoUtils
+except ImportError:
+    ThermoUtils = None
+
+try:
     from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError:
     KBReadsUtils = None
@@ -101,6 +111,21 @@ try:
     from .patric_ws_utils import PatricWSUtils
 except ImportError:
     PatricWSUtils = None
+
+try:
+    from .rcsb_pdb_utils import RCSBPDBUtils
+except ImportError:
+    RCSBPDBUtils = None
+
+try:
+    from .mmseqs_utils import MMSeqsUtils
+except ImportError:
+    MMSeqsUtils = None
+
+try:
+    from .kb_berdl_utils import KBBERDLUtils
+except ImportError:
+    KBBERDLUtils = None
 
 # Import example composite classes
 # Temporarily disabled for testing core functionality
@@ -121,6 +146,7 @@ __all__ = [
     "DataType",
     "EscherUtils",
     "KBAnnotationUtils",
+    "KBBERDLUtils",
     "KBGenomeUtils",
     "KBModelUtils",
     "KBPLMUtils",
@@ -128,16 +154,20 @@ __all__ = [
     "KBSDKUtils",
     "KBUniProtUtils",
     "KBWSUtils",
+    "MMSeqsUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSFBAUtils",
+    "MSReconstructionUtils",
     "NotebookUtils",
     "NumberType",
     "PatricWSUtils",
+    "RCSBPDBUtils",
     "Reads",
     "ReadSet",
     "SharedEnvUtils",
     "SKANIUtils",
+    "ThermoUtils",
     "examples",
 ]
 

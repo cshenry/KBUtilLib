@@ -169,19 +169,44 @@ class NotebookUtils(BaseUtils):
     and integration with notebook-specific features like widgets and displays.
     """
 
-    def __init__(self, notebook_folder: str, **kwargs: Any) -> None:
+    def __init__(self, notebook_folder: str, notebook_name: Optional[str] = None, **kwargs: Any) -> None:
         """Initialize notebook utilities.
 
         Args:
+            notebook_folder: Path to the notebooks directory
+            notebook_name: Optional notebook name for namespacing datacache and nboutput.
+                If not provided, auto-detection is attempted. If detection fails,
+                datacache and nboutput remain flat (non-namespaced).
             **kwargs: Additional keyword arguments passed to BaseUtil
         """
         super().__init__(**kwargs)
         self.notebook_folder = notebook_folder
         self.data_dir = os.path.join(notebook_folder, "data")
         os.makedirs(self.data_dir, exist_ok=True)
-        self.datacache_dir = os.path.join(notebook_folder, "datacache")
+
+        # Base directories (always available for fallback lookups)
+        self.datacache_base_dir = os.path.join(notebook_folder, "datacache")
+        os.makedirs(self.datacache_base_dir, exist_ok=True)
+        self.output_base_dir = os.path.join(notebook_folder, "nboutput")
+        os.makedirs(self.output_base_dir, exist_ok=True)
+
+        # Determine notebook name: explicit argument > auto-detection
+        if notebook_name is None:
+            notebook_name = self._detect_notebook_name()
+
+        self.notebook_name = notebook_name
+
+        # Set namespaced directories if notebook name is available
+        if self.notebook_name:
+            self.datacache_dir = os.path.join(self.datacache_base_dir, self.notebook_name)
+            self.output_dir = os.path.join(self.output_base_dir, self.notebook_name)
+            self.log_info(f"Notebook name: {self.notebook_name}")
+        else:
+            self.datacache_dir = self.datacache_base_dir
+            self.output_dir = self.output_base_dir
+            self.log_warning("Could not detect notebook name; datacache and nboutput are not namespaced")
+
         os.makedirs(self.datacache_dir, exist_ok=True)
-        self.output_dir = os.path.join(notebook_folder, "nboutput")
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.in_notebook = self._detect_notebook_environment()
@@ -189,6 +214,55 @@ class NotebookUtils(BaseUtils):
             self.log_info("Notebook environment detected")
         else:
             self.log_debug("Not running in notebook environment")
+
+    def _detect_notebook_name(self) -> Optional[str]:
+        """Detect the name of the currently running Jupyter notebook.
+
+        Tries multiple detection methods in order of reliability:
+        1. VS Code injected variable (__vsc_ipynb_file__)
+        2. JPY_SESSION_NAME environment variable (JupyterLab, newer VS Code)
+        3. ipykernel __session__ variable
+        4. ipynbname library (queries Jupyter server API)
+
+        Returns:
+            Notebook filename without path or .ipynb extension, or None if detection fails
+        """
+        from pathlib import Path
+
+        # Method 1: VS Code / Cursor injected variable
+        try:
+            from IPython import get_ipython
+            ip = get_ipython()
+            if ip and '__vsc_ipynb_file__' in ip.user_ns:
+                nb_path = ip.user_ns['__vsc_ipynb_file__']
+                return Path(nb_path).stem
+        except (ImportError, Exception):
+            pass
+
+        # Method 2: JPY_SESSION_NAME environment variable
+        jpy_session = os.environ.get('JPY_SESSION_NAME')
+        if jpy_session:
+            return Path(jpy_session).stem
+
+        # Method 3: ipykernel __session__ variable
+        try:
+            from IPython import get_ipython
+            ip = get_ipython()
+            if ip:
+                session = ip.user_ns.get('__session__')
+                if session:
+                    return Path(session).stem
+        except (ImportError, Exception):
+            pass
+
+        # Method 4: ipynbname library
+        try:
+            import ipynbname
+            return ipynbname.name()
+        except Exception:
+            pass
+
+        return None
 
     def _detect_notebook_environment(self) -> bool:
         """Detect if code is running in a Jupyter notebook environment.
@@ -592,16 +666,33 @@ class NotebookUtils(BaseUtils):
             kb_metadata=meta.get("kb_metadata", []),
         )
 
+    def _resolve_datacache_dir(self, notebook_name: Optional[str] = None) -> str:
+        """Resolve the datacache directory for a given notebook name.
+
+        Args:
+            notebook_name: Optional notebook name. If provided, returns
+                datacache/<notebook_name>/. If None, returns self.datacache_dir.
+
+        Returns:
+            Path to the datacache directory
+        """
+        if notebook_name is not None:
+            return os.path.join(self.datacache_base_dir, notebook_name)
+        return self.datacache_dir
+
     def load(
         self,
         name_or_meta: Union[str, dict],
         default: Any = None,
         kb_type: Optional[str] = None,
+        notebook_name: Optional[str] = None,
     ) -> Union[Any, DataObject]:
         """Load data from a JSON file in the notebook data directory.
 
         Automatically detects if the loaded data is a DataObject and returns
-        the appropriate type.
+        the appropriate type. If the file is not found in the notebook-specific
+        subdirectory, falls back to the base datacache directory for backwards
+        compatibility.
 
         Args:
             name_or_meta: Either a filename (string, without extension) or a
@@ -611,6 +702,8 @@ class NotebookUtils(BaseUtils):
                 - data_type: str (optional) - one of 'TRANS', 'PROT', 'MGR'
             default: Default value to return if file doesn't exist
             kb_type: Optional KBase type for object factory construction
+            notebook_name: Optional notebook name to load from a different
+                notebook's datacache subdirectory
 
         Returns:
             DataObject if the loaded data is a DataObject, otherwise raw data
@@ -621,14 +714,25 @@ class NotebookUtils(BaseUtils):
                 or if meta dict is missing required fields
         """
         # Determine filename based on input type
+        target_dir = self._resolve_datacache_dir(notebook_name)
         if isinstance(name_or_meta, dict):
-            filename = self._filename_from_meta(name_or_meta)
+            filename = self._filename_from_meta(name_or_meta, notebook_name=notebook_name)
         elif isinstance(name_or_meta, str):
-            filename = self.datacache_dir + "/" + name_or_meta + ".json"
+            filename = os.path.join(target_dir, name_or_meta + ".json")
         else:
             raise ValueError(
                 f"name_or_meta must be a string or dict, got: {type(name_or_meta)}"
             )
+
+        # If not found in the target directory, fall back to base datacache directory
+        if not exists(filename) and target_dir != self.datacache_base_dir:
+            if isinstance(name_or_meta, dict):
+                fallback_filename = self._filename_from_meta(name_or_meta, use_base_dir=True)
+            else:
+                fallback_filename = os.path.join(self.datacache_base_dir, name_or_meta + ".json")
+            if exists(fallback_filename):
+                self.log_info(f"File not found in {target_dir}, loading from base datacache")
+                filename = fallback_filename
 
         if not exists(filename):
             if default is None:
@@ -649,11 +753,13 @@ class NotebookUtils(BaseUtils):
 
         return data
 
-    def _filename_from_meta(self, meta: dict) -> str:
+    def _filename_from_meta(self, meta: dict, notebook_name: Optional[str] = None, use_base_dir: bool = False) -> str:
         """Generate full file path from metadata dictionary.
 
         Args:
             meta: Metadata dictionary with prefix, number_type, data_type
+            notebook_name: Optional notebook name to use a different notebook's datacache
+            use_base_dir: If True, use the base datacache directory (for fallback lookups)
 
         Returns:
             Full file path
@@ -689,15 +795,46 @@ class NotebookUtils(BaseUtils):
                 )
 
         filename = "-".join(parts)
-        return self.datacache_dir + "/" + filename + ".json"
+        if use_base_dir:
+            target_dir = self.datacache_base_dir
+        else:
+            target_dir = self._resolve_datacache_dir(notebook_name)
+        return os.path.join(target_dir, filename + ".json")
 
-    def list(self):
-        """List all JSON files in the notebook data directory."""
-        if not exists(self.datacache_dir):
+    def list(self, notebook_name: Optional[str] = None):
+        """List all JSON files in the notebook datacache directory.
+
+        Args:
+            notebook_name: Optional notebook name to list files from a different
+                notebook's datacache subdirectory
+
+        Returns:
+            List of filenames (without .json extension)
+        """
+        target_dir = self._resolve_datacache_dir(notebook_name)
+        if not exists(target_dir):
             return []
-        files = os.listdir(self.datacache_dir)
+        files = os.listdir(target_dir)
         return [x.split(".")[0] for x in files if x.endswith(".json")]
 
-    def exists(self, name: str) -> bool:
-        """Check if a JSON file exists in the notebook data directory."""
-        return exists(self.datacache_dir + "/" + name + ".json")
+    def exists(self, name: str, notebook_name: Optional[str] = None) -> bool:
+        """Check if a JSON file exists in the notebook datacache directory.
+
+        Checks the notebook-specific subdirectory first, then falls back to
+        the base datacache directory for backwards compatibility.
+
+        Args:
+            name: Filename without extension
+            notebook_name: Optional notebook name to check a different
+                notebook's datacache subdirectory
+
+        Returns:
+            True if the file exists in either the target or base directory
+        """
+        target_dir = self._resolve_datacache_dir(notebook_name)
+        if exists(os.path.join(target_dir, name + ".json")):
+            return True
+        # Fallback to base datacache directory
+        if target_dir != self.datacache_base_dir:
+            return exists(os.path.join(self.datacache_base_dir, name + ".json"))
+        return False

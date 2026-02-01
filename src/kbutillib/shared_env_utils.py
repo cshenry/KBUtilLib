@@ -226,6 +226,80 @@ class SharedEnvUtils(BaseUtils):
 
         return value
 
+    def set_environment_variable(
+        self,
+        key_path: str,
+        value: Any,
+        save: bool = True
+    ) -> None:
+        """Set an environment variable using dot notation and optionally save to config file.
+
+        Args:
+            key_path: Dot-separated path to config value (e.g., "skani.executable")
+            value: The value to set
+            save: If True, saves the updated config to the config file
+
+        Examples:
+            >>> util.set_environment_variable("skani.executable", "/usr/local/bin/skani")
+            >>> util.set_environment_variable("ai_curation.backend", "claude-code")
+            >>> util.set_environment_variable("paths.data_dir", "./data", save=False)
+        """
+        keys = key_path.split('.')
+        current = self._config_hash
+
+        # Navigate to the parent of the target key, creating nested dicts as needed
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            elif not isinstance(current[key], dict):
+                # Overwrite non-dict value with a dict
+                current[key] = {}
+            current = current[key]
+
+        # Set the final key
+        current[keys[-1]] = value
+        self.log_info(f"Set config value: {key_path} = {value}")
+
+        if save:
+            self.save_config()
+
+    def save_config(self, config_file: Optional[Union[str, Path]] = None) -> None:
+        """Save the current configuration to a YAML file.
+
+        Args:
+            config_file: Optional path to save to. Uses self._config_file if None.
+                        If self._config_file is also None, uses DEFAULT_CONFIG_FILE.
+
+        Raises:
+            ImportError: If PyYAML is not installed
+            Exception: If file cannot be written
+        """
+        if config_file is None:
+            config_file = self._config_file
+
+        if config_file is None:
+            # Create default config file if none exists
+            config_file = DEFAULT_CONFIG_FILE
+            self._config_file = config_file
+
+        config_path = Path(config_file)
+
+        # Ensure parent directory exists
+        if not config_path.parent.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import yaml
+            with open(config_path, 'w') as f:
+                yaml.dump(self._config_hash, f, default_flow_style=False, sort_keys=False)
+            self.log_info(f"Saved configuration to: {config_path}")
+        except ImportError:
+            self.log_error("PyYAML not installed. Install with: pip install pyyaml")
+            raise
+        except Exception as e:
+            self.log_error(f"Error saving config to {config_path}: {e}")
+            raise
+
     def read_token_file(
         self, token_file: Optional[Union[str, Path]] = None
     ) -> Dict[str, Any]:

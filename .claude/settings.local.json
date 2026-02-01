@@ -9,7 +9,19 @@
       "Bash(curl:*)",
       "Bash(src/kbutillib/kb_model_standardization_utils.py)",
       "Bash(python3:*)",
-      "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python3:*)"
+      "Bash(PYTHONPATH=/Users/chenry/Dropbox/Projects/KBUtilLib/src:$PYTHONPATH python3:*)",
+      "Bash(/Users/chenry/.npm-global/bin/claude:*)",
+      "Skill(claude-commands-expert)",
+      "Skill(claude-commands-expert:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Skill(kbutillib-dev)",
+      "Skill(kbutillib-dev:*)",
+      "Bash(uv run python3:*)",
+      "Bash(source .venv/bin/activate)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

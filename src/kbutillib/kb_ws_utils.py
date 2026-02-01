@@ -348,6 +348,43 @@ class KBWSUtils(SharedEnvUtils):
             ws = str(ws)
         return ws + "/" + id_or_ref
 
+    def is_ref(self, ref_string: str) -> bool:
+        """Check if a string is a valid KBase workspace reference.
+
+        A valid KBase reference has one of the following formats:
+        - wsid/objid (e.g., "123/456")
+        - wsid/objid/version (e.g., "123/456/1")
+        - wsname/objname (e.g., "MyWorkspace/MyObject")
+        - wsname/objname/version (e.g., "MyWorkspace/MyObject/1")
+
+        Args:
+            ref_string: String to check
+
+        Returns:
+            bool: True if the string appears to be a valid KBase reference
+        """
+        if not isinstance(ref_string, str):
+            return False
+
+        parts = ref_string.split("/")
+
+        # Must have 2 or 3 parts (ws/obj or ws/obj/ver)
+        if len(parts) < 2 or len(parts) > 3:
+            return False
+
+        # Each part must be non-empty
+        if any(not part.strip() for part in parts):
+            return False
+
+        # If 3 parts, the version (last part) should be numeric
+        if len(parts) == 3:
+            try:
+                int(parts[2])
+            except ValueError:
+                return False
+
+        return True
+
     def list_all_types(
         self, include_empty_modules: bool = False, track_provenance: bool = False
     ) -> List[str]:

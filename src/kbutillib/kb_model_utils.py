@@ -363,7 +363,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
     def get_msgenome_from_dict(self, genome_data):
         from cobrakbase.core.kbase_object_factory import KBaseObjectFactory
         factory = KBaseObjectFactory()
-        genome = factory._build_object("KBaseGenomes.Genome", genome_data, [], {})
+        genome = factory._build_object("KBaseGenomes.Genome", genome_data, None, None)
         return genome
     
     def get_msgenome(self, id_or_ref, ws=None):
@@ -516,17 +516,31 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return mdlutl
 
     #################Classifier functions#####################
-    def get_classifier(self):
-        cls_pickle = self.config["data"] + "/knn_ACNP_RAST_full_01_17_2023.pickle"
-        cls_features = (
-            self.config["data"] + "/knn_ACNP_RAST_full_01_17_2023_features.json"
-        )
-        # cls_pickle = self.module_dir+"/data/knn_ACNP_RAST_filter.pickle"
-        # cls_features = self.module_dir+"/data/knn_ACNP_RAST_filter_features.json"
+    def get_classifier(self, classifier_dir=None):
+        """Load the genome classifier for model building.
+
+        Args:
+            classifier_dir: Optional path to classifier directory. If None, uses
+                           the default location in KBUtilLib/data/ms_classifier/
+
+        Returns:
+            MSGenomeClassifier instance
+        """
+        import os
+
+        if classifier_dir is None:
+            # Default: KBUtilLib/data/ms_classifier/ (relative to this source file)
+            src_dir = os.path.dirname(os.path.abspath(__file__))
+            kbutillib_root = os.path.dirname(os.path.dirname(src_dir))
+            classifier_dir = os.path.join(kbutillib_root, "data", "ms_classifier")
+
+        cls_pickle = os.path.join(classifier_dir, "knn_ACNP_RAST_full_01_17_2023.pickle")
+        cls_features = os.path.join(classifier_dir, "knn_ACNP_RAST_full_01_17_2023_features.json")
+
         with open(cls_pickle, "rb") as fh:
             model_filter = pickle.load(fh)
         with open(cls_features) as fh:
-            features = self.json.load(fh)
+            features = json.load(fh)
         return self.MSGenomeClassifier(model_filter, features)
 
     #################Template functions#####################

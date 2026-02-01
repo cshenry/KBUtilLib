@@ -1,0 +1,30 @@
+{
+    "status": "success",
+    "released_types": [
+        "KBaseFBA.FBAComparison-5.0",
+        "KBaseFBA.FBAPathwayAnalysis-1.0",
+        "KBaseFBA.EscherMap-4.0",
+        "KBaseFBA.FBA-14.1",
+        "KBaseFBA.regulatory_network-2.0",
+        "KBaseFBA.Classifier-1.1",
+        "KBaseFBA.GenomeDataLakeTables-2.0",
+        "KBaseFBA.BooleanGeneExpressionDataCollection-2.0",
+        "KBaseFBA.ModelTemplate-4.2",
+        "KBaseFBA.FBAModelSet-1.1",
+        "KBaseFBA.Gapfilling-7.0",
+        "KBaseFBA.ModelComparison-4.0",
+        "KBaseFBA.MissingRoleData-1.0",
+        "KBaseFBA.FBAPathwayAnalysisMultiple-1.0",
+        "KBaseFBA.SubsystemAnnotation-1.0",
+        "KBaseFBA.ClassifierResult-5.0",
+        "KBaseFBA.Gapgeneration-4.0",
+        "KBaseFBA.ReactionSensitivityAnalysis-5.1",
+        "KBaseFBA.FBAModel-14.0",
+        "KBaseFBA.NewModelTemplate-2.1",
+        "KBaseFBA.BooleanGeneExpressionData-1.0",
+        "KBaseFBA.ReactionProbabilities-2.0",
+        "KBaseFBA.ETC-6.0",
+        "KBaseFBA.PromConstraint-6.1",
+        "KBaseFBA.ClassifierTrainingSet-5.0"
+    ]
+}

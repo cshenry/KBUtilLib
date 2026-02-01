@@ -5,9 +5,7 @@ from typing import Any, Dict, Optional
 import re
 import json
 import subprocess
-import tempfile
 import os
-from pathlib import Path
 
 # Optional imports - only needed for FBA analysis, not for AI curation
 try:
@@ -52,7 +50,7 @@ class AICurationUtils(ArgoUtils):
         if self.ai_backend == "claude-code":
             self.claude_code_executable = self.get_config_value(
                 "ai_curation.claude_code_executable",
-                default="claude-code"
+                default="claude"
             )
             self._verify_claude_code_available()
 
@@ -61,6 +59,7 @@ class AICurationUtils(ArgoUtils):
     def _verify_claude_code_available(self) -> None:
         """Verify that claude-code executable is available."""
         try:
+            print(self.claude_code_executable)
             result = subprocess.run(
                 [self.claude_code_executable, "--version"],
                 capture_output=True,
@@ -90,74 +89,64 @@ class AICurationUtils(ArgoUtils):
             system: System message for context
 
         Returns:
-            The AI response text from output.json
+            The AI response text as JSON string
         """
-        # Create temporary directory for this query
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            input_file = tmpdir_path / "input.json"
-            output_file = tmpdir_path / "output.json"
+        # Build the command
+        cmd = [
+            self.claude_code_executable,
+            "-p", prompt,
+            "--output-format", "json",
+            "--dangerously-skip-permissions"  # Skip permission prompts that could cause hangs
+        ]
 
-            # Write input data to JSON file
-            input_data = {"prompt_data": prompt}
-            with open(input_file, 'w') as f:
-                json.dump(input_data, f, indent=2)
+        # Add system prompt if provided
+        if system:
+            cmd.extend(["--system-prompt", system])
 
-            # Build full prompt with system message and instructions
-            full_prompt = f"""{system}
+        try:
+            # Print the full command for debugging
+            self.log_info(f"Claude CLI command: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                stdin=subprocess.DEVNULL  # Prevent waiting for stdin
+            )
 
-Read the input data from input.json and respond to the prompt contained within.
+            if result.returncode != 0:
+                self.log_error(f"Claude Code failed: {result.stderr}")
+                raise RuntimeError(f"Claude Code returned non-zero exit code: {result.returncode}")
 
-IMPORTANT: You must write your response as valid JSON to output.json in the current directory.
-Your response should be pure JSON with no additional text or formatting outside the JSON structure.
-
-The input file is: {input_file.name}
-"""
-
-            # Call claude-code with the prompt
+            # Parse the JSON output from Claude
+            # The output format is JSON with a "result" field containing the response
             try:
-                self.log_debug(f"Calling Claude Code in {tmpdir}")
-                cmd = [
-                    self.claude_code_executable,
-                    "-p", full_prompt,
-                    "--read", str(input_file),
-                    "--write", str(output_file)
-                ]
-
-                result = subprocess.run(
-                    cmd,
-                    cwd=tmpdir,
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minute timeout
-                )
-
-                if result.returncode != 0:
-                    self.log_error(f"Claude Code failed: {result.stderr}")
-                    raise RuntimeError(f"Claude Code returned non-zero exit code: {result.returncode}")
-
-                # Read response from output.json
-                if not output_file.exists():
-                    self.log_error(f"Output file not created: {output_file}")
-                    self.log_debug(f"stdout: {result.stdout}")
-                    self.log_debug(f"stderr: {result.stderr}")
-                    raise FileNotFoundError(f"Claude Code did not create output.json")
-
-                with open(output_file, 'r') as f:
-                    response_data = json.load(f)
-
-                # Return as JSON string if it's a dict, otherwise return as-is
-                if isinstance(response_data, dict):
-                    return json.dumps(response_data)
+                output_data = json.loads(result.stdout)
+                # Extract the actual response text from Claude's JSON output
+                if isinstance(output_data, dict) and "result" in output_data:
+                    response_text = output_data["result"]
                 else:
-                    return str(response_data)
+                    response_text = result.stdout
+            except json.JSONDecodeError:
+                # If output isn't valid JSON, use raw stdout
+                response_text = result.stdout
 
-            except subprocess.TimeoutExpired:
-                self.log_error("Claude Code timed out after 5 minutes")
-                raise
-            except Exception as e:
-                self.log_error(f"Error calling Claude Code: {e}")
-                raise
+            # The response_text should be the JSON that the AI generated
+            # Try to parse it to validate it's proper JSON, then return as string
+            try:
+                # Validate it's proper JSON by parsing
+                parsed = json.loads(response_text)
+                return json.dumps(parsed)
+            except json.JSONDecodeError:
+                # If not valid JSON, return as-is and let caller handle it
+                return response_text
+
+        except subprocess.TimeoutExpired:
+            self.log_error("Claude Code timed out after 5 minutes")
+            raise
+        except Exception as e:
+            self.log_error(f"Error calling Claude Code: {e}")
+            raise
 
     def chat(self, prompt: str, *, system: str = "") -> str:
         """Send a chat request to the configured AI backend (Argo or Claude Code).
@@ -676,5 +665,442 @@ The input file is: {input_file.name}
             self._save_cached_curation("ReactionFromFunctionalRoles", cache)
         else:
             print("ReactionFromFunctionalRoles-cached")
+
+        return cache[cache_key]
+
+    def find_compound_aliases(
+        self,
+        compounds: list,
+        batch_size: int = 10,
+        alias_type: str = "ChEBI"
+    ) -> dict[str, Any]:
+        """Use AI to find aliases for a batch of compounds.
+
+        This function processes compounds in batches and uses AI to propose
+        database identifiers (e.g., CHEBI IDs) based on compound metadata.
+
+        Args:
+            compounds: List of dicts with keys: id, name, formula, smiles, inchi,
+                      inchikey, other_aliases (dict of existing aliases by source)
+            batch_size: Number of compounds per AI query (for batching experiments)
+            alias_type: Target alias type to find (ChEBI, KEGG, MetaCyc, etc.)
+
+        Returns:
+            Dict mapping compound IDs to:
+                - proposed_aliases: List of proposed alias IDs (without prefix)
+                - confidence: high/medium/low/none
+                - reasoning: Brief explanation
+                - alternatives: Other possible matches (if ambiguous)
+        """
+        system = f"""You are an expert biochemical database curator with deep knowledge of {alias_type}
+(Chemical Entities of Biological Interest) database and other biochemical databases.
+
+You will receive a batch of compounds in JSON format. For each compound,
+analyze the provided information (name, formula, structure, existing aliases)
+and determine the most likely {alias_type} identifier(s).
+
+INPUT FORMAT:
+[
+  {{
+    "id": "cpd00001",
+    "name": "compound name",
+    "formula": "molecular formula",
+    "charge": 0,
+    "smiles": "SMILES string",
+    "inchi": "InChI string",
+    "inchikey": "InChIKey",
+    "other_aliases": {{"KEGG": [...], "MetaCyc": [...], ...}}
+  }},
+  ...
+]
+
+OUTPUT FORMAT (strict JSON):
+{{
+  "cpd00001": {{
+    "proposed_aliases": ["12345"],
+    "confidence": "high|medium|low|none",
+    "reasoning": "Brief explanation of how you identified this {alias_type} ID",
+    "alternatives": ["67890"]
+  }},
+  ...
+}}
+
+GUIDELINES:
+1. Use structural information (InChIKey, SMILES, InChI) as primary matching criteria
+   - InChIKey is the most reliable structural identifier
+   - SMILES can help identify the compound structure
+2. Cross-reference with KEGG, MetaCyc, and other aliases when available
+   - These databases often have direct mappings to {alias_type}
+3. Consider charge state and protonation forms ({alias_type} often has multiple entries)
+   - The same molecule at different pH may have different {alias_type} IDs
+4. Set confidence="none" and proposed_aliases=[] if no reliable match found
+   - Don't guess - it's better to return no match than a wrong one
+5. Use alternatives for ambiguous cases (isomers, stereoisomers, tautomers, etc.)
+6. Return {alias_type} IDs WITHOUT any prefix (just the numeric ID)
+
+CONFIDENCE LEVELS:
+- "high": Structural match (InChIKey) or well-known compound with verified mapping
+- "medium": Name/alias match with supporting evidence but no structural confirmation
+- "low": Partial match or inference from related compounds
+- "none": No reliable match found
+
+Respond strictly in valid JSON with **no text outside the JSON**.
+All keys and string values must use double quotes.
+Use only plain ASCII characters."""
+
+        user_prompt = f"""Find {alias_type} identifiers for the following compounds.
+
+Compound batch:
+"""
+
+        # Process compounds in batches
+        all_results = {}
+        cache = self._load_cached_curation(f"CompoundAliases_{alias_type}")
+
+        # Filter out compounds already in cache
+        compounds_to_process = []
+        for cpd in compounds:
+            cpd_id = cpd.get("id", "")
+            if cpd_id in cache:
+                all_results[cpd_id] = cache[cpd_id]
+                print(f"CompoundAliases_{alias_type}-cached: {cpd_id}")
+            else:
+                compounds_to_process.append(cpd)
+
+        if not compounds_to_process:
+            return all_results
+
+        # Process remaining compounds in batches
+        for i in range(0, len(compounds_to_process), batch_size):
+            batch = compounds_to_process[i:i + batch_size]
+            batch_ids = [cpd.get("id", f"unknown_{j}") for j, cpd in enumerate(batch)]
+
+            self.log_info(f"Processing batch {i // batch_size + 1}: {len(batch)} compounds")
+
+            # Prepare batch data for AI
+            batch_data = []
+            for cpd in batch:
+                cpd_input = {
+                    "id": cpd.get("id", ""),
+                    "name": cpd.get("name", ""),
+                    "formula": cpd.get("formula", ""),
+                    "charge": cpd.get("charge", 0),
+                    "smiles": cpd.get("smiles", ""),
+                    "inchi": cpd.get("inchi", ""),
+                    "inchikey": cpd.get("inchikey", ""),
+                    "other_aliases": cpd.get("other_aliases", {})
+                }
+                batch_data.append(cpd_input)
+
+            prompt = user_prompt + json.dumps(batch_data, indent=2)
+
+            try:
+                ai_output = self.chat(prompt=prompt, system=system)
+
+                # Debug: log raw response
+                self.log_debug(f"Raw AI response length: {len(ai_output) if ai_output else 0}")
+                if not ai_output or not ai_output.strip():
+                    self.log_warning(f"Empty AI response for batch")
+                    raise json.JSONDecodeError("Empty response", "", 0)
+
+                # Clean up the response - remove markdown code blocks
+                ai_output_clean = ai_output.strip()
+
+                # Remove markdown code block wrappers (```json ... ``` or ``` ... ```)
+                if ai_output_clean.startswith('```'):
+                    # Find the end of the first line (might be ```json or just ```)
+                    first_newline = ai_output_clean.find('\n')
+                    if first_newline != -1:
+                        ai_output_clean = ai_output_clean[first_newline + 1:]
+                    # Remove trailing ```
+                    if ai_output_clean.endswith('```'):
+                        ai_output_clean = ai_output_clean[:-3].strip()
+
+                # If still not starting with {, try to find JSON object
+                if not ai_output_clean.startswith('{'):
+                    start_idx = ai_output_clean.find('{')
+                    if start_idx != -1:
+                        ai_output_clean = ai_output_clean[start_idx:]
+                        # Find matching closing brace
+                        brace_count = 0
+                        end_idx = 0
+                        for i, char in enumerate(ai_output_clean):
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = i + 1
+                                    break
+                        if end_idx > 0:
+                            ai_output_clean = ai_output_clean[:end_idx]
+
+                self.log_debug(f"Cleaned AI response: {ai_output_clean[:200]}...")
+                batch_results = json.loads(ai_output_clean)
+
+                # Store results in cache and all_results
+                for cpd_id in batch_ids:
+                    if cpd_id in batch_results:
+                        cache[cpd_id] = batch_results[cpd_id]
+                        all_results[cpd_id] = batch_results[cpd_id]
+                    else:
+                        # AI didn't return result for this compound
+                        missing_result = {
+                            "proposed_aliases": [],
+                            "confidence": "none",
+                            "reasoning": "AI did not return a result for this compound",
+                            "alternatives": []
+                        }
+                        cache[cpd_id] = missing_result
+                        all_results[cpd_id] = missing_result
+
+                # Save cache after each batch
+                self._save_cached_curation(f"CompoundAliases_{alias_type}", cache)
+
+            except json.JSONDecodeError as e:
+                self.log_error(f"Failed to parse AI response for batch: {e}")
+                self.log_error(f"Raw response was: {repr(ai_output[:500] if ai_output else 'EMPTY')}")
+                # Mark all compounds in batch as failed
+                for cpd_id in batch_ids:
+                    error_result = {
+                        "proposed_aliases": [],
+                        "confidence": "none",
+                        "reasoning": f"AI response parsing error: {str(e)}",
+                        "alternatives": []
+                    }
+                    cache[cpd_id] = error_result
+                    all_results[cpd_id] = error_result
+                self._save_cached_curation(f"CompoundAliases_{alias_type}", cache)
+            except Exception as e:
+                self.log_error(f"Error processing batch: {e}")
+                raise
+
+        return all_results
+
+    def curate_biochemical_compound(self, compound) -> dict[str, Any]:
+        """Use AI to validate, correct, and enrich a biochemical compound record.
+
+        This function takes a COBRApy Metabolite object and uses AI to:
+        - Validate identity and structure (name, formula, charge, mass, SMILES, InChI, InChIKey)
+        - Evaluate thermodynamic data (deltag)
+        - Verify formula and mass consistency
+        - Validate aliases and cross-references
+        - Evaluate abbreviation appropriateness
+
+        Args:
+            compound: A COBRApy Metabolite object with standard attributes
+
+        Returns:
+            Dict with the original compound data plus:
+                - changes: List of changes made with field, old_value, new_value, reason
+                - errors: List of error messages
+                - comments: List of non-fatal observations and suggestions
+                - newdata: List of proposed new data with field, value, source, confidence
+        """
+        system = """You are an expert biochemical database curator with deep expertise in:
+small-molecule chemistry, biochemical thermodynamics, metabolite identifiers (KEGG, ChEBI, MetaCyc, BiGG), SMILES/InChI/InChIKey validation, charge and formula balancing at pH 7, and metabolic modeling databases.
+
+You will be given ONE compound record in JSON format.
+
+Your task is to VALIDATE, CORRECT, and ENRICH the compound record while preserving compatibility with biochemical databases.
+
+INPUT:
+A JSON object describing a biochemical compound.
+
+VALIDATION TASKS (ALL REQUIRED)
+1. Identity and Structure
+   - Verify that name, formula, charge, mass, SMILES, InChI (if present), and InChIKey (if present) all describe the SAME chemical entity.
+   - Confirm the charge state is appropriate for biochemical standard conditions (pH ~7).
+   - IMPORTANT: InChI strings in this database represent the NEUTRAL form of the compound, while the formula represents the CHARGED (ionic) form at pH 7.
+   - The formula should differ from the neutral InChI by the number of hydrogens corresponding to the charge (e.g., a -1 charge means one fewer H than the neutral form).
+   - Do NOT flag formula/InChI mismatches if they are consistent with the stated charge.
+   - Check that SMILES, InChI, and InChIKey are mutually consistent (all represent the neutral form).
+   - If structure fields are missing but can be inferred with high confidence, propose them.
+
+2. Thermodynamics
+   - Evaluate the provided standard Gibbs free energy of formation (deltag_kcal_per_mol field).
+   - IMPORTANT: The deltag values are in kcal/mol (NOT kJ/mol). This is the ModelSEED convention.
+   - For reference: 1 kcal/mol = 4.184 kJ/mol. Typical values range from -200 to +50 kcal/mol.
+   - Check that the magnitude and sign are reasonable for the compound class given kcal/mol units.
+   - Flag values that are suspicious, inconsistent with known databases, or inappropriate for biochemical standard conditions.
+   - Do NOT fabricate precise thermodynamic values; only propose replacements when well established.
+
+3. Formula and Mass
+   - The formula represents the CHARGED form at pH 7, NOT the neutral form.
+   - Verify that the chemical formula matches the molecular mass within reasonable rounding.
+   - When validating formula vs InChI: account for the charge. A compound with charge -1 will have one fewer H in its formula than in the neutral InChI.
+   - Example: Phosphate at pH 7 might have formula "HO4P" (charge -2) while InChI shows "H3O4P" (neutral H3PO4).
+   - Do NOT recommend changing the formula to match InChI without considering the charge field.
+
+4. Aliases and Cross-References
+   - IMPORTANT: This database uses UNIFIED compound records representing the predominant ionic form at pH 7.
+   - DO NOT REMOVE aliases for different protonation/ionic states - they are VALID synonyms for the unified record.
+   - "uric acid" and "urate" are BOTH valid aliases for the same unified compound (one is neutral name, one is ionic name).
+   - "phosphoric acid", "phosphate", "HPO4", "H2PO4", "PO4" are ALL valid aliases for a unified phosphate record.
+   - "H2O", "water", "hydroxide", "hydronium" are ALL valid aliases for the unified water record.
+   - The ONLY reason to remove an alias is if it refers to a CHEMICALLY DISTINCT compound (different molecular skeleton/connectivity).
+   - Validate all database identifiers (KEGG, ChEBI, MetaCyc, BiGG, etc.) for correctness.
+   - Propose missing but well-known identifiers when appropriate.
+
+5. Abbreviation
+   - Evaluate whether the abbreviation is recognizable, standard, and unambiguous.
+   - Propose a better abbreviation if appropriate.
+
+CORRECTION RULES
+- DO NOT silently overwrite any existing data.
+- Any change must be explicitly recorded with a reason.
+- If uncertain, propose rather than assert.
+- Do not introduce speculative chemistry.
+- Preserve the original JSON structure and fields.
+
+OUTPUT REQUIREMENTS
+
+Return the SAME JSON object, corrected as needed, and ADD the following fields:
+
+"changes": [
+  {
+    "field": "<field_name>",
+    "old_value": "<old_value>",
+    "new_value": "<new_value>",
+    "reason": "<clear, concise explanation>"
+  }
+]
+
+IMPORTANT: For alias changes, list each alias modification as a SEPARATE change entry:
+- Use field "alias_removed" with old_value as the removed alias and new_value as null
+- Use field "alias_added" with old_value as null and new_value as the added alias
+- Do NOT lump all aliases together in a single change entry
+- Example:
+  {"field": "alias_removed", "old_value": "bad-alias", "new_value": null, "reason": "..."}
+  {"field": "alias_added", "old_value": null, "new_value": "new-alias", "reason": "..."}
+
+"errors": [
+  "<error message>"
+]
+
+"comments": [
+  "<non-fatal observations, modeling implications, or suggestions>"
+]
+
+"newdata": [
+  {
+    "field": "<field_name>",
+    "value": "<new_value>",
+    "source": "<database, literature, or inference>",
+    "confidence": "<high | medium | low>"
+  }
+]
+
+If NO issues are found:
+- Explicitly state that the record is internally consistent.
+- Leave "changes" empty.
+- Use "comments" to briefly explain why the record is acceptable.
+
+OUTPUT CONSTRAINTS
+- Output MUST be valid JSON.
+- Do NOT include explanatory text outside the JSON.
+- Do NOT reformat unrelated fields.
+- Do NOT invent database identifiers or thermodynamic values.
+
+Respond strictly in valid JSON with **no text outside the JSON**.
+All keys and string values must use double quotes.
+Use only plain ASCII characters.
+"""
+
+        shared_prompt = """Validate, correct, and enrich the following biochemical compound record.
+
+Compound JSON:
+"""
+        cache = self._load_cached_curation("CompoundCuration")
+
+        # Build compound data dictionary from COBRApy Metabolite object
+        compound_data = {
+            "id": compound.id,
+            "name": compound.name,
+        }
+
+        # Add formula if available
+        if hasattr(compound, 'formula') and compound.formula:
+            compound_data["formula"] = compound.formula
+
+        # Add charge if available
+        if hasattr(compound, 'charge') and compound.charge is not None:
+            compound_data["charge"] = compound.charge
+
+        # Add compartment if available
+        if hasattr(compound, 'compartment') and compound.compartment:
+            compound_data["compartment"] = compound.compartment
+
+        # Add abbreviation if available (ModelSEED compounds use 'abbr' attribute)
+        if hasattr(compound, 'abbr') and compound.abbr:
+            compound_data["abbreviation"] = compound.abbr
+
+        # Add annotation/cross-references if available
+        if hasattr(compound, 'annotation') and compound.annotation:
+            compound_data["annotations"] = {}
+            for anno_type, values in compound.annotation.items():
+                if isinstance(values, set):
+                    compound_data["annotations"][anno_type] = list(values)
+                elif isinstance(values, list):
+                    compound_data["annotations"][anno_type] = values
+                else:
+                    compound_data["annotations"][anno_type] = [values]
+
+        # Add notes if available (may contain SMILES, InChI, deltag, etc.)
+        if hasattr(compound, 'notes') and compound.notes:
+            for key, value in compound.notes.items():
+                if key not in compound_data:
+                    compound_data[key] = value
+
+        # Try to extract common fields from various attributes
+        # SMILES
+        if hasattr(compound, 'smiles') and compound.smiles:
+            compound_data["smiles"] = compound.smiles
+        elif 'smiles' not in compound_data and hasattr(compound, 'annotation'):
+            if 'smiles' in compound.annotation:
+                val = compound.annotation['smiles']
+                compound_data["smiles"] = list(val)[0] if isinstance(val, set) else val
+
+        # InChI
+        if hasattr(compound, 'inchi') and compound.inchi:
+            compound_data["inchi"] = compound.inchi
+        elif 'inchi' not in compound_data and hasattr(compound, 'annotation'):
+            if 'inchi' in compound.annotation:
+                val = compound.annotation['inchi']
+                compound_data["inchi"] = list(val)[0] if isinstance(val, set) else val
+
+        # InChIKey
+        if hasattr(compound, 'inchikey') and compound.inchikey:
+            compound_data["inchikey"] = compound.inchikey
+        elif 'inchikey' not in compound_data and hasattr(compound, 'annotation'):
+            if 'inchikey' in compound.annotation:
+                val = compound.annotation['inchikey']
+                compound_data["inchikey"] = list(val)[0] if isinstance(val, set) else val
+
+        # Mass
+        if hasattr(compound, 'mass') and compound.mass is not None:
+            compound_data["mass"] = compound.mass
+
+        # DeltaG (standard Gibbs free energy of formation) - units are kcal/mol
+        if hasattr(compound, 'deltag') and compound.deltag is not None:
+            compound_data["deltag_kcal_per_mol"] = compound.deltag
+        elif hasattr(compound, 'delta_g') and compound.delta_g is not None:
+            compound_data["deltag_kcal_per_mol"] = compound.delta_g
+
+        # Aliases/other names
+        if hasattr(compound, 'names') and compound.names:
+            compound_data["aliases"] = list(compound.names) if isinstance(compound.names, set) else compound.names
+
+        # Use compound ID as cache key
+        cache_key = compound.id
+
+        if cache_key not in cache:
+            self.log_warning(f"Querying AI to curate compound {compound.id}")
+            prompt = shared_prompt + json.dumps(compound_data, indent=2)
+            ai_output = self.chat(prompt=prompt, system=system)
+            cache[cache_key] = json.loads(ai_output)
+            self._save_cached_curation("CompoundCuration", cache)
+        else:
+            print("CompoundCuration-cached")
 
         return cache[cache_key]

@@ -5,12 +5,28 @@ import re
 import subprocess
 import string
 import json
+import pandas as pd
 from typing import Any, Optional, Dict
 from collections import defaultdict
 
 from .shared_env_utils import SharedEnvUtils
 from .dependency_manager import get_data_path
 
+compartment_types = {
+    "cytosol":"c",
+    "extracellar":"e",
+    "extracellular":"e",
+    "extraorganism":"e",
+    "periplasm":"p",
+    "membrane":"m",
+    "mitochondria":"m",
+    "environment":"e",
+    "env":"e",
+    "c":"c",
+    "p":"p",
+    "e":"e",
+    "m":"m"
+}
 
 class MSBiochemUtils(SharedEnvUtils):
     """Utilities for searching the ModelSEED Biochemistry Database.
@@ -269,6 +285,55 @@ class MSBiochemUtils(SharedEnvUtils):
             self.log_error(error_msg)
             raise
 
+    
+    def _parse_id(self, object_or_id):
+        """Parse a compound or reaction ID to extract base ID, compartment, and index.
+
+        Supports two notation styles:
+        - Bracket notation: "adp[c]", "h[e]", "cpd00001[c]"
+        - Underscore notation: "cpd01024_c0", "rxn00001_c"
+
+        Args:
+            object_or_id: Either a string ID or an object with an .id attribute
+
+        Returns:
+            Tuple of (base_id, compartment, index) where:
+            - base_id: The compound/reaction ID without compartment
+            - compartment: Single letter compartment code (c, e, p, m)
+            - index: Compartment index (usually "" or "0")
+        """
+        # Check if input is a string or object and if it's an object, set id to object.id
+        if isinstance(object_or_id, str):
+            id = object_or_id
+        else:
+            id = object_or_id.id
+        # Try bracket notation first (e.g., "adp[c]" or "h[e]")
+        baseid = id
+        compartment = None
+        index = None
+        bracket_match = re.search(r"(.+)\[([a-zA-Z]+)(\d*)\]$", id)
+        if bracket_match:
+            baseid = bracket_match[1]
+            compartment = bracket_match[2]
+            index = bracket_match[3]
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized in bracket notation.") # Try underscore notation (e.g., "cpd01024_c0")
+        elif re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
+            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
+            baseid = m[1]
+            compartment = m[2]
+            index = m[3]
+            if compartment.lower() not in compartment_types:
+                self.log_warning(f"Compartment type '{compartment}' not recognized in underscore notation.")
+        if hasattr(object_or_id, 'compartment') and object_or_id.compartment:
+            objcomp = object_or_id.compartment
+            if compartment is None:
+                compartment = objcomp
+                self.log_warning("Comparment is not encoded in the ID but is encoded in the object:",object_or_id.id,objcomp)
+            elif objcomp != compartment:
+                self.log_warning("Compartment mismatch between ID and object:",met_id,objcomp,compartment)
+        return (baseid, compartment, index)
+
     def update_database(self) -> None:
         """Update the ModelSEED database to the latest version."""
         if not os.path.exists(self.modelseed_db_path):
@@ -314,6 +379,16 @@ class MSBiochemUtils(SharedEnvUtils):
                     matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {},"structure_hits": {}})
                     matches[hit]["identifier_hits"][item] = 1 * identifier_hash[item]["type"]
                     matches[hit]["score"] += 10
+            elif item.contains(":"):
+                array = item.split(":")[1]
+                itemid = array[1]
+                itemtype = array[0]
+                if itemid in identifier_hash:
+                    for hit in identifier_hash[item]["ids"]:
+                        if itemtype in identifier_hash[itemid]["type"]:
+                            matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {},"structure_hits": {}})
+                            matches[hit]["identifier_hits"][item] = 1 * identifier_hash[item]["type"]
+                            matches[hit]["score"] += 10
         for item in query_structures:
             if item in structure_hash:
                 for hit in structure_hash[item]["ids"]:
@@ -644,193 +719,152 @@ class MSBiochemUtils(SharedEnvUtils):
             return None
         return self.reaction_directionality_from_bounds(rxnobj)
 
-    def get_compound_deltag(self, compound_id: str) -> Optional[float]:
-        """Get the standard Gibbs free energy of formation for a compound.
+    def build_model_metabolite_index(self,model):
+        """Build a hash of metabolite base IDs linked to compartments"""
+        metabolite_index = {}
+        base_id_index = {}
+        for met in model.metabolites:
+            (base_id,compartment,index) = self._parse_id(met)
+            metabolite_index[met.id] = {
+                "base_id": base_id,
+                "compartment": compartment,
+                "index": index
+            }
+            compartment_index = base_id_index.get(base_id,{})
+            compartment_index[compartment] = met
+        return metabolite_index,base_id_index
 
-        Retrieves deltaG value from:
-        1. ModelSEED compound object deltag attribute
-        2. Compound annotations if available
-
-        Args:
-            compound_id: ModelSEED compound ID (e.g., 'cpd00001')
-
-        Returns:
-            Standard Gibbs free energy of formation in kJ/mol, or None if not available
-
-        Raises:
-            ValueError: If compound not found in ModelSEED database and no deltag in annotations
-        """
-        # Get the compound object from ModelSEED database
-        compound = self.get_compound_by_id(compound_id)
-
-        if compound is None:
-            raise ValueError(
-                f"Compound '{compound_id}' not found in ModelSEED database"
-            )
-
-        # First, try to get deltaG from the compound object's deltag attribute
-        if hasattr(compound, 'deltag') and compound.deltag is not None:
-            # Check if it's a valid value (ModelSEED uses 10000000 for unknown)
-            if abs(compound.deltag) < 10000000:
-                return float(compound.deltag)
-
-        # Try to get from annotations
-        if hasattr(compound, 'annotation') and compound.annotation:
-            if 'deltag' in compound.annotation:
-                deltag_val = compound.annotation['deltag']
-                if isinstance(deltag_val, (int, float)) and abs(deltag_val) < 10000000:
-                    return float(deltag_val)
-                elif isinstance(deltag_val, str):
-                    try:
-                        val = float(deltag_val)
-                        if abs(val) < 10000000:
-                            return val
-                    except ValueError:
-                        pass
-
-        # If we get here, no valid deltaG was found
+    def is_water(self,met):
+        (base_id,compartment,index) = self._parse_id(met)
+        if base_id in ["h2o","cpd00001"]:
+            return True
+        if met.formula == "H2O" and met.charge == 0:
+            return True
+        return False
+    
+    def is_proton(self,met):
+        (base_id,compartment,index) = self._parse_id(met)
+        if base_id in ["h","cpd00067"]:
+            return True
+        if met.formula == "H" and met.charge == 1:
+            return True
+        return False
+    
+    def find_proton_in_compartment(self,model, compartment):
+        """Find or create H+ metabolite in the given compartment."""
+        metabolite_index,base_id_index = self.build_model_metabolite_index(model)
+        h_base_ids = ["h","cpd00067"]
+        for item in h_base_ids:
+            if item in base_id_index:
+                if compartment in base_id_index[item]:
+                    return base_id_index[item][compartment]
+        for met in model.metabolites:
+            print(met.id,met.formula,met.charge,metabolite_index[met.id]["compartment"])
+            if met.formula == "H" and met.charge == 1 and metabolite_index[met.id]["compartment"] == compartment:
+                return met
         return None
 
-    def calculate_reaction_deltag(
-        self,
-        reaction,
-        use_compound_formation: bool = True,
-        require_all_compounds: bool = True
-    ) -> Dict[str, Any]:
-        """Calculate standard free energy change for a reaction.
+    def parse_formula(self,formula_str):
+        """Parse a chemical formula string into element counts."""
+        if not formula_str or pd.isna(formula_str):
+            return {}
+        elements = {}
+        # Match element symbols followed by optional counts
+        import re
+        matches = re.findall(r'([A-Z][a-z]?)(\d*)', formula_str)
+        for element, count in matches:
+            if element:
+                elements[element] = elements.get(element, 0) + (int(count) if count else 1)
+        return elements
 
-        This method can use either:
-        1. Compound formation energies (recommended, more accurate)
-        2. Reaction's stored deltaG value if available
-
-        Args:
-            reaction: Either a ModelSEED reaction ID (str) or a reaction object
-            use_compound_formation: If True, calculate from compound formation energies.
-                                   If False, use reaction's stored deltaG if available.
-            require_all_compounds: Only used if use_compound_formation=True.
-                                  If True, raises error if any compound lacks deltaG.
-
+    def check_reaction_balance(self,rxn):
+        """Check mass and charge balance for a reaction.
+        
         Returns:
-            Dictionary with calculation results (see get_reaction_deltag_from_formation)
-
-        Raises:
-            ValueError: If reaction not found or if calculation requirements not met
+            dict with keys:
+            - 'mass_balanced': bool
+            - 'charge_balanced': bool
+            - 'element_imbalance': dict of element -> imbalance (positive = excess on product side)
+            - 'charge_imbalance': int (positive = excess positive charge on product side)
+            - 'missing_formulas': list of metabolite IDs missing formulas
         """
-        # Get reaction ID
-        if isinstance(reaction, str):
-            reaction_id = reaction
-            reaction_obj = self.get_reaction_by_id(reaction_id)
-        else:
-            reaction_obj = reaction
-            reaction_id = reaction_obj.id if hasattr(reaction_obj, 'id') else str(reaction)
+        element_balance = defaultdict(float)
+        charge_balance = 0
+        missing_formulas = []
+        stoichiometry = {}
 
-        if reaction_obj is None:
-            raise ValueError(f"Reaction '{reaction_id}' not found in ModelSEED database")
+        for met, coeff in rxn.metabolites.items():
+            # Check formula using COBRApy's built-in elements property
+            if met.formula and not pd.isna(met.formula) and met.formula != '':
+                elements = met.elements  # COBRApy parses formula automatically
+                for element, count in elements.items():
+                    element_balance[element] += coeff * count
+            else:
+                missing_formulas.append(met.id)
+            
+            # Check charge
+            if met.charge is not None:
+                charge_balance += coeff * met.charge
+        
+            stoichiometry[met.id] = {
+                'formula': met.formula,
+                'charge': met.charge,
+                'coefficient': coeff,
+                'deltag': met.notes.get('deltag', None)
+            }
+            if "seed.compound" in met.annotation:
+                stoichiometry[met.id]['seed_compound'] = met.annotation['seed.compound']
 
-        # Initialize result structure
-        result = {
-            'deltag': None,
-            'deltag_error': None,
-            'reaction_id': reaction_id,
-            'equation': reaction_obj.build_reaction_string(use_metabolite_names=True),
-            'compound_contributions': {},
-            'missing_compounds': [],
-            'warnings': []
+        # Round to handle floating point errors
+        element_imbalance = {k: round(v, 6) for k, v in element_balance.items() if round(v, 6) != 0}
+        charge_imbalance = round(charge_balance, 6)
+        
+        return {
+            'mass_balanced': len(element_imbalance) == 0,
+            'charge_balanced': charge_imbalance == 0,
+            'element_imbalance': element_imbalance,
+            'charge_imbalance': charge_imbalance,
+            'missing_formulas': missing_formulas,
+            'stoichiometry': stoichiometry
         }
 
-        if use_compound_formation:
-            # Calculate deltaG from stoichiometry
-            deltag_sum = 0.0
-            deltag_error_sum = 0.0  # Sum of squared errors for error propagation
-            missing_compounds = []
-            compound_contributions = {}
-
-            # Iterate through metabolites (compounds) in the reaction
-            for metabolite, stoichiometry in reaction_obj.metabolites.items():
-                # Get base compound ID (remove compartment suffix)
-                base_cpd_id = metabolite.id.split('_')[0]
-
-                try:
-                    # Get deltaG for this compound
-                    deltag_f = self.get_compound_deltag(metabolite.id)
-
-                    if deltag_f is None:
-                        missing_compounds.append({
-                            'compound_id': base_cpd_id,
-                            'stoichiometry': stoichiometry,
-                            'name': metabolite.name if hasattr(metabolite, 'name') else base_cpd_id
-                        })
-                        continue
-
-                    # Calculate contribution: stoichiometry × ΔG°f
-                    contribution = stoichiometry * deltag_f
-                    compound_contributions[base_cpd_id] = {
-                        'deltag_f': deltag_f,
-                        'stoichiometry': stoichiometry,
-                        'contribution': contribution
-                    }
-
-                    deltag_sum += contribution
-
-                    # Try to get error for error propagation
-                    compound = self.get_compound_by_id(base_cpd_id)
-                    if compound and hasattr(compound, 'delta_g_error') and compound.delta_g_error is not None:
-                        if abs(compound.delta_g_error) < 10000000:
-                            # Error propagation: σ² = Σ(νi² × σi²)
-                            deltag_error_sum += (stoichiometry ** 2) * (compound.delta_g_error ** 2)
-
-                except ValueError as e:
-                    missing_compounds.append({
-                        'compound_id': base_cpd_id,
-                        'stoichiometry': stoichiometry,
-                        'error': str(e)
-                    })
-
-            # Check if we have missing compounds
-            if missing_compounds:
-                result['missing_compounds'] = missing_compounds
-
-                if require_all_compounds:
-                    compound_list = [f"{c['compound_id']} (stoich: {c['stoichiometry']})"
-                                for c in missing_compounds]
-                    raise ValueError(
-                        f"Reaction '{reaction_id}' contains compounds without valid deltaG values: "
-                        f"{', '.join(compound_list)}. These compounds are either not in ModelSEED "
-                        f"database or do not have deltaG values in their annotations."
-                    )
-                else:
-                    result['warnings'].append(
-                        f"Partial calculation: {len(missing_compounds)} compound(s) missing deltaG values"
-                    )
-
-            # Set the calculated values
-            result['deltag'] = deltag_sum
-            result['compound_contributions'] = compound_contributions
-
-            # Calculate propagated error
-            if deltag_error_sum > 0:
-                result['deltag_error'] = deltag_error_sum ** 0.5
+    def can_fix_with_protons(self,balance_result):
+        """Check if imbalance can be fixed by adjusting H+ only.
+        
+        Returns:
+            tuple (can_fix: bool, proton_adjustment: float)
+            proton_adjustment is the number of H+ to ADD to the reaction
+            (negative means remove H+ from products / add to substrates)
+        """
+        elem_imbalance = balance_result['element_imbalance']
+        charge_imbalance = balance_result['charge_imbalance']
+        
+        # If only H is imbalanced (or nothing is imbalanced in mass)
+        non_h_imbalance = {k: v for k, v in elem_imbalance.items() if k != 'H'}
+        
+        if non_h_imbalance:
+            # There's an imbalance in elements other than H
+            return False, 0
+        
+        # Get H imbalance (positive = excess H on product side)
+        h_imbalance = elem_imbalance.get('H', 0)
+        
+        # Check if H imbalance matches charge imbalance
+        # H+ has +1 charge, so adding 1 H+ adds +1 charge and +1 H
+        # To fix: we need to add protons to the substrate side (negative coeff)
+        # proton_adjustment = -h_imbalance (to cancel out the H excess)
+        
+        # Verify that fixing H also fixes charge
+        # If we add -h_imbalance protons (to substrate side), 
+        # charge change = -h_imbalance * 1 = -h_imbalance
+        # This should equal -charge_imbalance to balance
+        
+        if h_imbalance == charge_imbalance:
+            # Both can be fixed by adjusting H+ by -h_imbalance
+            return True, -h_imbalance
+        elif h_imbalance == 0 and charge_imbalance != 0:
+            # No H imbalance but charge is off - can fix with H+ 
+            return True, -charge_imbalance
         else:
-            # Use reaction's stored deltaG
-            result = {
-                'deltag': None,
-                'deltag_error': None,
-                'reaction_id': reaction_id,
-                'equation': reaction_obj.build_reaction_string() if hasattr(reaction_obj, 'build_reaction_string') else str(reaction_obj),
-                'source': 'reaction_attribute',
-                'warnings': []
-            }
-
-            if hasattr(reaction_obj, 'delta_g') and reaction_obj.delta_g is not None:
-                if abs(reaction_obj.delta_g) < 10000000:
-                    result['deltag'] = float(reaction_obj.deltag)
-                else:
-                    result['warnings'].append("Reaction deltaG value is unknown (10000000)")
-            else:
-                result['warnings'].append("Reaction has no stored deltaG value")
-
-            if hasattr(reaction_obj, 'delta_g_error') and reaction_obj.delta_g_error is not None:
-                if abs(reaction_obj.delta_g_error) < 10000000:
-                    result['deltag_error'] = float(reaction_obj.delta_g_error)
-
-            return result
+            # H and charge imbalances don't match - can't fix with just H+
+            return False, 0

@@ -1,0 +1,98 @@
+{
+    "KBaseGenomes.GenomeDataLakeTables-0.1": {
+        "id": "GenomeDataLakeTables",
+        "description": "GenomeDataLakeTables object: this object holds the DataLake tables with contextual data for the input genome set\n\n@metadata ws genomeset_ref as Genome set\n@metadata ws description as Description\n@metadata ws name as Name\n@metadata ws length(pangenome_data) as Number pangenomes",
+        "type": "object",
+        "original-type": "kidl-structure",
+        "properties": {
+            "description": {
+                "type": "string",
+                "original-type": "kidl-string"
+            },
+            "name": {
+                "type": "string",
+                "original-type": "kidl-string"
+            },
+            "genomeset_ref": {
+                "type": "string",
+                "original-type": "kidl-string",
+                "id-reference": {
+                    "attributes": [
+                        "KBaseCollections.GenomeSet"
+                    ],
+                    "id-type": "ws"
+                }
+            },
+            "pangenome_data": {
+                "type": "array",
+                "original-type": "kidl-list",
+                "items": {
+                    "type": "object",
+                    "original-type": "kidl-structure",
+                    "properties": {
+                        "pangenome_id": {
+                            "type": "string",
+                            "original-type": "kidl-string"
+                        },
+                        "pangenome_taxonomy": {
+                            "type": "string",
+                            "original-type": "kidl-string"
+                        },
+                        "user_genomes": {
+                            "type": "array",
+                            "original-type": "kidl-list",
+                            "items": {
+                                "type": "string",
+                                "original-type": "kidl-string",
+                                "id-reference": {
+                                    "attributes": [
+                                        "KBaseGenomes.Genome",
+                                        "KBaseGenomeAnnotations.GenomeAnnotation"
+                                    ],
+                                    "id-type": "ws"
+                                }
+                            }
+                        },
+                        "datalake_genomes": {
+                            "type": "array",
+                            "original-type": "kidl-list",
+                            "items": {
+                                "type": "string",
+                                "original-type": "kidl-string"
+                            }
+                        },
+                        "sqllite_tables_handle_ref": {
+                            "type": "string",
+                            "original-type": "kidl-string",
+                            "id-reference": {
+                                "attributes": [],
+                                "id-type": "handle"
+                            }
+                        }
+                    },
+                    "additionalProperties": true,
+                    "required": [
+                        "pangenome_id",
+                        "pangenome_taxonomy",
+                        "user_genomes",
+                        "datalake_genomes",
+                        "sqllite_tables_handle_ref"
+                    ]
+                }
+            }
+        },
+        "additionalProperties": true,
+        "required": [
+            "description",
+            "name",
+            "genomeset_ref",
+            "pangenome_data"
+        ],
+        "metadata-ws": {
+            "Description": "description",
+            "Genome set": "genomeset_ref",
+            "Name": "name",
+            "Number pangenomes": "length(pangenome_data)"
+        }
+    }
+}

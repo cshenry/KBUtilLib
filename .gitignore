@@ -38,3 +38,6 @@ OPTIONAL_IMPORTS_SUMMARY.md
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 .idea
+
+# Large data/cache files
+data/AICurationCacheCompoundCuration.json

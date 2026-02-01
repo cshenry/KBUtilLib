@@ -6,6 +6,7 @@ import pandas as pd
 import re
 import json
 import os
+import cobra
 from pathlib import Path
 import statistics
 
@@ -45,6 +46,895 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             **kwargs: Additional keyword arguments passed to SharedEnvironment
         """
         super().__init__(**kwargs)
+        self.local_map_directory = os.path.join(os.path.dirname(__file__),'..','..', 'data', 'escher_maps')
+        self.kbase_map_ws_id = 93991
+        # Private attributes for lazy loading
+        self._local_map_index = None
+        self._kbase_map_index = None
+
+    @property
+    def local_map_index(self) -> Dict[str, Dict]:
+        """Lazy-loaded index of local escher maps.
+
+        Returns:
+            Dict mapping map name (filename without .json) to stats dict with 'filename' added
+        """
+        if self._local_map_index is None:
+            self._local_map_index = {}
+            if os.path.isdir(self.local_map_directory):
+                for filename in os.listdir(self.local_map_directory):
+                    if filename.endswith('.json'):
+                        map_name = filename[:-5]  # Remove .json extension
+                        filepath = os.path.join(self.local_map_directory, filename)
+                        try:
+                            with open(filepath, 'r') as f:
+                                map_data = json.load(f)
+                            stats = self._compute_stats_from_map_data(map_data)
+                            stats['filename'] = filepath
+                            self._local_map_index[map_name] = stats
+                        except (json.JSONDecodeError, IOError) as e:
+                            self.log_warning(f"Could not load local map {filename}: {e}")
+        return self._local_map_index
+
+    @property
+    def kbase_map_index(self) -> Dict[str, Dict]:
+        """Lazy-loaded index of KBase workspace escher maps.
+
+        Returns:
+            Dict mapping map name (workspace object name) to stats dict with 'kbase_ref' added
+        """
+        if self._kbase_map_index is None:
+            self._kbase_map_index = {}
+            try:
+                # List objects in the EscherMaps workspace
+                # list_ws_objects returns dict: {obj_name: obj_info_tuple}
+                objects = self.list_ws_objects(self.kbase_map_ws_id)
+                for obj_name, obj_info in objects.items():
+                    obj_ref = f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"  # ws_id/obj_id/version
+                    try:
+                        obj_result = self.get_object(obj_ref)
+                        map_data = obj_result.get("data") if isinstance(obj_result, dict) else obj_result
+                        stats = self._compute_stats_from_map_data(map_data)
+                        stats['kbase_ref'] = obj_ref
+                        self._kbase_map_index[obj_name] = stats
+                    except Exception as e:
+                        self.log_warning(f"Could not load KBase map {obj_name}: {e}")
+            except Exception as e:
+                self.log_warning(f"Could not access KBase workspace {self.kbase_map_ws_id}: {e}")
+        return self._kbase_map_index
+
+    def _compute_stats_from_map_data(self, map_data, model=None) -> Dict:
+        """Computes stats from map json data.
+
+        Computes total metabolites and reactions in the map. If a model is provided,
+        also computes how many genes, reactions, and metabolites from the model are in the map.
+
+        Args:
+            map_data: Escher map JSON data (list with header and canvas data)
+            model: Optional COBRApy model or MSModelUtil to compare against
+
+        Returns:
+            Dict containing:
+                - reaction_count: Total reactions in map
+                - metabolite_count: Total metabolites in map
+                - reaction_ids: List of reaction IDs in map
+                - metabolite_ids: List of metabolite IDs in map
+                If model provided:
+                - model_reactions_in_map: Count of model reactions found in map
+                - model_metabolites_in_map: Count of model metabolites found in map
+                - model_genes_in_map: Count of model genes found in map
+                - model_reaction_coverage: Fraction of model reactions in map
+                - model_metabolite_coverage: Fraction of model metabolites in map
+        """
+        stats = {
+            'reaction_count': 0,
+            'metabolite_count': 0,
+            'reaction_ids': [],
+            'metabolite_ids': []
+        }
+
+        # Handle both KBase and Escher map formats
+        if self._is_kbase_map_format(map_data):
+            # KBase format: {"metadata": {...}, "layout": {...}}
+            canvas_data = map_data.get('layout', {})
+        elif self._is_escher_map_format(map_data):
+            # Escher format: [header, canvas_data]
+            canvas_data = map_data[1]
+        else:
+            self.log_warning("Map data does not have expected Escher or KBase structure")
+            return stats
+
+        # Extract reactions
+        reactions = canvas_data.get('reactions', {})
+        for rxn_data in reactions.values():
+            bigg_id = rxn_data.get('bigg_id', '')
+            if bigg_id and bigg_id not in stats['reaction_ids']:
+                stats['reaction_ids'].append(bigg_id)
+
+        stats['reaction_count'] = len(stats['reaction_ids'])
+
+        # Extract metabolites (nodes of type 'metabolite')
+        nodes = canvas_data.get('nodes', {})
+        for node_data in nodes.values():
+            if node_data.get('node_type') == 'metabolite':
+                bigg_id = node_data.get('bigg_id', '')
+                if bigg_id and bigg_id not in stats['metabolite_ids']:
+                    stats['metabolite_ids'].append(bigg_id)
+
+        stats['metabolite_count'] = len(stats['metabolite_ids'])
+
+        # If model provided, compute coverage statistics
+        if model is not None:
+            # Handle model input (COBRApy model or MSModelUtil)
+            if hasattr(model, 'model'):
+                cobra_model = model.model
+            else:
+                cobra_model = model
+
+            # Get model IDs
+            model_rxn_ids = {rxn.id for rxn in cobra_model.reactions}
+            model_met_ids = {met.id for met in cobra_model.metabolites}
+
+            # Calculate overlaps
+            map_rxn_set = set(stats['reaction_ids'])
+            map_met_set = set(stats['metabolite_ids'])
+
+            rxns_in_map = model_rxn_ids & map_rxn_set
+            mets_in_map = model_met_ids & map_met_set
+
+            # For genes, we need to check which genes are associated with reactions in the map
+            genes_in_map = set()
+            for rxn_id in rxns_in_map:
+                if rxn_id in cobra_model.reactions:
+                    rxn = cobra_model.reactions.get_by_id(rxn_id)
+                    genes_in_map.update(gene.id for gene in rxn.genes)
+
+            stats['model_reactions_in_map'] = len(rxns_in_map)
+            stats['model_metabolites_in_map'] = len(mets_in_map)
+            stats['model_genes_in_map'] = len(genes_in_map)
+
+            # Coverage fractions
+            stats['model_reaction_coverage'] = len(rxns_in_map) / len(model_rxn_ids) if model_rxn_ids else 0.0
+            stats['model_metabolite_coverage'] = len(mets_in_map) / len(model_met_ids) if model_met_ids else 0.0
+
+        return stats
+
+    def list_available_maps(self, model=None, as_df: bool = False) -> Union[list, pd.DataFrame]:
+        """List all available Escher maps from both local and KBase sources with stats.
+
+        Retrieves all maps from the local map directory and KBase workspace,
+        computes statistics for each map, and returns the results.
+
+        Args:
+            model: Optional COBRApy model or MSModelUtil. If provided, computes
+                   model coverage statistics for each map. If None, uses cached stats.
+            as_df: If True, returns results as a pandas DataFrame. Default False.
+
+        Returns:
+            Union[list, pd.DataFrame]: List of dictionaries (or DataFrame if as_df=True)
+                containing map information and stats:
+                - name: Map name
+                - source: 'local' or 'kbase'
+                - filename: File path (for local maps)
+                - kbase_ref: KBase reference (for KBase maps)
+                - reaction_count: Number of reactions in map
+                - metabolite_count: Number of metabolites in map
+                If model provided:
+                - model_reactions_in_map: Count of model reactions in map
+                - model_metabolites_in_map: Count of model metabolites in map
+                - model_genes_in_map: Count of model genes in map
+                - model_reaction_coverage: Fraction of model reactions in map
+                - model_metabolite_coverage: Fraction of model metabolites in map
+
+        Example:
+            >>> from kbutillib import EscherUtils
+            >>> import cobra
+            >>>
+            >>> eu = EscherUtils()
+            >>> # List all maps without model coverage
+            >>> maps = eu.list_available_maps()
+            >>> print(f"Found {len(maps)} maps")
+            >>>
+            >>> # List maps with model coverage as DataFrame
+            >>> model = cobra.test.create_test_model("textbook")
+            >>> df = eu.list_available_maps(model=model, as_df=True)
+            >>> print(df.sort_values('model_reaction_coverage', ascending=False))
+        """
+        results = []
+
+        # Process local maps
+        if model is None:
+            # Use cached stats from lazy-loaded index
+            for map_name, stats in self.local_map_index.items():
+                entry = {
+                    'name': map_name,
+                    'source': 'local',
+                    'filename': stats.get('filename', ''),
+                    'kbase_ref': None,
+                    'reaction_count': stats.get('reaction_count', 0),
+                    'metabolite_count': stats.get('metabolite_count', 0),
+                }
+                # Don't include reaction_ids and metabolite_ids in output (too verbose)
+                results.append(entry)
+        else:
+            # Compute stats with model for local maps
+            if os.path.isdir(self.local_map_directory):
+                for filename in os.listdir(self.local_map_directory):
+                    if filename.endswith('.json'):
+                        map_name = filename[:-5]
+                        filepath = os.path.join(self.local_map_directory, filename)
+                        try:
+                            with open(filepath, 'r') as f:
+                                map_data = json.load(f)
+                            stats = self._compute_stats_from_map_data(map_data, model=model)
+                            entry = {
+                                'name': map_name,
+                                'source': 'local',
+                                'filename': filepath,
+                                'kbase_ref': None,
+                                'reaction_count': stats.get('reaction_count', 0),
+                                'metabolite_count': stats.get('metabolite_count', 0),
+                                'model_reactions_in_map': stats.get('model_reactions_in_map', 0),
+                                'model_metabolites_in_map': stats.get('model_metabolites_in_map', 0),
+                                'model_genes_in_map': stats.get('model_genes_in_map', 0),
+                                'model_reaction_coverage': stats.get('model_reaction_coverage', 0.0),
+                                'model_metabolite_coverage': stats.get('model_metabolite_coverage', 0.0),
+                            }
+                            results.append(entry)
+                        except (json.JSONDecodeError, IOError) as e:
+                            self.log_warning(f"Could not load local map {filename}: {e}")
+
+        # Process KBase maps
+        if model is None:
+            # Use cached stats from lazy-loaded index
+            for map_name, stats in self.kbase_map_index.items():
+                entry = {
+                    'name': map_name,
+                    'source': 'kbase',
+                    'filename': None,
+                    'kbase_ref': stats.get('kbase_ref', ''),
+                    'reaction_count': stats.get('reaction_count', 0),
+                    'metabolite_count': stats.get('metabolite_count', 0),
+                }
+                results.append(entry)
+        else:
+            # Compute stats with model for KBase maps
+            try:
+                objects = self.list_ws_objects(self.kbase_map_ws_id)
+                for obj_name, obj_info in objects.items():
+                    obj_ref = f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"
+                    try:
+                        obj_result = self.get_object(obj_ref)
+                        map_data = obj_result.get("data") if isinstance(obj_result, dict) else obj_result
+                        stats = self._compute_stats_from_map_data(map_data, model=model)
+                        entry = {
+                            'name': obj_name,
+                            'source': 'kbase',
+                            'filename': None,
+                            'kbase_ref': obj_ref,
+                            'reaction_count': stats.get('reaction_count', 0),
+                            'metabolite_count': stats.get('metabolite_count', 0),
+                            'model_reactions_in_map': stats.get('model_reactions_in_map', 0),
+                            'model_metabolites_in_map': stats.get('model_metabolites_in_map', 0),
+                            'model_genes_in_map': stats.get('model_genes_in_map', 0),
+                            'model_reaction_coverage': stats.get('model_reaction_coverage', 0.0),
+                            'model_metabolite_coverage': stats.get('model_metabolite_coverage', 0.0),
+                        }
+                        results.append(entry)
+                    except Exception as e:
+                        self.log_warning(f"Could not load KBase map {obj_name}: {e}")
+            except Exception as e:
+                self.log_warning(f"Could not access KBase workspace {self.kbase_map_ws_id}: {e}")
+
+        if as_df:
+            return pd.DataFrame(results)
+        return results
+
+    def map_stats(self, map_identifier: str, model=None) -> Dict:
+        """Load a map and compute its statistics.
+
+        Loads the specified map using _load_map and computes statistics
+        including reaction/metabolite counts and optionally model coverage.
+
+        Args:
+            map_identifier: Name of map, filename, or KBase reference
+            model: Optional COBRApy model or MSModelUtil. If provided, computes
+                   model coverage statistics.
+
+        Returns:
+            Dict containing:
+                - name: Map identifier used
+                - reaction_count: Total reactions in map
+                - metabolite_count: Total metabolites in map
+                - reaction_ids: List of reaction IDs in map
+                - metabolite_ids: List of metabolite IDs in map
+                If model provided:
+                - model_reactions_in_map: Count of model reactions found in map
+                - model_metabolites_in_map: Count of model metabolites found in map
+                - model_genes_in_map: Count of model genes found in map
+                - model_reaction_coverage: Fraction of model reactions in map
+                - model_metabolite_coverage: Fraction of model metabolites in map
+
+        Raises:
+            ValueError: If the map cannot be found or loaded
+
+        Example:
+            >>> from kbutillib import EscherUtils
+            >>> import cobra
+            >>>
+            >>> eu = EscherUtils()
+            >>> # Get stats for a map without model
+            >>> stats = eu.map_stats("core")
+            >>> print(f"Map has {stats['reaction_count']} reactions")
+            >>>
+            >>> # Get stats with model coverage
+            >>> model = cobra.test.create_test_model("textbook")
+            >>> stats = eu.map_stats("core", model=model)
+            >>> print(f"Model coverage: {stats['model_reaction_coverage']:.1%}")
+        """
+        # Load the map
+        map_data = self._load_map(map_identifier)
+
+        # Compute stats
+        stats = self._compute_stats_from_map_data(map_data, model=model)
+
+        # Add the map identifier to the stats
+        stats['name'] = map_identifier
+
+        return stats
+
+    def _load_map(self, map_identifier: str) -> Dict:
+        """Loads a map from an input name, filename, or KBase reference.
+
+        Attempts to load the map in the following order:
+        1. Check if it's a file path that exists
+        2. Check if it's in the local_map_index
+        3. Check if it's in the kbase_map_index
+        4. Check if it's a KBase reference and attempt to fetch from workspace
+
+        Args:
+            map_identifier: Name of map, filename, or KBase reference
+
+        Returns:
+            dict: Map data as loaded from JSON
+
+        Raises:
+            ValueError: If the map cannot be found or loaded from any source
+        """
+        attempts = []
+
+        # 1. Check if the map is a filename by checking if the file exists
+        if os.path.isfile(map_identifier):
+            try:
+                with open(map_identifier, 'r') as f:
+                    map_data = json.load(f)
+                # Validate it's a valid Escher map (should be a list with at least 2 elements)
+                if isinstance(map_data, list) and len(map_data) >= 2:
+                    self.log_info(f"Loaded map from file: {map_identifier}")
+                    return map_data
+                else:
+                    attempts.append(f"File '{map_identifier}' exists but is not a valid Escher map format")
+            except json.JSONDecodeError as e:
+                attempts.append(f"File '{map_identifier}' exists but is not valid JSON: {e}")
+            except IOError as e:
+                attempts.append(f"File '{map_identifier}' exists but could not be read: {e}")
+        else:
+            attempts.append(f"File '{map_identifier}' does not exist")
+
+        # 2. Check if the map is in local_map_index
+        if map_identifier in self.local_map_index:
+            filepath = self.local_map_index[map_identifier].get('filename')
+            if filepath and os.path.isfile(filepath):
+                try:
+                    with open(filepath, 'r') as f:
+                        map_data = json.load(f)
+                    self.log_info(f"Loaded map '{map_identifier}' from local index: {filepath}")
+                    return map_data
+                except (json.JSONDecodeError, IOError) as e:
+                    attempts.append(f"Map '{map_identifier}' found in local index but failed to load: {e}")
+            else:
+                attempts.append(f"Map '{map_identifier}' found in local index but file missing")
+        else:
+            attempts.append(f"Map '{map_identifier}' not found in local map index")
+
+        # 3. Check if the map is in kbase_map_index
+        if map_identifier in self.kbase_map_index:
+            kbase_ref = self.kbase_map_index[map_identifier].get('kbase_ref')
+            if kbase_ref:
+                try:
+                    obj_result = self.get_object(kbase_ref)
+                    map_data = obj_result.get("data") if isinstance(obj_result, dict) else obj_result
+                    # Translate from KBase format to Escher format if needed
+                    if self._is_kbase_map_format(map_data):
+                        map_data = self._translate_map_from_kbase(map_data)
+                    self.log_info(f"Loaded map '{map_identifier}' from KBase index: {kbase_ref}")
+                    return map_data
+                except Exception as e:
+                    attempts.append(f"Map '{map_identifier}' found in KBase index but failed to load: {e}")
+            else:
+                attempts.append(f"Map '{map_identifier}' found in KBase index but no reference available")
+        else:
+            attempts.append(f"Map '{map_identifier}' not found in KBase map index")
+
+        # 4. Check if it's a KBase reference directly
+        if self.is_ref(map_identifier):
+            try:
+                obj_result = self.get_object(map_identifier)
+                map_data = obj_result.get("data") if isinstance(obj_result, dict) else obj_result
+                # Translate from KBase format to Escher format if needed
+                if self._is_kbase_map_format(map_data):
+                    map_data = self._translate_map_from_kbase(map_data)
+                    self.log_info(f"Loaded and translated map from KBase reference: {map_identifier}")
+                    return map_data
+                elif self._is_escher_map_format(map_data):
+                    self.log_info(f"Loaded map from KBase reference: {map_identifier}")
+                    return map_data
+                else:
+                    attempts.append(f"KBase reference '{map_identifier}' loaded but is not a valid Escher or KBase map format")
+            except Exception as e:
+                attempts.append(f"KBase reference '{map_identifier}' failed to load: {e}")
+        else:
+            attempts.append(f"'{map_identifier}' is not a valid KBase reference")
+
+        # If everything fails, report failure with all attempts
+        error_msg = f"Could not load map '{map_identifier}'. Attempted:\n"
+        error_msg += "\n".join(f"  - {attempt}" for attempt in attempts)
+        raise ValueError(error_msg)
+
+    def _translate_map_from_kbase(self, kbase_map: Dict) -> list:
+        """Convert a KBase map format to standard Escher map format.
+
+        KBase maps use a dict structure: {"metadata": {...}, "layout": {...}}
+        Escher maps use a list structure: [header_dict, canvas_dict]
+
+        Additionally handles:
+        - Converting reversibility from int (0/1) to bool
+        - Preserving all other fields unchanged
+
+        Args:
+            kbase_map: Map data in KBase format (dict with 'metadata' and 'layout' keys)
+
+        Returns:
+            list: Map data in standard Escher format [header, canvas]
+        """
+        import copy
+
+        # If it's already in Escher format, return as-is
+        if isinstance(kbase_map, list) and len(kbase_map) >= 2:
+            return kbase_map
+
+        # Validate KBase format
+        if not isinstance(kbase_map, dict):
+            raise ValueError(f"Expected dict for KBase map, got {type(kbase_map).__name__}")
+
+        if 'layout' not in kbase_map:
+            raise ValueError("KBase map missing 'layout' key")
+
+        # Extract metadata (header) - use 'metadata' if present, or construct from available fields
+        metadata = kbase_map.get('metadata', {})
+        header = {
+            'map_name': metadata.get('map_name', ''),
+            'map_id': metadata.get('map_id', ''),
+            'map_description': metadata.get('map_description', ''),
+            'homepage': metadata.get('homepage', 'https://escher.github.io'),
+            'schema': metadata.get('schema', 'https://escher.github.io/escher/jsonschema/1-0-0#')
+        }
+
+        # Extract layout (canvas)
+        layout = copy.deepcopy(kbase_map['layout'])
+
+        # Convert reversibility from int to bool in reactions
+        reactions = layout.get('reactions', {})
+        for rxn_data in reactions.values():
+            if 'reversibility' in rxn_data:
+                # KBase uses 0/1, Escher uses true/false
+                rxn_data['reversibility'] = bool(rxn_data['reversibility'])
+
+        return [header, layout]
+
+    def _translate_map_to_kbase(self, escher_map: list, authors: list = None) -> Dict:
+        """Convert a standard Escher map format to KBase map format.
+
+        Escher maps use a list structure: [header_dict, canvas_dict]
+        KBase maps use a dict structure: {"metadata": {...}, "layout": {...}}
+
+        Additionally handles:
+        - Converting reversibility from bool to int (0/1)
+        - Adding 'authors' field to metadata
+
+        Args:
+            escher_map: Map data in standard Escher format [header, canvas]
+            authors: Optional list of author names to include in metadata
+
+        Returns:
+            dict: Map data in KBase format with 'metadata' and 'layout' keys
+        """
+        import copy
+
+        # If it's already in KBase format, return as-is
+        if isinstance(escher_map, dict) and 'layout' in escher_map:
+            return escher_map
+
+        # Validate Escher format
+        if not isinstance(escher_map, list) or len(escher_map) < 2:
+            raise ValueError(f"Expected list with at least 2 elements for Escher map, got {type(escher_map).__name__}")
+
+        header = escher_map[0]
+        canvas = copy.deepcopy(escher_map[1])
+
+        # Build metadata from header
+        metadata = {
+            'map_name': header.get('map_name', ''),
+            'map_id': header.get('map_id', ''),
+            'map_description': header.get('map_description', ''),
+            'homepage': header.get('homepage', 'https://escher.github.io'),
+            'schema': header.get('schema', 'https://escher.github.io/escher/jsonschema/1-0-0#'),
+            'authors': authors if authors else []
+        }
+
+        # Convert reversibility from bool to int in reactions
+        reactions = canvas.get('reactions', {})
+        for rxn_data in reactions.values():
+            if 'reversibility' in rxn_data:
+                # Escher uses true/false, KBase uses 0/1
+                rxn_data['reversibility'] = 1 if rxn_data['reversibility'] else 0
+
+        return {
+            'metadata': metadata,
+            'layout': canvas
+        }
+
+    def _is_kbase_map_format(self, map_data) -> bool:
+        """Check if map data is in KBase format.
+
+        Args:
+            map_data: Map data to check
+
+        Returns:
+            bool: True if map is in KBase format (dict with 'layout' key)
+        """
+        return isinstance(map_data, dict) and 'layout' in map_data
+
+    def _is_escher_map_format(self, map_data) -> bool:
+        """Check if map data is in standard Escher format.
+
+        Args:
+            map_data: Map data to check
+
+        Returns:
+            bool: True if map is in Escher format (list with at least 2 elements)
+        """
+        return isinstance(map_data, list) and len(map_data) >= 2
+
+    def _translate_map_with_flux(self, map_data: Dict, flux: Dict[str, float]) -> Dict:
+        """Reverses map reaction definitions for negative fluxes and adjusts reaction IDs.
+
+        For reactions with negative flux values, this function:
+        1. Reverses the reaction direction in the map (swaps segment orientations)
+        2. Changes the reaction ID to <ID>-rev
+
+        Args:
+            map_data: Escher map data dictionary containing reaction definitions
+            flux: Dictionary mapping reaction IDs to flux values
+
+        Returns:
+            Dict: Modified map data with reversed reactions for negative fluxes
+        """
+        import copy
+
+        # Get reactions from the map (structure: map_data[1]['reactions'])
+        if not isinstance(map_data, list) or len(map_data) < 2:
+            self.log_warning("Map data does not have expected structure")
+            return map_data
+
+        reactions = map_data[1].get('reactions', {})
+
+        # Track which reactions need to be reversed
+        reactions_to_reverse = []
+        for rxn_id, flux_value in flux.items():
+            if flux_value < 0:
+                reactions_to_reverse.append(rxn_id)
+
+        # Process each reaction in the map
+        new_reactions = {}
+        for map_rxn_id, rxn_data in reactions.items():
+            bigg_id = rxn_data.get('bigg_id', '')
+
+            if bigg_id in reactions_to_reverse:
+                # Create reversed version
+                reversed_data = copy.deepcopy(rxn_data)
+
+                # Update the bigg_id to add -rev suffix
+                reversed_data['bigg_id'] = f"{bigg_id}-rev"
+                # Update label_x/label_y positions if needed (keep same for now)
+                if 'label' in reversed_data:
+                    reversed_data['label'] = f"{bigg_id}(R)"
+
+                if 'metabolites' in reversed_data:
+                    for metabolite_data in reversed_data["metabolites"]:
+                        metabolite_data["coefficient"] = -1*metabolite_data["coefficient"]
+
+                new_reactions[map_rxn_id] = reversed_data
+            else:
+                new_reactions[map_rxn_id] = rxn_data
+
+        map_data[1]['reactions'] = new_reactions
+        return map_data
+
+    def _get_short_reaction_name(self, reaction) -> str:
+        """Get a short display name for a reaction.
+
+        For ModelSEED reactions (rxnXXXXX pattern), finds the shortest alias name
+        from the biochemistry database. For other reactions, uses the reaction ID.
+
+        Args:
+            reaction: COBRA reaction object
+
+        Returns:
+            str: Short display name for the reaction
+        """
+        # Try to extract ModelSEED ID from reaction
+        msid = self.reaction_to_msid(reaction)
+
+        if msid:
+            # Fetch the biochemistry reaction to get aliases
+            biochem_rxn = self.get_reaction_by_id(msid)
+            if biochem_rxn:
+                # Collect all name aliases
+                all_names = []
+                if biochem_rxn.name:
+                    all_names.append(biochem_rxn.name)
+                if hasattr(biochem_rxn, 'names') and biochem_rxn.names:
+                    all_names.extend(list(biochem_rxn.names))
+
+                # Find the shortest name
+                if all_names:
+                    shortest = min(all_names, key=len)
+                    return shortest
+
+        # Fallback: use the reaction ID (without any -rev suffix for cleaner display)
+        rxn_id = reaction.id
+        if rxn_id.endswith('-rev'):
+            rxn_id = rxn_id[:-4]
+        return rxn_id
+
+    def _get_short_name_for_reaction_id(self, reaction_id: str) -> str:
+        """Get a short display name for a reaction ID string.
+
+        For ModelSEED reactions (rxnXXXXX pattern), finds the shortest alias name
+        from the biochemistry database. For other reactions, uses the reaction ID.
+
+        Args:
+            reaction_id: Reaction ID string (e.g., 'rxn00001_c0', 'PFK')
+
+        Returns:
+            str: Short display name for the reaction
+        """
+        # Try to extract ModelSEED ID from reaction ID string
+        msid = self.reaction_id_to_msid(reaction_id)
+
+        if msid:
+            # Fetch the biochemistry reaction to get aliases
+            biochem_rxn = self.get_reaction_by_id(msid)
+            if biochem_rxn:
+                # Collect all name aliases
+                all_names = []
+                if biochem_rxn.name:
+                    all_names.append(biochem_rxn.name)
+                if hasattr(biochem_rxn, 'names') and biochem_rxn.names:
+                    all_names.extend(list(biochem_rxn.names))
+
+                # Find the shortest name
+                if all_names:
+                    shortest = min(all_names, key=len)
+                    return shortest
+
+        # Fallback: use the reaction ID (without any -rev suffix for cleaner display)
+        if reaction_id.endswith('-rev'):
+            reaction_id = reaction_id[:-4]
+        return reaction_id
+
+    def update_map_reaction_names(
+        self,
+        map_identifier: str,
+        output_path: Optional[str] = None
+    ) -> Dict:
+        """Update reaction names in an Escher map to use short ModelSEED names.
+
+        For each reaction in the map:
+        - If it's a ModelSEED reaction (rxnXXXXX pattern), uses the shortest
+          alias name from the biochemistry database
+        - Otherwise, uses the reaction's bigg_id as the name
+
+        Args:
+            map_identifier: Name of map, filename, or KBase reference
+            output_path: Optional path to save the modified map. If None,
+                        the map is modified but not saved.
+
+        Returns:
+            Dict: The modified map data (in Escher format)
+
+        Example:
+            >>> from kbutillib import EscherUtils
+            >>> eu = EscherUtils()
+            >>> # Update a map and save to file
+            >>> eu.update_map_reaction_names("my_model_map.json", "my_model_map_short_names.json")
+            >>> # Or update without saving
+            >>> map_data = eu.update_map_reaction_names("my_model_map.json")
+        """
+        # Load the map
+        if isinstance(map_identifier, str):
+            map_data = self._load_map(map_identifier)
+        else:
+            map_data = map_identifier
+
+        # Get reactions from the map
+        if not isinstance(map_data, list) or len(map_data) < 2:
+            self.log_warning("Map data does not have expected structure")
+            return map_data
+
+        reactions = map_data[1].get('reactions', {})
+        updated_count = 0
+
+        # Update each reaction's name
+        for map_rxn_id, rxn_data in reactions.items():
+            bigg_id = rxn_data.get('bigg_id', '')
+            if bigg_id:
+                short_name = self._get_short_name_for_reaction_id(bigg_id)
+                rxn_data['name'] = short_name
+                updated_count += 1
+
+        self.log_info(f"Updated names for {updated_count} reactions in map")
+
+        # Save to file if output path provided
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(map_data, f, indent=2)
+            self.log_info(f"Saved updated map to: {output_path}")
+
+        return map_data
+
+    def _translate_model_with_flux(self, model, flux: Dict[str, float], use_short_rxn_names=True):
+        """Clones a model and reverses all reactions associated with negative fluxes.
+
+        For reactions with negative flux values, this function:
+        1. Reverses the reaction (swaps reactants and products)
+        2. Changes the reaction ID to <ID>-rev
+        3. Adjusts bounds appropriately
+        4. Sets short display names for all reactions (shortest alias for ModelSEED reactions, ID for others)
+
+        Args:
+            model: COBRApy model object or MSModelUtil object
+            flux: Dictionary mapping reaction IDs to flux values
+
+        Returns:
+            COBRApy model: Cloned model with reversed reactions for negative fluxes
+                          and shortened reaction names for Escher display
+        """
+        # Handle model input (COBRApy model or MSModelUtil)
+        if hasattr(model, 'model'):
+            cobra_model = model.model
+        else:
+            cobra_model = model
+
+        # Clone the model
+        cloned_model = cobra.io.json.from_json(cobra.io.json.to_json(cobra_model))
+
+        # Track which reactions need to be reversed
+        reactions_to_reverse = []
+        for rxn_id, flux_value in flux.items():
+            if flux_value < 0 and rxn_id in cloned_model.reactions:
+                reactions_to_reverse.append(rxn_id)
+
+        # Reverse each reaction with negative flux
+        for rxn_id in reactions_to_reverse:
+            rxn = cloned_model.reactions.get_by_id(rxn_id)
+
+            # Store original metabolites (coefficient dict)
+            original_metabolites = {met: coef for met, coef in rxn.metabolites.items()}
+
+            # Clear and add reversed metabolites (negate all coefficients)
+            rxn.subtract_metabolites(original_metabolites)
+            reversed_metabolites = {met: -coef for met, coef in original_metabolites.items()}
+            rxn.add_metabolites(reversed_metabolites)
+
+            # Swap and negate bounds
+            old_lower = rxn.lower_bound
+            old_upper = rxn.upper_bound
+            rxn.lower_bound = -old_upper
+            rxn.upper_bound = -old_lower
+
+            # Change the reaction ID to add -rev suffix
+            rxn.id = f"{rxn_id}-rev"
+
+        # IMPORTANT: Repair the model to update internal indices after ID changes
+        # Without this, the model's reactions dict still uses old IDs as keys
+        cloned_model.repair()
+
+        if use_short_rxn_names:
+            # Set short display names for all reactions
+            for rxn in cloned_model.reactions:
+                rxn.name = self._get_short_reaction_name(rxn)
+
+        return cloned_model
+
+
+    def _translate_flux(self, flux: Dict[str, float]) -> Dict[str, float]:
+        """Changes all negative fluxes to positive values while adjusting IDs.
+
+        For reactions with negative flux values, this function:
+        1. Negates the flux value to make it positive
+        2. Changes the reaction ID to <ID>-rev
+
+        Args:
+            flux: Dictionary mapping reaction IDs to flux values
+
+        Returns:
+            Dict[str, float]: Modified flux dictionary with all positive values
+                and adjusted IDs for originally negative fluxes
+        """
+        translated_flux = {}
+
+        for rxn_id, flux_value in flux.items():
+            if flux_value < 0:
+                # Negate to make positive and add -rev suffix to ID
+                translated_flux[f"{rxn_id}-rev"] = -flux_value
+            else:
+                # Keep as-is
+                translated_flux[rxn_id] = flux_value
+
+        return translated_flux
+
+    def create_map_html2(self,model,map,output_path,flux=None,height=600,width=900,use_short_rxn_names=True):
+        """Create an HTML file that renders an Escher map with model data
+
+        Args:
+            model: COBRApy model object or MSModelUtil object
+            flux: Flux solution data (dict or pandas Series with reaction IDs as keys/index)
+
+        Returns:
+            str: Path to the created HTML file
+        """
+        try:
+            from escher import Builder
+        except ImportError:
+            raise ImportError("escher package is required for map visualization. Install with: pip install escher")
+
+        #Translating model to modelutl
+        if not isinstance(model, self.MSModelUtil):
+            model = self.MSModelUtil(model)
+        
+        #Loading map from file
+        map_data = self._load_map(map)
+        if use_short_rxn_names:
+            map_data = self.update_map_reaction_names(map_data)
+
+        #If there's flux, translating map, model, and flux
+        cobramodel = model.model
+        if flux is not None:
+            map_data = self._translate_map_with_flux(map_data,flux)
+            cobramodel = self._translate_model_with_flux(model,flux,use_short_rxn_names=use_short_rxn_names)
+            flux = self._translate_flux(flux)
+
+        # Create Escher Builder
+        builder_kwargs = {
+            'model': cobramodel,
+            'height': height,
+            'width': width,
+            'map_json': json.dumps(map_data)
+        }
+
+        builder = Builder(**builder_kwargs)
+
+        if flux is not None:
+            builder.reaction_data = flux
+
+        # Use reaction names (short names set by _translate_model_with_flux) instead of IDs
+        builder.identifiers_on_map = 'name'
+
+        builder.save_html(output_path)
 
     def _get_flux_direction(
         self,
@@ -182,6 +1072,16 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp:
                 tmp_path = tmp.name
+
+            # Set builder properties for full interactivity before saving
+            if hasattr(builder, 'menu'):
+                builder.menu = 'all'
+            if hasattr(builder, 'enable_keys'):
+                builder.enable_keys = True
+            if hasattr(builder, 'enable_editing'):
+                builder.enable_editing = True
+            if hasattr(builder, 'scroll_behavior'):
+                builder.scroll_behavior = 'zoom'
 
             builder.save_html(tmp_path)
             with open(tmp_path, 'r', encoding='utf-8') as f:
@@ -368,6 +1268,17 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         flux_threshold: Optional[float] = None,
         arrow_color_scheme: Union[str, Dict, list] = 'magnitude',
         arrow_directionality: bool = True,
+        # Escher control options
+        menu: Literal['all', 'zoom', 'none'] = 'all',
+        enable_keys: bool = True,
+        enable_editing: bool = True,
+        scroll_behavior: Literal['pan', 'zoom'] = 'zoom',
+        enable_search: bool = True,
+        enable_tooltips: bool = True,
+        # Display options
+        identifiers_on_map: Literal['bigg_id', 'name'] = 'name',
+        hide_secondary_metabolites: bool = False,
+        show_gene_reaction_rules: bool = False,
         **escher_kwargs
     ) -> Union[str, Dict[str, str]]:
         """Create an HTML file that renders an Escher map with model data.
@@ -393,6 +1304,15 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             flux_threshold: Minimum flux value to display (default: 1e-6)
             arrow_color_scheme: Color scheme type - 'magnitude', 'directional', or custom list (default: 'magnitude')
             arrow_directionality: Emphasize flux direction in visualization (default: True)
+            menu: Menu type - 'all' for full menu, 'zoom' for zoom buttons only, 'none' to hide (default: 'all')
+            enable_keys: Enable keyboard shortcuts for map interaction (default: True)
+            enable_editing: Enable map editing functions (default: True)
+            scroll_behavior: Scroll wheel behavior - 'pan' to move map, 'zoom' to adjust magnification (default: 'zoom')
+            enable_search: Enable search functionality for finding reactions/metabolites (default: True)
+            enable_tooltips: Enable tooltips on hover (default: True)
+            identifiers_on_map: What to display as labels - 'name' for compound/reaction names, 'bigg_id' for IDs (default: 'name')
+            hide_secondary_metabolites: Hide secondary metabolites like water, ATP, etc. (default: False)
+            show_gene_reaction_rules: Show gene reaction rules on the map (default: False)
             **escher_kwargs: Additional arguments passed to Escher Builder
 
         Returns:
@@ -620,9 +1540,28 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         
         if gene_data:
             builder.gene_data = gene_data
-        
-        # Get Escher map HTML and scripts
-        escher_html = self._get_escher_html_embed(builder)
+
+        # Set Builder options for interactivity
+        if enable_search:
+            builder.enable_search = True
+        if enable_tooltips:
+            builder.enable_tooltips = ['label', 'object']
+
+        # Set display options
+        builder.identifiers_on_map = identifiers_on_map
+        builder.hide_secondary_metabolites = hide_secondary_metabolites
+        builder.show_gene_reaction_rules = show_gene_reaction_rules
+
+        # Get Escher map HTML and scripts with control options
+        escher_html = self._get_escher_html_embed(
+            builder,
+            menu=menu,
+            enable_keys=enable_keys,
+            enable_editing=enable_editing,
+            scroll_behavior=scroll_behavior,
+            enable_search=enable_search,
+            enable_tooltips=enable_tooltips
+        )
         
         # Extract div and scripts from Escher HTML
         import re
@@ -763,16 +1702,46 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 
             return results
     
-    def _get_escher_html_embed(self, builder) -> str:
+    def _get_escher_html_embed(
+        self,
+        builder,
+        menu: str = 'all',
+        enable_keys: bool = True,
+        enable_editing: bool = True,
+        scroll_behavior: str = 'zoom',
+        enable_search: bool = True,
+        enable_tooltips: bool = True
+    ) -> str:
         """Get the HTML/JavaScript code to embed the Escher map.
-        
+
         Args:
             builder: Escher Builder object
-            
+            menu: Menu type - 'all' for full menu, 'zoom' for zoom buttons only (default: 'all')
+            enable_keys: Enable keyboard shortcuts (default: True)
+            enable_editing: Enable editing functions (default: True)
+            scroll_behavior: Scroll behavior - 'pan' or 'zoom' (default: 'zoom')
+            enable_search: Enable search functionality (default: True)
+            enable_tooltips: Enable tooltips (default: True)
+
         Returns:
             str: Complete HTML including div and scripts to render the map
         """
         try:
+            # Set Builder properties for interactivity controls
+            # These must be set before generating HTML
+            if hasattr(builder, 'menu'):
+                builder.menu = menu
+            if hasattr(builder, 'enable_keys'):
+                builder.enable_keys = enable_keys
+            if hasattr(builder, 'enable_editing'):
+                builder.enable_editing = enable_editing
+            if hasattr(builder, 'scroll_behavior'):
+                builder.scroll_behavior = scroll_behavior
+            if hasattr(builder, 'enable_search'):
+                builder.enable_search = enable_search
+            if hasattr(builder, 'enable_tooltips'):
+                builder.enable_tooltips = ['label', 'object'] if enable_tooltips else []
+
             # Method 1: Try _repr_html_() - this is the standard Jupyter/IPython method
             if hasattr(builder, '_repr_html_'):
                 try:
@@ -790,8 +1759,9 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                 import tempfile
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp_file:
                     tmp_path = tmp_file.name
-                
+
                 try:
+                    # Properties were already set on builder above, just save
                     builder.save_html(tmp_path)
                     with open(tmp_path, 'r', encoding='utf-8') as f:
                         full_html = f.read()
@@ -866,157 +1836,3 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                 '<p>Error loading Escher map visualization. Check console for details.</p>';
             </script>
             """
-
-    def load_flux_solution(self, source: Union[str, Dict, pd.DataFrame, Any]) -> Dict:
-        """Load flux solution from various sources.
-        
-        Args:
-            source: Flux data source - can be:
-                - File path (JSON, CSV, TSV)
-                - Dictionary
-                - pandas DataFrame
-                - COBRApy solution object
-                - MSModelUtil with flux solution
-                
-        Returns:
-            Dict: Flux data with reaction IDs as keys
-            
-        Raises:
-            ValueError: If source format is not supported
-        """
-        if isinstance(source, str):
-            # File path
-            path = Path(source)
-            if not path.exists():
-                raise ValueError(f"File not found: {source}")
-                
-            if path.suffix.lower() == '.json':
-                with open(path, 'r') as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                else:
-                    raise ValueError("JSON file must contain a dictionary")
-                    
-            elif path.suffix.lower() in ['.csv', '.tsv']:
-                separator = ',' if path.suffix.lower() == '.csv' else '\t'
-                df = pd.read_csv(path, sep=separator, index_col=0)
-                if len(df.columns) == 1:
-                    return df.iloc[:, 0].to_dict()
-                else:
-                    # Assume first column is reaction IDs, second is flux values
-                    return dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
-            else:
-                raise ValueError(f"Unsupported file format: {path.suffix}")
-                
-        elif isinstance(source, dict):
-            return source
-            
-        elif isinstance(source, pd.DataFrame):
-            if len(source.columns) == 1:
-                return source.iloc[:, 0].to_dict()
-            else:
-                # Try to find a column that looks like flux values
-                flux_cols = [col for col in source.columns if 
-                           any(keyword in col.lower() for keyword in ['flux', 'rate', 'value'])]
-                if flux_cols:
-                    return source[flux_cols[0]].to_dict()
-                else:
-                    return source.iloc[:, 0].to_dict()
-                    
-        elif isinstance(source, pd.Series):
-            return source.to_dict()
-            
-        elif hasattr(source, 'fluxes'):
-            # COBRApy solution object
-            if isinstance(source.fluxes, pd.Series):
-                return source.fluxes.to_dict()
-            else:
-                return dict(source.fluxes)
-                
-        elif hasattr(source, 'get_flux_values'):
-            # MSModelUtil or similar object
-            return source.get_flux_values()
-            
-        else:
-            raise ValueError(f"Unsupported flux solution source type: {type(source)}")
-
-    def create_simple_map_from_model(
-        self,
-        model,
-        central_metabolism: bool = True,
-        output_file: str = "simple_map.html",
-        **kwargs
-    ) -> str:
-        """Create a simple metabolic map visualization from a model without requiring pre-existing map data.
-        
-        Args:
-            model: COBRApy model or MSModelUtil object
-            central_metabolism: If True, focus on central metabolism pathways
-            output_file: Output HTML file path
-            **kwargs: Additional arguments passed to create_map_html
-            
-        Returns:
-            str: Path to created HTML file
-        """
-        # This is a simplified version that creates a basic visualization
-        # In a real implementation, you might generate a basic network layout
-        
-        # Handle model input
-        if hasattr(model, 'model'):
-            cobra_model = model.model
-        else:
-            cobra_model = model
-            
-        # Create a simple network representation
-        network_data = self._create_simple_network_layout(cobra_model, central_metabolism)
-        
-        return self.create_map_html(
-            model=model,
-            map_json=network_data,
-            output_file=output_file,
-            title="Simple Metabolic Network",
-            **kwargs
-        )
-    
-    def _create_simple_network_layout(self, model, central_metabolism: bool = True) -> Dict:
-        """Create a simple network layout for visualization.
-        
-        Args:
-            model: COBRApy model
-            central_metabolism: Focus on central metabolism
-            
-        Returns:
-            Dict: Simple map data structure
-        """
-        # This is a placeholder for creating a simple map layout
-        # A full implementation would create node positions and connections
-        
-        reactions = []
-        metabolites = []
-        
-        # Filter reactions if focusing on central metabolism
-        if central_metabolism:
-            central_keywords = [
-                'glycol', 'tca', 'citric', 'ppp', 'pentose', 'phosphate',
-                'glucose', 'pyruvate', 'acetyl', 'oxaloacetate'
-            ]
-            model_reactions = [r for r in model.reactions 
-                             if any(keyword in r.name.lower() for keyword in central_keywords)]
-        else:
-            model_reactions = list(model.reactions)[:50]  # Limit for simple visualization
-        
-        # Create simple data structure
-        for i, rxn in enumerate(model_reactions):
-            reactions.append({
-                'bigg_id': rxn.id,
-                'name': rxn.name or rxn.id,
-                'x': 100 + (i % 10) * 80,
-                'y': 100 + (i // 10) * 60
-            })
-        
-        return {
-            'reactions': {str(i): rxn for i, rxn in enumerate(reactions)},
-            'nodes': {},
-            'canvas': {'x': 0, 'y': 0, 'width': 1000, 'height': 600}
-        }

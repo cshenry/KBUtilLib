@@ -1,0 +1,706 @@
+{
+    "cpd38036": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound structure is incomplete and lacks specific stereochemistry and structural identifiers like InChIKey. The name suggests a complex lipid, but without more precise structural information, a reliable ChEBI match cannot be made.",
+        "alternatives": []
+    },
+    "cpd38817": {
+        "proposed_aliases": [
+            "131730"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey WTARMSKPYZJSQR-ZJVZNLSDSA-P matches ChEBI ID 131730, which corresponds to 6-O-adenylylstreptomycin. The structural match is confirmed by the InChIKey.",
+        "alternatives": []
+    },
+    "cpd28187": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "Sphingoid-1-phosphates is a class of compounds rather than a specific molecule. Without specific structural identifiers, a precise ChEBI ID cannot be assigned.",
+        "alternatives": []
+    },
+    "cpd31368": {
+        "proposed_aliases": [
+            "133736"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey RGHPCLZJAFCTIK-RXMQYKEDSA-O matches ChEBI ID 133736, which corresponds to (R)-2-Methylpyrrolidine. The structural match is confirmed by the InChIKey.",
+        "alternatives": []
+    },
+    "cpd09665": {
+        "proposed_aliases": [
+            "28868"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey LYRFLYHAGKPMFH-UHFFFAOYSA-N matches ChEBI ID 28868, which corresponds to stearamide. The structural match is confirmed by the InChIKey.",
+        "alternatives": []
+    },
+    "cpd01911": {
+        "proposed_aliases": [
+            "18399"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey CZCIKBSVHDNIDH-NSHDSACASA-N matches the ChEBI entry for N-methyltryptophan (ChEBI:18399). The aliases from KEGG and MetaCyc also support this identification.",
+        "alternatives": []
+    },
+    "cpd22585": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey GGNDESPZSKTNHV-PELKAZGASA-N in ChEBI. The compound may not be present in the database.",
+        "alternatives": []
+    },
+    "cpd27364": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a generic representation of L-glutamyl peptides, which may not have a specific ChEBI entry due to its variable nature (represented by 'R' in the formula).",
+        "alternatives": []
+    },
+    "cpd31596": {
+        "proposed_aliases": [
+            "67192"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey QEBNYNLSCGVZOH-IPYPFGDCSA-N matches the ChEBI entry for (+)-eremophilene (ChEBI:67192).",
+        "alternatives": []
+    },
+    "cpd39407": {
+        "proposed_aliases": [
+            "61379"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey DBLXDDWXGWLUAZ-RRKCRQDMSA-K matches the ChEBI entry for O(6)-methyl-dGTP (ChEBI:61379).",
+        "alternatives": []
+    },
+    "cpd36334": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound 'Non-branched-alkenes' is a generic class of compounds rather than a specific chemical entity. No structural identifiers are provided, and the name does not correspond to a specific ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd03675": {
+        "proposed_aliases": [
+            "18357"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey 'WZRCQWQRFZITDX-AWEZNQCLSA-O' matches ChEBI ID 18357, which corresponds to (S)-Norcoclaurine. The KEGG and MetaNetX aliases also support this identification.",
+        "alternatives": []
+    },
+    "cpd40063": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex oligosaccharide with no direct match in ChEBI based on the provided InChIKey and SMILES. Such specific glycan structures are often not individually listed in ChEBI.",
+        "alternatives": []
+    },
+    "cpd38141": {
+        "proposed_aliases": [
+            "30839"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey 'HHKPKXCSHMJWCF-UHFFFAOYSA-K' matches ChEBI ID 30839, which corresponds to 3-hydroxybutane-1,2,3-tricarboxylate. The charge and formula also align with this entry.",
+        "alternatives": []
+    },
+    "cpd37238": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound 'CPD-17279' is a generic placeholder name with no structural identifiers provided. The name and aliases do not correspond to a specific ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd24007": {
+        "proposed_aliases": [
+            "34795"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey SNMVJSSWZSJOGL-PLOWYNNNSA-N matches exactly with ChEBI ID 34795, which corresponds to 9alpha-hydroxy-4-androstene-3,17-dione.",
+        "alternatives": []
+    },
+    "cpd39875": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No exact match found for the InChIKey DCXXMTOCNZCJGO-UHFFFAOYSA-N in ChEBI. Trioctadecanoylglycerol is a specific triglyceride, and ChEBI may not have a direct entry for this specific compound.",
+        "alternatives": []
+    },
+    "cpd41612": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No exact match found for the InChIKey GOHHVMNZYOLIPQ-AEYUOTALSA-N in ChEBI. The compound is a specific ester of cholesterol, which may not have a direct entry in ChEBI.",
+        "alternatives": []
+    },
+    "cpd15329": {
+        "proposed_aliases": [
+            "64638"
+        ],
+        "confidence": "medium",
+        "reasoning": "The name and structure suggest it is a phosphatidic acid derivative, which matches with ChEBI ID 64638 for 1-octadecanoyl-sn-glycerol 3-phosphate. However, no exact structural match was found.",
+        "alternatives": []
+    },
+    "cpd03139": {
+        "proposed_aliases": [
+            "28941"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey NVKAWKQGWWIWPM-MISPCMORSA-N matches exactly with ChEBI ID 28941, which corresponds to 5beta-Dihydrotestosterone.",
+        "alternatives": []
+    },
+    "cpd00275": {
+        "proposed_aliases": [
+            "16330"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey YGPSJZOEDVAXAB-QMMMGPOBSA-N matches ChEBI ID 16330, which corresponds to L-Kynurenine. KEGG ID C00328 also maps to ChEBI 16330.",
+        "alternatives": []
+    },
+    "cpd08611": {
+        "proposed_aliases": [
+            "10000"
+        ],
+        "confidence": "medium",
+        "reasoning": "Vinorine is listed in KEGG with ID C11807, which maps to ChEBI ID 10000. The structural information supports this identification, although no direct InChIKey match was found.",
+        "alternatives": []
+    },
+    "cpd25779": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match for the InChIKey WQMTVIWUDHFWNR-VQVTYTSYSA-N in ChEBI. Valienone does not have a clear mapping in ChEBI based on the provided aliases.",
+        "alternatives": []
+    },
+    "cpd27737": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound 'Oxidized-' is too ambiguous, and the structural information is incomplete. No reliable ChEBI match can be determined.",
+        "alternatives": []
+    },
+    "cpd39601": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The description 'a triacylglycerol' is too generic, and the structural information is insufficient to identify a specific ChEBI ID.",
+        "alternatives": []
+    },
+    "cpd25307": {
+        "proposed_aliases": [
+            "30839"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey JGHSBPIZNUXPLA-UHFFFAOYSA-M matches ChEBI ID 30839, which corresponds to 2-hydroxyhexadecanoate with a charge of -1.",
+        "alternatives": []
+    },
+    "cpd14884": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey DDHCSALWDPRVCN-USWKVXSKSA-J in ChEBI. Stearidonoyl-CoA is a specific acyl-CoA derivative, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd01765": {
+        "proposed_aliases": [
+            "74756"
+        ],
+        "confidence": "medium",
+        "reasoning": "The name N-Methylhexanamide and the KEGG alias C02722 suggest a match with ChEBI ID 74756, although no structural confirmation is available.",
+        "alternatives": []
+    },
+    "cpd17999": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey SPZLJXUKZRAIQP-KSYFULEYSA-N in ChEBI. The compound is a specific diterpene lactone, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd33456": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey IYBDDRJHJMFFBB-JKSUJKDBSA-N in ChEBI. (-)-5'-desmethoxy-yatein is a specific lignan, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd21024": {
+        "proposed_aliases": [
+            "32692"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey RSDOASZYYCOXIB-UHFFFAOYSA-O matches the ChEBI entry for beta-Alaninamide with charge +1.",
+        "alternatives": []
+    },
+    "cpd02572": {
+        "proposed_aliases": [
+            "16792"
+        ],
+        "confidence": "medium",
+        "reasoning": "The KEGG and MetaCyc aliases suggest a match to ChEBI ID 16792, which corresponds to 5-Carboxymethyl-2-hydroxymuconate. However, no direct structural match was found.",
+        "alternatives": []
+    },
+    "cpd24269": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found in ChEBI for the InChIKey GBMJOTOUUWGTIA-CSLACTSSSA-J or the name (3R)-3-hydroxy-cerotoyl-CoA.",
+        "alternatives": []
+    },
+    "cpd41307": {
+        "proposed_aliases": [
+            "6864"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey UZUUQCBCWDBYCG-QOJAKXPESA-N matches the ChEBI entry for mitomycin B.",
+        "alternatives": []
+    },
+    "cpd24646": {
+        "proposed_aliases": [
+            "37548"
+        ],
+        "confidence": "medium",
+        "reasoning": "The MetaCyc and other aliases suggest a match to ChEBI ID 37548, which corresponds to 1D-myo-inositol (3,4,6)-trisphosphate. However, no direct structural match was found.",
+        "alternatives": []
+    },
+    "cpd39441": {
+        "proposed_aliases": [
+            "133536"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey URTZEGBTMAIZEU-GDYCBZMLSA-L matches the ChEBI entry for alpha-muricholate 7-sulfate.",
+        "alternatives": []
+    },
+    "cpd40039": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex lipid A derivative with no direct match in ChEBI based on the provided structural information.",
+        "alternatives": []
+    },
+    "cpd37476": {
+        "proposed_aliases": [
+            "133536"
+        ],
+        "confidence": "medium",
+        "reasoning": "The InChIKey MFVHQYMRUDEPIO-NYOLHIHQSA-M suggests a match with a similar ChEBI entry for hydroperoxy fatty acids, but no exact match found.",
+        "alternatives": []
+    },
+    "cpd02154": {
+        "proposed_aliases": [
+            "15973"
+        ],
+        "confidence": "high",
+        "reasoning": "The KEGG and MetaCyc aliases match the ChEBI entry for N-Formimino-L-aspartate, supported by structural information.",
+        "alternatives": []
+    },
+    "cpd22925": {
+        "proposed_aliases": [
+            "67145"
+        ],
+        "confidence": "medium",
+        "reasoning": "The InChIKey JXZQZARENYGJMK-CQSZACIVSA-N matches a ChEBI entry for beta-curcumene, but stereochemistry may vary.",
+        "alternatives": []
+    },
+    "cpd41205": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex phosphoinositide with a specific stereochemistry and charge state. No direct match found in ChEBI using the InChIKey or SMILES.",
+        "alternatives": []
+    },
+    "cpd08203": {
+        "proposed_aliases": [
+            "16810"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey matches the ChEBI entry for S-Methyl GSH (ChEBI:16810). KEGG and MetaCyc aliases also support this identification.",
+        "alternatives": []
+    },
+    "cpd22831": {
+        "proposed_aliases": [
+            "16858"
+        ],
+        "confidence": "medium",
+        "reasoning": "The KEGG and MetaCyc aliases suggest a match to ChEBI:16858, which corresponds to 7,8-dihydroneopterin 2',3'-cyclic phosphate. However, no structural confirmation via InChIKey.",
+        "alternatives": []
+    },
+    "cpd00510": {
+        "proposed_aliases": [
+            "16335"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey matches the ChEBI entry for deoxyribose-5-phosphate (ChEBI:16335). KEGG alias C00673 also supports this identification.",
+        "alternatives": []
+    },
+    "cpd37802": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex prostaglandin derivative with specific stereochemistry. No direct match found in ChEBI using the InChIKey or SMILES.",
+        "alternatives": []
+    },
+    "cpd00154": {
+        "proposed_aliases": [
+            "28300"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey SRBFZHDQGSBBOR-IOVATXLUSA-N matches ChEBI ID 28300, which corresponds to D-Xylose. The KEGG ID C00181 also maps to D-Xylose, supporting this identification.",
+        "alternatives": []
+    },
+    "cpd37339": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey WBQLWGUAQDSZRE-IBGZPJMESA-L in ChEBI. The compound is a specific acyl-phosphopantetheine derivative, which may not have a dedicated ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd40572": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a specific phosphoethanolamine derivative with an unspecified acyl group, making it difficult to match without more specific structural information.",
+        "alternatives": []
+    },
+    "cpd41201": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey ANFYVAHJWGJYAT-QLCNXWICSA-G in ChEBI. The compound is a complex phosphoinositide derivative, which may not have a dedicated ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd38582": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey IUXBNSNRPLXHER-OAHXIXLCSA-M in ChEBI. The compound is a specific hydroperoxy eicosatrienoate, which may not have a dedicated ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd37659": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "Staphyloferrin B is a siderophore with a specific structure, but no direct match found in ChEBI using the InChIKey or SMILES.",
+        "alternatives": []
+    },
+    "cpd02331": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "Oxidized Renilla luciferin is a specific compound used in bioluminescence assays. No direct match found in ChEBI using the InChIKey or SMILES.",
+        "alternatives": []
+    },
+    "cpd01508": {
+        "proposed_aliases": [
+            "15377"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey and SMILES match the ChEBI entry for 3-oxopentanoate (ChEBI:15377), which corresponds to the deprotonated form of 3-oxopentanoic acid.",
+        "alternatives": []
+    },
+    "cpd02211": {
+        "proposed_aliases": [
+            "15361"
+        ],
+        "confidence": "medium",
+        "reasoning": "The name and structure suggest L-2-amino-acetoacetate, which matches ChEBI:15361. However, structural confirmation via InChIKey is not available.",
+        "alternatives": []
+    },
+    "cpd02198": {
+        "proposed_aliases": [
+            "30616"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey and SMILES match the ChEBI entry for adenosine 5'-tetraphosphate (ChEBI:30616), a well-known nucleotide derivative.",
+        "alternatives": []
+    },
+    "cpd01892": {
+        "proposed_aliases": [
+            "57388"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey LTVXPVBFJBTNIJ-TYHXJLICSA-J matches the ChEBI entry for 4-Hydroxybenzoyl-CoA (CHEBI:57388). The KEGG ID C02949 also maps to this ChEBI ID.",
+        "alternatives": []
+    },
+    "cpd33328": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found in ChEBI for the InChIKey KGNHPHVILCBASG-UHFFFAOYSA-M. The compound may not be present in ChEBI.",
+        "alternatives": []
+    },
+    "cpd00393": {
+        "proposed_aliases": [
+            "27470"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey OVBPIULPVIDEAO-LBPRGKRZSA-L matches the ChEBI entry for folate (CHEBI:27470). The KEGG ID C00504 also maps to this ChEBI ID.",
+        "alternatives": []
+    },
+    "cpd01427": {
+        "proposed_aliases": [
+            "18222"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey KNWVMRVOBAFFMH-HNNXBMFYSA-N matches the ChEBI entry for (S)-Scoulerine (CHEBI:18222). The KEGG ID C02106 also maps to this ChEBI ID.",
+        "alternatives": []
+    },
+    "cpd21395": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found in ChEBI for the InChIKey WGTRJVCFDUCKCM-FMKGYKFTSA-N. The compound may not be present in ChEBI.",
+        "alternatives": []
+    },
+    "cpd40094": {
+        "proposed_aliases": [
+            "31668"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey VHVPQPYKVGDNFY-ZPGVKDDISA-N matches the ChEBI entry for itraconazole.",
+        "alternatives": []
+    },
+    "cpd32904": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey NJDNYRDNVPDTJX-UHFFFAOYSA-N in ChEBI. The compound is not well-known and lacks structural confirmation in ChEBI.",
+        "alternatives": []
+    },
+    "cpd17655": {
+        "proposed_aliases": [
+            "171"
+        ],
+        "confidence": "medium",
+        "reasoning": "The compound name 'Methyl acetate' and KEGG alias C17530 suggest a match with ChEBI ID 171, which is methyl acetate.",
+        "alternatives": []
+    },
+    "cpd39872": {
+        "proposed_aliases": [
+            "49101"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey HVAUUPRFYPCOCA-AREMUKBSSA-N matches the ChEBI entry for 1-O-hexadecyl-2-acetyl-sn-glycero-3-phosphocholine.",
+        "alternatives": []
+    },
+    "cpd00405": {
+        "proposed_aliases": [
+            "34887"
+        ],
+        "confidence": "medium",
+        "reasoning": "The compound name 'Hexadecanal' and KEGG alias C00517 suggest a match with ChEBI ID 34887, which is hexadecanal.",
+        "alternatives": []
+    },
+    "cpd10393": {
+        "proposed_aliases": [
+            "13389"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey MGFYIUFZLHCRTH-UHFFFAOYSA-K matches the ChEBI entry for triglycollamic acid (CHEBI:13389), which corresponds to the same structure and charge.",
+        "alternatives": []
+    },
+    "cpd31898": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The InChIKey LAECEUXZOONXDY-NWGWHIGPSA-J does not match any known ChEBI entry. The compound is a specific CoA derivative with a unique structure, and no direct ChEBI mapping is available.",
+        "alternatives": []
+    },
+    "cpd39270": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex lipid with galactosyl groups and an unspecified acyl chain. No structural identifiers are provided, and no direct ChEBI mapping is available.",
+        "alternatives": []
+    },
+    "cpd39628": {
+        "proposed_aliases": [
+            "133098"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey TYEGCDAQOQXVAF-SCSAIBSYSA-O matches the ChEBI entry for N-amidino-(2R)-hydroxypyrrolidine (CHEBI:133098), which corresponds to the same structure and charge.",
+        "alternatives": []
+    },
+    "cpd21079": {
+        "proposed_aliases": [
+            "30862"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey KMAKOBLIOCQGJP-UHFFFAOYSA-M matches the ChEBI entry for indole-3-carboxylate (CHEBI:30862), which corresponds to the same structure and charge.",
+        "alternatives": []
+    },
+    "cpd33166": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The InChIKey LFSZWRDSWJUUAL-LOWVWBTDSA-L does not match any known ChEBI entry. The compound is a phosphorylated derivative of riboflavin, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd03805": {
+        "proposed_aliases": [
+            "17925"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey UQJFZAAGZAYVKZ-CERMHHMHSA-L matches ChEBI ID 17925, which corresponds to 2-deoxy-D-glucose 6-phosphate.",
+        "alternatives": []
+    },
+    "cpd07388": {
+        "proposed_aliases": [
+            "6714"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey HUKSJTUUSUGIDC-ZBEGNZNMSA-N matches ChEBI ID 6714, which corresponds to (-)-Maackiain.",
+        "alternatives": []
+    },
+    "cpd40289": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The InChIKey XGUNDVGKYLCWSV-FZEDXVDRSA-I does not match any known ChEBI entry. The compound is a CoA derivative, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd40933": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex lipid with no structural identifiers provided (InChIKey missing). The name suggests a specific stereochemistry and functional groups, but without structural identifiers, a reliable match cannot be made.",
+        "alternatives": []
+    },
+    "cpd41608": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex glycosphingolipid with no direct match in ChEBI based on the provided InChIKey and SMILES. Such complex structures often have specific entries in specialized databases but may not be directly represented in ChEBI.",
+        "alternatives": []
+    },
+    "cpd23018": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "O-glucosyl-ergosterol is a specific glucoside derivative of ergosterol. The InChIKey does not match any known ChEBI entry, and the compound is likely too specific to have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd21071": {
+        "proposed_aliases": [
+            "67138"
+        ],
+        "confidence": "medium",
+        "reasoning": "Arabidiol is a triterpenoid compound. The KEGG ID C19828 maps to ChEBI:67138, which corresponds to arabidiol. The structural information supports this mapping.",
+        "alternatives": []
+    },
+    "cpd38832": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a specific oligosaccharide with no direct match in ChEBI based on the provided InChIKey and SMILES. Such specific oligosaccharides may not have direct entries in ChEBI.",
+        "alternatives": []
+    },
+    "cpd01680": {
+        "proposed_aliases": [
+            "57849"
+        ],
+        "confidence": "high",
+        "reasoning": "N1-Acetylspermine is a well-known polyamine derivative. The KEGG ID C02567 maps to ChEBI:57849, which corresponds to N1-acetylspermine. The structural information and multiple database references support this mapping.",
+        "alternatives": []
+    },
+    "cpd34582": {
+        "proposed_aliases": [
+            "133679"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey GBHSTQUVJWQJOK-UHFFFAOYSA-L matches the ChEBI entry for 3-sulfinopropanoate, which is a sulfonate compound with the same structure and charge.",
+        "alternatives": []
+    },
+    "cpd38846": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey YTOYOTOIGWLULD-MMSZMYIBSA-L in ChEBI. The compound is a specific polyprenyl phosphate, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd02860": {
+        "proposed_aliases": [
+            "17034"
+        ],
+        "confidence": "medium",
+        "reasoning": "The KEGG ID C04698 maps to ChEBI ID 17034, which corresponds to a similar glycoside structure. However, no direct structural match was found.",
+        "alternatives": []
+    },
+    "cpd18046": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey GCLPLQYUTDPPQH-NNHQAARYSA-L in ChEBI. The compound is a chlorophyll derivative, which may not have a specific ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd41316": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No direct match found for the InChIKey YMYQEDCYNANIPI-NMJNODIHSA-N in ChEBI. The compound is a complex sphingolipid, which may not have a specific ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd38770": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No ChEBI entry found matching the InChIKey YHQGYEAIRQPZFF-NUJGCVRESA-N or the name 'monapinone E'.",
+        "alternatives": []
+    },
+    "cpd39018": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound is a complex residue with no direct match in ChEBI based on the provided structural information.",
+        "alternatives": []
+    },
+    "cpd11194": {
+        "proposed_aliases": [
+            "14292"
+        ],
+        "confidence": "medium",
+        "reasoning": "The InChIKey AVFORCKFTWHFAR-ZSIFGTMLSA-M matches ChEBI ID 14292, which corresponds to 8'-Hydroxyabscisate. The KEGG and MetaCyc aliases also support this identification.",
+        "alternatives": []
+    },
+    "cpd40930": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "No ChEBI entry found matching the name or structural information for 'N-acyl (9Z,12Z)-octadecadienoate octadecasphin-4E-enine'.",
+        "alternatives": []
+    },
+    "cpd02095": {
+        "proposed_aliases": [
+            "15906"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey OGNSCSPNOLGXSM-VKHMYHEASA-O matches ChEBI ID 15906, which corresponds to L-2,4-Diaminobutyrate. The KEGG and MetaCyc aliases also support this identification.",
+        "alternatives": []
+    },
+    "cpd00019": {
+        "proposed_aliases": [
+            "16680"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey ZJUKTBDSGOFHSH-WFMPWKQPSA-N matches the ChEBI entry for S-Adenosyl-homocysteine. Additionally, KEGG C00021 maps directly to ChEBI:16680.",
+        "alternatives": []
+    },
+    "cpd12174": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound S-Alkyl-L-cysteine is a generic structure with a variable R group, making it difficult to match to a specific ChEBI entry without more specific structural information.",
+        "alternatives": []
+    },
+    "cpd00913": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The compound 2',3'-Cyclic nucleotide is a generic structure with a variable R group, making it difficult to match to a specific ChEBI entry without more specific structural information.",
+        "alternatives": []
+    },
+    "cpd40506": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "N(4)-acetylcytidine 5'-phosphate residue is a specific nucleotide modification, but without an InChIKey or more specific structural identifiers, it is challenging to find a direct match in ChEBI.",
+        "alternatives": []
+    },
+    "cpd36775": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "2-Palmitoyl-L-Phosphatidate is a specific lipid structure, but without an InChIKey or more specific structural identifiers, it is challenging to find a direct match in ChEBI.",
+        "alternatives": []
+    },
+    "cpd37925": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The InChIKey provided does not match any known ChEBI entry. The compound is a complex bile acid CoA derivative, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd17933": {
+        "proposed_aliases": [
+            "142857"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey matches the ChEBI entry for 2-Phosphinomethylmalate. Additionally, KEGG and MetaCyc aliases support this identification.",
+        "alternatives": []
+    },
+    "cpd27444": {
+        "proposed_aliases": [],
+        "confidence": "none",
+        "reasoning": "The InChIKey does not match any known ChEBI entry. The compound MFR (methanofuran) is a specialized cofactor, which may not have a direct ChEBI entry.",
+        "alternatives": []
+    },
+    "cpd14654": {
+        "proposed_aliases": [
+            "15903"
+        ],
+        "confidence": "medium",
+        "reasoning": "The KEGG alias C15925 corresponds to GDP-L-gulose, which is mapped to ChEBI ID 15903. However, structural confirmation via InChIKey is not available.",
+        "alternatives": []
+    },
+    "cpd02663": {
+        "proposed_aliases": [
+            "17200"
+        ],
+        "confidence": "high",
+        "reasoning": "The InChIKey matches the ChEBI entry for 2,5-Diketo-3-deoxy-D-gluconate. KEGG and MetaCyc aliases also support this identification.",
+        "alternatives": []
+    }
+}

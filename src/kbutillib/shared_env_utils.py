@@ -28,6 +28,7 @@ class SharedEnvUtils(BaseUtils):
     def __init__(
         self,
         config_file: Optional[Union[str, Path]] = None,
+        config: Optional[Dict[str, Any]] = None,
         token_file: Optional[Union[str, Path]] = Path.home() / ".tokens",
         kbase_token_file: Optional[Union[str, Path]] = Path.home() / ".kbase" / "token",
         token: Optional[Union[str, Dict[str, str]]] = None,
@@ -37,20 +38,35 @@ class SharedEnvUtils(BaseUtils):
 
         Args:
             config_file: Optional explicit config file path. If None, uses priority order.
-            token_file: Path to token file (default: ~/.tokens)
-            kbase_token_file: Path to KBase token file (default: ~/.kbase/token)
-            token: Optional token(s) to set (string or dict)
+                Set to False to skip all config file discovery.
+            config: Optional config dictionary to use directly. If provided, this takes
+                precedence over config_file and file discovery. Can be combined with
+                config_file=False to skip file discovery entirely.
+            token_file: Path to token file (default: ~/.tokens). Set to None to skip
+                reading tokens from the standard token file.
+            kbase_token_file: Path to KBase token file (default: ~/.kbase/token). Set to
+                None to skip reading from the KBase token file.
+            token: Optional token(s) to set directly without reading from files. Can be
+                a string (sets the "kbase" namespace) or a dict mapping namespace to token.
+                This value takes precedence over tokens read from files.
             **kwargs: Additional arguments passed to BaseUtils
         """
         super().__init__(**kwargs)
 
-        # Determine config file using priority order
+        # Determine config: direct dict takes precedence, then file discovery
         self._config_hash = {}
-        self._config_file = self._find_config_file(config_file)
-
-        if self._config_file:
-            self._config_hash = self.read_config()
-            self.log_info(f"Loaded configuration from: {self._config_file}")
+        if config is not None:
+            self._config_hash = config
+            self._config_file = None
+            self.log_info("Using directly provided configuration dictionary")
+        elif config_file is not False:
+            self._config_file = self._find_config_file(config_file)
+            if self._config_file:
+                self._config_hash = self.read_config()
+                self.log_info(f"Loaded configuration from: {self._config_file}")
+        else:
+            self._config_file = None
+            self.log_debug("Config file discovery disabled")
 
         # Reading token file
         self._token_hash = {}
@@ -64,15 +80,15 @@ class SharedEnvUtils(BaseUtils):
         # Loading environment variables
         self.load_environment_variables()
 
-        # Setting KBase token from input argument if provided
+        # Setting KBase token from input argument if provided (without saving to file)
         if token is not None:
             if isinstance(token, str):
-                # If token is a string, set it directly
-                self.set_token(token, namespace="kbase")
+                # If token is a string, set it directly (don't save to file)
+                self.set_token(token, namespace="kbase", save_file=False)
             elif isinstance(token, dict):
-                # If token is a dictionary, set each key-value pair
+                # If token is a dictionary, set each key-value pair (don't save to file)
                 for key, value in token.items():
-                    self.set_token(value, key)
+                    self.set_token(value, key, save_file=False)
 
     def _find_config_file(self, explicit_path: Optional[Union[str, Path]] = None) -> Optional[Path]:
         """Find the configuration file using priority order.

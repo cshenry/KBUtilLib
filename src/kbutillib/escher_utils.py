@@ -19,6 +19,20 @@ from .ms_biochem_utils import MSBiochemUtils
 # Default arrow width range for enhanced visualization
 DEFAULT_ARROW_WIDTH_RANGE = (2, 20)
 
+# 10 distinct colors for reaction class badges
+REACTION_CLASS_COLORS = [
+    '#e6194b',  # Red
+    '#3cb44b',  # Green
+    '#4363d8',  # Blue
+    '#f58231',  # Orange
+    '#911eb4',  # Purple
+    '#42d4f4',  # Cyan
+    '#f032e6',  # Magenta
+    '#bfef45',  # Lime
+    '#fabed4',  # Pink
+    '#469990',  # Teal
+]
+
 # Default color schemes for different visualization types
 DEFAULT_FLUX_COLOR_SCHEMES = {
     'magnitude': [
@@ -887,15 +901,230 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 
         return translated_flux
 
-    def create_map_html2(self,model,map,output_path,flux=None,height=600,width=900,use_short_rxn_names=True):
-        """Create an HTML file that renders an Escher map with model data
+    def _translate_reaction_classes(self, reaction_classes: Dict[str, str],
+                                     flux: Optional[Dict[str, float]]) -> Dict[str, str]:
+        """Adjust reaction_classes keys to match translated reaction IDs.
+
+        For reactions with negative flux, their bigg_id in the map becomes <ID>-rev.
+        This method updates the reaction_classes dict keys accordingly.
+
+        Args:
+            reaction_classes: Dict mapping reaction IDs to class names
+            flux: Dict mapping reaction IDs to flux values (or None)
+
+        Returns:
+            Dict with adjusted keys matching translated bigg_ids
+        """
+        if not flux:
+            return dict(reaction_classes)
+        translated = {}
+        for rxn_id, class_name in reaction_classes.items():
+            if rxn_id in flux and flux[rxn_id] < 0:
+                translated[f"{rxn_id}-rev"] = class_name
+            else:
+                translated[rxn_id] = class_name
+        return translated
+
+    def _inject_reaction_class_overlays(self, html_path: str,
+                                         reaction_classes: Dict[str, str]) -> None:
+        """Inject reaction class badge overlays into an Escher HTML file.
+
+        Post-processes the HTML file produced by Escher's save_html() to add
+        colored rectangle badges near each reaction label, indicating which
+        class the reaction belongs to. Also adds a legend in the bottom-right.
+
+        Badges are appended inside Escher's own SVG reaction-label-group elements
+        so they pan/zoom with the map. They use pointer-events:none so Escher's
+        click/drag handlers are not disrupted.
+
+        Args:
+            html_path: Path to the HTML file to modify
+            reaction_classes: Dict mapping reaction bigg_ids to class names
+                              (already translated for negative flux if needed)
+        """
+        if not reaction_classes:
+            return
+
+        # Build color mapping from class names to palette
+        unique_classes = sorted(set(reaction_classes.values()))
+        if len(unique_classes) > len(REACTION_CLASS_COLORS):
+            self.log_warning(
+                f"More than {len(REACTION_CLASS_COLORS)} reaction classes provided. "
+                f"Colors will wrap around."
+            )
+        class_colors = {}
+        for i, class_name in enumerate(unique_classes):
+            class_colors[class_name] = REACTION_CLASS_COLORS[i % len(REACTION_CLASS_COLORS)]
+
+        # Read the HTML file
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        # Serialize data for JavaScript injection
+        rc_json = json.dumps(reaction_classes)
+        cc_json = json.dumps(class_colors)
+
+        # Build legend items HTML
+        legend_items = ''
+        for class_name in unique_classes:
+            color = class_colors[class_name]
+            legend_items += (
+                f'<div class="rxn-legend-item">'
+                f'<div class="rxn-legend-swatch" style="background:{color}"></div>'
+                f'<span>{class_name}</span></div>'
+            )
+
+        injection = f'''
+<style>
+.rxn-class-badge {{
+    pointer-events: none;
+    opacity: 0.85;
+}}
+#reaction-class-legend {{
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    padding: 10px 14px;
+    font-family: sans-serif;
+    font-size: 12px;
+    z-index: 10000;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    max-height: 80vh;
+    overflow-y: auto;
+    pointer-events: auto;
+}}
+#reaction-class-legend h4 {{
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 4px;
+}}
+.rxn-legend-item {{
+    display: flex;
+    align-items: center;
+    margin-bottom: 4px;
+}}
+.rxn-legend-swatch {{
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    margin-right: 8px;
+    flex-shrink: 0;
+}}
+</style>
+<div id="reaction-class-legend">
+    <h4>Reaction Classes</h4>
+    {legend_items}
+</div>
+<script>
+(function() {{
+    var reactionClasses = {rc_json};
+    var classColors = {cc_json};
+
+    var BADGE_WIDTH = 14;
+    var BADGE_HEIGHT = 10;
+    var BADGE_OFFSET_X = -20;
+    var BADGE_OFFSET_Y = -14;
+
+    function addBadges() {{
+        var reactions = document.querySelectorAll('.reaction');
+        if (!reactions.length) return false;
+        var added = 0;
+        reactions.forEach(function(reactionGroup) {{
+            var data = reactionGroup.__data__;
+            if (!data || !data.bigg_id) return;
+            var biggId = data.bigg_id;
+            if (!(biggId in reactionClasses)) return;
+            var className = reactionClasses[biggId];
+            var color = classColors[className];
+            if (!color) return;
+
+            var labelGroup = reactionGroup.querySelector('.reaction-label-group');
+            if (!labelGroup) return;
+
+            // Avoid duplicates if called more than once
+            if (labelGroup.querySelector('.rxn-class-badge')) return;
+
+            var ns = 'http://www.w3.org/2000/svg';
+            var rect = document.createElementNS(ns, 'rect');
+            rect.setAttribute('class', 'rxn-class-badge');
+            rect.setAttribute('x', BADGE_OFFSET_X);
+            rect.setAttribute('y', BADGE_OFFSET_Y);
+            rect.setAttribute('width', BADGE_WIDTH);
+            rect.setAttribute('height', BADGE_HEIGHT);
+            rect.setAttribute('rx', '2');
+            rect.setAttribute('fill', color);
+            labelGroup.appendChild(rect);
+            added++;
+        }});
+        return added > 0;
+    }}
+
+    function waitAndAddBadges() {{
+        var container = document.getElementById('map-container');
+        if (!container) {{
+            setTimeout(waitAndAddBadges, 200);
+            return;
+        }}
+        if (addBadges()) return;
+
+        var observer = new MutationObserver(function(mutations, obs) {{
+            var reactions = document.querySelectorAll('.reaction');
+            if (reactions.length > 0) {{
+                obs.disconnect();
+                setTimeout(addBadges, 500);
+            }}
+        }});
+        observer.observe(container, {{ childList: true, subtree: true }});
+
+        // Safety fallback
+        setTimeout(function() {{
+            observer.disconnect();
+            addBadges();
+        }}, 10000);
+    }}
+
+    if (document.readyState === 'loading') {{
+        document.addEventListener('DOMContentLoaded', waitAndAddBadges);
+    }} else {{
+        waitAndAddBadges();
+    }}
+}})();
+</script>
+'''
+
+        # Inject before </body>
+        html_content = html_content.replace('</body>', injection + '\n</body>')
+
+        # Write back
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        self.log_info(
+            f"Injected reaction class overlays for {len(reaction_classes)} reactions "
+            f"across {len(unique_classes)} classes"
+        )
+
+    def create_map_html2(self,model,map,output_path,flux=None,reaction_classes=None,height=600,width=900,use_short_rxn_names=True):
+        """Create an HTML file that renders an Escher map with model data.
 
         Args:
             model: COBRApy model object or MSModelUtil object
-            flux: Flux solution data (dict or pandas Series with reaction IDs as keys/index)
-
-        Returns:
-            str: Path to the created HTML file
+            map: Map identifier (name, filename, or KBase reference)
+            output_path: Path to write the HTML file
+            flux: Flux solution data (dict or pandas Series with reaction IDs as keys/index).
+                  Used for reaction data display and directionality (negative flux reactions
+                  are reversed in the map).
+            reaction_classes: Optional dict mapping reaction IDs to class name strings
+                  (e.g. {"rxn00001_c0": "glycolysis", "rxn00002_c0": "TCA cycle"}).
+                  Up to 10 distinct classes are supported with unique colors. When provided,
+                  colored badges are overlaid on classified reactions and a legend is added.
+            height: Height of the map container in pixels
+            width: Width of the map container in pixels
+            use_short_rxn_names: If True, use shortest ModelSEED alias names for reactions
         """
         try:
             from escher import Builder
@@ -936,903 +1165,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 
         builder.save_html(output_path)
 
-    def _get_flux_direction(
-        self,
-        reaction_id: str,
-        flux_value: float,
-        model,
-        threshold: float = 1e-6
-    ) -> Literal['forward', 'reverse', 'bidirectional']:
-        """Determine flux direction relative to reaction definition.
-
-        Args:
-            reaction_id: Reaction identifier
-            flux_value: Flux value (positive = forward, negative = reverse)
-            model: COBRApy model object
-            threshold: Minimum absolute flux to consider directional
-
-        Returns:
-            'forward' if flux > threshold
-            'reverse' if flux < -threshold
-            'bidirectional' if |flux| <= threshold
-        """
-        if abs(flux_value) <= threshold:
-            return 'bidirectional'
-        return 'forward' if flux_value > 0 else 'reverse'
-
-    def _calculate_optimal_reaction_scale(
-        self,
-        flux_data: Dict[str, float],
-        arrow_width_range: Optional[Tuple[float, float]] = None
-    ) -> list:
-        """Generate smart reaction_scale based on flux distribution.
-
-        Args:
-            flux_data: Dict mapping reaction IDs to flux values
-            arrow_width_range: (min_width, max_width) tuple for arrow sizing
-
-        Returns:
-            List of reaction_scale configuration objects
-        """
-        if arrow_width_range is None:
-            arrow_width_range = DEFAULT_ARROW_WIDTH_RANGE
-
-        min_width, max_width = arrow_width_range
-
-        # Get absolute values for sizing (preserve sign for direction)
-        abs_values = [abs(v) for v in flux_data.values() if abs(v) > 1e-10]
-
-        if not abs_values:
-            # No significant fluxes, return minimal scale
-            return [
-                {'type': 'value', 'value': 0, 'color': '#dcdcdc', 'size': min_width}
-            ]
-
-        # Calculate statistics
-        min_flux = min(abs_values)
-        max_flux = max(abs_values)
-
-        # Use statistical scaling with quartiles
-        return [
-            {'type': 'value', 'value': 0, 'color': '#f0f0f0', 'size': min_width},
-            {'type': 'Q1', 'color': '#6699ff', 'size': min_width + (max_width - min_width) * 0.3},
-            {'type': 'median', 'color': '#3366cc', 'size': min_width + (max_width - min_width) * 0.5},
-            {'type': 'Q3', 'color': '#ff8866', 'size': min_width + (max_width - min_width) * 0.75},
-            {'type': 'max', 'color': '#cc3300', 'size': max_width}
-        ]
-
-    def _create_directional_color_scheme(
-        self,
-        scheme_type: Literal['magnitude', 'directional', 'custom'] = 'magnitude',
-        custom_scheme: Optional[list] = None
-    ) -> list:
-        """Create color scheme configuration for flux visualization.
-
-        Args:
-            scheme_type: Type of color scheme to use
-            custom_scheme: Custom reaction_scale configuration (if scheme_type='custom')
-
-        Returns:
-            List of reaction_scale configuration objects
-        """
-        if scheme_type == 'custom' and custom_scheme:
-            return custom_scheme
-
-        if scheme_type in DEFAULT_FLUX_COLOR_SCHEMES:
-            return DEFAULT_FLUX_COLOR_SCHEMES[scheme_type].copy()
-
-        # Default to magnitude scheme
-        return DEFAULT_FLUX_COLOR_SCHEMES['magnitude'].copy()
-
-    def _enhance_reaction_styles_for_directionality(
-        self,
-        flux_data: Optional[Dict[str, float]] = None,
-        emphasize_direction: bool = True
-    ) -> list:
-        """Configure reaction_styles to emphasize arrows and directionality.
-
-        Args:
-            flux_data: Flux data to analyze for negative values
-            emphasize_direction: Whether to emphasize flux direction
-
-        Returns:
-            List of reaction style options ['color', 'size', etc.]
-        """
-        styles = ['color', 'size', 'text']
-
-        # Add 'abs' if we're not emphasizing direction OR if no negative fluxes
-        if flux_data and emphasize_direction:
-            has_negative = any(v < -1e-6 for v in flux_data.values())
-            if not has_negative:
-                styles.insert(2, 'abs')  # Insert before 'text'
-        elif not emphasize_direction:
-            styles.insert(2, 'abs')
-
-        return styles
-
-    def _extract_svg_from_builder(self, builder) -> Optional[str]:
-        """Extract SVG content from Escher Builder object.
-
-        Args:
-            builder: Escher Builder object
-
-        Returns:
-            SVG content as string, or None if extraction fails
-        """
-        try:
-            # Try to get HTML representation and extract SVG
-            if hasattr(builder, '_repr_html_'):
-                html_repr = builder._repr_html_()
-                return self._parse_svg_from_html(html_repr)
-        except Exception as e:
-            self.log_warning(f"Could not extract SVG from builder: {e}")
-
-        # Fallback: try save_html to temp file then parse
-        try:
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp:
-                tmp_path = tmp.name
-
-            # Set builder properties for full interactivity before saving
-            if hasattr(builder, 'menu'):
-                builder.menu = 'all'
-            if hasattr(builder, 'enable_keys'):
-                builder.enable_keys = True
-            if hasattr(builder, 'enable_editing'):
-                builder.enable_editing = True
-            if hasattr(builder, 'scroll_behavior'):
-                builder.scroll_behavior = 'zoom'
-
-            builder.save_html(tmp_path)
-            with open(tmp_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-
-            os.unlink(tmp_path)
-            return self._parse_svg_from_html(html_content)
-
-        except Exception as e:
-            self.log_warning(f"Fallback SVG extraction failed: {e}")
-            return None
-
-    def _parse_svg_from_html(self, html_content: str) -> Optional[str]:
-        """Parse SVG content from HTML string.
-
-        Args:
-            html_content: HTML string containing SVG
-
-        Returns:
-            SVG content as string, or None if not found
-        """
-        # Try using regex to extract SVG (simple approach)
-        svg_pattern = r'(<svg[^>]*>.*?</svg>)'
-        matches = re.findall(svg_pattern, html_content, re.DOTALL)
-
-        if matches:
-            return matches[0]  # Return first SVG found
-
-        # If regex fails, try more basic extraction
-        start_tag = '<svg'
-        end_tag = '</svg>'
-
-        start_idx = html_content.find(start_tag)
-        if start_idx == -1:
-            return None
-
-        end_idx = html_content.find(end_tag, start_idx)
-        if end_idx == -1:
-            return None
-
-        return html_content[start_idx:end_idx + len(end_tag)]
-
-    def _validate_svg_content(self, svg_string: str) -> bool:
-        """Validate SVG structure.
-
-        Args:
-            svg_string: SVG content to validate
-
-        Returns:
-            True if valid SVG structure, False otherwise
-        """
-        if not svg_string:
-            return False
-
-        # Basic validation: check for svg tags
-        has_open_tag = '<svg' in svg_string
-        has_close_tag = '</svg>' in svg_string
-
-        return has_open_tag and has_close_tag
-
-    def _save_svg_file(self, svg_content: str, output_path: Union[str, Path]) -> str:
-        """Write standalone SVG file.
-
-        Args:
-            svg_content: SVG content as string
-            output_path: Output file path
-
-        Returns:
-            Absolute path to saved SVG file
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            # Add XML declaration if not present
-            if not svg_content.strip().startswith('<?xml'):
-                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-            f.write(svg_content)
-
-        self.log_info(f"SVG file saved to: {output_path.absolute()}")
-        return str(output_path.absolute())
-
-    def _generate_html_with_enhanced_escher(
-        self,
-        builder,
-        title: str,
-        metadata: Optional[Dict] = None
-    ) -> str:
-        """Create HTML with optimally configured Escher map.
-
-        Args:
-            builder: Configured Escher Builder object
-            title: HTML page title
-            metadata: Additional metadata to display
-
-        Returns:
-            Complete HTML content as string
-        """
-        # Use existing _get_escher_html_embed method
-        escher_embed = self._get_escher_html_embed(builder)
-
-        # Prepare metadata display
-        metadata_html = ""
-        if metadata:
-            metadata_items = [
-                f'<div class="data-info">{key}: {value}</div>'
-                for key, value in metadata.items()
-            ]
-            metadata_html = "\n        ".join(metadata_items)
-
-        html_template = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>{title}</title>
-    <meta charset="utf-8">
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 20px;
-            padding: 20px;
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .map-container {{
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
-            overflow: auto;
-        }}
-        .data-info {{
-            display: inline-block;
-            margin: 5px 15px;
-            padding: 5px 10px;
-            background-color: #e8f4f8;
-            border-radius: 4px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>{title}</h1>
-        {metadata_html}
-    </div>
-
-    <div class="map-container">
-        <div id="escher-map"></div>
-    </div>
-
-    <script>
-        {escher_embed}
-    </script>
-</body>
-</html>"""
-
-        return html_template
-
-    def create_map_html(
-        self,
-        model,
-        flux_solution: Optional[Union[Dict, pd.Series]] = None,
-        map_json: Optional[Union[str, Dict]] = None,
-        output_file: str = "escher_map.html",
-        metabolomic_data: Optional[Dict] = None,
-        transcriptomic_data: Optional[Dict] = None,
-        proteomic_data: Optional[Dict] = None,
-        title: str = "Metabolic Map Visualization",
-        map_name: Optional[str] = None,
-        reaction_scale: Optional[list] = None,
-        metabolite_scale: Optional[list] = None,
-        gene_scale: Optional[list] = None,
-        height: int = 600,
-        width: int = 900,
-        # Enhanced arrow visualization parameters
-        enhanced_arrows: bool = True,
-        output_format: Literal['html', 'svg', 'both'] = 'html',
-        arrow_width_scale: Optional[Tuple[float, float]] = None,
-        flux_threshold: Optional[float] = None,
-        arrow_color_scheme: Union[str, Dict, list] = 'magnitude',
-        arrow_directionality: bool = True,
-        # Escher control options
-        menu: Literal['all', 'zoom', 'none'] = 'all',
-        enable_keys: bool = True,
-        enable_editing: bool = True,
-        scroll_behavior: Literal['pan', 'zoom'] = 'zoom',
-        enable_search: bool = True,
-        enable_tooltips: bool = True,
-        # Display options
-        identifiers_on_map: Literal['bigg_id', 'name'] = 'name',
-        hide_secondary_metabolites: bool = False,
-        show_gene_reaction_rules: bool = False,
-        **escher_kwargs
-    ) -> Union[str, Dict[str, str]]:
-        """Create an HTML file that renders an Escher map with model data.
-
-        Args:
-            model: COBRApy model object or MSModelUtil object
-            flux_solution: Flux solution data (dict or pandas Series with reaction IDs as keys/index)
-            map_json: Path to Escher map JSON file or map data as dict
-            output_file: Output HTML file path
-            metabolomic_data: Metabolite concentration data (dict with metabolite IDs as keys)
-            transcriptomic_data: Gene expression data (dict with gene IDs as keys)
-            proteomic_data: Protein abundance data (dict with gene/protein IDs as keys)
-            title: HTML page title
-            map_name: Name to display for the map
-            reaction_scale: Custom reaction color scale for flux data
-            metabolite_scale: Custom metabolite color scale for concentration data
-            gene_scale: Custom gene color scale for expression/proteomic data
-            height: Map height in pixels
-            width: Map width in pixels
-            enhanced_arrows: Enable enhanced arrow visualization with smart defaults (default: True)
-            output_format: Output format - 'html', 'svg', or 'both' (default: 'html')
-            arrow_width_scale: Tuple of (min_width, max_width) for arrow sizing (default: (2, 20))
-            flux_threshold: Minimum flux value to display (default: 1e-6)
-            arrow_color_scheme: Color scheme type - 'magnitude', 'directional', or custom list (default: 'magnitude')
-            arrow_directionality: Emphasize flux direction in visualization (default: True)
-            menu: Menu type - 'all' for full menu, 'zoom' for zoom buttons only, 'none' to hide (default: 'all')
-            enable_keys: Enable keyboard shortcuts for map interaction (default: True)
-            enable_editing: Enable map editing functions (default: True)
-            scroll_behavior: Scroll wheel behavior - 'pan' to move map, 'zoom' to adjust magnification (default: 'zoom')
-            enable_search: Enable search functionality for finding reactions/metabolites (default: True)
-            enable_tooltips: Enable tooltips on hover (default: True)
-            identifiers_on_map: What to display as labels - 'name' for compound/reaction names, 'bigg_id' for IDs (default: 'name')
-            hide_secondary_metabolites: Hide secondary metabolites like water, ATP, etc. (default: False)
-            show_gene_reaction_rules: Show gene reaction rules on the map (default: False)
-            **escher_kwargs: Additional arguments passed to Escher Builder
-
-        Returns:
-            str: Path to the created HTML file (if output_format='html' or 'svg')
-            Dict[str, str]: Dict with 'html' and 'svg' keys (if output_format='both')
-
-        Raises:
-            ImportError: If escher package is not available
-            ValueError: If required data is missing or invalid
-            
-        Example:
-            >>> from kbutillib import EscherUtils
-            >>> import cobra
-            >>> 
-            >>> # Load model and run FBA
-            >>> model = cobra.test.create_test_model("textbook")
-            >>> solution = model.optimize()
-            >>> 
-            >>> # Create Escher visualization
-            >>> escher_utils = EscherUtils()
-            >>> html_file = escher_utils.create_map_html(
-            ...     model=model,
-            ...     flux_solution=solution.fluxes,
-            ...     map_name="E. coli core",
-            ...     title="FBA Results Visualization",
-            ...     output_file="my_map.html"
-            ... )
-            >>> 
-            >>> # With additional data
-            >>> metabolite_data = {"glc__D_e": 10.0, "pyr_c": 5.2}
-            >>> gene_data = {"b0008": 2.5, "b0114": 1.8}
-            >>> 
-            >>> html_file = escher_utils.create_map_html(
-            ...     model=model,
-            ...     flux_solution=solution.fluxes,
-            ...     metabolomic_data=metabolite_data,
-            ...     transcriptomic_data=gene_data,
-            ...     output_file="enhanced_map.html"
-            ... )
-            >>>
-            >>> # With enhanced arrow visualization (enabled by default)
-            >>> html_file = escher_utils.create_map_html(
-            ...     model=model,
-            ...     flux_solution=solution.fluxes,
-            ...     enhanced_arrows=True,  # Smart arrow scaling and coloring
-            ...     arrow_color_scheme='magnitude',  # or 'directional'
-            ...     output_format='both',  # Generate both HTML and SVG
-            ...     output_file="optimized_map.html"
-            ... )
-            >>> # Returns: {'html': '/path/to/optimized_map.html', 'svg': '/path/to/optimized_map.svg'}
-        """
-        try:
-            from escher import Builder
-        except ImportError:
-            raise ImportError("escher package is required for map visualization. Install with: pip install escher")
-        
-        # Handle model input (COBRApy model or MSModelUtil)
-        if hasattr(model, 'model'):
-            # MSModelUtil object
-            cobra_model = model.model
-        else:
-            # Assume it's already a COBRApy model
-            cobra_model = model
-            
-        # Validate model
-        if not hasattr(cobra_model, 'reactions'):
-            raise ValueError("Invalid model object. Must be a COBRApy model or MSModelUtil object.")
-
-        # Task 4.4: Input validation for new parameters
-        if flux_threshold is not None and flux_threshold < 0:
-            raise ValueError("flux_threshold must be non-negative")
-
-        if output_format not in ['html', 'svg', 'both']:
-            raise ValueError("output_format must be 'html', 'svg', or 'both'")
-
-        # Convert flux_solution to dict if needed
-        flux_data_dict = None
-        if flux_solution is not None:
-            if isinstance(flux_solution, pd.Series):
-                flux_data_dict = flux_solution.to_dict()
-            elif isinstance(flux_solution, dict):
-                flux_data_dict = flux_solution
-            else:
-                raise ValueError("flux_solution must be a dictionary or pandas Series")
-
-        # Handle map data
-        map_data = None
-        if map_json:
-            if isinstance(map_json, str):
-                # Path to JSON file
-                if os.path.exists(map_json):
-                    with open(map_json, 'r') as f:
-                        map_data = json.load(f)
-                else:
-                    # Try to treat as JSON string
-                    try:
-                        map_data = json.loads(map_json)
-                    except json.JSONDecodeError:
-                        raise ValueError(f"Map file not found: {map_json}")
-            elif isinstance(map_json, dict):
-                map_data = map_json
-            else:
-                raise ValueError("map_json must be a file path, JSON string, or dictionary")
-
-        # Tasks 4.5-4.10: Enhanced arrows implementation
-        reaction_styles_configured = None
-
-        if enhanced_arrows and flux_data_dict:
-            # Task 4.10: Log enhanced visualization
-            self.log_info("Using enhanced arrow visualization with smart defaults")
-
-            # Task 4.6: Calculate optimal reaction_scale if not provided
-            if reaction_scale is None:
-                reaction_scale = self._calculate_optimal_reaction_scale(
-                    flux_data_dict,
-                    arrow_width_scale
-                )
-                self.log_info(f"Generated smart reaction_scale with {len(reaction_scale)} stops")
-
-            # Task 4.7: Apply directional color scheme
-            if isinstance(arrow_color_scheme, str):
-                # Check if we should use directional scheme
-                if arrow_color_scheme == 'directional':
-                    scheme_config = self._create_directional_color_scheme('directional')
-                    # Override reaction_scale with directional scheme if not custom
-                    if reaction_scale == self._calculate_optimal_reaction_scale(flux_data_dict, arrow_width_scale):
-                        reaction_scale = scheme_config
-                elif arrow_color_scheme == 'magnitude':
-                    # Already set by _calculate_optimal_reaction_scale
-                    pass
-            elif isinstance(arrow_color_scheme, (list, dict)):
-                # Custom scheme provided
-                reaction_scale = arrow_color_scheme
-
-            # Task 4.8: Configure reaction_styles for directionality
-            reaction_styles_configured = self._enhance_reaction_styles_for_directionality(
-                flux_data_dict,
-                emphasize_direction=arrow_directionality
-            )
-
-        # Task 4.11: Backward compatibility - Set default scales if not provided
-        # This ensures existing behavior when enhanced_arrows=False or no flux data
-        if reaction_scale is None:
-            reaction_scale = [
-                {"type": "value", "value": 0, "color": "#dcdcdc", "size": 10},
-                {"type": "value", "value": 0.000001, "color": "#9696ff", "size": 15},
-                {"type": "value", "value": 1, "color": "#ff6666", "size": 25},
-                {"type": "value", "value": 10, "color": "#ff0000", "size": 35},
-                {"type": "value", "value": 100, "color": "#cc0000", "size": 50}
-            ]
-            
-        if metabolite_scale is None:
-            metabolite_scale = [
-                {"type": "value", "value": 0, "color": "#f0f0f0", "size": 10},
-                {"type": "value", "value": 0.001, "color": "#6699ff", "size": 15},
-                {"type": "value", "value": 0.1, "color": "#0066cc", "size": 20},
-                {"type": "value", "value": 1, "color": "#003d7a", "size": 25}
-            ]
-            
-        if gene_scale is None:
-            gene_scale = [
-                {"type": "value", "value": 0, "color": "#e0e0e0", "size": 8},
-                {"type": "value", "value": 0.5, "color": "#ffcc66", "size": 12},
-                {"type": "value", "value": 1, "color": "#ff9900", "size": 16},
-                {"type": "value", "value": 2, "color": "#cc6600", "size": 20},
-                {"type": "value", "value": 5, "color": "#993300", "size": 25}
-            ]
-        
-        # Create Escher Builder
-        builder_kwargs = {
-            'model': cobra_model,
-            'height': height,
-            'width': width,
-            **escher_kwargs
-        }
-
-        if map_data:
-            # Escher Builder expects map_json as a JSON string, not a dict
-            builder_kwargs['map_json'] = json.dumps(map_data)
-        elif map_name:
-            builder_kwargs['map_name'] = map_name
-
-        builder = Builder(**builder_kwargs)
-
-        # Set scales
-        builder.reaction_scale = reaction_scale
-        builder.metabolite_scale = metabolite_scale
-        builder.gene_scale = gene_scale
-
-        # Task 4.8 & 4.9: Apply enhanced reaction_styles if configured
-        if reaction_styles_configured:
-            builder.reaction_styles = reaction_styles_configured
-
-        # Apply flux threshold if specified
-        if flux_threshold is not None:
-            builder.reaction_data_threshold = flux_threshold
-        elif enhanced_arrows:
-            # Use default threshold for enhanced arrows
-            builder.reaction_data_threshold = 1e-6
-
-        # Add flux data
-        if flux_data_dict is not None:
-            builder.reaction_data = flux_data_dict
-        
-        # Add metabolomic data
-        if metabolomic_data is not None:
-            if isinstance(metabolomic_data, dict):
-                builder.metabolite_data = metabolomic_data
-            else:
-                raise ValueError("metabolomic_data must be a dictionary")
-        
-        # Add gene expression/proteomic data
-        gene_data = {}
-        if transcriptomic_data is not None:
-            if isinstance(transcriptomic_data, dict):
-                gene_data.update(transcriptomic_data)
-            else:
-                raise ValueError("transcriptomic_data must be a dictionary")
-                
-        if proteomic_data is not None:
-            if isinstance(proteomic_data, dict):
-                gene_data.update(proteomic_data)
-            else:
-                raise ValueError("proteomic_data must be a dictionary")
-        
-        if gene_data:
-            builder.gene_data = gene_data
-
-        # Set Builder options for interactivity
-        if enable_search:
-            builder.enable_search = True
-        if enable_tooltips:
-            builder.enable_tooltips = ['label', 'object']
-
-        # Set display options
-        builder.identifiers_on_map = identifiers_on_map
-        builder.hide_secondary_metabolites = hide_secondary_metabolites
-        builder.show_gene_reaction_rules = show_gene_reaction_rules
-
-        # Get Escher map HTML and scripts with control options
-        escher_html = self._get_escher_html_embed(
-            builder,
-            menu=menu,
-            enable_keys=enable_keys,
-            enable_editing=enable_editing,
-            scroll_behavior=scroll_behavior,
-            enable_search=enable_search,
-            enable_tooltips=enable_tooltips
-        )
-        
-        # Extract div and scripts from Escher HTML
-        import re
-        # Find the main div (usually has id or class related to escher)
-        div_pattern = r'<div[^>]*id=["\']([^"\']*)["\'][^>]*>.*?</div>'
-        div_match = re.search(r'<div[^>]*>.*?</div>', escher_html, re.DOTALL)
-        escher_div = div_match.group(0) if div_match else '<div id="escher-map"></div>'
-        
-        # Extract all script tags
-        script_pattern = r'<script[^>]*>.*?</script>'
-        scripts = re.findall(script_pattern, escher_html, re.DOTALL)
-        escher_scripts = '\n'.join(scripts) if scripts else ''
-        
-        # Create HTML content
-        html_template = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>{title}</title>
-    <meta charset="utf-8">
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 20px;
-            padding: 20px;
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .map-container {{
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
-            overflow: auto;
-        }}
-        .info-panel {{
-            margin-top: 20px;
-            padding: 15px;
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .data-info {{
-            display: inline-block;
-            margin: 5px 15px;
-            padding: 5px 10px;
-            background-color: #e8f4f8;
-            border-radius: 4px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>{title}</h1>
-        {f'<h2>Map: {map_name}</h2>' if map_name else ''}
-        <div class="data-info">Model: {cobra_model.id if hasattr(cobra_model, 'id') else 'Unnamed'}</div>
-        <div class="data-info">Reactions: {len(cobra_model.reactions)}</div>
-        <div class="data-info">Metabolites: {len(cobra_model.metabolites)}</div>
-        <div class="data-info">Genes: {len(cobra_model.genes)}</div>
-        {f'<div class="data-info">Flux data: {len(flux_solution)} reactions</div>' if flux_solution else ''}
-        {f'<div class="data-info">Metabolomic data: {len(metabolomic_data)} metabolites</div>' if metabolomic_data else ''}
-        {f'<div class="data-info">Transcriptomic data: {len(transcriptomic_data)} genes</div>' if transcriptomic_data else ''}
-        {f'<div class="data-info">Proteomic data: {len(proteomic_data)} proteins</div>' if proteomic_data else ''}
-    </div>
-    
-    <div class="map-container">
-        {escher_div}
-    </div>
-    
-    <div class="info-panel">
-        <h3>Legend</h3>
-        <p><strong>Reactions:</strong> Color and size indicate flux magnitude</p>
-        {f'<p><strong>Metabolites:</strong> Color indicates concentration levels</p>' if metabolomic_data else ''}
-        {f'<p><strong>Genes:</strong> Color indicates expression/protein abundance levels</p>' if (transcriptomic_data or proteomic_data) else ''}
-        <p>Generated using Escher pathway visualization</p>
-    </div>
-    
-    {escher_scripts}
-</body>
-</html>"""
-        
-        # Task 5.0: Handle output format
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Task 5.2: Determine SVG file path if needed
-        if output_format in ['svg', 'both']:
-            # Replace .html extension with .svg, or add .svg
-            if output_path.suffix.lower() == '.html':
-                svg_path = output_path.with_suffix('.svg')
-            else:
-                svg_path = Path(str(output_path) + '.svg')
-
-        # Task 5.1 & 5.3-5.6: Generate output based on format
-        if output_format == 'html':
-            # Standard HTML output
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(html_template)
-            self.log_info(f"Escher map HTML saved to: {output_path.absolute()}")
-            return str(output_path.absolute())
-
-        elif output_format == 'svg':
-            # SVG-only output
-            svg_content = self._extract_svg_from_builder(builder)
-            if svg_content and self._validate_svg_content(svg_content):
-                svg_file = self._save_svg_file(svg_content, svg_path)
-                return svg_file
-            else:
-                self.log_warning("SVG extraction failed, falling back to HTML output")
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(html_template)
-                self.log_info(f"Escher map HTML saved to: {output_path.absolute()}")
-                return str(output_path.absolute())
-
-        elif output_format == 'both':
-            # Generate both HTML and SVG
-            results = {}
-
-            # Save HTML
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(html_template)
-            self.log_info(f"Escher map HTML saved to: {output_path.absolute()}")
-            results['html'] = str(output_path.absolute())
-
-            # Save SVG
-            svg_content = self._extract_svg_from_builder(builder)
-            if svg_content and self._validate_svg_content(svg_content):
-                svg_file = self._save_svg_file(svg_content, svg_path)
-                results['svg'] = svg_file
-            else:
-                self.log_warning("SVG extraction failed, only HTML generated")
-                results['svg'] = None
-
-            return results
-    
-    def _get_escher_html_embed(
-        self,
-        builder,
-        menu: str = 'all',
-        enable_keys: bool = True,
-        enable_editing: bool = True,
-        scroll_behavior: str = 'zoom',
-        enable_search: bool = True,
-        enable_tooltips: bool = True
-    ) -> str:
-        """Get the HTML/JavaScript code to embed the Escher map.
-
-        Args:
-            builder: Escher Builder object
-            menu: Menu type - 'all' for full menu, 'zoom' for zoom buttons only (default: 'all')
-            enable_keys: Enable keyboard shortcuts (default: True)
-            enable_editing: Enable editing functions (default: True)
-            scroll_behavior: Scroll behavior - 'pan' or 'zoom' (default: 'zoom')
-            enable_search: Enable search functionality (default: True)
-            enable_tooltips: Enable tooltips (default: True)
-
-        Returns:
-            str: Complete HTML including div and scripts to render the map
-        """
-        try:
-            # Set Builder properties for interactivity controls
-            # These must be set before generating HTML
-            if hasattr(builder, 'menu'):
-                builder.menu = menu
-            if hasattr(builder, 'enable_keys'):
-                builder.enable_keys = enable_keys
-            if hasattr(builder, 'enable_editing'):
-                builder.enable_editing = enable_editing
-            if hasattr(builder, 'scroll_behavior'):
-                builder.scroll_behavior = scroll_behavior
-            if hasattr(builder, 'enable_search'):
-                builder.enable_search = enable_search
-            if hasattr(builder, 'enable_tooltips'):
-                builder.enable_tooltips = ['label', 'object'] if enable_tooltips else []
-
-            # Method 1: Try _repr_html_() - this is the standard Jupyter/IPython method
-            if hasattr(builder, '_repr_html_'):
-                try:
-                    html_repr = builder._repr_html_()
-                    if html_repr and html_repr.strip():
-                        self.log_info("Successfully got HTML from builder._repr_html_()")
-                        return html_repr
-                    else:
-                        self.log_warning("builder._repr_html_() returned empty string")
-                except Exception as e:
-                    self.log_warning(f"builder._repr_html_() raised exception: {e}")
-            
-            # Method 2: Try save_html to temp file and read it
-            if hasattr(builder, 'save_html'):
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp_file:
-                    tmp_path = tmp_file.name
-
-                try:
-                    # Properties were already set on builder above, just save
-                    builder.save_html(tmp_path)
-                    with open(tmp_path, 'r', encoding='utf-8') as f:
-                        full_html = f.read()
-                    
-                    # Extract body content (div and scripts)
-                    import re
-                    # Find the body content
-                    body_match = re.search(r'<body[^>]*>(.*?)</body>', full_html, re.DOTALL)
-                    if body_match:
-                        body_content = body_match.group(1)
-                        # Also get any scripts in head
-                        head_scripts = re.findall(r'<script[^>]*>.*?</script>', full_html, re.DOTALL)
-                        result = body_content
-                        if head_scripts:
-                            result = '\n'.join(head_scripts) + '\n' + result
-                        # Clean up temp file
-                        import os
-                        os.unlink(tmp_path)
-                        self.log_info("Successfully got HTML from builder.save_html()")
-                        return result
-                    else:
-                        # If no body found, return the full HTML
-                        import os
-                        os.unlink(tmp_path)
-                        return full_html
-                except Exception as e:
-                    self.log_warning(f"builder.save_html() raised exception: {e}")
-                    # Clean up temp file if it exists
-                    import os
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
-            
-            # Method 3: Try to_html method
-            if hasattr(builder, 'to_html'):
-                try:
-                    html = builder.to_html()
-                    if html and html.strip():
-                        return html
-                except Exception as e:
-                    self.log_warning(f"builder.to_html() raised exception: {e}")
-            
-            # Method 4: Try to_script method
-            if hasattr(builder, 'to_script'):
-                try:
-                    script = builder.to_script()
-                    return f'<div id="escher-map"></div>\n<script>{script}</script>'
-                except Exception as e:
-                    self.log_warning(f"builder.to_script() raised exception: {e}")
-            
-            # Last resort: create basic embedding code
-            self.log_warning("All methods to get Escher HTML failed, using fallback")
-            return f"""
-            <div id="escher-map"></div>
-            <script>
-            // Basic Escher map embedding
-            console.log("Escher map data loaded");
-            // Note: Full Escher integration requires escher.js library
-            document.getElementById('escher-map').innerHTML = 
-                '<p>Escher map visualization would appear here. ' +
-                'This requires the full Escher.js library for proper rendering.</p>';
-            </script>
-            """
-        except Exception as e:
-            self.log_warning(f"Could not generate Escher embed code: {e}")
-            import traceback
-            self.log_warning(f"Traceback: {traceback.format_exc()}")
-            return f"""
-            <div id="escher-map"></div>
-            <script>
-            console.log("Error loading Escher map: {e}");
-            document.getElementById('escher-map').innerHTML = 
-                '<p>Error loading Escher map visualization. Check console for details.</p>';
-            </script>
-            """
+        # Post-process HTML to add reaction class badge overlays
+        if reaction_classes:
+            translated_classes = self._translate_reaction_classes(reaction_classes, flux)
+            self._inject_reaction_class_overlays(output_path, translated_classes)

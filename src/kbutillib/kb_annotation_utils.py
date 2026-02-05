@@ -406,6 +406,82 @@ class KBAnnotationUtils(KBWSUtils):
                 output["feature_object"] = params["feature_object"]
         return output
 
+    def build_genome_tsv(self, genome_ref, output_filename):
+        # Use KBAnnotationUtils.process_object to standardise
+        # features, aliases, and ontology terms in self.ftrhash
+        util.process_object({"input_ref": genome_ref})
+
+        # Discover all cleaned ontology types across this genome
+        all_ontology_types = set()
+        for ftr in self.ftrhash.values():
+            for raw_tag in ftr.get("ontology_terms", {}):
+                all_ontology_types.add(self.clean_tag(raw_tag))
+        sorted_ont_types = sorted(all_ontology_types)
+
+        # Build rows – only genes and noncoding features
+        gene_rows = []
+        for ftr_id, ftr in self.ftrhash.items():
+            ftr_type = self.ftrtypes.get(ftr_id, 'Unknown')
+            if ftr_type not in ('gene', 'noncoding'):
+                continue
+            # Aliases (upgrade_feature already normalised to [[src, val], ...])
+            aliases = ftr.get("aliases", [])
+            alias_str = (
+                ";".join(f"{a[0]}:{a[1]}" for a in aliases if len(a) >= 2)
+                if aliases else ""
+            )
+
+            # Location
+            locations = ftr.get("location", [])
+            contig = locations[0][0] if locations else ""
+            start = locations[0][1] if locations else 0
+            strand = locations[0][2] if locations else "+"
+            length = locations[0][3] if locations else 0
+            end = start + length if strand == "+" else start - length
+
+            # Functions (upgrade_feature converted 'function' → 'functions' list)
+            functions = ftr.get("functions", [])
+            if isinstance(functions, list):
+                functions_str = ";".join(functions)
+            else:
+                functions_str = str(functions) if functions else ""
+
+            row_data = {
+                'gene_id': ftr.get('id', ''),
+                'aliases': alias_str,
+                'contig': contig,
+                'start': start,
+                'end': end,
+                'strand': strand,
+                'type': ftr_type,
+                'functions': functions_str,
+                'protein_translation': ftr.get('protein_translation', ''),
+                'dna_sequence': ftr.get('dna_sequence', ''),
+            }
+
+            # Add a column per ontology type
+            for ont_type in sorted_ont_types:
+                terms_list = []
+                for raw_tag, terms_dict in ftr.get("ontology_terms", {}).items():
+                    if self.clean_tag(raw_tag) != ont_type:
+                        continue
+                    for raw_term in terms_dict:
+                        cleaned = self.clean_term(raw_term, raw_tag, ont_type)
+                        name = self.get_term_name(ont_type, cleaned)
+                        rxns = self.translate_term_to_modelseed(cleaned)
+                        entry = f"{cleaned}:{name}"
+                        if rxns:
+                            entry += "|" + ",".join(rxns)
+                        terms_list.append(entry)
+                row_data[f"Annotation:{ont_type}"] = (
+                    ";".join(terms_list) if terms_list else ""
+                )
+            gene_rows.append(row_data)
+
+        gene_df = pd.DataFrame(gene_rows)
+        gene_df.to_csv(output_filename, sep='\t', index=False)
+        return gene_df
+
     def process_object(self, params):
         if params.get("object"):
             self.object = params["object"]

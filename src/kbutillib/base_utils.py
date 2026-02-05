@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from .dependency_manager import get_dependency_manager
+#from .dependency_manager import get_dependency_manager
 
 requests.packages.urllib3.disable_warnings()
 

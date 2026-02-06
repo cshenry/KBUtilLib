@@ -409,7 +409,7 @@ class KBAnnotationUtils(KBWSUtils):
     def build_genome_tsv(self, genome_ref, output_filename):
         # Use KBAnnotationUtils.process_object to standardise
         # features, aliases, and ontology terms in self.ftrhash
-        util.process_object({"input_ref": genome_ref})
+        self.process_object({"input_ref": genome_ref})
 
         # Discover all cleaned ontology types across this genome
         all_ontology_types = set()

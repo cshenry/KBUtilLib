@@ -1,164 +1,99 @@
 # Dependency Management
 
-KBUtilLib uses Git submodules to manage external dependencies. This provides a standardized, version-controlled way to include required libraries and data repositories.
+KBUtilLib uses a simple path-based system to locate external dependencies. By default, dependencies are expected in sibling directories alongside the KBUtilLib repository. Custom paths can be configured via `dependencies.yaml`.
 
 ## Quick Start
 
-### First-time setup
+### Setup
 
-When cloning the repository, initialize submodules:
+Clone KBUtilLib and its dependencies as sibling directories:
 
 ```bash
+cd ~/Projects  # or wherever you keep your repos
 git clone https://github.com/cshenry/KBUtilLib.git
-cd KBUtilLib
-git submodule update --init --recursive
+git clone https://github.com/ModelSEED/ModelSEEDpy.git
+git clone https://github.com/ModelSEED/ModelSEEDDatabase.git
+git clone https://github.com/Fxe/cobrakbase.git
+git clone https://github.com/kbaseapps/cb_annotation_ontology_api.git
 ```
 
-Or clone with submodules in one step:
+This gives you a directory structure like:
 
-```bash
-git clone --recursive https://github.com/cshenry/KBUtilLib.git
+```
+Projects/
+├── KBUtilLib/
+├── ModelSEEDpy/
+├── ModelSEEDDatabase/
+├── cobrakbase/
+└── cb_annotation_ontology_api/
 ```
 
-### Updating dependencies
+No additional configuration is needed — KBUtilLib will find them automatically.
 
-To update all dependencies to their latest commits:
+### Using the activate script
 
-```bash
-git submodule update --remote
-```
-
-To update a specific dependency:
+Source `activate.sh` to set up PYTHONPATH automatically:
 
 ```bash
-git submodule update --remote dependencies/ModelSEEDpy
+source KBUtilLib/activate.sh
 ```
 
 ## Configuration
 
-Dependencies are configured in `dependencies.yaml`. This file specifies:
-
-- **git_url**: The repository URL
-- **branch**: The branch to track
-- **commit**: Optional specific commit to pin (set to `null` to use branch head)
-- **path**: Local path where the dependency is located
-
-### Example configuration
+Dependencies are configured in `dependencies.yaml` at the repo root. Each dependency has a `path` field:
 
 ```yaml
 dependencies:
   modelseedpy:
-    git_url: "https://github.com/ModelSEED/ModelSEEDpy.git"
-    branch: "main"
-    commit: null
-    path: "dependencies/ModelSEEDpy"
+    path: "../ModelSEEDpy"
+
+  ModelSEEDDatabase:
+    path: "../ModelSEEDDatabase"
+
+  cobrakbase:
+    path: "../cobrakbase"
+
+  cb_annotation_ontology_api:
+    path: "../cb_annotation_ontology_api"
 ```
 
-## Custom Dependency Locations
+### Custom paths
 
-You can use custom paths for dependencies by modifying `dependencies.yaml`:
-
-### Using a relative path
+You can point to any location by editing the path:
 
 ```yaml
+# Relative path (resolved from KBUtilLib repo root)
 modelseedpy:
-  git_url: "https://github.com/ModelSEED/ModelSEEDpy.git"
-  branch: "main"
-  commit: null
-  path: "../ModelSEEDpy"  # Sibling directory
-```
+  path: "../ModelSEEDpy"
 
-### Using an absolute path
-
-```yaml
+# Absolute path
 modelseedpy:
-  git_url: "https://github.com/ModelSEED/ModelSEEDpy.git"
-  branch: "main"
-  commit: null
-  path: "/home/user/code/ModelSEEDpy"  # Absolute path
+  path: "/home/user/code/ModelSEEDpy"
 ```
-
-**Note**: When using custom paths outside the `dependencies/` directory, you need to ensure the repository is cloned and available at that location. The dependency manager will not automatically clone repositories outside the default `dependencies/` directory.
 
 ## Current Dependencies
 
-KBUtilLib includes the following dependencies:
-
 1. **ModelSEEDpy** - Metabolic modeling tools
    - Repository: https://github.com/ModelSEED/ModelSEEDpy
-   - Branch: main
 
 2. **ModelSEEDDatabase** - Biochemistry database
    - Repository: https://github.com/ModelSEED/ModelSEEDDatabase
-   - Branch: master
 
 3. **cobrakbase** - KBase extensions for COBRA
    - Repository: https://github.com/Fxe/cobrakbase
-   - Branch: master
 
 4. **cb_annotation_ontology_api** - Annotation ontology API
    - Repository: https://github.com/kbaseapps/cb_annotation_ontology_api
-   - Branch: main
 
 ## How It Works
 
-The dependency management system consists of two main components:
+The dependency manager (`src/kbutillib/dependency_manager.py`):
+1. Reads `dependencies.yaml` for configured paths
+2. Resolves relative paths from the repo root
+3. Adds found dependency paths to `sys.path` for imports
+4. Provides `get_data_path()` for accessing data within dependencies
 
-### 1. Git Submodules
-
-Git submodules track specific commits of external repositories. Configuration is stored in:
-- `.gitmodules` - Submodule configuration
-- `.git/modules/` - Submodule data
-
-### 2. Dependency Manager
-
-The Python dependency manager (`src/kbutillib/dependency_manager.py`):
-- Reads `dependencies.yaml` for configuration
-- Resolves dependency paths (absolute and relative)
-- Adds dependencies to `sys.path` for imports
-- Provides utility functions for accessing dependency data
-
-### Automatic Initialization
-
-When you import KBUtilLib modules, the dependency manager automatically:
-1. Loads the configuration from `dependencies.yaml`
-2. Resolves all dependency paths
-3. Checks if dependencies exist at configured paths
-4. For paths in the `dependencies/` directory, initializes submodules if needed
-5. Adds all dependency paths to Python's `sys.path`
-
-## Developer Guide
-
-### Adding a new dependency
-
-1. Add the dependency configuration to `dependencies.yaml`:
-
-```yaml
-dependencies:
-  new_dependency:
-    git_url: "https://github.com/org/repo.git"
-    branch: "main"
-    commit: null
-    path: "dependencies/new_dependency"
-```
-
-2. Add the submodule:
-
-```bash
-git submodule add -b main https://github.com/org/repo.git dependencies/new_dependency
-git submodule update --init --recursive dependencies/new_dependency
-```
-
-3. Commit the changes:
-
-```bash
-git add .gitmodules dependencies.yaml dependencies/new_dependency
-git commit -m "Add new_dependency submodule"
-```
-
-### Accessing dependency data
-
-Use the dependency manager's helper functions:
+### Accessing dependency data in code
 
 ```python
 from kbutillib.dependency_manager import get_data_path
@@ -170,65 +105,27 @@ msdb_path = get_data_path("ModelSEEDDatabase")
 data_path = get_data_path("cb_annotation_ontology_api", "data/FilteredReactions.csv")
 ```
 
-### Pinning to a specific commit
+## Adding a New Dependency
 
-To pin a dependency to a specific commit:
+1. Clone the repo as a sibling directory (or wherever you prefer)
 
-1. Navigate to the dependency directory:
-```bash
-cd dependencies/ModelSEEDpy
-```
-
-2. Checkout the desired commit:
-```bash
-git checkout abc123def
-```
-
-3. Update `dependencies.yaml`:
+2. Add to `dependencies.yaml`:
 ```yaml
-modelseedpy:
-  commit: "abc123def"
-  # ... rest of config
+  new_dependency:
+    path: "../new_dependency"
 ```
 
-4. Commit the change from the repository root:
-```bash
-cd ../..
-git add dependencies/ModelSEEDpy dependencies.yaml
-git commit -m "Pin ModelSEEDpy to commit abc123def"
+3. Use in code:
+```python
+from kbutillib.dependency_manager import get_data_path
+path = get_data_path("new_dependency")
 ```
 
 ## Troubleshooting
 
-### Submodule directory is empty
-
-Run:
-```bash
-git submodule update --init --recursive
-```
-
 ### Import errors
-
-Ensure the dependency manager is initialized:
-```python
-from kbutillib.dependency_manager import get_dependency_manager
-dep_mgr = get_dependency_manager()
-```
-
-### Dependency not found
 
 Check that:
 1. The path in `dependencies.yaml` is correct
-2. The dependency exists at that location
-3. For submodules, run `git submodule update --init --recursive`
-
-## Migration from Old System
-
-The previous dependency management system used symlinks and direct cloning. Key changes:
-
-- **Old location**: `src/kbutillib/dependencies/`
-- **New location**: `dependencies/` (repository root)
-- **Old method**: Runtime cloning with `_ensure_git_dependency()`
-- **New method**: Git submodules with configuration file
-
-The new system is automatically initialized when importing KBUtilLib modules.
+2. The dependency repo exists at that location
+3. Run `source activate.sh` to set up PYTHONPATH

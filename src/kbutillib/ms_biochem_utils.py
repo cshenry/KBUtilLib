@@ -65,10 +65,10 @@ class MSBiochemUtils(SharedEnvUtils):
                 if db_path:
                     modelseed_db_path = str(db_path)
                 else:
-                    # Fallback to default location if not found
+                    # Fallback: look in sibling directory
                     from pathlib import Path
                     repo_root = Path(__file__).parent.parent.parent
-                    modelseed_db_path = str(repo_root / "dependencies" / "ModelSEEDDatabase")
+                    modelseed_db_path = str((repo_root / ".." / "ModelSEEDDatabase").resolve())
 
         self.modelseed_db_path = modelseed_db_path
         self.auto_download = auto_download

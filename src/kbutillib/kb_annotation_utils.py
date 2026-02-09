@@ -56,10 +56,10 @@ class KBAnnotationUtils(KBWSUtils):
         if ontology_path:
             self.annoontology_dir = ontology_path
         else:
-            # Fallback to default location
+            # Fallback: look in sibling directory
             from pathlib import Path
             repo_root = Path(__file__).parent.parent.parent
-            self.annoontology_dir = repo_root / "dependencies" / "cb_annotation_ontology_api"
+            self.annoontology_dir = repo_root / ".." / "cb_annotation_ontology_api"
 
         self.object = None
         self.objectinfo = None

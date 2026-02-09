@@ -29,11 +29,22 @@ class KBWSUtils(SharedEnvUtils):
     """
 
     def __init__(
-        self, kb_version: Optional[str] = "prod", max_retry: int = 3, **kwargs: Any
+        self, kb_version: Optional[str] = "prod", max_retry: int = 3,  kbendpoint: Optional[str] = None, **kwargs: Any
     ) -> None:
         """Initialize KBase Workspace utilities."""
         super().__init__(**kwargs)
         self.kb_version = kb_version
+        #Overrides KBVersion based on kbendpoint, which is generally how SDK modules are configured
+        if kbendpoint:
+            from urllib.parse import urlparse
+            hostname = urlparse(kbendpoint).hostname or ""
+            if hostname.startswith("ci."):
+                kb_version = "ci"
+            elif hostname.startswith("appdev."):
+                kb_version = "appdev"
+            else:
+                kb_version = "prod"
+            self.kb_version = kb_version
         base_url = self.get_base_url_from_version(kb_version)
         self.workspace_url = f"{base_url}/ws"
         self.shock_url = f"{base_url}/shock-api"

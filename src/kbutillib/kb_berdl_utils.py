@@ -3,10 +3,13 @@
 This module provides utilities for interacting with the BERDL (Biological and
 Environmental Research Data Lake) API to query genomic, ontology, and other
 scientific data stored in the KBase data lake.
+
+For full documentation, call: utils.print_docs() or see docs/modules/kb_berdl_utils.md
 """
 
 import json
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -18,9 +21,9 @@ class KBBERDLUtils(SharedEnvUtils):
 
     This class provides methods to:
     - Execute SQL queries against BERDL delta tables
-    - Query genome data (contigs, features, etc.)
-    - Query ontology data (reactions, compounds, etc.)
-    - List available tables and schemas
+    - List available databases, tables, and schemas
+    - Paginate through large result sets
+    - Test API connectivity
 
     The BERDL API requires authentication via a KBase token. Users must have
     the BERDL user role to access the API.
@@ -55,7 +58,7 @@ class KBBERDLUtils(SharedEnvUtils):
         )
         self.berdl_api_path = self.get_config_value(
             "berdl.api_path",
-            default="/apis/mcp/delta/tables"
+            default="/apis/mcp/delta"
         )
         self.berdl_timeout = self.get_config_value(
             "berdl.timeout",
@@ -71,6 +74,54 @@ class KBBERDLUtils(SharedEnvUtils):
 
         self.log_info(f"KBBERDLUtils initialized (API: {self.api_url})")
 
+    def print_docs(self) -> None:
+        """Print the BERDL documentation to the console.
+
+        Displays the full module documentation from the docs file.
+        This is useful for quick reference in interactive sessions.
+        """
+        # Try to find the docs file relative to this module
+        module_dir = Path(__file__).parent
+        docs_path = module_dir.parent.parent / "docs" / "modules" / "kb_berdl_utils.md"
+
+        if docs_path.exists():
+            print(docs_path.read_text())
+        else:
+            # Fallback to inline help
+            print("""
+KBBERDLUtils - BERDL Data API Utilities
+
+The BERDL API provides SQL access to KBase data stored in Delta Lake format.
+
+Quick Start:
+    from kbutillib import KBBERDLUtils
+    utils = KBBERDLUtils()
+
+    # Test connection
+    utils.test_connection()
+
+    # List databases
+    utils.get_database_list()
+
+    # List tables in a database
+    utils.get_database_tables("kbase_genomes")
+
+    # Get table columns
+    utils.get_table_columns("kbase_genomes", "contig")
+
+    # Run SQL query
+    utils.query("SELECT * FROM kbase_genomes.contig LIMIT 10")
+
+Authentication:
+    Store your KBase token in ~/.kbase/token
+
+Performance:
+    - Logged into BERDL JupyterHub: Uses personal cluster (faster)
+    - Not logged in: Uses shared cluster (slower)
+
+Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
+""")
+
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers including authentication.
 
@@ -80,7 +131,7 @@ class KBBERDLUtils(SharedEnvUtils):
         Raises:
             ValueError: If no KBase token is available
         """
-        token = self.get_token("kbase")
+        token = self.get_token(namespace="berdl")
         if not token:
             raise ValueError(
                 "No KBase token available. Set token via set_token() or "
@@ -158,7 +209,7 @@ class KBBERDLUtils(SharedEnvUtils):
             self.log_debug(f"Executing BERDL query: {sql}")
 
             response = requests.post(
-                f"{self.api_url}/query",
+                f"{self.api_url}/tables/query",
                 headers=headers,
                 json=payload,
                 timeout=timeout
@@ -237,173 +288,287 @@ class KBBERDLUtils(SharedEnvUtils):
                 "query": sql
             }
 
-    def query_contigs(
+    def get_database_list(
         self,
-        limit: int = 100,
-        offset: int = 0,
-        order_by: str = "contig_id",
-        filters: Optional[Dict[str, Any]] = None
+        timeout: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Query contig data from kbase_genomes.contig table.
-
-        Args:
-            limit: Maximum number of rows to return. Default: 100
-            offset: Number of rows to skip (for pagination). Default: 0
-            order_by: Column to order results by. Default: "contig_id"
-            filters: Optional dict of column: value pairs for WHERE clause
+        """List all databases available in BERDL.
 
         Returns:
-            Query result dict (see query() for structure)
+            Dict containing:
+                - success: bool indicating if request succeeded
+                - databases: List of database names
+                - count: Number of databases
+                - error: Error message if success is False
 
         Example:
             >>> utils = KBBERDLUtils()
-            >>> result = utils.query_contigs(limit=10)
-            >>> for contig in result["data"]:
-            ...     print(f"{contig['contig_id']}: {contig['length']} bp")
+            >>> result = utils.get_database_list()
+            >>> for db in result["databases"]:
+            ...     print(db)
         """
-        sql = f"SELECT * FROM kbase_genomes.contig"
+        self.initialize_call("get_database_list", {}, print_params=True)
 
-        if filters:
-            conditions = []
-            for col, val in filters.items():
-                if isinstance(val, str):
-                    conditions.append(f"{col} = '{val}'")
-                else:
-                    conditions.append(f"{col} = {val}")
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
+        if timeout is None:
+            timeout = self.berdl_timeout
 
-        sql += f" ORDER BY {order_by}"
+        try:
+            headers = self._get_headers()
 
-        return self.query(sql, limit=limit, offset=offset)
+            response = requests.post(
+                f"{self.api_url}/databases/list",
+                headers=headers,
+                json={},
+                timeout=timeout
+            )
 
-    def query_ontology_statements(
+            response.raise_for_status()
+            result = response.json()
+
+            # Parse response - may be a list directly or wrapped
+            databases = result if isinstance(result, list) else result.get("databases", [])
+
+            self.log_info(f"Found {len(databases)} databases")
+
+            return {
+                "success": True,
+                "databases": databases,
+                "count": len(databases)
+            }
+
+        except requests.exceptions.RequestException as e:
+            self.log_error(f"Request failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "databases": [],
+                "count": 0
+            }
+
+    def get_database_tables(
         self,
-        subject_prefix: Optional[str] = None,
-        predicate: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0
+        database: str,
+        timeout: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Query ontology statements from kbase_ontology_source.statements table.
+        """List all tables in a specific database.
 
         Args:
-            subject_prefix: Filter subjects starting with this prefix
-                (e.g., "seed.reaction:" for SEED reactions)
-            predicate: Filter by predicate (e.g., "rdfs:label" for names)
-            limit: Maximum number of rows to return. Default: 100
-            offset: Number of rows to skip. Default: 0
+            database: Database name (e.g., "kbase_genomes")
+            timeout: Request timeout in seconds
 
         Returns:
-            Query result dict (see query() for structure)
+            Dict containing:
+                - success: bool
+                - database: The database name queried
+                - tables: List of table names
+                - count: Number of tables
+                - error: Error message if success is False
 
         Example:
             >>> utils = KBBERDLUtils()
-            >>> # Get SEED reaction names
-            >>> result = utils.query_ontology_statements(
-            ...     subject_prefix="seed.reaction:",
-            ...     predicate="rdfs:label",
-            ...     limit=10
+            >>> result = utils.get_database_tables("kbase_genomes")
+            >>> for table in result["tables"]:
+            ...     print(table)
+        """
+        self.initialize_call(
+            "get_database_tables",
+            {"database": database},
+            print_params=True
+        )
+
+        if timeout is None:
+            timeout = self.berdl_timeout
+
+        try:
+            headers = self._get_headers()
+
+            response = requests.post(
+                f"{self.api_url}/databases/tables/list",
+                headers=headers,
+                json={"database": database},
+                timeout=timeout
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            # Parse response
+            tables = result if isinstance(result, list) else result.get("tables", [])
+
+            self.log_info(f"Found {len(tables)} tables in {database}")
+
+            return {
+                "success": True,
+                "database": database,
+                "tables": tables,
+                "count": len(tables)
+            }
+
+        except requests.exceptions.RequestException as e:
+            self.log_error(f"Request failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "database": database,
+                "tables": [],
+                "count": 0
+            }
+
+    def get_table_columns(
+        self,
+        database: str,
+        table: str,
+        timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get column information for a specific table.
+
+        Args:
+            database: Database name (e.g., "kbase_genomes")
+            table: Table name (e.g., "contig")
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dict containing:
+                - success: bool
+                - database: The database name
+                - table: The table name
+                - columns: List of column info dicts with 'name' and 'type'
+                - error: Error message if success is False
+
+        Example:
+            >>> utils = KBBERDLUtils()
+            >>> result = utils.get_table_columns("kbase_genomes", "contig")
+            >>> for col in result["columns"]:
+            ...     print(f"{col['name']}: {col['type']}")
+        """
+        self.initialize_call(
+            "get_table_columns",
+            {"database": database, "table": table},
+            print_params=True
+        )
+
+        if timeout is None:
+            timeout = self.berdl_timeout
+
+        try:
+            headers = self._get_headers()
+
+            response = requests.post(
+                f"{self.api_url}/databases/tables/schema",
+                headers=headers,
+                json={"database": database, "table": table},
+                timeout=timeout
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            # Parse response - expecting column info
+            columns = result if isinstance(result, list) else result.get("columns", result.get("schema", []))
+
+            # Normalize column format
+            normalized_columns = []
+            for col in columns:
+                if isinstance(col, str):
+                    normalized_columns.append({"name": col, "type": "unknown"})
+                elif isinstance(col, dict):
+                    normalized_columns.append({
+                        "name": col.get("name", col.get("column_name", "")),
+                        "type": col.get("type", col.get("data_type", "unknown"))
+                    })
+
+            self.log_info(f"Found {len(normalized_columns)} columns in {database}.{table}")
+
+            return {
+                "success": True,
+                "database": database,
+                "table": table,
+                "columns": normalized_columns
+            }
+
+        except requests.exceptions.RequestException as e:
+            self.log_error(f"Request failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "database": database,
+                "table": table,
+                "columns": []
+            }
+
+    def get_database_schema(
+        self,
+        database: Optional[str] = None,
+        include_columns: bool = False,
+        timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get the complete schema structure of databases.
+
+        Args:
+            database: Specific database to get schema for (None for all)
+            include_columns: Whether to include column details for each table
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dict containing:
+                - success: bool
+                - schema: Dict mapping database names to table lists
+                          (or table names to column lists if include_columns)
+                - error: Error message if success is False
+
+        Example:
+            >>> utils = KBBERDLUtils()
+            >>> # Get all databases and tables
+            >>> result = utils.get_database_schema()
+            >>> for db, tables in result["schema"].items():
+            ...     print(f"{db}: {len(tables)} tables")
+
+            >>> # Get schema with column details
+            >>> result = utils.get_database_schema(
+            ...     database="kbase_genomes",
+            ...     include_columns=True
             ... )
         """
-        sql = "SELECT subject, predicate, value FROM kbase_ontology_source.statements"
+        self.initialize_call(
+            "get_database_schema",
+            {"database": database, "include_columns": include_columns},
+            print_params=True
+        )
 
-        conditions = []
-        if subject_prefix:
-            conditions.append(f"subject LIKE '{subject_prefix}%'")
-        if predicate:
-            conditions.append(f"predicate = '{predicate}'")
+        if timeout is None:
+            timeout = self.berdl_timeout
 
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
+        try:
+            headers = self._get_headers()
 
-        return self.query(sql, limit=limit, offset=offset)
+            payload = {"include_schemas": include_columns}
+            if database:
+                payload["database"] = database
 
-    def get_reaction_names(
-        self,
-        reaction_ids: Optional[List[str]] = None,
-        limit: int = 100,
-        offset: int = 0
-    ) -> Dict[str, Any]:
-        """Get SEED reaction names from the ontology.
+            response = requests.post(
+                f"{self.api_url}/databases/structure",
+                headers=headers,
+                json=payload,
+                timeout=timeout
+            )
 
-        Args:
-            reaction_ids: Optional list of specific reaction IDs to fetch
-                (e.g., ["rxn00001", "rxn00002"]). If None, returns all.
-            limit: Maximum number of rows to return. Default: 100
-            offset: Number of rows to skip. Default: 0
+            response.raise_for_status()
+            result = response.json()
 
-        Returns:
-            Query result dict with reaction_id and reaction_name columns
+            self.log_info(f"Retrieved database schema structure")
 
-        Example:
-            >>> utils = KBBERDLUtils()
-            >>> result = utils.get_reaction_names(limit=10)
-            >>> for rxn in result["data"]:
-            ...     print(f"{rxn['reaction_id']}: {rxn['reaction_name']}")
-        """
-        sql = """
-            SELECT
-                subject as reaction_id,
-                value as reaction_name
-            FROM kbase_ontology_source.statements
-            WHERE subject LIKE 'seed.reaction:%'
-            AND predicate = 'rdfs:label'
-        """.strip()
+            return {
+                "success": True,
+                "schema": result
+            }
 
-        if reaction_ids:
-            # Format IDs with the seed.reaction: prefix if not present
-            formatted_ids = []
-            for rid in reaction_ids:
-                if rid.startswith("seed.reaction:"):
-                    formatted_ids.append(f"'{rid}'")
-                else:
-                    formatted_ids.append(f"'seed.reaction:{rid}'")
-            id_list = ", ".join(formatted_ids)
-            sql += f" AND subject IN ({id_list})"
-
-        return self.query(sql, limit=limit, offset=offset)
-
-    def get_compound_names(
-        self,
-        compound_ids: Optional[List[str]] = None,
-        limit: int = 100,
-        offset: int = 0
-    ) -> Dict[str, Any]:
-        """Get SEED compound names from the ontology.
-
-        Args:
-            compound_ids: Optional list of specific compound IDs to fetch
-                (e.g., ["cpd00001", "cpd00002"]). If None, returns all.
-            limit: Maximum number of rows to return. Default: 100
-            offset: Number of rows to skip. Default: 0
-
-        Returns:
-            Query result dict with compound_id and compound_name columns
-
-        Example:
-            >>> utils = KBBERDLUtils()
-            >>> result = utils.get_compound_names(["cpd00001", "cpd00002"])
-        """
-        sql = """
-            SELECT
-                subject as compound_id,
-                value as compound_name
-            FROM kbase_ontology_source.statements
-            WHERE subject LIKE 'seed.compound:%'
-            AND predicate = 'rdfs:label'
-        """.strip()
-
-        if compound_ids:
-            formatted_ids = []
-            for cid in compound_ids:
-                if cid.startswith("seed.compound:"):
-                    formatted_ids.append(f"'{cid}'")
-                else:
-                    formatted_ids.append(f"'seed.compound:{cid}'")
-            id_list = ", ".join(formatted_ids)
-            sql += f" AND subject IN ({id_list})"
-
-        return self.query(sql, limit=limit, offset=offset)
+        except requests.exceptions.RequestException as e:
+            self.log_error(f"Request failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "schema": {}
+            }
 
     def paginate_query(
         self,
@@ -536,39 +701,3 @@ class KBBERDLUtils(SharedEnvUtils):
                 "api_url": self.api_url
             }
 
-    def get_table_info(
-        self,
-        schema: str,
-        table: str
-    ) -> Dict[str, Any]:
-        """Get information about a specific table's columns.
-
-        Note: This uses DESCRIBE or information_schema depending on
-        what the underlying database supports.
-
-        Args:
-            schema: Schema name (e.g., "kbase_genomes")
-            table: Table name (e.g., "contig")
-
-        Returns:
-            Query result dict with column information
-
-        Example:
-            >>> utils = KBBERDLUtils()
-            >>> result = utils.get_table_info("kbase_genomes", "contig")
-        """
-        # Try to get column info - exact syntax depends on database
-        sql = f"DESCRIBE {schema}.{table}"
-        result = self.query(sql, limit=1000)
-
-        if not result["success"]:
-            # Fallback to information_schema approach
-            sql = f"""
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_schema = '{schema}'
-                AND table_name = '{table}'
-            """
-            result = self.query(sql, limit=1000)
-
-        return result

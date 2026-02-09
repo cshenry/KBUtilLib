@@ -225,6 +225,147 @@ class MSBiochemUtils(SharedEnvUtils):
         input_string = input_string.translate(str.maketrans('', '', string.punctuation + string.whitespace))
         return input_string.lower().strip()
 
+    def normalize_compound_name(self, name: str) -> list[str]:
+        """Normalize a compound name for better matching in the biochemistry database.
+
+        Applies a series of transformations to handle common naming variations
+        in chemical compound names (salts, hydrates, stereochemistry, etc.).
+
+        Args:
+            name: The compound name to normalize
+
+        Returns:
+            List of normalized name variants to try for matching.
+            The first element is the most normalized form, followed by
+            intermediate variants that may also match.
+        """
+        if not name:
+            return [name]
+
+        variants = set()
+        current = name.strip()
+
+        # Apply transformations iteratively to build up normalized forms
+        def apply_transforms(s: str) -> str:
+            result = s
+
+            # 1. Remove metal ion prefixes (Sodium, Potassium, etc.)
+            # Handle multi-sodium prefixes first (Trisodium, Disodium)
+            result = re.sub(r'^Trisodium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Disodium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Sodium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Tripotassium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Dipotassium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Potassium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Calcium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Magnesium\s+', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^Ammonium\s+', '', result, flags=re.IGNORECASE)
+
+            # 2. Remove hydrate suffixes (dihydrate, pentahydrate, hemihydrate, etc.)
+            result = re.sub(r'\s+\w*hydrate\b', '', result, flags=re.IGNORECASE)
+
+            # 3. Remove salt suffixes (including combined salt+hydrate patterns)
+            result = re.sub(r'\s+monopotassium\s+salt\s+\w*hydrate\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+monosodium\s+salt\s+\w*hydrate\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+trisodium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+disodium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+monosodium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+sodium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+tripotassium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+dipotassium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+monopotassium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+potassium\s+salt\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+salt\b', '', result, flags=re.IGNORECASE)
+
+            # 4. Remove hydrochloride suffixes
+            result = re.sub(r'\s+dihydrochloride\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+hydrochloride\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+HCl\b', '', result, flags=re.IGNORECASE)
+
+            # 5. Remove dibasic/monobasic qualifiers
+            result = re.sub(r'\s+dibasic\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+monobasic\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(r'\s+tribasic\b', '', result, flags=re.IGNORECASE)
+
+            # Clean up any double spaces
+            result = re.sub(r'\s+', ' ', result).strip()
+
+            return result
+
+        # Apply basic transformations
+        normalized = apply_transforms(current)
+        variants.add(normalized)
+
+        # 6. Handle D,L stereochemistry - try both D,L -> L and D,L -> D
+        if 'D,L' in normalized or 'd,l' in normalized.lower():
+            variants.add(re.sub(r'D,L[-\s]?', 'L-', normalized, flags=re.IGNORECASE))
+            variants.add(re.sub(r'D,L[-\s]?', 'D-', normalized, flags=re.IGNORECASE))
+            variants.add(re.sub(r'D,L[-\s]?', '', normalized, flags=re.IGNORECASE))
+        if 'DL-' in normalized or 'dl-' in normalized.lower():
+            variants.add(re.sub(r'DL[-\s]?', 'L-', normalized, flags=re.IGNORECASE))
+            variants.add(re.sub(r'DL[-\s]?', 'D-', normalized, flags=re.IGNORECASE))
+            variants.add(re.sub(r'DL[-\s]?', '', normalized, flags=re.IGNORECASE))
+
+        # 7. Convert "ic acid" to "ate" (e.g., "Pyruvic acid" -> "Pyruvate")
+        acid_variants = set()
+        for v in list(variants):
+            if re.search(r'ic\s+acid\b', v, flags=re.IGNORECASE):
+                ate_form = re.sub(r'ic\s+acid\b', 'ate', v, flags=re.IGNORECASE)
+                acid_variants.add(ate_form)
+            # Also try the reverse: "ate" -> "ic acid"
+            if re.search(r'ate\b', v, flags=re.IGNORECASE) and not re.search(r'ic\s+acid\b', v, flags=re.IGNORECASE):
+                acid_form = re.sub(r'ate\b', 'ic acid', v, flags=re.IGNORECASE)
+                acid_variants.add(acid_form)
+        variants.update(acid_variants)
+
+        # 8. Handle common acid name variations
+        for v in list(variants):
+            # "ous acid" -> "ite"
+            if re.search(r'ous\s+acid\b', v, flags=re.IGNORECASE):
+                variants.add(re.sub(r'ous\s+acid\b', 'ite', v, flags=re.IGNORECASE))
+
+        # Add original name as fallback
+        variants.add(name.strip())
+
+        # Sort by length (shortest/most normalized first) and return as list
+        return sorted(list(variants), key=len)
+
+    def normalize_and_search_compound(self, name: str) -> dict[str, Any]:
+        """Search for a compound using normalized name variants.
+
+        Tries multiple normalized forms of the compound name to find the best match.
+
+        Args:
+            name: The compound name to search for
+
+        Returns:
+            Dict with search results, including which variant matched
+        """
+        variants = self.normalize_compound_name(name)
+        all_matches = {}
+        matched_variant = None
+
+        for variant in variants:
+            matches = self.search_compounds(query_identifiers=[variant])
+            if matches:
+                for cpd_id, match_info in matches.items():
+                    if cpd_id not in all_matches:
+                        all_matches[cpd_id] = match_info
+                        all_matches[cpd_id]['matched_variant'] = variant
+                    elif match_info['score'] > all_matches[cpd_id]['score']:
+                        all_matches[cpd_id] = match_info
+                        all_matches[cpd_id]['matched_variant'] = variant
+
+                if matched_variant is None:
+                    matched_variant = variant
+
+        return {
+            'matches': all_matches,
+            'original_name': name,
+            'variants_tried': variants,
+            'first_matched_variant': matched_variant
+        }
+
     def _parse_formula(self,formula: str) -> dict:
         # Match elements (capital letter + optional lowercase letters) followed by optional digits
         tokens = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
@@ -379,7 +520,7 @@ class MSBiochemUtils(SharedEnvUtils):
                     matches.setdefault(hit, {"score": 0, "identifier_hits": {}, "formula_hits": {},"structure_hits": {}})
                     matches[hit]["identifier_hits"][item] = 1 * identifier_hash[item]["type"]
                     matches[hit]["score"] += 10
-            elif item.contains(":"):
+            elif ":" in item:
                 array = item.split(":")[1]
                 itemid = array[1]
                 itemtype = array[0]

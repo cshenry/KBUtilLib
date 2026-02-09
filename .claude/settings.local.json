@@ -29,7 +29,8 @@
       "WebFetch(domain:escher.readthedocs.io)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(pip show:*)",
-      "Bash(uv show:*)"
+      "Bash(uv show:*)",
+      "WebFetch(domain:hub.berdl.kbase.us)"
     ],
     "deny": [],
     "ask": []

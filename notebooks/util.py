@@ -15,7 +15,7 @@ print(base_dir+"/KBUtilLib/src")
 sys.path = [base_dir+"/KBUtilLib/src",base_dir+"/cobrakbase",base_dir+"/ModelSEEDpy/"] + sys.path
 
 # Import utilities with error handling
-from kbutillib import ModelStandardizationUtils, MSFBAUtils, AICurationUtils, NotebookUtils, EscherUtils, KBPLMUtils, BVBRCUtils
+from kbutillib import ModelStandardizationUtils, MSFBAUtils, KBBERDLUtils, AICurationUtils, NotebookUtils, EscherUtils, KBPLMUtils, BVBRCUtils
 
 import hashlib
 import pandas as pd
@@ -39,6 +39,16 @@ class BVBRCUtil(NotebookUtils,BVBRCUtils):
             name="BVBRCUtils",
             **kwargs
         )
+bvbrcutil = BVBRCUtil()
+
+class KBBERDLUtil(NotebookUtils,KBBERDLUtils):
+    def __init__(self,**kwargs):
+        super().__init__(
+            notebook_folder=script_dir,
+            name="KBBERDLUtil",
+            **kwargs
+        )
+kbberdlutil = KBBERDLUtil()
 
 class AICurationUtil(NotebookUtils,AICurationUtils):
     def __init__(self,backend="argo",proxy_port=None,**kwargs):
@@ -49,3 +59,4 @@ class AICurationUtil(NotebookUtils,AICurationUtils):
             proxy_port=proxy_port,
             **kwargs
         )
+aiutil = AICurationUtil()

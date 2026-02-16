@@ -6,6 +6,7 @@ from unittest import result
 import pandas as pd
 import re
 import json
+import os
 
 from .kb_annotation_utils import KBAnnotationUtils
 from .ms_biochem_utils import MSBiochemUtils
@@ -33,7 +34,8 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         self._import_modules()
 
         # Configuring cobrakbase API
-        self.kbase_api = self.cobrakbase.KBaseAPI(token=self.get_token("kbase"))
+        os.environ["KB_AUTH_TOKEN"] = self.get_token("kbase")
+        self.kbase_api = self.cobrakbase.KBaseAPI()
         self.kbase_api.ws_client = self.ws_client()
         self._msrecon = None
 

@@ -75,7 +75,7 @@ class MSReconstructionUtils(KBModelUtils):
         except ImportError as e:
             self.log_error(f"Failed to import reconstruction modules: {e}")
             raise
-    
+
     def _kbase_imports(self) -> None:
         """Import additional modules needed for kbase-related operations."""
         try:
@@ -737,7 +737,7 @@ class MSReconstructionUtils(KBModelUtils):
                 atp_media_filename=self.modelseedpy_data_dir + "/atp_medias.tsv",
                 recompute=False,
             )
-            print("Tests:", atp_tests)
+
 
         all_tests = additional_tests + atp_tests
 

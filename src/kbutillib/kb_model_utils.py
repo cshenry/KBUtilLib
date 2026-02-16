@@ -33,7 +33,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         self._import_modules()
 
         # Configuring cobrakbase API
-        self.kbase_api = self.cobrakbase.KBaseAPI()
+        self.kbase_api = self.cobrakbase.KBaseAPI(token=self.get_token("kbase"))
         self.kbase_api.ws_client = self.ws_client()
         self._msrecon = None
 
@@ -365,7 +365,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         factory = KBaseObjectFactory()
         genome = factory._build_object("KBaseGenomes.Genome", genome_data, None, None)
         return genome
-    
+
     def get_msgenome(self, id_or_ref, ws=None):
         genome = self.kbase_api.get_from_ws(id_or_ref, ws)
         genome.id = genome.info.id

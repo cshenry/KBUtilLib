@@ -59,6 +59,12 @@ class KBWSUtils(SharedEnvUtils):
         )
         self.ws_id = None
         self.ws_name = None
+        self.method = None
+        self.input_objects = None
+        self.params = None
+        self.service = None
+        self.version = None
+        self.description = None
 
     def reset_attributes(self):
         """Resetting workspace elements related to a new method call."""
@@ -238,6 +244,17 @@ class KBWSUtils(SharedEnvUtils):
         )
         return self.ws_client().save_objects(params)
 
+    def set_provenance(self,method=None,description=None,input_objects=None,params=None,service=None,version=None):
+        self.method = method
+        self.input_objects = input_objects
+        self.params = params
+        self.service = service
+        self.version = version
+        if description:
+            self.description = description
+        else:
+            self.description = method
+
     def get_provenance(self) -> List[Dict[str, Any]]:
         """Generate provenance information for workspace operations.
 
@@ -246,7 +263,7 @@ class KBWSUtils(SharedEnvUtils):
         """
         return [
             {
-                "description": self.method,
+                "description": self.description,
                 "input_ws_objects": self.input_objects,
                 "method": self.method,
                 "script_command_line": "",

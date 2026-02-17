@@ -8,12 +8,12 @@ from typing import Any, Optional, Union
 
 import requests
 
-from .shared_env_utils import SharedEnvUtils
+from .kb_ws_utils import KBWSUtils
 
 # TODO: Need to write the callback service and run it on poplar, then write and run tests for this module
 
 
-class KBCallbackUtils(SharedEnvUtils):
+class KBCallbackUtils(KBWSUtils):
     """Utilities enabling execution of KBase callbacks"""
 
     def __init__(
@@ -199,7 +199,7 @@ class KBCallbackUtils(SharedEnvUtils):
                 "name": objid,
                 "data": obj_json,
                 "upgrade": 1,
-                "provenance": self.provenance(),
+                "provenance": self.get_provenance(),
                 "hidden": 0,
                 "workspace": self.ws_name,
             }

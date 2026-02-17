@@ -88,7 +88,7 @@ class MSBiochemUtils(SharedEnvUtils):
         if self._biochem_db is None:
             self._ensure_database_available()
         return self._biochem_db
-    
+
     @property
     def identifier_hash(self) -> Dict:
         """Index the biochemistry compounds by their identifiers."""
@@ -101,7 +101,7 @@ class MSBiochemUtils(SharedEnvUtils):
                     self._identifier_hash[item]["ids"].append(cpd.id)
                     item = self._standardize_string(cpd.name)
                     self._identifier_hash.setdefault(item, {"type": "name", "ids": []})
-                    self._identifier_hash[item]["ids"].append(cpd.id)   
+                    self._identifier_hash[item]["ids"].append(cpd.id)
                     for name in cpd.names:
                         name = self._standardize_string(str(name))
                         self._identifier_hash.setdefault(name, {"type": "synonym", "ids": []})
@@ -113,7 +113,7 @@ class MSBiochemUtils(SharedEnvUtils):
                                 self._identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
                                 self._identifier_hash[item]["ids"].append(cpd.id)
         return self._identifier_hash
-    
+
     @property
     def rxn_identifier_hash(self) -> Dict:
         """Index the biochemistry reactions by their identifiers."""
@@ -143,7 +143,7 @@ class MSBiochemUtils(SharedEnvUtils):
                                 self._rxn_identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
                                 self._rxn_identifier_hash[item]["ids"].append(rxn.id)
         return self._rxn_identifier_hash
-    
+
     @property
     def rxn_stoichiometry_hash(self) -> Dict:#TODO: This is AI code currently - need to revise this
         """Index the biochemistry reactions by their stoichiometry."""
@@ -165,7 +165,7 @@ class MSBiochemUtils(SharedEnvUtils):
                         base_cpd_hash[base_id] += rxn.metabolites[metabolite]
                     self._rxn_stoichiometry_hash["rxn_hash"][rxn.id] = {"metabolite_hash": base_cpd_hash,"transport_hash":transport_hash,"proton_stoichiometry":0,"equation":rxn.build_reaction_string(),"id":rxn.id,"name":rxn.name}
                     self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = 0
-                    for base_id in base_cpd_hash:    
+                    for base_id in base_cpd_hash:
                         if base_id == "cpd00067":
                             self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = base_cpd_hash[base_id]
                             self._rxn_stoichiometry_hash["rxn_hash"][rxn.id]["proton_stoichiometry"] = base_cpd_hash[base_id]
@@ -369,7 +369,7 @@ class MSBiochemUtils(SharedEnvUtils):
     def _parse_formula(self,formula: str) -> dict:
         # Match elements (capital letter + optional lowercase letters) followed by optional digits
         tokens = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
-        
+
         counts = defaultdict(int)
         for element, num in tokens:
             counts[element] += int(num) if num else 1
@@ -426,7 +426,7 @@ class MSBiochemUtils(SharedEnvUtils):
             self.log_error(error_msg)
             raise
 
-    
+
     def _parse_id(self, object_or_id):
         """Parse a compound or reaction ID to extract base ID, compartment, and index.
 
@@ -500,7 +500,7 @@ class MSBiochemUtils(SharedEnvUtils):
         except subprocess.CalledProcessError as e:
             error_msg = f"Failed to update ModelSEED database: {e.stderr}"
             self.log_error(error_msg)
-            raise RuntimeError(error_msg)          
+            raise RuntimeError(error_msg)
 
     def search_compounds(
         self,
@@ -787,7 +787,7 @@ class MSBiochemUtils(SharedEnvUtils):
         stats["reversibility_distribution"] = reversibility_stats
 
         return stats
-    
+
     def reaction_to_string(self,reaction):
         """Converts reaction into string representation."""
         [base_id, compartment, index] = self._parse_id(reaction)
@@ -882,7 +882,7 @@ class MSBiochemUtils(SharedEnvUtils):
         if met.formula == "H2O" and met.charge == 0:
             return True
         return False
-    
+
     def is_proton(self,met):
         (base_id,compartment,index) = self._parse_id(met)
         if base_id in ["h","cpd00067"]:
@@ -890,7 +890,7 @@ class MSBiochemUtils(SharedEnvUtils):
         if met.formula == "H" and met.charge == 1:
             return True
         return False
-    
+
     def find_proton_in_compartment(self,model, compartment):
         """Find or create H+ metabolite in the given compartment."""
         metabolite_index,base_id_index = self.build_model_metabolite_index(model)
@@ -920,7 +920,7 @@ class MSBiochemUtils(SharedEnvUtils):
 
     def check_reaction_balance(self,rxn):
         """Check mass and charge balance for a reaction.
-        
+
         Returns:
             dict with keys:
             - 'mass_balanced': bool
@@ -942,11 +942,11 @@ class MSBiochemUtils(SharedEnvUtils):
                     element_balance[element] += coeff * count
             else:
                 missing_formulas.append(met.id)
-            
+
             # Check charge
             if met.charge is not None:
                 charge_balance += coeff * met.charge
-        
+
             stoichiometry[met.id] = {
                 'formula': met.formula,
                 'charge': met.charge,
@@ -959,7 +959,7 @@ class MSBiochemUtils(SharedEnvUtils):
         # Round to handle floating point errors
         element_imbalance = {k: round(v, 6) for k, v in element_balance.items() if round(v, 6) != 0}
         charge_imbalance = round(charge_balance, 6)
-        
+
         return {
             'mass_balanced': len(element_imbalance) == 0,
             'charge_balanced': charge_imbalance == 0,
@@ -971,7 +971,7 @@ class MSBiochemUtils(SharedEnvUtils):
 
     def can_fix_with_protons(self,balance_result):
         """Check if imbalance can be fixed by adjusting H+ only.
-        
+
         Returns:
             tuple (can_fix: bool, proton_adjustment: float)
             proton_adjustment is the number of H+ to ADD to the reaction
@@ -979,32 +979,32 @@ class MSBiochemUtils(SharedEnvUtils):
         """
         elem_imbalance = balance_result['element_imbalance']
         charge_imbalance = balance_result['charge_imbalance']
-        
+
         # If only H is imbalanced (or nothing is imbalanced in mass)
         non_h_imbalance = {k: v for k, v in elem_imbalance.items() if k != 'H'}
-        
+
         if non_h_imbalance:
             # There's an imbalance in elements other than H
             return False, 0
-        
+
         # Get H imbalance (positive = excess H on product side)
         h_imbalance = elem_imbalance.get('H', 0)
-        
+
         # Check if H imbalance matches charge imbalance
         # H+ has +1 charge, so adding 1 H+ adds +1 charge and +1 H
         # To fix: we need to add protons to the substrate side (negative coeff)
         # proton_adjustment = -h_imbalance (to cancel out the H excess)
-        
+
         # Verify that fixing H also fixes charge
-        # If we add -h_imbalance protons (to substrate side), 
+        # If we add -h_imbalance protons (to substrate side),
         # charge change = -h_imbalance * 1 = -h_imbalance
         # This should equal -charge_imbalance to balance
-        
+
         if h_imbalance == charge_imbalance:
             # Both can be fixed by adjusting H+ by -h_imbalance
             return True, -h_imbalance
         elif h_imbalance == 0 and charge_imbalance != 0:
-            # No H imbalance but charge is off - can fix with H+ 
+            # No H imbalance but charge is off - can fix with H+
             return True, -charge_imbalance
         else:
             # H and charge imbalances don't match - can't fix with just H+

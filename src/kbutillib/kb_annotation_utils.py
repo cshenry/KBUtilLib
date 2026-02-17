@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .kb_ws_utils import KBWSUtils
+from .kb_callback_utils import KBCallbackUtils
 from .dependency_manager import get_data_path
 
 source_hash = {"MetaCyc": "META", "KEGG": "RO", "BiGG": "BIGG", "Rhea": "RHEA"}
@@ -44,7 +45,7 @@ ontology_hash = {
 }
 
 
-class KBAnnotationUtils(KBWSUtils):
+class KBAnnotationUtils(KBWSUtils, KBCallbackUtils):
     """Utilities for managing gene annotation information within KBase genome objects in the workspace"""
 
     def __init__(self, **kwargs: Any) -> None:

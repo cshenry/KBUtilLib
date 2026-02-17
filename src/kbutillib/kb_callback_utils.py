@@ -29,6 +29,18 @@ class KBCallbackUtils(SharedEnvUtils):
         self._callback_directory = callback_directory
         self._callback_clients = {}
 
+    def set_callback_client(self, name, client):
+        """Set an externally-created client instance for use by callback utilities.
+
+        This allows callers to inject pre-built clients (e.g., DataFileUtil, GenomeFileUtil)
+        instead of having KBCallbackUtils create them from the callback_url.
+
+        Args:
+            name: Client name key (e.g., "DataFileUtil", "GenomeFileUtil")
+            client: The client instance to store
+        """
+        self._callback_clients[name] = client
+
     def initialize_callback(self):
         """Initialize the callback URL for KBase services.
 

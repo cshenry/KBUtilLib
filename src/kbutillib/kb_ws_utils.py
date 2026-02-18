@@ -244,7 +244,7 @@ class KBWSUtils(SharedEnvUtils):
         )
         return self.ws_client().save_objects(params)
 
-    def set_provenance(self,method=None,description=None,input_objects=None,params=None,service=None,version=None):
+    def set_provenance(self,method="unknown",description=None,input_objects=[],params={},service="unknown",version=0):
         self.method = method
         self.input_objects = input_objects
         self.params = params

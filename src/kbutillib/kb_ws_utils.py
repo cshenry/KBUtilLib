@@ -235,7 +235,7 @@ class KBWSUtils(SharedEnvUtils):
                     "name": objid,
                     "type": obj_type,
                     "meta": {},
-                    "provenance": self.get_provenance(),
+                    "provenance": []#self.get_provenance(),
                 }
             ],
         }

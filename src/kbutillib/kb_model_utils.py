@@ -572,7 +572,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         # template = self.kbase_api.get_object(template_id,ws)
         # info = self.kbase_api.get_object_info(template_id,ws)
         # template = MSTemplateBuilder.from_dict(template).build()
-        self.input_objects.append(template.info.reference)
+        #self.input_objects.append(template.info.reference)
         return template
 
     #################Save functions#####################

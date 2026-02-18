@@ -49,10 +49,13 @@ class BaseUtils:
         self.obj_created = []
         self.input_objects = []
         # Initializing attributes tracking method data to support provencance and context
-        self.method = None
+        self.method = "Unknown"
         self.params = {}
         self.initialized = False
-        self.timestamp = None
+        self.timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        self.service = "Unknown"
+        self.version = "Unknown"
+        self.description = "Unknown"
 
     def initialize_call(
         self,

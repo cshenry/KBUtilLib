@@ -59,12 +59,6 @@ class KBWSUtils(SharedEnvUtils):
         )
         self.ws_id = None
         self.ws_name = None
-        self.method = None
-        self.input_objects = None
-        self.params = None
-        self.service = None
-        self.version = None
-        self.description = None
 
     def reset_attributes(self):
         """Resetting workspace elements related to a new method call."""

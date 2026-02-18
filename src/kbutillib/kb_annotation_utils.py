@@ -45,7 +45,7 @@ ontology_hash = {
 }
 
 
-class KBAnnotationUtils(KBWSUtils, KBCallbackUtils):
+class KBAnnotationUtils(KBCallbackUtils):
     """Utilities for managing gene annotation information within KBase genome objects in the workspace"""
 
     def __init__(self, **kwargs: Any) -> None:

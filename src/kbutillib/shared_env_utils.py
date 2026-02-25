@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from .base_utils import BaseUtils
+from .dependency_manager import DependencyManager, DEFAULT_DEPENDENCIES_FILE
 
 # Standard kbutillib directory
 KBUTILLIB_DIR = Path.home() / ".kbutillib"
 DEFAULT_CONFIG_FILE = KBUTILLIB_DIR / "config.yaml"
-
 
 class SharedEnvUtils(BaseUtils):
     """Manages shared environment configuration, secrets, and runtime settings.
@@ -79,6 +79,9 @@ class SharedEnvUtils(BaseUtils):
             self._token_hash = self.read_token_file()
         # Loading environment variables
         self.load_environment_variables()
+
+        # Initialize dependency manager (auto_init=False so callers control when to resolve)
+        self.dependency_manager = DependencyManager(auto_init=False)
 
         # Setting KBase token from input argument if provided (without saving to file)
         if token is not None:
@@ -404,6 +407,29 @@ class SharedEnvUtils(BaseUtils):
         """
         return self._env_vars.get(key, default)
 
+    def get_dependency_path(self, dep_name: str) -> Optional[Path]:
+        """Get the resolved path for a dependency.
+
+        Args:
+            dep_name: Name of the dependency (as defined in dependencies.yaml)
+
+        Returns:
+            Path object or None if dependency not found
+        """
+        return self.dependency_manager.get_dependency_path(dep_name)
+
+    def get_data_path(self, dep_name: str, relative_path: str = "") -> Optional[Path]:
+        """Get a path to data within a dependency.
+
+        Args:
+            dep_name: Name of the dependency
+            relative_path: Relative path within the dependency
+
+        Returns:
+            Path object or None if dependency not found
+        """
+        return self.dependency_manager.get_data_path(dep_name, relative_path)
+
     # Printing environment state for debugging or inspection
     def export_environment(self) -> Dict[str, Any]:
         """Export the current environment state for debugging or inspection."""
@@ -512,5 +538,75 @@ class SharedEnvUtils(BaseUtils):
         except Exception as e:
             result["message"] += f"\nFailed to copy config file: {e}"
             return result
+
+        return result
+
+    @staticmethod
+    def create_local_dependency_config(
+        source_dependencies: Optional[Union[str, Path]] = None,
+        force: bool = False
+    ) -> Dict[str, Any]:
+        """Copy dependencies.yaml from the repo into ~/.kbutillib/dependencies.yaml.
+
+        This allows users to customize dependency paths locally without modifying
+        the repository's dependencies.yaml.
+
+        Args:
+            source_dependencies: Optional path to dependencies file to copy. If None,
+                                uses the repo root dependencies.yaml.
+            force: If True, overwrites existing local config
+
+        Returns:
+            Dict with status information:
+            {
+                "success": bool,
+                "config_copied": bool,
+                "config_path": str,
+                "message": str
+            }
+
+        Examples:
+            >>> SharedEnvUtils.create_local_dependency_config()
+            >>> SharedEnvUtils.create_local_dependency_config(force=True)
+        """
+        result = {
+            "success": False,
+            "config_copied": False,
+            "config_path": str(DEFAULT_DEPENDENCIES_FILE),
+            "message": "",
+        }
+
+        # Find the source file
+        if source_dependencies:
+            source = Path(source_dependencies)
+            if not source.exists():
+                result["message"] = f"Source dependencies file not found: {source}"
+                return result
+        else:
+            # Default: repo root dependencies.yaml
+            repo_root = Path(__file__).parent.parent.parent
+            source = repo_root / "dependencies.yaml"
+            if not source.exists():
+                result["message"] = f"Repo dependencies.yaml not found at {source}"
+                return result
+
+        # Check if local config already exists
+        if DEFAULT_DEPENDENCIES_FILE.exists() and not force:
+            result["success"] = True
+            result["message"] = f"Local config already exists: {DEFAULT_DEPENDENCIES_FILE}"
+            return result
+
+        # Ensure ~/.kbutillib/ directory exists
+        if not KBUTILLIB_DIR.exists():
+            KBUTILLIB_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Copy
+        try:
+            shutil.copy2(source, DEFAULT_DEPENDENCIES_FILE)
+            result["config_copied"] = True
+            result["success"] = True
+            result["message"] = f"Copied {source} to {DEFAULT_DEPENDENCIES_FILE}"
+        except Exception as e:
+            result["message"] = f"Failed to copy: {e}"
 
         return result

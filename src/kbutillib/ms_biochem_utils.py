@@ -10,7 +10,6 @@ from typing import Any, Optional, Dict
 from collections import defaultdict
 
 from .shared_env_utils import SharedEnvUtils
-from .dependency_manager import get_data_path
 
 compartment_types = {
     "cytosol":"c",
@@ -61,7 +60,7 @@ class MSBiochemUtils(SharedEnvUtils):
                 modelseed_db_path = config_path
             else:
                 # Use dependency manager to get the ModelSEEDDatabase path
-                db_path = get_data_path("ModelSEEDDatabase")
+                db_path = self.get_data_path("ModelSEEDDatabase")
                 if db_path:
                     modelseed_db_path = str(db_path)
                 else:

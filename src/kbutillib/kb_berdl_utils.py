@@ -8,8 +8,9 @@ For full documentation, call: utils.print_docs() or see docs/modules/kb_berdl_ut
 """
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -700,4 +701,163 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
                 "message": f"Connection failed: {result.get('error', 'Unknown error')}",
                 "api_url": self.api_url
             }
+
+    def get_genometables_from_kbase(
+        self,
+        ref: str,
+        output_path: str,
+        kb_version: str = "prod",
+        ws_utils: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Download a GenomeDataLakeTables object and its SQLite databases from KBase.
+
+        Retrieves a KBaseFBA.GenomeDataLakeTables workspace object, saves the
+        JSON data to the output directory, and downloads each clade's SQLite
+        database from the KBase blob store.
+
+        Args:
+            ref: Workspace reference to the GenomeDataLakeTables object
+                (e.g., "76990/TestDB" or "76990/5/1")
+            output_path: Local directory path to save the JSON and SQLite databases.
+                Will be created if it doesn't exist.
+            kb_version: KBase environment version ("prod", "appdev", "ci").
+                Default: "prod". Ignored if ws_utils is provided.
+            ws_utils: Optional pre-configured KBWSUtils instance. If None,
+                one will be created using kb_version and the current token.
+
+        Returns:
+            Dict containing:
+                - success: bool indicating if operation succeeded
+                - object_name: Name of the retrieved workspace object
+                - object_ref: Full workspace reference (ws_id/obj_id/version)
+                - json_path: Path to the saved JSON file
+                - databases: List of dicts with clade info and download paths:
+                    - clade: Clade/pangenome ID
+                    - taxonomy: Pangenome taxonomy string
+                    - handle_ref: Handle reference used for download
+                    - db_path: Path to the downloaded SQLite file
+                    - size: File size in bytes
+                - error: Error message if success is False
+
+        Example:
+            >>> utils = KBBERDLUtils()
+            >>> result = utils.get_genometables_from_kbase(
+            ...     ref="76990/TestDB",
+            ...     output_path="data/downloaded_dbs",
+            ...     kb_version="appdev"
+            ... )
+            >>> if result["success"]:
+            ...     print(f"Downloaded {len(result['databases'])} databases")
+            ...     for db in result["databases"]:
+            ...         print(f"  {db['clade']}: {db['db_path']} ({db['size']:,} bytes)")
+        """
+        self.initialize_call(
+            "get_genometables_from_kbase",
+            {"ref": ref, "output_path": output_path, "kb_version": kb_version},
+            print_params=True,
+        )
+
+        # Create or use provided KBWSUtils instance
+        if ws_utils is None:
+            from .kb_ws_utils import KBWSUtils
+            ws_utils = KBWSUtils(kb_version=kb_version)
+
+        # Create output directory
+        os.makedirs(output_path, exist_ok=True)
+
+        # Retrieve the workspace object
+        try:
+            obj = ws_utils.get_object(ref)
+            if obj is None:
+                return {
+                    "success": False,
+                    "error": f"Object not found at reference: {ref}",
+                    "object_name": None,
+                    "object_ref": ref,
+                    "json_path": None,
+                    "databases": [],
+                }
+        except Exception as e:
+            self.log_error(f"Failed to retrieve object {ref}: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to retrieve object: {e}",
+                "object_name": None,
+                "object_ref": ref,
+                "json_path": None,
+                "databases": [],
+            }
+
+        obj_data = obj["data"]
+        obj_info = obj["info"]
+        obj_name = obj_info[1]
+        obj_ref = f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"
+
+        self.log_info(f"Retrieved: {obj_name} ({obj_ref})")
+
+        # Save JSON object to output directory
+        json_path = os.path.join(output_path, f"{obj_name}.json")
+        with open(json_path, "w") as f:
+            json.dump(obj_data, f, indent=2)
+        self.log_info(f"Saved JSON to: {json_path}")
+
+        # Download SQLite databases for each pangenome/clade
+        pangenome_data = obj_data.get("pangenome_data", [])
+        self.log_info(f"Found {len(pangenome_data)} pangenome entries")
+
+        databases: List[Dict[str, Any]] = []
+        for entry in pangenome_data:
+            clade = entry["pangenome_id"]
+            handle_ref = entry["sqllite_tables_handle_ref"]
+            taxonomy = entry.get("pangenome_taxonomy", "")
+
+            clade_dir = os.path.join(output_path, clade)
+            os.makedirs(clade_dir, exist_ok=True)
+
+            db_path = os.path.join(clade_dir, f"{clade}.db")
+            self.log_info(f"Downloading database for clade: {clade} (handle: {handle_ref})")
+
+            try:
+                result_path = ws_utils.download_blob_file(handle_ref, db_path)
+                if result_path:
+                    size = os.path.getsize(result_path)
+                    self.log_info(f"  Downloaded: {size:,} bytes -> {result_path}")
+                    databases.append({
+                        "clade": clade,
+                        "taxonomy": taxonomy,
+                        "handle_ref": handle_ref,
+                        "db_path": result_path,
+                        "size": size,
+                    })
+                else:
+                    self.log_error(f"  Download failed for clade {clade} (handle: {handle_ref})")
+                    databases.append({
+                        "clade": clade,
+                        "taxonomy": taxonomy,
+                        "handle_ref": handle_ref,
+                        "db_path": None,
+                        "size": 0,
+                    })
+            except Exception as e:
+                self.log_error(f"  Error downloading clade {clade}: {e}")
+                databases.append({
+                    "clade": clade,
+                    "taxonomy": taxonomy,
+                    "handle_ref": handle_ref,
+                    "db_path": None,
+                    "size": 0,
+                })
+
+        successful = [db for db in databases if db["db_path"] is not None]
+        self.log_info(
+            f"Download complete: {len(successful)}/{len(databases)} databases downloaded"
+        )
+
+        return {
+            "success": len(successful) == len(databases),
+            "object_name": obj_name,
+            "object_ref": obj_ref,
+            "json_path": json_path,
+            "databases": databases,
+        }
 

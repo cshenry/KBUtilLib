@@ -3,23 +3,30 @@
 # This file specifies paths to external dependencies.
 # By default, dependencies are expected in sibling directories alongside KBUtilLib.
 #
-# Each dependency has a 'path' field:
-#   - Relative paths are resolved from the KBUtilLib repo root
-#   - Absolute paths are used as-is
+# Each dependency has:
+#   'path' - local path to the dependency:
+#     - Relative paths are resolved from the KBUtilLib repo root
+#     - Absolute paths are used as-is
+#   'git' - git repository URL for cloning/checkout
 #
 # Examples:
 #   path: "../ModelSEEDpy"              # Sibling directory (default)
 #   path: "/absolute/path/to/ModelSEEDpy"  # Absolute path
+#   git: "https://github.com/org/repo.git"
 
 dependencies:
   modelseedpy:
     path: "../ModelSEEDpy"
+    git: "https://github.com/cshenry/ModelSEEDpy"
 
   ModelSEEDDatabase:
     path: "../ModelSEEDDatabase"
+    git: "https://github.com/ModelSEED/ModelSEEDDatabase.git"
 
   cobrakbase:
     path: "../cobrakbase"
+    git: "https://github.com/Fxe/cobrakbase.git"
 
   cb_annotation_ontology_api:
     path: "../cb_annotation_ontology_api"
+    git: "https://github.com/kbaseapps/cb_annotation_ontology_api.git"

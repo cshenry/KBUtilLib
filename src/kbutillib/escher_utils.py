@@ -1169,3 +1169,5 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         if reaction_classes:
             translated_classes = self._translate_reaction_classes(reaction_classes, flux)
             self._inject_reaction_class_overlays(output_path, translated_classes)
+
+        return output_path

@@ -10,7 +10,6 @@ import pandas as pd
 
 from .kb_ws_utils import KBWSUtils
 from .kb_callback_utils import KBCallbackUtils
-from .dependency_manager import get_data_path
 
 source_hash = {"MetaCyc": "META", "KEGG": "RO", "BiGG": "BIGG", "Rhea": "RHEA"}
 
@@ -53,7 +52,7 @@ class KBAnnotationUtils(KBCallbackUtils):
         super().__init__(**kwargs)
 
         # Get the cb_annotation_ontology_api directory from dependency manager
-        ontology_path = get_data_path("cb_annotation_ontology_api")
+        ontology_path = self.get_data_path("cb_annotation_ontology_api")
         if ontology_path:
             self.annoontology_dir = ontology_path
         else:

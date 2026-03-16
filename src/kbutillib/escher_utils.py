@@ -1006,6 +1006,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         html_path: str,
         reaction_badges: List[Dict],
         badge_saturation: float = 3.0,
+        badge_size: float = 1.0,
         badge_x_start: int = -6,
     ) -> None:
         """Inject numerical fold-change badge overlays into an Escher HTML file.
@@ -1019,6 +1020,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             reaction_badges: List of badge dicts (already translated for flux).
                 Each dict has 'label' (str) and 'data' (dict rxn_id -> float).
             badge_saturation: Saturation value for the diverging color scale.
+            badge_size: Scale factor for badge dimensions (1.0 = default size).
             badge_x_start: Starting x-offset for the first numerical badge.
         """
         if not reaction_badges:
@@ -1111,11 +1113,12 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 <script>
 (function() {{
     var badges = {badges_json};
-    var BADGE_WIDTH = 30;
-    var BADGE_HEIGHT = 12;
-    var BADGE_GAP = 2;
+    var BADGE_WIDTH = {round(46 * badge_size)};
+    var BADGE_HEIGHT = {round(18 * badge_size)};
+    var BADGE_GAP = {round(3 * badge_size)};
     var BADGE_X_START = {badge_x_start};
-    var BADGE_Y_OFFSET = -16;
+    var BADGE_Y_OFFSET = {round(-22 * badge_size)};
+    var BADGE_FONT_SIZE = '{round(10 * badge_size)}';
 
     function addNumericalBadges() {{
         var reactions = document.querySelectorAll('.reaction');
@@ -1153,7 +1156,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                 txt.setAttribute('class', 'num-fc-badge-text');
                 txt.setAttribute('x', xPos + BADGE_WIDTH / 2);
                 txt.setAttribute('y', BADGE_Y_OFFSET + BADGE_HEIGHT / 2);
-                txt.setAttribute('font-size', '7');
+                txt.setAttribute('font-size', BADGE_FONT_SIZE);
                 var displayVal = badgeInfo.value;
                 if (displayVal >= 100) {{
                     txt.textContent = Math.round(displayVal) + 'x';
@@ -1407,7 +1410,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 
     def create_map_html2(self, model, map, output_path, flux=None,
                          reaction_classes=None, reaction_badges=None,
-                         badge_saturation=3.0,
+                         badge_saturation=3.0, badge_size=1.0,
                          height=600, width=900, use_short_rxn_names=True):
         """Create an HTML file that renders an Escher map with model data.
 
@@ -1435,6 +1438,8 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             badge_saturation: Saturation value for numerical badge color scale.
                   Fold-change values are clamped to [1/badge_saturation, badge_saturation].
                   Default 3.0 means full red at 0.33x, full blue at 3.0x.
+            badge_size: Scale factor for numerical badge dimensions (default 1.0).
+                  Values > 1.0 make badges larger, < 1.0 makes them smaller.
             height: Height of the map container in pixels
             width: Width of the map container in pixels
             use_short_rxn_names: If True, use shortest ModelSEED alias names for reactions
@@ -1487,7 +1492,8 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         if reaction_badges:
             translated_badges = self._translate_reaction_badges(reaction_badges, flux)
             self._inject_numerical_badge_overlays(
-                output_path, translated_badges, badge_saturation=badge_saturation
+                output_path, translated_badges,
+                badge_saturation=badge_saturation, badge_size=badge_size
             )
 
         return output_path

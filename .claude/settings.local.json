@@ -30,7 +30,11 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(pip show:*)",
       "Bash(uv show:*)",
-      "WebFetch(domain:hub.berdl.kbase.us)"
+      "WebFetch(domain:hub.berdl.kbase.us)",
+      "Bash(git -C /Users/chenry/Dropbox/Projects/ModelSEEDpy remote get-url origin)",
+      "Bash(git -C /Users/chenry/Dropbox/Projects/ModelSEEDDatabase remote get-url:*)",
+      "Bash(git -C /Users/chenry/Dropbox/Projects/cobrakbase remote get-url:*)",
+      "Bash(git -C /Users/chenry/Dropbox/Projects/cb_annotation_ontology_api remote get-url origin)"
     ],
     "deny": [],
     "ask": []

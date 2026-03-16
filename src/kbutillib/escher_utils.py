@@ -1,7 +1,8 @@
 """Utilities for managing and visualizing models on escher maps."""
 
+import math
 import pickle
-from typing import Any, Dict, Optional, Union, Literal, Tuple
+from typing import Any, Dict, List, Optional, Union, Literal, Tuple
 import pandas as pd
 import re
 import json
@@ -925,6 +926,302 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                 translated[rxn_id] = class_name
         return translated
 
+    @staticmethod
+    def _fold_change_to_color(value: float, saturation: float = 3.0) -> str:
+        """Convert a fold-change value to a diverging red-white-blue color.
+
+        The mapping works in log space so that reciprocal fold changes
+        (e.g. 0.5 and 2.0) are equidistant from 1.0.
+
+        Args:
+            value: Fold-change ratio (1.0 = no change). Values <= 0 are
+                   treated as the minimum (full red).
+            saturation: Fold-change value that maps to full color intensity.
+                        Values are clamped to [1/saturation, saturation].
+
+        Returns:
+            Hex color string (e.g. '#ff0000').
+        """
+        if saturation <= 1.0:
+            saturation = 3.0
+
+        min_val = 1.0 / saturation
+        max_val = saturation
+
+        # Clamp; treat zero/negative as minimum
+        if value <= 0:
+            value = min_val
+        value = max(min_val, min(max_val, value))
+
+        # Map to [-1, 1] in log space
+        log_val = math.log(value)
+        log_max = math.log(max_val)  # = -math.log(min_val)
+        t = log_val / log_max  # -1 for min_val, 0 for 1.0, +1 for max_val
+
+        if t < 0:
+            # Red side: interpolate white -> red as t goes 0 -> -1
+            frac = -t  # 0..1
+            r = 255
+            g = int(255 * (1 - frac))
+            b = int(255 * (1 - frac))
+        else:
+            # Blue side: interpolate white -> blue as t goes 0 -> +1
+            frac = t  # 0..1
+            r = int(255 * (1 - frac))
+            g = int(255 * (1 - frac))
+            b = 255
+
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def _translate_reaction_badges(
+        self,
+        reaction_badges: List[Dict],
+        flux: Optional[Dict[str, float]]
+    ) -> List[Dict]:
+        """Adjust reaction_badges data keys to match translated reaction IDs.
+
+        For reactions with negative flux, their bigg_id in the map becomes
+        <ID>-rev. This method updates the badge data dict keys accordingly.
+
+        Args:
+            reaction_badges: List of badge dicts with 'label' and 'data' keys
+            flux: Dict mapping reaction IDs to flux values (or None)
+
+        Returns:
+            List of badge dicts with adjusted data keys
+        """
+        translated = []
+        for badge in reaction_badges:
+            new_data = {}
+            for rxn_id, val in badge['data'].items():
+                if flux and rxn_id in flux and flux[rxn_id] < 0:
+                    new_data[f"{rxn_id}-rev"] = val
+                else:
+                    new_data[rxn_id] = val
+            translated.append({'label': badge['label'], 'data': new_data})
+        return translated
+
+    def _inject_numerical_badge_overlays(
+        self,
+        html_path: str,
+        reaction_badges: List[Dict],
+        badge_saturation: float = 3.0,
+        badge_x_start: int = -6,
+    ) -> None:
+        """Inject numerical fold-change badge overlays into an Escher HTML file.
+
+        Adds colored rectangles with numerical values near each reaction label.
+        Multiple badges are placed side by side. Also adds a color-scale legend
+        for each badge channel.
+
+        Args:
+            html_path: Path to the HTML file to modify
+            reaction_badges: List of badge dicts (already translated for flux).
+                Each dict has 'label' (str) and 'data' (dict rxn_id -> float).
+            badge_saturation: Saturation value for the diverging color scale.
+            badge_x_start: Starting x-offset for the first numerical badge.
+        """
+        if not reaction_badges:
+            return
+
+        # Pre-compute colors for all badge data
+        badges_with_colors = []
+        for badge in reaction_badges:
+            colored_data = {}
+            for rxn_id, val in badge['data'].items():
+                color = self._fold_change_to_color(val, badge_saturation)
+                colored_data[rxn_id] = {'value': val, 'color': color}
+            badges_with_colors.append({
+                'label': badge['label'],
+                'data': colored_data,
+            })
+
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        badges_json = json.dumps(badges_with_colors)
+
+        # Build legend HTML for each badge channel
+        legend_html = '<div id="numerical-badge-legend">'
+        for badge in reaction_badges:
+            label = badge['label']
+            min_label = f"{1.0 / badge_saturation:.2g}x"
+            max_label = f"{badge_saturation:.2g}x"
+            legend_html += (
+                f'<div class="num-badge-legend-row">'
+                f'<div class="num-badge-legend-label">{label}</div>'
+                f'<div class="num-badge-legend-scale">'
+                f'<span class="num-badge-legend-val">{min_label}</span>'
+                f'<div class="num-badge-legend-gradient"></div>'
+                f'<span class="num-badge-legend-val">{max_label}</span>'
+                f'</div></div>'
+            )
+        legend_html += '</div>'
+
+        injection = f'''
+<style>
+.num-fc-badge {{
+    pointer-events: none;
+    opacity: 0.9;
+}}
+.num-fc-badge-text {{
+    pointer-events: none;
+    font-family: sans-serif;
+    text-anchor: middle;
+    dominant-baseline: central;
+}}
+#numerical-badge-legend {{
+    position: fixed;
+    bottom: 10px;
+    left: 10px;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    padding: 10px 14px;
+    font-family: sans-serif;
+    font-size: 12px;
+    z-index: 10000;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    pointer-events: auto;
+}}
+.num-badge-legend-row {{
+    margin-bottom: 6px;
+}}
+.num-badge-legend-label {{
+    font-weight: bold;
+    margin-bottom: 2px;
+}}
+.num-badge-legend-scale {{
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}}
+.num-badge-legend-gradient {{
+    width: 100px;
+    height: 12px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #ff0000, #ffffff 50%, #0000ff);
+}}
+.num-badge-legend-val {{
+    font-size: 10px;
+    white-space: nowrap;
+}}
+</style>
+{legend_html}
+<script>
+(function() {{
+    var badges = {badges_json};
+    var BADGE_WIDTH = 30;
+    var BADGE_HEIGHT = 12;
+    var BADGE_GAP = 2;
+    var BADGE_X_START = {badge_x_start};
+    var BADGE_Y_OFFSET = -16;
+
+    function addNumericalBadges() {{
+        var reactions = document.querySelectorAll('.reaction');
+        if (!reactions.length) return false;
+        var added = 0;
+        reactions.forEach(function(reactionGroup) {{
+            var data = reactionGroup.__data__;
+            if (!data || !data.bigg_id) return;
+            var biggId = data.bigg_id;
+
+            var labelGroup = reactionGroup.querySelector('.reaction-label-group');
+            if (!labelGroup) return;
+            if (labelGroup.querySelector('.num-fc-badge')) return;
+
+            var ns = 'http://www.w3.org/2000/svg';
+            for (var i = 0; i < badges.length; i++) {{
+                var badgeInfo = badges[i].data[biggId];
+                if (!badgeInfo) continue;
+
+                var xPos = BADGE_X_START + i * (BADGE_WIDTH + BADGE_GAP);
+
+                var rect = document.createElementNS(ns, 'rect');
+                rect.setAttribute('class', 'num-fc-badge');
+                rect.setAttribute('x', xPos);
+                rect.setAttribute('y', BADGE_Y_OFFSET);
+                rect.setAttribute('width', BADGE_WIDTH);
+                rect.setAttribute('height', BADGE_HEIGHT);
+                rect.setAttribute('rx', '2');
+                rect.setAttribute('fill', badgeInfo.color);
+                rect.setAttribute('stroke', '#888');
+                rect.setAttribute('stroke-width', '0.5');
+                labelGroup.appendChild(rect);
+
+                var txt = document.createElementNS(ns, 'text');
+                txt.setAttribute('class', 'num-fc-badge-text');
+                txt.setAttribute('x', xPos + BADGE_WIDTH / 2);
+                txt.setAttribute('y', BADGE_Y_OFFSET + BADGE_HEIGHT / 2);
+                txt.setAttribute('font-size', '7');
+                var displayVal = badgeInfo.value;
+                if (displayVal >= 100) {{
+                    txt.textContent = Math.round(displayVal) + 'x';
+                }} else if (displayVal >= 10) {{
+                    txt.textContent = displayVal.toFixed(1) + 'x';
+                }} else {{
+                    txt.textContent = displayVal.toFixed(2) + 'x';
+                }}
+                // Choose text color for contrast
+                var brightness = 0;
+                var c = badgeInfo.color;
+                if (c.length === 7) {{
+                    var r = parseInt(c.substr(1,2),16);
+                    var g = parseInt(c.substr(3,2),16);
+                    var b = parseInt(c.substr(5,2),16);
+                    brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                }}
+                txt.setAttribute('fill', brightness > 140 ? '#000' : '#fff');
+                labelGroup.appendChild(txt);
+                added++;
+            }}
+        }});
+        return added > 0;
+    }}
+
+    function waitAndAddNumericalBadges() {{
+        var container = document.getElementById('map-container');
+        if (!container) {{
+            setTimeout(waitAndAddNumericalBadges, 200);
+            return;
+        }}
+        if (addNumericalBadges()) return;
+
+        var observer = new MutationObserver(function(mutations, obs) {{
+            var reactions = document.querySelectorAll('.reaction');
+            if (reactions.length > 0) {{
+                obs.disconnect();
+                setTimeout(addNumericalBadges, 500);
+            }}
+        }});
+        observer.observe(container, {{ childList: true, subtree: true }});
+
+        setTimeout(function() {{
+            observer.disconnect();
+            addNumericalBadges();
+        }}, 10000);
+    }}
+
+    if (document.readyState === 'loading') {{
+        document.addEventListener('DOMContentLoaded', waitAndAddNumericalBadges);
+    }} else {{
+        waitAndAddNumericalBadges();
+    }}
+}})();
+</script>
+'''
+
+        html_content = html_content.replace('</body>', injection + '\n</body>')
+
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        total_badges = sum(len(b['data']) for b in reaction_badges)
+        self.log_info(
+            f"Injected numerical badge overlays: {len(reaction_badges)} channels, "
+            f"{total_badges} total badge entries"
+        )
+
     def _inject_reaction_class_overlays(self, html_path: str,
                                          reaction_classes: Dict[str, str]) -> None:
         """Inject reaction class badge overlays into an Escher HTML file.
@@ -1108,7 +1405,10 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             f"across {len(unique_classes)} classes"
         )
 
-    def create_map_html2(self,model,map,output_path,flux=None,reaction_classes=None,height=600,width=900,use_short_rxn_names=True):
+    def create_map_html2(self, model, map, output_path, flux=None,
+                         reaction_classes=None, reaction_badges=None,
+                         badge_saturation=3.0,
+                         height=600, width=900, use_short_rxn_names=True):
         """Create an HTML file that renders an Escher map with model data.
 
         Args:
@@ -1122,6 +1422,19 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                   (e.g. {"rxn00001_c0": "glycolysis", "rxn00002_c0": "TCA cycle"}).
                   Up to 10 distinct classes are supported with unique colors. When provided,
                   colored badges are overlaid on classified reactions and a legend is added.
+            reaction_badges: Optional list of dicts for numerical fold-change badges.
+                  Each dict has 'label' (str) and 'data' (dict mapping reaction IDs to
+                  fold-change floats). Example::
+
+                      reaction_badges=[
+                          {"label": "Prot FC", "data": {"rxn00001_c0": 0.3}},
+                          {"label": "Flux FC", "data": {"rxn00001_c0": 0.8}},
+                      ]
+
+                  Badges use a diverging red-white-blue color scale (log-space).
+            badge_saturation: Saturation value for numerical badge color scale.
+                  Fold-change values are clamped to [1/badge_saturation, badge_saturation].
+                  Default 3.0 means full red at 0.33x, full blue at 3.0x.
             height: Height of the map container in pixels
             width: Width of the map container in pixels
             use_short_rxn_names: If True, use shortest ModelSEED alias names for reactions
@@ -1169,5 +1482,12 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         if reaction_classes:
             translated_classes = self._translate_reaction_classes(reaction_classes, flux)
             self._inject_reaction_class_overlays(output_path, translated_classes)
+
+        # Post-process HTML to add numerical fold-change badge overlays
+        if reaction_badges:
+            translated_badges = self._translate_reaction_badges(reaction_badges, flux)
+            self._inject_numerical_badge_overlays(
+                output_path, translated_badges, badge_saturation=badge_saturation
+            )
 
         return output_path

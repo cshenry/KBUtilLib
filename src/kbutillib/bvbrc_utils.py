@@ -332,7 +332,6 @@ class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
             }
             ontology_events.append(event)
             self.log_debug(f"Created {ontology_type} event with {len(ontology_terms)} genes")
-        self.save("test_genome",genome)
         # Add events to genome
         output = self.add_ontology_events(
             object=genome,

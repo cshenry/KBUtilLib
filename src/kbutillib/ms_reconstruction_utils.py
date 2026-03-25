@@ -290,8 +290,6 @@ class MSReconstructionUtils(KBModelUtils):
         mdl = builder.build(base_model, "0", False, False)
         mdl.genome = genome
         mdl.template = active_gs_template
-        mdl.core_template_ref = str(core_template.info)
-        mdl.template_ref = str(active_gs_template.info)
         current_output["Core GF"] = "NA"
 
         mdlutl = self.MSModelUtil.get(mdl)
@@ -591,6 +589,12 @@ class MSReconstructionUtils(KBModelUtils):
             # Add KBase-specific references
             mdlutl.model.genome_ref = self.wsinfo_to_ref(genome.annoont.info)
             mdlutl.wsid = gid + suffix
+
+            # Set template refs (requires .info from KBase workspace objects)
+            if loaded_core_template and hasattr(loaded_core_template, "info"):
+                mdlutl.model.core_template_ref = str(loaded_core_template.info)
+            if loaded_gs_template and hasattr(loaded_gs_template, "info"):
+                mdlutl.model.template_ref = str(loaded_gs_template.info)
 
             # Get the GS template from the model (build_metabolic_model may have loaded it)
             model_gs_template = mdlutl.model.template

@@ -572,6 +572,141 @@ class PatricWSUtils(SharedEnvUtils):
         """
         return self.get_object(path)
 
+    def parse_media_data(self, raw_data: str, metadata: Optional[List] = None,
+                         ref: str = "") -> Dict[str, Any]:
+        """Parse raw workspace media data, handling both JSON and TSV formats.
+
+        PATRIC workspace stores public media as TSV text with columns:
+            id  name  concentration  minflux  maxflux
+
+        This method detects the format and returns a normalized dict with
+        ``mediacompounds`` in either case.
+
+        Args:
+            raw_data: Raw string data from workspace (JSON or TSV)
+            metadata: Optional workspace metadata list (used to extract name)
+            ref: Workspace reference path (fallback for name extraction)
+
+        Returns:
+            Dict with keys ``id``, ``name``, ``mediacompounds``
+        """
+        if not raw_data or not raw_data.strip():
+            raise ValueError(f"Empty media data for {ref}")
+
+        # Try JSON first
+        try:
+            obj = json.loads(raw_data)
+            if isinstance(obj, dict):
+                return obj
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Fall back to TSV parsing
+        lines = raw_data.strip().split("\n")
+        if len(lines) < 2 or "\t" not in lines[0]:
+            raise ValueError(
+                f"Could not parse media data for {ref} "
+                f"(not JSON or TSV): {raw_data[:200]}"
+            )
+
+        compounds = []
+        for line in lines[1:]:
+            cols = line.split("\t")
+            if len(cols) >= 5:
+                compounds.append({
+                    "compound_ref": "~/compounds/" + cols[0],
+                    "name": cols[1],
+                    "concentration": float(cols[2]) if cols[2] else 0.001,
+                    "minFlux": float(cols[3]) if cols[3] else -100,
+                    "maxFlux": float(cols[4]) if cols[4] else 100,
+                })
+
+        # Derive media name from metadata or ref
+        media_name = ref.rstrip("/").split("/")[-1]
+        if metadata and len(metadata) > 0:
+            media_name = metadata[0]
+
+        return {"id": media_name, "name": media_name, "mediacompounds": compounds}
+
+    def get_media(self, path: str, as_msmedia: bool = False):
+        """Retrieve and parse a media object from the PATRIC workspace.
+
+        Handles both JSON and TSV formats (PATRIC public media is stored as
+        TSV).  When *as_msmedia* is ``True``, returns an ``MSMedia`` object
+        ready for use with ``MSGapfill`` or ``MSFBAUtils``.
+
+        Args:
+            path: Workspace path to the media object
+            as_msmedia: If True, return an MSMedia object instead of a dict
+
+        Returns:
+            Parsed media dict, or MSMedia object if *as_msmedia* is True
+
+        Example:
+            >>> media = utils.get_media('/chenry/public/modelsupport/media/NMS')
+            >>> media['mediacompounds'][0]['name']
+            'H2O'
+            >>> ms_media = utils.get_media('/chenry/public/modelsupport/media/NMS', as_msmedia=True)
+        """
+        result = self._ws_client.get([path])
+
+        if not result or not result[0]:
+            raise ValueError(f"Empty workspace response for media at {path}")
+
+        entry = result[0]
+        metadata = entry[0] if entry else []
+        raw = entry[1] if len(entry) > 1 else None
+
+        # Handle Shock URLs stored in metadata field
+        if (raw is None or raw == "") and metadata:
+            if len(metadata) > 9 and metadata[9] and str(metadata[9]).startswith("http"):
+                raw = str(metadata[9])
+
+        if raw is None or raw == "":
+            raise ValueError(f"No data found for media at {path}")
+
+        # If data is a Shock URL, download it
+        if isinstance(raw, str) and raw.startswith("http") and "shock" in raw:
+            download_url = raw.rstrip("/") + "?download"
+            token = self.get_token(namespace="patric")
+            resp = requests.get(
+                download_url,
+                headers={"Authorization": f"OAuth {token}"},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            raw = resp.text
+
+        # If data is already a dict (auto-parsed by workspace client)
+        if isinstance(raw, dict):
+            media_dict = raw
+        elif isinstance(raw, str):
+            media_dict = self.parse_media_data(raw, metadata=metadata, ref=path)
+        else:
+            raise ValueError(f"Unexpected data type for media at {path}: {type(raw)}")
+
+        if not as_msmedia:
+            return media_dict
+
+        # Convert to MSMedia
+        from modelseedpy.core.msmedia import MSMedia, MediaCompound
+        ms_media = MSMedia(
+            media_dict.get("id", "media"),
+            name=media_dict.get("name", "media"),
+        )
+        for mc in media_dict.get("mediacompounds", []):
+            cpd_id = mc.get("compound_ref", "").split("/")[-1]
+            if cpd_id:
+                ms_media.mediacompounds.append(
+                    MediaCompound(
+                        cpd_id,
+                        -1 * mc.get("maxFlux", 100),
+                        -1 * mc.get("minFlux", -100),
+                        concentration=mc.get("concentration", 0.001),
+                    )
+                )
+        return ms_media
+
     def list_models(self, directory: str, recursive: bool = False) -> List[Dict[str, Any]]:
         """List all models in a workspace directory.
 

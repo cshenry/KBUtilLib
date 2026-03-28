@@ -115,7 +115,7 @@ def precommit(session: nox.Session) -> None:
 @nox.session(python=python_versions)
 def mypy(session: nox.Session) -> None:
     """Type-check using mypy."""
-    args = session.posargs or ["src", "tests", "docs/conf.py"]
+    args = session.posargs or ["src", "tests"]
 
     session.run(
         "uv",

@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { python: "3.9", os: "ubuntu-latest", session: "mypy" }
+          - { python: "3.12", os: "ubuntu-latest", session: "tests" }
 
     env:
       NOXSESSION: ${{ matrix.session }}

@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
-from src.kbutillib.ms_biochem_utils import MSBiochemUtils
+from kbutillib.ms_biochem_utils import MSBiochemUtils
 
 
 @pytest.fixture

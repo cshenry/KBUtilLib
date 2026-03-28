@@ -22,10 +22,16 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
     reaction and metabolite operations, and other metabolic modeling tasks.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, template_source="kbase", templates_path=None, **kwargs: Any) -> None:
         """Initialize KBase model utilities.
 
         Args:
+            template_source: Where to load templates from. "kbase" (default) loads
+                from KBase workspace. "git" loads from local JSON files at
+                templates_path, bypassing KBase workspace entirely.
+            templates_path: Path to local templates directory (required when
+                template_source="git"). Should contain template JSON files
+                (e.g., GramNegModelTemplateV7.json).
             **kwargs: Additional keyword arguments passed to SharedEnvironment
         """
         super().__init__(**kwargs)
@@ -33,10 +39,17 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         # Import required modules after ensuring dependencies
         self._import_modules()
 
-        # Configuring cobrakbase API
-        os.environ["KB_AUTH_TOKEN"] = self.get_token("kbase")
-        self.kbase_api = self.cobrakbase.KBaseAPI()
-        self.kbase_api.ws_client = self.ws_client()
+        self.template_source = template_source
+        self.templates_path = templates_path
+
+        # Configuring cobrakbase API (only needed for KBase workspace access)
+        if template_source == "kbase":
+            os.environ["KB_AUTH_TOKEN"] = self.get_token("kbase")
+            self.kbase_api = self.cobrakbase.KBaseAPI()
+            self.kbase_api.ws_client = self.ws_client()
+        else:
+            self.kbase_api = None
+
         self._msrecon = None
 
     @property
@@ -107,6 +120,17 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             "old_grampos": "NewKBaseModelTemplates/GramPosModelTemplateV3",
             "old_gramneg": "NewKBaseModelTemplates/GramNegModelTemplateV3",
             "custom": None,
+        }
+
+        # Mapping from template key to local JSON filename (for template_source="git")
+        self.template_files = {
+            "core": "Core-V6.json",
+            "gp": "GramPosModelTemplateV7.json",
+            "gn": "GramNegModelTemplateV7.json",
+            "ar": "GramNegModelTemplateV7.json",  # fallback until archaea template exists
+            "grampos": "GramPosModelTemplateV7.json",
+            "gramneg": "GramNegModelTemplateV7.json",
+            "archaea": "GramNegModelTemplateV7.json",
         }
 
         # Setting ATP media
@@ -565,14 +589,50 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return gs_template
 
     def get_template(self, template_id, ws=None):
-        """Retrieve a template from KBase workspace."""
+        """Retrieve a template from KBase workspace or local file.
+
+        When template_source="git", loads from local JSON files at templates_path.
+        When template_source="kbase" (default), loads from KBase workspace.
+        """
+        if self.template_source == "git":
+            return self._get_template_from_file(template_id)
+        # Existing KBase workspace behavior
         if ws is None and "/" not in template_id and template_id in self.templates:
             template_id = self.templates[template_id]
         template = self.kbase_api.get_from_ws(template_id, ws)
-        # template = self.kbase_api.get_object(template_id,ws)
-        # info = self.kbase_api.get_object_info(template_id,ws)
-        # template = MSTemplateBuilder.from_dict(template).build()
-        self.input_objects.append(template.info.reference)
+        if hasattr(template, 'info') and hasattr(template.info, 'reference'):
+            self.input_objects.append(template.info.reference)
+        return template
+
+    def _get_template_from_file(self, template_id):
+        """Load template from local git repo JSON file.
+
+        Args:
+            template_id: Template key (e.g., "gn", "core") or filename.
+
+        Returns:
+            Built MSTemplate object.
+        """
+        from modelseedpy import MSTemplateBuilder
+
+        if not self.templates_path:
+            raise ValueError(
+                "templates_path is required when template_source='git'"
+            )
+
+        # Resolve template key to filename
+        if template_id in self.template_files:
+            filename = self.template_files[template_id]
+        else:
+            # Assume it's a filename or path
+            filename = template_id
+
+        path = os.path.join(self.templates_path, filename)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Template file not found: {path}")
+
+        with open(path) as f:
+            template = MSTemplateBuilder.from_dict(json.load(f)).build()
         return template
 
     #################Save functions#####################

@@ -140,16 +140,10 @@ def mypy(session: nox.Session) -> None:
         session.run("mypy", f"--python-executable={sys.executable}", "noxfile.py")
 
 
-@nox.session(python=python_versions, venv_backend="none")
+@nox.session(venv_backend="none")
 def tests(session: nox.Session) -> None:
     """Run the test suite."""
-    session.run(
-        "uv",
-        "sync",
-        "--group",
-        "dev",
-        external=True,
-    )
+    session.run("uv", "sync", "--group", "dev", external=True)
     session.run("uv", "run", "pytest", *session.posargs, external=True)
 
 

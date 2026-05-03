@@ -1,0 +1,48 @@
+{
+  "command_type": "create-prd",
+  "status": "complete",
+  "session_id": "ai-design-2026-05-02-kbutillib-notebook-engine",
+  "parent_session_id": null,
+  "session_summary": "PRD for KBUtilLib notebook engine redesign. Replaces 840-line notebook_utils.py + per-project god-class util.py with formal provenanced data engine: SQLite catalog + parquet vectors + content-addressed blobs, typed Experiment/Sample/Vector schema, manifest notebook with freshness tracking, function migration lifecycle, and tiered test framework. ADP1Notebooks is the proving ground.",
+
+  "tasks": [
+    {"task_id": "1.0", "description": "Phase 1 — Data engine core (SQLite catalog, parquet vectors, blob store, NotebookSession API, serializer registry, backward-compat shim)", "status": "pending", "parent_task_id": null, "notes": "2 weeks est. Layer 0 + 1 tests included."},
+    {"task_id": "2.0", "description": "Phase 2 — Schema implementation (Pydantic models, vector_types.yaml registry, validate_entities)", "status": "pending", "parent_task_id": null, "notes": "1 week est. Can overlap with Phase 1."},
+    {"task_id": "3.0", "description": "Phase 3 — Manifest v1 (notebook generator, browse API, mtime-based stale detection)", "status": "pending", "parent_task_id": null, "notes": "1 week est."},
+    {"task_id": "4.0", "description": "Phase 4 — ADP1Notebooks end-to-end refactor (proving ground)", "status": "pending", "parent_task_id": null, "notes": "2-3 weeks est."},
+    {"task_id": "4.5", "description": "Phase 4.5 — Rewrite /jupyter-dev skill to teach new pattern", "status": "pending", "parent_task_id": null, "notes": "0.5 week est."},
+    {"task_id": "5.0", "description": "Phase 5 — Manifest v2 (cell-source-hash) + function migration CLI", "status": "pending", "parent_task_id": null, "notes": "1 week est."}
+  ],
+
+  "files": {
+    "created": [
+      {"path": "agent-io/prds/notebook-engine-redesign/humanprompt.md", "purpose": "Original user vision and follow-up direction", "type": "markdown"},
+      {"path": "agent-io/prds/notebook-engine-redesign/fullprompt.md", "purpose": "Full PRD with locked design, schema, API, DDL, phasing, and tests", "type": "markdown"},
+      {"path": "agent-io/prds/notebook-engine-redesign/data.json", "purpose": "PRD tracking file", "type": "config"}
+    ],
+    "modified": [],
+    "deleted": []
+  },
+
+  "artifacts": {
+    "prd_filename": "agent-io/prds/notebook-engine-redesign/fullprompt.md"
+  },
+
+  "queries_for_user": [],
+
+  "comments": [
+    "All 13 design decisions from the session are locked and recorded in §15 of fullprompt.md.",
+    "Phase 1 is ready to hand to an AgentForge developer task once the user approves; recommend --auto-merge --auto-review with --timeout 900.",
+    "Existing notebook_utils.py is preserved as a backward-compat shim during migration; not deleted in v1.",
+    "The 5-base multi-inheritance pattern in ADP1Notebooks is NOT being refactored — new engine is a peer, not a replacement. Composition refactor deferred.",
+    "Hard rule: no pickle. Each object type (MSGenome, COBRA model, MSExpression, etc.) gets a dedicated serializer module."
+  ],
+
+  "context": "Design session conducted 2026-05-02 → 2026-05-03 via /ai-design. Project state for kbutillib in AIAssistant has goals, decisions, and notes recorded in parallel. Active questions resolved: storage hybrid (SQLite+Parquet), per-vector parquet, name-as-primary identity, hybrid NotebookSession, no-pickle, open VectorType registry, label-based replicates, lineage-based aggregation, lazy EntityRef resolution, 6-kind Mutation taxonomy, 3-arm Experiment union (Sample/Computation/ExternalDataset), silent overwrite, in-tree catalog at notebooks/.kbcache/.",
+
+  "metrics": {
+    "files_analyzed": 5
+  },
+
+  "errors": []
+}

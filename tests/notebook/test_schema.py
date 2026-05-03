@@ -94,6 +94,20 @@ class TestSample:
                 strains={},
             )
 
+    def test_sample_abundance_must_be_positive(self):
+        with pytest.raises(ValueError, match="must be > 0"):
+            Sample(
+                id="s1",
+                media=Media(id="glucose"),
+                strains={"wt": 0.0, "ko": 1.0},
+            )
+        with pytest.raises(ValueError, match="must be > 0"):
+            Sample(
+                id="s1",
+                media=Media(id="glucose"),
+                strains={"wt": -0.5, "ko": 1.5},
+            )
+
 
 # ------------------------------------------------------------------
 # Computation
@@ -180,6 +194,13 @@ class TestMutation:
             Mutation(
                 kind="invalid",
                 target=EntityRef(kind=EntityKind.GENE, id="b0001", namespace="ecoli"),
+            )
+
+    def test_mutation_target_must_be_gene(self):
+        with pytest.raises(ValueError, match="Mutation.target must be a GENE"):
+            Mutation(
+                kind="knockout",
+                target=EntityRef(kind=EntityKind.REACTION, id="rxn0001", namespace="model"),
             )
 
 

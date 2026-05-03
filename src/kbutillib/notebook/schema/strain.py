@@ -2,9 +2,9 @@
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from .entity import EntityRef
+from .entity import EntityKind, EntityRef
 
 
 class Mutation(BaseModel):
@@ -17,6 +17,13 @@ class Mutation(BaseModel):
     source_organism: Optional[str] = None
     source_gene: Optional[str] = None
     description: Optional[str] = None
+
+    @field_validator("target")
+    @classmethod
+    def _target_must_be_gene(cls, v: EntityRef) -> EntityRef:
+        if v.kind != EntityKind.GENE:
+            raise ValueError(f"Mutation.target must be a GENE, got {v.kind}")
+        return v
 
 
 class Strain(BaseModel):

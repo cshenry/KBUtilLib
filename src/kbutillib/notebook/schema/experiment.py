@@ -22,6 +22,10 @@ class Sample(BaseModel):
     def _abundances_sum_to_one(cls, v: dict[str, float]) -> dict[str, float]:
         if not v:
             raise ValueError("strains must not be empty")
+        if any(abundance <= 0 for abundance in v.values()):
+            raise ValueError(
+                f"all strain abundances must be > 0, got {v}"
+            )
         total = sum(v.values())
         if abs(total - 1.0) > 1e-6:
             raise ValueError(

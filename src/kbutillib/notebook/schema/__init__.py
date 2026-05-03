@@ -4,6 +4,7 @@ from .entity import EntityKind, EntityRef
 from .strain import Mutation, Strain
 from .media import Media
 from .experiment import Experiment, Sample, Computation, ExternalDataset
+from .validation import ValidationIssue, ValidationReport
 from .vector import Vector, VectorType
 
 __all__ = [
@@ -16,6 +17,8 @@ __all__ = [
     "Sample",
     "Computation",
     "ExternalDataset",
+    "ValidationIssue",
+    "ValidationReport",
     "Vector",
     "VectorType",
 ]

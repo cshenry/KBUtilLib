@@ -1,0 +1,24 @@
+domains:
+  transcriptomics: { default_entity_kind: gene }
+  proteomics:      { default_entity_kind: gene }
+  metabolomics:    { default_entity_kind: metabolite }
+  flux:            { default_entity_kind: reaction }
+  mutant_growth_rate: { default_entity_kind: gene }
+  fold_change:     {}
+  essentiality:    {}
+  growth:          {}
+
+scales:
+  raw:                  {}
+  absolute:             {}
+  normalized_relative:  {}
+  log2:                 {}
+  z_score:              {}
+  rate:                 {}
+  fold_change:          {}
+
+projections:
+  gpr_max:   {}
+  gpr_min:   {}
+  gpr_mean:  {}
+  gpr_eval:  { description: "Evaluate GPR Boolean expression" }

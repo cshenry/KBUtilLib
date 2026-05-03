@@ -1,7 +1,14 @@
-"""Notebook utility functions for Jupyter environments and interactive development."""
+"""Notebook utility functions for Jupyter environments and interactive development.
+
+.. deprecated::
+    The ``NotebookUtils`` class is superseded by
+    ``kbutillib.notebook.NotebookSession``. Existing code continues to work
+    via this shim; new code should use ``NotebookSession`` directly.
+"""
 
 import json
 import os
+import warnings
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from genericpath import exists
@@ -838,3 +845,21 @@ class NotebookUtils(BaseUtils):
         if target_dir != self.datacache_base_dir:
             return exists(os.path.join(self.datacache_base_dir, name + ".json"))
         return False
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat shim: re-export NotebookSession so old imports still work
+# ---------------------------------------------------------------------------
+try:
+    from .notebook import NotebookSession  # noqa: F401
+
+    def _deprecated_notebook_utils_init():
+        warnings.warn(
+            "NotebookUtils is deprecated. Use kbutillib.notebook.NotebookSession instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+except ImportError:
+    # notebook subpackage not available (missing optional deps)
+    NotebookSession = None  # type: ignore[assignment,misc]

@@ -9,7 +9,7 @@ from .cache import Cache
 from .detect import detect_notebook_environment, detect_notebook_name
 from .experiment_store import ExperimentStore, StrainStore
 from .schema.entity import EntityKind, EntityRef
-from .schema.experiment import Computation, Sample
+from .schema.experiment import Computation
 from .schema.validation import ValidationIssue, ValidationReport
 from .storage.blobs import BlobStore
 from .storage.catalog import Catalog

@@ -54,6 +54,7 @@ class VectorStore:
         df_out.index.name = "entity_id"
 
         path, content_hash, n_bytes = self._storage.write(id, df_out)
+        n_entities = len(df_out)
 
         vec = Vector(
             id=id,
@@ -66,7 +67,7 @@ class VectorStore:
             content_hash=content_hash,
             created_at=datetime.now(timezone.utc),
         )
-        self._upsert_vector(vec)
+        self._upsert_vector(vec, n_entities=n_entities)
         self._log("write", id, content_hash)
         return vec
 
@@ -153,7 +154,7 @@ class VectorStore:
             parents=parents,
             created_at=datetime.now(timezone.utc),
         )
-        self._upsert_vector(vec)
+        self._upsert_vector(vec, n_entities=len(result))
         self._log("write", id, content_hash)
         return vec
 
@@ -168,6 +169,17 @@ class VectorStore:
         """Compute fold-change (optionally log-transformed) between two Vectors."""
         num_vec, num_df = self.get(numerator_id)
         den_vec, den_df = self.get(denominator_id)
+
+        if num_df.shape[1] != 1:
+            raise ValueError(
+                f"Numerator vector {numerator_id!r} has {num_df.shape[1]} columns; "
+                f"fold_change requires single-column vectors"
+            )
+        if den_df.shape[1] != 1:
+            raise ValueError(
+                f"Denominator vector {denominator_id!r} has {den_df.shape[1]} columns; "
+                f"fold_change requires single-column vectors"
+            )
 
         # Align on index
         combined = num_df.join(den_df, lsuffix="_num", rsuffix="_den", how="inner")
@@ -200,7 +212,7 @@ class VectorStore:
             parents=[numerator_id, denominator_id],
             created_at=datetime.now(timezone.utc),
         )
-        self._upsert_vector(vec)
+        self._upsert_vector(vec, n_entities=len(result))
         self._log("write", id, content_hash)
         return vec
 
@@ -330,7 +342,7 @@ class VectorStore:
             "SELECT * FROM vectors WHERE id=?", (id,)
         ).fetchone()
 
-    def _upsert_vector(self, vec: Vector) -> None:
+    def _upsert_vector(self, vec: Vector, *, n_entities: int = 0) -> None:
         conn = self._catalog.conn
         existing = self._get_row(vec.id)
         if existing:
@@ -348,7 +360,7 @@ class VectorStore:
                     vec.entity_kind.value,
                     vec.entity_namespace,
                     json.dumps(vec.columns),
-                    0,  # n_entities set later if needed
+                    n_entities,
                     len(vec.columns),
                     vec.parquet_path,
                     vec.content_hash,
@@ -373,7 +385,7 @@ class VectorStore:
                     vec.entity_kind.value,
                     vec.entity_namespace,
                     json.dumps(vec.columns),
-                    0,
+                    n_entities,
                     len(vec.columns),
                     vec.parquet_path,
                     vec.content_hash,

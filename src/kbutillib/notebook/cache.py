@@ -90,19 +90,26 @@ class Cache:
         combined_meta = {**(metadata or {}), **(extra_meta or {})}
         meta_json = json.dumps(combined_meta) if combined_meta else None
 
-        if existing:
-            self._catalog.conn.execute(
-                "UPDATE cache_objects SET type=?, blob_path=?, content_hash=?, "
-                "n_bytes=?, metadata_json=?, created_at=? WHERE id=?",
-                (ser.type_name, blob_rel, content_hash, n_bytes, meta_json, now, name),
-            )
-        else:
-            self._catalog.conn.execute(
-                "INSERT INTO cache_objects (id, type, blob_path, content_hash, n_bytes, metadata_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name, ser.type_name, blob_rel, content_hash, n_bytes, meta_json, now),
-            )
-        self._catalog.conn.commit()
+        try:
+            if existing:
+                self._catalog.conn.execute(
+                    "UPDATE cache_objects SET type=?, blob_path=?, content_hash=?, "
+                    "n_bytes=?, metadata_json=?, created_at=? WHERE id=?",
+                    (ser.type_name, blob_rel, content_hash, n_bytes, meta_json, now, name),
+                )
+            else:
+                self._catalog.conn.execute(
+                    "INSERT INTO cache_objects (id, type, blob_path, content_hash, n_bytes, metadata_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, ser.type_name, blob_rel, content_hash, n_bytes, meta_json, now),
+                )
+            self._catalog.conn.commit()
+        except Exception:
+            # Remove orphaned blob file on catalog write failure
+            blob_path = self._blobs.blob_path(content_hash, ser.file_extension)
+            if blob_path.exists():
+                blob_path.unlink(missing_ok=True)
+            raise
 
         self._catalog.log_access(
             object_id=name,
@@ -181,8 +188,20 @@ class Cache:
         row = self._get_row(name)
         if row is None:
             raise KeyError(f"Cache object {name!r} not found")
+        content_hash = row["content_hash"]
         self._catalog.conn.execute("DELETE FROM cache_objects WHERE id=?", (name,))
         self._catalog.conn.commit()
+
+        # Remove blob file if no other cache entry references the same hash
+        other_refs = self._catalog.conn.execute(
+            "SELECT COUNT(*) FROM cache_objects WHERE content_hash=?",
+            (content_hash,),
+        ).fetchone()[0]
+        if other_refs == 0:
+            ser = get_serializer(row["type"])
+            blob_path = self._blobs.blob_path(content_hash, ser.file_extension)
+            if blob_path.exists():
+                blob_path.unlink()
 
         self._catalog.log_access(
             object_id=name,
@@ -191,7 +210,7 @@ class Cache:
             notebook=self._notebook,
             cell_index=get_cell_index(),
             cell_source_hash=get_cell_source_hash(),
-            content_hash=row["content_hash"],
+            content_hash=content_hash,
         )
 
     def cached(

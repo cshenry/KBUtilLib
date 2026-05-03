@@ -852,14 +852,6 @@ class NotebookUtils(BaseUtils):
 # ---------------------------------------------------------------------------
 try:
     from .notebook import NotebookSession  # noqa: F401
-
-    def _deprecated_notebook_utils_init():
-        warnings.warn(
-            "NotebookUtils is deprecated. Use kbutillib.notebook.NotebookSession instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
 except ImportError:
     # notebook subpackage not available (missing optional deps)
     NotebookSession = None  # type: ignore[assignment,misc]

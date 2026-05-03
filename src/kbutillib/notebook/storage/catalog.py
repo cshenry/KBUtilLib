@@ -10,9 +10,6 @@ from typing import Optional
 CURRENT_SCHEMA_VERSION = 1
 
 DDL = """\
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
 -- ============================================================
 -- CATALOG META
 -- ============================================================

@@ -138,11 +138,17 @@ class Manifest:
         for obj in all_objects:
             shape = "box" if obj.kind == "cache" else "ellipse"
             color = "red" if obj.is_stale else "black"
-            lines.append(f'  "{obj.id}" [shape={shape}, color={color}];')
+            obj_id = self._dot_escape(obj.id)
+            lines.append(f'  "{obj_id}" [shape={shape}, color={color}];')
             for parent in obj.parents:
-                lines.append(f'  "{parent}" -> "{obj.id}";')
+                lines.append(f'  "{self._dot_escape(parent)}" -> "{obj_id}";')
         lines.append("}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _dot_escape(value: str) -> str:
+        """Escape characters that would break a DOT-quoted string."""
+        return value.replace("\\", "\\\\").replace('"', '\\"')
 
     def render(self, output_path: Optional[Path] = None) -> Path:
         """Generate Manifest.ipynb with browseable cells. Returns the output path.
@@ -159,38 +165,72 @@ class Manifest:
             "name": "python3",
         }
 
-        # Title cell
+        # Title cell — project name, generation timestamp, link to PRD
+        project_name = self._project_name() or "(unnamed project)"
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         nb.cells.append(nbformat.v4.new_markdown_cell(
-            "# Project Manifest\n\n"
+            f"# Manifest — {project_name}\n\n"
+            f"**Generated:** {generated_at}\n\n"
             "Auto-generated overview of notebooks, cache objects, vectors, "
             "and their access history.\n\n"
-            "*Re-run this notebook or call `session.manifest.render()` to refresh.*"
+            "See the [notebook engine PRD](../agent-io/prds/notebook-engine-redesign/fullprompt.md) "
+            "for the design and freshness rules."
         ))
 
-        # Setup cell
+        # Setup cell — uses __file__ so .kbcache resolves next to the notebook
         nb.cells.append(nbformat.v4.new_code_cell(
             "from kbutillib.notebook import NotebookSession\n\n"
-            "session = NotebookSession.for_notebook()\n"
+            "session = NotebookSession.for_notebook(__file__)\n"
             "manifest = session.manifest"
         ))
 
-        # Notebooks cell
+        # Notebooks section — DataFrame render
         nb.cells.append(nbformat.v4.new_markdown_cell("## Notebooks"))
-        nb.cells.append(nbformat.v4.new_code_cell("manifest.notebooks()"))
-
-        # Objects cell
-        nb.cells.append(nbformat.v4.new_markdown_cell("## Objects (Cache + Vectors)"))
-        nb.cells.append(nbformat.v4.new_code_cell("manifest.objects()"))
-
-        # Stale objects cell
-        nb.cells.append(nbformat.v4.new_markdown_cell("## Stale Objects"))
-        nb.cells.append(nbformat.v4.new_code_cell("manifest.stale()"))
-
-        # DAG cell
-        nb.cells.append(nbformat.v4.new_markdown_cell("## Dependency DAG"))
         nb.cells.append(nbformat.v4.new_code_cell(
-            "print(manifest.dot())"
+            "import pandas as pd\n"
+            "pd.DataFrame([n.model_dump() for n in manifest.notebooks()])"
         ))
+
+        # Cache objects section — DataFrame render filtered to kind='cache'
+        nb.cells.append(nbformat.v4.new_markdown_cell("## Cache objects"))
+        nb.cells.append(nbformat.v4.new_code_cell(
+            "import pandas as pd\n"
+            "pd.DataFrame([\n"
+            "    o.model_dump() for o in manifest.objects() if o.kind == 'cache'\n"
+            "])"
+        ))
+
+        # Vectors section — DataFrame render filtered to kind='vector', surfaces
+        # type_domain / type_scale by splitting the assembled "{scale}-{domain}" type string.
+        nb.cells.append(nbformat.v4.new_markdown_cell("## Vectors"))
+        nb.cells.append(nbformat.v4.new_code_cell(
+            "import pandas as pd\n"
+            "rows = []\n"
+            "for o in manifest.objects():\n"
+            "    if o.kind != 'vector':\n"
+            "        continue\n"
+            "    row = o.model_dump()\n"
+            "    if '-' in o.type:\n"
+            "        scale, domain = o.type.split('-', 1)\n"
+            "        row['type_scale'] = scale\n"
+            "        row['type_domain'] = domain\n"
+            "    rows.append(row)\n"
+            "pd.DataFrame(rows)"
+        ))
+
+        # Stale objects section
+        nb.cells.append(nbformat.v4.new_markdown_cell("## Stale objects"))
+        nb.cells.append(nbformat.v4.new_code_cell(
+            "import pandas as pd\n"
+            "pd.DataFrame([o.model_dump() for o in manifest.stale()])"
+        ))
+
+        # DAG section
+        nb.cells.append(nbformat.v4.new_markdown_cell("## Dependency DAG"))
+        nb.cells.append(nbformat.v4.new_code_cell("print(manifest.dot())"))
+
+        # Trailer
+        nb.cells.append(nbformat.v4.new_markdown_cell("Re-run this notebook to refresh."))
 
         # Determine output path
         if output_path is None:
@@ -202,6 +242,14 @@ class Manifest:
             nbformat.write(nb, f)
 
         return output_path
+
+    def _project_name(self) -> Optional[str]:
+        """Look up project_name from catalog_meta, returning None if unset."""
+        conn = self._session._get_catalog().conn
+        row = conn.execute("SELECT project_name FROM catalog_meta LIMIT 1").fetchone()
+        if row is None:
+            return None
+        return row["project_name"]
 
     # ------------------------------------------------------------------
     # Internals

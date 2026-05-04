@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AccessRecord(BaseModel):
@@ -38,5 +38,5 @@ class ObjectEntry(BaseModel):
     last_read: Optional[datetime] = None
     write_count: int = 0
     read_count: int = 0
-    parents: list[str] = []
+    parents: list[str] = Field(default_factory=list)
     is_stale: bool = False

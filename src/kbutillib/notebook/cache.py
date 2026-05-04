@@ -196,13 +196,19 @@ class Cache:
             cache itself is project-wide (all notebooks share one catalog).
         """
         if created_by_notebook:
-            # Subquery: ids where the earliest write came from the target notebook
+            # Subquery: for each object, find the notebook of its earliest write.
+            # Uses a correlated subquery to reliably pick the first write row.
             base = (
                 "SELECT c.* FROM cache_objects c "
                 "INNER JOIN ("
-                "  SELECT object_id, notebook FROM access_log "
-                "  WHERE object_kind='cache' AND op='write' "
-                "  GROUP BY object_id HAVING MIN(timestamp)"
+                "  SELECT a1.object_id, a1.notebook FROM access_log a1 "
+                "  WHERE a1.object_kind='cache' AND a1.op='write' "
+                "    AND a1.timestamp = ("
+                "      SELECT MIN(a2.timestamp) FROM access_log a2 "
+                "      WHERE a2.object_id = a1.object_id "
+                "        AND a2.object_kind='cache' AND a2.op='write'"
+                "    )"
+                "  GROUP BY a1.object_id"
                 ") a ON c.id = a.object_id AND a.notebook = ?"
             )
             params: list[Any] = [created_by_notebook]

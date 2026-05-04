@@ -138,7 +138,7 @@ class TestCacheDelete:
         assert cache.load("copy2") == obj
 
 
-class TestCrosNotebookCache:
+class TestCrossNotebookCache:
     """Cache is project-wide: save in notebook A, load in notebook B."""
 
     def test_cross_notebook_load(self, tmp_path):

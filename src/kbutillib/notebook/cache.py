@@ -222,7 +222,9 @@ class Cache:
     ):
         """Decorator: returns cached value if present, otherwise computes + saves.
 
-        ``inputs`` is purely declarative for now (Phase 3 manifest will use it).
+        When the decorated function executes and a new result is saved,
+        the ``inputs`` list is persisted in the object's metadata under
+        the key ``"inputs"`` for use by the Manifest freshness API.
         """
 
         def decorator(fn):
@@ -231,7 +233,10 @@ class Cache:
                 if self.exists(name):
                     return self.load(name)
                 result = fn(*args, **kwargs)
-                self.save(name, result, type_hint=type_hint)
+                metadata: Optional[dict] = None
+                if inputs is not None:
+                    metadata = {"inputs": inputs}
+                self.save(name, result, type_hint=type_hint, metadata=metadata)
                 return result
 
             return wrapper

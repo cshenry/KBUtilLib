@@ -8,6 +8,7 @@ from typing import Any, Optional
 from .cache import Cache
 from .detect import detect_notebook_environment, detect_notebook_name
 from .experiment_store import ExperimentStore, StrainStore
+from .manifest import Manifest
 from .schema.entity import EntityKind, EntityRef
 from .schema.experiment import Computation
 from .schema.validation import ValidationIssue, ValidationReport
@@ -47,6 +48,7 @@ class NotebookSession:
         self._vectors: Optional[VectorStore] = None
         self._experiments: Optional[ExperimentStore] = None
         self._strains: Optional[StrainStore] = None
+        self._manifest: Optional[Manifest] = None
 
     @classmethod
     def for_notebook(
@@ -128,6 +130,12 @@ class NotebookSession:
         if self._strains is None:
             self._strains = StrainStore(self._get_catalog())
         return self._strains
+
+    @property
+    def manifest(self) -> Manifest:
+        if self._manifest is None:
+            self._manifest = Manifest(self)
+        return self._manifest
 
     # ------------------------------------------------------------------
     # Validation

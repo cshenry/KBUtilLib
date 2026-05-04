@@ -96,7 +96,9 @@ The existing `notebook_utils.py` becomes a thin shim that re-exports `NotebookSe
 notebooks/
 ├── util.py                   # project-specific functions; uses NotebookSession
 ├── *.ipynb                   # the notebooks
-├── data/                     # raw inputs (unchanged)
+├── data/                     # raw inputs (KEEP — input data, not cache)
+├── models/                   # raw input model files (KEEP — input, not cache)
+├── genomes/                  # raw input genome files (KEEP — input, not cache)
 ├── nboutput/                 # products: HTML, PNG, XLSX, TSV (unchanged)
 └── .kbcache/                 # NEW — gitignored by default
     ├── catalog.sqlite        # the catalog
@@ -106,7 +108,9 @@ notebooks/
         └── <vector_id>.parquet
 ```
 
-The existing `datacache/`, `models/`, `genomes/` subdirs go away. Migration CLI handles legacy data.
+**Inputs vs. cache rule:** `data/`, `models/`, `genomes/` (and similar named input dirs) are **inputs** — the raw material notebooks read from. They stay. Only `datacache/` is replaced by `.kbcache/`. Notebooks are designed to regenerate cached intermediates from inputs on every fresh run; cache migration is **not** a goal.
+
+Legacy `datacache/` content is **not migrated** when refactoring an existing project — notebooks ingest from `data/`/`models/`/`genomes/` afresh and rebuild the cache via the new API. (See Phase 4 §9 below.)
 
 ---
 
@@ -571,26 +575,36 @@ ADP1Notebooks/notebooks/
 ├── test_util.py              # pytest tests for util.py functions
 ├── Manifest.ipynb            # auto-generated
 ├── ADP1ExpressionAnalysis.ipynb
-├── ADP1FoldChangeAnalysis.ipynb
+├── ADP1BERDLFoldChangeAnalysis.ipynb
 ├── ... (existing notebooks, refactored)
-├── data/
+├── data/                     # KEEP — input data
+├── models/                   # KEEP — input model files
+├── genomes/                  # KEEP — input genome files
 ├── nboutput/
-└── .kbcache/
+└── .kbcache/                 # NEW (gitignored)
 ```
 
 ### 9.2 Migration steps
-1. Run `kbutillib migrate-cache notebooks/` (described §11) to import legacy `datacache/` JSONs into the new catalog.
-2. Refactor `util.py`:
+
+**No cache migration.** The new system is designed to regenerate all intermediates from raw inputs (`data/`, `models/`, `genomes/`) on every fresh run. Do not attempt to import legacy `datacache/` content. The clean path is to start with an empty `.kbcache/` and let notebooks rebuild from inputs.
+
+1. Refactor `util.py`:
    - Replace multi-inheritance god-class with a thin `NotebookSession` instance + free functions / small helper classes.
    - Each function gets a docstring and a pytest test in `test_util.py`.
    - Fix the broken `model` reference (line 213) and missing `averaged_expression` (lines 895–920).
-3. Convert each notebook cell-by-cell to use:
+2. Drop redundant/superseded notebooks (use newer BERDL versions in preference to older non-BERDL siblings):
+   - Drop `ADP1OldExpressionAnalysis.ipynb` (clearly superseded).
+   - Drop `BERDLMockup.ipynb` (mockup, not real analysis).
+   - For BERDL vs non-BERDL pairs (e.g., `ADP1FoldChangeAnalysis.ipynb` vs `ADP1BERDLFoldChangeAnalysis.ipynb`), keep the BERDL version.
+   - Drop dated copies (e.g., `ADP1ExpressionAnalysis_20251024.ipynb`) when the un-dated version is current.
+3. Convert each remaining notebook cell-by-cell to use:
    - `session.cache.save("name", obj)` / `session.cache.load("name")` (instead of `util.save`/`util.load`).
-   - `session.vectors.from_*(...)` for proteomics/transcriptomics/MGR ingestion.
+   - `session.vectors.from_*(...)` for proteomics/transcriptomics/MGR ingestion from `data/` files.
    - `session.experiments.register_*(...)` for Sample/Computation/ExternalDataset registration.
    - `@session.cache.cached(...)` for compute-or-load methods.
-4. Validate notebooks run end-to-end via papermill smoke tests.
-5. Remove `datacache/`, `models/`, `genomes/` subdirs (after migration verified).
+4. Validate notebooks run end-to-end via papermill smoke tests, ingesting from `data/`/`models/`/`genomes/` only.
+5. Delete the old `datacache/` directory after smoke tests confirm the new pipeline reconstitutes everything needed (do NOT migrate its contents — it's expected scratch).
+6. **Keep** `data/`, `models/`, `genomes/` as inputs. They are NOT removed.
 
 ---
 
@@ -605,7 +619,8 @@ The current skill (`~/.claude/commands/jupyter-dev.md`) bakes in: util.py as god
 - **Markdown precedes code** (preserved from old skill).
 - **Cell independence** preserved as a virtue.
 - **Migration lifecycle**: util.py functions are explicitly marked with `@migration_target("kbutillib.kb_genome_utils")` when ready; CLI moves them.
-- **No ad-hoc subdirs** (`models/`, `genomes/`) — model files become cache objects loaded via `session.cache.load("ADP1Model")`.
+- **Inputs vs. cache**: `data/`, `models/`, `genomes/` directories stay as raw inputs and are read directly by ingestion cells. Only intermediates and computed artifacts go through the cache. No cache migration tooling — notebooks regenerate everything from inputs on fresh runs.
+- **`datacache/` is replaced** by `.kbcache/` (gitignored). The new skill scaffolds projects with `.kbcache/` only.
 
 The old skill is archived for reference, not deleted.
 
@@ -613,22 +628,11 @@ The old skill is archived for reference, not deleted.
 
 ## 11. Migration tooling
 
-### 11.1 Legacy datacache import
+### 11.1 Legacy datacache import — NOT IMPLEMENTED
 
-```bash
-kbutillib migrate-cache <notebooks-dir>           # dry run; reports findings
-kbutillib migrate-cache <notebooks-dir> --apply   # writes new .kbcache/
-```
+Cache migration is intentionally **not** in scope. Notebooks are designed to regenerate all intermediates from raw inputs in `data/`, `models/`, and `genomes/` on every fresh run. There is no automated path from legacy `datacache/` content to the new `.kbcache/` — re-run notebooks against raw inputs to rebuild.
 
-Behavior:
-1. Scans `datacache/*.json` and `datacache/*/*.json`.
-2. Filenames matching `{prefix}-{NR|AA|Log2}-{TRANS|PROT|MGR|RxnTRANS|RxnPROT|RxnMGR}.json` are interpreted as Vectors:
-   - Synthetic Sample/Computation Experiment registered (one per unique prefix; user can re-attribute later).
-   - DataObject `_dataobject_marker` JSONs decoded directly.
-   - Plain JSONs at root path imported as `cache_objects`.
-3. `models/*.json` imported as `cache_objects` of type `cobra_model` or `msmodelutil`.
-4. `genomes/*.json` imported as `cache_objects` of type `msgenome`.
-5. Old subdirs left in place; user removes manually after verification.
+This is a deliberate design rule: cached intermediates are scratch, not source. If a notebook can't reproduce them from its inputs, that's a notebook bug to fix, not a migration to write.
 
 ### 11.2 Function migration CLI (Phase 5)
 
@@ -697,9 +701,12 @@ Layers 0–2 run pre-commit. Layer 3 runs nightly CI. Layer 4 runs on the migrat
 | 1. Data engine core | SQLite catalog, parquet vectors, blob store, save/load with provenance, NotebookSession API, serializer registry, backward-compat shim, Layer 0 + 1 tests | 2 weeks |
 | 2. Schema | Pydantic models, vector_types.yaml registry, validate_entities, Layer 1 tests | 1 week |
 | 3. Manifest v1 | Manifest notebook generator, browse API, mtime-based stale detection | 1 week |
-| 4. ADP1 refactor | End-to-end migration, util.py refactor, papermill smoke tests | 2-3 weeks |
+| 4a. ADP1 util.py shell | New util.py with NotebookSession + free helper functions; test_util.py | 0.5 week |
+| 4b. ADP1 pilot notebook | Migrate one notebook end-to-end against new API; surface gaps | 0.5–1 week |
+| 4c. ADP1 remaining notebooks | Bulk migration of the remaining BERDL-era notebooks | 1 week |
+| 4d. ADP1 final cleanup | Drop legacy datacache/, papermill smoke tests, drop redundant/old notebooks | 0.5 week |
 | 4.5. /jupyter-dev rewrite | New skill teaching the new pattern; archive old skill | 0.5 week |
-| 5. Manifest v2 + migration CLI | Cell-source-hash freshness, function migration tooling | 1 week |
+| 5. Manifest v2 + function migration CLI | Cell-source-hash freshness, util.py → permanent module migration tooling | 1 week |
 
 Total: ~7-9 weeks of focused work. Phases are sequential except Phase 2 can overlap with Phase 1.
 
@@ -735,3 +742,7 @@ All from the design session:
 - **Catalog location**: per-project, in-tree at `notebooks/.kbcache/catalog.sqlite`.
 - **`/jupyter-dev` skill**: rewritten as Phase 4.5 deliverable.
 - **Composition refactor**: deferred. New engine is a peer to existing mixins, not a replacement.
+- **Inputs vs. cache**: `data/`, `models/`, `genomes/` (and similar input dirs) are raw inputs and stay. Only `datacache/` is replaced by `.kbcache/`. Notebooks must regenerate intermediates from inputs on every fresh run.
+- **No cache migration**: the migration CLI from §11.1 is removed from scope. Refactored projects start with empty `.kbcache/` and rebuild via fresh notebook runs against raw inputs.
+- **Phase 4 split**: Phase 4 is decomposed into 4a (util.py shell + tests), 4b (one pilot notebook end-to-end), 4c (remaining notebooks), 4d (cleanup + papermill smoke). Reduces single-task risk.
+- **Notebook redundancy**: BERDL versions supersede non-BERDL siblings; dated copies (`*_20251024.ipynb`) and `*Old*` and `*Mockup*` notebooks are dropped during Phase 4.

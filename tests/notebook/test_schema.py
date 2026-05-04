@@ -14,6 +14,7 @@ from kbutillib.notebook.schema.experiment import (
 from kbutillib.notebook.schema.media import Media
 from kbutillib.notebook.schema.strain import Mutation, Strain
 from kbutillib.notebook.schema.vector import Vector, VectorType
+from kbutillib.notebook.session import NotebookSession
 
 
 # ------------------------------------------------------------------
@@ -62,6 +63,54 @@ class TestMedia:
     def test_invalid_source(self):
         with pytest.raises(Exception):
             Media(id="x", source="invalid")
+
+    def test_kbase_source_no_composition_is_valid(self):
+        """Media with source='kbase' and no inline_composition is valid at construction."""
+        m = Media(id="glucose", source="kbase")
+        assert m.inline_composition is None
+
+    def test_msmedia_source_no_composition_is_valid(self):
+        """Media with source='msmedia' and no inline_composition is valid at construction."""
+        m = Media(id="rich_media", source="msmedia")
+        assert m.inline_composition is None
+
+    def test_resolve_composition_inline(self, tmp_session):
+        """resolve_composition returns inline_composition directly for inline source."""
+        m = Media(id="custom", source="inline", inline_composition={"cpd00001": 10.0, "cpd00002": 5.0})
+        comp = m.resolve_composition(tmp_session)
+        assert comp == {"cpd00001": 10.0, "cpd00002": 5.0}
+
+    def test_resolve_composition_inline_missing_raises(self, tmp_session):
+        """resolve_composition raises ValueError for inline source with no composition."""
+        m = Media(id="bad", source="inline")
+        with pytest.raises(ValueError, match="no inline_composition"):
+            m.resolve_composition(tmp_session)
+
+    def test_resolve_composition_kbase_stub(self, tmp_session):
+        """resolve_composition raises NotImplementedError for kbase source."""
+        m = Media(id="glucose", source="kbase")
+        with pytest.raises(NotImplementedError, match="KBase media lookup"):
+            m.resolve_composition(tmp_session)
+
+    def test_resolve_composition_msmedia_stub(self, tmp_session):
+        """resolve_composition raises NotImplementedError for msmedia source."""
+        m = Media(id="rich", source="msmedia")
+        with pytest.raises(NotImplementedError, match="ModelSEED media lookup"):
+            m.resolve_composition(tmp_session)
+
+    def test_kbase_media_sample_registration(self, tmp_session):
+        """A Sample with kbase media and no composition can be registered successfully."""
+        sample = Sample(
+            id="kbase_sample",
+            media=Media(id="glucose", source="kbase"),
+            strains={"wt": 1.0},
+        )
+        exp = tmp_session.experiments.register_sample(sample)
+        assert exp.id == "kbase_sample"
+        # Round-trip: retrieve and check media is preserved
+        loaded = tmp_session.experiments.get("kbase_sample")
+        assert loaded.payload.media.source == "kbase"
+        assert loaded.payload.media.inline_composition is None
 
 
 # ------------------------------------------------------------------

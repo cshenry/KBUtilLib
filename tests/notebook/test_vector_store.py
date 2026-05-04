@@ -187,6 +187,103 @@ class TestFoldChange:
             vs.fold_change("single", "multi", id="fc_bad2")
 
 
+class TestFoldChangeAggregate:
+    """fold_change with aggregate= auto-reduces multi-column inputs."""
+
+    def test_aggregate_mean_both_multi(self, tmp_session: NotebookSession, experiment_id: str):
+        vs = tmp_session.vectors
+        num_df = pd.DataFrame({"r1": [8.0, 4.0], "r2": [12.0, 6.0]}, index=["g1", "g2"])
+        den_df = pd.DataFrame({"r1": [2.0, 1.0], "r2": [4.0, 3.0]}, index=["g1", "g2"])
+        vs.from_dataframe(
+            num_df, id="agg_num", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        vs.from_dataframe(
+            den_df, id="agg_den", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        fc = vs.fold_change("agg_num", "agg_den", id="fc_agg", aggregate="mean")
+        assert fc.derivation == "log2_fold_change"
+        # Intermediate vectors created
+        num_agg_vec = vs.metadata("fc_agg__num_agg")
+        assert num_agg_vec.derivation == "mean"
+        assert num_agg_vec.parents == ["agg_num"]
+        den_agg_vec = vs.metadata("fc_agg__den_agg")
+        assert den_agg_vec.derivation == "mean"
+        assert den_agg_vec.parents == ["agg_den"]
+        # FC parents point to the intermediate vectors
+        assert fc.parents == ["fc_agg__num_agg", "fc_agg__den_agg"]
+
+    def test_aggregate_median(self, tmp_session: NotebookSession, experiment_id: str):
+        vs = tmp_session.vectors
+        num_df = pd.DataFrame({"r1": [4.0], "r2": [8.0], "r3": [16.0]}, index=["g1"])
+        den_df = pd.DataFrame({"val": [1.0]}, index=["g1"])
+        vs.from_dataframe(
+            num_df, id="med_num", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        vs.from_dataframe(
+            den_df, id="med_den", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        fc = vs.fold_change("med_num", "med_den", id="fc_med", aggregate="median")
+        _, fc_df = vs.get("fc_med")
+        # median of [4, 8, 16] = 8; log2(8/1) = 3.0
+        assert fc_df.iloc[0, 0] == pytest.approx(3.0)
+
+    def test_aggregate_single_col_passthrough(self, tmp_session: NotebookSession, experiment_id: str):
+        """When aggregate is set but inputs are already single-column, no intermediate is created."""
+        vs = tmp_session.vectors
+        num_df = pd.DataFrame({"val": [8.0]}, index=["g1"])
+        den_df = pd.DataFrame({"val": [2.0]}, index=["g1"])
+        vs.from_dataframe(
+            num_df, id="pt_num", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        vs.from_dataframe(
+            den_df, id="pt_den", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        fc = vs.fold_change("pt_num", "pt_den", id="fc_pt", aggregate="mean")
+        # No intermediate vectors since inputs were already single-column
+        assert fc.parents == ["pt_num", "pt_den"]
+        _, fc_df = vs.get("fc_pt")
+        assert fc_df.iloc[0, 0] == pytest.approx(2.0)
+
+    def test_aggregate_max(self, tmp_session: NotebookSession, experiment_id: str):
+        vs = tmp_session.vectors
+        num_df = pd.DataFrame({"r1": [2.0], "r2": [8.0]}, index=["g1"])
+        den_df = pd.DataFrame({"val": [1.0]}, index=["g1"])
+        vs.from_dataframe(
+            num_df, id="max_num", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        vs.from_dataframe(
+            den_df, id="max_den", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        fc = vs.fold_change("max_num", "max_den", id="fc_max", aggregate="max")
+        _, fc_df = vs.get("fc_max")
+        # max of [2, 8] = 8; log2(8/1) = 3.0
+        assert fc_df.iloc[0, 0] == pytest.approx(3.0)
+
+    def test_aggregate_still_rejects_without_flag(self, tmp_session: NotebookSession, experiment_id: str):
+        """Multi-column inputs without aggregate= still raise ValueError."""
+        vs = tmp_session.vectors
+        multi_df = pd.DataFrame({"a": [1.0], "b": [2.0]}, index=["g1"])
+        single_df = pd.DataFrame({"val": [1.0]}, index=["g1"])
+        vs.from_dataframe(
+            multi_df, id="noagg_m", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        vs.from_dataframe(
+            single_df, id="noagg_s", experiment_id=experiment_id,
+            type=VTYPE, entity_kind=EntityKind.GENE, entity_namespace="ecoli",
+        )
+        with pytest.raises(ValueError, match="single-column"):
+            vs.fold_change("noagg_m", "noagg_s", id="fc_noagg")
+
+
 class TestGetMany:
     def test_get_many(self, tmp_session: NotebookSession, experiment_id: str):
         vs = tmp_session.vectors

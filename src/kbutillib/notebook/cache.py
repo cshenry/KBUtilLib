@@ -138,7 +138,13 @@ class Cache:
         default: Any = _MISSING,
         expected_type: Optional[str] = None,
     ) -> Any:
-        """Load an object by name. Raises KeyError if missing and no default."""
+        """Load an object by name. Raises KeyError if missing and no default.
+
+        The cache is project-wide: objects saved by any notebook that shares
+        the same ``.kbcache/`` directory are visible to all other notebooks.
+        The *notebook_name* passed to the Cache constructor only affects
+        provenance tracking in the access_log, not visibility.
+        """
         row = self._get_row(name)
         if row is None:
             if default is not _MISSING:
@@ -172,8 +178,40 @@ class Cache:
             raise KeyError(f"Cache object {name!r} not found")
         return self._row_to_entry(row)
 
-    def list(self, *, type_filter: Optional[str] = None) -> list[CacheEntry]:
-        if type_filter:
+    def list(
+        self,
+        *,
+        type_filter: Optional[str] = None,
+        created_by_notebook: Optional[str] = None,
+    ) -> list[CacheEntry]:
+        """List cached objects with optional filters.
+
+        Parameters
+        ----------
+        type_filter : str, optional
+            Only return entries whose serializer type matches.
+        created_by_notebook : str, optional
+            Only return entries whose *first* write in access_log came from
+            the given notebook name.  The filter uses the provenance log; the
+            cache itself is project-wide (all notebooks share one catalog).
+        """
+        if created_by_notebook:
+            # Subquery: ids where the earliest write came from the target notebook
+            base = (
+                "SELECT c.* FROM cache_objects c "
+                "INNER JOIN ("
+                "  SELECT object_id, notebook FROM access_log "
+                "  WHERE object_kind='cache' AND op='write' "
+                "  GROUP BY object_id HAVING MIN(timestamp)"
+                ") a ON c.id = a.object_id AND a.notebook = ?"
+            )
+            params: list[Any] = [created_by_notebook]
+            if type_filter:
+                base += " AND c.type = ?"
+                params.append(type_filter)
+            base += " ORDER BY c.created_at"
+            rows = self._catalog.conn.execute(base, params).fetchall()
+        elif type_filter:
             rows = self._catalog.conn.execute(
                 "SELECT * FROM cache_objects WHERE type=? ORDER BY created_at",
                 (type_filter,),

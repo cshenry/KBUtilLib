@@ -138,6 +138,60 @@ class TestCacheDelete:
         assert cache.load("copy2") == obj
 
 
+class TestCrosNotebookCache:
+    """Cache is project-wide: save in notebook A, load in notebook B."""
+
+    def test_cross_notebook_load(self, tmp_path):
+        """Object saved by notebook A is visible to notebook B."""
+        from kbutillib.notebook.session import NotebookSession
+
+        kbcache = tmp_path / ".kbcache"
+        sess_a = NotebookSession(kbcache_dir=kbcache, notebook_name="notebook_a")
+        sess_a.cache.save("shared_obj", {"cross": True})
+        sess_a.close()
+
+        sess_b = NotebookSession(kbcache_dir=kbcache, notebook_name="notebook_b")
+        loaded = sess_b.cache.load("shared_obj")
+        assert loaded == {"cross": True}
+        sess_b.close()
+
+    def test_list_created_by_notebook(self, tmp_path):
+        """list(created_by_notebook=) filters by originating notebook."""
+        from kbutillib.notebook.session import NotebookSession
+
+        kbcache = tmp_path / ".kbcache"
+        sess_a = NotebookSession(kbcache_dir=kbcache, notebook_name="nb_alpha")
+        sess_a.cache.save("alpha_obj", [1])
+        sess_a.close()
+
+        sess_b = NotebookSession(kbcache_dir=kbcache, notebook_name="nb_beta")
+        sess_b.cache.save("beta_obj", [2])
+
+        # Without filter: both visible
+        all_entries = sess_b.cache.list()
+        all_ids = [e.id for e in all_entries]
+        assert "alpha_obj" in all_ids
+        assert "beta_obj" in all_ids
+
+        # With filter: only the target notebook's objects
+        alpha_entries = sess_b.cache.list(created_by_notebook="nb_alpha")
+        alpha_ids = [e.id for e in alpha_entries]
+        assert "alpha_obj" in alpha_ids
+        assert "beta_obj" not in alpha_ids
+
+        beta_entries = sess_b.cache.list(created_by_notebook="nb_beta")
+        beta_ids = [e.id for e in beta_entries]
+        assert "beta_obj" in beta_ids
+        assert "alpha_obj" not in beta_ids
+        sess_b.close()
+
+    def test_list_created_by_notebook_empty(self, tmp_session: NotebookSession):
+        """Filtering by a non-existent notebook returns empty list."""
+        tmp_session.cache.save("something", {"x": 1})
+        entries = tmp_session.cache.list(created_by_notebook="nonexistent_nb")
+        assert entries == []
+
+
 class TestCacheAccessLog:
     def test_write_logged(self, tmp_session: NotebookSession):
         cache = tmp_session.cache

@@ -165,20 +165,78 @@ class VectorStore:
         *,
         id: str,
         log_base: Optional[int] = 2,
+        aggregate: Optional[Literal["mean", "median", "max", "min"]] = None,
     ) -> Vector:
-        """Compute fold-change (optionally log-transformed) between two Vectors."""
+        """Compute fold-change (optionally log-transformed) between two Vectors.
+
+        When *aggregate* is set and the numerator or denominator has multiple
+        columns, the columns are first reduced to a single column using the
+        specified aggregation function. Intermediate aggregated vectors are
+        created with ids ``{id}__num_agg`` / ``{id}__den_agg`` so the full
+        derivation chain is preserved in the catalog.
+
+        Without *aggregate*, multi-column inputs are rejected with ValueError.
+        """
         num_vec, num_df = self.get(numerator_id)
         den_vec, den_df = self.get(denominator_id)
+
+        # Auto-aggregate multi-column inputs when aggregate is specified
+        if aggregate is not None:
+            if num_df.shape[1] > 1:
+                agg_num_id = f"{id}__num_agg"
+                num_result = getattr(num_df, aggregate)(axis=1).to_frame(name="aggregated")
+                path, content_hash, _ = self._storage.write(agg_num_id, num_result)
+                agg_num_vec = Vector(
+                    id=agg_num_id,
+                    type=num_vec.type,
+                    experiment_id=num_vec.experiment_id,
+                    entity_kind=num_vec.entity_kind,
+                    entity_namespace=num_vec.entity_namespace,
+                    columns=["aggregated"],
+                    parquet_path=self._storage.relative_path(agg_num_id),
+                    content_hash=content_hash,
+                    derivation=aggregate,
+                    parents=[numerator_id],
+                    created_at=datetime.now(timezone.utc),
+                )
+                self._upsert_vector(agg_num_vec, n_entities=len(num_result))
+                self._log("write", agg_num_id, content_hash)
+                numerator_id = agg_num_id
+                num_vec = agg_num_vec
+                num_df = num_result
+
+            if den_df.shape[1] > 1:
+                agg_den_id = f"{id}__den_agg"
+                den_result = getattr(den_df, aggregate)(axis=1).to_frame(name="aggregated")
+                path, content_hash, _ = self._storage.write(agg_den_id, den_result)
+                agg_den_vec = Vector(
+                    id=agg_den_id,
+                    type=den_vec.type,
+                    experiment_id=den_vec.experiment_id,
+                    entity_kind=den_vec.entity_kind,
+                    entity_namespace=den_vec.entity_namespace,
+                    columns=["aggregated"],
+                    parquet_path=self._storage.relative_path(agg_den_id),
+                    content_hash=content_hash,
+                    derivation=aggregate,
+                    parents=[denominator_id],
+                    created_at=datetime.now(timezone.utc),
+                )
+                self._upsert_vector(agg_den_vec, n_entities=len(den_result))
+                self._log("write", agg_den_id, content_hash)
+                denominator_id = agg_den_id
+                den_vec = agg_den_vec
+                den_df = den_result
 
         if num_df.shape[1] != 1:
             raise ValueError(
                 f"Numerator vector {numerator_id!r} has {num_df.shape[1]} columns; "
-                f"fold_change requires single-column vectors"
+                f"fold_change requires single-column vectors (use aggregate= to auto-reduce)"
             )
         if den_df.shape[1] != 1:
             raise ValueError(
                 f"Denominator vector {denominator_id!r} has {den_df.shape[1]} columns; "
-                f"fold_change requires single-column vectors"
+                f"fold_change requires single-column vectors (use aggregate= to auto-reduce)"
             )
 
         # Align on index

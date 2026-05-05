@@ -442,3 +442,24 @@ Implemented the `kbu init-notebook` CLI to solve the bootstrap chicken-egg probl
 - Jinja2 added as a main dependency for template rendering.
 - `jupyter` and `ipykernel` added to the `[dependency-groups] notebook` group in `pyproject.toml`.
 - The `[project.scripts]` entry renamed from `KBUtilLib` to `kbu` pointing at the same `__main__:main` entry point (now a Click group instead of a single command).
+
+### 2026-05-05 — Real-world deployment of `kbu init-notebook` on ADP1Notebooks
+
+First end-to-end exercise of the bootstrap CLI against a real notebook repo. Five hard-won lessons that should update the defaults:
+
+1. **Python 3.13 + scientific Python ecosystem incompat.** The `_default.yaml` originally pinned `default_python: "3.12"` to match `AgentForge-py3.12`. Tried 3.13 (locally available) → scikit-learn build fails: `pkgutil.ImpImporter` (removed in 3.12+) is referenced by an old setuptools that scikit-learn pulls into its build-isolation env. Tried 3.12 (installed via pyenv) → SAME failure for the SAME reason. Only **Python 3.11** worked cleanly for the full ModelSEED/cobra dep tree. Updated `_default.yaml` to `default_python: "3.11"` until upstream scikit-learn pins newer build deps. Future repos can override per-machine when 3.12/3.13 builds catch up.
+
+2. **`ModelSEEDDatabase` is NOT pip-installable** — it's a data repo (no `pyproject.toml`, no `setup.py`). Including it in `editable_installs` breaks the bootstrap. Removed from `_default.yaml`. Notebook code should access ModelSEEDDatabase via env var or path, not via Python import. Future inclusions of similar data-only repos (e.g., a future MediaDB) need the same treatment.
+
+3. **`setuptools` and `wheel` should be in `notebook_deps`.** Fresh Python 3.11+ venvs ship without setuptools by default. The very first editable install in a new venv hits `BackendUnavailable: Cannot import 'setuptools.build_meta'` until pip pulls them. Added to `_default.yaml` so they're installed before the editable install pass. Doesn't fully eliminate the issue (build-isolation envs are a separate problem; cf. lesson #1) but covers the basic case.
+
+4. **`bin/activate` PATH ordering wins over pyenv shims** — when properly sourced. Earlier attempt to `source ./activate.sh 2>&1 | tail -1` ran `source` in a subshell (because of the pipe) and lost the env entirely. PATH was never modified, so `python` still resolved to pyenv's shim. **Use `source ./activate.sh >/tmp/_act.log 2>&1` instead** when you want to suppress chatter — redirection to a file does not spawn a subshell. Add this to §7.1 verification cookbook.
+
+5. **The two-pass workflow that worked**: 
+   - First run `kbu init-notebook --python 3.11` (no `--force`) → creates venv, runs editable installs, generates `util.py` only if missing, registers kernel, but **does NOT pin existing notebooks** that have non-`kbu.nb-*` kernels (defensive default).
+   - Then run `kbu init-notebook --python 3.11 --force` → smart-merges the new template header into existing `util.py` (preserving all helpers below the sentinel), AND pins all `.ipynb` files to the new kernel.
+   - Two passes also surfaced the build-isolation issue separately from the data-repo issue, making each easy to diagnose.
+
+**Sentinel marker workflow**: When porting an existing util.py that has helpers but no `# === project-specific helpers below ===` marker, manually insert the marker at the boundary between framework code and project helpers BEFORE running `kbu init-notebook --force`. Otherwise `--force` will refuse with a clear error.
+
+**Pre-commit polish**: After `kbu init-notebook` runs, the repo has 18+ modified .ipynb files (kernel pins) and a modified `util.py`. These are clean bootstrap output but should be reviewed before commit (the diff is dense — visual diff tools recommended over plain `git diff`).

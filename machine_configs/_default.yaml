@@ -1,9 +1,10 @@
-default_python: "3.12"
+default_python: "3.11"
 editable_installs:
   - ~/Dropbox/Projects/KBUtilLib
   - ~/Dropbox/Projects/cobrakbase
   - ~/Dropbox/Projects/ModelSEEDpy
-  - ~/Dropbox/Projects/ModelSEEDDatabase
+# ModelSEEDDatabase is a data repo (no pyproject.toml/setup.py); not pip-installable.
+# Notebook code accesses its files via env var or path; do not include here.
 notebook_deps:
   - jupyter
   - ipykernel
@@ -11,3 +12,5 @@ notebook_deps:
   - itables
   - pandas
   - tqdm
+  - setuptools
+  - wheel

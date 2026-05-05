@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-KBUTILLIB_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+# Resolve the real path of this script, following symlinks (works on macOS + Linux).
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  # Resolve relative symlink
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+KBUTILLIB_ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 PYTHON="${KBU_PYTHON:-python3}"
 exec env PYTHONPATH="$KBUTILLIB_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m kbutillib "$@"

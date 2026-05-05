@@ -1,0 +1,13 @@
+default_python: "3.12"
+editable_installs:
+  - ~/Dropbox/Projects/KBUtilLib
+  - ~/Dropbox/Projects/cobrakbase
+  - ~/Dropbox/Projects/ModelSEEDpy
+  - ~/Dropbox/Projects/ModelSEEDDatabase
+notebook_deps:
+  - jupyter
+  - ipykernel
+  - ipywidgets
+  - itables
+  - pandas
+  - tqdm

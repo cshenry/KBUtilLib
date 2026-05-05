@@ -81,17 +81,57 @@ git rev-list --left-right --count main...origin/main    # 0 0
 
 ---
 
-## 3. AgentForge environment prerequisites
+## 3. `kbu init-notebook` bootstrap
+
+Each notebook project needs a per-project venv with editable installs of sibling repos. The `kbu init-notebook` CLI automates this.
+
+### 3.1 One-time setup (per machine)
+
+```bash
+# Symlink the kbu wrapper into your PATH (once per machine)
+ln -sf ~/Dropbox/Projects/KBUtilLib/bin/kbu ~/.local/bin/kbu
+
+# Verify
+kbu --version
+```
+
+### 3.2 Bootstrap a notebook project
+
+```bash
+cd /Users/chenry/Dropbox/Projects/<NotebookRepo>
+kbu init-notebook
+```
+
+This will:
+1. Resolve your machine alias from `~/.agentforge/config.yaml` (or hardware UUID, or interactive prompt).
+2. Read merged config from `KBUtilLib/machine_configs/_default.yaml` + `<alias>.yaml`.
+3. Create a venv via `venvman create --project kbu.nb-<project>`.
+4. `pip install -e` each sibling repo (KBUtilLib, cobrakbase, ModelSEEDpy, ModelSEEDDatabase).
+5. `pip install` notebook deps (jupyter, ipykernel, ipywidgets, itables, pandas, tqdm).
+6. Render `notebooks/util.py` from a Jinja template (NotebookSession-based).
+7. Register a Jupyter kernel: `kbu.nb-<project>`.
+8. Pin all `*.ipynb` files to that kernel.
+
+### 3.3 Options
+
+| Flag | Effect |
+|---|---|
+| `--project NAME` | Override project name (default: cwd basename) |
+| `--python VER` | Override Python version (default: from machine config) |
+| `--alias NAME` | Override machine alias resolution |
+| `--force` | Overwrite util.py header (preserves custom code below marker); force-pin all kernels |
+| `--no-pin-kernels` | Skip kernel registration and .ipynb metadata pinning |
+| `--no-venv` | Skip venv creation; only generate template files |
+
+### 3.4 AgentForge environment prerequisites
 
 The submitting machine must be configured to write task records to the Dropbox-synced fleet location, otherwise the worker on `emailmac` can't see submissions.
-
-### 3.1 Verify config
 
 ```bash
 cat ~/.agentforge/config.yaml
 ```
 
-Must contain (top-level keys, NOT under `worker:`):
+Must contain:
 
 ```yaml
 central_tasks_dir: /Users/chenry/Dropbox/Jobs/agentforge/tasks
@@ -107,15 +147,6 @@ worker:
 
 If `central_tasks_dir` is missing, submissions land in local `~/.agentforge/tasks/` (invisible to other machines).
 
-### 3.2 Smoke test routing
-
-```bash
-agentforge submit --role developer --machine emailmac --repo SomeRepo --summary "routing test" "echo hi"
-ls -la ~/Dropbox/Jobs/agentforge/tasks/ | tail -3   # the new task file should appear here
-```
-
-If it appears in `~/.agentforge/tasks/` instead, fix config.
-
 ---
 
 ## 4. Phasing strategy
@@ -125,6 +156,7 @@ For a notebook repo with ≥10 notebooks, use this 4-stage decomposition. Smalle
 | Phase | Scope | Est. effort | Outputs |
 |---|---|---|---|
 | **Pre-flight** | §2 cleanup of target repo | 5 min manual | clean repo synced to origin |
+| **4-bootstrap** | `kbu init-notebook` creates per-project venv, renders `util.py` from template, registers Jupyter kernel, pins notebooks. | 0.5 wk agent | `bin/kbu`, `src/kbutillib/cli/`, `machine_configs/`, tests |
 | **4a — util.py shell** | Replace 1000+ line `util.py` god-class with `NotebookSession` + free helper functions + tests. NO `.ipynb` changes. | 0.5 wk agent | `util.py` (slim), `util_legacy.py` (preserved), `test_util.py`, `conftest.py`, `UTIL_README.md` |
 | **4b — pilot notebook** | Migrate ONE representative notebook end-to-end. Surfaces API gaps. | 0.5–1 wk agent | migrated notebook, ported util.py functions, `PHASE_4B_MIGRATION_LOG.md` documenting deferrals + gaps |
 | **3.5-style gap-fix** | Address API gaps surfaced by the pilot. Verify-first; some "gaps" are misunderstandings. | 0.5 wk agent | KBUtilLib API extensions + tests + PRD §15 updates |
@@ -279,8 +311,9 @@ This is the most important rule. Several agent attempts have proposed building "
 
 ## 10. util.py lifecycle
 
-1. **Phase 4a**: Old `util.py` (1000+ lines, multi-inheritance god-class) → renamed `util_legacy.py` (preserved for porting reference). New `util.py` is a slim shell:
-   - sys.path setup for sibling repos (`KBUtilLib/src`, `cobrakbase`, `ModelSEEDpy`)
+1. **Phase 4-bootstrap**: `kbu init-notebook` renders the initial `notebooks/util.py` from a Jinja template (`src/kbutillib/cli/templates/util.py.tmpl`). The template provides common imports, a module-level `session` (NotebookSession), `session_for()` back-compat shim, and a `# === project-specific helpers below ===` marker separating generated header from project-specific code. No sys.path tricks — the per-project venv handles imports.
+
+2. **Phase 4a**: Old `util.py` (1000+ lines, multi-inheritance god-class) → renamed `util_legacy.py` (preserved for porting reference). New `util.py` builds on the template from 4-bootstrap:
    - `from kbutillib.notebook import NotebookSession`
    - `session_for(file: str) -> NotebookSession` convenience constructor
    - A handful of pure helper functions ported from legacy (with tests)
@@ -390,4 +423,22 @@ Migrated ADP1BERDLFitnessFluxFitting (9 cells), ADP1BERDLAnalysis (22 cells), AD
 - `dev ✓ → review ✓ → merge ✓` first try (clean review). But auto-merge bug still required §8 manual merge.
 - Reviewer made no fix-up commit (its branch was identical to main, not a sibling with fixes). Simpler manual-merge case than Phase 3.5.
 
+### 2026-05-05 — Phase 4-bootstrap (kbu CLI)
 
+Implemented the `kbu init-notebook` CLI to solve the bootstrap chicken-egg problem: Phase 4a dropped `sys.path` setup from `util.py`, but running migrated notebooks fails with `ModuleNotFoundError` because `kbutillib` isn't importable without a properly configured venv. The chosen solution is per-notebook-project venvs with `pip install -e` of sibling repos, orchestrated by a new `kbu` CLI.
+
+**Bootstrap chicken-egg solution**: The `bin/kbu` shell wrapper (~5 lines) sets `PYTHONPATH` to `KBUtilLib/src` before invoking `python -m kbutillib`, so it works on a fresh machine without any prior installation. Symlink it once into `~/.local/bin/` and it's available everywhere.
+
+**Machine alias resolution**: 4-level fallback chain: (1) AgentForge `config.load_config()` Python import, (2) direct YAML parse of `~/.agentforge/config.yaml`, (3) hardware UUID match against `machine_configs/*.yaml`, (4) interactive prompt. The AgentForge import path catches `pydantic.ValidationError` and falls through gracefully. Hardware UUID extraction uses `ioreg` on macOS and `/etc/machine-id` on Linux.
+
+**Per-machine config**: `machine_configs/_default.yaml` defines the baseline (Python version, editable installs, notebook deps). Per-machine overrides (e.g., `emailmac.yaml`, `h100.yaml`) deep-merge on top. Dropbox conflicted-copy files (`*(Conflict*).yaml`) are excluded from all glob operations.
+
+**Smart-merge for util.py**: When `--force` is used and `notebooks/util.py` already exists, the template header above the `# === project-specific helpers below ===` marker is replaced while preserving all custom code below it. Without `--force`, existing `util.py` is never touched. Without the marker in the existing file, `--force` refuses with a clear error.
+
+**Kernel pinning policy**: By default, only `kbu.nb-*` kernels and unset kernels are overwritten. External kernels (e.g., KBase narrative kernel) are preserved unless `--force` is specified.
+
+**Implementation notes**:
+- All subprocess calls (venvman, pip, ipykernel) are mocked in tests via `unittest.mock.patch`. 40 tests total covering the full resolution chain, smart-merge edge cases, slugification, idempotence, broken venv detection, and kernel pinning policy.
+- Jinja2 added as a main dependency for template rendering.
+- `jupyter` and `ipykernel` added to the `[dependency-groups] notebook` group in `pyproject.toml`.
+- The `[project.scripts]` entry renamed from `KBUtilLib` to `kbu` pointing at the same `__main__:main` entry point (now a Click group instead of a single command).

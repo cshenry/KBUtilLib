@@ -1,13 +1,6 @@
-"""Command-line interface."""
+"""kbu CLI entry point."""
 
-import click
-
-
-@click.command()
-@click.version_option()
-def main() -> None:
-    """KBUtilLib."""
-
+from kbutillib.cli import main
 
 if __name__ == "__main__":
-    main(prog_name="KBUtilLib")  # pragma: no cover
+    main()

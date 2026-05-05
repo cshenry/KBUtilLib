@@ -1,0 +1,38 @@
+"""{{ project_name }} util -- runs as %run util.py at the top of every cell.
+
+Provides: common imports, project NotebookSession (named `session`), and
+project-specific helper functions (added below the marker by migration tasks).
+"""
+from __future__ import annotations
+
+import json, math, os, re
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+import pandas as pd
+try:
+    import cobra
+    from cobra import Reaction, Metabolite
+except ImportError:
+    cobra = None  # type: ignore
+
+from kbutillib.notebook import NotebookSession
+from kbutillib.notebook.schema import (
+    Sample, Computation, ExternalDataset, Experiment,
+    Strain, Mutation, Media,
+    Vector, VectorType, EntityKind, EntityRef,
+)
+
+# Auto-detect notebook name from IPython runtime.
+session: NotebookSession = NotebookSession.for_notebook(
+    None, project_name="{{ project_name }}"
+)
+
+
+def session_for(notebook_file: Optional[str] = None) -> NotebookSession:
+    """Back-compat shim. Prefer the module-level `session`."""
+    return NotebookSession.for_notebook(notebook_file, project_name="{{ project_name }}")
+
+
+# === project-specific helpers below ===

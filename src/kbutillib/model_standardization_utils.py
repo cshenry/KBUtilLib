@@ -61,60 +61,6 @@ class ModelStandardizationUtils(MSBiochemUtils):
         """
         super().__init__(**kwargs)
 
-    def _parse_id(self, object_or_id):
-        """Parse a compound or reaction ID to extract base ID, compartment, and index.
-
-        Supports two notation styles:
-        - Bracket notation: "adp[c]", "h[e]", "cpd00001[c]"
-        - Underscore notation: "cpd01024_c0", "rxn00001_c"
-
-        Args:
-            object_or_id: Either a string ID or an object with an .id attribute
-
-        Returns:
-            Tuple of (base_id, compartment, index) where:
-            - base_id: The compound/reaction ID without compartment
-            - compartment: Single letter compartment code (c, e, p, m)
-            - index: Compartment index (usually "" or "0")
-        """
-        # Check if input is a string or object and if it's an object, set id to object.id
-        if isinstance(object_or_id, str):
-            id = object_or_id
-        else:
-            id = object_or_id.id
-
-        # Try bracket notation first (e.g., "adp[c]" or "h[e]")
-        bracket_match = re.search(r"(.+)\[([a-zA-Z]+)\]$", id)
-        if bracket_match:
-            baseid = bracket_match[1]
-            compartment = bracket_match[2]
-            index = ""  # Bracket notation doesn't have index
-            if compartment.lower() not in compartment_types:
-                self.log_warning(f"Compartment type '{compartment}' not recognized in bracket notation. Using default 'c'.")
-                compartment = "c"
-            else:
-                compartment = compartment_types[compartment.lower()]
-            return (baseid, compartment, index)
-
-        # Try underscore notation (e.g., "cpd01024_c0")
-        if re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
-            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
-            baseid = m[1]
-            compartment = m[2]
-            index = m[3]
-            if compartment.lower() not in compartment_types:
-                self.log_warning(f"Compartment type '{compartment}' not recognized. Readding compartment to base ID.")
-                baseid = baseid+"_"+compartment
-                compartment = "c"
-            else:
-                # Standardizing the compartment when it's recognizable
-                compartment = compartment_types[compartment.lower()]
-            return (baseid, compartment, index)
-
-        # If no compartment notation found, default to cytosol "c"
-        self.log_warning(f"ID '{id}' cannot be parsed - using ID as base and defaulting to compartment 'c'")
-        return (id, "c", "")
-
     def remove_model_periplasm_compartment(self, model_or_mdlutl):
         """Remove the periplasm compartment from a model."""
         mdlutl = self._check_and_convert_model(model_or_mdlutl)

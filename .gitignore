@@ -41,3 +41,4 @@ OPTIONAL_IMPORTS_SUMMARY.md
 
 # Large data/cache files
 data/AICurationCacheCompoundCuration.json
+data/ms_classifier/

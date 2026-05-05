@@ -14,3 +14,4 @@ notebook_deps:
   - tqdm
   - setuptools
   - wheel
+  - openpyxl   # pandas .xlsx reader (proteomics data is routinely Excel)

@@ -363,6 +363,31 @@ Append entries here after each phase completes. Date-stamp each entry.
 - Found archival Word doc. Action item to upload to DocDB.
 - Took ~5 minutes total. Worth doing manually rather than as an agent task.
 
-### 2026-05-XX — Phase 4c-i (TBD)
+### 2026-05-04 — Phase 4c-i (ADP1Notebooks BERDL trio)
 
-(Will fill in after 4c-i lands.)
+Migrated ADP1BERDLFitnessFluxFitting (9 cells), ADP1BERDLAnalysis (22 cells), ADP1BERDLCrossSampleAnalysis (6 cells). Net diff: +531 / -2153 — massive simplification.
+
+**Key patterns / lessons:**
+
+1. **`_legacy = NotebookUtil()` shim emerged organically** for cells using KBase API methods with no NotebookSession equivalent yet (`get_media`, `constrain_objective_to_fraction_of_optimum`, `get_msgenome_from_dict`, `create_map_html2`). Cells initialize `session` for cache I/O (migrated) AND `_legacy` for the un-wrapped APIs (deferred). Clean pragmatic pattern; preserve until Phase 4d wraps these in KBUtilLib.
+
+2. **No new util.py functions needed.** The 3 notebooks were thin enough that just replacing `util.save/load` with `session.cache.save/load` was the bulk of the work. Phase 4a's ported helpers + 4b's three additions covered everything. Surprising — implies the per-project god-class util.py was mostly *cache shim*, not unique business logic.
+
+3. **Cross-notebook cache references work in practice.** CrossSampleAnalysis loads `ADP1BERDLFoldChangeAnalysis/...`-prefixed keys saved by another notebook; loaded cleanly because the cache is project-wide (Phase 3.5 invariant proved). The `notebook_name=` argument from the legacy API is genuinely unnecessary in the new design.
+
+4. **Free side-benefit cleanups.** The agent noticed and removed hardcoded `sys.path.insert(0, '/Users/chenry/Dropbox/Projects/ModelSEEDpy')` lines (cells were assuming a developer's local layout). Available via venv on emailmac/h100 too. Worth scanning for these in every migration.
+
+5. **nbformat version bumps.** One notebook needed upgrade from 4.4 → 4.5 to validate cell IDs. Future migrations should anticipate this — add to migration recipe in §7.1.
+
+**Deferred APIs needing KBUtilLib wrappers** (candidates for a Phase 3.5-ii follow-up before Phase 4d):
+- `get_media()` (KBWS) → `session.media.get_kbase(id)` or similar
+- `constrain_objective_to_fraction_of_optimum()` (MSFBAUtils) → util.py port or KBUtilLib helper
+- `get_msgenome_from_dict()` (KBPLMUtils) → util.py port or KBUtilLib helper
+- `create_map_html2()` (EscherUtils) — existing `generate_escher_map()` lacks badges/advanced features
+
+**Process notes:**
+- Bumped `--timeout` to 1800s (from 900s default). Dev took 1091s. The 900s budget would have been borderline with a 22-cell notebook in the mix. Recommend 1800s for any 3+ notebook task.
+- `dev ✓ → review ✓ → merge ✓` first try (clean review). But auto-merge bug still required §8 manual merge.
+- Reviewer made no fix-up commit (its branch was identical to main, not a sibling with fixes). Simpler manual-merge case than Phase 3.5.
+
+

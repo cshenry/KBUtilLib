@@ -42,3 +42,7 @@ OPTIONAL_IMPORTS_SUMMARY.md
 # Large data/cache files
 data/AICurationCacheCompoundCuration.json
 data/ms_classifier/
+
+# claude-skills runtime artifacts (populated by `claude-skills sync`)
+.claude/commands/
+.claude/skills/

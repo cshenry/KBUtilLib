@@ -6,25 +6,27 @@ project-specific helper functions (added below the marker by migration tasks).
 from __future__ import annotations
 
 # === System path bootstrap =================================================
-# Prepend machine-specific Python paths from KBUtilLib/machine_configs/<alias>.yaml
-# (sys_paths: field) before any heavy imports. Lets each machine declare extra
-# paths needed for binary-bundled libs (e.g., CPLEX, modelseed_cplex) without
-# per-project hardcoding. Silent no-op if not resolvable.
+# Prepend machine-specific Python paths to sys.path BEFORE any heavy imports.
+# Reads ~/.kbu-sys-paths (plain text, one path per line, # comments OK).
+# Silent no-op if the file isn't present or unreadable.
 import sys as _sys
 from pathlib import Path as _Path
+
 def _bootstrap_sys_paths() -> None:
+    user_file = _Path.home() / ".kbu-sys-paths"
+    if not user_file.exists():
+        return
     try:
-        from kbutillib.cli.machine import resolve_alias, load_machine_config
-        alias = resolve_alias(prompt_fallback=False)
-        if alias is None:
-            return
-        cfg = load_machine_config(alias)
-        for p in cfg.get("sys_paths", []) or []:
-            expanded = str(_Path(p).expanduser())
+        for raw in user_file.read_text().splitlines():
+            s = raw.split("#", 1)[0].strip()
+            if not s:
+                continue
+            expanded = str(_Path(s).expanduser())
             if expanded and expanded not in _sys.path:
                 _sys.path.insert(0, expanded)
     except Exception:
         pass
+
 _bootstrap_sys_paths()
 # ===========================================================================
 

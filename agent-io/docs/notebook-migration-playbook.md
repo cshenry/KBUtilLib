@@ -491,3 +491,15 @@ _legacy.<method>(...)
 at the top of the cell. This pattern works on every machine where the kbu venv has KBUtilLib + cobrakbase + ModelSEEDpy editable-installed, regardless of which underlying Python (kbu venv on Mac, modelseed_cplex env on Poplar, etc.).
 
 **Cross-notebook genome dependency**. `ADP1BERDLFitnessFluxFitting.ipynb` cell 10 was patched with a self-contained KBase fetch of `ADP1Genome` because the canonical producer (`ADP1AnnotationAnalysis.ipynb`) hadn't been migrated yet. Phase 4c-ii will migrate AnnotationAnalysis; once that produces `ADP1Genome` in the cache as part of its normal run, the FitnessFluxFitting bootstrap cell becomes redundant (TODO: remove it then).
+
+### 2026-05-05 — Phase 5a: helpers promoted
+
+Promoted 10 generic helper functions from `ADP1Notebooks/notebooks/util.py` into the new `kbutillib.notebook.helpers` package so future notebook projects inherit them automatically:
+
+- **`helpers/compartment.py`**: `COMPARTMENT_MAP`, `normalize_compartment`
+- **`helpers/reaction.py`**: `get_reaction_directionality`, `standardize_exchange_id` + `_EXCHANGE_RE`, `get_exchange_map`, `build_gene_reaction_map`, `reaction_equation_with_names`, `is_diffusion_reaction`, `compare_reaction_stoichiometry`
+- **`helpers/fva.py`**: `find_significant_differences`, `classify_fva_flux`
+
+All functions moved bit-for-bit (no semantic changes). Each has a corresponding pytest test under `tests/notebook/helpers/` ported from `ADP1Notebooks/notebooks/test_util.py`. A shared `conftest.py` provides the synthetic `mini_model` cobra fixture.
+
+The `util.py.tmpl` template now includes a `from kbutillib.notebook.helpers import ...` line, so every new `kbu init-notebook` project picks up these helpers in its generated `util.py`.

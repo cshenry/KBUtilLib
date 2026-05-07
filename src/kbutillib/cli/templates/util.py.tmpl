@@ -43,6 +43,13 @@ except ImportError:
     cobra = None  # type: ignore
 
 from kbutillib.notebook import NotebookSession
+from kbutillib.notebook.helpers import (  # noqa: F401 — generic helpers available to all notebooks
+    COMPARTMENT_MAP, normalize_compartment,
+    get_reaction_directionality, standardize_exchange_id, get_exchange_map,
+    build_gene_reaction_map, reaction_equation_with_names,
+    is_diffusion_reaction, compare_reaction_stoichiometry,
+    find_significant_differences, classify_fva_flux,
+)
 from kbutillib.notebook.schema import (
     Sample, Computation, ExternalDataset, Experiment,
     Strain, Mutation, Media,

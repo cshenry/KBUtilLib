@@ -10,7 +10,7 @@ import os
 
 from .kb_annotation_utils import KBAnnotationUtils
 from .ms_biochem_utils import MSBiochemUtils
-from .model_standardization_utils import compartment_types
+from .model_standardization_utils import compartment_types, direction_conversion
 
 # TODO: One issue exists with this module: (1) if a genome isn't RAST annotated, the call to reannotate it with RAST doesn't work unless we get callbacks to work
 
@@ -699,14 +699,14 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                     "model_direction": self.reaction_directionality_from_bounds(rxn),
                     "ai_direction": None,
                     "biochem_reversibility": self.reaction_biochem_directionality(rxn),
-                    "combined": (
-                            f"{direction_conversion[model_direction]}|"
-                            f"{direction_conversion[ai_direction]}|"
-                            f"{direction_conversion[biochem_direction]}"
-                        )
                 }
                 output[rxn.id]["ai_output"] = self.analyze_reaction_directionality(rxn)
                 output[rxn.id]["ai_direction"] = output[rxn.id]["ai_output"]["directionality"]
+                output[rxn.id]["combined"] = (
+                    f"{direction_conversion[output[rxn.id]['model_direction']]}|"
+                    f"{direction_conversion[output[rxn.id]['ai_direction']]}|"
+                    f"{direction_conversion[output[rxn.id]['biochem_reversibility']]}"
+                )
         if output_dataframe:
             output = pd.DataFrame.from_records(output.values())
         return output

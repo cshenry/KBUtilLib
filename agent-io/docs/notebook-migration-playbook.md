@@ -463,3 +463,31 @@ First end-to-end exercise of the bootstrap CLI against a real notebook repo. Fiv
 **Sentinel marker workflow**: When porting an existing util.py that has helpers but no `# === project-specific helpers below ===` marker, manually insert the marker at the boundary between framework code and project helpers BEFORE running `kbu init-notebook --force`. Otherwise `--force` will refuse with a clear error.
 
 **Pre-commit polish**: After `kbu init-notebook` runs, the repo has 18+ modified .ipynb files (kernel pins) and a modified `util.py`. These are clean bootstrap output but should be reviewed before commit (the diff is dense — visual diff tools recommended over plain `git diff`).
+
+### 2026-05-06 — Validating the BERDL trio: 5 recurring antipatterns
+
+End-to-end validation of FoldChange, FitnessFluxFitting, BERDLAnalysis, and CrossSample surfaced five recurring bugs from the migration agent. **These should be embedded as pre-flight checks in every Phase 4c-* prompt** so the agent self-audits before the cell-by-cell rewrite.
+
+1. **Hardcoded biomass reaction id (`GROWTH_DASH_RXN`)**. Legacy ModelSEED convention; current models (incl. MergedADP1Model.json) use `bio1`. Wherever the migration assumes a biomass reaction id, default it to `bio1` AND make sure the cell that calls FBA passes `biomass_reaction="bio1"` explicitly. Symptom: `status="optimal"` but `biomass=0` because the constraint check `if biomass_reaction in [r.id for r in model.reactions]` returns False and no biomass lower bound gets set.
+
+2. **Missing media application**. Legacy `process_strain_with_expression` and friends called `_set_model_media(model, media)` BEFORE running FBA. Migrations consistently drop this step. Symptom: model has no carbon source bounded → biomass=0 even with correct biomass id. Fix: add `_legacy.set_media(model, media)` immediately after model load, before any analysis. Use `_legacy.get_media("KBaseMedia/Carbon-Pyruvic-Acid", msmedia=True)` (or other KBase ref) to fetch.
+
+3. **Algorithm reimplementations as heuristics**. The migration agent will sometimes write a `def run_X(...)` in util.py that *appears* to do what the legacy code did, but actually invented a naive heuristic instead of calling the canonical ModelSEEDpy / KBUtilLib method. Three confirmed cases in the BERDL trio:
+   - `process_strain_with_expression` reimplemented as bound-nudging (should call `MSExpression.fit_flux_to_proteomics_fold_change_data`).
+   - `set_media` dropped entirely (should call `MSFBAUtils.set_media` via `_legacy`).
+   - `create_map_html2` reimplemented as a thin `escher.Builder` wrapper missing badges/legends (should call `EscherUtils.create_map_html2` via `_legacy`).
+   **Audit rule**: any new function in util.py whose body is more than a few lines is suspect. `diff util.py util_legacy.py` and check that the function is calling the canonical legacy method via `_legacy`, not reimplementing it.
+
+4. **Slash-prefixed cache keys for cross-notebook reads**. Legacy datacache used per-notebook subdirs (`datacache/<notebook>/<key>.json`); the legacy `util.load(name, notebook_name=X)` call was migrated as `session.cache.load(f"{notebook}/{name}")`. The new cache is project-wide and flat — keys are global. If the producer wrote with `key="foo"` and consumer reads `f"<NB>/foo"`, KeyError. Fix: strip the `<NB>/` prefix from the consumer's load. **Caveat**: when a notebook saves AND loads the same prefixed key (e.g., BERDLAnalysis uses `"ADP1BERDLAnalysis/genome_gapfill_analysis"` for both), the prefix is consistent and harmless; leave intra-notebook prefixes alone. Three flavors to catch: literal `"<NB>/key"`, string concat `"<NB>/" + var`, f-string `f"<NB>/{var}"`.
+
+5. **`sol.fluxes.values()` on a pandas Series**. Cobra solutions return `.fluxes` as a `pd.Series`. `.values` is an attribute (returns ndarray), not a method — `.values()` calls the ndarray and raises `TypeError: 'numpy.ndarray' object is not callable`. Replace with `(sol.fluxes.abs() > 1e-9).sum()` or iterate the Series directly. Same goes for `.items()` (works fine on Series, no fix needed).
+
+**The `_legacy` shim is load-bearing**. For any KBase-API-touching call (`get_media`, `get_object`, `set_media`, `create_map_html2`, `constrain_objective_to_fraction_of_optimum`, `get_msgenome_from_dict`), use:
+```python
+from util_legacy import NotebookUtil
+_legacy = NotebookUtil()
+_legacy.<method>(...)
+```
+at the top of the cell. This pattern works on every machine where the kbu venv has KBUtilLib + cobrakbase + ModelSEEDpy editable-installed, regardless of which underlying Python (kbu venv on Mac, modelseed_cplex env on Poplar, etc.).
+
+**Cross-notebook genome dependency**. `ADP1BERDLFitnessFluxFitting.ipynb` cell 10 was patched with a self-contained KBase fetch of `ADP1Genome` because the canonical producer (`ADP1AnnotationAnalysis.ipynb`) hadn't been migrated yet. Phase 4c-ii will migrate AnnotationAnalysis; once that produces `ADP1Genome` in the cache as part of its normal run, the FitnessFluxFitting bootstrap cell becomes redundant (TODO: remove it then).

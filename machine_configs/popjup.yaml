@@ -1,0 +1,9 @@
+# KBUtilLib/machine_configs/popjup.yaml
+hardware_uuids:
+  - "dc08553dbd53e80f0c38819068157eba"          # popjup's /etc/machine-id contents
+default_python: "3.11"
+sys_paths:
+  - /home/chenry/MyEnvs/modelseed_cplex
+  - /home/chenry/Dropbox/Projects/ModelSEEDpy
+  - /home/chenry/Dropbox/Projects/KBUtilLib/src
+  - /home/chenry/Dropbox/Projects/cobrakbase

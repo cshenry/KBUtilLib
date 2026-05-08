@@ -158,6 +158,24 @@ except ImportError as e:
     _import_error("kb_berdl_utils", e)
     KBBERDLUtils = None
 
+try:
+    from .kb_job_utils import KBJobUtils, JobRecord, JobState, JobStore
+except ImportError as e:
+    _import_error("kb_job_utils", e)
+    KBJobUtils = None
+    JobRecord = None
+    JobState = None
+    JobStore = None
+
+try:
+    from .kbase_endpoints import base_url, service_url, narrative_url, env_from_url
+except ImportError as e:
+    _import_error("kbase_endpoints", e)
+    base_url = None
+    service_url = None
+    narrative_url = None
+    env_from_url = None
+
 # Import example composite classes
 # Temporarily disabled for testing core functionality
 # try:
@@ -176,9 +194,13 @@ __all__ = [
     "DataObject",
     "DataType",
     "EscherUtils",
+    "JobRecord",
+    "JobState",
+    "JobStore",
     "KBAnnotationUtils",
     "KBBERDLUtils",
     "KBGenomeUtils",
+    "KBJobUtils",
     "KBModelUtils",
     "KBPLMUtils",
     "KBReadsUtils",
@@ -199,7 +221,11 @@ __all__ = [
     "SharedEnvUtils",
     "SKANIUtils",
     "ThermoUtils",
+    "base_url",
+    "env_from_url",
     "examples",
+    "narrative_url",
+    "service_url",
 ]
 
 __version__ = "0.1.0"

@@ -11,6 +11,8 @@ import requests
 
 from .installed_clients.AbstractHandleClient import AbstractHandle as HandleService
 from .installed_clients.WorkspaceClient import Workspace
+from .kbase_endpoints import base_url as _base_url
+from .kbase_endpoints import env_from_url, service_url
 from .shared_env_utils import SharedEnvUtils
 
 
@@ -34,21 +36,13 @@ class KBWSUtils(SharedEnvUtils):
         """Initialize KBase Workspace utilities."""
         super().__init__(**kwargs)
         self.kb_version = kb_version
-        #Overrides KBVersion based on kbendpoint, which is generally how SDK modules are configured
+        # Overrides kb_version based on kbendpoint, which is generally how SDK modules are configured
         if kbendpoint:
-            from urllib.parse import urlparse
-            hostname = urlparse(kbendpoint).hostname or ""
-            if hostname.startswith("ci."):
-                kb_version = "ci"
-            elif hostname.startswith("appdev."):
-                kb_version = "appdev"
-            else:
-                kb_version = "prod"
+            kb_version = env_from_url(kbendpoint)
             self.kb_version = kb_version
-        base_url = self.get_base_url_from_version(kb_version)
-        self.workspace_url = f"{base_url}/ws"
-        self.shock_url = f"{base_url}/shock-api"
-        self.hs_url = f"{base_url}/handle_service"
+        self.workspace_url = service_url("workspace", kb_version)
+        self.shock_url = service_url("shock", kb_version)
+        self.hs_url = service_url("handle_service", kb_version)
         self.cached_to_obj_path = {}
         self._ws_client = Workspace(
             self.workspace_url, token=self.get_token(namespace="kbase")
@@ -106,15 +100,16 @@ class KBWSUtils(SharedEnvUtils):
             self.ws_id = info[0]
 
     def get_base_url_from_version(self, version):
-        if version == "prod":
-            return "https://kbase.us/services"
-        elif version == "appdev":
-            return "https://appdev.kbase.us/services"
-        elif version == "ci":
-            return "https://ci.kbase.us/services"
-        else:
+        """Return the services base URL for a KBase environment.
+
+        Delegates to :func:`kbase_endpoints.base_url`.  Kept for
+        backward compatibility with existing callers.
+        """
+        try:
+            return _base_url(version)
+        except ValueError:
             self.log_critical("Unknown workspace version: " + version)
-            return "https://kbase.us/services"
+            return _base_url("prod")
 
     def download_blob_file(self, handle_id, file_path):
         headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}

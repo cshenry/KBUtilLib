@@ -503,3 +503,49 @@ Promoted 10 generic helper functions from `ADP1Notebooks/notebooks/util.py` into
 All functions moved bit-for-bit (no semantic changes). Each has a corresponding pytest test under `tests/notebook/helpers/` ported from `ADP1Notebooks/notebooks/test_util.py`. A shared `conftest.py` provides the synthetic `mini_model` cobra fixture.
 
 The `util.py.tmpl` template now includes a `from kbutillib.notebook.helpers import ...` line, so every new `kbu init-notebook` project picks up these helpers in its generated `util.py`.
+
+### 2026-05-06 — Phase 4c-ii: Expression / Annotation trio
+
+Migrated ADP1AnnotationAnalysis (16 code cells), ADP1ExpressionAnalysis (8 code cells), ADP1AIGeneAssociation (1 code cell). Net pattern: predominantly cache-shim replacements (`util.load/save` → `session.cache.load/save`) with KBase-touching methods delegated to `_legacy`.
+
+**Key observations:**
+
+1. **AnnotationAnalysis is the canonical `ADP1Genome` producer.** Cell 15 now writes `session.cache.save("ADP1Genome", data)` via `_legacy.get_object()`. Plain key — no slash prefix. The FitnessFluxFitting bootstrap cell (cell 10) is now redundant and should be removed in Phase 4d.
+
+2. **ExpressionAnalysis is "thick _legacy."** Nearly all logic lives in `NotebookUtil.run_expression_flux_analysis` and its sub-methods. The migration is trivial (swap `util.` → `_legacy.`) but Antipattern 1 (`GROWTH_DASH_RXN` hardcode) still exists inside `process_strain_with_expression` at line 219 of util_legacy.py. This is a Phase 4d fix — it requires modifying the legacy method or replacing it with a proper KBUtilLib wrapper.
+
+3. **AIGeneAssociation is minimal.** One real cell calling `_legacy.evaluate_reaction_gene_association()` (from AICurationUtils parent class). No reimplementation needed.
+
+4. **No new util.py functions needed.** All three notebooks' logic is either pure inline data wrangling or KBase-service-touching methods — nothing crossed the "pure Python helper" threshold for porting.
+
+5. **No cross-notebook slash-prefixed consumers found.** Searched entire repo for `ADP1AnnotationAnalysis/`, `ADP1ExpressionAnalysis/`, `ADP1AIGeneAssociation/` in cache load calls — zero hits.
+
+**Antipattern scorecard (all 5 checked, 0 violations in migrated cells):**
+- AP1 (GROWTH_DASH_RXN): not in migrated cells; present inside `_legacy` (deferred).
+- AP2 (missing media): N/A — all FBA delegates to `_legacy` which handles media internally.
+- AP3 (reimplementations): no new util.py functions; all via `_legacy`.
+- AP4 (slash-prefixed keys): all keys plain.
+- AP5 (`sol.fluxes.values()`): not present.
+
+### 2026-05-06 — Phase 4c-iii: Phenotype / Essentiality trio
+
+Migrated ADP1DGOAAnalysis (9 code cells from 17), ADP1EssentialityAnalysis (10 code cells), ADP1MutantPhenotypeAnalysis (8 code cells). Pattern: cache-shim replacements plus heavy `_legacy` delegation for all FBA/FVA/expression-fitting and Escher map generation.
+
+**Key observations:**
+
+1. **`objective="MAX{bio1}"` vs `objective="bio1"`.** The `constrain_objective_to_fraction_of_optimum` KBUtilLib method expects `MAX{<rxn_id>}` syntax to signal maximization direction. When migrating from `GROWTH_DASH_RXN`, check whether the legacy call used `MAX{GROWTH_DASH_RXN}` wrapper or bare ID — they are not interchangeable. The MutantPhenotypeAnalysis notebook used `MAX{GROWTH_DASH_RXN}` which becomes `MAX{bio1}`.
+
+2. **Compound cache key naming convention.** MutantPhenotypeAnalysis uses `"ADP1-AA-MGR"`, `"ADP1-NR-MGR"`, etc. — encoding `<project>-<normalization>-<datatype>`. These are flat keys (no slash), valid under the new cache, but future consumers need the schema documented.
+
+3. **Inline-only helper functions.** `compute_expression_flux_statistics()` in MutantPhenotypeAnalysis is pure Python but single-use and cell-local. Decision: leave inline. Rule of thumb: only port to util.py if (a) used by multiple notebooks or (b) >20 lines and benefits from unit testing.
+
+4. **DGOAAnalysis heavily consolidated.** Original had 17 code cells including 7 Escher-debugging cells. Collapsed to 9 cells; Escher generation is a single `_legacy.create_map_html2()` call.
+
+5. **No new util.py functions.** All logic is either pure inline wrangling or KBase-touching / ModelSEEDpy methods.
+
+**Antipattern scorecard (all 5 checked, 0 violations in migrated cells):**
+- AP1 (GROWTH_DASH_RXN): replaced with `bio1` / `MAX{bio1}` in all migrated cells. Still present in `_legacy` (deferred to 4d).
+- AP2 (missing media): all FBA goes through `_legacy.run_fba(model, media=...)` or `_legacy.constrain_objective_to_fraction_of_optimum(model, media=...)`, which handle media internally. Standalone `pfba()` calls have explicit `_legacy.set_media()` first.
+- AP3 (reimplementations): no new util.py functions; Escher via `_legacy.create_map_html2()`, expression fitting via `MSExpression.fit_flux_to_mutant_growth_rate_data()`, coupling via `_legacy.analyzed_reaction_objective_coupling()`.
+- AP4 (slash-prefixed keys): all keys plain. No cross-notebook slash-prefixed consumers found.
+- AP5 (`sol.fluxes.values()`): not present; uses `.fluxes.to_dict()`, `.fluxes.get()`, `.fluxes.items()`.

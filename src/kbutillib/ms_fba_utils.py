@@ -344,7 +344,7 @@ class MSFBAUtils(KBModelUtils):
 
         for i in range(solution_count):
             # Try to optimize
-            model.printlp(print=True,path="models/lpfiles/",filename="unblock_objective_with_exchanges_"+str(i))
+            mdlutl.printlp(print=True,path="models/lpfiles/",filename="unblock_objective_with_exchanges_"+str(i))
             solution = cobra_model.optimize()
 
             if solution.status != 'optimal':
@@ -358,7 +358,7 @@ class MSFBAUtils(KBModelUtils):
                     flux = solution.fluxes.get(ex_rxn.id, 0)
                     if abs(flux) > 1e-6:
                         # Get the metabolite name for better readability
-                        met_id = ex_rxn.id.replace("EXC_temp_", "")
+                        met_id = ex_rxn.id.replace("EX_temp_", "")
                         active_exchanges[ex_rxn.id] = {
                             'flux': flux,
                             'metabolite': met_id,
@@ -558,8 +558,14 @@ class MSFBAUtils(KBModelUtils):
                 self.log_info(f"\nProcessing condition: {condition}")
 
             try:
-                # Create a copy of the model for this condition
-                model_copy = MSModelUtil.from_cobrapy(cobra.io.json.to_json(model.model))
+                # Create a deep copy of the model for this condition so per-condition
+                # mutations (media bounds, objective constraints, etc.) don't leak
+                # back into the shared parent model. `MSModelUtil.from_cobrapy`
+                # expects a *file path*, not a JSON string, so the previous
+                # `from_cobrapy(cobra.io.json.to_json(...))` call was relying on
+                # an undocumented fallback. Use `cobra.Model.copy()` directly
+                # and wrap the result in a fresh `MSModelUtil`.
+                model_copy = MSModelUtil(model.model.copy())
 
                 # Get media for this condition
                 media = media_dict[condition]

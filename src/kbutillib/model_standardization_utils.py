@@ -13,24 +13,11 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from .ms_biochem_utils import MSBiochemUtils
+from .ms_biochem_utils import MSBiochemUtils, compartment_types
 
 # Module-level constants
-compartment_types = {
-    "cytosol":"c",
-    "extracellar":"e",
-    "extracellular":"e",
-    "extraorganism":"e",
-    "periplasm":"p",
-    "membrane":"m",
-    "mitochondria":"m",
-    "environment":"e",
-    "env":"e",
-    "c":"c",
-    "p":"p",
-    "e":"e",
-    "m":"m"
-}
+# `compartment_types` is canonically defined in `ms_biochem_utils` and re-exported
+# here for backward compatibility with downstream callers (e.g. `kb_model_utils`).
 
 direction_conversion = {
     "":"-",

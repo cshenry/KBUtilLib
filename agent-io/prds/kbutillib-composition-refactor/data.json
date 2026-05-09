@@ -1,0 +1,550 @@
+{
+  "prd_name": "kbutillib-composition-refactor",
+  "status": "approved",
+  "owner": "Chris Henry",
+  "repo": "KBUtilLib",
+  "refactor_style": "big-bang",
+  "facade_class": "KBUtilLib",
+  "module_decomposition": {
+    "base_utils": {
+      "current_class": "BaseUtils",
+      "post_refactor_class": "BaseUtils",
+      "action": "keep",
+      "inheritance": "none",
+      "composed_deps": [],
+      "public_methods": [
+        "__init__", "reset_attributes", "initialize_call", "log_info",
+        "log_warning", "log_error", "log_debug", "log_critical",
+        "print_attributes", "validate_args", "transfer_outputs",
+        "save_util_data", "load_util_data", "const_util_rxn_prefixes"
+      ]
+    },
+    "shared_env_utils": {
+      "current_class": "SharedEnvUtils",
+      "post_refactor_class": "SharedEnvUtils",
+      "action": "keep",
+      "inheritance": "BaseUtils",
+      "composed_deps": [],
+      "public_methods": [
+        "__init__", "read_config", "get_config", "get_config_value",
+        "set_environment_variable", "save_config", "read_token_file",
+        "save_token_file", "set_token", "get_token",
+        "load_environment_variables", "get_env_var", "get_dependency_path",
+        "get_data_path", "export_environment", "initialize_environment",
+        "create_local_dependency_config"
+      ]
+    },
+    "kb_ws_utils": {
+      "current_class": "KBWSUtils",
+      "post_refactor_class": "KBWSUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "ws",
+      "public_methods": [
+        "__init__", "ws_client", "set_ws", "get_base_url_from_version",
+        "download_blob_file", "upload_blob_file", "save_ws_object",
+        "set_provenance", "get_provenance", "list_ws_objects",
+        "process_ws_ids", "get_object_info", "get_object", "ws_get_objects",
+        "wsinfo_to_ref", "create_ref", "is_ref", "list_all_types",
+        "get_type_specs", "object_url", "register_typespec_dryrun",
+        "request_module_ownership", "list_module_versions",
+        "get_module_info", "release_module"
+      ]
+    },
+    "kb_callback_utils": {
+      "current_class": "KBCallbackUtils",
+      "post_refactor_class": "KBCallbackUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBWSUtils",
+      "composed_deps": ["env", "ws"],
+      "facade_attr": "callback",
+      "public_methods": [
+        "__init__", "set_callback_client", "initialize_callback",
+        "stop_callback", "report_client", "dfu_client", "gfu_client",
+        "afu_client", "rast_client", "anno_client", "devutil_client",
+        "annotate_genome_with_rast", "save_genome_or_metagenome",
+        "save_report_to_kbase"
+      ],
+      "bugs_to_fix": [
+        "Path.parent() is property not method",
+        "self.set_config() does not exist"
+      ]
+    },
+    "kb_annotation_utils": {
+      "current_class": "KBAnnotationUtils",
+      "post_refactor_class": "KBAnnotationUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBCallbackUtils",
+      "composed_deps": ["env", "ws", "callback"],
+      "facade_attr": "annotation",
+      "public_methods": [
+        "__init__", "get_alias_hash", "translate_term_to_modelseed",
+        "get_annotation_ontology_events", "add_ontology_events",
+        "add_annotation_ontology_events", "build_genome_tsv",
+        "process_object", "save_object", "clean_tag", "clean_term",
+        "standardize_event", "process_feature_aliases", "upgrade_feature",
+        "integrate_terms_from_ftr", "add_feature_ontology_terms",
+        "check_genome", "convert_role_to_searchrole",
+        "translate_rast_function_to_sso", "get_term_name"
+      ]
+    },
+    "ms_biochem_utils": {
+      "current_class": "MSBiochemUtils",
+      "post_refactor_class": "MSBiochemUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "biochem",
+      "public_methods": [
+        "__init__", "biochem_db", "identifier_hash", "rxn_identifier_hash",
+        "rxn_stoichiometry_hash", "structure_hash", "element_hashes",
+        "normalize_compound_name", "normalize_and_search_compound",
+        "update_database", "search_compounds", "search_reactions",
+        "get_compound_by_id", "get_reaction_by_id", "get_database_statistics",
+        "reaction_to_string", "reaction_id_to_msid", "reaction_to_msid",
+        "reaction_directionality_from_bounds", "reaction_biochem_directionality",
+        "build_model_metabolite_index", "is_water", "is_proton",
+        "find_proton_in_compartment", "parse_formula",
+        "check_reaction_balance", "can_fix_with_protons"
+      ],
+      "methods_extracted_to_flat": {
+        "_parse_id": "model_helpers._parse_id"
+      }
+    },
+    "kb_model_utils": {
+      "current_class": "KBModelUtils",
+      "post_refactor_class": "KBModelUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBAnnotationUtils, MSBiochemUtils",
+      "composed_deps": ["env", "ws", "annotation", "biochem"],
+      "facade_attr": "model",
+      "public_methods": [
+        "__init__", "msrecon", "process_media_list", "create_minimal_medias",
+        "get_msgenome_from_ontology", "get_expression_objs",
+        "get_msgenome_from_dict", "get_msgenome", "get_media",
+        "get_phenotypeset", "get_model", "extend_model_with_other_ontologies",
+        "get_classifier", "get_gs_template", "get_template", "save_model",
+        "save_phenotypeset", "save_solution_as_fba",
+        "model_reaction_directionality_analysis"
+      ],
+      "methods_extracted_to_flat": {
+        "_check_and_convert_model": "model_helpers._check_and_convert_model",
+        "_parse_id": "model_helpers._parse_id"
+      },
+      "bugs_to_fix": [
+        "direction_conversion undefined in model_reaction_directionality_analysis"
+      ]
+    },
+    "ms_fba_utils": {
+      "current_class": "MSFBAUtils",
+      "post_refactor_class": "MSFBAUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBModelUtils",
+      "composed_deps": ["env", "model"],
+      "facade_attr": "fba",
+      "public_methods": [
+        "__init__", "set_media", "set_objective_from_string",
+        "constrain_objective", "constrain_objective_to_fraction_of_optimum",
+        "configure_fba_formulation", "run_fba", "run_fva",
+        "analyzed_reaction_objective_coupling",
+        "determine_biomass_objective_coupling",
+        "unblock_objective_with_exchanges",
+        "fit_flux_to_mutant_growth_rate_data"
+      ],
+      "ap3_carveouts": [
+        "run_fva",
+        "analyzed_reaction_objective_coupling",
+        "fit_flux_to_mutant_growth_rate_data"
+      ],
+      "bugs_to_fix": [
+        "model.printlp should be mdlutl.printlp (line 347)",
+        "EXC_temp_ should be EX_temp_ (line 361)",
+        "MSModelUtil.from_cobrapy API misuse (line 562)"
+      ]
+    },
+    "ms_reconstruction_utils": {
+      "current_class": "MSReconstructionUtils",
+      "post_refactor_class": "MSReconstructionUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBModelUtils",
+      "composed_deps": ["env", "model"],
+      "facade_attr": "recon",
+      "public_methods": [
+        "__init__", "module_dir", "modelseedpy_data_dir",
+        "build_metabolic_model", "compute_ontology_model_changes",
+        "kb_build_metabolic_models", "gapfill_metabolic_model",
+        "kb_gapfill_metabolic_models"
+      ]
+    },
+    "model_standardization_utils": {
+      "current_class": "ModelStandardizationUtils",
+      "post_refactor_class": "ModelStandardizationUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "MSBiochemUtils",
+      "composed_deps": ["env", "biochem"],
+      "facade_attr": "standardize",
+      "public_methods": [
+        "__init__", "remove_model_periplasm_compartment",
+        "model_standardization", "compare_model_to_msmodel",
+        "match_model_compounds_to_db", "match_model_reactions_to_db",
+        "check_for_perfect_matches", "analyze_compound_matches",
+        "translate_model_to_ms_namespace", "apply_translation_to_model"
+      ]
+    },
+    "escher_utils": {
+      "current_class": "EscherUtils",
+      "post_refactor_class": "EscherUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBModelUtils, MSBiochemUtils",
+      "composed_deps": ["env", "model", "biochem"],
+      "facade_attr": "escher",
+      "public_methods": [
+        "__init__", "local_map_index", "kbase_map_index",
+        "list_available_maps", "map_stats", "update_map_reaction_names",
+        "create_map_html2"
+      ]
+    },
+    "kb_genome_utils": {
+      "current_class": "KBGenomeUtils",
+      "post_refactor_class": "KBGenomeUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBWSUtils",
+      "composed_deps": ["env", "ws"],
+      "facade_attr": "genome",
+      "public_methods": [
+        "__init__", "load_kbase_gene_container", "object_to_features",
+        "get_ftr", "ftr_to_aliases", "alias_to_ftrs", "object_to_proteins",
+        "add_annotations_to_object", "reverse_complement",
+        "translate_sequence", "calculate_gc_content",
+        "load_genome_from_local_files", "aggregate_taxonomies",
+        "create_synthetic_genome"
+      ],
+      "bugs_to_fix": [
+        "Path not imported (used in load_genome_from_local_files)",
+        "hashlib not imported",
+        "defaultdict not imported",
+        "datetime not imported",
+        "Counter not imported"
+      ]
+    },
+    "kb_plm_utils": {
+      "current_class": "KBPLMUtils",
+      "post_refactor_class": "KBPLMUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBGenomeUtils",
+      "composed_deps": ["env", "genome"],
+      "facade_attr": "plm",
+      "public_methods": [
+        "__init__", "query_plm_api", "query_plm_api_batch",
+        "get_uniprot_sequences", "create_blast_database", "run_blastp",
+        "find_best_hits_for_features", "get_best_uniprot_ids"
+      ]
+    },
+    "kb_uniprot_utils": {
+      "current_class": "KBUniProtUtils",
+      "post_refactor_class": "KBUniProtUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "BaseUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "uniprot",
+      "public_methods": [
+        "__init__", "get_uniprot_entry", "get_protein_sequence",
+        "get_annotations", "get_publications", "get_rhea_ids",
+        "get_pdb_ids", "get_uniref_ids", "get_uniprot_info",
+        "get_batch_uniprot_info"
+      ]
+    },
+    "kb_reads_utils": {
+      "current_class": "KBReadsUtils",
+      "post_refactor_class": "KBReadsUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBWSUtils",
+      "composed_deps": ["env", "ws"],
+      "facade_attr": "reads",
+      "public_methods": [
+        "__init__", "upload_reads", "download_reads",
+        "bulk_upload_reads", "bulk_download_reads",
+        "download_assembly", "upload_assembly"
+      ],
+      "data_classes_unchanged": ["Reads", "ReadSet", "Assembly", "AssemblySet"]
+    },
+    "kb_sdk_utils": {
+      "current_class": "KBSDKUtils",
+      "post_refactor_class": "KBSDKUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBWSUtils",
+      "composed_deps": ["env", "ws"],
+      "facade_attr": "sdk",
+      "public_methods": ["__init__", "build_dataframe_report"]
+    },
+    "kb_berdl_utils": {
+      "current_class": "KBBERDLUtils",
+      "post_refactor_class": "KBBERDLUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "berdl",
+      "public_methods": [
+        "__init__", "print_docs", "query", "get_database_list",
+        "get_database_tables", "get_table_columns", "get_database_schema",
+        "paginate_query", "test_connection", "get_genometables_from_kbase"
+      ]
+    },
+    "kbase_catalog_client": {
+      "current_class": "CatalogClient",
+      "post_refactor_class": "CatalogClient",
+      "action": "keep",
+      "current_inheritance": "none",
+      "composed_deps": [],
+      "facade_attr": "catalog",
+      "public_methods": [
+        "__init__", "register_repo", "push_dev_to_beta", "request_release",
+        "get_module_info", "get_module_state", "get_module_version",
+        "list_basic_module_info", "get_build_log", "list_builds",
+        "is_registered", "wait_for_build", "register_and_wait"
+      ]
+    },
+    "bvbrc_utils": {
+      "current_class": "BVBRCUtils",
+      "post_refactor_class": "BVBRCUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "KBGenomeUtils, KBAnnotationUtils",
+      "composed_deps": ["env", "genome", "annotation"],
+      "facade_attr": "bvbrc",
+      "public_methods": [
+        "__init__", "fetch_genome_metadata", "fetch_genome_sequences",
+        "fetch_genome_features", "fetch_feature_sequences",
+        "build_kbase_genome_from_api"
+      ]
+    },
+    "patric_ws_utils": {
+      "current_class": "PatricWSUtils",
+      "post_refactor_class": "PatricWSUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "patric",
+      "standalone_classes_unchanged": ["PatricWSClient"],
+      "public_methods": [
+        "__init__", "ws_client", "build_ref", "save_object", "get_object",
+        "get_ref", "list_objects", "delete_object", "copy_object",
+        "save_model_object", "get_model_object", "save_fba_object",
+        "get_fba_object", "save_media_object", "get_media_object",
+        "parse_media_data", "get_media", "list_models", "list_fbas",
+        "list_media"
+      ]
+    },
+    "rcsb_pdb_utils": {
+      "current_class": "RCSBPDBUtils",
+      "post_refactor_class": "RCSBPDBUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "BaseUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "pdb",
+      "public_methods": [
+        "__init__", "query_rcsb_with_sequence", "query_rcsb_metadata_by_id",
+        "query_rcsb_with_proteins"
+      ]
+    },
+    "argo_utils": {
+      "current_class": "ArgoUtils",
+      "post_refactor_class": "ArgoUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "argo",
+      "public_methods": ["__init__", "chat", "ping"],
+      "standalone_functions": ["_parse", "llm_label"]
+    },
+    "ai_curation_utils": {
+      "current_class": "AICurationUtils",
+      "post_refactor_class": "AICurationUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "ArgoUtils",
+      "composed_deps": ["env", "argo"],
+      "facade_attr": "curation",
+      "public_methods": [
+        "__init__", "chat", "analyze_reaction_directionality",
+        "evaluate_reaction_equivalence", "evaluate_reaction_gene_association",
+        "analyze_reaction_stoichiometry",
+        "build_reaction_from_functional_roles",
+        "find_compound_aliases", "curate_biochemical_compound"
+      ]
+    },
+    "mmseqs_utils": {
+      "current_class": "MMSeqsUtils",
+      "post_refactor_class": "MMSeqsUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "mmseqs",
+      "public_methods": [
+        "__init__", "cluster_proteins", "easy_cluster",
+        "get_cluster_representatives", "get_cluster_membership"
+      ]
+    },
+    "skani_utils": {
+      "current_class": "SKANIUtils",
+      "post_refactor_class": "SKANIUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env"],
+      "facade_attr": "skani",
+      "public_methods": [
+        "__init__", "sketch_genome_directory", "add_skani_database",
+        "query_genomes", "list_databases", "get_database_info",
+        "remove_database", "compute_pairwise_distances"
+      ]
+    },
+    "thermo_utils": {
+      "current_class": "ThermoUtils",
+      "post_refactor_class": "ThermoUtilsImpl",
+      "action": "rewrite",
+      "current_inheritance": "SharedEnvUtils",
+      "composed_deps": ["env", "biochem"],
+      "facade_attr": "thermo",
+      "public_methods": [
+        "__init__", "get_compound_deltag", "calculate_reaction_deltag",
+        "compute_ion_transfer"
+      ],
+      "methods_extracted_to_flat": {
+        "_parse_id": "model_helpers._parse_id"
+      }
+    },
+    "kb_job_utils": {
+      "current_class": "KBJobUtils",
+      "post_refactor_class": "KBJobUtils",
+      "action": "keep",
+      "current_inheritance": "none (already composition)",
+      "composed_deps": ["env"],
+      "facade_attr": "jobs",
+      "public_methods": [
+        "__init__", "run_job", "check_job", "check_jobs", "cancel_job",
+        "get_job_logs", "get_record", "list_active", "list_all",
+        "refresh_active", "refresh_all", "cleanup", "submit_chain",
+        "get_pipeline", "list_pipelines", "cancel_pipeline",
+        "advance_pipelines", "start_watcher", "stop_watcher", "close"
+      ]
+    }
+  },
+  "flat_modules": {
+    "kbase_endpoints": {
+      "status": "already_done",
+      "functions": ["base_url", "service_url", "narrative_url", "env_from_url"]
+    },
+    "model_directionality": {
+      "status": "new",
+      "contents": [
+        "direction_conversion (constant)",
+        "directionality_from_bounds(reaction, tol)",
+        "biochem_directionality(reaction, biochem)",
+        "combine_directionality_signals(model_dir, biochem_dir, ai_dir)"
+      ],
+      "extracted_from": ["kb_model_utils.model_reaction_directionality_analysis", "ms_biochem_utils.reaction_directionality_from_bounds", "ms_biochem_utils.reaction_biochem_directionality"]
+    },
+    "model_helpers": {
+      "status": "new",
+      "contents": [
+        "_check_and_convert_model(model)",
+        "_parse_id(object_or_id)"
+      ],
+      "replaces_duplicates_in": ["kb_model_utils._parse_id", "ms_biochem_utils._parse_id", "thermo_utils._parse_id", "kb_model_utils._check_and_convert_model"]
+    },
+    "compartments": {
+      "status": "new",
+      "contents": [
+        "compartment_types (constant, complete version from ms_biochem_utils)",
+        "normalize_compartment(compartment)"
+      ],
+      "replaces_duplicates_in": ["ms_biochem_utils.compartment_types", "model_standardization_utils.compartment_types"]
+    }
+  },
+  "toolkit_facade": {
+    "class_name": "KBUtilLib",
+    "constructor": "KBUtilLib(env: SharedEnvUtils | None = None, **env_kwargs)",
+    "notebook_integration": "NotebookSession.kbu -> KBUtilLib(env=self._env)",
+    "attributes": {
+      "ws": {"impl": "KBWSUtilsImpl", "deps": ["env"]},
+      "callback": {"impl": "KBCallbackUtilsImpl", "deps": ["env", "ws"]},
+      "annotation": {"impl": "KBAnnotationUtilsImpl", "deps": ["env", "ws", "callback"]},
+      "biochem": {"impl": "MSBiochemUtilsImpl", "deps": ["env"]},
+      "model": {"impl": "KBModelUtilsImpl", "deps": ["env", "ws", "annotation", "biochem"]},
+      "fba": {"impl": "MSFBAUtilsImpl", "deps": ["env", "model"]},
+      "recon": {"impl": "MSReconstructionUtilsImpl", "deps": ["env", "model"]},
+      "escher": {"impl": "EscherUtilsImpl", "deps": ["env", "model", "biochem"]},
+      "standardize": {"impl": "ModelStandardizationUtilsImpl", "deps": ["env", "biochem"]},
+      "genome": {"impl": "KBGenomeUtilsImpl", "deps": ["env", "ws"]},
+      "plm": {"impl": "KBPLMUtilsImpl", "deps": ["env", "genome"]},
+      "bvbrc": {"impl": "BVBRCUtilsImpl", "deps": ["env", "genome", "annotation"]},
+      "reads": {"impl": "KBReadsUtilsImpl", "deps": ["env", "ws"]},
+      "sdk": {"impl": "KBSDKUtilsImpl", "deps": ["env", "ws"]},
+      "argo": {"impl": "ArgoUtilsImpl", "deps": ["env"]},
+      "curation": {"impl": "AICurationUtilsImpl", "deps": ["env", "argo"]},
+      "thermo": {"impl": "ThermoUtilsImpl", "deps": ["env", "biochem"]},
+      "mmseqs": {"impl": "MMSeqsUtilsImpl", "deps": ["env"]},
+      "skani": {"impl": "SKANIUtilsImpl", "deps": ["env"]},
+      "berdl": {"impl": "KBBERDLUtilsImpl", "deps": ["env"]},
+      "patric": {"impl": "PatricWSUtilsImpl", "deps": ["env"]},
+      "uniprot": {"impl": "KBUniProtUtilsImpl", "deps": ["env"]},
+      "pdb": {"impl": "RCSBPDBUtilsImpl", "deps": ["env"]},
+      "catalog": {"impl": "CatalogClient", "deps": []},
+      "jobs": {"impl": "KBJobUtils", "deps": ["env"]}
+    }
+  },
+  "modules_to_retire": [
+    {"module": "notebook_utils.py", "loc": 857, "reason": "superseded by notebook/ subpackage"},
+    {"module": "examples.py", "loc": 150, "reason": "broken, commented out of __init__.py"},
+    {"module": "kb_model_utils.py.bak", "loc": 0, "reason": "already removed by task-40d03085"}
+  ],
+  "agentforge_tasks": [
+    {
+      "task_id": "task-1-preflight",
+      "name": "Pre-flight smoke tests",
+      "role": "developer",
+      "scope": "Write semantic smoke tests against current public surface",
+      "flags": ["--auto-merge", "--auto-review"],
+      "timeout": 1800,
+      "depends_on": null,
+      "files": ["tests/test_composition_smoke.py", "tests/conftest.py"],
+      "gate": "All tests pass on current code"
+    },
+    {
+      "task_id": "task-2-rewrite",
+      "name": "Composition rewrite",
+      "role": "developer",
+      "scope": "Implement all *Impl classes, flat modules, KBUtilLib facade, delete retired modules",
+      "flags": ["--auto-merge", "--auto-review"],
+      "timeout": 1800,
+      "depends_on": "task-1-preflight",
+      "files": ["all modules in src/kbutillib/", "new flat modules", "kbutillib/__init__.py"],
+      "gate": "pytest tests/test_composition_smoke.py passes; KBUtilLib() constructs without error"
+    },
+    {
+      "task_id": "task-3-cleanup",
+      "name": "Cleanup and integration",
+      "role": "developer",
+      "scope": "NotebookSession.kbu integration, __init__.py exports, CLI updates",
+      "flags": ["--auto-merge", "--auto-review"],
+      "timeout": 1200,
+      "depends_on": "task-2-rewrite",
+      "files": ["notebook/session.py", "kbutillib/__init__.py"],
+      "gate": "from kbutillib import KBUtilLib; KBUtilLib() succeeds"
+    }
+  ],
+  "consumers": [
+    {"name": "ADP1Notebooks", "usage": "multi-inheritance god class util.py", "breaking": true, "migration": "archive all -> rebuild against session.kbu.*"},
+    {"name": "KBModelAgent", "usage": "direct MSFBAUtils/KBModelUtils instantiation", "breaking": true, "migration": "KBUtilLib facade"},
+    {"name": "KBDatalakeApps", "usage": "KBWSUtils/KBGenomeUtils instantiation", "breaking": true, "migration": "KBUtilLib facade"},
+    {"name": "MeetingAIAssistant", "usage": "ArgoUtils/AICurationUtils instantiation", "breaking": true, "migration": "KBUtilLib facade"},
+    {"name": "cb_annotation_ontology_api", "usage": "KBAnnotationUtils as SDK callback client", "breaking": true, "migration": "explicit KBAnnotationUtilsImpl(env, ws, callback)"}
+  ],
+  "ap3_carveouts": {
+    "module": "ms_fba_utils",
+    "methods": [
+      {"name": "run_fva", "reason": "cobra.flux_variability_analysis is broken; this is the working FVA implementation"},
+      {"name": "analyzed_reaction_objective_coupling", "reason": "evaluates KO impact with reduced/essential/dispensable categorization; different from cobra.single_reaction_deletion"},
+      {"name": "fit_flux_to_mutant_growth_rate_data", "reason": "science code at this abstraction layer; does not belong in ModelSEEDpy.MSExpression"}
+    ]
+  }
+}

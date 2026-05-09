@@ -1081,3 +1081,35 @@ class ModelStandardizationUtils(MSBiochemUtils):
             self.log_info(f"Untranslated reactions: {stats['untranslated_reactions']}")
 
         return stats
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class ModelStandardizationUtilsImpl:
+    """Composition-based model standardization utilities.
+
+    Holds ``env`` and ``biochem`` instead of inheriting from ``MSBiochemUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, biochem, **kwargs):
+        self._env = env
+        self._biochem = biochem
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        _kwargs.update(kwargs)
+        self._delegate = ModelStandardizationUtils(**_kwargs)
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def biochem(self):
+        return self._biochem
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)

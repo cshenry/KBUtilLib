@@ -1,4 +1,9 @@
-"""KBUtilLib - Modular utility framework for scientific and development projects."""
+"""KBUtilLib - Modular utility framework for scientific and development projects.
+
+Architecture: Composition over SharedEnvUtils. Each *Impl class holds a
+SharedEnvUtils instance and zero or more sibling *Impl instances.
+The KBUtilLib facade provides lazy-property access to all sub-utilities.
+"""
 
 import sys
 
@@ -6,21 +11,26 @@ import sys
 from .base_utils import BaseUtils
 from .shared_env_utils import SharedEnvUtils
 
+# Facade
+from .toolkit import KBUtilLib
+
+# Flat modules
+from .compartments import compartment_types, normalize_compartment
+from .model_directionality import (
+    direction_conversion,
+    directionality_from_bounds,
+    biochem_directionality,
+    combine_directionality_signals,
+)
+from .model_helpers import _parse_id, _check_and_convert_model
+
 
 def _import_error(module_name: str, error: Exception) -> None:
     """Print import error details to stderr for debugging."""
     print(f"[KBUtilLib] Failed to import {module_name}: {type(error).__name__}: {error}", file=sys.stderr)
 
 
-# Optional modules - wrapped in try-except to handle missing dependencies
-try:
-    from .notebook_utils import NotebookUtils, DataObject, NumberType, DataType
-except ImportError as e:
-    _import_error("notebook_utils", e)
-    NotebookUtils = None
-    DataObject = None
-    NumberType = None
-    DataType = None
+# ── Legacy classes (inheritance-based, kept for backward compat) ────────
 
 try:
     from .kb_ws_utils import KBWSUtils
@@ -159,6 +169,12 @@ except ImportError as e:
     KBBERDLUtils = None
 
 try:
+    from .kb_callback_utils import KBCallbackUtils
+except ImportError as e:
+    _import_error("kb_callback_utils", e)
+    KBCallbackUtils = None
+
+try:
     from .kb_job_utils import KBJobUtils, JobRecord, JobState, JobStore
 except ImportError as e:
     _import_error("kb_job_utils", e)
@@ -176,29 +192,157 @@ except ImportError as e:
     narrative_url = None
     env_from_url = None
 
-# Import example composite classes
-# Temporarily disabled for testing core functionality
-# try:
-#     from . import examples
-# except ImportError:
-#     examples = None
+
+# ── Composition-based *Impl classes ────────────────────────────────────
+
+try:
+    from .kb_ws_utils import KBWSUtilsImpl
+except ImportError:
+    KBWSUtilsImpl = None
+
+try:
+    from .kb_callback_utils import KBCallbackUtilsImpl
+except ImportError:
+    KBCallbackUtilsImpl = None
+
+try:
+    from .kb_annotation_utils import KBAnnotationUtilsImpl
+except ImportError:
+    KBAnnotationUtilsImpl = None
+
+try:
+    from .ms_biochem_utils import MSBiochemUtilsImpl
+except ImportError:
+    MSBiochemUtilsImpl = None
+
+try:
+    from .kb_model_utils import KBModelUtilsImpl
+except ImportError:
+    KBModelUtilsImpl = None
+
+try:
+    from .ms_fba_utils import MSFBAUtilsImpl
+except ImportError:
+    MSFBAUtilsImpl = None
+
+try:
+    from .ms_reconstruction_utils import MSReconstructionUtilsImpl
+except ImportError:
+    MSReconstructionUtilsImpl = None
+
+try:
+    from .escher_utils import EscherUtilsImpl
+except ImportError:
+    EscherUtilsImpl = None
+
+try:
+    from .model_standardization_utils import ModelStandardizationUtilsImpl
+except ImportError:
+    ModelStandardizationUtilsImpl = None
+
+try:
+    from .kb_genome_utils import KBGenomeUtilsImpl
+except ImportError:
+    KBGenomeUtilsImpl = None
+
+try:
+    from .kb_plm_utils import KBPLMUtilsImpl
+except ImportError:
+    KBPLMUtilsImpl = None
+
+try:
+    from .bvbrc_utils import BVBRCUtilsImpl
+except ImportError:
+    BVBRCUtilsImpl = None
+
+try:
+    from .kb_reads_utils import KBReadsUtilsImpl
+except ImportError:
+    KBReadsUtilsImpl = None
+
+try:
+    from .kb_sdk_utils import KBSDKUtilsImpl
+except ImportError:
+    KBSDKUtilsImpl = None
+
+try:
+    from .argo_utils import ArgoUtilsImpl
+except ImportError:
+    ArgoUtilsImpl = None
+
+try:
+    from .ai_curation_utils import AICurationUtilsImpl
+except ImportError:
+    AICurationUtilsImpl = None
+
+try:
+    from .thermo_utils import ThermoUtilsImpl
+except ImportError:
+    ThermoUtilsImpl = None
+
+try:
+    from .mmseqs_utils import MMSeqsUtilsImpl
+except ImportError:
+    MMSeqsUtilsImpl = None
+
+try:
+    from .skani_utils import SKANIUtilsImpl
+except ImportError:
+    SKANIUtilsImpl = None
+
+try:
+    from .kb_berdl_utils import KBBERDLUtilsImpl
+except ImportError:
+    KBBERDLUtilsImpl = None
+
+try:
+    from .patric_ws_utils import PatricWSUtilsImpl
+except ImportError:
+    PatricWSUtilsImpl = None
+
+try:
+    from .kb_uniprot_utils import KBUniProtUtilsImpl
+except ImportError:
+    KBUniProtUtilsImpl = None
+
+try:
+    from .rcsb_pdb_utils import RCSBPDBUtilsImpl
+except ImportError:
+    RCSBPDBUtilsImpl = None
+
+
+# Retired
 examples = None
 
+
 __all__ = [
+    # Facade
+    "KBUtilLib",
+    # Core
+    "BaseUtils",
+    "SharedEnvUtils",
+    # Flat modules
+    "compartment_types",
+    "normalize_compartment",
+    "direction_conversion",
+    "directionality_from_bounds",
+    "biochem_directionality",
+    "combine_directionality_signals",
+    "_parse_id",
+    "_check_and_convert_model",
+    # Legacy class names (inheritance-based)
     "AICurationUtils",
     "ArgoUtils",
     "Assembly",
     "AssemblySet",
-    "BaseUtils",
     "BVBRCUtils",
-    "DataObject",
-    "DataType",
     "EscherUtils",
     "JobRecord",
     "JobState",
     "JobStore",
     "KBAnnotationUtils",
     "KBBERDLUtils",
+    "KBCallbackUtils",
     "KBGenomeUtils",
     "KBJobUtils",
     "KBModelUtils",
@@ -212,18 +356,39 @@ __all__ = [
     "MSBiochemUtils",
     "MSFBAUtils",
     "MSReconstructionUtils",
-    "NotebookUtils",
-    "NumberType",
     "PatricWSUtils",
     "RCSBPDBUtils",
     "Reads",
     "ReadSet",
-    "SharedEnvUtils",
     "SKANIUtils",
     "ThermoUtils",
+    # Composition-based Impl classes
+    "AICurationUtilsImpl",
+    "ArgoUtilsImpl",
+    "BVBRCUtilsImpl",
+    "EscherUtilsImpl",
+    "KBAnnotationUtilsImpl",
+    "KBBERDLUtilsImpl",
+    "KBCallbackUtilsImpl",
+    "KBGenomeUtilsImpl",
+    "KBModelUtilsImpl",
+    "KBPLMUtilsImpl",
+    "KBReadsUtilsImpl",
+    "KBSDKUtilsImpl",
+    "KBUniProtUtilsImpl",
+    "KBWSUtilsImpl",
+    "MMSeqsUtilsImpl",
+    "ModelStandardizationUtilsImpl",
+    "MSBiochemUtilsImpl",
+    "MSFBAUtilsImpl",
+    "MSReconstructionUtilsImpl",
+    "PatricWSUtilsImpl",
+    "RCSBPDBUtilsImpl",
+    "SKANIUtilsImpl",
+    "ThermoUtilsImpl",
+    # Endpoints
     "base_url",
     "env_from_url",
-    "examples",
     "narrative_url",
     "service_url",
 ]

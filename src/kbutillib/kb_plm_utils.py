@@ -802,3 +802,39 @@ class KBPLMUtils(KBGenomeUtils):
             for feature_id, hit_data in results.items()
             if hit_data["best_uniprot_id"] is not None
         }
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class KBPLMUtilsImpl:
+    """Composition-based PLM utilities.
+
+    Holds ``env`` and ``genome`` instead of inheriting from ``KBGenomeUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, genome, **kwargs):
+        self._env = env
+        self._genome = genome
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        self._delegate = KBPLMUtils(**_kwargs)
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def genome(self):
+        return self._genome
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)

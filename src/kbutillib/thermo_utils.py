@@ -354,3 +354,37 @@ class ThermoUtils(SharedEnvUtils):
             reaction.notes['ion_transfer'] = result['total_ion_transfer']
 
         return result
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class ThermoUtilsImpl:
+    """Composition-based thermodynamic utilities.
+
+    Holds ``env`` and ``biochem`` instead of inheriting from ``SharedEnvUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, biochem, **kwargs):
+        self._env = env
+        self._biochem = biochem
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        _kwargs.update(kwargs)
+        self._delegate = ThermoUtils(**_kwargs)
+        # Wire biochem_utils to use the composed instance
+        self._delegate._biochem_utils = biochem
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def biochem(self):
+        return self._biochem
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)

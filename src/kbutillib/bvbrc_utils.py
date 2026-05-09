@@ -461,3 +461,48 @@ class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
                         ontologies['GO'][feature_id][term] = 1
 
         return kbase_feature
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class BVBRCUtilsImpl:
+    """Composition-based BVBRC utilities.
+
+    Holds ``env``, ``genome``, and ``annotation`` instead of inheriting.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, genome, annotation, **kwargs):
+        self._env = env
+        self._genome = genome
+        self._annotation = annotation
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = BVBRCUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def genome(self):
+        return self._genome
+
+    @property
+    def annotation(self):
+        return self._annotation
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("BVBRCUtilsImpl: delegate not initialized")
+        return getattr(self._delegate, name)

@@ -1104,3 +1104,43 @@ Compound JSON:
             print("CompoundCuration-cached")
 
         return cache[cache_key]
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class AICurationUtilsImpl:
+    """Composition-based AI curation utilities.
+
+    Holds ``env`` and ``argo`` instead of inheriting from ``ArgoUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, argo, **kwargs):
+        self._env = env
+        self._argo = argo
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = AICurationUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def argo(self):
+        return self._argo
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("AICurationUtilsImpl: delegate not initialized")
+        return getattr(self._delegate, name)

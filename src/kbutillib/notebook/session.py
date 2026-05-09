@@ -49,6 +49,8 @@ class NotebookSession:
         self._experiments: Optional[ExperimentStore] = None
         self._strains: Optional[StrainStore] = None
         self._manifest: Optional[Manifest] = None
+        self._kbu: Optional[Any] = None
+        self._env: Optional[Any] = None
 
     @classmethod
     def for_notebook(
@@ -130,6 +132,18 @@ class NotebookSession:
         if self._strains is None:
             self._strains = StrainStore(self._get_catalog())
         return self._strains
+
+    @property
+    def kbu(self) -> Any:
+        """Lazy-loaded KBUtilLib facade sharing this session's environment."""
+        if self._kbu is None:
+            from ..toolkit import KBUtilLib
+            from ..shared_env_utils import SharedEnvUtils
+
+            if self._env is None:
+                self._env = SharedEnvUtils()
+            self._kbu = KBUtilLib(env=self._env)
+        return self._kbu
 
     @property
     def manifest(self) -> Manifest:

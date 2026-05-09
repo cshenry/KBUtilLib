@@ -1497,3 +1497,49 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
             )
 
         return output_path
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class EscherUtilsImpl:
+    """Composition-based Escher map utilities.
+
+    Holds ``env``, ``model``, and ``biochem`` instead of inheriting.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, model, biochem, **kwargs):
+        self._env = env
+        self._model = model
+        self._biochem = biochem
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = EscherUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def model(self):
+        return self._model
+
+    @property
+    def biochem(self):
+        return self._biochem
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("EscherUtilsImpl: delegate not initialized")
+        return getattr(self._delegate, name)

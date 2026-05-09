@@ -380,21 +380,21 @@ class TestSKANIUtils:
 
 
 class TestKBUtilLibFacade:
-    """Tests 18-19 from PRD §7.2 — KBUtilLib facade (lands in Task 2)."""
+    """Tests 18-19 from PRD §7.2 — KBUtilLib facade."""
 
-    @pytest.mark.skip(reason="KBUtilLib facade lands in Task 2 of the composition refactor")
     def test_facade_fba_returns_impl(self):
         """kbu.fba returns MSFBAUtilsImpl instance."""
+        pytest.importorskip("modelseedpy", reason="modelseedpy required")
+        pytest.importorskip("cobrakbase", reason="cobrakbase required")
         from kbutillib import KBUtilLib
-
-        kbu = KBUtilLib()
         from kbutillib.ms_fba_utils import MSFBAUtilsImpl
 
+        kbu = KBUtilLib()
         assert isinstance(kbu.fba, MSFBAUtilsImpl)
 
-    @pytest.mark.skip(reason="KBUtilLib facade lands in Task 2 of the composition refactor")
     def test_facade_biochem_lazy_singleton(self):
         """kbu.biochem is same object on second access (lazy singleton)."""
+        pytest.importorskip("modelseedpy", reason="modelseedpy required")
         from kbutillib import KBUtilLib
 
         kbu = KBUtilLib()

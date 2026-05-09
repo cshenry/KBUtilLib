@@ -710,3 +710,54 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         if output_dataframe:
             output = pd.DataFrame.from_records(output.values())
         return output
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class KBModelUtilsImpl:
+    """Composition-based model utilities.
+
+    Holds ``env``, ``ws``, ``annotation``, and ``biochem`` instead of inheriting.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, ws, annotation, biochem, **kwargs):
+        self._env = env
+        self._ws = ws
+        self._annotation = annotation
+        self._biochem = biochem
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = KBModelUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def ws(self):
+        return self._ws
+
+    @property
+    def annotation(self):
+        return self._annotation
+
+    @property
+    def biochem(self):
+        return self._biochem
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("KBModelUtilsImpl: delegate not initialized (missing cobrakbase/modelseedpy)")
+        return getattr(self._delegate, name)

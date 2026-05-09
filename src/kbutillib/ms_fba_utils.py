@@ -690,3 +690,48 @@ class MSFBAUtils(KBModelUtils):
             self.log_info(f"\nCompleted analysis for {len([r for r in results.values() if r.get('status') == 'optimal'])} conditions")
 
         return results
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class MSFBAUtilsImpl:
+    """Composition-based FBA utilities.
+
+    Holds ``env`` and ``model`` instead of inheriting from ``KBModelUtils``.
+    Delegates all method calls to an internal legacy instance.
+
+    **AP3 carve-outs preserved**:
+    - ``run_fva`` — working FVA implementation (cobra.flux_variability_analysis is broken)
+    - ``analyzed_reaction_objective_coupling`` — KO-impact-on-biomass analysis
+    - ``fit_flux_to_mutant_growth_rate_data`` — specific science code
+    """
+
+    def __init__(self, env, model, **kwargs):
+        self._env = env
+        self._model = model
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = MSFBAUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def model(self):
+        return self._model
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("MSFBAUtilsImpl: delegate not initialized (missing cobrakbase/modelseedpy)")
+        return getattr(self._delegate, name)

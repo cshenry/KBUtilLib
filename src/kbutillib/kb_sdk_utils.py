@@ -64,3 +64,39 @@ class KBSDKUtils(KBWSUtils):
             f.write(html_data)
         with open(self.working_dir + "/html/data.json", "w") as f:
             f.write(json_str)
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class KBSDKUtilsImpl:
+    """Composition-based SDK utilities.
+
+    Holds ``env`` and ``ws`` instead of inheriting from ``KBWSUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, ws, **kwargs):
+        self._env = env
+        self._ws = ws
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        self._delegate = KBSDKUtils(**_kwargs)
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def ws(self):
+        return self._ws
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)

@@ -1014,3 +1014,54 @@ class KBAnnotationUtils(KBCallbackUtils):
         if term not in self.term_names[type]:
             return "Unknown"
         return self.term_names[type][term]
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class KBAnnotationUtilsImpl:
+    """Composition-based annotation utilities.
+
+    Holds ``env``, ``ws``, and ``callback`` instead of inheriting.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, ws, callback, **kwargs):
+        self._env = env
+        self._ws = ws
+        self._callback = callback
+        # Build kwargs for the legacy constructor
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = KBAnnotationUtils(**_kwargs)
+        except FileNotFoundError:
+            # Data files for cb_annotation_ontology_api may not be available
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def ws(self):
+        return self._ws
+
+    @property
+    def callback(self):
+        return self._callback
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError(
+                "KBAnnotationUtilsImpl: delegate not initialized "
+                "(cb_annotation_ontology_api data files not available)"
+            )
+        return getattr(self._delegate, name)

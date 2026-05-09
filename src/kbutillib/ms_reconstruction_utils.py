@@ -1152,3 +1152,44 @@ class MSReconstructionUtils(KBModelUtils):
     # Backward compatibility aliases
     build_metabolic_models = kb_build_metabolic_models
     gapfill_metabolic_models = kb_gapfill_metabolic_models
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class MSReconstructionUtilsImpl:
+    """Composition-based reconstruction utilities.
+
+    Holds ``env`` and ``model`` instead of inheriting from ``KBModelUtils``.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, model, **kwargs):
+        self._env = env
+        self._model = model
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        try:
+            self._delegate = MSReconstructionUtils(**_kwargs)
+        except Exception:
+            self._delegate = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def model(self):
+        return self._model
+
+    def __getattr__(self, name):
+        if self._delegate is None:
+            raise RuntimeError("MSReconstructionUtilsImpl: delegate not initialized")
+        return getattr(self._delegate, name)

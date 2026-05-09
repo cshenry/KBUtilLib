@@ -1008,3 +1008,420 @@ class MSBiochemUtils(SharedEnvUtils):
         else:
             # H and charge imbalances don't match - can't fix with just H+
             return False, 0
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+import logging as _logging
+
+_biochem_logger = _logging.getLogger(__name__)
+
+
+class MSBiochemUtilsImpl:
+    """Composition-based ModelSEED biochemistry utilities.
+
+    Holds ``env: SharedEnvUtils`` instead of inheriting from it.
+    All public methods preserved from the legacy ``MSBiochemUtils``.
+    """
+
+    def __init__(self, env, modelseed_db_path=None, auto_download=True):
+        self._env = env
+        # Reuse the exact initialization logic from the legacy class
+        if modelseed_db_path is None:
+            config_path = env.get_config("ModelSEEDBiochem", "modelseedbiochem_directory")
+            if config_path:
+                modelseed_db_path = config_path
+            else:
+                db_path = env.get_data_path("ModelSEEDDatabase")
+                if db_path:
+                    modelseed_db_path = str(db_path)
+                else:
+                    from pathlib import Path
+                    repo_root = Path(__file__).parent.parent.parent
+                    modelseed_db_path = str((repo_root / ".." / "ModelSEEDDatabase").resolve())
+
+        self.modelseed_db_path = modelseed_db_path
+        self.auto_download = auto_download
+        self._biochem_db = None
+        self._identifier_hash = None
+        self._structure_hash = None
+        self._element_hashes = None
+        self._rxn_identifier_hash = None
+        self._rxn_stoichiometry_hash = None
+
+        self._ensure_database_available()
+
+    @property
+    def env(self):
+        return self._env
+
+    def log_info(self, msg):
+        _biochem_logger.info(msg)
+
+    def log_warning(self, msg, *a):
+        _biochem_logger.warning(msg, *a)
+
+    def log_error(self, msg):
+        _biochem_logger.error(msg)
+
+    def log_debug(self, msg):
+        _biochem_logger.debug(msg)
+
+    def log_critical(self, msg):
+        _biochem_logger.critical(msg)
+
+    def _ensure_database_available(self):
+        try:
+            from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
+            self._biochem_db = ModelSEEDBiochem.get(path=self.modelseed_db_path)
+            self.log_info(f"ModelSEED database loaded from {self.modelseed_db_path}")
+        except Exception as e:
+            self.log_error(f"Failed to load ModelSEED database: {e}")
+            raise
+
+    # Properties — delegate to same logic
+    @property
+    def biochem_db(self):
+        if self._biochem_db is None:
+            self._ensure_database_available()
+        return self._biochem_db
+
+    @property
+    def identifier_hash(self):
+        if self._identifier_hash is None:
+            self._identifier_hash = {}
+            for cpd in self.biochem_db.compounds:
+                if cpd.is_obsolete == False:
+                    item = self._standardize_string(cpd.id)
+                    self._identifier_hash.setdefault(item, {"type": "msid", "ids": []})
+                    self._identifier_hash[item]["ids"].append(cpd.id)
+                    item = self._standardize_string(cpd.name)
+                    self._identifier_hash.setdefault(item, {"type": "name", "ids": []})
+                    self._identifier_hash[item]["ids"].append(cpd.id)
+                    for name in cpd.names:
+                        name = self._standardize_string(str(name))
+                        self._identifier_hash.setdefault(name, {"type": "synonym", "ids": []})
+                        self._identifier_hash[name]["ids"].append(cpd.id)
+                    for anno_type in cpd.annotation:
+                        if isinstance(cpd.annotation[anno_type], set):
+                            for item in cpd.annotation[anno_type]:
+                                item = self._standardize_string(item)
+                                self._identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
+                                self._identifier_hash[item]["ids"].append(cpd.id)
+        return self._identifier_hash
+
+    @property
+    def rxn_identifier_hash(self):
+        if self._rxn_identifier_hash is None:
+            self._rxn_identifier_hash = {}
+            for rxn in self.biochem_db.reactions:
+                if rxn.is_obsolete == False:
+                    item = self._standardize_string(rxn.id)
+                    self._rxn_identifier_hash.setdefault(item, {"type": "msid", "ids": []})
+                    self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+                    item = self._standardize_string(rxn.name)
+                    self._rxn_identifier_hash.setdefault(item, {"type": "name", "ids": []})
+                    self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+                    for name in rxn.names:
+                        name = self._standardize_string(str(name))
+                        self._rxn_identifier_hash.setdefault(name, {"type": "synonym", "ids": []})
+                        self._rxn_identifier_hash[name]["ids"].append(rxn.id)
+                    for anno_type in rxn.annotation:
+                        if isinstance(rxn.annotation[anno_type], set):
+                            for item in rxn.annotation[anno_type]:
+                                if anno_type != "ec-code":
+                                    item = self._standardize_string(item)
+                                else:
+                                    array = item.split(".")
+                                    self._rxn_identifier_hash.setdefault(array[0]+"."+array[1]+"."+array[2], {"type": "3rd-lvl-"+anno_type, "ids": []})
+                                    self._rxn_identifier_hash[array[0]+"."+array[1]+"."+array[2]]["ids"].append(rxn.id)
+                                self._rxn_identifier_hash.setdefault(item, {"type": anno_type, "ids": []})
+                                self._rxn_identifier_hash[item]["ids"].append(rxn.id)
+        return self._rxn_identifier_hash
+
+    @property
+    def rxn_stoichiometry_hash(self):
+        # Delegate to legacy class property body — large property, reuse via instance
+        if self._rxn_stoichiometry_hash is None:
+            # Create a temporary legacy instance to compute this
+            self._rxn_stoichiometry_hash = {"proton_stoichiometry": {},"transport_stoichiometry":{},"metabolite_hash":{},"rxn_hash":{}}
+            for rxn in self.biochem_db.reactions:
+                if rxn.is_obsolete == False:
+                    base_cpd_hash = {}
+                    transport_hash = {}
+                    for metabolite in rxn.metabolites:
+                        base_id = metabolite.id[0:-2]
+                        comp = metabolite.id[-1:]
+                        if str(comp) == "1":
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"].setdefault(base_id, {})
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"][base_id].setdefault(rxn.metabolites[metabolite], [])
+                            self._rxn_stoichiometry_hash["transport_stoichiometry"][base_id][rxn.metabolites[metabolite]].append(rxn.id)
+                            transport_hash[base_id] = rxn.metabolites[metabolite]
+                        base_cpd_hash.setdefault(base_id, 0)
+                        base_cpd_hash[base_id] += rxn.metabolites[metabolite]
+                    self._rxn_stoichiometry_hash["rxn_hash"][rxn.id] = {"metabolite_hash": base_cpd_hash,"transport_hash":transport_hash,"proton_stoichiometry":0,"equation":rxn.build_reaction_string(),"id":rxn.id,"name":rxn.name}
+                    self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = 0
+                    for base_id in base_cpd_hash:
+                        if base_id == "cpd00067":
+                            self._rxn_stoichiometry_hash["proton_stoichiometry"][rxn.id] = base_cpd_hash[base_id]
+                            self._rxn_stoichiometry_hash["rxn_hash"][rxn.id]["proton_stoichiometry"] = base_cpd_hash[base_id]
+                        elif base_cpd_hash[base_id] != 0:
+                            self._rxn_stoichiometry_hash["metabolite_hash"].setdefault(base_id, {})
+                            self._rxn_stoichiometry_hash["metabolite_hash"][base_id].setdefault(base_cpd_hash[base_id], [])
+                            self._rxn_stoichiometry_hash["metabolite_hash"][base_id][base_cpd_hash[base_id]].append(rxn.id)
+        return self._rxn_stoichiometry_hash
+
+    @property
+    def structure_hash(self):
+        if self._structure_hash is None:
+            self._structure_hash = {}
+            for cpd in self.biochem_db.compounds:
+                if cpd.is_obsolete == False:
+                    if "InChI" in cpd.annotation:
+                        self._structure_hash.setdefault(cpd.annotation["InChI"], {"type": "InChI", "ids": []})
+                        self._structure_hash[cpd.annotation["InChI"]]["ids"].append(cpd.id)
+                    if "SMILE" in cpd.annotation:
+                        self._structure_hash.setdefault(cpd.annotation["SMILE"], {"type": "SMILE", "ids": []})
+                        self._structure_hash[cpd.annotation["SMILE"]]["ids"].append(cpd.id)
+                    if "InChIKey" in cpd.annotation:
+                        key = cpd.annotation["InChIKey"]
+                        self._structure_hash.setdefault(key, {"type": "InChIKey", "ids": []})
+                        self._structure_hash[key]["ids"].append(cpd.id)
+                        key_components = key.split("-")
+                        self._structure_hash.setdefault(key_components[0], {"type": "InChIKeyBaseOne", "ids": []})
+                        self._structure_hash[key_components[0]]["ids"].append(cpd.id)
+                        self._structure_hash.setdefault(key_components[0]+"-"+key_components[1], {"type": "InChIKeyBaseTwo", "ids": []})
+                        self._structure_hash[key_components[0]+"-"+key_components[1]]["ids"].append(cpd.id)
+        return self._structure_hash
+
+    @property
+    def element_hashes(self):
+        if self._element_hashes is None:
+            self._element_hashes = {"element_hash":{},"element_count":{},"cpd_elements":{}}
+            for cpd in self.biochem_db.compounds:
+                if cpd.is_obsolete == False and cpd.formula is not None and len(cpd.formula) > 0:
+                    elements = self._parse_formula(cpd.formula)
+                    self._element_hashes["cpd_elements"][cpd.id] = elements
+                    self._element_hashes["element_count"][cpd.id] = len(elements)
+                    if "H" in elements:
+                        self._element_hashes["element_count"][cpd.id] += -1
+                    for element, count in elements.items():
+                        self._element_hashes["element_hash"].setdefault(element, {})
+                        self._element_hashes["element_hash"][element].setdefault(count, [])
+                        self._element_hashes["element_hash"][element][count].append(cpd.id)
+        return self._element_hashes
+
+    def _standardize_string(self, input_string):
+        input_string = input_string.replace("_DASH_", "-")
+        input_string = input_string.replace("_COLON_", ":")
+        input_string = input_string.translate(str.maketrans('', '', string.punctuation + string.whitespace))
+        return input_string.lower().strip()
+
+    def _parse_formula(self, formula):
+        tokens = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
+        counts = defaultdict(int)
+        for element, num in tokens:
+            counts[element] += int(num) if num else 1
+        return dict(counts)
+
+    def _parse_id(self, object_or_id):
+        from .model_helpers import _parse_id
+        return _parse_id(object_or_id)
+
+    # Public methods — all delegated with identical bodies
+    def normalize_compound_name(self, name):
+        # Create a temporary legacy instance to use its method
+        # This is a pure function on the name, no state needed
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        return _legacy.normalize_compound_name(name)
+
+    def normalize_and_search_compound(self, name):
+        variants = self.normalize_compound_name(name)
+        all_matches = {}
+        matched_variant = None
+        for variant in variants:
+            matches = self.search_compounds(query_identifiers=[variant])
+            if matches:
+                for cpd_id, match_info in matches.items():
+                    if cpd_id not in all_matches:
+                        all_matches[cpd_id] = match_info
+                        all_matches[cpd_id]['matched_variant'] = variant
+                    elif match_info['score'] > all_matches[cpd_id]['score']:
+                        all_matches[cpd_id] = match_info
+                        all_matches[cpd_id]['matched_variant'] = variant
+                if matched_variant is None:
+                    matched_variant = variant
+        return {'matches': all_matches, 'original_name': name, 'variants_tried': variants, 'first_matched_variant': matched_variant}
+
+    def update_database(self):
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        _legacy.modelseed_db_path = self.modelseed_db_path
+        _legacy.log_info = self.log_info
+        _legacy.log_error = self.log_error
+        _legacy._biochem_db = self._biochem_db
+        _legacy.update_database()
+        self._biochem_db = _legacy._biochem_db
+
+    def search_compounds(self, query_identifiers=[], query_structures=[], query_formula=None):
+        # Reuse the exact logic — it only depends on self properties
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        _legacy._identifier_hash = None
+        _legacy._structure_hash = None
+        _legacy._element_hashes = None
+        _legacy._biochem_db = self._biochem_db
+        _legacy.modelseed_db_path = self.modelseed_db_path
+        # Copy cached indexes
+        _legacy._identifier_hash = self._identifier_hash
+        _legacy._structure_hash = self._structure_hash
+        _legacy._element_hashes = self._element_hashes
+        # Bind logger
+        _legacy.log_info = self.log_info
+        _legacy.log_warning = self.log_warning
+        _legacy.log_error = self.log_error
+        result = _legacy.search_compounds(query_identifiers, query_structures, query_formula)
+        # Sync back any lazily-computed indexes
+        self._identifier_hash = _legacy._identifier_hash
+        self._structure_hash = _legacy._structure_hash
+        self._element_hashes = _legacy._element_hashes
+        return result
+
+    def search_reactions(self, query_identifiers=[], query_ec=[], query_stoichiometry=None, cpd_hits=None, default_missing_count=1):
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        _legacy._rxn_identifier_hash = self._rxn_identifier_hash
+        _legacy._rxn_stoichiometry_hash = self._rxn_stoichiometry_hash
+        _legacy._identifier_hash = self._identifier_hash
+        _legacy._structure_hash = self._structure_hash
+        _legacy._element_hashes = self._element_hashes
+        _legacy._biochem_db = self._biochem_db
+        _legacy.modelseed_db_path = self.modelseed_db_path
+        _legacy.log_info = self.log_info
+        _legacy.log_warning = self.log_warning
+        result = _legacy.search_reactions(query_identifiers, query_ec, query_stoichiometry, cpd_hits, default_missing_count)
+        self._rxn_identifier_hash = _legacy._rxn_identifier_hash
+        self._rxn_stoichiometry_hash = _legacy._rxn_stoichiometry_hash
+        return result
+
+    def get_compound_by_id(self, compound_id):
+        try:
+            return self.biochem_db.compounds.get_by_id(compound_id)
+        except Exception:
+            return None
+
+    def get_reaction_by_id(self, reaction_id):
+        try:
+            return self.biochem_db.reactions.get_by_id(reaction_id)
+        except Exception:
+            return None
+
+    def get_database_statistics(self):
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        _legacy._biochem_db = self._biochem_db
+        _legacy.modelseed_db_path = self.modelseed_db_path
+        return _legacy.get_database_statistics()
+
+    def reaction_to_string(self, reaction):
+        from .model_helpers import _parse_id
+        [base_id, comp, index] = _parse_id(reaction)
+        name = re.sub(r'\s*\[[a-zA-Z0-9]+\]$', '', reaction.name)
+        output = {"rxnstring": base_id + "(" + name + ")", "base_id": base_id, "compartment": comp, "index": index}
+        if comp is not None and comp != "c":
+            output["rxnstring"] += "[" + str(comp) + "]"
+        equation = reaction.build_reaction_string(use_metabolite_names=True)
+        if "<--" in equation:
+            array = equation.split("<--")
+            equation = array[1] + " --> " + array[0]
+            output["reversed"] = True
+        output["rxnstring"] += ": " + equation
+        return output
+
+    def reaction_id_to_msid(self, reaction_id):
+        pattern = re.compile(r"rxn\d+")
+        match = pattern.search(reaction_id)
+        if match:
+            return match.group()
+        return None
+
+    def reaction_to_msid(self, reaction):
+        pattern = re.compile(r"rxn\d+")
+        idstring = reaction if isinstance(reaction, str) else reaction.id
+        match = pattern.search(idstring)
+        if match:
+            return match.group()
+        if not isinstance(reaction, str):
+            for anno_type in reaction.annotation:
+                if isinstance(reaction.annotation[anno_type], set):
+                    for alias in reaction.annotation[anno_type]:
+                        match = pattern.search(alias)
+                        if match:
+                            return match.group()
+        return None
+
+    def reaction_directionality_from_bounds(self, reaction, tol=1e-9):
+        from .model_directionality import directionality_from_bounds
+        return directionality_from_bounds(reaction, tol)
+
+    def reaction_biochem_directionality(self, reaction):
+        rxnobj = self.get_reaction_by_id(reaction)
+        if rxnobj is None:
+            return None
+        return self.reaction_directionality_from_bounds(rxnobj)
+
+    def build_model_metabolite_index(self, model):
+        from .model_helpers import _parse_id
+        metabolite_index = {}
+        base_id_index = {}
+        for met in model.metabolites:
+            (base_id, comp, index) = _parse_id(met)
+            metabolite_index[met.id] = {"base_id": base_id, "compartment": comp, "index": index}
+            compartment_index = base_id_index.get(base_id, {})
+            compartment_index[comp] = met
+        return metabolite_index, base_id_index
+
+    def is_water(self, met):
+        from .model_helpers import _parse_id
+        (base_id, comp, index) = _parse_id(met)
+        if base_id in ["h2o", "cpd00001"]:
+            return True
+        if met.formula == "H2O" and met.charge == 0:
+            return True
+        return False
+
+    def is_proton(self, met):
+        from .model_helpers import _parse_id
+        (base_id, comp, index) = _parse_id(met)
+        if base_id in ["h", "cpd00067"]:
+            return True
+        if met.formula == "H" and met.charge == 1:
+            return True
+        return False
+
+    def find_proton_in_compartment(self, model, compartment):
+        metabolite_index, base_id_index = self.build_model_metabolite_index(model)
+        h_base_ids = ["h", "cpd00067"]
+        for item in h_base_ids:
+            if item in base_id_index:
+                if compartment in base_id_index[item]:
+                    return base_id_index[item][compartment]
+        for met in model.metabolites:
+            if met.formula == "H" and met.charge == 1 and metabolite_index[met.id]["compartment"] == compartment:
+                return met
+        return None
+
+    def parse_formula(self, formula_str):
+        if not formula_str or pd.isna(formula_str):
+            return {}
+        elements = {}
+        matches = re.findall(r'([A-Z][a-z]?)(\d*)', formula_str)
+        for element, count in matches:
+            if element:
+                elements[element] = elements.get(element, 0) + (int(count) if count else 1)
+        return elements
+
+    def check_reaction_balance(self, rxn):
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        _legacy._biochem_db = self._biochem_db
+        return _legacy.check_reaction_balance(rxn)
+
+    def can_fix_with_protons(self, balance_result):
+        _legacy = MSBiochemUtils.__new__(MSBiochemUtils)
+        return _legacy.can_fix_with_protons(balance_result)

@@ -742,3 +742,37 @@ class PatricWSUtils(SharedEnvUtils):
             List of media metadata
         """
         return self.list_objects(directory, obj_type=self.OBJECT_TYPES['media'], recursive=recursive)
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class PatricWSUtilsImpl:
+    """Composition-based version of PatricWSUtils.
+
+    Holds ``env: SharedEnvUtils`` instead of inheriting.
+    Delegates all method calls to an internal legacy instance.
+    """
+
+    def __init__(self, env, **kwargs):
+        self._env = env
+        # Build kwargs to pass through to legacy constructor
+        _kwargs = {
+            "config_file": False,
+            "token_file": None,
+            "kbase_token_file": None,
+        }
+        # Copy token if env has one
+        try:
+            _kwargs["token"] = env.get_token("kbase")
+        except Exception:
+            pass
+        _kwargs.update(kwargs)
+        self._delegate = PatricWSUtils(**_kwargs)
+
+    @property
+    def env(self):
+        return self._env
+
+    def __getattr__(self, name):
+        # Delegate all attribute access to the legacy instance
+        return getattr(self._delegate, name)

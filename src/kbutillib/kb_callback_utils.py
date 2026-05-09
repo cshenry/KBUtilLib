@@ -258,3 +258,280 @@ class KBCallbackUtils(KBWSUtils):
             "report_ref": output["ref"],
             "workspace_name": self.ws_name,
         }
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+import logging as _logging
+
+_cb_logger = _logging.getLogger(__name__)
+
+
+class KBCallbackUtilsImpl:
+    """Composition-based callback utilities.
+
+    Holds ``env`` and ``ws`` instead of inheriting from ``KBWSUtils``.
+    """
+
+    def __init__(
+        self,
+        env,
+        ws,
+        callback_directory="/tmp/scratch",
+        callback_url=None,
+    ):
+        self._env = env
+        self._ws = ws
+        self._callback_url = callback_url
+        self._callback_directory = callback_directory
+        self._callback_clients = {}
+        # Provenance state
+        self.obj_created = []
+        self.input_objects = []
+        self.method = "Unknown"
+        self.params = {}
+        self.initialized = False
+        self.description = "Unknown"
+        self.name = "KBCallbackUtilsImpl"
+        self.service = "Unknown"
+        self.version = "Unknown"
+        self.working_dir = None
+        self.ws_id = None
+        self.ws_name = None
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def ws(self):
+        return self._ws
+
+    def get_token(self, namespace="kbase"):
+        return self._env.get_token(namespace=namespace)
+
+    def get_config(self, section, key=None):
+        return self._env.get_config(section, key)
+
+    def log_info(self, msg):
+        _cb_logger.info(msg)
+
+    def log_warning(self, msg, *a):
+        _cb_logger.warning(msg, *a)
+
+    def log_error(self, msg):
+        _cb_logger.error(msg)
+
+    def log_debug(self, msg):
+        _cb_logger.debug(msg)
+
+    def log_critical(self, msg):
+        _cb_logger.critical(msg)
+
+    # Delegate workspace methods to composed ws
+    def ws_client(self):
+        return self._ws.ws_client()
+
+    def set_ws(self, workspace):
+        self._ws.set_ws(workspace)
+        self.ws_id = self._ws.ws_id
+        self.ws_name = self._ws.ws_name
+
+    def create_ref(self, id_or_ref, ws=None):
+        return self._ws.create_ref(id_or_ref, ws)
+
+    def get_provenance(self):
+        return [{
+            "description": self.description,
+            "input_ws_objects": self.input_objects,
+            "method": self.method,
+            "script_command_line": "",
+            "method_params": [self.params],
+            "service": self.name,
+            "service_ver": self.version,
+        }]
+
+    def reset_attributes(self):
+        self.obj_created = []
+        self.input_objects = []
+        self.method = "Unknown"
+        self.params = {}
+        self.initialized = False
+        self.ws_id = None
+        self.ws_name = None
+
+    def initialize_call(self, method, params, print_params=False, no_print=None, no_prov_params=None):
+        if not self.initialized:
+            self.method = method
+            self.params = params
+            self.initialized = True
+
+    def validate_args(self, params, required, defaults):
+        for item in required:
+            if item not in params:
+                raise ValueError(f"Required argument {item} is missing!")
+        for key, value in defaults.items():
+            if key not in params:
+                params[key] = value
+        return params
+
+    def const_util_rxn_prefixes(self):
+        return ["EXF", "EX_", "SK_", "DM_", "bio"]
+
+    # ── Callback-specific methods ────────────────────────────────────
+
+    def set_callback_client(self, name, client):
+        self._callback_clients[name] = client
+
+    def initialize_callback(self):
+        callback_service_url = self.get_config("DevEnv", "callback_service_url")
+        if not callback_service_url:
+            raise ValueError("Callback service URL not configured.")
+        response = requests.post(
+            f"{callback_service_url}/start",
+            json={"token": self.get_token(namespace="kbase")},
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Failed to start callback service: {response.text}")
+        output = response.json()
+        self._callback_url = output["callback_url"]
+        os.makedirs(str(Path(self._callback_directory).parent), exist_ok=True)
+        if exists(self._callback_directory):
+            os.remove(self._callback_directory)
+        os.symlink(
+            self._callback_directory + output["directory"],
+            "/tmp/" + output["directory"] + "/scratch",
+        )
+
+    def stop_callback(self):
+        callback_service_url = self.get_config("DevEnv", "callback_service_url")
+        if not callback_service_url:
+            raise ValueError("Callback service URL not configured.")
+        response = requests.post(
+            f"{callback_service_url}/stop",
+            json={"token": self.get_token(namespace="kbase")},
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Failed to stop callback service: {response.text}")
+        self._callback_url = None
+
+    def report_client(self):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "KBaseReport" not in self._callback_clients:
+            from installed_clients.KBaseReportClient import KBaseReport
+            self._callback_clients["KBaseReport"] = KBaseReport(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["KBaseReport"]
+
+    def dfu_client(self):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "DataFileUtil" not in self._callback_clients:
+            from installed_clients.DataFileUtilClient import DataFileUtil
+            self._callback_clients["DataFileUtil"] = DataFileUtil(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["DataFileUtil"]
+
+    def gfu_client(self):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "GenomeFileUtil" not in self._callback_clients:
+            from installed_clients.GenomeFileUtilClient import GenomeFileUtil
+            self._callback_clients["GenomeFileUtil"] = GenomeFileUtil(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["GenomeFileUtil"]
+
+    def afu_client(self):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "AssemblyUtil" not in self._callback_clients:
+            from installed_clients.AssemblyUtilClient import AssemblyUtil
+            self._callback_clients["AssemblyUtil"] = AssemblyUtil(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["AssemblyUtil"]
+
+    def rast_client(self):
+        if "RAST_SDK" not in self._callback_clients:
+            from installed_clients.RAST_SDKClient import RAST_SDK
+            self._callback_clients["RAST_SDK"] = RAST_SDK(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["RAST_SDK"]
+
+    def anno_client(self, native_python_api=False):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "cb_annotation_ontology_api" not in self._callback_clients:
+            from installed_clients.cb_annotation_ontology_apiClient import cb_annotation_ontology_api
+            self._callback_clients["cb_annotation_ontology_api"] = cb_annotation_ontology_api(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["cb_annotation_ontology_api"]
+
+    def devutil_client(self):
+        if self._callback_url is None:
+            raise ValueError("Either set callback URL or call initialize_callback.")
+        if "KBDevUtils" not in self._callback_clients:
+            from installed_clients.chenry_utility_moduleClient import chenry_utility_module
+            self._callback_clients["KBDevUtils"] = chenry_utility_module(
+                self._callback_url, token=self.get_token(namespace="kbase")
+            )
+        return self._callback_clients["KBDevUtils"]
+
+    def annotate_genome_with_rast(self, genome_id, ws=None, output_ws=None):
+        if not output_ws:
+            output_ws = ws
+        rast_client = self.rast_client()
+        output = rast_client.annotate_genome({
+            "workspace": output_ws,
+            "input_genome": genome_id,
+            "output_genome": genome_id + ".RAST",
+        })
+        return output["workspace"] + "/" + output["id"]
+
+    def save_genome_or_metagenome(self, objid, workspace, obj_json):
+        self.set_ws(workspace)
+        save_output = self.gfu_client().save_one_genome({
+            "name": objid,
+            "data": obj_json,
+            "upgrade": 1,
+            "provenance": self.get_provenance(),
+            "hidden": 0,
+            "workspace": self.ws_name,
+        })
+        self.obj_created.append({"ref": self.create_ref(objid, self.ws_name), "description": ""})
+        return save_output["info"]
+
+    def save_report_to_kbase(self, height=700, message="", warnings=[], file_links=[], summary_height=None):
+        if not self.working_dir:
+            raise ValueError("Working directory is not set")
+        os.makedirs(self.working_dir + "/html", exist_ok=True)
+        rootDir = self.working_dir + "/html/"
+        files = [{"path": "/kb/module/work/tmp/html/", "name": "index.html", "description": "HTML report"}]
+        for dirName, subdirList, fileList in os.walk(rootDir):
+            for fname in fileList:
+                if fname != "index.html":
+                    files.append({
+                        "path": dirName.replace(rootDir, "/kb/module/work/tmp/html/"),
+                        "name": fname,
+                        "description": "Files related to HTML report",
+                    })
+        report_name = self.method + "-" + str(uuid.uuid4())
+        output = self.report_client().create_extended_report({
+            "message": message,
+            "warnings": warnings,
+            "html_links": files,
+            "file_links": file_links,
+            "direct_html_link_index": 0,
+            "html_window_height": height,
+            "objects_created": self.obj_created,
+            "workspace_name": self.ws_name,
+            "report_object_name": report_name,
+            "summary_window_height": summary_height,
+        })
+        return {"report_name": report_name, "report_ref": output["ref"], "workspace_name": self.ws_name}

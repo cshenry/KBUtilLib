@@ -1,6 +1,9 @@
 """KBase API utilities for interacting with KBase services and data."""
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import re
 import sys
@@ -14,6 +17,8 @@ from .installed_clients.WorkspaceClient import Workspace
 from .kbase_endpoints import base_url as _base_url
 from .kbase_endpoints import env_from_url, service_url
 from .shared_env_utils import SharedEnvUtils
+
+logger = logging.getLogger(__name__)
 
 
 class KBWSUtils(SharedEnvUtils):
@@ -642,6 +647,429 @@ class KBWSUtils(SharedEnvUtils):
         Returns:
             List of released types
         """
+        try:
+            result = self._ws_client.release_module(module_name)
+            return {"status": "success", "released_types": result}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+
+# ── Composition-based implementation ─────────────────────────────────────
+
+class KBWSUtilsImpl:
+    """Composition-based workspace utilities.
+
+    Holds a :class:`SharedEnvUtils` instance instead of inheriting from it.
+    All public methods are preserved from the legacy ``KBWSUtils``.
+    """
+
+    def __init__(
+        self,
+        env: SharedEnvUtils,
+        kb_version: str = "prod",
+        max_retry: int = 3,
+        kbendpoint: Optional[str] = None,
+    ) -> None:
+        self._env = env
+        self.kb_version = kb_version
+        if kbendpoint:
+            kb_version = env_from_url(kbendpoint)
+            self.kb_version = kb_version
+        self.workspace_url = service_url("workspace", kb_version)
+        self.shock_url = service_url("shock", kb_version)
+        self.hs_url = service_url("handle_service", kb_version)
+        self.cached_to_obj_path: Dict[str, Any] = {}
+        self._ws_client = Workspace(
+            self.workspace_url, token=env.get_token(namespace="kbase")
+        )
+        self.max_retry = max_retry
+        self.hs_client = HandleService(
+            self.hs_url, token=env.get_token(namespace="kbase")
+        )
+        self.ws_id: Optional[int] = None
+        self.ws_name: Optional[str] = None
+        # Provenance state (from BaseUtils)
+        self.obj_created: List[Any] = []
+        self.input_objects: List[Any] = []
+        self.method = "Unknown"
+        self.params: Dict[str, Any] = {}
+        self.initialized = False
+        self.description = "Unknown"
+        self.name = "KBWSUtilsImpl"
+        self.service = "Unknown"
+        self.version = "Unknown"
+        self.working_dir: Optional[str] = None
+
+    # -- Env / logger delegation ------------------------------------------
+
+    @property
+    def env(self) -> SharedEnvUtils:
+        return self._env
+
+    def get_token(self, namespace: str = "kbase") -> str:
+        return self._env.get_token(namespace=namespace)
+
+    def get_config(self, section: str, key: str = None) -> Any:
+        return self._env.get_config(section, key)
+
+    def log_info(self, msg: str) -> None:
+        logger.info(msg)
+
+    def log_warning(self, msg: str, *args) -> None:
+        logger.warning(msg, *args)
+
+    def log_error(self, msg: str) -> None:
+        logger.error(msg)
+
+    def log_debug(self, msg: str) -> None:
+        logger.debug(msg)
+
+    def log_critical(self, msg: str) -> None:
+        logger.critical(msg)
+
+    def reset_attributes(self) -> None:
+        self.obj_created = []
+        self.input_objects = []
+        self.method = "Unknown"
+        self.params = {}
+        self.initialized = False
+        self.description = "Unknown"
+        self.ws_id = None
+        self.ws_name = None
+
+    def initialize_call(
+        self,
+        method: str,
+        params: Dict[str, Any],
+        print_params: bool = False,
+        no_print: List[str] = None,
+        no_prov_params: List[str] = None,
+    ) -> None:
+        if no_print is None:
+            no_print = []
+        if no_prov_params is None:
+            no_prov_params = []
+        if not self.initialized:
+            self.obj_created = []
+            self.input_objects = []
+            self.method = method
+            filtered_params = {k: v for k, v in params.items() if k not in no_prov_params}
+            self.params = filtered_params.copy()
+            self.initialized = True
+            if "workspace" in params:
+                self.set_ws(params["workspace"])
+            elif "output_workspace" in params:
+                self.set_ws(params["output_workspace"])
+
+    def validate_args(self, params, required, defaults):
+        for item in required:
+            if item not in params:
+                raise ValueError(f"Required argument {item} is missing!")
+        for key, value in defaults.items():
+            if key not in params:
+                params[key] = value
+        return params
+
+    def const_util_rxn_prefixes(self):
+        return ["EXF", "EX_", "SK_", "DM_", "bio"]
+
+    # -- Workspace methods (bodies identical to KBWSUtils) ----------------
+
+    def ws_client(self) -> Workspace:
+        return self._ws_client
+
+    def set_ws(self, workspace) -> None:
+        if self.ws_id == workspace or self.ws_name == workspace:
+            return
+        if not isinstance(workspace, str) or re.search(r"^\d+$", workspace) is not None:
+            if isinstance(workspace, str):
+                workspace = int(workspace)
+            self.ws_id = workspace
+            info = self.ws_client().get_workspace_info({"id": workspace})
+            self.ws_name = info[1]
+        else:
+            self.ws_name = workspace
+            info = self.ws_client().get_workspace_info({"workspace": workspace})
+            self.ws_id = info[0]
+
+    def get_base_url_from_version(self, version):
+        try:
+            return _base_url(version)
+        except ValueError:
+            logger.critical("Unknown workspace version: " + version)
+            return _base_url("prod")
+
+    def download_blob_file(self, handle_id, file_path):
+        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
+        hs = self.hs_client
+        handles = hs.hids_to_handles([handle_id])
+        shock_id = handles[0]["id"]
+        node_url = self.shock_url + "/node/" + shock_id
+        r = requests.get(node_url, headers=headers, allow_redirects=True)
+        if not r.ok:
+            print(json.loads(r.content)["error"][0])
+            return None
+        resp_obj = r.json()
+        size = resp_obj["data"]["file"]["size"]
+        if not size:
+            print(f"Node {shock_id} has no file")
+            return None
+        node_file_name = resp_obj["data"]["file"]["name"]
+        dir = os.path.dirname(file_path)
+        os.makedirs(dir, exist_ok=True)
+        if os.path.isdir(file_path):
+            file_path = os.path.join(file_path, node_file_name)
+        with open(file_path, "wb") as fhandle:
+            with requests.get(
+                node_url + "?download_raw",
+                stream=True,
+                headers=headers,
+                allow_redirects=True,
+            ) as r:
+                if not r.ok:
+                    print(json.loads(r.content)["error"][0])
+                    return None
+                for chunk in r.iter_content(1024):
+                    if not chunk:
+                        break
+                    fhandle.write(chunk)
+        return file_path
+
+    def upload_blob_file(self, filepath):
+        logger.info(f"Uploading file to Shock: {filepath}")
+        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
+        file_size = os.path.getsize(filepath)
+        filename = os.path.basename(filepath)
+        with open(filepath, "rb") as f:
+            files = {
+                "upload": (filename, f, "application/octet-stream", {"Content-Length": str(file_size)})
+            }
+            r = requests.post(self.shock_url + "/node", headers=headers, files=files, allow_redirects=True)
+            if not r.ok:
+                error_msg = r.text
+                try:
+                    error_data = r.json()
+                    error_msg = error_data.get("error", [r.text])[0]
+                except Exception:
+                    pass
+                raise RuntimeError(f"Failed to upload file to Shock: {error_msg}")
+            shock_node = r.json()["data"]
+            shock_id = shock_node["id"]
+        hs = self.hs_client
+        handle = hs.persist_handle({"id": shock_id, "type": "shock", "url": self.shock_url})
+        handle_id = handle
+        logger.info(f"File uploaded to Shock: {shock_id}, Handle: {handle_id}")
+        return shock_id, handle_id
+
+    def save_ws_object(self, objid, workspace, obj_json, obj_type):
+        self.set_ws(workspace)
+        params = {
+            "id": self.ws_id,
+            "objects": [{"data": obj_json, "name": objid, "type": obj_type, "meta": {}, "provenance": []}],
+        }
+        self.obj_created.append({"ref": self.create_ref(objid, self.ws_name), "description": ""})
+        return self.ws_client().save_objects(params)
+
+    def set_provenance(self, method="unknown", description=None, input_objects=[], params={}, service="unknown", version=0):
+        self.method = method
+        self.input_objects = input_objects
+        self.params = params
+        self.service = service
+        self.version = version
+        self.description = description or method
+
+    def get_provenance(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "description": self.description,
+                "input_ws_objects": self.input_objects,
+                "method": self.method,
+                "script_command_line": "",
+                "method_params": [self.params],
+                "service": self.name,
+                "service_ver": self.version,
+            }
+        ]
+
+    def list_ws_objects(self, wsid_or_ref, type=None, include_metadata=True):
+        ws_client = self.ws_client()
+        done = False
+        full_output = {}
+        start_after = None
+        while not done:
+            input = {}
+            if type:
+                input["type"] = type
+            input["includeMetadata"] = 1 if include_metadata else 0
+            if isinstance(wsid_or_ref, int):
+                input["ids"] = [wsid_or_ref]
+                wsid_or_ref = str(wsid_or_ref)
+            else:
+                input["workspaces"] = [wsid_or_ref]
+            if start_after:
+                input["startafter"] = start_after
+            output = ws_client.list_objects(input)
+            start_after = wsid_or_ref + "/" + str(output[-1][0])
+            for item in output:
+                full_output[item[1]] = item
+            if len(output) < 5000:
+                done = True
+        return full_output
+
+    def process_ws_ids(self, id_or_ref, workspace=None, no_ref=False):
+        objspec = {}
+        if len(id_or_ref.split(";")) > 1:
+            objspec["to_obj_ref_path"] = id_or_ref.split(";")[0:-1]
+            id_or_ref = id_or_ref.split(";")[-1]
+        if len(id_or_ref.split("/")) > 1:
+            if no_ref:
+                array = id_or_ref.split("/")
+                workspace = array[0]
+                id_or_ref = array[1]
+            else:
+                objspec["ref"] = id_or_ref
+        if "ref" not in objspec:
+            if isinstance(workspace, int):
+                objspec["wsid"] = workspace
+            else:
+                objspec["workspace"] = workspace
+            if isinstance(id_or_ref, int):
+                objspec["objid"] = id_or_ref
+            else:
+                objspec["name"] = id_or_ref
+        return objspec
+
+    def get_object_info(self, id_or_ref, ws=None):
+        ws_identities = [self.process_ws_ids(id_or_ref, ws)]
+        return self.ws_client().get_object_info(ws_identities, 1)[0]
+
+    def get_object(self, id_or_ref, ws=None):
+        res = self.ws_get_objects({"objects": [self.process_ws_ids(id_or_ref, ws)]})
+        if res is None:
+            return None
+        return res["data"][0]
+
+    def ws_get_objects(self, args):
+        tries = 0
+        while tries < self.max_retry:
+            try:
+                return self.ws_client().get_objects2(args)
+            except Exception as e:
+                logger.warning(
+                    "Workspace get_objects2 call failed [%s:%s - %s]. Trying again! Error: %s",
+                    sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2], str(e),
+                )
+                tries += 1
+                time.sleep(10)
+        logger.warning("get_objects2 failed after multiple tries: %s", sys.exc_info()[0])
+        raise
+
+    def wsinfo_to_ref(self, info):
+        return str(info[6]) + "/" + str(info[0]) + "/" + str(info[4])
+
+    def create_ref(self, id_or_ref, ws=None):
+        if isinstance(id_or_ref, int):
+            id_or_ref = str(id_or_ref)
+        if len(id_or_ref.split("/")) > 1:
+            return id_or_ref
+        if isinstance(ws, int):
+            ws = str(ws)
+        return ws + "/" + id_or_ref
+
+    def is_ref(self, ref_string: str) -> bool:
+        if not isinstance(ref_string, str):
+            return False
+        parts = ref_string.split("/")
+        if len(parts) < 2 or len(parts) > 3:
+            return False
+        if any(not part.strip() for part in parts):
+            return False
+        if len(parts) == 3:
+            try:
+                int(parts[2])
+            except ValueError:
+                return False
+        return True
+
+    def list_all_types(self, include_empty_modules: bool = False, track_provenance: bool = False) -> List[str]:
+        if track_provenance:
+            self.initialize_call("list_all_types", {"include_empty_modules": include_empty_modules})
+        logger.info(f"Retrieving all types from workspace (include_empty_modules={include_empty_modules})")
+        try:
+            result = self._ws_client.list_all_types({"with_empty_modules": 1 if include_empty_modules else 0})
+            type_list = []
+            for module, types in result.items():
+                for typename, version in types.items():
+                    type_list.append(f"{module}.{typename}")
+            logger.info(f"Successfully retrieved {len(type_list)} types")
+            return type_list
+        except Exception as e:
+            raise Exception(f"Failed to list all types from workspace: {str(e)}")
+
+    def get_type_specs(self, type_list: List[str], track_provenance: bool = False) -> Dict[str, Any]:
+        if not isinstance(type_list, list):
+            raise ValueError("type_list must be a list")
+        if len(type_list) == 0:
+            raise ValueError("type_list cannot be empty")
+        if track_provenance:
+            self.initialize_call("get_type_specs", {"type_list": type_list})
+        logger.info(f"Retrieving type specifications for {len(type_list)} types")
+        specs = {}
+        try:
+            for type_string in type_list:
+                try:
+                    type_info = self._ws_client.get_type_info(type_string)
+                    specs[type_string] = type_info
+                except Exception as e:
+                    raise Exception(f"Failed to retrieve spec for type '{type_string}': {str(e)}")
+            logger.info(f"Successfully retrieved {len(specs)} type specifications")
+            return specs
+        except Exception as e:
+            if "Failed to retrieve spec for type" in str(e):
+                raise
+            else:
+                raise Exception(f"Failed to retrieve type specifications: {str(e)}")
+
+    def object_url(self, id_or_ref, ws=None):
+        if ws is not None:
+            return f"https://narrative.kbase.us/legacy/dataview/{ws}/{id_or_ref}"
+        else:
+            return f"https://narrative.kbase.us/legacy/dataview/{id_or_ref}"
+
+    def register_typespec_dryrun(self, typespec, new_types, dryrun=True):
+        print("Note: Registering new typespecs requires:")
+        print("  1. Module ownership (request via request_module_ownership)")
+        print("  2. Admin approval for new modules")
+        print("  3. Valid KIDL syntax")
+        params = {"spec": typespec, "new_types": new_types, "dryrun": 1 if dryrun else 0}
+        try:
+            return self._ws_client.register_typespec(params)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def request_module_ownership(self, module_name):
+        try:
+            self._ws_client.request_module_ownership(module_name)
+            return {"status": "success", "message": f"Requested ownership of {module_name}"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_module_versions(self, module_name):
+        try:
+            return self._ws_client.list_module_versions({"mod": module_name})
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_module_info(self, module_name, version=None):
+        params = {"mod": module_name}
+        if version:
+            params["ver"] = version
+        try:
+            return self._ws_client.get_module_info(params)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def release_module(self, module_name):
         try:
             result = self._ws_client.release_module(module_name)
             return {"status": "success", "released_types": result}

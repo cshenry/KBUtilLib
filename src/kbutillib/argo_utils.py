@@ -428,28 +428,38 @@ class ArgoUtilsImpl:
 
     Holds ``env: SharedEnvUtils`` instead of inheriting.
     Delegates all method calls to an internal legacy instance.
+
+    The legacy ``ArgoUtils`` eagerly constructs an ``httpx.Client`` and
+    may issue a network ping during ``__init__``.  To keep
+    ``KBUtilLib().argo`` cheap, the delegate is created lazily on first
+    real attribute access.
     """
 
     def __init__(self, env, **kwargs):
         self._env = env
-        # Build kwargs to pass through to legacy constructor
-        _kwargs = {
-            "config_file": False,
-            "token_file": None,
-            "kbase_token_file": None,
-        }
-        # Copy token if env has one
-        try:
-            _kwargs["token"] = env.get_token("kbase")
-        except Exception:
-            pass
-        _kwargs.update(kwargs)
-        self._delegate = ArgoUtils(**_kwargs)
+        self._init_kwargs = kwargs
+        self._delegate = None
+
+    def _ensure_delegate(self):
+        if self._delegate is None:
+            _kwargs = {
+                "config_file": False,
+                "token_file": None,
+                "kbase_token_file": None,
+            }
+            # Copy token if env has one
+            try:
+                _kwargs["token"] = self._env.get_token("kbase")
+            except Exception:
+                pass
+            _kwargs.update(self._init_kwargs)
+            self._delegate = ArgoUtils(**_kwargs)
 
     @property
     def env(self):
         return self._env
 
     def __getattr__(self, name):
-        # Delegate all attribute access to the legacy instance
+        # Delegate all attribute access to the lazily-created legacy instance
+        self._ensure_delegate()
         return getattr(self._delegate, name)

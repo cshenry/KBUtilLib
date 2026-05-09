@@ -98,6 +98,60 @@ Three new flat modules consolidate previously duplicated code:
 - **`model_helpers.py`** — `_parse_id()` + `_check_and_convert_model()`
 - **`model_directionality.py`** — `direction_conversion` dict + analysis functions
 
+## Migration Guide
+
+### From legacy classes to the facade
+
+Old (inheritance-based):
+
+```python
+from kbutillib import MSFBAUtils
+fba = MSFBAUtils(config_file=False, token_file=None, kbase_token_file=None)
+sol = fba.run_fba(model)
+```
+
+New (composition-based):
+
+```python
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+sol = kbu.fba.run_fba(model)
+```
+
+### From notebook god class to session.kbu
+
+Old (inheritance-based god class in ADP1Notebooks `util.py`):
+
+```python
+class Util(MSFBAUtils, AICurationUtils, NotebookUtils, KBPLMUtils, EscherUtils):
+    ...
+```
+
+New:
+
+```python
+session = NotebookSession.for_notebook()
+session.kbu.fba.run_fba(model)
+session.kbu.curation.compare_annotations(...)
+session.kbu.plm.embed_sequences(...)
+```
+
+### Legacy aliases policy
+
+Legacy class names (`MSFBAUtils`, `KBWSUtils`, etc.) remain importable from `kbutillib` for backward compatibility. These are the **original inheritance-based classes** and still work as before. They will be maintained but not extended.
+
+New code should use the `KBUtilLib` facade or the `*Impl` classes directly.
+
+### AP3 carve-outs
+
+Some `*Impl` classes wrap a legacy delegate internally rather than reimplementing all methods from scratch. These are "AP3 carve-outs" documented in the PRD:
+
+- `ArgoUtilsImpl` — wraps legacy `ArgoUtils` with a lazy delegate (httpx.Client creation is deferred until first method call)
+- `MSFBAUtilsImpl` — wraps legacy `MSFBAUtils`
+- `KBSDKUtilsImpl` — wraps legacy `KBSDKUtils`
+
+These will be converted to native composition in a future phase.
+
 ## Reference Implementations
 
 - `kb_job_utils/` — already composition-based (the reference shape)

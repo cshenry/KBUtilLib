@@ -175,13 +175,19 @@ except ImportError as e:
     KBCallbackUtils = None
 
 try:
-    from .kb_job_utils import KBJobUtils, JobRecord, JobState, JobStore
+    from .kb_job_utils import (
+        KBJobUtils, JobRecord, JobState, JobStore,
+        PipelineState, PipelineStatus, ChainStep,
+    )
 except ImportError as e:
     _import_error("kb_job_utils", e)
     KBJobUtils = None
     JobRecord = None
     JobState = None
     JobStore = None
+    PipelineState = None
+    PipelineStatus = None
+    ChainStep = None
 
 try:
     from .kbase_endpoints import base_url, service_url, narrative_url, env_from_url
@@ -336,6 +342,7 @@ __all__ = [
     "Assembly",
     "AssemblySet",
     "BVBRCUtils",
+    "ChainStep",
     "EscherUtils",
     "JobRecord",
     "JobState",
@@ -357,6 +364,8 @@ __all__ = [
     "MSFBAUtils",
     "MSReconstructionUtils",
     "PatricWSUtils",
+    "PipelineState",
+    "PipelineStatus",
     "RCSBPDBUtils",
     "Reads",
     "ReadSet",

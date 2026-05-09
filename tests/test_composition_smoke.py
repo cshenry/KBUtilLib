@@ -401,3 +401,61 @@ class TestKBUtilLibFacade:
         first = kbu.biochem
         second = kbu.biochem
         assert first is second
+
+
+# ── Clean-room construction and integration tests ──────────────────────
+
+
+class TestCleanRoomConstruction:
+    """Verify KBUtilLib() constructs cleanly and lazy properties work."""
+
+    def test_facade_constructs_without_error(self):
+        """KBUtilLib() default construction succeeds."""
+        from kbutillib import KBUtilLib
+
+        kbu = KBUtilLib()
+        assert kbu is not None
+        assert kbu.env is not None
+
+    def test_facade_env_shared(self):
+        """KBUtilLib constructed with explicit SharedEnvUtils shares it."""
+        from kbutillib import KBUtilLib
+        from kbutillib.shared_env_utils import SharedEnvUtils
+
+        env = SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None)
+        kbu = KBUtilLib(env=env)
+        assert kbu.env is env
+
+    def test_facade_argo_deferred(self):
+        """kbu.argo property constructs without network access (lazy delegate)."""
+        from kbutillib import KBUtilLib
+        from kbutillib.argo_utils import ArgoUtilsImpl
+
+        kbu = KBUtilLib()
+        argo = kbu.argo
+        assert isinstance(argo, ArgoUtilsImpl)
+        # Delegate should still be None (not yet used)
+        assert argo._delegate is None
+
+    def test_top_level_exports_pipeline(self):
+        """PipelineState, PipelineStatus, ChainStep are importable from top-level."""
+        from kbutillib import PipelineState, PipelineStatus, ChainStep
+
+        assert PipelineState is not None
+        assert PipelineStatus is not None
+        assert ChainStep is not None
+
+
+class TestNotebookSessionKbu:
+    """Verify NotebookSession.kbu property is correctly wired."""
+
+    def test_notebook_session_kbu_returns_facade(self, tmp_path):
+        """session.kbu returns a KBUtilLib instance sharing the session's env."""
+        from kbutillib.notebook.session import NotebookSession
+        from kbutillib.toolkit import KBUtilLib
+
+        session = NotebookSession(kbcache_dir=tmp_path / ".kbcache")
+        kbu = session.kbu
+        assert isinstance(kbu, KBUtilLib)
+        # Second access returns same instance
+        assert session.kbu is kbu

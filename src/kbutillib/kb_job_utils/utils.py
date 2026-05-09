@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ..installed_clients.execution_engine2Client import execution_engine2
 from ..kbase_endpoints import service_url
 from ..shared_env_utils import SharedEnvUtils
+from .pipeline import ChainStep, PipelineState, PipelineStatus
 from .state import JobRecord, JobState
 from .store import JobStore
 
@@ -214,14 +216,22 @@ class KBJobUtils:
     def refresh_active(self) -> List[JobRecord]:
         """Re-check all locally-stored non-terminal jobs against EE2.
 
+        After refreshing individual jobs, calls :meth:`advance_pipelines`
+        so that any pipeline whose current step has transitioned to a
+        terminal state gets its next step submitted (or finalized).
+
         Returns:
             List of updated :class:`JobRecord` objects.
         """
         active = self._store.list_active()
         if not active:
+            # Still advance pipelines — a pipeline step may have been
+            # refreshed by an earlier call, but not yet advanced.
+            self.advance_pipelines()
             return []
         job_ids = [r.job_id for r in active]
         results = self.check_jobs(job_ids)
+        self.advance_pipelines()
         return list(results.values())
 
     def refresh_all(self) -> List[JobRecord]:
@@ -264,6 +274,233 @@ class KBJobUtils:
                 self._store.delete(rec.job_id)
                 deleted += 1
         return deleted
+
+    # ── pipelines ────────────────────────────────────────────────────────
+
+    def submit_chain(
+        self,
+        steps: Union[List[dict], List[ChainStep]],
+        *,
+        name: Optional[str] = None,
+        project: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> PipelineState:
+        """Create a pipeline and submit its first step.
+
+        Args:
+            steps: List of EE2 ``run_job`` param dicts, or a list of
+                pre-built :class:`ChainStep` objects.  Plain dicts are
+                wrapped as ``ChainStep(params=dict)``.
+            name: Optional human-readable pipeline name.
+            project: Optional project identifier.
+            tags: Optional string tags.
+
+        Returns:
+            The freshly persisted :class:`PipelineState`.
+
+        Raises:
+            ValueError: If *steps* is empty.
+        """
+        if not steps:
+            raise ValueError("Pipeline must have at least one step.")
+
+        # Normalize to ChainStep objects
+        chain_steps: List[ChainStep] = []
+        for s in steps:
+            if isinstance(s, ChainStep):
+                chain_steps.append(s)
+            else:
+                chain_steps.append(ChainStep(params=s))
+
+        pipeline_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc)
+
+        pipeline = PipelineState(
+            pipeline_id=pipeline_id,
+            spec=chain_steps,
+            status=PipelineStatus.RUNNING,
+            current_step=0,
+            total_steps=len(chain_steps),
+            created_at=now,
+            name=name,
+            project=project,
+            tags=tags or [],
+        )
+
+        # Submit the first step
+        first = chain_steps[0]
+        params = first.params
+        method = params.get("method", "")
+        run_params_list = params.get("params", [{}])
+        record = self.run_job(
+            method=method,
+            params=run_params_list,
+            app_id=first.app_id or params.get("app_id"),
+            workspace_id=params.get("wsid"),
+            service_ver=params.get("service_ver"),
+            meta={
+                "pipeline_id": pipeline_id,
+                "pipeline_step": 0,
+            },
+        )
+
+        logger.info(
+            "Pipeline %s created with %d steps; first job: %s",
+            pipeline_id, len(chain_steps), record.job_id,
+        )
+
+        self._store.upsert_pipeline(pipeline)
+        return pipeline
+
+    def get_pipeline(self, pipeline_id: str) -> Optional[PipelineState]:
+        """Retrieve a pipeline by ID from the local store."""
+        return self._store.get_pipeline(pipeline_id)
+
+    def list_pipelines(
+        self,
+        *,
+        status: Optional[PipelineStatus] = None,
+        project: Optional[str] = None,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[PipelineState]:
+        """List pipelines with optional filters."""
+        return self._store.list_pipelines(
+            status=status, project=project, since=since, limit=limit,
+        )
+
+    def cancel_pipeline(self, pipeline_id: str) -> PipelineState:
+        """Cancel a pipeline and its in-flight step.
+
+        Idempotent — calling on a terminal pipeline is a no-op.
+
+        Returns:
+            The updated :class:`PipelineState`.
+
+        Raises:
+            KeyError: If *pipeline_id* does not exist.
+        """
+        pipeline = self._store.get_pipeline(pipeline_id)
+        if pipeline is None:
+            raise KeyError(f"Pipeline {pipeline_id} not found.")
+
+        if pipeline.is_terminal():
+            return pipeline
+
+        # Cancel the in-flight job for the current step (if any)
+        current_job = self._find_pipeline_step_job(pipeline_id, pipeline.current_step)
+        if current_job is not None and not current_job.state.is_terminal:
+            try:
+                self.cancel_job(current_job.job_id)
+            except Exception:
+                logger.warning(
+                    "Failed to cancel in-flight job %s for pipeline %s step %d",
+                    current_job.job_id, pipeline_id, pipeline.current_step,
+                )
+
+        pipeline.status = PipelineStatus.TERMINATED
+        pipeline.finished_at = datetime.now(timezone.utc)
+        self._store.upsert_pipeline(pipeline)
+        logger.info("Pipeline %s cancelled.", pipeline_id)
+        return pipeline
+
+    def advance_pipelines(self) -> List[PipelineState]:
+        """Advance all RUNNING pipelines whose current step has completed.
+
+        Called automatically at the end of :meth:`refresh_active`.
+
+        Returns:
+            List of pipelines whose state changed during this call.
+        """
+        running = self._store.list_pipelines(status=PipelineStatus.RUNNING)
+        changed: List[PipelineState] = []
+
+        for pipeline in running:
+            advanced = self._try_advance_pipeline(pipeline)
+            if advanced:
+                changed.append(pipeline)
+
+        return changed
+
+    def _try_advance_pipeline(self, pipeline: PipelineState) -> bool:
+        """Attempt to advance a single pipeline. Returns True if state changed."""
+        current_job = self._find_pipeline_step_job(
+            pipeline.pipeline_id, pipeline.current_step
+        )
+        if current_job is None:
+            # No job found for current step — nothing to do
+            return False
+
+        if not current_job.state.is_terminal:
+            # Still running, nothing to advance
+            return False
+
+        now = datetime.now(timezone.utc)
+
+        if current_job.state == JobState.COMPLETED:
+            if pipeline.current_step < pipeline.total_steps - 1:
+                # Submit next step
+                next_idx = pipeline.current_step + 1
+                next_step = pipeline.spec[next_idx]
+                params = next_step.params
+                method = params.get("method", "")
+                run_params_list = params.get("params", [{}])
+                record = self.run_job(
+                    method=method,
+                    params=run_params_list,
+                    app_id=next_step.app_id or params.get("app_id"),
+                    workspace_id=params.get("wsid"),
+                    service_ver=params.get("service_ver"),
+                    meta={
+                        "pipeline_id": pipeline.pipeline_id,
+                        "pipeline_step": next_idx,
+                    },
+                )
+                pipeline.current_step = next_idx
+                pipeline.last_advanced_at = now
+                logger.info(
+                    "Pipeline %s advanced to step %d; job: %s",
+                    pipeline.pipeline_id, next_idx, record.job_id,
+                )
+            else:
+                # All steps done
+                pipeline.status = PipelineStatus.COMPLETED
+                pipeline.finished_at = now
+                logger.info("Pipeline %s completed.", pipeline.pipeline_id)
+        elif current_job.state == JobState.ERROR:
+            pipeline.status = PipelineStatus.ERROR
+            pipeline.finished_at = now
+            logger.info("Pipeline %s failed at step %d.",
+                        pipeline.pipeline_id, pipeline.current_step)
+        elif current_job.state == JobState.TERMINATED:
+            pipeline.status = PipelineStatus.TERMINATED
+            pipeline.finished_at = now
+            logger.info("Pipeline %s terminated at step %d.",
+                        pipeline.pipeline_id, pipeline.current_step)
+        else:
+            return False
+
+        self._store.upsert_pipeline(pipeline)
+        return True
+
+    def _find_pipeline_step_job(
+        self, pipeline_id: str, step: int
+    ) -> Optional[JobRecord]:
+        """Find the job record for a given pipeline step.
+
+        Searches jobs whose meta contains the matching pipeline_id and
+        pipeline_step.
+        """
+        # Search all jobs for the one with matching pipeline metadata.
+        # Since pipeline jobs have pipeline_id/pipeline_step in meta,
+        # we scan the store. For small numbers of jobs this is fine.
+        all_jobs = self._store.list_all()
+        for job in all_jobs:
+            meta = job.meta or {}
+            if (meta.get("pipeline_id") == pipeline_id
+                    and meta.get("pipeline_step") == step):
+                return job
+        return None
 
     # ── watcher ──────────────────────────────────────────────────────────
 

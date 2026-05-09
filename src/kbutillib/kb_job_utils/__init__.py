@@ -16,16 +16,25 @@ Phase 2 scope:
 - Cleanup old records (``cleanup``)
 - Opt-in background watcher thread (``start_watcher`` / ``stop_watcher``)
 - ``kbu jobs`` and ``kbu jobdaemon`` CLI subcommands
+
+Phase 3 scope:
+- Linear job pipelines (``submit_chain``, ``advance_pipelines``)
+- Pipeline CRUD (``get_pipeline``, ``list_pipelines``, ``cancel_pipeline``)
+- ``kbu jobs chain`` CLI subcommand group
 """
 
+from .pipeline import ChainStep, PipelineState, PipelineStatus
 from .state import JobRecord, JobState
 from .store import JobStore
 from .utils import KBJobUtils, Watcher
 
 __all__ = [
+    "ChainStep",
     "JobRecord",
     "JobState",
     "JobStore",
     "KBJobUtils",
+    "PipelineState",
+    "PipelineStatus",
     "Watcher",
 ]

@@ -94,6 +94,13 @@ exclude_lines = [
   "if TYPE_CHECKING:",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: mark test as slow running",
+    "integration: mark test as integration test",
+    "kbase: mark test as requiring a live KBase token (skipped unless KBASE_LIVE_TESTS=1)",
+]
+
 [tool.mypy]
 strict = true
 warn_unreachable = true

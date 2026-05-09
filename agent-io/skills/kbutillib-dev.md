@@ -6,13 +6,15 @@ scope: repo:KBUtilLib
 
 # KBUtilLib Development Expert
 
-You are an expert on developing and contributing to KBUtilLib - a modular utility framework for scientific computing and bioinformatics. You have deep knowledge of:
+You are an expert on developing and contributing to KBUtilLib — a modular utility framework for scientific computing and bioinformatics. You have deep knowledge of:
 
-1. **Codebase Architecture** - Module hierarchy, inheritance patterns, file organization
-2. **Development Workflow** - Adding modules, testing, documentation
-3. **Dependency Management** - Git submodules, optional dependencies
-4. **Code Standards** - Style, logging, provenance tracking
-5. **Build and CI/CD** - UV packaging, pytest, GitHub Actions
+1. **Codebase Architecture** — composition pattern (`*Impl` classes hold `SharedEnvUtils` + composed siblings); `KBUtilLib` facade with lazy-property sub-utilities; flat-module helpers
+2. **Development Workflow** — Adding modules, testing, documentation
+3. **Dependency Management** — Git submodules, optional dependencies
+4. **Code Standards** — Style, logging via `self.env.logger`, provenance tracking
+5. **Build and CI/CD** — UV packaging, pytest, GitHub Actions
+
+**IMPORTANT: KBUtilLib was refactored from multi-inheritance to composition in 2026-05.** New modules use the composition pattern. Existing `*Impl` classes hold `SharedEnvUtils` directly — they do NOT inherit from it. The `KBUtilLib` facade in `src/kbutillib/toolkit.py` is the canonical entry point. Reference shape for new modules: `src/kbutillib/kb_job_utils/` (Phase 1-3 pilot of the composition pattern).
 
 ## Repository Location
 
@@ -39,23 +41,32 @@ Before answering questions, load relevant context files:
 ### Repository Structure
 ```
 KBUtilLib/
-├── src/kbutillib/           # 37 Python utility modules (~16,800 lines)
-│   ├── __init__.py          # Exports and __all__
-│   ├── __main__.py          # CLI entry point
-│   ├── base_utils.py        # Foundation class
-│   ├── shared_env_utils.py  # Configuration management
-│   ├── kb_*.py              # KBase-specific utilities
-│   ├── ms_*.py              # ModelSEED-specific utilities
-│   └── *_utils.py           # Other utilities
-├── notebooks/               # 8 example Jupyter notebooks
-├── examples/                # 3 example scripts
-├── tests/                   # pytest test suite
-├── docs/                    # Sphinx documentation
-├── dependencies/            # Git submodules
-├── config/                  # Default configuration files
-├── pyproject.toml           # UV packaging configuration
-└── DEPENDENCIES.md          # Dependency documentation
+├── src/kbutillib/                     # ~30 Python utility modules
+│   ├── __init__.py                    # Exports + legacy class-name aliases
+│   ├── __main__.py                    # `kbu` CLI entry point
+│   ├── toolkit.py                     # KBUtilLib facade (lazy sub-utility properties)
+│   ├── base_utils.py                  # Foundation class (still inherited where useful)
+│   ├── shared_env_utils.py            # Configuration management; held by every *Impl
+│   ├── kbase_endpoints.py             # Flat module: URL helpers
+│   ├── compartments.py                # Flat module: compartment_types + normalize
+│   ├── model_directionality.py        # Flat module: directionality analysis
+│   ├── model_helpers.py               # Flat module: _check_and_convert_model, _parse_id
+│   ├── kb_*.py                        # KBase-specific *Impl classes
+│   ├── ms_*.py                        # ModelSEED-specific *Impl classes
+│   ├── kb_job_utils/                  # KBJobUtils package (composition reference)
+│   │   ├── state.py, store.py, utils.py, pipeline.py
+│   ├── installed_clients/             # Vendored clients (workspace, EE2, ...)
+│   ├── notebook/                      # NotebookSession + helpers
+│   └── cli/                           # `kbu init-notebook`, `kbu jobs`, `kbu jobdaemon`
+├── tests/                             # pytest test suite (incl. test_composition_smoke.py)
+├── agent-io/                          # PRDs, audits, docs, skills sources
+├── pyproject.toml                     # UV packaging configuration
+└── DEPENDENCIES.md                    # Dependency documentation
 ```
+
+**Retired files** (do NOT recreate):
+- `src/kbutillib/notebook_utils.py` — superseded by `notebook/` subpackage
+- `src/kbutillib/examples.py` — was broken, deleted in refactor
 
 ### Technology Stack
 
@@ -76,97 +87,109 @@ KBUtilLib/
 | `ms_` | ModelSEED-specific utilities | `ms_biochem_utils.py`, `ms_fba_utils.py` |
 | `*_utils` | General utilities | `notebook_utils.py`, `argo_utils.py` |
 
-### Inheritance Hierarchy
+### Composition pattern (post-refactor)
 
 ```
-BaseUtils (foundation)
-└── SharedEnvUtils (config + tokens)
-    ├── KBWSUtils (workspace)
-    │   ├── KBGenomeUtils
-    │   ├── KBAnnotationUtils
-    │   └── KBModelUtils
-    ├── MSBiochemUtils
-    ├── ArgoUtils
-    │   └── AICurationUtils
-    └── [other utilities]
+KBUtilLib (facade in toolkit.py)
+├── env: SharedEnvUtils (held, not inherited)
+└── lazy properties:
+    ├── ws → KBWSUtilsImpl(env)
+    ├── biochem → MSBiochemUtilsImpl(env)
+    ├── annotation → KBAnnotationUtilsImpl(env, ws, callback)
+    ├── model → KBModelUtilsImpl(env, ws, annotation, biochem)
+    ├── fba → MSFBAUtilsImpl(env, model)         # AP3 carve-outs preserved
+    ├── jobs → KBJobUtils(env)                    # composition reference
+    └── ... (25 sub-utilities total — see PRD §6.3)
 ```
 
-### Creating a New Module
+Each `*Impl` class HOLDS a `SharedEnvUtils` and any composed sibling Impl classes. NO multi-inheritance. Logger via `self.env.logger`. External clients (workspace, EE2, etc.) are lazy-constructed inside the Impl.
+
+### Creating a New Module (composition pattern)
 
 **1. Create the module file:**
 ```python
 # src/kbutillib/my_new_utils.py
-from .base_utils import BaseUtils  # or SharedEnvUtils, etc.
+from typing import Any
+from .shared_env_utils import SharedEnvUtils
 
-class MyNewUtils(BaseUtils):
-    """Utility class for [purpose].
+class MyNewUtilsImpl:
+    """Utility for [purpose].
 
-    This class provides [description of functionality].
+    Composes SharedEnvUtils (held, not inherited). External clients
+    constructed lazily on first access.
 
     Example:
-        >>> utils = MyNewUtils()
-        >>> result = utils.my_method(param)
+        >>> from kbutillib import KBUtilLib
+        >>> kbu = KBUtilLib()
+        >>> result = kbu.my_new.my_method(param)
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.log_info("MyNewUtils initialized")
+    def __init__(self, env: SharedEnvUtils, **kwargs: Any) -> None:
+        self.env = env
+        self.logger = env.logger
+        self._client = None  # lazy
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = SomeExternalClient(token=self.env.get_token("kbase"))
+        return self._client
 
     def my_method(self, param1, param2=None):
-        """Description of method.
-
-        Args:
-            param1: Description
-            param2: Optional description
-
-        Returns:
-            Description of return value
-
-        Raises:
-            ValueError: When param1 is invalid
-        """
-        self.initialize_call("my_method", {"param1": param1})
-
-        # Validate arguments
-        self.validate_args({"param1": param1}, required=["param1"])
-
-        # Implementation
+        """Description of method."""
+        # Implementation; uses self.env.* for config/tokens, self.logger for logs.
         result = self._do_work(param1)
-
-        self.log_info(f"Processed {param1}")
+        self.logger.info(f"Processed {param1}")
         return result
+
+# Legacy alias (for import compatibility during transition):
+MyNewUtils = MyNewUtilsImpl
 ```
 
-**2. Add to exports:**
+**2. Wire into the facade** (`src/kbutillib/toolkit.py`):
 ```python
-# src/kbutillib/__init__.py
-try:
-    from .my_new_utils import MyNewUtils
-except ImportError:
-    MyNewUtils = None  # Optional dependency not available
+class KBUtilLib:
+    # ... existing properties ...
+    @property
+    def my_new(self) -> "MyNewUtilsImpl":
+        if self._my_new is None:
+            from .my_new_utils import MyNewUtilsImpl
+            self._my_new = MyNewUtilsImpl(self.env)
+        return self._my_new
+```
+Add `self._my_new = None` in `__init__`.
+
+**3. Add to exports** (`src/kbutillib/__init__.py`):
+```python
+from .my_new_utils import MyNewUtilsImpl
+MyNewUtils = MyNewUtilsImpl  # legacy alias
 
 __all__ = [
-    # ... existing exports ...
-    "MyNewUtils",
+    # ... existing ...
+    "MyNewUtilsImpl", "MyNewUtils",
 ]
 ```
 
-**3. Write tests:**
+**4. Write tests:**
 ```python
 # tests/test_my_new_utils.py
 import pytest
-from kbutillib import MyNewUtils
+from kbutillib import KBUtilLib
 
 class TestMyNewUtils:
-    def test_initialization(self):
-        utils = MyNewUtils()
-        assert utils is not None
+    def test_facade_construction(self):
+        kbu = KBUtilLib()
+        assert kbu.my_new is not None
+        # Lazy singleton:
+        assert kbu.my_new is kbu.my_new
 
     def test_my_method(self):
-        utils = MyNewUtils()
-        result = utils.my_method("test_param")
+        kbu = KBUtilLib()
+        result = kbu.my_new.my_method("test_param")
         assert result is not None
 ```
+
+**5. Reference shape:** read `src/kbutillib/kb_job_utils/utils.py` — the composition-pattern pilot. Match its style.
 
 ### Running Tests
 
@@ -227,11 +250,12 @@ git submodule update --remote
 
 When helping developers:
 
-1. **Show complete implementations** - Provide working, tested code
-2. **Follow conventions** - Use established naming and patterns
-3. **Include tests** - Always suggest tests for new code
-4. **Reference existing modules** - Point to similar implementations
-5. **Load context files** - Use architecture documentation for guidance
+1. **Show complete implementations** — Provide working, tested code
+2. **Follow the composition convention** — `*Impl` classes hold `SharedEnvUtils`; logger via `self.env.logger`; external clients lazy. NEVER multi-inherit utilities.
+3. **Include tests** — Always suggest tests for new code; smoke tests via `KBUtilLib` facade
+4. **Reference KBJobUtils** — `src/kbutillib/kb_job_utils/` is the canonical composition reference shape
+5. **Load context files** — Use architecture documentation for guidance
+6. **Wire new utilities into the facade** — every new `*Impl` gets a lazy property in `toolkit.py`
 
 ## Response Format
 

@@ -4,55 +4,86 @@ Comprehensive architecture documentation for KBUtilLib developers.
 
 ## Core Design Philosophy
 
-KBUtilLib is built on three core principles:
+KBUtilLib (post-2026-05) is built on three core principles:
 
-1. **Composability** - Utility classes combine via multiple inheritance
-2. **Modularity** - Each utility is independent and self-contained
-3. **Simplicity** - Focused classes with clear responsibilities
+1. **Composition over inheritance** — Utility classes (`*Impl`) **hold** a `SharedEnvUtils` and any composed sibling Impls; they do NOT inherit from a common ancestor chain. The `KBUtilLib` facade in `toolkit.py` lazy-instantiates and wires them.
+2. **Modularity** — Each utility is independent and self-contained. Sub-utilities depend on each other only via explicit constructor parameters.
+3. **Simplicity** — Focused classes with clear responsibilities, lazy external clients, single-source-of-truth env.
+
+> **Architectural history:** Pre-2026-05, KBUtilLib used multi-inheritance. The 2026-05 composition refactor (PRD: `agent-io/prds/kbutillib-composition-refactor/fullprompt.md`) inverted the design. KBJobUtils (`src/kbutillib/kb_job_utils/`) was the pilot module; the rest of the codebase followed.
 
 ## Repository Structure
 
 ```
 KBUtilLib/
-├── src/kbutillib/              # Main package (37 modules, ~16,800 lines)
-│   ├── __init__.py             # Public exports and __all__
-│   ├── __main__.py             # CLI entry point (Click-based)
+├── src/kbutillib/                    # Main package (~30 modules)
+│   ├── __init__.py                   # Public exports + legacy class-name aliases
+│   ├── __main__.py                   # CLI entry point (Click-based) — `kbu`
+│   ├── toolkit.py                    # KBUtilLib facade with lazy sub-utility properties
 │   │
 │   ├── # Foundation Layer
-│   ├── base_utils.py           # BaseUtils - logging, provenance, common methods
-│   ├── shared_env_utils.py     # SharedEnvUtils - config, tokens, env vars
+│   ├── base_utils.py                 # BaseUtils - still inherited by SharedEnvUtils
+│   ├── shared_env_utils.py           # SharedEnvUtils - HELD by every *Impl, not inherited
 │   │
-│   ├── # KBase Integration Layer
-│   ├── kb_ws_utils.py          # KBWSUtils - Workspace Service API
-│   ├── kb_genome_utils.py      # KBGenomeUtils - genome analysis
-│   ├── kb_annotation_utils.py  # KBAnnotationUtils - annotations
-│   ├── kb_model_utils.py       # KBModelUtils - metabolic models
-│   ├── kb_reads_utils.py       # KBReadsUtils - reads/assemblies
-│   ├── kb_callback_utils.py    # KBCallbackUtils - callback services
-│   ├── kb_sdk_utils.py         # KBSDKUtils - SDK development
-│   ├── kb_uniprot_utils.py     # KBUniProtUtils - UniProt API
-│   ├── kb_plm_utils.py         # KBPLMUtils - protein language models
+│   ├── # Flat-module helpers (no class)
+│   ├── kbase_endpoints.py            # base_url, service_url, narrative_url
+│   ├── compartments.py               # compartment_types, normalize_compartment
+│   ├── model_directionality.py       # direction_conversion + helpers
+│   ├── model_helpers.py              # _check_and_convert_model, _parse_id (canonical)
 │   │
-│   ├── # ModelSEED Integration Layer
-│   ├── ms_biochem_utils.py     # MSBiochemUtils - biochemistry DB
-│   ├── ms_fba_utils.py         # MSFBAUtils - FBA operations
-│   ├── ms_reconstruction_utils.py  # MSReconstructionUtils - model building
+│   ├── # KBase Integration Layer (*Impl classes)
+│   ├── kb_ws_utils.py                # KBWSUtilsImpl - Workspace Service API
+│   ├── kb_genome_utils.py            # KBGenomeUtilsImpl
+│   ├── kb_annotation_utils.py        # KBAnnotationUtilsImpl
+│   ├── kb_model_utils.py             # KBModelUtilsImpl
+│   ├── kb_reads_utils.py             # KBReadsUtilsImpl
+│   ├── kb_callback_utils.py          # KBCallbackUtilsImpl
+│   ├── kb_sdk_utils.py               # KBSDKUtilsImpl
+│   ├── kb_uniprot_utils.py           # KBUniProtUtilsImpl
+│   ├── kb_plm_utils.py               # KBPLMUtilsImpl
+│   ├── kb_berdl_utils.py             # KBBERDLUtilsImpl
 │   │
-│   ├── # AI/ML Layer
-│   ├── argo_utils.py           # ArgoUtils - LLM integration
-│   ├── ai_curation_utils.py    # AICurationUtils - AI curation
+│   ├── # ModelSEED Integration Layer (*Impl)
+│   ├── ms_biochem_utils.py           # MSBiochemUtilsImpl
+│   ├── ms_fba_utils.py               # MSFBAUtilsImpl  (preserves AP3 carve-outs)
+│   ├── ms_reconstruction_utils.py    # MSReconstructionUtilsImpl
 │   │
-│   ├── # External APIs Layer
-│   ├── bvbrc_utils.py          # BVBRCUtils - BV-BRC API
-│   ├── patric_ws_utils.py      # PatricWSUtils - PATRIC workspace
-│   ├── rcsb_pdb_utils.py       # RCSBPDBUtils - PDB structures
+│   ├── # AI/ML Layer (*Impl)
+│   ├── argo_utils.py                 # ArgoUtilsImpl - LLM gateway (lazy client init)
+│   ├── ai_curation_utils.py          # AICurationUtilsImpl
+│   │
+│   ├── # External APIs Layer (*Impl)
+│   ├── bvbrc_utils.py                # BVBRCUtilsImpl
+│   ├── patric_ws_utils.py            # PatricWSUtilsImpl
+│   ├── rcsb_pdb_utils.py             # RCSBPDBUtilsImpl
 │   │
 │   ├── # Utility Layer
-│   ├── notebook_utils.py       # NotebookUtils - Jupyter enhancements
-│   ├── escher_utils.py         # EscherUtils - visualization
-│   ├── skani_utils.py          # SKANIUtils - genome distance
-│   ├── model_standardization_utils.py  # Model standardization
-│   └── thermo_utils.py         # ThermoUtils - thermodynamics
+│   ├── escher_utils.py               # EscherUtilsImpl
+│   ├── skani_utils.py                # SKANIUtilsImpl
+│   ├── mmseqs_utils.py               # MMSeqsUtilsImpl
+│   ├── model_standardization_utils.py # ModelStandardizationUtilsImpl
+│   ├── thermo_utils.py               # ThermoUtilsImpl
+│   │
+│   ├── # KBJobUtils package (composition reference)
+│   ├── kb_job_utils/
+│   │   ├── state.py                  # JobState, JobStatus, ChainStep, PipelineState
+│   │   ├── store.py                  # SQLite JobStore at ~/.kbjobs/kbjobs.db
+│   │   ├── utils.py                  # KBJobUtils + Watcher
+│   │   └── pipeline.py               # Linear chain support
+│   │
+│   ├── # Vendored clients
+│   ├── installed_clients/
+│   │   ├── WorkspaceClient.py
+│   │   ├── AbstractHandleClient.py
+│   │   ├── execution_engine2Client.py
+│   │   └── baseclient.py, authclient.py
+│   │
+│   ├── # Notebook engine
+│   ├── notebook/
+│   │   ├── session.py                # NotebookSession (with .kbu, .cache, .vectors)
+│   │   └── helpers/                  # Promoted helpers (compartment, reaction, fva)
+│   │
+│   └── cli/                          # `kbu init-notebook`, `kbu jobs`, `kbu jobdaemon`
 │
 ├── notebooks/                   # Example Jupyter notebooks
 │   ├── ConfigureEnvironment.ipynb
@@ -93,105 +124,74 @@ KBUtilLib/
 └── README.md                   # Project overview
 ```
 
-## Module Hierarchy
+## Architecture: composition graph
 
-### Inheritance Tree
+### KBUtilLib facade (toolkit.py)
 
 ```
-BaseUtils (base_utils.py)
-│
-│   Core functionality:
-│   - Logging (logger, log_info, log_debug, log_error)
-│   - Provenance tracking (initialize_call, provenance list)
-│   - Argument validation (validate_args)
-│   - Data I/O (save_util_data, load_util_data)
-│
-└── SharedEnvUtils (shared_env_utils.py)
-    │
-    │   Configuration management:
-    │   - Config file loading (load_config, config object)
-    │   - Token management (get_token, set_token)
-    │   - Environment variables
-    │
-    ├── KBWSUtils (kb_ws_utils.py)
-    │   │   KBase Workspace Service:
-    │   │   - Object retrieval/storage
-    │   │   - Type specs
-    │   │   - Workspace listing
-    │   │
-    │   ├── KBGenomeUtils (kb_genome_utils.py)
-    │   │       Genome analysis:
-    │   │       - Feature extraction
-    │   │       - Sequence translation
-    │   │       - Annotation access
-    │   │
-    │   ├── KBAnnotationUtils (kb_annotation_utils.py)
-    │   │       Annotation management:
-    │   │       - Ontology filtering
-    │   │       - EC/KEGG extraction
-    │   │       - Reaction mapping
-    │   │
-    │   ├── KBModelUtils (kb_model_utils.py)
-    │   │       Model operations:
-    │   │       - Model retrieval
-    │   │       - Reaction/metabolite access
-    │   │       - Template management
-    │   │
-    │   └── KBReadsUtils (kb_reads_utils.py)
-    │           Reads/assembly handling:
-    │           - Assembly objects
-    │           - ReadSet management
-    │
-    ├── PatricWSUtils (patric_ws_utils.py)
-    │       PATRIC workspace access
-    │
-    ├── MSBiochemUtils (ms_biochem_utils.py)
-    │       ModelSEED biochemistry:
-    │       - Compound/reaction search
-    │       - Database indexing
-    │
-    ├── MSFBAUtils (ms_fba_utils.py)
-    │       FBA operations:
-    │       - Run FBA/pFBA/FVA
-    │       - Media configuration
-    │       - Constraints
-    │
-    ├── MSReconstructionUtils (ms_reconstruction_utils.py)
-    │       Model reconstruction:
-    │       - Draft model building
-    │       - Gap-filling
-    │
-    ├── ArgoUtils (argo_utils.py)
-    │   │   LLM integration:
-    │   │   - Query Argo API
-    │   │   - Model selection
-    │   │
-    │   └── AICurationUtils (ai_curation_utils.py)
-    │           AI curation:
-    │           - Reaction curation
-    │           - Caching
-    │
-    ├── BVBRCUtils (bvbrc_utils.py)
-    │       BV-BRC API access
-    │
-    ├── KBUniProtUtils (kb_uniprot_utils.py)
-    │       UniProt REST API
-    │
-    ├── RCSBPDBUtils (rcsb_pdb_utils.py)
-    │       PDB structure access
-    │
-    ├── KBPLMUtils (kb_plm_utils.py)
-    │       Protein language models
-    │
-    └── SKANIUtils (skani_utils.py)
-            Genome distance computation
-
-# Independent utilities (not in SharedEnvUtils hierarchy)
-├── NotebookUtils (notebook_utils.py) - inherits BaseUtils
-├── EscherUtils (escher_utils.py) - inherits BaseUtils
-├── ModelStandardizationUtils - inherits BaseUtils
-└── ThermoUtils - inherits BaseUtils
+KBUtilLib (single class; held by callers)
+├── env: SharedEnvUtils (constructed once, shared across all sub-utilities)
+└── lazy properties (constructed on first access; held thereafter)
+    ├── ws → KBWSUtilsImpl(env)
+    ├── callback → KBCallbackUtilsImpl(env, ws)
+    ├── annotation → KBAnnotationUtilsImpl(env, ws, callback)
+    ├── biochem → MSBiochemUtilsImpl(env)
+    ├── model → KBModelUtilsImpl(env, ws, annotation, biochem)
+    ├── fba → MSFBAUtilsImpl(env, model)         # AP3 carve-outs preserved
+    ├── recon → MSReconstructionUtilsImpl(env, model)
+    ├── escher → EscherUtilsImpl(env, model, biochem)
+    ├── standardize → ModelStandardizationUtilsImpl(env, biochem)
+    ├── genome → KBGenomeUtilsImpl(env, ws)
+    ├── plm → KBPLMUtilsImpl(env, genome)
+    ├── bvbrc → BVBRCUtilsImpl(env, genome, annotation)
+    ├── reads → KBReadsUtilsImpl(env, ws)
+    ├── sdk → KBSDKUtilsImpl(env, ws)
+    ├── argo → ArgoUtilsImpl(env)
+    ├── curation → AICurationUtilsImpl(env, argo)
+    ├── thermo → ThermoUtilsImpl(env, biochem)
+    ├── mmseqs → MMSeqsUtilsImpl(env)
+    ├── skani → SKANIUtilsImpl(env)
+    ├── berdl → KBBERDLUtilsImpl(env)
+    ├── patric → PatricWSUtilsImpl(env)
+    ├── uniprot → KBUniProtUtilsImpl(env)
+    ├── pdb → RCSBPDBUtilsImpl(env)
+    ├── catalog → CatalogClient (standalone)
+    └── jobs → KBJobUtils(env)
 ```
+
+### Class structure (every `*Impl`)
+
+```python
+class XxxImpl:
+    def __init__(self, env: SharedEnvUtils, *deps) -> None:
+        self.env = env                      # held, not inherited
+        self.logger = env.logger            # delegated
+        self.<dep_name> = <dep>             # composed siblings
+        self._client = None                 # lazy external client
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = SomeRemoteClient(token=self.env.get_token("..."))
+        return self._client
+
+    def public_method(self, ...):
+        # Use self.env.* for config/tokens
+        # Use self.<dep_name>.* for cross-utility calls
+        # Use self.logger for logging
+        ...
+```
+
+### Legacy alias layer (for import compatibility)
+
+`__init__.py` exports both names:
+
+```python
+from .ms_fba_utils import MSFBAUtilsImpl
+MSFBAUtils = MSFBAUtilsImpl  # legacy alias
+```
+
+Existing `from kbutillib import MSFBAUtils` still resolves. But constructor signatures changed (composition takes deps explicitly), so `MSFBAUtils()` from old code may need updating. Always prefer the facade.
 
 ## Configuration System
 
@@ -234,49 +234,68 @@ tokens = {
 
 ## Provenance System
 
-Every method call can be tracked for reproducibility:
+`SharedEnvUtils` (held by every `*Impl`) tracks calls. Inside an Impl method:
 
 ```python
-class MyUtils(BaseUtils):
+class MyUtilsImpl:
+    def __init__(self, env: SharedEnvUtils) -> None:
+        self.env = env
+        self.logger = env.logger
+
     def my_method(self, param1):
-        # Start tracking
-        self.initialize_call("my_method", {"param1": param1})
-
-        # Method implementation
+        self.env.initialize_call("my_method", {"param1": param1})
         result = self._do_work(param1)
-
-        # Logged to provenance list
         return result
 
-# Access provenance
-utils = MyUtils()
-utils.my_method("test")
-print(utils.provenance)
+# Access provenance from the facade
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+kbu.my_new.my_method("test")
+print(kbu.env.provenance)
 # [{"method": "my_method", "params": {"param1": "test"}, "timestamp": "..."}]
 ```
 
 ## Export System
 
-The `__init__.py` uses try/except for optional dependencies:
+The `__init__.py` exports the facade, all `*Impl` classes, legacy aliases, and key flat-module helpers:
 
 ```python
 # src/kbutillib/__init__.py
 
-# Always available
+# Foundation
 from .base_utils import BaseUtils
 from .shared_env_utils import SharedEnvUtils
 
+# Facade (top-level entry point)
+from .toolkit import KBUtilLib
+
+# *Impl classes + legacy aliases
+from .kb_ws_utils import KBWSUtilsImpl
+from .ms_fba_utils import MSFBAUtilsImpl
+# ... etc for every module
+KBWSUtils = KBWSUtilsImpl     # legacy alias
+MSFBAUtils = MSFBAUtilsImpl   # legacy alias
+
+# KBJobUtils — composition pilot
+from .kb_job_utils import (
+    KBJobUtils, JobState, JobStatus,
+    PipelineState, PipelineStatus, ChainStep,
+)
+
 # Optional - may have missing dependencies
 try:
-    from .kb_plm_utils import KBPLMUtils
+    from .kb_plm_utils import KBPLMUtilsImpl
+    KBPLMUtils = KBPLMUtilsImpl
 except ImportError:
-    KBPLMUtils = None
+    KBPLMUtils = KBPLMUtilsImpl = None
 
 __all__ = [
-    "BaseUtils",
-    "SharedEnvUtils",
-    "KBPLMUtils",  # May be None
-    # ...
+    "BaseUtils", "SharedEnvUtils", "KBUtilLib",
+    "KBWSUtilsImpl", "KBWSUtils",  # both names exported
+    "MSFBAUtilsImpl", "MSFBAUtils",
+    "KBJobUtils", "JobState", "JobStatus",
+    "PipelineState", "PipelineStatus", "ChainStep",
+    # ... etc
 ]
 ```
 
@@ -450,17 +469,16 @@ docs/
 ### Standard Error Pattern
 ```python
 def my_method(self, required_param, optional_param=None):
-    # Validate required parameters
     if not required_param:
         raise ValueError("required_param is required")
 
     try:
         result = self._external_call(required_param)
     except ConnectionError as e:
-        self.log_error(f"Connection failed: {e}")
+        self.logger.error(f"Connection failed: {e}")
         raise
     except Exception as e:
-        self.log_error(f"Unexpected error: {e}")
+        self.logger.error(f"Unexpected error: {e}")
         raise
 
     return result
@@ -475,10 +493,14 @@ except ImportError:
     OptionalFeature = None
     HAS_OPTIONAL = False
 
-class MyUtils(BaseUtils):
+class MyUtilsImpl:
+    def __init__(self, env: SharedEnvUtils) -> None:
+        self.env = env
+        self.logger = env.logger
+
     def optional_method(self):
         if not HAS_OPTIONAL:
-            self.log_warning("Optional feature not available")
+            self.logger.warning("Optional feature not available")
             return None
         return OptionalFeature.do_something()
 ```

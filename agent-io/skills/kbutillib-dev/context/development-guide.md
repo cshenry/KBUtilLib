@@ -35,15 +35,18 @@ source .venv/bin/activate
 pip install -e ".[dev,notebooks]"
 ```
 
-## Adding a New Utility Module
+## Adding a New Utility Module (composition pattern)
 
 ### Step 1: Plan Your Module
 
 Before coding, determine:
-1. **Purpose**: What does this module do?
-2. **Parent class**: Which utility to inherit from?
-3. **Dependencies**: What external libraries needed?
-4. **API surface**: What methods will be public?
+1. **Purpose** — What does this module do?
+2. **Composed dependencies** — Which sibling `*Impl` classes does it need? (e.g., `env`, `ws`, `biochem`). Match the pattern in PRD §6.3.
+3. **External dependencies** — What pip libraries / vendored clients?
+4. **API surface** — What methods will be public?
+5. **Facade attribute name** — Pick a short attribute (e.g., `kbu.<name>`); avoid overlap with existing 25.
+
+Reference shape: read `src/kbutillib/kb_job_utils/utils.py` first.
 
 ### Step 2: Create the Module File
 
@@ -54,290 +57,242 @@ Before coding, determine:
 This module provides utilities for [purpose].
 
 Example:
-    >>> from kbutillib import MyNewUtils
-    >>> utils = MyNewUtils()
-    >>> result = utils.my_method("param")
+    >>> from kbutillib import KBUtilLib
+    >>> kbu = KBUtilLib()
+    >>> result = kbu.my_new.my_method("param")
 """
 
-from typing import Any, Dict, List, Optional
-from .shared_env_utils import SharedEnvUtils  # or appropriate parent
+from typing import Any, Dict, Optional
+
+from .shared_env_utils import SharedEnvUtils
+# Composed sibling Impls (if any):
+# from .kb_ws_utils import KBWSUtilsImpl
 
 
-class MyNewUtils(SharedEnvUtils):
+class MyNewUtilsImpl:
     """Utility class for [purpose].
 
-    This class provides methods for [description].
+    Composes SharedEnvUtils (held, NOT inherited). External clients
+    constructed lazily on first access.
 
     Attributes:
-        some_attribute: Description of attribute.
+        env: SharedEnvUtils instance held for config + tokens + logger.
+        logger: Delegated to env.logger.
 
     Example:
-        >>> utils = MyNewUtils(config_file="my_config.yaml")
-        >>> utils.my_method("test")
+        >>> from kbutillib import KBUtilLib
+        >>> kbu = KBUtilLib(env=SharedEnvUtils(config_file="my_config.yaml"))
+        >>> kbu.my_new.my_method("test")
     """
 
     def __init__(
         self,
-        config_file: Optional[str] = None,
-        **kwargs: Any
+        env: SharedEnvUtils,
+        # ws: KBWSUtilsImpl | None = None,  # if composed
+        **kwargs: Any,
     ) -> None:
-        """Initialize MyNewUtils.
+        """Initialize MyNewUtilsImpl.
 
         Args:
-            config_file: Optional path to configuration file.
-            **kwargs: Additional arguments passed to parent class.
+            env: Shared environment (config, tokens, logger).
+            ws: Composed workspace utility (if needed).
         """
-        super().__init__(config_file=config_file, **kwargs)
-        self.log_info("MyNewUtils initialized")
+        self.env = env
+        self.logger = env.logger
+        # self.ws = ws
 
-        # Module-specific initialization
+        # External-client placeholders (lazy)
+        self._client = None
+
+        # Module-specific state
         self._cache: Dict[str, Any] = {}
+
+    @property
+    def client(self):
+        """Lazy external client; constructed on first access."""
+        if self._client is None:
+            self._client = SomeRemoteClient(token=self.env.get_token("my_service"))
+        return self._client
 
     def my_method(
         self,
         required_param: str,
-        optional_param: Optional[int] = None
+        optional_param: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Brief description of method.
 
-        Longer description explaining what the method does,
-        any important behaviors, and edge cases.
-
         Args:
-            required_param: Description of this parameter.
-            optional_param: Description of optional parameter.
-                Defaults to None.
+            required_param: Description.
+            optional_param: Description. Defaults to None.
 
         Returns:
-            Dictionary containing:
-                - key1: Description
-                - key2: Description
+            Dictionary containing key1, key2.
 
         Raises:
             ValueError: When required_param is empty.
-            ConnectionError: When external service unavailable.
 
         Example:
-            >>> utils = MyNewUtils()
-            >>> result = utils.my_method("test", optional_param=5)
-            >>> print(result["key1"])
+            >>> kbu.my_new.my_method("test", optional_param=5)
         """
-        # Track method call for provenance
-        self.initialize_call("my_method", {
+        self.env.initialize_call("my_method", {
             "required_param": required_param,
-            "optional_param": optional_param
+            "optional_param": optional_param,
         })
 
-        # Validate arguments
         if not required_param:
             raise ValueError("required_param cannot be empty")
 
-        # Check cache
         cache_key = f"my_method:{required_param}"
         if cache_key in self._cache:
-            self.log_debug(f"Cache hit: {cache_key}")
+            self.logger.debug(f"Cache hit: {cache_key}")
             return self._cache[cache_key]
 
-        # Main implementation
-        self.log_info(f"Processing: {required_param}")
+        self.logger.info(f"Processing: {required_param}")
         result = self._do_actual_work(required_param, optional_param)
-
-        # Cache result
         self._cache[cache_key] = result
-
         return result
 
-    def _do_actual_work(
-        self,
-        param1: str,
-        param2: Optional[int]
-    ) -> Dict[str, Any]:
-        """Internal method for actual processing.
-
-        Private methods start with underscore and don't need
-        full docstrings unless complex.
-        """
-        # Implementation here
+    def _do_actual_work(self, param1: str, param2: Optional[int]) -> Dict[str, Any]:
         return {"key1": param1, "key2": param2 or 0}
+
+
+# Legacy alias for import compatibility (constructor signature changed)
+MyNewUtils = MyNewUtilsImpl
 ```
 
-### Step 3: Add to Package Exports
+### Step 3: Wire into the KBUtilLib facade
+
+```python
+# src/kbutillib/toolkit.py
+
+class KBUtilLib:
+    def __init__(self, env: SharedEnvUtils | None = None, **env_kwargs):
+        # ... existing __init__ ...
+        self._my_new = None  # add this line
+
+    # Add a lazy property:
+    @property
+    def my_new(self) -> "MyNewUtilsImpl":
+        if self._my_new is None:
+            from .my_new_utils import MyNewUtilsImpl
+            self._my_new = MyNewUtilsImpl(self.env)
+            # If your *Impl composes other siblings, pass them here:
+            # self._my_new = MyNewUtilsImpl(self.env, self.ws)
+        return self._my_new
+```
+
+### Step 4: Add to Package Exports
 
 ```python
 # src/kbutillib/__init__.py
 
-# Add import with try/except for optional dependencies
+# Add import with try/except for optional deps:
 try:
-    from .my_new_utils import MyNewUtils
+    from .my_new_utils import MyNewUtilsImpl
+    MyNewUtils = MyNewUtilsImpl  # legacy alias
 except ImportError as e:
     import logging
-    logging.getLogger(__name__).debug(f"MyNewUtils not available: {e}")
-    MyNewUtils = None
+    logging.getLogger(__name__).debug(f"MyNewUtilsImpl not available: {e}")
+    MyNewUtilsImpl = MyNewUtils = None
 
-# Add to __all__
 __all__ = [
     # ... existing exports ...
-    "MyNewUtils",
+    "MyNewUtilsImpl", "MyNewUtils",
 ]
 ```
 
-### Step 4: Write Tests
+### Step 5: Write Tests
 
 ```python
 # tests/test_my_new_utils.py
-"""Tests for MyNewUtils."""
+"""Tests for MyNewUtilsImpl."""
 
 import pytest
-from kbutillib import MyNewUtils
+from kbutillib import KBUtilLib, MyNewUtilsImpl
 
 
-class TestMyNewUtils:
-    """Test suite for MyNewUtils class."""
-
+class TestMyNewUtilsImpl:
     @pytest.fixture
-    def utils(self):
-        """Create MyNewUtils instance for testing."""
-        return MyNewUtils()
+    def kbu(self):
+        return KBUtilLib()
 
-    def test_initialization(self, utils):
-        """Test that utils initializes correctly."""
-        assert utils is not None
-        assert hasattr(utils, 'logger')
+    def test_facade_construction(self, kbu):
+        assert kbu.my_new is not None
+        assert isinstance(kbu.my_new, MyNewUtilsImpl)
 
-    def test_initialization_with_config(self, tmp_path):
-        """Test initialization with config file."""
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text("key: value\n")
-        utils = MyNewUtils(config_file=str(config_file))
-        assert utils is not None
+    def test_facade_lazy_singleton(self, kbu):
+        assert kbu.my_new is kbu.my_new  # cached
 
-    def test_my_method_basic(self, utils):
-        """Test my_method with valid input."""
-        result = utils.my_method("test_param")
-        assert result is not None
-        assert "key1" in result
+    def test_my_method_basic(self, kbu):
+        result = kbu.my_new.my_method("test_param")
         assert result["key1"] == "test_param"
 
-    def test_my_method_with_optional(self, utils):
-        """Test my_method with optional parameter."""
-        result = utils.my_method("test", optional_param=42)
+    def test_my_method_with_optional(self, kbu):
+        result = kbu.my_new.my_method("test", optional_param=42)
         assert result["key2"] == 42
 
-    def test_my_method_empty_param_raises(self, utils):
-        """Test that empty required_param raises ValueError."""
+    def test_my_method_empty_param_raises(self, kbu):
         with pytest.raises(ValueError, match="cannot be empty"):
-            utils.my_method("")
+            kbu.my_new.my_method("")
 
-    def test_my_method_caching(self, utils):
-        """Test that results are cached."""
-        result1 = utils.my_method("cached_param")
-        result2 = utils.my_method("cached_param")
-        assert result1 is result2  # Same object from cache
+    def test_my_method_caching(self, kbu):
+        result1 = kbu.my_new.my_method("cached_param")
+        result2 = kbu.my_new.my_method("cached_param")
+        assert result1 is result2
 
     @pytest.mark.parametrize("param,expected", [
-        ("a", "a"),
-        ("test", "test"),
-        ("longer_param", "longer_param"),
+        ("a", "a"), ("test", "test"), ("longer_param", "longer_param"),
     ])
-    def test_my_method_various_inputs(self, utils, param, expected):
-        """Test my_method with various inputs."""
-        result = utils.my_method(param)
+    def test_my_method_various_inputs(self, kbu, param, expected):
+        result = kbu.my_new.my_method(param)
         assert result["key1"] == expected
 
 
-class TestMyNewUtilsIntegration:
-    """Integration tests for MyNewUtils."""
+class TestMyNewUtilsImplDirect:
+    """Tests bypassing the facade (for unit-testing in isolation)."""
 
-    @pytest.mark.integration
-    def test_with_real_service(self):
-        """Test integration with external service."""
-        pytest.skip("Requires external service")
+    def test_direct_construction(self):
+        from kbutillib import SharedEnvUtils
+        env = SharedEnvUtils()
+        impl = MyNewUtilsImpl(env)
+        assert impl.env is env
+        assert impl.logger is env.logger
 ```
 
-### Step 5: Add Documentation
+### Step 6: Add Documentation
 
 ```markdown
 # docs/modules/my_new_utils.md
 
-# MyNewUtils
+# MyNewUtilsImpl
 
-Utility class for [purpose].
+Utility class for [purpose] (composition pattern).
 
 ## Overview
 
-MyNewUtils provides functionality for [description]. It inherits from
-SharedEnvUtils, giving access to configuration and token management.
-
-## Installation
-
-MyNewUtils is included in the base kbutillib package:
-
-```python
-from kbutillib import MyNewUtils
-```
+`MyNewUtilsImpl` holds a `SharedEnvUtils` and is exposed as `kbu.my_new`
+on the `KBUtilLib` facade. Legacy alias `MyNewUtils` remains for
+import compatibility.
 
 ## Quick Start
 
 ```python
-from kbutillib import MyNewUtils
-
-# Initialize
-utils = MyNewUtils()
-
-# Basic usage
-result = utils.my_method("parameter")
-print(result)
-```
-
-## Configuration
-
-MyNewUtils uses the standard configuration system:
-
-```yaml
-# ~/kbutillib_config.yaml
-my_new_utils:
-  setting1: value1
-  setting2: value2
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+result = kbu.my_new.my_method("parameter")
 ```
 
 ## API Reference
 
-### my_method(required_param, optional_param=None)
-
+### my_method(required_param, optional_param=None) → dict
 Brief description.
 
-**Parameters:**
-- `required_param` (str): Description
-- `optional_param` (int, optional): Description
-
-**Returns:**
-- dict: Result dictionary with keys...
-
-**Example:**
-```python
-result = utils.my_method("test", optional_param=5)
-```
-
-## Composition Examples
-
-MyNewUtils can be combined with other utilities:
-
-```python
-from kbutillib import MyNewUtils, KBGenomeUtils
-
-class CustomTools(MyNewUtils, KBGenomeUtils):
-    pass
-
-tools = CustomTools()
-```
-
 ## See Also
-
-- [SharedEnvUtils](shared_env_utils.md) - Parent class
-- [Related utility](related.md)
+- [Architecture](../architecture.md) — composition pattern
+- [`KBJobUtils`](kb_job_utils.md) — composition reference shape
 ```
 
-### Step 6: Update README
+### Step 7: Update README
 
 Add a brief mention to the main README.md if the module is significant.
 
@@ -449,59 +404,75 @@ git submodule update --remote
 git submodule status
 ```
 
-## Common Development Patterns
+## Common Development Patterns (composition)
 
-### Inheriting from BaseUtils
-```python
-from .base_utils import BaseUtils
-
-class MyUtils(BaseUtils):
-    def my_method(self):
-        self.initialize_call("my_method", {})
-        self.log_info("Starting...")
-        # work
-        self.log_debug("Details...")
-        return result
-```
-
-### Inheriting from SharedEnvUtils
+### Basic *Impl shape
 ```python
 from .shared_env_utils import SharedEnvUtils
 
-class MyUtils(SharedEnvUtils):
+class MyUtilsImpl:
+    def __init__(self, env: SharedEnvUtils) -> None:
+        self.env = env
+        self.logger = env.logger
+
     def my_method(self):
-        # Access config
-        setting = self.get_config_value("my.setting")
-
-        # Access token
-        token = self.get_token("kbase")
-
+        self.env.initialize_call("my_method", {})
+        self.logger.info("Starting...")
+        # work
+        self.logger.debug("Details...")
         return result
 ```
 
-### HTTP Client Pattern
+### Composing sibling Impls
+```python
+class MyAnnotationUtilsImpl:
+    def __init__(
+        self,
+        env: SharedEnvUtils,
+        ws: "KBWSUtilsImpl",
+        biochem: "MSBiochemUtilsImpl",
+    ) -> None:
+        self.env = env
+        self.logger = env.logger
+        self.ws = ws
+        self.biochem = biochem
+
+    def annotate_genome(self, genome_ref):
+        genome = self.ws.get_object(genome_ref)
+        # Use composed sibling: self.biochem.search_compounds(...)
+        ...
+```
+
+The facade wires deps automatically (see `toolkit.py` lazy properties).
+
+### HTTP client pattern (with lazy construction)
 ```python
 import requests
 from .shared_env_utils import SharedEnvUtils
 
-class MyAPIUtils(SharedEnvUtils):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._session = requests.Session()
-        self._base_url = self.get_config_value("my_api.endpoint")
+class MyAPIUtilsImpl:
+    def __init__(self, env: SharedEnvUtils) -> None:
+        self.env = env
+        self.logger = env.logger
+        self._session: requests.Session | None = None
+
+    @property
+    def session(self) -> requests.Session:
+        if self._session is None:
+            self._session = requests.Session()
+        return self._session
+
+    @property
+    def base_url(self) -> str:
+        return self.env.get_config_value("my_api.endpoint")
 
     def _request(self, method, endpoint, **kwargs):
-        """Make authenticated request."""
-        url = f"{self._base_url}/{endpoint}"
+        url = f"{self.base_url}/{endpoint}"
         headers = kwargs.pop("headers", {})
-
-        token = self.get_token("my_api")
+        token = self.env.get_token("my_api")
         if token:
             headers["Authorization"] = f"Bearer {token}"
-
-        response = self._session.request(
-            method, url, headers=headers, **kwargs
-        )
+        response = self.session.request(method, url, headers=headers, **kwargs)
         response.raise_for_status()
         return response.json()
 
@@ -512,11 +483,11 @@ class MyAPIUtils(SharedEnvUtils):
 ### Caching Pattern
 ```python
 from functools import lru_cache
-from .base_utils import BaseUtils
 
-class CachedUtils(BaseUtils):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+class CachedUtilsImpl:
+    def __init__(self, env: SharedEnvUtils) -> None:
+        self.env = env
+        self.logger = env.logger
         self._cache = {}
 
     def get_with_cache(self, key):
@@ -532,6 +503,21 @@ class CachedUtils(BaseUtils):
         """Uses built-in LRU cache."""
         return self._fetch(key)
 ```
+
+### KBJobUtils package layout (multi-file Impl)
+
+When an Impl is too big for one file, follow the KBJobUtils pattern:
+
+```
+src/kbutillib/my_complex_utils/
+├── __init__.py                     # exports the *Impl class + state types
+├── state.py                        # @dataclass for state objects + enums
+├── store.py                        # SQLite or other persistence
+├── utils.py                        # the *Impl class (main API)
+└── (other.py)                      # optional: workers, helpers
+```
+
+Reference: `src/kbutillib/kb_job_utils/`. The package's `__init__.py` re-exports the public surface; the facade only sees the package-level imports.
 
 ## Debugging Tips
 
@@ -556,12 +542,13 @@ import pdb; pdb.set_trace()
 
 ### Inspect Provenance
 ```python
-utils = MyUtils()
-utils.my_method("test")
-utils.another_method("param")
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+kbu.my_new.my_method("test")
+kbu.my_new.another_method("param")
 
-# See all tracked calls
-for call in utils.provenance:
+# Provenance lives on the held SharedEnvUtils
+for call in kbu.env.provenance:
     print(f"{call['method']}: {call['params']}")
 ```
 
@@ -569,12 +556,14 @@ for call in utils.provenance:
 
 Before submitting a PR:
 
-- [ ] All tests pass: `uv run pytest`
+- [ ] All tests pass: `uv run pytest` (incl. `tests/test_composition_smoke.py`)
+- [ ] New `*Impl` follows composition pattern — holds `env: SharedEnvUtils`, NOT inheriting
+- [ ] New `*Impl` wired into `KBUtilLib` facade in `toolkit.py` as a lazy property
+- [ ] Legacy alias added in `__init__.py` (`MyUtils = MyUtilsImpl`)
 - [ ] Linting passes: `uv run ruff check src/`
 - [ ] Types check: `uv run mypy src/kbutillib/`
-- [ ] New code has tests
+- [ ] New code has tests (both via `KBUtilLib()` facade and direct `Impl` construction)
 - [ ] Docstrings follow Google style
-- [ ] Module added to `__init__.py`
 - [ ] README updated if adding major feature
 - [ ] No secrets in code
 
@@ -583,9 +572,17 @@ Before submitting a PR:
 ### Import Errors
 ```python
 # Check if module is available
-from kbutillib import MyUtils
-if MyUtils is None:
+from kbutillib import MyUtilsImpl
+if MyUtilsImpl is None:
     print("Module not available - check dependencies")
+
+# Or via facade — accessing the property triggers import
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+try:
+    kbu.my_new
+except (ImportError, AttributeError) as e:
+    print(f"Module not loaded: {e}")
 ```
 
 ### Submodule Issues

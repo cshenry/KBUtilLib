@@ -2,38 +2,49 @@
 
 Complete reference for all utility modules in KBUtilLib.
 
-## Module Hierarchy
+> **Architecture note (2026-05):** KBUtilLib was refactored from multi-inheritance to **composition**. Each utility class is now `*Impl` (e.g. `MSFBAUtilsImpl`, `KBWSUtilsImpl`) and **holds** a `SharedEnvUtils` rather than inheriting from it. The `KBUtilLib` facade in `src/kbutillib/toolkit.py` lazy-instantiates all sub-utilities and wires composed dependencies automatically.
+> Legacy class names (`KBWSUtils`, `MSFBAUtils`, etc.) are still exported as aliases in `__init__.py` for import compatibility, but constructor signatures changed — prefer the facade.
+
+## Composition graph (PRD §6.3)
+
+The `KBUtilLib` facade exposes 25 sub-utilities as lazy properties. Each `*Impl` holds `SharedEnvUtils` and any composed sibling Impls per the table below.
 
 ```
-BaseUtils (foundation)
-├── SharedEnvUtils (configuration & tokens)
-│   ├── KBWSUtils (KBase Workspace)
-│   │   ├── KBGenomeUtils (genome analysis)
-│   │   ├── KBAnnotationUtils (annotations)
-│   │   ├── KBModelUtils (metabolic models)
-│   │   └── KBReadsUtils (reads/assemblies)
-│   ├── PatricWSUtils (PATRIC Workspace)
-│   ├── MSBiochemUtils (ModelSEED biochemistry)
-│   ├── MSFBAUtils (FBA analysis)
-│   ├── MSReconstructionUtils (model reconstruction)
-│   ├── ArgoUtils (LLM integration)
-│   ├── AICurationUtils (AI curation)
-│   ├── BVBRCUtils (BV-BRC API)
-│   ├── KBUniProtUtils (UniProt API)
-│   ├── RCSBPDBUtils (PDB structures)
-│   ├── KBPLMUtils (protein language models)
-│   └── SKANIUtils (genome distance)
-├── EscherUtils (visualization)
-├── NotebookUtils (Jupyter enhancements)
-├── ModelStandardizationUtils (model standardization)
-└── ThermoUtils (thermodynamics)
+KBUtilLib (toolkit.py)
+├── env: SharedEnvUtils
+└── lazy properties:
+    ├── ws → KBWSUtilsImpl(env)
+    ├── callback → KBCallbackUtilsImpl(env, ws)
+    ├── annotation → KBAnnotationUtilsImpl(env, ws, callback)
+    ├── biochem → MSBiochemUtilsImpl(env)
+    ├── model → KBModelUtilsImpl(env, ws, annotation, biochem)
+    ├── fba → MSFBAUtilsImpl(env, model)
+    ├── recon → MSReconstructionUtilsImpl(env, model)
+    ├── escher → EscherUtilsImpl(env, model, biochem)
+    ├── standardize → ModelStandardizationUtilsImpl(env, biochem)
+    ├── genome → KBGenomeUtilsImpl(env, ws)
+    ├── plm → KBPLMUtilsImpl(env, genome)
+    ├── bvbrc → BVBRCUtilsImpl(env, genome, annotation)
+    ├── reads → KBReadsUtilsImpl(env, ws)
+    ├── sdk → KBSDKUtilsImpl(env, ws)
+    ├── argo → ArgoUtilsImpl(env)
+    ├── curation → AICurationUtilsImpl(env, argo)
+    ├── thermo → ThermoUtilsImpl(env, biochem)
+    ├── mmseqs → MMSeqsUtilsImpl(env)
+    ├── skani → SKANIUtilsImpl(env)
+    ├── berdl → KBBERDLUtilsImpl(env)
+    ├── patric → PatricWSUtilsImpl(env)
+    ├── uniprot → KBUniProtUtilsImpl(env)
+    ├── pdb → RCSBPDBUtilsImpl(env)
+    ├── catalog → CatalogClient (standalone)
+    └── jobs → KBJobUtils(env)  # composition reference
 ```
 
 ## Foundation Layer
 
 ### BaseUtils
 **Location:** `src/kbutillib/base_utils.py`
-**Purpose:** Base class providing core functionality for all utilities.
+**Purpose:** Base class still inherited where appropriate (e.g. `SharedEnvUtils`). Not part of `*Impl` chain — the new pattern composes `SharedEnvUtils` rather than inheriting from `BaseUtils`.
 
 **Key Methods:**
 - `initialize_call(method_name, params)` - Start provenance tracking
@@ -47,9 +58,9 @@ BaseUtils (foundation)
 - `provenance` - List of tracked method calls
 
 ### SharedEnvUtils
-**Location:** `src/kbutillib/shared_env_utils.py` (~500 lines)
+**Location:** `src/kbutillib/shared_env_utils.py`
 **Inherits:** BaseUtils
-**Purpose:** Configuration and authentication management.
+**Purpose:** Configuration and authentication management. **HELD by every `*Impl`** — never inherit from this in new code.
 
 **Key Methods:**
 - `load_config(config_file=None)` - Load YAML configuration
@@ -67,11 +78,28 @@ BaseUtils (foundation)
 - `argo` - Argo LLM service
 - Custom namespaces as needed
 
+## Flat-module helpers (no class — direct function imports)
+
+Extracted during the composition refactor for shared use across `*Impl` classes:
+
+### `kbase_endpoints.py`
+URL helpers: `base_url`, `service_url`, `narrative_url`, `env_from_url`. Used by every `*Impl` that hits a KBase service.
+
+### `model_directionality.py`
+Reaction direction analysis. Replaces the broken `KBModelUtils.model_reaction_directionality_analysis` and centralizes `direction_conversion`. Functions: `directionality_from_bounds`, `biochem_directionality`, `combine_directionality_signals`.
+
+### `model_helpers.py`
+Canonical `_check_and_convert_model(model) -> MSModelUtil` and `_parse_id(object_or_id) -> tuple`. Replaces the previous triplicate copies in `kb_model_utils`, `ms_biochem_utils`, `thermo_utils`.
+
+### `compartments.py`
+`compartment_types` mapping (the complete version) and `normalize_compartment(compartment) -> str`.
+
 ## Data Access Layer
 
-### KBWSUtils
-**Location:** `src/kbutillib/kb_ws_utils.py` (~595 lines)
-**Inherits:** SharedEnvUtils
+### KBWSUtilsImpl (legacy alias: `KBWSUtils`)
+**Location:** `src/kbutillib/kb_ws_utils.py`
+**Composes:** `env: SharedEnvUtils`
+**Facade attribute:** `kbu.ws`
 **Purpose:** KBase Workspace Service API access.
 
 **Key Methods:**
@@ -80,15 +108,17 @@ BaseUtils (foundation)
 - `list_objects(workspace_id, type_filter=None)` - List workspace objects
 - `get_object_info(workspace_id, object_ref)` - Get object metadata
 - `get_type_spec(type_name)` - Get type specification
+- `is_ref(s)` - Check if string is a workspace reference
 
 **Workspace Reference Formats:**
 - `ws_id/obj_name` - By workspace ID and name
 - `ws_id/obj_name/version` - Specific version
 - `obj_id` - Direct object ID
 
-### PatricWSUtils
-**Location:** `src/kbutillib/patric_ws_utils.py` (~609 lines)
-**Inherits:** SharedEnvUtils
+### PatricWSUtilsImpl (legacy alias: `PatricWSUtils`)
+**Location:** `src/kbutillib/patric_ws_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.patric`
 **Purpose:** PATRIC/BV-BRC Workspace access.
 
 **Key Methods:**
@@ -99,28 +129,32 @@ BaseUtils (foundation)
 
 ## Bioinformatics Analysis Layer
 
-### KBGenomeUtils
-**Location:** `src/kbutillib/kb_genome_utils.py` (~770 lines)
-**Inherits:** KBWSUtils
+### KBGenomeUtilsImpl (legacy alias: `KBGenomeUtils`)
+**Location:** `src/kbutillib/kb_genome_utils.py`
+**Composes:** `env`, `ws`
+**Facade attribute:** `kbu.genome`
 **Purpose:** Genome data analysis and manipulation.
 
 **Key Methods:**
-- `get_genome(workspace_id, genome_ref)` - Retrieve genome object
+- `get_genome(workspace_id, genome_ref)` - Retrieve genome object (uses `self.ws.get_object`)
 - `get_features(genome)` - Get all features
 - `get_features_by_type(genome, feature_type)` - Filter by type (CDS, rRNA, etc.)
 - `get_features_by_function(genome, function_pattern)` - Filter by function
 - `translate_feature(feature)` - DNA to protein translation
 - `translate_features(features)` - Bulk translation
 - `get_contig_sequences(genome)` - Get contig sequences
+- `reverse_complement(seq)` - Reverse complement
+- `translate_sequence(seq)` - Translate DNA to protein
 
 **Feature Types:**
 - `CDS` - Coding sequences
 - `rRNA`, `tRNA` - RNA features
 - `gene`, `mRNA` - Gene annotations
 
-### KBAnnotationUtils
-**Location:** `src/kbutillib/kb_annotation_utils.py` (~940 lines)
-**Inherits:** KBWSUtils
+### KBAnnotationUtilsImpl (legacy alias: `KBAnnotationUtils`)
+**Location:** `src/kbutillib/kb_annotation_utils.py`
+**Composes:** `env`, `ws`, `callback`
+**Facade attribute:** `kbu.annotation`
 **Purpose:** Gene and protein annotation management.
 
 **Key Methods:**
@@ -130,27 +164,26 @@ BaseUtils (foundation)
 - `get_ec_numbers(feature)` - Extract EC numbers
 - `get_kegg_ids(feature)` - Extract KEGG identifiers
 - `map_function_to_reactions(function)` - Map functional role to reactions
+- `translate_term_to_modelseed(term)` - Term → ModelSEED ID
 
-**Supported Ontologies:**
-- EC numbers
-- KEGG
-- MetaCyc
-- UniProt
-- GO terms
+**Supported Ontologies:** EC, KEGG, MetaCyc, UniProt, GO
 
-### MSBiochemUtils
-**Location:** `src/kbutillib/ms_biochem_utils.py` (~859 lines)
-**Inherits:** SharedEnvUtils
+### MSBiochemUtilsImpl (legacy alias: `MSBiochemUtils`)
+**Location:** `src/kbutillib/ms_biochem_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.biochem`
 **Purpose:** ModelSEED biochemistry database access.
 
 **Key Methods:**
 - `search_compounds(query)` - Search compounds by name/ID/formula
 - `search_reactions(query)` - Search reactions by name/equation
-- `get_compound(compound_id)` - Get compound by ID (cpd00001)
+- `get_compound_by_id(compound_id)` - Get compound by ID (cpd00001)
 - `get_reaction(reaction_id)` - Get reaction by ID (rxn00001)
 - `get_reaction_stoichiometry(reaction_id)` - Get stoichiometry dict
 - `search_by_formula(formula)` - Find compounds by molecular formula
 - `search_by_inchikey(inchikey)` - Find by structure
+- `reaction_directionality_from_bounds(reaction)` - Wraps `model_directionality.directionality_from_bounds`
+- `reaction_biochem_directionality(reaction)` - Wraps `model_directionality.biochem_directionality`
 
 **ID Formats:**
 - Compounds: `cpd#####` (e.g., cpd00001 = H2O)
@@ -158,9 +191,10 @@ BaseUtils (foundation)
 
 ## Metabolic Modeling Layer
 
-### KBModelUtils
-**Location:** `src/kbutillib/kb_model_utils.py` (~696 lines)
-**Inherits:** KBWSUtils
+### KBModelUtilsImpl (legacy alias: `KBModelUtils`)
+**Location:** `src/kbutillib/kb_model_utils.py`
+**Composes:** `env`, `ws`, `annotation`, `biochem`
+**Facade attribute:** `kbu.model`
 **Purpose:** Metabolic model analysis and manipulation.
 
 **Key Methods:**
@@ -178,28 +212,32 @@ BaseUtils (foundation)
 - `modelgenes` - List of genes
 - `biomasses` - Biomass objective functions
 
-### MSFBAUtils
-**Location:** `src/kbutillib/ms_fba_utils.py` (~685 lines)
-**Inherits:** SharedEnvUtils
+### MSFBAUtilsImpl (legacy alias: `MSFBAUtils`)
+**Location:** `src/kbutillib/ms_fba_utils.py`
+**Composes:** `env`, `model`
+**Facade attribute:** `kbu.fba`
 **Purpose:** Flux Balance Analysis operations.
 
 **Key Methods:**
-- `run_fba(model, media=None)` - Run FBA simulation
+- `run_fba(model, biomass_reaction="bio1", media=None)` - Run FBA simulation
 - `run_pfba(model)` - Parsimonious FBA
-- `run_fva(model, reactions=None)` - Flux Variability Analysis
+- `run_fva(model, reactions=None)` — **AP3 carve-out**: working FVA implementation; `cobra.flux_variability_analysis` is broken; do not replace.
 - `set_media(model, media_id)` - Configure growth media
 - `set_objective(model, reaction_id)` - Set objective function
 - `add_constraint(model, constraint)` - Add flux constraint
 - `set_fraction_of_optimum(model, fraction)` - Set optimality fraction
+- `analyzed_reaction_objective_coupling(model)` — **AP3 carve-out**: KO-impact-on-biomass; not the same operation as `cobra.single_reaction_deletion`.
+- `fit_flux_to_mutant_growth_rate_data(...)` — **AP3 carve-out**: specific science code; do NOT move into ModelSEEDpy.MSExpression.
 
 **Media Options:**
 - `Complete` - Rich media
 - `Minimal` - Minimal glucose
 - Custom media definitions
 
-### MSReconstructionUtils
-**Location:** `src/kbutillib/ms_reconstruction_utils.py` (~757 lines)
-**Inherits:** SharedEnvUtils
+### MSReconstructionUtilsImpl (legacy alias: `MSReconstructionUtils`)
+**Location:** `src/kbutillib/ms_reconstruction_utils.py`
+**Composes:** `env`, `model`
+**Facade attribute:** `kbu.recon`
 **Purpose:** Genome-scale model reconstruction.
 
 **Key Methods:**
@@ -208,23 +246,33 @@ BaseUtils (foundation)
 - `prune_model(model)` - Remove unnecessary reactions
 - `integrate_phenotypes(model, phenotype_data)` - Add phenotype constraints
 
-### EscherUtils
-**Location:** `src/kbutillib/escher_utils.py` (~1,089 lines)
-**Inherits:** BaseUtils
+### EscherUtilsImpl (legacy alias: `EscherUtils`)
+**Location:** `src/kbutillib/escher_utils.py`
+**Composes:** `env`, `model`, `biochem`
+**Facade attribute:** `kbu.escher`
 **Purpose:** Escher pathway map visualization.
 
 **Key Methods:**
 - `create_map(reactions, layout=None)` - Create Escher map
+- `create_map_html2(model, fluxes, ...)` - Enhanced map with badges/legends
 - `visualize_fluxes(map, fba_solution)` - Overlay flux values
 - `set_reaction_colors(map, color_dict)` - Custom reaction coloring
 - `save_map(map, filename)` - Save to file
 - `load_map(filename)` - Load existing map
+- `list_available_maps()` - List built-in maps
+
+### ModelStandardizationUtilsImpl (legacy alias: `ModelStandardizationUtils`)
+**Location:** `src/kbutillib/model_standardization_utils.py`
+**Composes:** `env`, `biochem`
+**Facade attribute:** `kbu.standardize`
+**Purpose:** Standardize model IDs / compartments / reaction directions.
 
 ## External API Layer
 
-### BVBRCUtils
-**Location:** `src/kbutillib/bvbrc_utils.py` (~463 lines)
-**Inherits:** SharedEnvUtils
+### BVBRCUtilsImpl (legacy alias: `BVBRCUtils`)
+**Location:** `src/kbutillib/bvbrc_utils.py`
+**Composes:** `env`, `genome`, `annotation`
+**Facade attribute:** `kbu.bvbrc`
 **Purpose:** BV-BRC (formerly PATRIC) API access.
 
 **Key Methods:**
@@ -234,49 +282,37 @@ BaseUtils (foundation)
 - `get_genome_sequences(genome_id)` - Get contig sequences
 - `convert_to_kbase(bvbrc_genome)` - Convert to KBase format
 
-### KBUniProtUtils
-**Location:** `src/kbutillib/kb_uniprot_utils.py` (~651 lines)
-**Inherits:** SharedEnvUtils
+### KBUniProtUtilsImpl (legacy alias: `KBUniProtUtils`)
+**Location:** `src/kbutillib/kb_uniprot_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.uniprot`
 **Purpose:** UniProt REST API integration.
 
-**Key Methods:**
-- `get_uniprot_entry(accession)` - Get entry by accession
-- `search_uniprot(query)` - Search UniProt
-- `get_protein_sequence(accession)` - Get protein sequence
-- `get_annotations(accession)` - Get functional annotations
-- `map_ids(ids, from_db, to_db)` - ID mapping
-
-### RCSBPDBUtils
-**Location:** `src/kbutillib/rcsb_pdb_utils.py` (~598 lines)
-**Inherits:** SharedEnvUtils
+### RCSBPDBUtilsImpl (legacy alias: `RCSBPDBUtils`)
+**Location:** `src/kbutillib/rcsb_pdb_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.pdb`
 **Purpose:** RCSB PDB structure database access.
-
-**Key Methods:**
-- `get_structure(pdb_id)` - Get PDB structure
-- `search_structures(query)` - Search PDB
-- `get_sequence(pdb_id, chain)` - Get chain sequence
-- `get_experimental_info(pdb_id)` - Get experimental metadata
 
 ## AI/ML Layer
 
-### ArgoUtils
+### ArgoUtilsImpl (legacy alias: `ArgoUtils`)
 **Location:** `src/kbutillib/argo_utils.py`
-**Inherits:** SharedEnvUtils
-**Purpose:** Argo LLM service integration.
+**Composes:** `env`
+**Facade attribute:** `kbu.argo`
+**Purpose:** Argo LLM service integration. Gateway client lazy-constructed (Task 3 fix).
 
 **Key Methods:**
 - `query_argo(prompt, model="gpt4o")` - Send LLM query
 - `query_argo_async(prompt, model)` - Async query with polling
 - `get_available_models()` - List available models
 
-**Available Models:**
-- `gpt4o` - GPT-4o
-- `gpt3mini` - GPT-3.5 Mini
-- `o1`, `o1-mini`, `o3-mini` - Reasoning models
+**Available Models:** gpt4o, gpt3mini, o1, o1-mini, o3-mini
 
-### AICurationUtils
-**Location:** `src/kbutillib/ai_curation_utils.py` (~897 lines)
-**Inherits:** ArgoUtils
+### AICurationUtilsImpl (legacy alias: `AICurationUtils`)
+**Location:** `src/kbutillib/ai_curation_utils.py`
+**Composes:** `env`, `argo`
+**Facade attribute:** `kbu.curation`
 **Purpose:** AI-powered biochemistry curation.
 
 **Key Methods:**
@@ -287,78 +323,95 @@ BaseUtils (foundation)
 - `get_cached_result(query_hash)` - Get cached curation result
 - `cache_result(query_hash, result)` - Cache curation result
 
-**Backends:**
-- `argo` - Argo LLM service
-- `claude` - Claude Code integration
-
-### KBPLMUtils
-**Location:** `src/kbutillib/kb_plm_utils.py` (~804 lines)
-**Inherits:** SharedEnvUtils
+### KBPLMUtilsImpl (legacy alias: `KBPLMUtils`)
+**Location:** `src/kbutillib/kb_plm_utils.py`
+**Composes:** `env`, `genome`
+**Facade attribute:** `kbu.plm`
 **Purpose:** Protein language model integration.
 
-**Key Methods:**
-- `search_homologs(sequence)` - PLM-based homology search
-- `create_blast_db(sequences)` - Create BLAST database
-- `search_blast(query, db)` - BLAST search
-- `get_uniprot_for_hits(hits)` - Fetch UniProt info for hits
+## Other Utilities
 
-## Utility Layer
-
-### NotebookUtils
-**Location:** `src/kbutillib/notebook_utils.py` (~703 lines)
-**Inherits:** BaseUtils
-**Purpose:** Jupyter notebook enhancements.
-
-**Key Classes:**
-- `DataObject` - Standardized data object with provenance
+### KBJobUtils (composition pilot)
+**Location:** `src/kbutillib/kb_job_utils/`
+**Composes:** `env`
+**Facade attribute:** `kbu.jobs`
+**Purpose:** EE2 job submission and local SQLite tracking. **Reference shape for the composition pattern** — read this when building new modules.
 
 **Key Methods:**
-- `display_dataframe(df)` - Enhanced DataFrame display
-- `create_progress_bar(total)` - Progress bar
-- `display_html(html)` - Rich HTML output
+- `submit(params, *, name=None, project=None, ...)` - Submit + track
+- `refresh(job_id)` / `refresh_active()` / `refresh_all()` - Update local tracker
+- `get(job_id)` / `list(...)` / `summary()` - Read from local store
+- `cancel(job_id)` / `forget(job_id)` / `cleanup(...)` - Manage records
+- `submit_chain(steps, ...)` / `advance_pipelines()` - Linear pipelines (Phase 3)
+- `start_watcher(interval=300)` / `stop_watcher()` - In-process watcher thread
 
-### SKANIUtils
-**Location:** `src/kbutillib/skani_utils.py` (~800 lines)
-**Inherits:** SharedEnvUtils
-**Purpose:** Fast genome distance computation using SKANI.
+**CLI:** `kbu jobs status/list/refresh/logs/cancel/chain/...`, `kbu jobdaemon`
 
-**Key Methods:**
-- `compute_ani(genome1, genome2)` - Compute ANI between genomes
-- `create_sketch_db(genomes)` - Create SKANI sketch database
-- `search_db(query_genome, db)` - Search against database
-- `clear_cache()` - Clear sketch cache
+### MMSeqsUtilsImpl (legacy alias: `MMSeqsUtils`)
+**Location:** `src/kbutillib/mmseqs_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.mmseqs`
+**Purpose:** MMseqs2 sequence clustering / search.
+
+### SKANIUtilsImpl (legacy alias: `SKANIUtils`)
+**Location:** `src/kbutillib/skani_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.skani`
+**Purpose:** Fast genome distance computation using skani.
+
+### ThermoUtilsImpl (legacy alias: `ThermoUtils`)
+**Location:** `src/kbutillib/thermo_utils.py`
+**Composes:** `env`, `biochem`
+**Facade attribute:** `kbu.thermo`
+**Purpose:** Thermodynamic calculations on metabolic reactions/compounds.
+
+### KBBERDLUtilsImpl (legacy alias: `KBBERDLUtils`)
+**Location:** `src/kbutillib/kb_berdl_utils.py`
+**Composes:** `env`
+**Facade attribute:** `kbu.berdl`
+**Purpose:** BERDL datalake integration.
+
+### NotebookSession + helpers
+**Location:** `src/kbutillib/notebook/`
+**Purpose:** Jupyter notebook engine with cache, vectors, and `session.kbu` facade integration. Replaces the deleted `notebook_utils.py`.
 
 ## Import Patterns
 
 ```python
-# Import specific utilities
-from kbutillib import KBWSUtils, KBGenomeUtils, MSBiochemUtils
+# Preferred: facade
+from kbutillib import KBUtilLib
+kbu = KBUtilLib()
+kbu.fba.run_fba(model)
 
-# Import all (optional dependencies may fail gracefully)
-from kbutillib import *
+# Legacy aliases still work (constructor signatures changed):
+from kbutillib import KBWSUtils, MSFBAUtils  # = KBWSUtilsImpl, MSFBAUtilsImpl
 
-# Check what's available
-import kbutillib
-print(kbutillib.__all__)
+# Flat-module helpers — direct function imports:
+from kbutillib.kbase_endpoints import base_url
+from kbutillib.compartments import normalize_compartment
+from kbutillib.model_directionality import directionality_from_bounds
+from kbutillib.model_helpers import _parse_id
 ```
 
-## Composable Combinations
+## Composition examples (no more multi-inheritance!)
 
 ```python
-# Genomics workflow
-class GenomicsTools(KBWSUtils, KBGenomeUtils, KBAnnotationUtils):
-    pass
+# Genomics workflow — facade
+kbu = KBUtilLib()
+genome = kbu.genome.get_genome(ws_id, "MyGenome/1")
+annotations = kbu.annotation.get_annotations(genome)
 
-# Metabolic modeling workflow
-class ModelingTools(KBModelUtils, MSFBAUtils, MSBiochemUtils):
-    pass
+# Metabolic modeling workflow — facade
+model = kbu.model.get_model(ws_id, "MyModel/1")
+solution = kbu.fba.run_fba(model, biomass_reaction="bio1")
+fva = kbu.fba.run_fva(model)  # AP3 carve-out, working version
 
-# AI curation workflow
-class CurationTools(AICurationUtils, MSBiochemUtils, NotebookUtils):
-    pass
+# AI curation workflow — facade
+result = kbu.curation.curate_reaction_direction(reaction_data)
 
-# Full analysis stack
-class FullStack(KBGenomeUtils, KBAnnotationUtils, KBModelUtils,
-                MSBiochemUtils, MSFBAUtils, NotebookUtils):
-    pass
+# Inside a notebook — session.kbu
+from kbutillib.notebook import NotebookSession
+session = NotebookSession(...)
+session.kbu.fba.run_fba(model)
+session.cache.save("fluxes", solution)  # session also exposes cache, vectors
 ```

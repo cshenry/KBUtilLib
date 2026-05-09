@@ -1,71 +1,69 @@
 # KBUtilLib Common Patterns and Workflows
 
-Practical patterns and complete workflows for using KBUtilLib.
+Practical patterns and complete workflows for using KBUtilLib (post-2026-05 composition refactor).
 
-## Pattern 1: Composable Class Design
+> The legacy multi-inheritance pattern (`class MyTools(A, B): pass`) is **deprecated**. Use the `KBUtilLib` facade. See PRD §6 for the architecture.
 
-The core pattern in KBUtilLib is combining utility classes via multiple inheritance.
+## Pattern 1: The KBUtilLib facade
 
-### Basic Composition
+The single entry point for all KBUtilLib utilities. Sub-utilities are lazy-instantiated; composed dependencies wired automatically.
+
+### Basic Usage
 ```python
-from kbutillib import KBWSUtils, KBGenomeUtils, MSBiochemUtils
+from kbutillib import KBUtilLib
 
-# Combine utilities you need
-class MyAnalysisTools(KBWSUtils, KBGenomeUtils, MSBiochemUtils):
-    """Custom tool combining genome and biochemistry utilities."""
+kbu = KBUtilLib()  # constructs facade with default SharedEnvUtils
 
-    def my_custom_method(self, genome_ref):
-        """Custom method using inherited functionality."""
-        genome = self.get_genome(self.workspace_id, genome_ref)
-        features = self.get_features_by_type(genome, "CDS")
-
-        # Use MSBiochemUtils methods
-        for feature in features:
-            reactions = self.map_function_to_reactions(feature['function'])
-        return reactions
-
-# Use the combined class
-tools = MyAnalysisTools(workspace_id=12345)
+# Access any sub-utility as a property; first access constructs it
+genome = kbu.genome.get_genome(workspace_id=12345, genome_ref="MyGenome/1")
+features = kbu.genome.get_features_by_type(genome, "CDS")
+reactions = kbu.biochem.search_reactions("transport")
 ```
 
-### Specialized Stacks
+### Custom env / explicit config
 ```python
-# Genomics-focused stack
-class GenomicsStack(KBWSUtils, KBGenomeUtils, KBAnnotationUtils, BVBRCUtils):
-    pass
+from kbutillib import KBUtilLib, SharedEnvUtils
 
-# Modeling-focused stack
-class ModelingStack(KBWSUtils, KBModelUtils, MSFBAUtils, MSBiochemUtils):
-    pass
+env = SharedEnvUtils(config_file="/path/to/my_config.yaml")
+kbu = KBUtilLib(env=env)
+```
 
-# Curation-focused stack
-class CurationStack(AICurationUtils, MSBiochemUtils, NotebookUtils):
-    pass
+### Sharing one env across utilities (the whole point of composition)
+```python
+# All sub-utilities share the same SharedEnvUtils — no duplicate token loads,
+# no duplicate config reads. The facade does this automatically.
+assert kbu.fba.env is kbu.biochem.env is kbu.ws.env
+```
 
-# Full analysis stack
-class FullStack(KBGenomeUtils, KBAnnotationUtils, KBModelUtils,
-                MSFBAUtils, MSBiochemUtils, NotebookUtils):
-    pass
+### Combining at the call site (instead of inheritance)
+```python
+# Before (deprecated):
+# class MyTools(KBWSUtils, KBGenomeUtils, MSBiochemUtils): pass
+# tools = MyTools(); features = tools.get_features_by_type(genome, "CDS")
+
+# After:
+kbu = KBUtilLib()
+features = kbu.genome.get_features_by_type(genome, "CDS")
+reactions = kbu.biochem.search_reactions(feature['function'])
 ```
 
 ## Pattern 2: Configuration Management
 
-### Standard Configuration Flow
+### Configuration is on the held SharedEnvUtils
 ```python
+from kbutillib import KBUtilLib
+
+# Option 1: Auto-detect (loads from ~/kbutillib_config.yaml or repo defaults)
+kbu = KBUtilLib()
+
+# Option 2: Explicit configuration
 from kbutillib import SharedEnvUtils
+env = SharedEnvUtils(config_file="/path/to/my_config.yaml")
+kbu = KBUtilLib(env=env)
 
-class MyTools(SharedEnvUtils):
-    pass
-
-# Option 1: Auto-detect configuration
-tools = MyTools()  # Loads from ~/kbutillib_config.yaml or defaults
-
-# Option 2: Explicit configuration file
-tools = MyTools(config_file="/path/to/my_config.yaml")
-
-# Option 3: Runtime configuration
-tools = MyTools()
-tools.set_token("my_token", namespace="kbase")
+# Option 3: Runtime token override
+kbu = KBUtilLib()
+kbu.env.set_token("my_token", namespace="kbase")
 ```
 
 ### Configuration File Template
@@ -85,9 +83,7 @@ modelseed:
 
 logging:
   level: INFO
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# Custom settings
 my_analysis:
   output_dir: ~/analysis_results
   cache_enabled: true
@@ -95,83 +91,71 @@ my_analysis:
 
 ### Accessing Configuration
 ```python
-# Dot-notation access
-endpoint = tools.get_config_value("kbase.endpoint")
-output_dir = tools.get_config_value("my_analysis.output_dir")
-
-# With defaults
-cache = tools.get_config_value("my_analysis.cache_enabled", default=False)
+endpoint = kbu.env.get_config_value("kbase.endpoint")
+output_dir = kbu.env.get_config_value("my_analysis.output_dir")
+cache = kbu.env.get_config_value("my_analysis.cache_enabled", default=False)
 ```
 
 ## Pattern 3: Genome Analysis Workflow
 
-### Complete Genome Analysis Pipeline
 ```python
-from kbutillib import KBWSUtils, KBGenomeUtils, KBAnnotationUtils
+from kbutillib import KBUtilLib
 
-class GenomeAnalyzer(KBWSUtils, KBGenomeUtils, KBAnnotationUtils):
-    pass
-
-analyzer = GenomeAnalyzer(workspace_id=12345)
+kbu = KBUtilLib()
 
 # Step 1: Retrieve genome
-genome = analyzer.get_genome(12345, "MyGenome/1")
+genome = kbu.genome.get_genome(12345, "MyGenome/1")
 print(f"Genome: {genome['scientific_name']}")
 print(f"Features: {len(genome['features'])}")
 
 # Step 2: Extract coding sequences
-cds_features = analyzer.get_features_by_type(genome, "CDS")
+cds_features = kbu.genome.get_features_by_type(genome, "CDS")
 print(f"CDS count: {len(cds_features)}")
 
 # Step 3: Translate to proteins
-proteins = analyzer.translate_features(cds_features)
-print(f"Translated {len(proteins)} proteins")
+proteins = kbu.genome.translate_features(cds_features)
 
 # Step 4: Analyze annotations
-annotations = analyzer.get_annotations(genome)
-ec_annotations = analyzer.filter_annotations_by_ontology(annotations, "EC")
-print(f"Features with EC numbers: {len(ec_annotations)}")
+annotations = kbu.annotation.get_annotations(genome)
+ec_annotations = kbu.annotation.filter_annotations_by_ontology(annotations, "EC")
 
-# Step 5: Extract functional roles
+# Step 5: Map functional roles to reactions (uses kbu.annotation + kbu.biochem)
 for feature in cds_features[:10]:
-    ec_nums = analyzer.get_ec_numbers(feature)
+    ec_nums = kbu.annotation.get_ec_numbers(feature)
     if ec_nums:
-        reactions = analyzer.map_function_to_reactions(feature['function'])
+        reactions = kbu.annotation.map_function_to_reactions(feature['function'])
         print(f"{feature['id']}: {len(reactions)} reactions")
 ```
 
-## Pattern 4: Metabolic Model Analysis
+## Pattern 4: Metabolic Model Analysis (preserves AP3 carve-outs)
 
-### FBA Analysis Pipeline
+### FBA Pipeline
 ```python
-from kbutillib import KBWSUtils, KBModelUtils, MSFBAUtils, MSBiochemUtils
+from kbutillib import KBUtilLib
 
-class ModelAnalyzer(KBWSUtils, KBModelUtils, MSFBAUtils, MSBiochemUtils):
-    pass
-
-analyzer = ModelAnalyzer(workspace_id=12345)
+kbu = KBUtilLib()
 
 # Step 1: Get model
-model = analyzer.get_model(12345, "MyModel/1")
-print(f"Model has {len(analyzer.get_model_reactions(model))} reactions")
+model = kbu.model.get_model(12345, "MyModel/1")
+print(f"Model has {len(kbu.model.get_model_reactions(model))} reactions")
 
 # Step 2: Set up simulation
-analyzer.set_media(model, "Complete")
-analyzer.set_objective(model, "bio1")  # Biomass reaction
+kbu.fba.set_media(model, "Complete")
+kbu.fba.set_objective(model, "bio1")
 
 # Step 3: Run FBA
-solution = analyzer.run_fba(model)
+solution = kbu.fba.run_fba(model, biomass_reaction="bio1")
 print(f"Growth rate: {solution.objective_value}")
 
 # Step 4: Analyze flux distribution
-for reaction in solution.fluxes:
-    if abs(solution.fluxes[reaction]) > 0.1:
-        rxn_info = analyzer.get_reaction(reaction.split("_")[0])
-        print(f"{reaction}: {solution.fluxes[reaction]:.2f}")
+for reaction_id, flux in solution.fluxes.items():
+    if abs(flux) > 0.1:
+        rxn_info = kbu.biochem.get_reaction(reaction_id.split("_")[0])
+        print(f"{reaction_id}: {flux:.2f}  ({rxn_info.get('name')})")
 
-# Step 5: Flux Variability Analysis
-analyzer.set_fraction_of_optimum(model, 0.9)
-fva = analyzer.run_fva(model)
+# Step 5: Flux Variability Analysis (AP3 — uses kbu.fba.run_fva, NOT cobra)
+kbu.fba.set_fraction_of_optimum(model, 0.9)
+fva = kbu.fba.run_fva(model)
 for rxn, (min_flux, max_flux) in fva.items():
     if min_flux != max_flux:
         print(f"{rxn}: [{min_flux:.2f}, {max_flux:.2f}]")
@@ -179,74 +163,54 @@ for rxn, (min_flux, max_flux) in fva.items():
 
 ### Model Comparison
 ```python
-# Compare two models
-model1 = analyzer.get_model(12345, "Model1/1")
-model2 = analyzer.get_model(12345, "Model2/1")
+model1 = kbu.model.get_model(12345, "Model1/1")
+model2 = kbu.model.get_model(12345, "Model2/1")
 
-rxns1 = set(r['id'] for r in analyzer.get_model_reactions(model1))
-rxns2 = set(r['id'] for r in analyzer.get_model_reactions(model2))
+rxns1 = set(r['id'] for r in kbu.model.get_model_reactions(model1))
+rxns2 = set(r['id'] for r in kbu.model.get_model_reactions(model2))
 
-unique_to_1 = rxns1 - rxns2
-unique_to_2 = rxns2 - rxns1
-shared = rxns1 & rxns2
-
-print(f"Shared reactions: {len(shared)}")
-print(f"Unique to Model1: {len(unique_to_1)}")
-print(f"Unique to Model2: {len(unique_to_2)}")
+print(f"Shared: {len(rxns1 & rxns2)}")
+print(f"Unique to Model1: {len(rxns1 - rxns2)}")
+print(f"Unique to Model2: {len(rxns2 - rxns1)}")
 ```
 
 ## Pattern 5: AI-Powered Curation
 
-### Reaction Curation Pipeline
 ```python
-from kbutillib import AICurationUtils, MSBiochemUtils
+from kbutillib import KBUtilLib
 
-class CurationPipeline(AICurationUtils, MSBiochemUtils):
-    pass
-
-curator = CurationPipeline()
+kbu = KBUtilLib()
 
 # Step 1: Get reactions to curate
-reactions_to_curate = curator.search_reactions("transport")
+reactions_to_curate = kbu.biochem.search_reactions("transport")
 
-# Step 2: Curate each reaction
+# Step 2: Curate each
 results = []
 for rxn in reactions_to_curate[:10]:
-    # Check cache first
-    cached = curator.get_cached_result(rxn['id'])
+    cached = kbu.curation.get_cached_result(rxn['id'])
     if cached:
         results.append(cached)
         continue
 
-    # Curate direction
-    direction = curator.curate_reaction_direction(rxn)
+    direction = kbu.curation.curate_reaction_direction(rxn)
+    category = kbu.curation.categorize_stoichiometry(rxn)
 
-    # Categorize stoichiometry
-    category = curator.categorize_stoichiometry(rxn)
-
-    result = {
-        'reaction_id': rxn['id'],
-        'direction': direction,
-        'category': category
-    }
+    result = {'reaction_id': rxn['id'], 'direction': direction, 'category': category}
     results.append(result)
+    kbu.curation.cache_result(rxn['id'], result)
 
-    # Cache result
-    curator.cache_result(rxn['id'], result)
-
-# Step 3: Analyze results
+# Step 3: Analyze
 reversible = sum(1 for r in results if r['direction'] == 'reversible')
 print(f"Reversible reactions: {reversible}/{len(results)}")
 ```
 
 ### Gene-Reaction Validation
 ```python
-# Validate gene-reaction associations
-model = curator.get_model(12345, "MyModel/1")
+model = kbu.model.get_model(12345, "MyModel/1")
 
 for reaction in model['modelreactions'][:10]:
     for gene in reaction.get('genes', []):
-        assessment = curator.assess_gene_reaction(gene, reaction)
+        assessment = kbu.curation.assess_gene_reaction(gene, reaction)
         if assessment['confidence'] < 0.5:
             print(f"Low confidence: {gene['id']} -> {reaction['id']}")
             print(f"  Reason: {assessment['reasoning']}")
@@ -256,234 +220,197 @@ for reaction in model['modelreactions'][:10]:
 
 ### BV-BRC Genome Import
 ```python
-from kbutillib import BVBRCUtils, KBWSUtils
+from kbutillib import KBUtilLib
 
-class GenomeImporter(BVBRCUtils, KBWSUtils):
-    pass
+kbu = KBUtilLib()
 
-importer = GenomeImporter(workspace_id=12345)
+# Step 1: Search
+genomes = kbu.bvbrc.search_bvbrc_genomes("Escherichia coli K-12")
 
-# Step 1: Search for genomes
-genomes = importer.search_bvbrc_genomes("Escherichia coli K-12")
+# Step 2: Fetch
+bvbrc_genome = kbu.bvbrc.get_bvbrc_genome(genomes[0]['genome_id'])
 
-# Step 2: Fetch complete genome
-bvbrc_genome = importer.get_bvbrc_genome(genomes[0]['genome_id'])
+# Step 3: Convert to KBase
+kb_genome = kbu.bvbrc.convert_to_kbase(bvbrc_genome)
 
-# Step 3: Get features and sequences
-features = importer.get_genome_features(genomes[0]['genome_id'])
-sequences = importer.get_genome_sequences(genomes[0]['genome_id'])
-
-# Step 4: Convert to KBase format
-kb_genome = importer.convert_to_kbase(bvbrc_genome)
-
-# Step 5: Save to KBase workspace
-importer.save_object(
+# Step 4: Save (delegates to kbu.ws)
+kbu.ws.save_object(
     workspace_id=12345,
     obj_type="KBaseGenomes.Genome",
     data=kb_genome,
-    name="EcoliK12_imported"
+    name="EcoliK12_imported",
 )
 ```
 
 ### UniProt Annotation Enhancement
 ```python
-from kbutillib import KBUniProtUtils, KBGenomeUtils
+genome = kbu.genome.get_genome(12345, "MyGenome/1")
+features = kbu.genome.get_features_by_type(genome, "CDS")
 
-class AnnotationEnhancer(KBUniProtUtils, KBGenomeUtils):
-    pass
-
-enhancer = AnnotationEnhancer()
-
-# Get genome features
-genome = enhancer.get_genome(12345, "MyGenome/1")
-features = enhancer.get_features_by_type(genome, "CDS")
-
-# Enhance with UniProt data
 for feature in features[:10]:
-    # Search UniProt by sequence
-    sequence = enhancer.translate_feature(feature)
-    uniprot_hits = enhancer.search_uniprot(f"sequence:{sequence[:50]}")
-
+    sequence = kbu.genome.translate_feature(feature)
+    uniprot_hits = kbu.uniprot.search_uniprot(f"sequence:{sequence[:50]}")
     if uniprot_hits:
-        entry = enhancer.get_uniprot_entry(uniprot_hits[0]['accession'])
+        entry = kbu.uniprot.get_uniprot_entry(uniprot_hits[0]['accession'])
         print(f"{feature['id']}: {entry['proteinDescription']}")
 ```
 
-## Pattern 7: Notebook-Friendly Analysis
+## Pattern 7: Notebook integration via NotebookSession.kbu
 
-### Interactive Analysis Session
 ```python
-from kbutillib import (KBWSUtils, KBGenomeUtils, KBModelUtils,
-                        MSBiochemUtils, NotebookUtils)
+from kbutillib.notebook import NotebookSession
 
-class InteractiveAnalysis(KBWSUtils, KBGenomeUtils, KBModelUtils,
-                          MSBiochemUtils, NotebookUtils):
-    pass
+session = NotebookSession(...)  # Builds with its own SharedEnvUtils
 
-tools = InteractiveAnalysis(workspace_id=12345)
+# kbu hangs off the session — same facade, scoped to this notebook
+genome = session.kbu.genome.get_genome(12345, "MyGenome/1")
+features = session.kbu.genome.get_features(genome)
 
-# Create tracked data object
-genome = tools.get_genome(12345, "MyGenome/1")
-genome_data = tools.DataObject(
-    name="my_genome",
-    data=genome,
-    source="kbase_workspace",
-    params={"workspace": 12345, "ref": "MyGenome/1"}
+# Session also exposes its own utilities
+session.cache.save("genome_intermediate", genome)
+session.vectors.add(...)
+
+# DataFrame display + progress bars come from the notebook engine, not a util class
+import pandas as pd
+features_df = pd.DataFrame(features)
+session.cache.save("features_df", features_df)
+```
+
+`NotebookSession` replaces the deleted legacy `NotebookUtils`. Cache save/load, vector storage, and provenance tracking now live in the session, not on a multi-inherited utility class.
+
+## Pattern 8: EE2 Job Tracking + Pipelines (KBJobUtils)
+
+KBJobUtils is the canonical composition reference. Use it both as a tool and as a guide for building new modules.
+
+### Submit + track a single job
+```python
+kbu = KBUtilLib()
+
+state = kbu.jobs.submit({
+    "method": "ModelSEEDpy/build_metabolic_model",
+    "params": [{...}],
+}, name="adp1-build", project="ADP1Notebooks")
+
+# Local SQLite at ~/.kbjobs/kbjobs.db tracks every job
+print(state.job_id, state.status, state.submitted_at)
+
+# Periodic refresh (no wait/poll inside submit; caller controls cadence)
+kbu.jobs.refresh_active()  # bulk-refreshes all non-terminal jobs
+
+# Read locally without hitting EE2
+job = kbu.jobs.get(state.job_id)
+recent = kbu.jobs.list(status="completed", project="ADP1Notebooks", limit=20)
+```
+
+### Bulk submission (1400 metagenomes)
+```python
+metagenome_refs = [...]  # 1400 entries
+
+states = []
+for ref in metagenome_refs:
+    state = kbu.jobs.submit(
+        {"method": "BuildMetagenomeModel", "params": [{"genome_ref": ref}]},
+        project="metagenome-batch",
+        tags=["metagenome", "batch-2026-05"],
+    )
+    states.append(state)
+
+# Cron or in-process watcher does the actual refreshing:
+kbu.jobs.start_watcher(interval=300)  # threaded, daemon=True by default
+```
+
+### Linear pipelines (Phase 3)
+```python
+pipeline = kbu.jobs.submit_chain(
+    [
+        {"method": "BuildModel", "params": [{...}]},
+        {"method": "Gapfill", "params": [{...}]},
+        {"method": "RunFBA", "params": [{...}]},
+    ],
+    name="adp1-build-gapfill-fba",
+    project="ADP1Notebooks",
 )
 
-# Display DataFrame with features
-import pandas as pd
-features_df = pd.DataFrame(tools.get_features(genome))
-tools.display_dataframe(features_df)
-
-# Progress bar for long operations
-reactions = tools.search_reactions("metabolism")
-with tools.create_progress_bar(total=len(reactions)) as pbar:
-    for rxn in reactions:
-        # Process reaction
-        pbar.update(1)
+# refresh_active() advances chains automatically when each step completes
+kbu.jobs.refresh_active()
 ```
 
-## Pattern 8: Provenance Tracking
+## Pattern 9: Provenance Tracking
 
-### Tracking Method Calls
+`SharedEnvUtils` tracks calls; the held env is the single source of provenance for a session.
+
 ```python
-from kbutillib import BaseUtils
+from kbutillib import KBUtilLib
 
-class TrackedAnalysis(BaseUtils):
-    def analyze_data(self, data):
-        # Initialize call tracking
-        self.initialize_call("analyze_data", {"data_size": len(data)})
+kbu = KBUtilLib()
 
-        # Perform analysis
-        result = self._do_analysis(data)
-
-        # Log progress
-        self.log_info(f"Analyzed {len(data)} items")
-
-        return result
-
-    def save_results(self, results, filename):
-        self.initialize_call("save_results", {"filename": filename})
-        self.save_util_data(filename, results)
-        self.log_info(f"Saved results to {filename}")
-
-# Use and check provenance
-analyzer = TrackedAnalysis()
-result = analyzer.analyze_data(my_data)
-analyzer.save_results(result, "analysis_results.json")
-
-# View provenance
-print(analyzer.provenance)
-# [{"method": "analyze_data", "params": {...}, "timestamp": ...}, ...]
+# Each *Impl uses self.env.initialize_call internally on key methods.
+# View accumulated provenance via the env:
+events = kbu.env.provenance
+for event in events:
+    print(f"{event['timestamp']}: {event['method']} {event['params']}")
 ```
 
-## Pattern 9: Error Handling
+## Pattern 10: Error Handling
 
-### Robust API Calls
 ```python
-from kbutillib import KBWSUtils
-
-ws = KBWSUtils()
+kbu = KBUtilLib()
 
 def safe_get_object(workspace_id, object_ref):
-    """Safely retrieve object with error handling."""
     try:
-        return ws.get_object(workspace_id, object_ref)
+        return kbu.ws.get_object(workspace_id, object_ref)
     except ValueError as e:
-        ws.log_error(f"Object not found: {object_ref}")
+        kbu.env.logger.error(f"Object not found: {object_ref}")
         return None
     except ConnectionError as e:
-        ws.log_error(f"Connection failed: {e}")
-        raise
-    except Exception as e:
-        ws.log_error(f"Unexpected error: {e}")
+        kbu.env.logger.error(f"Connection failed: {e}")
         raise
 
-# Use with fallback
-genome = safe_get_object(12345, "MyGenome/1")
-if genome is None:
-    genome = safe_get_object(12345, "MyGenome_backup/1")
+genome = safe_get_object(12345, "MyGenome/1") or safe_get_object(12345, "MyGenome_backup/1")
 ```
 
 ### Batch Processing with Recovery
 ```python
-def process_batch(object_refs, workspace_id):
-    """Process multiple objects with error recovery."""
-    results = []
-    failed = []
-
-    for ref in object_refs:
+def process_batch(refs, workspace_id):
+    results, failed = [], []
+    for ref in refs:
         try:
-            obj = ws.get_object(workspace_id, ref)
-            result = process_object(obj)
-            results.append(result)
+            obj = kbu.ws.get_object(workspace_id, ref)
+            results.append(process_object(obj))
         except Exception as e:
-            ws.log_error(f"Failed to process {ref}: {e}")
+            kbu.env.logger.error(f"Failed {ref}: {e}")
             failed.append({"ref": ref, "error": str(e)})
-
-    ws.log_info(f"Processed {len(results)}/{len(object_refs)} objects")
-    if failed:
-        ws.log_warning(f"Failed: {len(failed)} objects")
-
+    kbu.env.logger.info(f"Processed {len(results)}/{len(refs)}; failed {len(failed)}")
     return results, failed
 ```
 
-## Pattern 10: Caching Results
+## Migration from legacy multi-inheritance
 
-### File-Based Caching
+If you find old code using the legacy pattern:
+
 ```python
-import os
-import json
-import hashlib
+# Old (deprecated):
+class MyTools(KBWSUtils, KBGenomeUtils, MSBiochemUtils):
+    pass
+tools = MyTools()
+features = tools.get_features_by_type(genome, "CDS")
 
-class CachedAnalysis(BaseUtils):
-    def __init__(self, cache_dir="~/.kbutillib_cache"):
-        super().__init__()
-        self.cache_dir = os.path.expanduser(cache_dir)
-        os.makedirs(self.cache_dir, exist_ok=True)
-
-    def _cache_key(self, method, params):
-        """Generate cache key from method and params."""
-        key_str = f"{method}:{json.dumps(params, sort_keys=True)}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-
-    def _get_cached(self, key):
-        """Retrieve cached result."""
-        cache_file = os.path.join(self.cache_dir, f"{key}.json")
-        if os.path.exists(cache_file):
-            return self.load_util_data(cache_file)
-        return None
-
-    def _set_cached(self, key, data):
-        """Store result in cache."""
-        cache_file = os.path.join(self.cache_dir, f"{key}.json")
-        self.save_util_data(cache_file, data)
-
-    def cached_operation(self, method_func, params):
-        """Run operation with caching."""
-        key = self._cache_key(method_func.__name__, params)
-
-        cached = self._get_cached(key)
-        if cached:
-            self.log_debug(f"Cache hit: {key}")
-            return cached
-
-        self.log_debug(f"Cache miss: {key}")
-        result = method_func(**params)
-        self._set_cached(key, result)
-        return result
+# New:
+kbu = KBUtilLib()
+features = kbu.genome.get_features_by_type(genome, "CDS")
 ```
+
+The legacy class names (`KBWSUtils`, `MSFBAUtils`, etc.) still resolve — they're aliased to the new `*Impl` classes in `__init__.py`. But constructor signatures changed (composition takes deps explicitly), so direct instantiation of the legacy names won't work the same way. Always prefer the facade.
 
 ## Example Notebooks Reference
 
 | Notebook | Purpose | Key Patterns |
 |----------|---------|--------------|
-| `ConfigureEnvironment.ipynb` | Initial setup | Configuration, tokens |
-| `BVBRCGenomeConversion.ipynb` | Import genomes | External API, conversion |
-| `AssemblyUploadDownload.ipynb` | Assembly handling | Workspace operations |
-| `SKANIGenomeDistance.ipynb` | Genome similarity | External tools, caching |
-| `ProteinLanguageModels.ipynb` | PLM analysis | AI/ML integration |
-| `StoichiometryAnalysis.ipynb` | Reaction analysis | Biochemistry operations |
-| `AICuration.ipynb` | AI curation | LLM integration, caching |
-| `KBaseWorkspaceUtilities.ipynb` | Workspace ops | Type discovery, metadata |
+| `ConfigureEnvironment.ipynb` | Initial setup | `kbu = KBUtilLib()`, tokens via `kbu.env` |
+| `BVBRCGenomeConversion.ipynb` | Import genomes | `kbu.bvbrc.*`, `kbu.ws.save_object` |
+| `AssemblyUploadDownload.ipynb` | Assembly handling | `kbu.ws.*` |
+| `SKANIGenomeDistance.ipynb` | Genome similarity | `kbu.skani.*` |
+| `ProteinLanguageModels.ipynb` | PLM analysis | `kbu.plm.*` |
+| `StoichiometryAnalysis.ipynb` | Reaction analysis | `kbu.biochem.*` |
+| `AICuration.ipynb` | AI curation | `kbu.curation.*` |
+| `KBaseWorkspaceUtilities.ipynb` | Workspace ops | `kbu.ws.*` |

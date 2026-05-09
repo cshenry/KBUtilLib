@@ -1,24 +1,26 @@
 # KBUtilLib API Quick Reference
 
-Quick reference for the most commonly used APIs in KBUtilLib.
+Quick reference for the most commonly used APIs in KBUtilLib (post-2026-05 composition refactor).
+
+> Use the `KBUtilLib` facade. The legacy multi-inheritance pattern (`class MyTools(A, B): pass`) is **deprecated** — `__init__.py` aliases keep imports resolving but constructor signatures changed.
 
 ## Configuration & Setup
 
-### Initialize with Configuration
-```python
-from kbutillib import SharedEnvUtils
+### Initialize the facade
 
-class MyTools(SharedEnvUtils):
-    pass
+```python
+from kbutillib import KBUtilLib
 
 # Default configuration (auto-loads from standard locations)
-tools = MyTools()
+kbu = KBUtilLib()
 
 # Explicit configuration file
-tools = MyTools(config_file="/path/to/config.yaml")
+from kbutillib import SharedEnvUtils
+env = SharedEnvUtils(config_file="/path/to/config.yaml")
+kbu = KBUtilLib(env=env)
 
-# With explicit token
-tools = MyTools(kbase_token="YOUR_TOKEN")
+# With explicit token (passes through to SharedEnvUtils)
+kbu = KBUtilLib(kbase_token="YOUR_TOKEN")
 ```
 
 ### Configuration File Format (YAML)
@@ -40,12 +42,12 @@ logging:
 
 ### Token Management
 ```python
-# Get tokens
-kbase_token = tools.get_token("kbase")
-argo_token = tools.get_token("argo")
+# Get tokens via the held SharedEnvUtils
+kbase_token = kbu.env.get_token("kbase")
+argo_token = kbu.env.get_token("argo")
 
 # Set tokens programmatically
-tools.set_token("NEW_TOKEN", namespace="kbase")
+kbu.env.set_token("NEW_TOKEN", namespace="kbase")
 
 # Tokens can also be set via environment variables:
 # KBASE_AUTH_TOKEN, ARGO_API_TOKEN
@@ -55,35 +57,35 @@ tools.set_token("NEW_TOKEN", namespace="kbase")
 
 ### Retrieve Objects
 ```python
-from kbutillib import KBWSUtils
-
-ws = KBWSUtils()
+kbu = KBUtilLib()
 
 # Get any object
-obj = ws.get_object(workspace_id=12345, object_ref="MyObject/1")
+obj = kbu.ws.get_object(workspace_id=12345, object_ref="MyObject/1")
 
 # Get with specific version
-obj = ws.get_object(12345, "MyObject/3")
+obj = kbu.ws.get_object(12345, "MyObject/3")
 
 # Get object info (metadata only)
-info = ws.get_object_info(12345, "MyObject")
-# Returns: [id, name, type, save_date, version, ...]
+info = kbu.ws.get_object_info(12345, "MyObject")
+
+# Check if string is a workspace ref
+assert kbu.ws.is_ref("12345/6/7") is True
+assert kbu.ws.is_ref("foo") is False
 ```
 
 ### List Objects
 ```python
 # List all objects in workspace
-objects = ws.list_objects(workspace_id=12345)
+objects = kbu.ws.list_objects(workspace_id=12345)
 
 # Filter by type
-genomes = ws.list_objects(12345, type_filter="KBaseGenomes.Genome")
-models = ws.list_objects(12345, type_filter="KBaseFBA.FBAModel")
+genomes = kbu.ws.list_objects(12345, type_filter="KBaseGenomes.Genome")
+models = kbu.ws.list_objects(12345, type_filter="KBaseFBA.FBAModel")
 ```
 
 ### Save Objects
 ```python
-# Save object to workspace
-ws.save_object(
+kbu.ws.save_object(
     workspace_id=12345,
     obj_type="KBaseGenomes.Genome",
     data=genome_data,
@@ -95,188 +97,142 @@ ws.save_object(
 
 ### Get and Analyze Genomes
 ```python
-from kbutillib import KBWSUtils, KBGenomeUtils
+kbu = KBUtilLib()
 
-class GenomeTools(KBWSUtils, KBGenomeUtils):
-    pass
-
-tools = GenomeTools()
-
-# Get genome
-genome = tools.get_genome(workspace_id=12345, genome_ref="MyGenome/1")
+# Get genome (delegates to kbu.ws under the hood)
+genome = kbu.genome.get_genome(workspace_id=12345, genome_ref="MyGenome/1")
 
 # Get all features
-features = tools.get_features(genome)
+features = kbu.genome.get_features(genome)
 
 # Filter by type
-cds_features = tools.get_features_by_type(genome, "CDS")
-rna_features = tools.get_features_by_type(genome, "rRNA")
+cds_features = kbu.genome.get_features_by_type(genome, "CDS")
+rna_features = kbu.genome.get_features_by_type(genome, "rRNA")
 
 # Filter by function
-transporters = tools.get_features_by_function(genome, "transport")
+transporters = kbu.genome.get_features_by_function(genome, "transport")
 ```
 
 ### Sequence Translation
 ```python
 # Translate single feature
-protein_seq = tools.translate_feature(feature)
+protein_seq = kbu.genome.translate_feature(feature)
 
 # Bulk translation
-proteins = tools.translate_features(cds_features)
-# Returns: {feature_id: protein_sequence, ...}
+proteins = kbu.genome.translate_features(cds_features)
 
 # Get contig sequences
-contigs = tools.get_contig_sequences(genome)
-# Returns: {contig_id: sequence, ...}
+contigs = kbu.genome.get_contig_sequences(genome)
+
+# Pure-string helpers
+rev = kbu.genome.reverse_complement("ATCG")          # "CGAT"
+aa = kbu.genome.translate_sequence("ATGATGATG")
 ```
 
 ## Annotation Operations
 
 ### Access Annotations
 ```python
-from kbutillib import KBWSUtils, KBAnnotationUtils
+kbu = KBUtilLib()
 
-class AnnotationTools(KBWSUtils, KBAnnotationUtils):
-    pass
-
-tools = AnnotationTools()
-
-# Get all annotations
-annotations = tools.get_annotations(genome)
-
-# Get annotation history
-events = tools.get_annotation_events(genome)
-
-# Filter by ontology
-ec_annotations = tools.filter_annotations_by_ontology(annotations, "EC")
-kegg_annotations = tools.filter_annotations_by_ontology(annotations, "KEGG")
+annotations = kbu.annotation.get_annotations(genome)
+events = kbu.annotation.get_annotation_events(genome)
+ec_annotations = kbu.annotation.filter_annotations_by_ontology(annotations, "EC")
+kegg_annotations = kbu.annotation.filter_annotations_by_ontology(annotations, "KEGG")
 ```
 
 ### Extract Identifiers
 ```python
-# Get EC numbers for a feature
-ec_numbers = tools.get_ec_numbers(feature)
-# Returns: ["1.1.1.1", "2.3.4.5"]
-
-# Get KEGG IDs
-kegg_ids = tools.get_kegg_ids(feature)
-# Returns: ["K00001", "K00002"]
-
-# Map function to reactions
-reactions = tools.map_function_to_reactions("alcohol dehydrogenase")
+ec_numbers = kbu.annotation.get_ec_numbers(feature)         # ["1.1.1.1", "2.3.4.5"]
+kegg_ids = kbu.annotation.get_kegg_ids(feature)             # ["K00001", "K00002"]
+reactions = kbu.annotation.map_function_to_reactions("alcohol dehydrogenase")
+modelseed_id = kbu.annotation.translate_term_to_modelseed("acetyl-CoA")
 ```
 
 ## ModelSEED Biochemistry
 
 ### Search Compounds
 ```python
-from kbutillib import MSBiochemUtils
+kbu = KBUtilLib()
 
-biochem = MSBiochemUtils()
-
-# Search by name
-compounds = biochem.search_compounds("glucose")
-# Returns list of matching compounds
-
-# Search by ID
-atp = biochem.get_compound("cpd00002")
-
-# Search by formula
-c6h12o6 = biochem.search_by_formula("C6H12O6")
-
-# Search by structure
-compound = biochem.search_by_inchikey("WQZGKKKJIJFFOK-...")
+compounds = kbu.biochem.search_compounds("glucose")
+atp = kbu.biochem.get_compound_by_id("cpd00002")
+c6h12o6 = kbu.biochem.search_by_formula("C6H12O6")
+compound = kbu.biochem.search_by_inchikey("WQZGKKKJIJFFOK-...")
 ```
 
 ### Search Reactions
 ```python
-# Search by name/equation
-reactions = biochem.search_reactions("glycolysis")
-
-# Get specific reaction
-reaction = biochem.get_reaction("rxn00001")
-
-# Get stoichiometry
-stoich = biochem.get_reaction_stoichiometry("rxn00001")
+reactions = kbu.biochem.search_reactions("glycolysis")
+reaction = kbu.biochem.get_reaction("rxn00001")
+stoich = kbu.biochem.get_reaction_stoichiometry("rxn00001")
 # Returns: {"cpd00001": -1, "cpd00002": 1, ...}
+
+# Direction analysis (delegates to kbutillib.model_directionality)
+direction = kbu.biochem.reaction_directionality_from_bounds(reaction)
+biochem_dir = kbu.biochem.reaction_biochem_directionality(reaction)
 ```
 
 ## Metabolic Model Operations
 
 ### Get and Analyze Models
 ```python
-from kbutillib import KBWSUtils, KBModelUtils
+kbu = KBUtilLib()
 
-class ModelTools(KBWSUtils, KBModelUtils):
-    pass
-
-tools = ModelTools()
-
-# Get model
-model = tools.get_model(workspace_id=12345, model_ref="MyModel/1")
-
-# Get model components
-reactions = tools.get_model_reactions(model)
-metabolites = tools.get_model_metabolites(model)
-genes = tools.get_model_genes(model)
+model = kbu.model.get_model(workspace_id=12345, model_ref="MyModel/1")
+reactions = kbu.model.get_model_reactions(model)
+metabolites = kbu.model.get_model_metabolites(model)
+genes = kbu.model.get_model_genes(model)
 ```
 
 ### Modify Models
 ```python
-# Add reaction
-tools.add_reaction(model, reaction_data)
-
-# Remove reaction
-tools.remove_reaction(model, "rxn00001_c0")
-
-# Get reconstruction template
-template = tools.get_template("GramNegative")
+kbu.model.add_reaction(model, reaction_data)
+kbu.model.remove_reaction(model, "rxn00001_c0")
+template = kbu.model.get_template("GramNegative")
 ```
 
-## FBA Operations
+## FBA Operations (preserves AP3 carve-outs)
 
 ### Run FBA
 ```python
-from kbutillib import KBModelUtils, MSFBAUtils
-
-class FBATools(KBModelUtils, MSFBAUtils):
-    pass
-
-tools = FBATools()
+kbu = KBUtilLib()
 
 # Basic FBA
-solution = tools.run_fba(model)
+solution = kbu.fba.run_fba(model, biomass_reaction="bio1")
 print(f"Objective value: {solution.objective_value}")
 
 # FBA with specific media
-tools.set_media(model, "Complete")
-solution = tools.run_fba(model)
+kbu.fba.set_media(model, "Complete")
+solution = kbu.fba.run_fba(model, biomass_reaction="bio1")
 
 # Parsimonious FBA
-solution = tools.run_pfba(model)
+solution = kbu.fba.run_pfba(model)
 ```
 
-### Flux Analysis
+### Flux Analysis (AP3 carve-outs)
+
 ```python
-# Flux Variability Analysis
-fva_results = tools.run_fva(model)
-# Returns: {reaction_id: (min_flux, max_flux), ...}
+# AP3: kbu.fba.run_fva is the WORKING FVA implementation.
+# cobra.flux_variability_analysis is broken; do NOT replace.
+fva_results = kbu.fba.run_fva(model)
+fva_results = kbu.fba.run_fva(model, reactions=["rxn00001", "rxn00002"])
 
-# FVA on specific reactions
-fva_results = tools.run_fva(model, reactions=["rxn00001", "rxn00002"])
+# AP3: KO impact on biomass — NOT cobra.single_reaction_deletion
+coupling = kbu.fba.analyzed_reaction_objective_coupling(model)
 
-# Set fraction of optimum constraint
-tools.set_fraction_of_optimum(model, 0.9)  # 90% of optimal
-fva_results = tools.run_fva(model)
+# AP3: specific science code; do NOT move to ModelSEEDpy.MSExpression
+fit = kbu.fba.fit_flux_to_mutant_growth_rate_data(model, mutant_data)
+
+# Set fraction of optimum
+kbu.fba.set_fraction_of_optimum(model, 0.9)
+fva_results = kbu.fba.run_fva(model)
 ```
 
 ### Constraints and Objectives
 ```python
-# Set objective
-tools.set_objective(model, "bio1")  # Biomass reaction
-
-# Add flux constraint
-tools.add_constraint(model, {
+kbu.fba.set_objective(model, "bio1")  # Biomass reaction
+kbu.fba.add_constraint(model, {
     "reaction": "rxn00001",
     "lower_bound": 0,
     "upper_bound": 10
@@ -287,170 +243,178 @@ tools.add_constraint(model, {
 
 ### Reaction Curation
 ```python
-from kbutillib import AICurationUtils
+kbu = KBUtilLib()
 
-curator = AICurationUtils()
-
-# Curate reaction direction
-result = curator.curate_reaction_direction(reaction_data)
-# Returns direction analysis with confidence
-
-# Categorize stoichiometry
-category = curator.categorize_stoichiometry(reaction)
-# Returns: "balanced", "transport", "exchange", etc.
-
-# Evaluate equivalence
-are_equivalent = curator.evaluate_equivalence(reaction1, reaction2)
+result = kbu.curation.curate_reaction_direction(reaction_data)
+category = kbu.curation.categorize_stoichiometry(reaction)
+are_equivalent = kbu.curation.evaluate_equivalence(reaction1, reaction2)
 ```
 
 ### Gene-Reaction Assessment
 ```python
-# Validate gene-reaction association
-assessment = curator.assess_gene_reaction(gene_info, reaction_info)
-# Returns confidence score and reasoning
+assessment = kbu.curation.assess_gene_reaction(gene_info, reaction_info)
 ```
 
 ### Caching
 ```python
-# Results are automatically cached
-# Check cache
-cached = curator.get_cached_result(query_hash)
-
-# Clear cache
-curator.clear_cache()
+cached = kbu.curation.get_cached_result(query_hash)
+kbu.curation.clear_cache()
 ```
 
 ## External APIs
 
 ### BV-BRC
 ```python
-from kbutillib import BVBRCUtils
-
-bvbrc = BVBRCUtils()
-
-# Get genome
-genome = bvbrc.get_bvbrc_genome("83332.12")
-
-# Search genomes
-genomes = bvbrc.search_bvbrc_genomes("Escherichia coli")
-
-# Convert to KBase format
-kb_genome = bvbrc.convert_to_kbase(genome)
+kbu = KBUtilLib()
+genome = kbu.bvbrc.get_bvbrc_genome("83332.12")
+genomes = kbu.bvbrc.search_bvbrc_genomes("Escherichia coli")
+kb_genome = kbu.bvbrc.convert_to_kbase(genome)
 ```
 
 ### UniProt
 ```python
-from kbutillib import KBUniProtUtils
-
-uniprot = KBUniProtUtils()
-
-# Get entry
-entry = uniprot.get_uniprot_entry("P00533")
-
-# Get sequence
-sequence = uniprot.get_protein_sequence("P00533")
-
-# Search
-results = uniprot.search_uniprot("alcohol dehydrogenase AND organism:ecoli")
-
-# ID mapping
-mapped = uniprot.map_ids(["P00533", "P12345"], from_db="UniProtKB_AC", to_db="PDB")
+entry = kbu.uniprot.get_uniprot_entry("P00533")
+sequence = kbu.uniprot.get_protein_sequence("P00533")
+results = kbu.uniprot.search_uniprot("alcohol dehydrogenase AND organism:ecoli")
+mapped = kbu.uniprot.map_ids(["P00533", "P12345"], from_db="UniProtKB_AC", to_db="PDB")
 ```
 
 ### PDB
 ```python
-from kbutillib import RCSBPDBUtils
-
-pdb = RCSBPDBUtils()
-
-# Get structure info
-structure = pdb.get_structure("1HHO")
-
-# Search
-structures = pdb.search_structures("hemoglobin")
-
-# Get sequence
-sequence = pdb.get_sequence("1HHO", chain="A")
+structure = kbu.pdb.get_structure("1HHO")
+structures = kbu.pdb.search_structures("hemoglobin")
+sequence = kbu.pdb.get_sequence("1HHO", chain="A")
 ```
 
 ## Visualization
 
 ### Escher Maps
 ```python
-from kbutillib import EscherUtils
+kbu = KBUtilLib()
 
-escher = EscherUtils()
+map = kbu.escher.create_map(reaction_list)
+kbu.escher.visualize_fluxes(map, fba_solution)
+kbu.escher.set_reaction_colors(map, {"rxn00001": "red", "rxn00002": "blue"})
+kbu.escher.save_map(map, "my_map.json")
 
-# Create map
-map = escher.create_map(reaction_list)
-
-# Visualize FBA results
-escher.visualize_fluxes(map, fba_solution)
-
-# Custom coloring
-escher.set_reaction_colors(map, {
-    "rxn00001": "red",
-    "rxn00002": "blue"
-})
-
-# Save
-escher.save_map(map, "my_map.json")
+# Enhanced map with badges/legends:
+html = kbu.escher.create_map_html2(model, fluxes, ...)
 ```
 
-## Notebook Utilities
+## EE2 Job Tracking (KBJobUtils)
 
-### Enhanced Display
+### Submit and Track Jobs
 ```python
-from kbutillib import NotebookUtils
+kbu = KBUtilLib()
 
-nb = NotebookUtils()
+# Submit a job (auto-persists to ~/.kbjobs/kbjobs.db)
+state = kbu.jobs.submit({
+    "method": "ModelSEEDpy/build_metabolic_model",
+    "params": [{...}],
+}, name="adp1-build", project="ADP1Notebooks")
+print(state.job_id, state.status)
 
-# Display DataFrame with interactive features
-nb.display_dataframe(df)
+# Refresh state from EE2
+state = kbu.jobs.refresh(state.job_id)
+states = kbu.jobs.refresh_active()  # bulk refresh non-terminal jobs
 
-# Progress bar
-with nb.create_progress_bar(total=100) as pbar:
-    for i in range(100):
-        # do work
-        pbar.update(1)
+# Read from local store (no EE2 hit)
+job = kbu.jobs.get(state.job_id)
+recent = kbu.jobs.list(status="completed", project="ADP1Notebooks", limit=20)
+counts = kbu.jobs.summary()  # {"queued": 3, "running": 5, ...}
+
+# Manage
+kbu.jobs.cancel(job_id)
+kbu.jobs.forget(job_id)
+kbu.jobs.cleanup(older_than_days=30, terminal_only=True)
+logs = kbu.jobs.get_logs(job_id, skip_lines=0)
 ```
 
-### Data Objects with Provenance
+### Linear Pipelines
 ```python
-# Create tracked data object
-data = nb.DataObject(
-    name="my_analysis",
-    data=result_data,
-    source="genome_analysis",
-    params={"param1": "value1"}
+# Submit a chain — only step 0 starts; advancement happens via refresh_active
+pipeline = kbu.jobs.submit_chain([
+    {"method": "step1", "params": [...]},
+    {"method": "step2", "params": [...]},
+    {"method": "step3", "params": [...]},
+], name="my_chain", project="ADP1Notebooks")
+
+# Periodic refresh advances the pipeline:
+kbu.jobs.refresh_active()
+# Or run the in-process watcher:
+kbu.jobs.start_watcher(interval=300)
+```
+
+### CLI
+```bash
+kbu jobs status <job_id>
+kbu jobs list --status running --project ADP1Notebooks
+kbu jobs refresh
+kbu jobs logs <job_id> --follow
+kbu jobs cancel <job_id>
+kbu jobs chain submit my_chain.json
+kbu jobs chain status <pipeline_id>
+kbu jobdaemon --interval 300   # foreground watcher
+```
+
+## Notebook Integration
+
+### NotebookSession + facade
+```python
+from kbutillib.notebook import NotebookSession
+
+session = NotebookSession(...)
+# session.kbu is the KBUtilLib facade scoped to this session's env
+session.kbu.fba.run_fba(model)
+session.kbu.biochem.search_compounds("glucose")
+
+# session also exposes its own utilities:
+session.cache.save("intermediate_data", df)
+session.vectors.add(...)
+```
+
+`NotebookSession` replaces the deleted legacy `NotebookUtils`. See `src/kbutillib/notebook/` for the full session API.
+
+## Flat-module helpers
+
+```python
+# URL helpers
+from kbutillib.kbase_endpoints import base_url, service_url, narrative_url
+
+# Compartment normalization
+from kbutillib.compartments import compartment_types, normalize_compartment
+
+# Model directionality
+from kbutillib.model_directionality import (
+    direction_conversion, directionality_from_bounds,
+    biochem_directionality, combine_directionality_signals,
 )
 
-# Access provenance
-print(data.provenance)
+# Model helpers (deduped from triplicate)
+from kbutillib.model_helpers import _check_and_convert_model, _parse_id
 ```
 
 ## Error Handling
 
 ```python
 try:
-    genome = tools.get_genome(12345, "NonExistentGenome")
+    genome = kbu.genome.get_genome(12345, "NonExistentGenome")
 except ValueError as e:
     print(f"Object not found: {e}")
 
 try:
-    result = curator.curate_reaction_direction(bad_data)
+    result = kbu.curation.curate_reaction_direction(bad_data)
 except Exception as e:
-    tools.log_error(f"Curation failed: {e}")
+    kbu.env.logger.error(f"Curation failed: {e}")
 ```
 
 ## Logging
 
 ```python
-# Set log level
-tools.logger.setLevel("DEBUG")
+# Logger is on the held SharedEnvUtils
+kbu.env.logger.setLevel("DEBUG")
+kbu.env.logger.info("Starting analysis")
 
-# Log messages
-tools.log_info("Starting analysis")
-tools.log_debug("Processing item 1 of 100")
-tools.log_error("Failed to process item")
+# Each *Impl exposes the same logger as self.env.logger
+kbu.fba.logger is kbu.env.logger  # True
 ```

@@ -112,17 +112,13 @@ module MyModule {
 };
 ```
 
-## Implementation File Pattern
+## Implementation File Pattern (post-2026-05 composition refactor)
 
 ```python
 #BEGIN_HEADER
 import os
 import json
-from kbutillib import KBWSUtils, KBCallbackUtils, SharedEnvUtils
-
-class MyAppUtils(KBWSUtils, KBCallbackUtils, SharedEnvUtils):
-    """Custom utility class combining KBUtilLib modules."""
-    pass
+from kbutillib import KBUtilLib, SharedEnvUtils
 #END_HEADER
 
 class MyModule:
@@ -133,7 +129,8 @@ class MyModule:
         #BEGIN_CONSTRUCTOR
         self.callback_url = os.environ['SDK_CALLBACK_URL']
         self.scratch = config['scratch']
-        self.utils = MyAppUtils(callback_url=self.callback_url)
+        # Build the facade with an SDK-flavored env (callback URL goes here)
+        self.kbu = KBUtilLib(env=SharedEnvUtils(callback_url=self.callback_url))
         #END_CONSTRUCTOR
         pass
 
@@ -143,14 +140,14 @@ class MyModule:
         workspace_name = params['workspace_name']
         genome_ref = params['genome_ref']
 
-        # Get data using KBUtilLib
-        genome_data = self.utils.get_object(workspace_name, genome_ref)
+        # Get data using the facade
+        genome_data = self.kbu.ws.get_object(workspace_name, genome_ref)
 
         # Do processing...
         results = self.process_genome(genome_data)
 
-        # Create report
-        report_info = self.utils.create_extended_report({
+        # Create report via callback
+        report_info = self.kbu.callback.create_extended_report({
             'message': 'Analysis complete',
             'workspace_name': workspace_name
         })

@@ -5,6 +5,8 @@ from __future__ import annotations
 import click
 
 from .init_notebook import init_notebook_cmd
+from .jobdaemon import jobdaemon_cmd
+from .jobs import jobs_cmd
 
 
 @click.group()
@@ -14,3 +16,5 @@ def main() -> None:
 
 
 main.add_command(init_notebook_cmd, name="init-notebook")
+main.add_command(jobs_cmd, name="jobs")
+main.add_command(jobdaemon_cmd, name="jobdaemon")

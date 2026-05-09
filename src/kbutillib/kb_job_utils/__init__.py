@@ -11,16 +11,21 @@ Phase 1 scope:
 - Cancel jobs (``cancel_job``)
 - Retrieve job logs (``get_job_logs``)
 
-Phase 2 (future): polling loop, callbacks, batch helpers.
+Phase 2 scope:
+- Refresh active / all jobs (``refresh_active``, ``refresh_all``)
+- Cleanup old records (``cleanup``)
+- Opt-in background watcher thread (``start_watcher`` / ``stop_watcher``)
+- ``kbu jobs`` and ``kbu jobdaemon`` CLI subcommands
 """
 
 from .state import JobRecord, JobState
 from .store import JobStore
-from .utils import KBJobUtils
+from .utils import KBJobUtils, Watcher
 
 __all__ = [
     "JobRecord",
     "JobState",
     "JobStore",
     "KBJobUtils",
+    "Watcher",
 ]

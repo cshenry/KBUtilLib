@@ -8,15 +8,16 @@ Design decisions
 ~~~~~~~~~~~~~~~~
 * **Composition over inheritance** -- holds ``SharedEnvUtils``, does not subclass it.
 * Token retrieved via ``env.get_token(namespace="kbase")``.
-* No internal polling loop (Phase 2).
+* Watcher is opt-in, in-process background thread (Phase 2).
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..installed_clients.execution_engine2Client import execution_engine2
 from ..kbase_endpoints import service_url
@@ -208,8 +209,200 @@ class KBJobUtils:
         """Return every locally-stored job record."""
         return self._store.list_all()
 
+    # ── refresh ──────────────────────────────────────────────────────────
+
+    def refresh_active(self) -> List[JobRecord]:
+        """Re-check all locally-stored non-terminal jobs against EE2.
+
+        Returns:
+            List of updated :class:`JobRecord` objects.
+        """
+        active = self._store.list_active()
+        if not active:
+            return []
+        job_ids = [r.job_id for r in active]
+        results = self.check_jobs(job_ids)
+        return list(results.values())
+
+    def refresh_all(self) -> List[JobRecord]:
+        """Re-check every locally-stored job against EE2.
+
+        Returns:
+            List of updated :class:`JobRecord` objects.
+        """
+        all_jobs = self._store.list_all()
+        if not all_jobs:
+            return []
+        job_ids = [r.job_id for r in all_jobs]
+        results = self.check_jobs(job_ids)
+        return list(results.values())
+
     # ── cleanup ──────────────────────────────────────────────────────────
 
+    def cleanup(
+        self,
+        older_than_days: int = 30,
+        terminal_only: bool = True,
+    ) -> int:
+        """Delete old job records from the local store.
+
+        Args:
+            older_than_days: Remove records older than this many days.
+            terminal_only: If True (default), only remove records in
+                terminal states.
+
+        Returns:
+            Number of records deleted.
+        """
+        cutoff = datetime.now(timezone.utc).timestamp() - (older_than_days * 86400)
+        all_jobs = self._store.list_all()
+        deleted = 0
+        for rec in all_jobs:
+            if terminal_only and not rec.state.is_terminal:
+                continue
+            if rec.updated_at.timestamp() < cutoff:
+                self._store.delete(rec.job_id)
+                deleted += 1
+        return deleted
+
+    # ── watcher ──────────────────────────────────────────────────────────
+
+    def start_watcher(
+        self,
+        interval: int = 300,
+        on_change: Optional[Callable[[JobRecord, JobRecord], None]] = None,
+        daemon: bool = True,
+    ) -> "Watcher":
+        """Start a background thread that periodically calls refresh_active().
+
+        Args:
+            interval: Seconds between refresh passes (default 300, min 30).
+            on_change: Optional callback(old_state, new_state) per job whose
+                status changed during a refresh pass.  Errors in the callback
+                are logged and do NOT kill the thread.
+            daemon: Thread daemon flag (default True).
+
+        Returns:
+            The :class:`Watcher` instance.
+
+        Idempotent -- calling ``start_watcher`` when one is already running
+        returns the existing watcher.
+        """
+        if hasattr(self, "_watcher") and self._watcher is not None:
+            if self._watcher.is_alive():
+                return self._watcher
+        interval = max(interval, 30)
+        w = Watcher(self, interval=interval, on_change=on_change, daemon=daemon)
+        self._watcher = w
+        w.start()
+        return w
+
+    def stop_watcher(self, timeout: float = 5.0) -> bool:
+        """Signal the watcher to stop and wait up to *timeout* seconds.
+
+        Returns:
+            True if the watcher stopped cleanly, False if it timed out.
+        """
+        w = getattr(self, "_watcher", None)
+        if w is None:
+            return True
+        w.stop()
+        w.join(timeout=timeout)
+        alive = w.is_alive()
+        if not alive:
+            self._watcher = None
+        return not alive
+
+    @property
+    def watcher(self) -> Optional["Watcher"]:
+        """The current watcher, or None if not running."""
+        w = getattr(self, "_watcher", None)
+        if w is not None and not w.is_alive():
+            self._watcher = None
+            return None
+        return w
+
     def close(self) -> None:
-        """Close the underlying database connection."""
+        """Stop the watcher (if running) and close the database connection."""
+        self.stop_watcher()
         self._store.close()
+
+
+class Watcher:
+    """Background thread that periodically refreshes active jobs.
+
+    Instantiated via :meth:`KBJobUtils.start_watcher` -- not typically
+    created directly.
+    """
+
+    def __init__(
+        self,
+        kbu: KBJobUtils,
+        interval: int = 300,
+        on_change: Optional[Callable[[JobRecord, JobRecord], None]] = None,
+        daemon: bool = True,
+    ) -> None:
+        self._kbu = kbu
+        self._interval = interval
+        self._on_change = on_change
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, daemon=daemon, name="kbjobs-watcher"
+        )
+        self.last_run_at: Optional[datetime] = None
+        self.runs: int = 0
+        self.errors: int = 0
+
+    def start(self) -> None:
+        """Start the watcher thread."""
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the watcher to stop.  Non-blocking."""
+        self._stop_event.set()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        """Wait for the watcher thread to finish."""
+        self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        """Return True if the watcher thread is still running."""
+        return self._thread.is_alive()
+
+    def _run(self) -> None:
+        """Main loop: refresh, diff, callback, sleep."""
+        while not self._stop_event.is_set():
+            try:
+                # Snapshot pre-refresh states for active jobs
+                pre_states: Dict[str, JobState] = {}
+                for rec in self._kbu.list_active():
+                    pre_states[rec.job_id] = rec.state
+
+                refreshed = self._kbu.refresh_active()
+
+                # Diff and emit on_change callbacks
+                if self._on_change is not None:
+                    for rec in refreshed:
+                        old_state = pre_states.get(rec.job_id)
+                        if old_state is not None and old_state != rec.state:
+                            try:
+                                # Build a synthetic "old" record for the callback
+                                old_rec = JobRecord(
+                                    job_id=rec.job_id,
+                                    method=rec.method,
+                                    state=old_state,
+                                )
+                                self._on_change(old_rec, rec)
+                            except Exception:
+                                logger.exception(
+                                    "on_change callback error for job %s",
+                                    rec.job_id,
+                                )
+
+                self.runs += 1
+                self.last_run_at = datetime.now(timezone.utc)
+            except Exception:
+                logger.exception("Watcher refresh error")
+                self.errors += 1
+
+            self._stop_event.wait(self._interval)

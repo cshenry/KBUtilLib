@@ -294,8 +294,6 @@ class TestKBAnnotationUtils:
 
     @pytest.fixture
     def annotation(self):
-        from pathlib import Path
-
         from kbutillib.kb_annotation_utils import KBAnnotationUtils
 
         # The constructor reads data files from cb_annotation_ontology_api;

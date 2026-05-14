@@ -45,6 +45,23 @@ class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
         self.session = requests.Session()
         self.session.verify = verify_ssl
 
+        # Authenticate against BV-BRC API when a PATRIC token is available.
+        # Without this header, queries only see public genomes, so users
+        # cannot fetch private genomes they own (e.g. RASTtk-annotated ones)
+        # for downstream model reconstruction. The token is set as a session
+        # default so all `self.session.get(...)` calls in this module
+        # (fetch_genome_metadata, fetch_genome_sequences, fetch_genome_features,
+        # fetch_feature_sequences) include it. Falls back silently to
+        # unauthenticated mode if no token is configured (public-only behavior
+        # is preserved).
+        try:
+            patric_token = self.get_token(namespace="patric")
+            if patric_token:
+                self.session.headers["Authorization"] = patric_token
+        except Exception:
+            # Tolerate any token-lookup failure; leave session unauthenticated.
+            pass
+
         # Suppress SSL warnings if not verifying
         if not verify_ssl:
             import urllib3

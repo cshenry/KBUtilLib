@@ -1,7 +1,7 @@
 ---
 name: KBUtilLib Development
 description: Development guide for KBUtilLib utility classes and modules
-scope: repo:KBUtilLib
+scope: domain
 ---
 
 # KBUtilLib Development Expert

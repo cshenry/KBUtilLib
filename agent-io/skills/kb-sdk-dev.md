@@ -1,7 +1,7 @@
 ---
 name: KBase SDK Development
 description: Guide for building KBase SDK apps with KIDL specs and workspace types
-scope: repo:KBUtilLib
+scope: domain
 ---
 
 # KBase SDK Development Expert

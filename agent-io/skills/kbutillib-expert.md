@@ -1,7 +1,7 @@
 ---
 name: KBUtilLib Expert
 description: Expert on KBUtilLib composable utility framework for KBase/ModelSEED
-scope: repo:KBUtilLib
+scope: domain
 ---
 
 # KBUtilLib Expert

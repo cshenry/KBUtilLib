@@ -1,7 +1,7 @@
 ---
 name: MSModelUtil Expert
 description: Expert on MSModelUtil for metabolic model construction and analysis
-scope: repo:KBUtilLib
+scope: domain
 ---
 
 # MSModelUtil Expert

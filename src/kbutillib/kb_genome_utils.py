@@ -1,11 +1,20 @@
 """KBase genome utilities for working with genomic data and annotations."""
 
+import hashlib
+import logging
+import time
+import warnings
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from os.path import exists
 import json
 
 from .base_utils import BaseUtils
 from .kb_ws_utils import KBWSUtils
+
+logger = logging.getLogger(__name__)
 
 genetic_code_standard = {
     "TTT": "F",
@@ -770,18 +779,443 @@ class KBGenomeUtils(KBWSUtils):
 
         return synthetic_genome
 
+    # ── New save / validate / build methods ─────────────────────────────────
+
+    def save_genome_object(self, genome_dict: Dict[str, Any], workspace, name: str) -> str:
+        """Save a KBaseGenomes.Genome typed object directly to the Workspace.
+
+        Uses the inherited ``save_ws_object`` transport (no EE2 job needed).
+
+        Args:
+            genome_dict: Complete KBase Genome object dict.
+            workspace: Workspace ID (int) or name (str).
+            name: Object name to save under.
+
+        Returns:
+            ``'ws_id/obj_id/version'`` reference string.
+        """
+        result = self.save_ws_object(name, workspace, genome_dict, "KBaseGenomes.Genome")
+        # save_ws_object returns the list returned by save_objects; first element is
+        # the object info: [obj_id, name, type, save_date, version, saved_by, ws_id, ...]
+        info = result[0]
+        return f"{info[6]}/{info[0]}/{info[4]}"
+
+    def save_assembly_from_fasta(self, fasta_path, workspace, name: str, *, wait: bool = True, timeout: int = 600) -> str:
+        """Save a FASTA file as a KBase Assembly via AssemblyUtil EE2 job.
+
+        This method on the bare ``KBGenomeUtils`` legacy class is not
+        supported.  The EE2 job path requires the composition facade which
+        holds a ``KBJobUtils`` instance.
+
+        Raises:
+            RuntimeError: Always — directs the caller to use the facade.
+        """
+        raise RuntimeError(
+            "save_assembly_from_fasta requires the composition-facade path; "
+            "use kbu = KBUtilLib(); kbu.genome.save_assembly_from_fasta(...)"
+        )
+
+    def save_genome_with_assembly(
+        self,
+        fasta_path,
+        genome_dict: Dict[str, Any],
+        workspace,
+        base_name: str,
+        *,
+        assembly_suffix: str = "_assembly",
+    ) -> Tuple[str, str]:
+        """Save FASTA as Assembly, splice assembly_ref, then save the Genome.
+
+        Args:
+            fasta_path: Path to the FASTA file.
+            genome_dict: Genome object dict (not mutated — shallow copy is made).
+            workspace: Workspace ID (int) or name (str).
+            base_name: Base name; assembly saved as ``base_name + assembly_suffix``.
+            assembly_suffix: Suffix appended to ``base_name`` for the assembly object.
+
+        Returns:
+            ``(assembly_ref, genome_ref)`` tuple of ``'ws_id/obj_id/version'`` strings.
+        """
+        assembly_ref = self.save_assembly_from_fasta(
+            fasta_path, workspace, base_name + assembly_suffix
+        )
+        genome_dict = dict(genome_dict)  # shallow copy; don't mutate caller's input
+        genome_dict["assembly_ref"] = assembly_ref
+        genome_ref = self.save_genome_object(genome_dict, workspace, base_name)
+        return assembly_ref, genome_ref
+
+    def validate_genome(
+        self, genome_dict: Dict[str, Any], *, require_assembly_ref: bool = True
+    ) -> List[str]:
+        """Validate a Genome dict against KBaseGenomes.Genome required fields.
+
+        Schema-only validation: checks for required keys, types, and
+        cross-field consistency.  Does NOT recompute MD5 or translate sequences.
+
+        Args:
+            genome_dict: The genome dict to validate.
+            require_assembly_ref: When True (default), flags missing or empty
+                ``assembly_ref``.  Set to False when validating a Genome dict
+                built before the assembly has been saved (e.g., immediately
+                after ``build_genome_from_fasta_gff``).
+
+        Returns:
+            List of human-readable error strings; empty list means valid.
+        """
+        errors: List[str] = []
+
+        required_scalar_fields = [
+            "id", "scientific_name", "domain", "molecule_type",
+            "source", "source_id", "taxonomy",
+        ]
+        for field in required_scalar_fields:
+            if not genome_dict.get(field):
+                errors.append(f"Missing or empty required field: '{field}'")
+
+        # Numeric fields
+        if not isinstance(genome_dict.get("genetic_code"), int):
+            errors.append("'genetic_code' must be an int")
+        if not isinstance(genome_dict.get("dna_size"), int) or genome_dict.get("dna_size", 0) <= 0:
+            errors.append("'dna_size' must be a positive int")
+        if not isinstance(genome_dict.get("num_contigs"), int) or genome_dict.get("num_contigs", 0) <= 0:
+            errors.append("'num_contigs' must be a positive int")
+
+        gc = genome_dict.get("gc_content")
+        if not isinstance(gc, (int, float)) or not (0.0 <= gc <= 1.0):
+            errors.append("'gc_content' must be a float in [0, 1]")
+
+        if not isinstance(genome_dict.get("md5"), str) or not genome_dict.get("md5"):
+            errors.append("'md5' must be a non-empty str")
+
+        # assembly_ref — conditionally required
+        if require_assembly_ref:
+            if not genome_dict.get("assembly_ref"):
+                errors.append("'assembly_ref' must be a non-empty str (use require_assembly_ref=False for pre-assembly dicts)")
+
+        # contig_ids / contig_lengths consistency
+        contig_ids = genome_dict.get("contig_ids")
+        contig_lengths = genome_dict.get("contig_lengths")
+        if not isinstance(contig_ids, list):
+            errors.append("'contig_ids' must be a list")
+            contig_ids = []
+        if not isinstance(contig_lengths, list):
+            errors.append("'contig_lengths' must be a list")
+            contig_lengths = []
+        if isinstance(contig_ids, list) and isinstance(contig_lengths, list):
+            if len(contig_ids) != len(contig_lengths):
+                errors.append(
+                    f"'contig_ids' length ({len(contig_ids)}) != "
+                    f"'contig_lengths' length ({len(contig_lengths)})"
+                )
+
+        contig_id_set = set(contig_ids)
+
+        # Feature list fields
+        for list_field in ("features", "cdss", "mrnas", "non_coding_features"):
+            if not isinstance(genome_dict.get(list_field), list):
+                errors.append(f"'{list_field}' must be a list")
+
+        if not isinstance(genome_dict.get("feature_counts"), dict):
+            errors.append("'feature_counts' must be a dict")
+
+        # Per-feature checks across all feature lists
+        seen_ids: set = set()
+        all_features = []
+        for list_field in ("features", "cdss", "mrnas", "non_coding_features"):
+            val = genome_dict.get(list_field, [])
+            if isinstance(val, list):
+                all_features.extend(val)
+
+        for ftr in all_features:
+            fid = ftr.get("id")
+            if not isinstance(fid, str) or not fid:
+                errors.append(f"Feature missing 'id': {ftr}")
+                continue
+            if fid in seen_ids:
+                errors.append(f"Duplicate feature id: '{fid}'")
+            seen_ids.add(fid)
+
+            if not isinstance(ftr.get("type"), str):
+                errors.append(f"Feature '{fid}' missing 'type'")
+
+            location = ftr.get("location")
+            if not isinstance(location, list):
+                errors.append(f"Feature '{fid}' 'location' must be a list")
+            else:
+                for loc in location:
+                    if not isinstance(loc, (list, tuple)) or len(loc) != 4:
+                        errors.append(
+                            f"Feature '{fid}' has malformed location tuple: {loc}"
+                        )
+                    elif contig_id_set and loc[0] not in contig_id_set:
+                        errors.append(
+                            f"Feature '{fid}' references unknown contig '{loc[0]}'"
+                        )
+
+        return errors
+
+    def build_genome_from_fasta_gff(
+        self,
+        fasta_path,
+        gff_path=None,
+        *,
+        scientific_name: str,
+        taxonomy: str,
+        genetic_code: int = 11,
+        source: str = "User",
+        source_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build a KBase Genome dict from a FASTA (and optional GFF3) file.
+
+        Args:
+            fasta_path: Path to the genome FASTA file.
+            gff_path: Path to a GFF3 annotation file, or None for gene-free genome.
+            scientific_name: Organism scientific name.
+            taxonomy: Full taxonomy string (semicolon-separated lineage).
+            genetic_code: NCBI genetic code table number (default 11, bacterial).
+            source: Source label stored in the Genome object (default "User").
+            source_id: Source identifier; defaults to stem of fasta_path if None.
+
+        Returns:
+            KBase Genome object dict (passes ``validate_genome(..., require_assembly_ref=False)``).
+        """
+        fasta_path = str(fasta_path)
+        sequences = self._parse_fasta(fasta_path)
+
+        contig_ids = sorted(sequences.keys())
+        contig_lengths = [len(sequences[cid]) for cid in contig_ids]
+        total_dna_size = sum(contig_lengths)
+
+        # GC content
+        all_seq = "".join(sequences[cid] for cid in contig_ids).upper()
+        gc_count = all_seq.count("G") + all_seq.count("C")
+        atgc_count = sum(1 for b in all_seq if b in "ATGC")
+        gc_content = gc_count / atgc_count if atgc_count > 0 else 0.0
+
+        # Genome-level MD5
+        genome_md5 = hashlib.md5(
+            "".join(sequences[cid] for cid in contig_ids).encode()
+        ).hexdigest()
+
+        # Derive domain from first taxonomy segment
+        first_segment = taxonomy.split(";")[0].strip().lower()
+        if "archaea" in first_segment:
+            domain = "Archaea"
+        elif "eukaryot" in first_segment:
+            domain = "Eukaryota"
+        else:
+            domain = "Bacteria"
+
+        if source_id is None:
+            source_id = Path(fasta_path).stem
+
+        features: List[Dict[str, Any]] = []
+        cdss: List[Dict[str, Any]] = []
+        mrnas: List[Dict[str, Any]] = []
+        non_coding_features: List[Dict[str, Any]] = []
+
+        if gff_path is not None:
+            gff_path = str(gff_path)
+            features, cdss, mrnas, non_coding_features = self._parse_gff(
+                gff_path, sequences, contig_ids, genetic_code
+            )
+
+        feature_counts: Dict[str, int] = {}
+        for ftr in features + cdss + mrnas + non_coding_features:
+            ftype = ftr.get("type", "unknown")
+            feature_counts[ftype] = feature_counts.get(ftype, 0) + 1
+
+        genome: Dict[str, Any] = {
+            "id": source_id,
+            "scientific_name": scientific_name,
+            "domain": domain,
+            "taxonomy": taxonomy,
+            "genetic_code": genetic_code,
+            "dna_size": total_dna_size,
+            "num_contigs": len(contig_ids),
+            "contig_ids": contig_ids,
+            "contig_lengths": contig_lengths,
+            "gc_content": gc_content,
+            "md5": genome_md5,
+            "molecule_type": "DNA",
+            "source": source,
+            "source_id": source_id,
+            "assembly_ref": "",
+            "features": features,
+            "cdss": cdss,
+            "mrnas": mrnas,
+            "non_coding_features": non_coding_features,
+            "feature_counts": feature_counts,
+        }
+
+        return genome
+
+    def _parse_gff(
+        self,
+        gff_path: str,
+        sequences: Dict[str, str],
+        contig_ids: List[str],
+        genetic_code: int,
+    ) -> Tuple[List, List, List, List]:
+        """Parse a GFF3 file into KBase feature lists.
+
+        Returns:
+            (features, cdss, mrnas, non_coding_features) tuple.
+        """
+        contig_id_set = set(contig_ids)
+        features: List[Dict[str, Any]] = []
+        cdss: List[Dict[str, Any]] = []
+        mrnas: List[Dict[str, Any]] = []
+        non_coding_features: List[Dict[str, Any]] = []
+
+        # Track gene objects by GFF ID for CDS->gene linking
+        gene_by_id: Dict[str, Dict[str, Any]] = {}
+
+        # Counter per type for synthesized IDs
+        type_counters: Dict[str, int] = defaultdict(int)
+        used_ids: Dict[str, int] = {}  # id -> count for deduplication
+
+        def _unique_id(base_id: str) -> str:
+            if base_id not in used_ids:
+                used_ids[base_id] = 0
+                return base_id
+            used_ids[base_id] += 1
+            return f"{base_id}_{used_ids[base_id] + 1}"
+
+        def _parse_attrs(attr_str: str) -> Dict[str, str]:
+            attrs: Dict[str, str] = {}
+            for part in attr_str.strip().split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    attrs[k.strip()] = v.strip()
+            return attrs
+
+        def _get_dna(seqid: str, start_1based: int, length: int, strand: str) -> str:
+            seq = sequences.get(seqid, "")
+            s = start_1based - 1
+            e = s + length
+            sub = seq[s:e]
+            if strand == "-":
+                sub = self.reverse_complement(sub)
+            return sub.upper()
+
+        handled_types = {"CDS", "gene", "tRNA", "rRNA", "ncRNA", "mRNA"}
+
+        with open(gff_path, "r") as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 8:
+                    continue
+                seqid, source_col, gff_type, start_str, end_str, score, strand, phase = parts[:8]
+                attr_str = parts[8] if len(parts) > 8 else ""
+
+                if gff_type not in handled_types:
+                    continue
+
+                if seqid not in contig_id_set:
+                    logger.warning(
+                        "_parse_gff: feature on unknown contig '%s' (skipping)", seqid
+                    )
+                    continue
+
+                start = int(start_str)  # 1-based inclusive (GFF convention)
+                end = int(end_str)      # 1-based inclusive
+                length = abs(end - start) + 1
+                strand = strand if strand in ("+", "-") else "+"
+
+                attrs = _parse_attrs(attr_str)
+                gff_id = attrs.get("ID") or attrs.get("locus_tag") or attrs.get("Name")
+                if not gff_id:
+                    type_counters[gff_type] += 1
+                    gff_id = f"{seqid}_{gff_type}_{type_counters[gff_type]}"
+
+                ftr_id = _unique_id(gff_id)
+
+                product = attrs.get("product", "")
+                functions = [product] if product else []
+
+                aliases = []
+                dbxref = attrs.get("Dbxref", "")
+                if dbxref:
+                    for entry in dbxref.split(","):
+                        entry = entry.strip()
+                        if ":" in entry:
+                            db, val = entry.split(":", 1)
+                            aliases.append([db, val])
+                locus_tag = attrs.get("locus_tag", "")
+                if locus_tag and locus_tag != ftr_id:
+                    aliases.append(["locus_tag", locus_tag])
+
+                location = [[seqid, start, strand, length]]
+                dna_seq = _get_dna(seqid, start, length, strand)
+                dna_len = len(dna_seq)
+                ftr_md5 = hashlib.md5(dna_seq.encode()).hexdigest()
+
+                base_ftr: Dict[str, Any] = {
+                    "id": ftr_id,
+                    "type": gff_type,
+                    "location": location,
+                    "functions": functions,
+                    "aliases": aliases,
+                    "dna_sequence": dna_seq,
+                    "dna_sequence_length": dna_len,
+                    "md5": ftr_md5,
+                }
+
+                if gff_type == "gene":
+                    base_ftr["cdss"] = []
+                    features.append(base_ftr)
+                    gene_by_id[gff_id] = base_ftr
+
+                elif gff_type == "CDS":
+                    protein = self.translate_sequence(dna_seq, genetic_code)
+                    # Trim trailing stop codon
+                    if protein.endswith("*"):
+                        protein = protein[:-1]
+                    protein_md5 = hashlib.md5(protein.encode()).hexdigest()
+                    base_ftr["type"] = "CDS"
+                    base_ftr["protein_translation"] = protein
+                    base_ftr["protein_translation_length"] = len(protein)
+                    base_ftr["protein_md5"] = protein_md5
+                    # Link to parent gene
+                    parent_gff_id = attrs.get("Parent", "")
+                    if parent_gff_id and parent_gff_id in gene_by_id:
+                        base_ftr["parent_gene"] = gene_by_id[parent_gff_id]["id"]
+                        gene_by_id[parent_gff_id]["cdss"].append(ftr_id)
+                    cdss.append(base_ftr)
+
+                elif gff_type == "mRNA":
+                    parent_gff_id = attrs.get("Parent", "")
+                    if parent_gff_id and parent_gff_id in gene_by_id:
+                        base_ftr["parent_gene"] = gene_by_id[parent_gff_id]["id"]
+                    mrnas.append(base_ftr)
+
+                else:
+                    # tRNA, rRNA, ncRNA -> non_coding_features
+                    non_coding_features.append(base_ftr)
+
+        return features, cdss, mrnas, non_coding_features
+
+
 # ── Composition-based implementation ─────────────────────────────────────
 
 class KBGenomeUtilsImpl:
     """Composition-based genome utilities.
 
-    Holds ``env`` and ``ws`` instead of inheriting from ``KBWSUtils``.
-    Delegates all method calls to an internal legacy instance.
+    Holds ``env``, ``ws``, and ``jobs`` instead of inheriting from ``KBWSUtils``.
+    Delegates all method calls to an internal legacy instance via ``__getattr__``.
+
+    The ``save_assembly_from_fasta`` method is explicitly overridden here (not
+    on the legacy class) because it requires the ``KBJobUtils`` instance.
     """
 
-    def __init__(self, env, ws, **kwargs):
+    def __init__(self, env, ws, jobs, **kwargs):
         self._env = env
         self._ws = ws
+        self._jobs = jobs
         _kwargs = {
             "config_file": False,
             "token_file": None,
@@ -801,6 +1235,114 @@ class KBGenomeUtilsImpl:
     @property
     def ws(self):
         return self._ws
+
+    @property
+    def jobs(self):
+        return self._jobs
+
+    def save_assembly_from_fasta(
+        self,
+        fasta_path,
+        workspace,
+        name: str,
+        *,
+        wait: bool = True,
+        timeout: int = 600,
+    ) -> str:
+        """Save a FASTA file as a KBase Assembly via AssemblyUtil EE2 job.
+
+        Submits ``AssemblyUtil.save_assembly_from_fasta`` to EE2, optionally
+        polls to terminal state, and returns the assembly ref.
+
+        Args:
+            fasta_path: Local path to the FASTA file.
+            workspace: Workspace name (str) or ID (int).
+            name: Name for the Assembly object in the workspace.
+            wait: When True (default), poll until the job completes and return
+                the assembly ref.  When False, return the EE2 job ID immediately.
+            timeout: Maximum seconds to poll (default 600).
+
+        Returns:
+            ``'ws_id/obj_id/version'`` assembly ref string (when ``wait=True``),
+            or the EE2 job ID string (when ``wait=False``).
+
+        Raises:
+            RuntimeError: If the job fails or times out.
+        """
+        from .kb_job_utils.state import JobState
+
+        record = self._jobs.run_job(
+            method="AssemblyUtil.save_assembly_from_fasta",
+            params=[{
+                "file": {"path": str(fasta_path)},
+                "workspace_name": workspace,
+                "assembly_name": name,
+            }],
+        )
+        if not wait:
+            return record.job_id
+
+        # Poll to terminal state
+        deadline = time.time() + timeout
+        while True:
+            record = self._jobs.check_job(record.job_id)
+            if record.state.is_terminal:
+                break
+            if time.time() > deadline:
+                raise RuntimeError(
+                    f"save_assembly_from_fasta timed out after {timeout}s "
+                    f"(job {record.job_id})"
+                )
+            time.sleep(5)
+
+        if record.state != JobState.COMPLETED:
+            raise RuntimeError(
+                f"save_assembly_from_fasta job {record.job_id} ended with "
+                f"state '{record.state}': {record.error_message}"
+            )
+
+        # AssemblyUtil.save_assembly_from_fasta returns {"assembly_ref": "<ws_id/obj_id/ver>"}
+        # Verified against AssemblyUtil KIDL spec (AssemblyUtil.spec, 2026-06-02).
+        raw = record.ee2_raw
+        result = raw.get("result", [{}])
+        if isinstance(result, list) and result:
+            result = result[0]
+        assembly_ref = result.get("assembly_ref")
+        if not assembly_ref:
+            raise RuntimeError(
+                f"save_assembly_from_fasta job {record.job_id} result "
+                f"did not contain 'assembly_ref'. Raw result: {result}"
+            )
+        return assembly_ref
+
+    def save_genome_with_assembly(
+        self,
+        fasta_path,
+        genome_dict: Dict[str, Any],
+        workspace,
+        base_name: str,
+        *,
+        assembly_suffix: str = "_assembly",
+    ) -> Tuple[str, str]:
+        """Save FASTA as Assembly (via EE2), splice assembly_ref, then save the Genome.
+
+        Args:
+            fasta_path: Path to the FASTA file.
+            genome_dict: Genome object dict (not mutated — shallow copy is made).
+            workspace: Workspace ID (int) or name (str).
+            base_name: Base name; assembly saved as ``base_name + assembly_suffix``.
+            assembly_suffix: Suffix appended to ``base_name`` for the assembly object.
+
+        Returns:
+            ``(assembly_ref, genome_ref)`` tuple of ``'ws_id/obj_id/version'`` strings.
+        """
+        assembly_ref = self.save_assembly_from_fasta(
+            fasta_path, workspace, base_name + assembly_suffix
+        )
+        genome_dict = dict(genome_dict)  # shallow copy; don't mutate caller's input
+        genome_dict["assembly_ref"] = assembly_ref
+        genome_ref = self._delegate.save_genome_object(genome_dict, workspace, base_name)
+        return assembly_ref, genome_ref
 
     def __getattr__(self, name):
         return getattr(self._delegate, name)

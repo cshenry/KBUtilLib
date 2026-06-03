@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,8 +68,11 @@ class Cache:
         """
         ser = get_serializer(type_hint) if type_hint else auto_dispatch(obj)
 
-        # Serialize to a temp path, compute hash
-        tmp_path = self._blobs.blobs_dir / f"_tmp_{name}{ser.file_extension}"
+        # Serialize to a temp path, compute hash. Use a flat uuid-based temp
+        # filename (not *name*) so hierarchical keys like "a/b/c" don't imply
+        # uncreated subdirectories under blobs/; the file is renamed to a
+        # content-addressed blob below, so its name is irrelevant.
+        tmp_path = self._blobs.blobs_dir / f"_tmp_{uuid.uuid4().hex}{ser.file_extension}"
         extra_meta = ser.serialize(obj, tmp_path)
         raw = tmp_path.read_bytes()
         content_hash = hashlib.sha256(raw).hexdigest()

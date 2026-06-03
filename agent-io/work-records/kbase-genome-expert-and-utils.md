@@ -7,7 +7,7 @@
 `kbase-genome-expert-and-utils`
 
 ## commit_shas
-_(populated after commit)_
+- `290cd36` feat(genome): add 5 new save/validate/build methods + kbase-genome-expert skill
 
 ## summary
 

@@ -14,7 +14,9 @@ You are an expert on KBUtilLib — a modular utility framework for scientific co
 4. **AI Curation** — LLM-powered reaction and annotation curation
 5. **Data Analysis Workflows** — Notebooks and practical usage patterns
 
-**IMPORTANT: KBUtilLib was refactored from multi-inheritance to composition in 2026-05. The legacy mix-in pattern (`class MyTools(KBGenomeUtils, MSBiochemUtils): pass`) is deprecated. The current API is the `KBUtilLib` facade with lazy sub-utility properties (`kbu.fba`, `kbu.biochem`, `kbu.ws`, etc.). Legacy class-name aliases (`KBWSUtils = KBWSUtilsImpl`, etc.) still resolve in `__init__.py` for import compatibility, but constructor signatures changed — use the facade.
+**IMPORTANT: KBUtilLib was refactored from multi-inheritance to composition in 2026-05. The legacy mix-in pattern (`class MyTools(KBGenomeUtils, MSBiochemUtils): pass`) is deprecated. The current API is the `KBUtilLib` facade with lazy sub-utility properties (`kbu.fba`, `kbu.biochem`, `kbu.ws`, etc.). Legacy class-name aliases (`KBWSUtils = KBWSUtilsImpl`, etc.) still resolve in `__init__.py` for import compatibility, but constructor signatures changed — use the facade.**
+
+**Installation note — `installed_clients/` shipping constraint:** The repo ships only `Workspace`, `EE2`, `AbstractHandle`, `baseclient`, and `authclient` under `installed_clients/`. `AssemblyUtilClient` and `GenomeFileUtilClient` are imported lazily inside `kb_callback_utils.py` but expected from a separate KBase SDK install. Without that install, calling `kbu.callback.gfu_client()` or `kbu.callback.afu_client()` raises `ImportError`.
 
 ## Repository Location
 
@@ -109,9 +111,14 @@ kbu = KBUtilLib()
 # 3. repo/config/default_config.yaml
 
 # The held SharedEnvUtils is exposed as kbu.env
-value = kbu.env.config.get("section.key")
+# Use dot-notation get_config_value (modern API):
+value = kbu.env.get_config_value("kbase.endpoint")
+output_dir = kbu.env.get_config_value("my_analysis.output_dir", default="./output")
 kbase_token = kbu.env.get_token("kbase")
 argo_token = kbu.env.get_token("argo")
+
+# get_config(section, key) still exists for INI-file compatibility but is deprecated.
+# Use get_config_value("section.key") in all new code.
 ```
 
 ### Common Workflows
@@ -165,10 +172,14 @@ categories = kbu.curation.categorize_stoichiometry(reaction)
 from kbutillib import KBUtilLib
 
 kbu = KBUtilLib()
-job = kbu.jobs.submit({"app_id": "ModelSEEDpy/build_metabolic_model", "params": {...}})
-print(job.job_id, job.status)
-# Periodic refresh via local SQLite tracker at ~/.kbjobs/
-states = kbu.jobs.refresh_active()
+# run_job submits to EE2 and persists locally in ~/.kbjobs/kbjobs.db
+record = kbu.jobs.run_job(
+    method="ModelSEEDpy.build_metabolic_model",
+    params=[{"genome_ref": "12345/6/7", "workspace_name": "my_workspace"}],
+)
+print(record.job_id, record.state)
+# Bulk-refresh all active (non-terminal) jobs from EE2:
+updated = kbu.jobs.refresh_active()
 ```
 
 ### Legacy aliases (for transition only — prefer the facade)
@@ -183,6 +194,7 @@ from kbutillib import KBWSUtils, MSFBAUtils  # = KBWSUtilsImpl, MSFBAUtilsImpl
 ## Related Skills
 
 - `/kbutillib-dev` - For developing and contributing to KBUtilLib
+- `/kbase-genome-expert` - For saving, loading, and validating KBase Genome objects from notebooks
 - `/modelseedpy-expert` - For ModelSEEDpy-specific questions
 - `/msmodelutl-expert` - For MSModelUtil class from cobrakbase
 - `/kb-sdk-dev` - For KBase SDK development

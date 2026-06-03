@@ -318,6 +318,13 @@ class MMSeqsUtils(SharedEnvUtils):
                 "num_clusters": len(clusters),
                 "num_proteins": len(proteins),
                 "singletons": singletons,
+                # The actual working directory containing seqDB, clusterDB,
+                # clusters.tsv, and tmp/.  Nested under *temp_dir* when the
+                # caller supplied one (tempfile.mkdtemp creates a subdir),
+                # so callers cannot reconstruct this path from temp_dir.
+                # Populated whether or not keep_temp_files was set; only
+                # meaningful for downstream re-use when keep_temp_files=True.
+                "work_dir": str(work_dir),
                 "parameters": {
                     "min_seq_id": min_seq_id,
                     "coverage": coverage,

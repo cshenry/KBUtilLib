@@ -790,6 +790,12 @@ class MSReconstructionUtils(KBModelUtils):
 
         output_solution = None
         output_solution_media = None
+        # `run_multi_gapfill` returns None when no gapfill solution exists
+        # (e.g. solver infeasible, model+media combination cannot grow). Guard
+        # before treating `solutions` as a dict; otherwise `media in solutions`
+        # raises TypeError.
+        if solutions is None:
+            solutions = {}
         for media in media_objs:
             if media in solutions and "growth" in solutions[media]:
                 growth_array.append(media.id + ":" + str(solutions[media]["growth"]))

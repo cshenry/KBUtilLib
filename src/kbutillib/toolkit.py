@@ -167,7 +167,7 @@ class KBUtilLib:
     def genome(self) -> KBGenomeUtilsImpl:
         if self._genome is None:
             from .kb_genome_utils import KBGenomeUtilsImpl
-            self._genome = KBGenomeUtilsImpl(self.env, self.ws)
+            self._genome = KBGenomeUtilsImpl(self.env, self.ws, self.jobs)
         return self._genome
 
     @property

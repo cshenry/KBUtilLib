@@ -91,10 +91,35 @@ my_analysis:
 
 ### Accessing Configuration
 ```python
+# Modern API — dot-notation get_config_value (SharedEnvUtils.get_config_value):
 endpoint = kbu.env.get_config_value("kbase.endpoint")
 output_dir = kbu.env.get_config_value("my_analysis.output_dir")
 cache = kbu.env.get_config_value("my_analysis.cache_enabled", default=False)
+
+# get_config(section, key) exists for INI-file compatibility but is deprecated.
+# Do not use it in new code.
 ```
+
+### Injecting SDK Clients in Notebook Contexts
+
+The `kbu.callback` sub-utility provides wrappers around the KBase SDK callback clients (`gfu_client()`, `afu_client()`, etc.). These normally require a **callback URL** that is only available inside an actively running SDK app container. Notebook authors running outside that context will get `ImportError` or `RuntimeError` when calling these methods directly.
+
+The injection escape hatch: `kbu.callback.set_callback_client(name, client)` lets you plug in a pre-built client object so the callback accessor returns your instance instead of attempting auto-construction.
+
+```python
+# If you have a GenomeFileUtil client built against a callback URL you control:
+from installed_clients.GenomeFileUtilClient import GenomeFileUtil
+
+gfu = GenomeFileUtil(url=my_callback_url, token=my_token)
+kbu.callback.set_callback_client("GenomeFileUtil", gfu)
+
+# Now kbu.callback.gfu_client() returns your pre-built client:
+client = kbu.callback.gfu_client()
+```
+
+> **Note:** `AssemblyUtilClient` and `GenomeFileUtilClient` are NOT shipped under `installed_clients/`; they require a separate KBase SDK install. Without that install, the import inside `kb_callback_utils.py` raises `ImportError`. For notebook-only assembly/genome save workflows, prefer `kbu.genome.save_assembly_from_fasta` / `kbu.genome.save_genome_with_assembly` which go through EE2 and direct Workspace respectively — no callback URL required.
+>
+> See `/kbase-genome-expert` for the complete notebook genome save workflow.
 
 ## Pattern 3: Genome Analysis Workflow
 
@@ -286,34 +311,36 @@ KBJobUtils is the canonical composition reference. Use it both as a tool and as 
 ```python
 kbu = KBUtilLib()
 
-state = kbu.jobs.submit({
-    "method": "ModelSEEDpy/build_metabolic_model",
-    "params": [{...}],
-}, name="adp1-build", project="ADP1Notebooks")
+# run_job returns a JobRecord with job_id and state (JobState.QUEUED on success)
+record = kbu.jobs.run_job(
+    method="ModelSEEDpy.build_metabolic_model",
+    params=[{"genome_ref": "12345/6/7", "workspace_name": "my_workspace"}],
+)
 
 # Local SQLite at ~/.kbjobs/kbjobs.db tracks every job
-print(state.job_id, state.status, state.submitted_at)
+print(record.job_id, record.state, record.created_at)
 
-# Periodic refresh (no wait/poll inside submit; caller controls cadence)
-kbu.jobs.refresh_active()  # bulk-refreshes all non-terminal jobs
+# Periodic refresh (no blocking poll inside run_job; caller controls cadence)
+kbu.jobs.refresh_active()  # bulk-refreshes all non-terminal jobs from EE2
 
 # Read locally without hitting EE2
-job = kbu.jobs.get(state.job_id)
-recent = kbu.jobs.list(status="completed", project="ADP1Notebooks", limit=20)
+job = kbu.jobs.get_record(record.job_id)
+active = kbu.jobs.list_active()    # all non-terminal records
+all_j = kbu.jobs.list_all()        # everything in the local store
 ```
 
 ### Bulk submission (1400 metagenomes)
 ```python
 metagenome_refs = [...]  # 1400 entries
 
-states = []
+records = []
 for ref in metagenome_refs:
-    state = kbu.jobs.submit(
-        {"method": "BuildMetagenomeModel", "params": [{"genome_ref": ref}]},
-        project="metagenome-batch",
-        tags=["metagenome", "batch-2026-05"],
+    rec = kbu.jobs.run_job(
+        method="BuildMetagenomeModel",
+        params=[{"genome_ref": ref}],
+        meta={"project": "metagenome-batch"},
     )
-    states.append(state)
+    records.append(rec)
 
 # Cron or in-process watcher does the actual refreshing:
 kbu.jobs.start_watcher(interval=300)  # threaded, daemon=True by default
@@ -328,7 +355,6 @@ pipeline = kbu.jobs.submit_chain(
         {"method": "RunFBA", "params": [{...}]},
     ],
     name="adp1-build-gapfill-fba",
-    project="ADP1Notebooks",
 )
 
 # refresh_active() advances chains automatically when each step completes

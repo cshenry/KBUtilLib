@@ -66,7 +66,8 @@ KBUtilLib (toolkit.py)
 - `load_config(config_file=None)` - Load YAML configuration
 - `get_token(namespace="kbase")` - Get authentication token
 - `set_token(token, namespace="kbase")` - Set authentication token
-- `get_config_value(key)` - Get config value by dot-notation path
+- `get_config_value(key_path, default=None)` - Get config value by dot-notation path (e.g. `"skani.executable"`); this is the modern API
+- `get_config(section, key, default=None)` - **Deprecated** (INI-compatibility only); prefer `get_config_value("section.key")` in all new code
 
 **Configuration Priority:**
 1. Explicit `config_file` parameter
@@ -133,7 +134,7 @@ Canonical `_check_and_convert_model(model) -> MSModelUtil` and `_parse_id(object
 **Location:** `src/kbutillib/kb_genome_utils.py`
 **Composes:** `env`, `ws`
 **Facade attribute:** `kbu.genome`
-**Purpose:** Genome data analysis and manipulation.
+**Purpose:** Genome data analysis and manipulation. Internally wraps a `KBGenomeUtils(KBWSUtils)` delegate (see source L805); inherited multi-utility methods reach via `__getattr__` passthrough.
 
 **Key Methods:**
 - `get_genome(workspace_id, genome_ref)` - Retrieve genome object (uses `self.ws.get_object`)
@@ -145,6 +146,22 @@ Canonical `_check_and_convert_model(model) -> MSModelUtil` and `_parse_id(object
 - `get_contig_sequences(genome)` - Get contig sequences
 - `reverse_complement(seq)` - Reverse complement
 - `translate_sequence(seq)` - Translate DNA to protein
+- `calculate_gc_content(sequence)` - Pure-string GC% computation
+- `load_kbase_gene_container(id_or_ref_or_filename, ws=None, localname=None)` - Load and cache a genome object by ref, workspace id, or local filename
+- `object_to_features(name)` - Return cached feature list for a loaded genome object
+- `get_ftr(name, ftrid)` - Lookup a single feature by id from a cached genome
+- `ftr_to_aliases(name, ftrid)` - Return alias list for a feature in a cached genome
+- `alias_to_ftrs(name, alias)` - Return features matching an alias in a cached genome
+- `object_to_proteins(ref)` - Extract protein sequences from a genome object ref
+- `add_annotations_to_object(reference, suffix, annotations)` - Update genome annotations via the SDK annotation client (**requires callback context**)
+- `load_genome_from_local_files(genome_id, features_dir, genomes_dir, metadata_dir, ...)` - BV-BRC local-file ingest; builds a KBase Genome dict from BV-BRC-shaped directory layout
+- `aggregate_taxonomies(genomes, asv_id, output_dir=None)` - Compute taxonomy consensus across a set of genomes
+- `create_synthetic_genome(asv_id, genomes, ...)` - Build a synthetic merged genome from multiple source genomes
+- `save_genome_object(genome_dict, workspace, name)` - Save a Genome dict to workspace via direct WS transport; returns `"ws_id/obj_id/version"` ref (no EE2 job; **new in this PRD**)
+- `save_assembly_from_fasta(fasta_path, workspace, name, *, wait=True, timeout=600)` - Submit `AssemblyUtil.save_assembly_from_fasta` via EE2; returns assembly_ref (**new in this PRD**)
+- `save_genome_with_assembly(fasta_path, genome_dict, workspace, base_name, *, assembly_suffix="_assembly")` - Orchestrate assembly-save then genome-save; returns `(assembly_ref, genome_ref)` (**new in this PRD**)
+- `validate_genome(genome_dict, *, require_assembly_ref=True)` - Schema-only validation; returns list of error strings (empty = valid) (**new in this PRD**)
+- `build_genome_from_fasta_gff(fasta_path, gff_path=None, *, scientific_name, taxonomy, genetic_code=11, ...)` - Build a Genome dict from FASTA + optional GFF3; empty features when gff_path is None (**new in this PRD**)
 
 **Feature Types:**
 - `CDS` - Coding sequences
@@ -337,15 +354,35 @@ Canonical `_check_and_convert_model(model) -> MSModelUtil` and `_parse_id(object
 **Facade attribute:** `kbu.jobs`
 **Purpose:** EE2 job submission and local SQLite tracking. **Reference shape for the composition pattern** — read this when building new modules.
 
-**Key Methods:**
-- `submit(params, *, name=None, project=None, ...)` - Submit + track
-- `refresh(job_id)` / `refresh_active()` / `refresh_all()` - Update local tracker
-- `get(job_id)` / `list(...)` / `summary()` - Read from local store
-- `cancel(job_id)` / `forget(job_id)` / `cleanup(...)` - Manage records
-- `submit_chain(steps, ...)` / `advance_pipelines()` - Linear pipelines (Phase 3)
-- `start_watcher(interval=300)` / `stop_watcher()` - In-process watcher thread
+**Key Methods (submission):**
+- `run_job(method, params, *, app_id=None, workspace_id=None, service_ver=None, meta=None) -> JobRecord` - Submit to EE2 + persist locally
+- `submit_chain(steps, *, name=None, project=None, tags=None) -> PipelineState` - Create a linear pipeline; submits step 0 immediately
 
-**CLI:** `kbu jobs status/list/refresh/logs/cancel/chain/...`, `kbu jobdaemon`
+**Key Methods (status):**
+- `check_job(job_id) -> JobRecord` - Query EE2 + update local record
+- `check_jobs(job_ids) -> Dict[str, JobRecord]` - Batch EE2 query
+- `refresh_active() -> List[JobRecord]` - Re-check all non-terminal jobs; also calls `advance_pipelines()`
+- `refresh_all() -> List[JobRecord]` - Re-check every locally-stored job
+
+**Key Methods (local reads):**
+- `get_record(job_id) -> JobRecord | None` - Read from local SQLite (no EE2 hit)
+- `list_active() -> List[JobRecord]` - All non-terminal records
+- `list_all() -> List[JobRecord]` - All records
+
+**Key Methods (management):**
+- `cancel_job(job_id) -> JobRecord` - Cancel a running EE2 job
+- `get_job_logs(job_id, skip_lines=0) -> dict` - Retrieve log lines from EE2
+- `cleanup(older_than_days=30, terminal_only=True) -> int` - Delete old local records; returns count deleted
+- `start_watcher(interval=300, ...) -> Watcher` - In-process background refresh thread (idempotent)
+- `stop_watcher(timeout=5.0) -> bool` - Signal watcher to stop
+
+**Pipeline methods:**
+- `get_pipeline(pipeline_id) -> PipelineState | None`
+- `list_pipelines(*, status=None, project=None, ...) -> List[PipelineState]`
+- `cancel_pipeline(pipeline_id) -> PipelineState`
+- `advance_pipelines() -> List[PipelineState]` - Called automatically by `refresh_active()`
+
+**CLI:** `kbu jobs status/list/summary/refresh/logs/cancel/forget/cleanup/chain`, `kbu jobdaemon`
 
 ### MMSeqsUtilsImpl (legacy alias: `MMSeqsUtils`)
 **Location:** `src/kbutillib/mmseqs_utils.py`

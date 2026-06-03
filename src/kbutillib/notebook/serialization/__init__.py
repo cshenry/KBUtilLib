@@ -65,6 +65,7 @@ def _boot() -> None:
         serialize_dataframe,
         serialize_text,
         serialize_msgenome,
+        serialize_msmedia,
         serialize_cobra_model,
         serialize_msmodelutil,
         serialize_msexpression,

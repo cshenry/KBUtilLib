@@ -5,7 +5,7 @@
   "status": "draft",
   "created": "2026-06-04",
   "author": "Chris Henry + /ai-design",
-  "repos": ["KBUtilLib"],
+  "repos": ["KBUtilLib", "ClaudeCommands"],
   "priority": "high",
   "problem": "KBUtilLib has no student-facing front door. Existing skills (kbutillib-expert, kbutillib-dev) assume expertise. Students lack workflow, layout, environment setup, and a way to use Claude Code productively for notebook design. Must also work for users outside Chris's environment (no ClaudeCommands, no AIAssistant).",
   "solution": "Two-tier /kbu-start slash command shipped inside KBUtilLib's own .claude/ (policy exception for distribution). Tier-1 (KBUtilLib repo): Help / Initialize / New project / Update. Tier-2 (student projects copied from templates/student-project/): Plan / Build / Run / Synthesize / Review / Literature review / Diagnose / Update, gated on a linear state machine (plan → p-review → build → b-review → run → synthesize → s-review → complete). State, sessions, notebook tracking, AIAssistant routing, venv management all behind the kbu CLI. Sessions auto-route to AIAssistant sessions.db if present, else local YAML in subproject.",
@@ -90,5 +90,28 @@
     "Multi-user collaboration on a single student project",
     "Remote-compute notebook execution (local kernel only)"
   ],
-  "confront_rounds": 0
+  "confront_rounds": 1,
+  "confront_history": [
+    {
+      "round": 1,
+      "date": "2026-06-04",
+      "task_id": "task-5fcbca32",
+      "adversary": "GPT-5 via codex backend (h100)",
+      "binding_stalls": 15,
+      "accepted": 10,
+      "dropped": [1, 2, 3, 12, 13],
+      "dropped_reason": {
+        "1": "skill files don't exist — that's the implementation work the conductor will do",
+        "2": "template tree doesn't exist — same as #1, implementation work",
+        "3": "CLI subcommands don't exist — same, implementation work",
+        "12": "tests skeleton — existing tests/ conventions cover this; conductor follows established pattern",
+        "13": "skill markdown / AskUserQuestion format examples — slash-command format readable from existing skills in repo"
+      },
+      "maestro_status": "failed (FALSE NEGATIVE: codex completion sentinel; artifact committed + verified via git on task branch)",
+      "artifact_branch": "maestro/researcher/you-are-the-autonomous-build-con-task-5fcbca32",
+      "artifact_path": "agent-io/confront/stall-report.md",
+      "artifact_commit": "0592c3b",
+      "advisory_critique_summary": "Slice v1 to Initialize+New project+state machine first; kbu subproject validate command; template_version capture; safer notebook exec defaults; KBU_AIA_PATHS env var; Windows examples; golden fixtures; kbu doctor early; fork-header CI lint"
+    }
+  ]
 }

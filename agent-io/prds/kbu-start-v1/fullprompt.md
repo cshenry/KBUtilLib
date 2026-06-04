@@ -538,6 +538,239 @@ jupyter-dev's home_path is) to:
   Interface: 1 CLI subcommand + flags. Deep — diff + hash comparison
   + safe apply.
 
+### Folded from confront round 1 (2026-06-04, task-5fcbca32)
+
+#### State machine field naming (locked)
+
+Manifest key: `[subproject].status` (NOT `state`). String value, hyphen-delimited.
+
+Allowed `status` values (exhaustive):
+`plan`, `p-review`, `build`, `b-review`, `run`, `synthesize`, `s-review`, `complete`.
+
+Timestamp format throughout all manifests, sessions, and the init marker:
+ISO-8601 UTC with `Z` suffix (e.g. `2026-06-04T15:30:00Z`). All `*_at` fields
+use this format unconditionally.
+
+`kbu subproject status <name>` reads `[subproject].status`; rejects unknown
+values with a non-zero exit and an error message naming the offending file.
+
+#### AIAssistant session-routing contract (locked)
+
+When `_detect_aiassistant()` returns a non-None path, kbu prepends the detected
+AIAssistant repo root + `src` to `sys.path` and imports:
+
+```python
+from assistant.state import save_session, get_recent_sessions
+```
+
+Required `save_session` payload keys (matching the existing AIAssistant API):
+`project_id` (str — set to `f"kbu-{repo_basename}-{subproject}"`), `command`
+(str — set to the kbu skill name, e.g. `"kbu-plan"`), `topics_discussed`
+(list[str]), `decisions_made` (list[str]), `work_submitted` (list[str] —
+file paths modified), `next_steps` (list[str]), `summary` (str).
+
+Optional payload keys: `started_at`, `ended_at` (ISO-8601 UTC).
+
+`save_session(...)` returns a `session_id` string. `get_recent_sessions(
+project_id=..., limit=N)` returns a list of session dicts.
+
+**Detection path list configurable** via env var `KBU_AIA_PATHS`
+(colon-separated). Default: `~/Dropbox/Projects/AIAssistant/state/sessions.db
+:~/Projects/AIAssistant/state/sessions.db`.
+
+If the import fails (AIAssistant present on disk but `assistant.state` import
+errors), kbu logs a warning, falls back to local YAML, and continues — session
+save MUST NOT silently swallow.
+
+**Auto-register**: on the first AIAssistant-routed `save_session` call for a
+kbu project, if the registry has no entry for `project_id`, call
+`assistant.state.registry.update_project(project_id, name=..., priority='low',
+status='active')`. If that function is not importable, log a warning and skip
+registration (the session still saves).
+
+#### Notebook execution defaults (`kbu notebook exec`)
+
+Kernel selection: prefer the project's named ipykernel (registered by
+`kbu new-project` / `kbu init`). Resolve via
+`jupyter_client.kernelspec.find_kernel_specs()` matching the project name
+from `kbu-project.toml [project].name`. If no match, fall back to `python3`
+kernel with a stderr warning.
+
+Per-cell timeout: 600 seconds. Override via `KBU_NOTEBOOK_CELL_TIMEOUT`
+environment variable.
+
+Error policy: **stop on error by default**. Exception traceback is captured
+in the executed notebook output and printed to stdout; exec exits non-zero.
+Override with `--allow-errors` to continue past errored cells (recorded with
+the original exception in cell outputs).
+
+Output handling: writes executed cells back to the same `.ipynb` file
+in place. Backup at `<notebook>.bak.<timestamp>.ipynb` created before write.
+
+Stream output capture: stdout/stderr captured per cell; truncate at 1 MiB
+per cell with a warning footer.
+
+#### `kbu init` marker file (locked)
+
+Location: `~/.config/kbu/init_done.json` (respect `XDG_CONFIG_HOME` when set).
+Created on successful init; read by `kbu init --status` and `kbu doctor`.
+
+Schema (version 1):
+
+```json
+{
+  "version": 1,
+  "initialized_at": "2026-06-04T15:30:00Z",
+  "kbutillib_repo_path": "/Users/chenry/Dropbox/Projects/KBUtilLib",
+  "kbutillib_commit": "<commit-sha-at-init>",
+  "venv_manager": "venvman",
+  "venv_python": "/abs/path/to/python",
+  "jupyter_kernel_name": "kbutillib"
+}
+```
+
+`venv_manager` is one of `"venvman"` or `".venv"`.
+
+`kbu init --status` exit codes:
+- `0` — marker present AND `venv_python` resolves to an executable.
+- `1` — marker missing.
+- `2` — marker present but `venv_python` no longer resolves (e.g., venv
+  deleted; user should re-run `kbu init`).
+
+venvman detection: `shutil.which("venvman")`. No `PATH` manipulation beyond
+what venvman's own activation does.
+
+#### `kbu update` diff representation and hashing
+
+Tracked paths (under student-repo root): `.claude/commands/` and `.vscode/`.
+
+Hash algorithm: **SHA-256** over file bytes.
+
+Storage in `kbu-project.toml`:
+
+```toml
+[update.file_hashes]
+".claude/commands/kbu-start.md" = "sha256:abc..."
+".claude/commands/kbu-plan.md" = "sha256:def..."
+".vscode/extensions.json" = "sha256:..."
+```
+
+Hashes recorded at end of `kbu new-project` and at end of `kbu update`.
+
+Diff entry struct (in-memory, passed to `apply_diff`):
+
+```python
+@dataclass
+class TemplateDiff:
+    path: str               # relative to template root
+    status: str             # "added" | "modified" | "deleted"
+    old_hash: str | None    # sha256:... or None if new
+    new_hash: str | None    # sha256:... or None if deleted
+```
+
+Locally-modified detection: for each path in `[update.file_hashes]`,
+compute current on-disk SHA-256 and compare against recorded hash. Mismatch
+classifies the file `locally_modified`. Update prompts before overwriting any
+locally-modified file; abort if user declines.
+
+#### `kbu session list` output schema
+
+Default format: TSV to stdout, header row, columns in this order:
+
+```
+id<TAB>at<TAB>subproject<TAB>skill<TAB>summary
+```
+
+`id`: short hex (first 8 chars of `session_id`).
+`at`: ISO-8601 UTC.
+`subproject`: subproject name (empty if session is project-level).
+`skill`: kbu skill name (e.g. `kbu-plan`).
+`summary`: single-line string; embedded tabs/newlines collapsed to single
+spaces; truncated to 120 chars with `…` if longer.
+
+Order: most recent first by `at`.
+
+Flags: `--limit N` caps rows (default 20). `--subproject <name>` filters.
+`--json` switches to JSON output (list of session dicts; full payload, no
+truncation).
+
+The tier-2 `/kbu-start` dashboard parses the TSV form.
+
+#### jupyter-dev source location (corrected)
+
+The jupyter-dev skill is homed in **ClaudeCommands**, not KBUtilLib.
+Canonical source: `ClaudeCommands/agent-io/skills/jupyter-dev.md`
+(skill_registry.json: `home_repo=ClaudeCommands`,
+`home_path=/Users/chenry/Dropbox/Projects/ClaudeCommands/agent-io/skills/jupyter-dev.md`).
+
+The file at `KBUtilLib/.claude/commands/jupyter-dev.md` is a sync-deployed
+copy — **DO NOT EDIT IT** (the next `claude-skills sync` overwrites edits).
+
+Implementation task list updated accordingly:
+
+- `ClaudeCommands` is added to the PRD's `repos` field (alongside `KBUtilLib`).
+- The jupyter-dev formalization task edits
+  `ClaudeCommands/agent-io/skills/jupyter-dev.md` and commits in
+  ClaudeCommands.
+- Post-edit, `claude-skills sync primary-laptop --apply` redeploys to all
+  machines (including KBUtilLib's `.claude/commands/`).
+
+#### Platform scope (v1)
+
+v1 targets **macOS only**. Linux + Windows support is deferred to v2.
+
+Rationale: KBUtilLib is currently used primarily on macOS lab machines, and
+pinning cross-platform behavior requires Linux/Windows testing which is out
+of v1 scope. Better to ship a tight macOS-only v1 than a half-cross-platform
+v1 that breaks for the long tail of student environments.
+
+Concrete v1 behavior on non-macOS (`sys.platform != "darwin"`):
+
+- `kbu init` prints a one-screen message:
+  > "v1 currently targets macOS. Linux/Windows support is planned for v2. To
+  > install KBUtilLib manually for now: `python -m venv .venv && source
+  > .venv/bin/activate && pip install -e <path-to-KBUtilLib>`. Then register
+  > a Jupyter kernel: `python -m ipykernel install --user --name=kbutillib`.
+  > You can use the tier-2 skills once `/path/to/KBUtilLib/.claude/` is on
+  > your Claude Code skill search path."
+  Exits with code 1.
+
+- `kbu new-project` issues the same v1 warning before creating the venv,
+  then proceeds with the `python -m venv` path only (no venvman detection
+  on non-macOS). Cursor instructions are printed verbatim with a note that
+  VS Code is the cross-platform equivalent.
+
+- Tier-2 skills work cross-platform (no shell-specific commands).
+
+- `KBU_PLATFORM_OVERRIDE=force` env var bypasses the macOS check for users
+  willing to try Linux/Windows in v1 (best-effort; no support).
+
+#### Literature-review MCP tool availability
+
+The harvested `kbu-literature-review` skill references PubMed, bioRxiv, arXiv,
+Semantic Scholar, and Google Scholar via MCP tools. BERIL ships these via its
+own MCP server configuration; KBUtilLib does not.
+
+v1 behavior:
+
+- At skill invocation, check whether the expected MCP tools are available
+  (via discovered tool list). If absent, the skill degrades gracefully:
+  - Prints a "to enable structured literature search, install the
+    `<server-name>` MCP server: `<install command>`" message. The exact
+    server names and install commands are determined at implementation time
+    by reading BERIL's `.mcp.json` and documenting verbatim.
+  - Falls back to direct `WebSearch` for the requested query (less
+    structured; no citation snowballing).
+  - Still appends results to `references.md` with an explicit note
+    `"[fallback path — install MCP servers for richer results]"`.
+
+- The kbu-literature-review skill is callable in any state. Calling it
+  without MCP tools available is NOT an error.
+
+- Implementation task: at fork time, read BERIL's `.mcp.json` to identify the
+  exact MCP server names and install commands; document them in the
+  kbu-literature-review skill body verbatim.
+
 ## Testing Decisions
 
 ### What good tests look like here
@@ -636,3 +869,36 @@ External behaviour. Mock subprocess + filesystem, not internal helpers.
 - KBUtilLib at this design point: composition refactor complete (per
   project_state); tier-2 skills will exercise the
   `KBUtilLib` facade as their canonical entry point.
+
+## Acceptance Criteria
+
+1. KBUtilLib `.claude/commands/kbu-start.md` exists (tier-1) and is invocable as `/kbu-start` from within the KBUtilLib repo. Menu: Help, Initialize, New project, Update.
+2. `KBUtilLib/templates/student-project/.claude/commands/kbu-start.md` exists and contains the 8-item tier-2 dashboard (Plan, Build, Run, Synthesize, Review, Literature review, Diagnose, Update), status-gated.
+3. All 8 tier-2 skill files exist at `templates/student-project/.claude/commands/`: kbu-plan, kbu-build, kbu-run, kbu-synthesize, kbu-review, kbu-literature-review, kbu-diagnose, kbu-update.
+4. The state machine has 8 states (plan, p-review, build, b-review, run, synthesize, s-review, complete). Forward transitions are validated against artifact preconditions. Review-fail transitions return to the prior action state. Manifest key is `[subproject].status` (NOT `state`).
+5. All timestamp fields throughout manifests, sessions, and the init marker use ISO-8601 UTC with `Z` suffix.
+6. Subproject manifest is a TOML file at `subprojects/<name>/kbu-subproject.toml` with the schema specified in Implementation Decisions.
+7. Root project manifest is a TOML file at `<project_root>/kbu-project.toml` with the schema specified in Implementation Decisions.
+8. `kbu subproject {create,list,status,advance,set-status}` are registered subcommands. `advance` validates artifact preconditions; `set-status` bypasses validation. `advance --reverse` moves from a review state to its prior action state.
+9. `kbu notebook {list,mark-run,exec}` are registered subcommands. `exec` defaults: project-named kernel (fallback python3), 600s per-cell timeout (overridable via `KBU_NOTEBOOK_CELL_TIMEOUT`), stop-on-error (overridable via `--allow-errors`), in-place write with `.bak.<timestamp>.ipynb` backup.
+10. `kbu session {save,list,show}` are registered subcommands. `list` outputs TSV with columns `id<TAB>at<TAB>subproject<TAB>skill<TAB>summary`, recent-first, default limit 20. `--json` switches to JSON.
+11. Session save routes to AIAssistant if any path in `KBU_AIA_PATHS` (default: `~/Dropbox/Projects/AIAssistant/state/sessions.db:~/Projects/AIAssistant/state/sessions.db`) exists.
+12. Session save payload uses `project_id`, `command`, `topics_discussed`, `decisions_made`, `work_submitted`, `next_steps`, `summary` keys (matching `assistant.state.save_session`).
+13. AIAssistant session import is `from assistant.state import save_session, get_recent_sessions`. If the import fails, kbu falls back to local YAML with a warning; never silently swallows.
+14. On first AIAssistant-routed session for a kbu project, auto-register the project as `kbu-<repo_basename>-<subproject>` via `assistant.state.registry.update_project` (skip with warning if function not found).
+15. `kbu init` creates a venv (venvman if `shutil.which("venvman")` returns non-None, else `python -m venv .venv` in KBUtilLib root), installs KBUtilLib editable, registers Jupyter kernel `kbutillib`, writes marker at `~/.config/kbu/init_done.json` (XDG_CONFIG_HOME respected).
+16. The init marker matches the schema specified in Implementation Decisions (version 1; fields: initialized_at, kbutillib_repo_path, kbutillib_commit, venv_manager, venv_python, jupyter_kernel_name).
+17. `kbu init --status` returns exit 0 if marker present AND `venv_python` resolves; exit 1 if marker missing; exit 2 if marker present but `venv_python` no longer resolves.
+18. `kbu new-project <path>` creates a child venv (venvman if present else `.venv`), pip-installs KBUtilLib editable from the source path (NOT vendored), registers a Jupyter kernel named after the project, writes kbu-project.toml with `[kbutillib].source_path` and `[kbutillib].source_commit`, runs `git init` + initial commit, prints exact Cursor + claude instructions.
+19. `kbu update` reads `[kbutillib].source_path` from kbu-project.toml; pulls source repo if it's a git repo; diffs `templates/student-project/.claude/` and `.vscode/` between recorded `last_pulled_commit` and current HEAD; presents a diff summary; applies on confirmation.
+20. `kbu update` records SHA-256 hashes of all tracked template files under `[update.file_hashes]` in kbu-project.toml. Locally-modified files (hash mismatch) trigger a clobber-with-warn prompt; abort if user declines.
+21. `kbu update --set-source <path>` relocates `[kbutillib].source_path`; clears `[update].last_pulled_commit` so the next `update` re-evaluates against the new parent.
+22. `kbu update --check` performs a dry-run; prints the diff summary; does not write.
+23. `kbu new-project` substitutes `{{project_name}}` in both filenames (e.g., `{{project_name}}.code-workspace`) and file content within the copied template tree.
+24. The jupyter-dev formalization edits the canonical source at `ClaudeCommands/agent-io/skills/jupyter-dev.md` (NOT the sync-deployed copy at `KBUtilLib/.claude/commands/jupyter-dev.md`). Post-edit, run `claude-skills sync primary-laptop --apply` to redeploy.
+25. The repos list for this PRD includes BOTH `KBUtilLib` and `ClaudeCommands`.
+26. v1 targets macOS only. On non-macOS (`sys.platform != "darwin"`), `kbu init` and `kbu new-project` print the v1 message and exit non-zero unless `KBU_PLATFORM_OVERRIDE=force` is set.
+27. `kbu-literature-review` skill checks for MCP tool availability at invocation; on absence, falls back to `WebSearch`, appends results to `references.md` with a `[fallback path]` note, and never errors out.
+28. Each lean-fork skill file (`kbu-plan.md`, `kbu-build.md`, `kbu-diagnose.md`) begins with a comment header naming the upstream source skill, the source commit SHA, and the last review date.
+29. Each harvested skill file (`kbu-synthesize.md`, `kbu-review.md`, `kbu-literature-review.md`) begins with a comment header naming BERIL-research-observatory as source plus the BERIL commit SHA.
+30. The Maestro `status=failed` completion sentinel is treated as a false-negative when a fresh, well-formed stall-report (containing both `## STALL REPORT` and `## FREE CRITIQUE` headers) is committed to the task branch. Implementation tasks that rely on Maestro status MUST verify via git, not status alone.

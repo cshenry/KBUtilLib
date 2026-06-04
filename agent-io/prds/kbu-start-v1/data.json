@@ -90,7 +90,7 @@
     "Multi-user collaboration on a single student project",
     "Remote-compute notebook execution (local kernel only)"
   ],
-  "confront_rounds": 1,
+  "confront_rounds": 2,
   "confront_history": [
     {
       "round": 1,
@@ -112,6 +112,33 @@
       "artifact_path": "agent-io/confront/stall-report.md",
       "artifact_commit": "0592c3b",
       "advisory_critique_summary": "Slice v1 to Initialize+New project+state machine first; kbu subproject validate command; template_version capture; safer notebook exec defaults; KBU_AIA_PATHS env var; Windows examples; golden fixtures; kbu doctor early; fork-header CI lint"
+    },
+    {
+      "round": 2,
+      "date": "2026-06-04",
+      "task_id": "task-b579fa8a",
+      "adversary": "GPT-5 via codex backend (h100)",
+      "binding_stalls": 12,
+      "accepted": 11,
+      "dropped": [10],
+      "dropped_reason": {
+        "10": "jupyter-dev cross-repo task is a taskplan concern, not a PRD ambiguity; repos field already names both KBUtilLib and ClaudeCommands and the conductor will route a ClaudeCommands task"
+      },
+      "maestro_status": "failed (FALSE NEGATIVE: codex completion sentinel; artifact committed + verified via git)",
+      "artifact_branch": "maestro/researcher/you-are-the-autonomous-build-con-task-b579fa8a",
+      "artifact_path": "agent-io/confront/stall-report.md",
+      "artifact_commit": "7f5c4c1",
+      "pre_resolutions": {
+        "5_mcp_servers": "Pinned from /tmp/BERIL-research-observatory/.mcp.json: pubmed (http https://pubmed.mcp.claude.com/mcp) + paper-search (uvx paper-search-mcp, optional SEMANTIC_SCHOLAR_API_KEY)",
+        "7_venvman_syntax": "Verified via local venvman.py create --help: venvman create --project NAME --dir DIR --python 3.11; no venvman use; activation via generated activate.sh"
+      },
+      "fork_sha_anchors": {
+        "ai-design": "AIAssistant b2d26fb6305b86bb56961e46dfd4e47e22c2ae00 / agent-io/skills/ai-design.md",
+        "ai-conductor": "AIAssistant 3fb8137604798fce4d29cf14d0041eb52aa25773 / agent-io/skills/ai-conductor.md",
+        "diagnose": "ClaudeCommands 7ec5c53b0464eef924d35c92bea44ebc6cba1753 / agent-io/skills/diagnose.md",
+        "beril": "BERIL-research-observatory 940c3b0ee7bbf63bc576bd6e8c25210ad692df8e"
+      },
+      "advisory_critique_summary": "Path prefix repo-root standard; kbu subproject list --json early; execution log sidecar per notebook run; reuse shared_env_utils patterns; references.md citation normalization; kernel name namespacing kbu-<project>; Linux smoke test under KBU_PLATFORM_OVERRIDE"
     }
   ]
 }

@@ -771,6 +771,249 @@ v1 behavior:
   exact MCP server names and install commands; document them in the
   kbu-literature-review skill body verbatim.
 
+### Folded from confront round 2 (2026-06-04, task-b579fa8a)
+
+#### Path conventions (clarification)
+
+All filesystem paths in this PRD are **repo-root relative** to the named repo.
+When a path is given as `KBUtilLib/...` or `ClaudeCommands/...`, the prefix
+names the repo; the filesystem path is the suffix relative to that repo's
+root (e.g., write `.claude/commands/kbu-start.md` in the KBUtilLib repo —
+NOT a literal nested `KBUtilLib/.claude/...` folder).
+
+#### State machine artifact preconditions (full table)
+
+`kbu subproject advance <name>` validates the following before each forward
+transition. Failures exit non-zero with an actionable message.
+
+| From → To | Required artifacts |
+|---|---|
+| `plan → p-review` | `RESEARCH_PLAN.md` exists |
+| `p-review → build` | At least one `REVIEW_plan_<n>.md` exists AND its top verdict is `pass` |
+| `build → b-review` | `notebooks/` exists with at least one `*.ipynb` AND `util.py` exists |
+| `b-review → run` | At least one `REVIEW_build_<n>.md` exists AND its verdict is `pass` |
+| `run → synthesize` | Every `[[notebooks]]` entry has `last_run_at` set AND `modified_since_run = false` |
+| `synthesize → s-review` | `REPORT.md` exists |
+| `s-review → complete` | At least one `REVIEW_synthesis_<n>.md` exists AND its verdict is `pass` |
+
+Reverse transitions (`advance --reverse`, triggered on review-fail) skip
+precondition validation and return to the prior action state unconditionally.
+
+Review verdict is recorded as an HTML comment at the top of
+`REVIEW_<stage>_<n>.md`:
+
+```html
+<!-- kbu-review:verdict: pass|fail -->
+```
+
+`kbu-review` writes this marker. `kbu subproject advance` greps for it.
+
+`set-status` bypasses all precondition validation.
+
+#### CLI output schemas — subproject list + notebook list
+
+**`kbu subproject list`** default TSV (header row included):
+
+```
+name<TAB>status<TAB>next_action
+```
+
+Order: subprojects in creation order (most recent first by `created_at`).
+`next_action`: short hint matching the menu item (e.g. `Plan`, `Review`,
+`Build`, `Synthesize`, `Complete`).
+
+**`kbu notebook list`** default TSV (header row included):
+
+```
+path<TAB>subproject<TAB>last_run_at<TAB>modified_since_run
+```
+
+`path`: relative to project root (e.g.
+`subprojects/foo/notebooks/01_x.ipynb`).
+`last_run_at`: ISO-8601 UTC, or empty string if never run.
+`modified_since_run`: `true` | `false`.
+Order: subproject creation order, then notebook filename within subproject.
+
+Both commands accept `--json` returning a full JSON object list with all
+fields (no truncation). Tier-2 dashboard prefers `--json` for parse
+stability; falls back to TSV only for human-facing output.
+
+#### Skill provenance comment header (canonical shape + pinned SHAs)
+
+Every lean-fork and harvested skill file under
+`templates/student-project/.claude/commands/` begins with this exact comment
+header:
+
+```html
+<!--
+kbu skill provenance
+type: lean-fork | harvested
+source_repo: <name>
+source_commit: <40-char sha>
+source_path: <relative path in source repo>
+last_reviewed: <YYYY-MM-DD>
+-->
+```
+
+Pinned source SHAs (anchored at PRD round 2, 2026-06-04):
+
+| File | type | source_repo | source_commit | source_path |
+|---|---|---|---|---|
+| `kbu-plan.md` | lean-fork | AIAssistant | `b2d26fb6305b86bb56961e46dfd4e47e22c2ae00` | `agent-io/skills/ai-design.md` |
+| `kbu-build.md` | lean-fork | AIAssistant | `3fb8137604798fce4d29cf14d0041eb52aa25773` | `agent-io/skills/ai-conductor.md` |
+| `kbu-diagnose.md` | lean-fork | ClaudeCommands | `7ec5c53b0464eef924d35c92bea44ebc6cba1753` | `agent-io/skills/diagnose.md` |
+| `kbu-synthesize.md` | harvested | BERIL-research-observatory | `940c3b0ee7bbf63bc576bd6e8c25210ad692df8e` | `.claude/skills/synthesize/SKILL.md` |
+| `kbu-review.md` | harvested | BERIL-research-observatory | `940c3b0ee7bbf63bc576bd6e8c25210ad692df8e` | `.claude/skills/berdl-review/SKILL.md` |
+| `kbu-literature-review.md` | harvested | BERIL-research-observatory | `940c3b0ee7bbf63bc576bd6e8c25210ad692df8e` | `.claude/skills/literature-review/SKILL.md` |
+
+`last_reviewed` is set to the date of the fork/harvest commit.
+
+#### Literature-review MCP servers (pinned from BERIL `.mcp.json`)
+
+Two MCP servers power the BERIL literature workflow; both reproduced verbatim:
+
+```json
+{
+  "mcpServers": {
+    "pubmed": {
+      "type": "http",
+      "url": "https://pubmed.mcp.claude.com/mcp"
+    },
+    "paper-search": {
+      "command": "uvx",
+      "args": ["--from", "paper-search-mcp", "python", "-m", "paper_search_mcp.server"],
+      "env": {
+        "SEMANTIC_SCHOLAR_API_KEY": "${SEMANTIC_SCHOLAR_API_KEY:-}"
+      }
+    }
+  }
+}
+```
+
+`pubmed` is hosted (no install). `paper-search` requires `uv` on PATH
+(install on macOS: `brew install uv`). The `SEMANTIC_SCHOLAR_API_KEY` env
+var is optional (only needed for Semantic Scholar rate limits).
+
+The `kbu-literature-review` skill body MUST embed this JSON snippet
+verbatim in its instructions section and direct the student to either
+(a) add it to the project's `.mcp.json` (creates if absent), OR (b) add
+it to `~/.claude.json` for machine-wide availability. On invocation, the
+skill checks for tool availability via MCP discovery; on absence,
+falls back to `WebSearch` per the round-1 MCP availability decision.
+
+#### Non-macOS policy (unified, supersedes earlier prose)
+
+Single rule for v1:
+
+On `sys.platform != "darwin"`, both `kbu init` and `kbu new-project`:
+- Without `KBU_PLATFORM_OVERRIDE=force`: print the v1 macOS-only message
+  and exit code 1.
+- With `KBU_PLATFORM_OVERRIDE=force`: proceed using the `python -m venv`
+  path only (no venvman detection, no Cursor-specific instructions; print
+  VS Code equivalents). venvman is treated as absent regardless of
+  `shutil.which("venvman")` on non-Darwin in v1.
+
+#### venvman invocation (corrected)
+
+The earlier venvman pseudocode in this PRD was wrong. Correct invocations:
+
+```bash
+# Tier-1 init (KBUtilLib repo)
+venvman create --project kbutillib --dir <KBUTILLIB_ROOT> --python 3.11
+
+# Tier-1 new-project (child project)
+venvman create --project <project_name> --dir <project_root> --python 3.11
+```
+
+Both write an `activate.sh` into the `--dir` location. To use the venv:
+`source <project_root>/activate.sh`. There is NO `venvman use` command —
+activation is via the generated `activate.sh`. The subsequent
+`pip install -e <KBUTILLIB_ROOT>` runs after sourcing `activate.sh`.
+
+If `venvman create` fails (non-zero exit), `kbu init` / `kbu new-project`
+fall back to `python -m venv .venv` and continue with a stderr warning
+naming the venvman error. Fallback is not a fatal error.
+
+#### Subproject manifest — single notebook registry
+
+The earlier subproject manifest TOML schema duplicated notebook tracking
+across both `[artifacts.notebooks]` and the `[[notebooks]]` array. The
+`[artifacts.notebooks]` field is **REMOVED**. The `[[notebooks]]` array is
+the single source of truth for notebook tracking. Corrected schema:
+
+```toml
+[subproject]
+name = "metal_cofitness"
+title = "Metal co-fitness analysis"
+status = "build"
+created_at = "2026-06-04T15:30:00Z"
+last_session_at = "2026-06-04T16:45:00Z"
+
+[artifacts]
+research_plan = true     # mirrors RESEARCH_PLAN.md presence
+report = false           # mirrors REPORT.md presence
+
+[artifacts.reviews]
+plan = ["REVIEW_plan_1.md"]
+build = []
+synthesis = []
+
+[[notebooks]]
+path = "01_data_exploration.ipynb"
+last_run_at = "2026-06-04T16:30:00Z"
+modified_since_run = false
+
+[[session_refs]]
+id = "7f3a9b2c"
+skill = "kbu-plan"
+at = "2026-06-04T15:30:00Z"
+summary = "..."
+```
+
+`kbu notebook list` and `kbu subproject advance` read `[[notebooks]]`
+exclusively for notebook state.
+
+#### AIAssistant registry import (locked)
+
+The round-1 session-routing contract mentioned auto-registration via
+`assistant.state.registry.update_project` but did not pin the import or
+signature. Locked:
+
+```python
+from assistant.state.registry import update_project
+# update_project(project_id: str, name: str = ..., priority: str = "low",
+#                status: str = "active") -> dict
+```
+
+ImportError is non-fatal: kbu logs a warning and skips registration; the
+session save itself still proceeds via `save_session`.
+
+#### Dashboard "(not available)" reason strings (enumerated)
+
+When `/kbu-start` tier-2 shows a disabled menu item, the parenthetical
+reason MUST be one of these exact strings (so docs and tests stay stable):
+
+| String | When |
+|---|---|
+| `wrong-state` | Item requires a state the current subproject is not in |
+| `missing-artifact` | Item requires an artifact (e.g., `RESEARCH_PLAN.md`) that doesn't exist |
+| `no-subprojects` | No subprojects exist yet (e.g., for Run / Synthesize / Review) |
+| `notebooks-stale` | Run was completed but notebooks were modified after `last_run_at` |
+| `review-pending` | A review is required next; this item can't run in a review state |
+
+Display format: `Run (not available: wrong-state)`.
+
+#### `kbu update --yes` (non-interactive)
+
+`kbu update` is interactive by default (prompts before clobbering
+locally-modified template files). The `kbu-update.md` skill presents the
+diff summary to the student, then calls `kbu update --yes` to apply
+without a second interactive prompt. `--yes` accepts all overwrite
+warnings.
+
+`--check` (dry-run) and `--yes` (force-apply) are mutually exclusive;
+passing both is an error.
+
 ## Testing Decisions
 
 ### What good tests look like here
@@ -902,3 +1145,18 @@ External behaviour. Mock subprocess + filesystem, not internal helpers.
 28. Each lean-fork skill file (`kbu-plan.md`, `kbu-build.md`, `kbu-diagnose.md`) begins with a comment header naming the upstream source skill, the source commit SHA, and the last review date.
 29. Each harvested skill file (`kbu-synthesize.md`, `kbu-review.md`, `kbu-literature-review.md`) begins with a comment header naming BERIL-research-observatory as source plus the BERIL commit SHA.
 30. The Maestro `status=failed` completion sentinel is treated as a false-negative when a fresh, well-formed stall-report (containing both `## STALL REPORT` and `## FREE CRITIQUE` headers) is committed to the task branch. Implementation tasks that rely on Maestro status MUST verify via git, not status alone.
+31. All filesystem paths in this PRD are repo-root relative to the named repo; no literal nested `KBUtilLib/...` or `ClaudeCommands/...` folder is created.
+32. `kbu subproject advance` enforces the full precondition table in Implementation Decisions › Folded from confront round 2: `RESEARCH_PLAN.md` for `plan→p-review`; `REVIEW_plan_*.md` verdict=pass for `p-review→build`; `notebooks/` with at least one `*.ipynb` and `util.py` for `build→b-review`; `REVIEW_build_*.md` verdict=pass for `b-review→run`; all `[[notebooks]]` entries with `last_run_at` set and `modified_since_run=false` for `run→synthesize`; `REPORT.md` for `synthesize→s-review`; `REVIEW_synthesis_*.md` verdict=pass for `s-review→complete`.
+33. `kbu-review` writes the verdict as an HTML comment `<!-- kbu-review:verdict: pass|fail -->` at the top of `REVIEW_<stage>_<n>.md`. `kbu subproject advance` reads this comment to validate review transitions.
+34. `kbu subproject list` default TSV columns are `name<TAB>status<TAB>next_action`, recent-first by `created_at`, header row included.
+35. `kbu notebook list` default TSV columns are `path<TAB>subproject<TAB>last_run_at<TAB>modified_since_run`, ordered by subproject creation then notebook filename, header row included.
+36. Both `kbu subproject list` and `kbu notebook list` accept `--json` returning full JSON object lists with no truncation.
+37. Each lean-fork / harvested skill file begins with the standardized provenance comment block specifying `type`, `source_repo`, `source_commit` (40-char SHA), `source_path`, `last_reviewed`. SHAs match the pinned table in Implementation Decisions.
+38. The `kbu-literature-review` skill body embeds the BERIL `.mcp.json` snippet verbatim and instructs the student to add it to either the project's `.mcp.json` or `~/.claude.json`.
+39. On `sys.platform != "darwin"`, `kbu init` and `kbu new-project` exit code 1 unless `KBU_PLATFORM_OVERRIDE=force`; under override, both use `python -m venv` only (no venvman detection).
+40. venvman invocation uses `venvman create --project NAME --dir DIR --python 3.11`. Activation is via the generated `activate.sh`. There is no `venvman use` command.
+41. venvman create failure falls back to `python -m venv .venv` with a stderr warning; fallback is not a fatal error.
+42. The subproject manifest has no `[artifacts.notebooks]` field. The `[[notebooks]]` array is the single source of truth for notebook tracking.
+43. AIAssistant registry import is `from assistant.state.registry import update_project`. ImportError is non-fatal: kbu logs a warning and skips registration; session save still proceeds.
+44. Disabled tier-2 menu items display one of the enumerated reason strings: `wrong-state`, `missing-artifact`, `no-subprojects`, `notebooks-stale`, `review-pending`. Format: `Run (not available: wrong-state)`.
+45. `kbu update` defaults to interactive (prompts before clobbering locally-modified files). `--yes` bypasses all overwrite prompts. `--check` and `--yes` are mutually exclusive; passing both is an error.

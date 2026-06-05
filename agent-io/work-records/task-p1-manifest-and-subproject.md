@@ -7,7 +7,7 @@ task-p1-manifest-and-subproject
 task-p1-manifest-and-subproject
 
 ## commit_shas
-(to be filled after commit)
+- e9b0f2164aa77851b32ec3b791ee76702115b2fe
 
 ## summary
 

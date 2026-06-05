@@ -7,7 +7,7 @@ task-p4-cli-init
 task-p4-cli-init
 
 ## commit_shas
-(filled after commit)
+- 172626a223f9f673df3751c4c915182acd0f1d6c
 
 ## summary
 Implemented the `kbu init` and `kbu doctor` subcommands per PRD `kbu-start-v1` (AC #15, #16, #17, #26 init portion, #39 init portion, #40, #41). Created `src/kbutillib/cli/init.py` with: marker file I/O at `~/.config/kbu/init_done.json` (XDG_CONFIG_HOME respected); `init()` supporting venvman (macOS-only, correct `venvman create --project kbutillib --dir <root> --python 3.11` invocation, activate.sh VIRTUAL_ENV parser, fallback to `python -m venv .venv` on venvman failure with stderr warning); `init_status()` returning 0/1/2; `doctor()` with 5 probes (init-done, cursor-on-path, claude-extension, kbu-version, jupyter-kernel); non-macOS without `KBU_PLATFORM_OVERRIDE=force` prints the v1 message and exits 1. Registered both `init` and `doctor` as top-level subcommands in `src/kbutillib/cli/__init__.py`. Added 34 tests in `tests/cli/test_init.py` covering all required scenarios; all pass.

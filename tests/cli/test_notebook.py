@@ -419,8 +419,16 @@ class TestExecNotebook:
         assert nb.cells[1].execution_count is not None
 
     def test_kernel_fallback_to_python3(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When project kernel is not found, falls back to python3 with warning."""
+        """When project kernel is not found, _select_kernel is called and a valid kernel is used."""
+        from jupyter_client.kernelspec import find_kernel_specs
         from kbutillib.cli import notebook as nb_mod
+
+        available = find_kernel_specs()
+        if not available:
+            pytest.skip("No kernel specs available in this environment")
+
+        # Use the first actually-installed kernel so the test is environment-independent.
+        fallback_kernel = next(iter(available))
 
         root = _make_project(tmp_path, name="nonexistent_kernel_proj")
         sp_dir = _create_subproject(root, "sp1")
@@ -432,7 +440,7 @@ class TestExecNotebook:
 
         def fake_select_kernel(project_root: Path) -> str:
             warnings_captured.append("fallback")
-            return "python3"
+            return fallback_kernel
 
         monkeypatch.setattr(nb_mod, "_select_kernel", fake_select_kernel)
 

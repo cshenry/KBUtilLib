@@ -7,7 +7,7 @@ task-p7-tier2-lean-forks
 task-p7-tier2-lean-forks
 
 ## commit_shas
-(populated after commit)
+- 12a1259a6b62ab9634e55a66f426bfd2c770fdf2
 
 ## summary
 Replaced three Phase-6 placeholder files under `templates/student-project/.claude/commands/` with full lean-fork skill implementations. `kbu-plan.md` forks `ai-design.md`'s grill methodology, stripping all AIAssistant state machinery and directing output to `RESEARCH_PLAN.md`. `kbu-build.md` forks `ai-conductor.md`'s in-context decompose-and-implement pattern, replacing the sub-agent fan-out with direct scaffold of notebooks and `util.py`. `kbu-diagnose.md` forks `diagnose.md` unchanged in methodology (reproduce → minimise → hypothesise → instrument → fix), with platform refs removed and `kbu session save` as the only end-of-skill call.

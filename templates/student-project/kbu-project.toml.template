@@ -1,0 +1,19 @@
+[project]
+name = "{{project_name}}"
+title = "{{project_name}}"
+created_at = "{{created_at}}"
+
+[[project.authors]]
+name = "{{author_name}}"
+affiliation = "{{author_affiliation}}"
+orcid = "{{author_orcid}}"
+
+[kbutillib]
+source_path = "{{kbutillib_source_path}}"
+source_commit = "{{kbutillib_source_commit}}"
+
+[update]
+last_pulled_at = "{{created_at}}"
+last_pulled_commit = "{{kbutillib_source_commit}}"
+
+[update.file_hashes]

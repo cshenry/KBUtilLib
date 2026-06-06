@@ -7,7 +7,7 @@ fix-streaming-upload
 task-fix-streaming-upload
 
 ## commit_shas
-(populated after commit)
+- `495d16e04a524bb9cf9e0fc633f5ef4fca566e74`
 
 ## summary
 Replaced the buffered `requests.post(..., files=...)` multipart body in both

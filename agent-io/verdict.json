@@ -1,0 +1,24 @@
+{
+  "verdict": "fail",
+  "reason": "venvman fallback warning does not name the venvman error: _run_venvman discards result.stderr before returning None, so the fallback message at init.py:262 is a fixed string with no error detail; spec requires the warning to NAME the venvman error, and the test only checks 'venvman' or 'fall' in output — not that the error text is surfaced.",
+  "criteria": [
+    {"criterion": "pytest tests/cli/test_init.py -v passes (34 tests)", "result": "pass", "detail": "34/34 pass"},
+    {"criterion": "kbu init --status exits 1 without marker", "result": "pass", "detail": "test_exit_1_when_no_marker confirmed; init_status() returns 1 when marker absent"},
+    {"criterion": "kbu doctor prints one [PASS|FAIL|SKIP] line per probe", "result": "pass", "detail": "5 probes, each line starts with the correct token, confirmed by test and code"},
+    {"criterion": "Test simulates non-Darwin without override, confirms exit 1 with v1 macOS-only message", "result": "pass", "detail": "test_non_darwin_without_override_exits_1 and test_non_darwin_without_override_prints_v1_message both pass"},
+    {"criterion": "Test confirms venvman invocation is exactly 'venvman create --project kbutillib --dir <path> --python 3.11'", "result": "pass", "detail": "test_venvman_subprocess_uses_correct_args asserts exact arg list"},
+    {"criterion": "Marker schema fields match exactly (version, initialized_at, kbutillib_repo_path, kbutillib_commit, venv_manager, venv_python, jupyter_kernel_name)", "result": "pass", "detail": "All 7 fields present, version=1 (int), jupyter_kernel_name defaults to 'kbutillib'"},
+    {"criterion": "Marker location respects XDG_CONFIG_HOME", "result": "pass", "detail": "_marker_path() checks XDG_CONFIG_HOME; test_xdg_config_home_respected passes"},
+    {"criterion": "init_status() exit codes: 0 (marker+venv ok), 1 (no marker), 2 (marker but venv gone)", "result": "pass", "detail": "All three cases implemented and tested"},
+    {"criterion": "Doctor probe order: marker → cursor → claude-extension → kbu-version → kernel-registered", "result": "pass", "detail": "probes list in doctor_command matches exactly"},
+    {"criterion": "Cursor-missing → claude-extension probe = SKIP (not FAIL)", "result": "pass", "detail": "_probe_claude_extension returns SKIP when shutil.which('cursor') is None; test confirmed"},
+    {"criterion": "venvman fallback: on non-zero exit, falls back to python -m venv with warning NAMING the venvman error", "result": "fail", "detail": "_run_venvman discards result.stderr on failure and returns None; _do_init emits a fixed 'Warning: venvman create failed' string without the error text; test only asserts 'venvman' or 'fall' in output, not the actual error"},
+    {"criterion": "Full CLI test suite (~228 tests) still passes", "result": "pass", "detail": "228 passed, 1 warning (pre-existing deprecation in traitlets)"},
+    {"criterion": "Tests do not assume specific kernelspec installed; kernel-list checks are mocked", "result": "pass", "detail": "All subprocess.run calls for jupyter kernelspec are monkeypatched"},
+    {"criterion": "No actual subprocess/venv creation in tests", "result": "pass", "detail": "subprocess.run, shutil.which, sys.platform all monkeypatched throughout"}
+  ],
+  "tests_run": [
+    {"cmd": "pytest tests/cli/test_init.py -v", "outcome": "34 passed in 0.05s"},
+    {"cmd": "pytest tests/cli/ -q", "outcome": "228 passed, 1 warning in 11.24s"}
+  ]
+}

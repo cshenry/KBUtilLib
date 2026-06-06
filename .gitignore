@@ -46,3 +46,8 @@ data/ms_classifier/
 # claude-skills runtime artifacts (populated by `claude-skills sync`)
 .claude/commands/
 .claude/skills/
+
+# Template tree — override ignore patterns so template data is tracked
+!templates/student-project/.vscode/
+!templates/student-project/.vscode/**
+!templates/student-project/**/*.code-workspace

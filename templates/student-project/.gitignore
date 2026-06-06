@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*.bak.*.ipynb
+
+# macOS
+.DS_Store
+
+# KBUtilLib
+sessions/
+.kbcache/

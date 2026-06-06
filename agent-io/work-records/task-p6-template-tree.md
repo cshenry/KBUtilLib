@@ -7,7 +7,7 @@ task-p6-template-tree
 task-p6-template-tree
 
 ## commit_shas
-<!-- filled after commit -->
+- cafeb464b19d5601605756d837f28bdcb74271de
 
 ## summary
 Created the `templates/student-project/` directory tree for KBUtilLib's kbu-start-v1 PRD. This establishes the complete structural skeleton that `kbu new-project` will copy verbatim into each new student project, including VS Code workspace configuration, a Python `.gitignore`, a student-facing README with `{{project_name}}` substitution tokens, a TOML manifest template with all schema fields from the PRD, and 9 placeholder skill files under `.claude/commands/` that will be filled in Phase 7. No skill prose is included — this task is purely structural per the task scope.

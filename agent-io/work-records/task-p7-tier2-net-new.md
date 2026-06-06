@@ -7,7 +7,7 @@ task-p7-tier2-net-new
 task-p7-tier2-net-new
 
 ## commit_shas
-- (populated after commit)
+- 4f520033f1caee31295d93b74808c5dc353c6ac5
 
 ## summary
 Wrote the three net-new Phase-7 skill files under `templates/student-project/.claude/commands/`: `kbu-start.md` (tier-2 status-aware navigation dashboard), `kbu-run.md` (deliberate notebook runner), and `kbu-update.md` (template update wrapper). All three replace Phase-6 placeholder stubs with full skill prose, carry the canonical `type: net-new` provenance header, stay under 300 lines, and contain no references to AIAssistant runtime, Maestro, or AgentForge concepts.

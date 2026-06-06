@@ -1,0 +1,159 @@
+{
+  "info": {
+    "id": "kb_quast/run_QUAST_app",
+    "module_name": "kb_quast",
+    "git_commit_hash": "f6be7c27bbf44a0d65b0250dbdb8079b5df9d7ae",
+    "name": "Assess Quality of Assemblies with QUAST - v4.4",
+    "ver": "1.0.0",
+    "subtitle": "Run QUAST (QUality ASsessment Tool) on a set of Assemblies to assess their quality.",
+    "tooltip": "Run QUAST (QUality ASsessment Tool) on a set of Assemblies to assess their quality.",
+    "icon": {
+      "url": "img?method_id=kb_quast/run_QUAST_app&image_name=quast-blue_360.png&tag=release"
+    },
+    "categories": [
+      "assembly"
+    ],
+    "authors": [
+      "gaprice"
+    ],
+    "input_types": [
+      "KBaseGenomeAnnotations.Assembly",
+      "KBaseGenomes.ContigSet"
+    ],
+    "output_types": [],
+    "app_type": "app",
+    "namespace": "kb_quast"
+  },
+  "widgets": {
+    "input": "kbaseNarrativeMethodInput",
+    "output": "no-display"
+  },
+  "parameters": [
+    {
+      "id": "assemblies",
+      "ui_name": "Assemblies",
+      "short_hint": "One or more Assemblies to be assessed with QUAST.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 1,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "input",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "valid_ws_types": [
+          "KBaseGenomes.ContigSet",
+          "KBaseGenomeAnnotations.Assembly"
+        ],
+        "is_output_name": 0,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    },
+    {
+      "id": "force_glimmer",
+      "ui_name": "Force Gene Calls For Large Assemblies",
+      "short_hint": "Force gene calls using the '--glimmer' option. If this is not selected, the App will not use '--glimmer' option for all files if the total contig length exceeds 20 million.",
+      "description": "",
+      "field_type": "checkbox",
+      "allow_multiple": 0,
+      "optional": 1,
+      "advanced": 1,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "0"
+      ],
+      "checkbox_options": {
+        "checked_value": 1,
+        "unchecked_value": 0
+      }
+    },
+    {
+      "id": "min_contig_length",
+      "ui_name": "Minimum contig length",
+      "short_hint": "Set the minimum size of contigs to process. Defaults to 500, minimum allowed is 50.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 1,
+      "advanced": 1,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "500"
+      ],
+      "text_options": {
+        "validate_as": "int",
+        "is_output_name": 0,
+        "placeholder": "",
+        "min_int": 50,
+        "regex_constraint": []
+      }
+    }
+  ],
+  "fixed_parameters": [],
+  "behavior": {
+    "kb_service_url": "",
+    "kb_service_name": "kb_quast",
+    "kb_service_version": "f6be7c27bbf44a0d65b0250dbdb8079b5df9d7ae",
+    "kb_service_method": "run_QUAST_app",
+    "kb_service_input_mapping": [
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      },
+      {
+        "input_parameter": "assemblies",
+        "target_property": "assemblies",
+        "target_type_transform": "list<ref>"
+      },
+      {
+        "input_parameter": "force_glimmer",
+        "target_property": "force_glimmer"
+      },
+      {
+        "input_parameter": "min_contig_length",
+        "target_property": "min_contig_length"
+      }
+    ],
+    "kb_service_output_mapping": [
+      {
+        "service_method_output_path": [
+          "0",
+          "report_name"
+        ],
+        "target_property": "report_name"
+      },
+      {
+        "service_method_output_path": [
+          "0",
+          "report_ref"
+        ],
+        "target_property": "report_ref"
+      },
+      {
+        "constant_value": "5",
+        "target_property": "report_window_line_height"
+      },
+      {
+        "service_method_output_path": [
+          "0"
+        ],
+        "target_property": "QUAST_result"
+      },
+      {
+        "input_parameter": "assemblies",
+        "target_property": "input_assemblies"
+      },
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      }
+    ]
+  },
+  "job_id_output_field": "docker"
+}

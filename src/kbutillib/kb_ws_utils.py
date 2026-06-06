@@ -11,6 +11,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 import requests
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 from .installed_clients.AbstractHandleClient import AbstractHandle as HandleService
 from .installed_clients.WorkspaceClient import Workspace
@@ -157,7 +158,20 @@ class KBWSUtils(SharedEnvUtils):
         return file_path
 
     def upload_blob_file(self, filepath):
-        """Upload a file to Shock and get handle.
+        """Upload a file to Shock/Blobstore and return a handle.
+
+        Uses ``requests_toolbelt.MultipartEncoder`` for a true streaming POST so
+        that memory usage stays flat (O(chunk size)) regardless of file size.
+
+        .. note::
+            **Cloudflare edge cap (~5–9 GB).**  When connecting through the
+            public ``kbase.us`` Cloudflare edge (i.e. from outside the KBase
+            network), the edge terminates single POST bodies at roughly 5–9 GB
+            with HTTP 413.  The streaming encoder fixes the 2× RAM blow-up
+            present in the old buffered approach, but it cannot circumvent the
+            edge size limit.  For files larger than ~5 GB upload from outside
+            KBase, use the Globus staging + ``import_reads_from_staging`` EE2
+            path instead.
 
         Args:
             filepath: Path to file to upload
@@ -167,29 +181,20 @@ class KBWSUtils(SharedEnvUtils):
         """
         self.log_info(f"Uploading file to Shock: {filepath}")
 
-        # Upload to Shock
-        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
-
-        # Get file size for Content-Length
-        file_size = os.path.getsize(filepath)
         filename = os.path.basename(filepath)
 
         with open(filepath, "rb") as f:
-            # Use multipart form with file and explicit content-type/size
-            # The tuple format is (filename, fileobj, content_type, headers)
-            files = {
-                "upload": (
-                    filename,
-                    f,
-                    "application/octet-stream",
-                    {"Content-Length": str(file_size)},
-                )
+            encoder = MultipartEncoder(
+                fields={"upload": (filename, f, "application/octet-stream")}
+            )
+            headers = {
+                "Authorization": "OAuth " + self.get_token(namespace="kbase"),
+                "Content-Type": encoder.content_type,
             }
-
             r = requests.post(
                 self.shock_url + "/node",
                 headers=headers,
-                files=files,
+                data=encoder,
                 allow_redirects=True,
             )
 
@@ -836,15 +841,41 @@ class KBWSUtilsImpl:
         return file_path
 
     def upload_blob_file(self, filepath):
+        """Upload a file to Shock/Blobstore and return a handle.
+
+        Uses ``requests_toolbelt.MultipartEncoder`` for a streaming POST so
+        memory stays flat regardless of file size (fixes the 2× RAM blow-up
+        from the old buffered ``files=`` approach).
+
+        .. note::
+            **Cloudflare edge cap (~5–9 GB).**  From outside the KBase
+            network, the Cloudflare edge terminates single POST bodies at
+            roughly 5–9 GB with HTTP 413.  Streaming fixes memory; it cannot
+            bypass the edge size limit.  For files larger than ~5 GB, use the
+            Globus staging + ``import_reads_from_staging`` EE2 path.
+
+        Args:
+            filepath: Path to file to upload
+
+        Returns:
+            Tuple of (shock_id, handle_id)
+        """
         logger.info(f"Uploading file to Shock: {filepath}")
-        headers = {"Authorization": "OAuth " + self.get_token(namespace="kbase")}
-        file_size = os.path.getsize(filepath)
         filename = os.path.basename(filepath)
         with open(filepath, "rb") as f:
-            files = {
-                "upload": (filename, f, "application/octet-stream", {"Content-Length": str(file_size)})
+            encoder = MultipartEncoder(
+                fields={"upload": (filename, f, "application/octet-stream")}
+            )
+            headers = {
+                "Authorization": "OAuth " + self.get_token(namespace="kbase"),
+                "Content-Type": encoder.content_type,
             }
-            r = requests.post(self.shock_url + "/node", headers=headers, files=files, allow_redirects=True)
+            r = requests.post(
+                self.shock_url + "/node",
+                headers=headers,
+                data=encoder,
+                allow_redirects=True,
+            )
             if not r.ok:
                 error_msg = r.text
                 try:

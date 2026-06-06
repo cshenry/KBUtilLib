@@ -1,0 +1,103 @@
+{
+  "info": {
+    "id": "kb_fastqc/runFastQC",
+    "module_name": "kb_fastqc",
+    "git_commit_hash": "7e67f706dcbfa6008b7b07585fadff3e790d83f0",
+    "name": "Assess Read Quality with FastQC - v0.12.1",
+    "ver": "1.2.2",
+    "subtitle": "A quality control application for high throughput sequence data.",
+    "tooltip": "A quality control application for high throughput sequence data.",
+    "icon": {
+      "url": "img?method_id=kb_fastqc/runFastQC&image_name=fastqc-pink.png&tag=release"
+    },
+    "categories": [
+      "active",
+      "reads"
+    ],
+    "authors": [
+      "seaver"
+    ],
+    "input_types": [
+      "KBaseAssembly.PairedEndLibrary",
+      "KBaseAssembly.SingleEndLibrary",
+      "KBaseFile.PairedEndLibrary",
+      "KBaseFile.SingleEndLibrary",
+      "KBaseRNASeq.RNASeqSampleSet"
+    ],
+    "output_types": [],
+    "app_type": "app",
+    "namespace": "kb_fastqc"
+  },
+  "widgets": {
+    "input": "null",
+    "output": "no-display"
+  },
+  "parameters": [
+    {
+      "id": "input_file_ref",
+      "ui_name": "Read Library/RNA-seq Sample Set",
+      "short_hint": "Select the Read Library or RNA-seq Sample Set to run quality control on.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "input",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "valid_ws_types": [
+          "KBaseFile.PairedEndLibrary",
+          "KBaseAssembly.PairedEndLibrary",
+          "KBaseAssembly.SingleEndLibrary",
+          "KBaseFile.SingleEndLibrary",
+          "KBaseRNASeq.RNASeqSampleSet"
+        ],
+        "is_output_name": 0,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    }
+  ],
+  "fixed_parameters": [],
+  "behavior": {
+    "kb_service_url": "",
+    "kb_service_name": "kb_fastqc",
+    "kb_service_version": "7e67f706dcbfa6008b7b07585fadff3e790d83f0",
+    "kb_service_method": "runFastQC",
+    "kb_service_input_mapping": [
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "input_ws"
+      },
+      {
+        "input_parameter": "input_file_ref",
+        "target_property": "input_file_ref",
+        "target_type_transform": "resolved-ref"
+      }
+    ],
+    "kb_service_output_mapping": [
+      {
+        "service_method_output_path": [
+          "0",
+          "report_name"
+        ],
+        "target_property": "report_name"
+      },
+      {
+        "service_method_output_path": [
+          "0",
+          "report_ref"
+        ],
+        "target_property": "report_ref"
+      },
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      }
+    ]
+  },
+  "job_id_output_field": "docker"
+}

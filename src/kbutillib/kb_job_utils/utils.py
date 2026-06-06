@@ -145,10 +145,23 @@ class KBJobUtils:
         return record
 
     def check_jobs(self, job_ids: List[str]) -> Dict[str, JobRecord]:
-        """Batch-check multiple jobs.  Returns a dict keyed by job_id."""
+        """Batch-check multiple jobs.  Returns a dict keyed by job_id.
+
+        EE2 has returned ``job_states`` as both a ``dict`` (legacy, keyed by
+        job_id) and a ``list[dict]`` (current, each item carries a ``job_id``
+        key).  This method normalises both shapes into the same
+        ``Dict[str, state_raw]`` mapping before processing.
+        """
         raw = self._ee2.check_jobs({"job_ids": job_ids})
         results: Dict[str, JobRecord] = {}
-        job_states = raw.get("job_states", {})
+        job_states_raw = raw.get("job_states", {})
+        # Normalise list-shape (current EE2) to dict-shape (legacy EE2).
+        if isinstance(job_states_raw, list):
+            job_states: Dict[str, Any] = {
+                js["job_id"]: js for js in job_states_raw
+            }
+        else:
+            job_states = job_states_raw
         for jid, state_raw in job_states.items():
             record = self._store.get(jid)
             if record is None:

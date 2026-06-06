@@ -195,20 +195,23 @@ class KBJobUtils:
     # ── job logs ─────────────────────────────────────────────────────────
 
     def get_job_logs(
-        self, job_id: str, skip_lines: int = 0
+        self, job_id: str, skip_lines: int = 0, latest: bool = False
     ) -> Dict[str, Any]:
         """Retrieve log lines for a job from EE2.
 
         Args:
             job_id: The EE2 job identifier.
             skip_lines: Number of initial log lines to skip.
+            latest: If True, request only the most recent lines
+                (passes ``latest=1`` to the EE2 ``get_job_logs`` call).
 
         Returns:
             Raw response dict from ``execution_engine2.get_job_logs``.
         """
-        return self._ee2.get_job_logs(
-            {"job_id": job_id, "skip_lines": skip_lines}
-        )
+        params: Dict[str, Any] = {"job_id": job_id, "skip_lines": skip_lines}
+        if latest:
+            params["latest"] = 1
+        return self._ee2.get_job_logs(params)
 
     # ── local queries (delegated to store) ───────────────────────────────
 

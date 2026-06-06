@@ -1,0 +1,306 @@
+{
+  "info": {
+    "id": "kb_uploadmethods/import_sra_as_reads_from_web",
+    "module_name": "kb_uploadmethods",
+    "git_commit_hash": "5b9346463df88a422ff5d4f4cba421679f63c73f",
+    "name": "Import SRA File as Reads From Web - v1.0.10",
+    "ver": "1.0.57",
+    "subtitle": "Import an SRA file from a web URL into your Narrative as a Reads data object.",
+    "tooltip": "Import an SRA file from a web URL into your Narrative as a Reads data object.",
+    "icon": {
+      "url": "img?method_id=kb_uploadmethods/import_sra_as_reads_from_web&image_name=data-pink.png&tag=release"
+    },
+    "categories": [
+      "active",
+      "reads",
+      "upload"
+    ],
+    "authors": [
+      "tgu2"
+    ],
+    "input_types": [],
+    "output_types": [],
+    "app_type": "app",
+    "namespace": "kb_uploadmethods"
+  },
+  "widgets": {
+    "input": "null",
+    "output": "no-display"
+  },
+  "parameters": [
+    {
+      "id": "download_type",
+      "ui_name": "URL type",
+      "short_hint": "URL type - 'Regular URL (Direct Download Link)', 'FTP Link (Note NCBI SRA FTP no longer supported)', 'Dropbox/Box Public Shared Link', or 'Google Drive Public Shared Link.'",
+      "description": "",
+      "field_type": "dropdown",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "Direct Download"
+      ],
+      "dropdown_options": {
+        "options": [
+          {
+            "value": "Direct Download",
+            "display": "Direct Download Link"
+          },
+          {
+            "value": "FTP",
+            "display": "FTP Link (Note: NCBI SRA FTP no longer supported)"
+          },
+          {
+            "value": "DropBox",
+            "display": "DropBox Public Shared Link"
+          },
+          {
+            "value": "Google Drive",
+            "display": "Google Drive Public Shared Link"
+          }
+        ],
+        "multiselection": 0
+      }
+    },
+    {
+      "id": "file_url",
+      "ui_name": "SRA URL",
+      "short_hint": "URL for source of SRA reads.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "is_output_name": 0,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    },
+    {
+      "id": "sequencing_tech",
+      "ui_name": "Sequencing technology",
+      "short_hint": "The name of the sequencing technology used to create the reads file.",
+      "description": "",
+      "field_type": "dropdown",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "Unknown"
+      ],
+      "dropdown_options": {
+        "options": [
+          {
+            "value": "Illumina",
+            "display": "Illumina"
+          },
+          {
+            "value": "PacBio CLR",
+            "display": "PacBio CLR"
+          },
+          {
+            "value": "PacBio CCS",
+            "display": "PacBio CCS"
+          },
+          {
+            "value": "IonTorrent",
+            "display": "IonTorrent"
+          },
+          {
+            "value": "NanoPore",
+            "display": "NanoPore"
+          },
+          {
+            "value": "Unknown",
+            "display": "Unknown"
+          }
+        ],
+        "multiselection": 0
+      }
+    },
+    {
+      "id": "name",
+      "ui_name": "Reads object name",
+      "short_hint": "Provide a name for the Reads that will be created by this importer.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "is_output_name": 1,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    },
+    {
+      "id": "insert_size_mean",
+      "ui_name": "Mean insert size",
+      "short_hint": "The mean (average) insert length.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 1,
+      "advanced": 1,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "validate_as": "float",
+        "is_output_name": 0,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    },
+    {
+      "id": "insert_size_std_dev",
+      "ui_name": "St. dev. of insert size",
+      "short_hint": "The standard deviation of insert lengths.",
+      "description": "",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 1,
+      "advanced": 1,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        ""
+      ],
+      "text_options": {
+        "validate_as": "float",
+        "is_output_name": 0,
+        "placeholder": "",
+        "regex_constraint": []
+      }
+    },
+    {
+      "id": "read_orientation_outward",
+      "ui_name": "Reads orientation outward",
+      "short_hint": "Select if reads in a pair point outward.",
+      "description": "",
+      "field_type": "checkbox",
+      "allow_multiple": 0,
+      "optional": 1,
+      "advanced": 1,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "0"
+      ],
+      "checkbox_options": {
+        "checked_value": 1,
+        "unchecked_value": 0
+      }
+    },
+    {
+      "id": "single_genome",
+      "ui_name": "Single genome",
+      "short_hint": "Select if the reads are from a single genome, and leave blank if the reads are from a metagenome.",
+      "description": "",
+      "field_type": "checkbox",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [
+        "1"
+      ],
+      "checkbox_options": {
+        "checked_value": 1,
+        "unchecked_value": 0
+      }
+    }
+  ],
+  "fixed_parameters": [],
+  "parameter_groups": [
+    {
+      "id": "sra_urls_to_add",
+      "parameter_ids": [
+        "file_url",
+        "name",
+        "sequencing_tech",
+        "single_genome",
+        "insert_size_mean",
+        "insert_size_std_dev",
+        "read_orientation_outward"
+      ],
+      "ui_name": "SRA URL(s)",
+      "short_hint": "SRA file URL and output Reads file name.",
+      "description": "",
+      "allow_multiple": 1,
+      "optional": 0,
+      "advanced": 0,
+      "with_border": 0
+    }
+  ],
+  "behavior": {
+    "kb_service_url": "",
+    "kb_service_name": "kb_uploadmethods",
+    "kb_service_version": "5b9346463df88a422ff5d4f4cba421679f63c73f",
+    "kb_service_method": "import_sra_from_web",
+    "kb_service_input_mapping": [
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      },
+      {
+        "input_parameter": "download_type",
+        "target_property": "download_type"
+      },
+      {
+        "input_parameter": "sra_urls_to_add",
+        "target_property": "sra_urls_to_add"
+      }
+    ],
+    "kb_service_output_mapping": [
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "wsName"
+      },
+      {
+        "service_method_output_path": [
+          "0",
+          "obj_refs"
+        ],
+        "target_property": "obj_refs"
+      },
+      {
+        "service_method_output_path": [
+          "0",
+          "report_name"
+        ],
+        "target_property": "report_name"
+      },
+      {
+        "service_method_output_path": [
+          "0",
+          "report_ref"
+        ],
+        "target_property": "report_ref"
+      },
+      {
+        "constant_value": "16",
+        "target_property": "report_window_line_height"
+      }
+    ]
+  },
+  "job_id_output_field": "docker"
+}

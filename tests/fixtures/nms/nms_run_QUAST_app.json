@@ -1,0 +1,81 @@
+{
+  "info": {
+    "id": "kb_quast/run_QUAST_app",
+    "module_name": "kb_quast",
+    "git_commit_hash": "0000000000000000000000000000000000000001",
+    "name": "Assess Assembly Quality with QUAST",
+    "ver": "5.2.0",
+    "subtitle": "Evaluate genome assembly quality using QUAST.",
+    "categories": ["active", "assembly"],
+    "authors": ["kbaseapps"],
+    "input_types": ["KBaseGenomeAnnotations.Assembly"],
+    "output_types": ["KBaseReport.Report"],
+    "app_type": "app",
+    "namespace": "kb_quast"
+  },
+  "widgets": {
+    "input": "null",
+    "output": "no-display"
+  },
+  "parameters": [
+    {
+      "id": "assemblies",
+      "ui_name": "Assembly object(s)",
+      "short_hint": "One or more Assembly objects to evaluate.",
+      "field_type": "text",
+      "allow_multiple": 1,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "input",
+      "default_values": [""]
+    },
+    {
+      "id": "workspace_name",
+      "ui_name": "Workspace name",
+      "short_hint": "The workspace where output will be saved.",
+      "field_type": "text",
+      "allow_multiple": 0,
+      "optional": 0,
+      "advanced": 0,
+      "disabled": 0,
+      "ui_class": "parameter",
+      "default_values": [""]
+    }
+  ],
+  "fixed_parameters": [],
+  "parameter_groups": [],
+  "behavior": {
+    "kb_service_url": "",
+    "kb_service_name": "kb_quast",
+    "kb_service_version": "0000000000000000000000000000000000000001",
+    "kb_service_method": "run_QUAST_app",
+    "kb_service_input_mapping": [
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      },
+      {
+        "input_parameter": "assemblies",
+        "target_property": "assemblies",
+        "target_type_transform": "list<resolved-ref>"
+      }
+    ],
+    "kb_service_output_mapping": [
+      {
+        "service_method_output_path": ["0", "report_name"],
+        "target_property": "report_name"
+      },
+      {
+        "service_method_output_path": ["0", "report_ref"],
+        "target_property": "report_ref"
+      },
+      {
+        "narrative_system_variable": "workspace",
+        "target_property": "workspace_name"
+      }
+    ]
+  },
+  "job_id_output_field": "docker",
+  "_note": "PLACEHOLDER — fetch from NMS: https://kbase.us/services/narrative_method_store/rpc (method: NarrativeMethodStore.get_method_spec, id: kb_quast/run_QUAST_app) and replace this file."
+}

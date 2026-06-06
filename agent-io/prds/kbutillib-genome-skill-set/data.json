@@ -1,0 +1,17 @@
+{
+  "prd_name": "kbutillib-genome-skill-set",
+  "title": "KBUtilLib Skill Set: Expert Refresh + Genome Skill",
+  "status": "draft",
+  "repos": ["KBUtilLib"],
+  "home_repo": "KBUtilLib",
+  "created_at": "2026-06-02",
+  "created_by": "ai-design",
+  "session_owner": "chenry",
+  "deliverables": [
+    "Refresh kbutillib-expert skill (8 approved gap-fixes from 2026-06-02 audit)",
+    "New kbase-genome-expert skill (notebook-only save/load/validate/manipulate of KBase Genome objects)",
+    "Extend kb_genome_utils.py with 5 high-level methods: save_genome_object, save_assembly_from_fasta, save_genome_with_assembly, validate_genome, build_genome_from_fasta_gff",
+    "Update toolkit.py wiring: KBGenomeUtilsImpl composes (env, ws, jobs)"
+  ],
+  "confront_rounds": 1
+}

@@ -7,7 +7,7 @@ task-p7-tier1-kbu-start
 task-p7-tier1-kbu-start
 
 ## commit_shas
-(filled after commit)
+- 0e22a35507cf2e83fc8d45616e6360d76f4d70db
 
 ## summary
 

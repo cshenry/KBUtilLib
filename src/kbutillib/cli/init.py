@@ -147,10 +147,12 @@ def _is_darwin() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _run_venvman(repo_root: Path) -> Optional[Path]:
+def _run_venvman(repo_root: Path) -> tuple[Optional[Path], str]:
     """Run venvman to create the kbutillib venv.
 
-    Returns the absolute path to the venv python, or None if venvman failed.
+    Returns ``(venv_python_path, error_detail)``. On success, the error_detail
+    is an empty string. On failure, the path is None and error_detail carries
+    the venvman stderr (or stdout fallback) so the caller can surface it.
 
     venvman writes an ``activate.sh`` into ``--dir``.  We source it to
     discover ``VIRTUAL_ENV``, but since we can't source a shell script from
@@ -172,7 +174,10 @@ def _run_venvman(repo_root: Path) -> Optional[Path]:
         check=False,
     )
     if result.returncode != 0:
-        return None
+        detail = (result.stderr or result.stdout or "").strip()
+        if not detail:
+            detail = f"venvman exited with code {result.returncode}"
+        return None, detail
     # Resolve venv python from activate.sh written by venvman
     activate_sh = repo_root / "activate.sh"
     if activate_sh.exists():
@@ -180,8 +185,8 @@ def _run_venvman(repo_root: Path) -> Optional[Path]:
         if venv_dir:
             candidate = venv_dir / "bin" / "python"
             if candidate.exists():
-                return candidate
-    return None
+                return candidate, ""
+    return None, "venvman succeeded but VIRTUAL_ENV could not be resolved from activate.sh"
 
 
 def _parse_virtual_env_from_activate(activate_sh: Path) -> Optional[Path]:
@@ -256,10 +261,10 @@ def _do_init(repo_root: Path) -> None:  # noqa: C901 — subprocess orchestratio
 
     if use_venvman:
         click.echo("Detected venvman — running venvman create ...")
-        venv_python = _run_venvman(repo_root)
+        venv_python, venvman_err = _run_venvman(repo_root)
         if venv_python is None:
             click.echo(
-                "Warning: venvman create failed — falling back to python -m venv .venv",
+                f"Warning: venvman create failed ({venvman_err}) — falling back to python -m venv .venv",
                 err=True,
             )
             venv_python = _create_plain_venv(repo_root)

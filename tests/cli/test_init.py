@@ -267,7 +267,7 @@ class TestVenvmanDetection:
             return result
 
         with patch("kbutillib.cli.init.subprocess.run", side_effect=_mock):
-            returned = _run_venvman(tmp_path)
+            returned_path, returned_err = _run_venvman(tmp_path)
 
         assert len(captured) == 1
         assert captured[0] == [
@@ -280,7 +280,8 @@ class TestVenvmanDetection:
             "--python",
             "3.11",
         ]
-        assert returned == fake_python
+        assert returned_path == fake_python
+        assert returned_err == ""
 
     def test_venvman_present_uses_venvman(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -296,12 +297,12 @@ class TestVenvmanDetection:
 
         venvman_calls: list[list] = []
 
-        def _mock_run_venvman(repo_root: Path) -> Path:
+        def _mock_run_venvman(repo_root: Path) -> tuple[Path, str]:
             venvman_calls.append([
                 "venvman", "create", "--project", "kbutillib",
                 "--dir", str(repo_root), "--python", "3.11",
             ])
-            return fake_python
+            return fake_python, ""
 
         def _mock_subproc(cmd, **kwargs):  # noqa: ANN001
             result = MagicMock()
@@ -357,9 +358,14 @@ class TestVenvmanFailureFallback:
             result.stderr = ""
             return result
 
+        venvman_error_detail = "venvman: python 3.11 toolchain missing"
+
         with (
             patch("kbutillib.cli.init.shutil.which", return_value="/usr/local/bin/venvman"),
-            patch("kbutillib.cli.init._run_venvman", return_value=None),  # simulate failure
+            patch(
+                "kbutillib.cli.init._run_venvman",
+                return_value=(None, venvman_error_detail),
+            ),
             patch("kbutillib.cli.init._create_plain_venv", return_value=fake_python),
             patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
             patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
@@ -367,8 +373,10 @@ class TestVenvmanFailureFallback:
             result = _invoke("init")
 
         assert result.exit_code == 0
-        # Warning about venvman fallback should be in combined output
+        # Warning about venvman fallback should be in combined output and must
+        # name the underlying venvman error (per AC — warning surfaces detail).
         assert "venvman" in result.output.lower() or "fall" in result.output.lower()
+        assert venvman_error_detail in result.output
         # Marker should be written with .venv manager (fallback)
         marker = _read_marker()
         assert marker is not None

@@ -1,0 +1,9 @@
+{
+  "prd_name": "kbu-bootstrap-v1",
+  "title": "kbu bootstrap — retrofit an existing repo as kbu-aware",
+  "repos": ["KBUtilLib"],
+  "created_at": "2026-06-06",
+  "confront_rounds": 1,
+  "predecessor": "kbu-start-v1",
+  "summary": "Add `kbu bootstrap` subcommand that runs in cwd, refuses unless cwd is a git repo with no kbu-project.toml, additively copies the student-project template tree (with a per-file conflict policy), detects-and-reuses an existing venv (refusing Python<3.11 without --force), pip-installs KBUtilLib editable, registers a Jupyter kernel, and writes kbu-project.toml with [project].bootstrapped=true and [update.file_hashes] covering only files actually written. Surgical change to kbu update so it doesn't propose to add files bootstrap deliberately skipped (filter by file_hashes membership; --add-untracked opts in)."
+}

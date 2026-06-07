@@ -7,7 +7,7 @@ p1-refactor-template-ops
 p1-refactor-template-ops
 
 ## commit_shas
-(filled after commit)
+- caf9ae53e610a4dae820dd7047819cf52a9caa36
 
 ## summary
 Extracted five reusable helper functions from `src/kbutillib/cli/new_project.py` into a new module `src/kbutillib/cli/_template_ops.py`. The extracted functions — `copy_template_tree`, `compute_file_hashes`, `run_venvman_project`, `create_plain_venv`, and `parse_virtual_env_from_activate` — are now the public API of `_template_ops.py`. `new_project.py` imports them with underscore-prefixed aliases (`_copy_template_tree`, etc.) to preserve compatibility with the existing tests that import those private names directly. No behavior changed; this is a pure mechanical extraction to enable the upcoming `kbu bootstrap` module to share the same helpers without circular imports.

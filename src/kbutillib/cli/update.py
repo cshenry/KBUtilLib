@@ -5,7 +5,26 @@ Diffs ``.claude/commands/`` and ``.vscode/`` between the recorded
 Warns before clobbering locally-modified template files.
 
 v1 tier-2 command — must be run from inside a project created by
-``kbu new-project`` (i.e., a directory containing ``kbu-project.toml``).
+``kbu new-project`` or ``kbu bootstrap`` (i.e., a directory containing
+``kbu-project.toml``).
+
+Bootstrap-aware filtering
+-------------------------
+When ``[update.file_hashes]`` in ``kbu-project.toml`` is **non-empty**
+(i.e., the manifest was written by ``kbu bootstrap`` or a prior ``kbu
+update``), ``_build_diff`` only proposes ``status='added'`` entries for
+source-template paths that already appear in ``file_hashes``.  Files in
+the source template that ``kbu bootstrap`` deliberately skipped (e.g.
+``.vscode/extensions.json``) are therefore *not* proposed as additions
+on the next ``kbu update``.
+
+Pass ``--add-untracked`` to revert to the legacy behaviour and propose
+all source-template files as additions regardless of ``file_hashes``.
+
+When ``file_hashes`` is **empty** (new-project repos using the kbu-start-v1
+flow that predate bootstrap, or brand-new repos with no prior pull), the
+old behaviour — all source files are candidate additions — is preserved
+unchanged.
 """
 
 from __future__ import annotations
@@ -112,6 +131,8 @@ def _build_diff(
     source: Path,
     last_commit: Optional[str],
     current_commit: str,
+    file_hashes: dict[str, str] | None = None,
+    add_untracked: bool = False,
 ) -> list[TemplateDiff]:
     """Build a TemplateDiff list comparing last_commit state vs current HEAD.
 
@@ -119,6 +140,19 @@ def _build_diff(
     ``templates/student-project/.vscode/`` in the source repo.
 
     ``last_commit`` being None (first pull) treats all files as "added".
+
+    Bootstrap-aware filtering
+    -------------------------
+    ``file_hashes`` is the ``[update.file_hashes]`` dict from the project
+    manifest.  When it is **non-empty** AND ``add_untracked`` is ``False``,
+    ``status='added'`` entries are only emitted for paths that already
+    appear in ``file_hashes``.  Source-template paths absent from
+    ``file_hashes`` (files ``kbu bootstrap`` deliberately skipped) are
+    suppressed.
+
+    When ``file_hashes`` is ``None`` or empty, **or** when
+    ``add_untracked`` is ``True``, the legacy behaviour is preserved: all
+    source-template files are candidate additions.
     """
     template_root_rel = "templates/student-project"
     diffs: list[TemplateDiff] = []
@@ -187,12 +221,23 @@ def _build_diff(
         # No last_commit: treat all current files as added
         pass  # old_hashes is empty; all files appear as "added" below
 
+    # Determine whether to apply bootstrap-aware filtering to 'added' entries.
+    # Filter is active when file_hashes is non-empty AND add_untracked is False.
+    _filter_added = bool(file_hashes) and not add_untracked
+
     # Compare current files against old hashes
     for rel_path, abs_path in current_files.items():
         new_hex = sha256_file(abs_path)
         new_h = _prefixed(new_hex)
         if rel_path not in old_hashes:
-            # File is new (added)
+            # File is new (added).
+            # When bootstrap-aware filtering is active, only emit the entry if
+            # the path is already recorded in file_hashes (i.e. bootstrap
+            # explicitly took ownership of it).  Paths absent from file_hashes
+            # were deliberately skipped by bootstrap and must not be proposed
+            # as additions unless --add-untracked is set.
+            if _filter_added and rel_path not in file_hashes:
+                continue
             diffs.append(TemplateDiff(
                 path=rel_path,
                 status="added",
@@ -317,11 +362,20 @@ def update(  # noqa: C901
     set_source: Optional[Path] = None,
     check: bool = False,
     yes: bool = False,
+    add_untracked: bool = False,
     project_root: Optional[Path] = None,
 ) -> None:
     """Pull template updates from the parent KBUtilLib install.
 
     *project_root* defaults to ``Path.cwd()`` (used in tests to override).
+
+    ``add_untracked`` mirrors the ``--add-untracked`` CLI flag.  When
+    ``True``, all source-template files are proposed as additions even if
+    they are absent from ``[update.file_hashes]`` (i.e. ``kbu bootstrap``
+    deliberately skipped them).  The default (``False``) preserves the
+    bootstrap-aware filtering: files not recorded in ``file_hashes`` are
+    silently skipped.  When ``[update.file_hashes]`` is empty (legacy
+    new-project repos), this parameter has no effect.
     """
     if check and yes:
         click.echo(
@@ -392,8 +446,18 @@ def update(  # noqa: C901
     if last_commit == "":
         last_commit = None
 
-    # Build diff
-    diff = _build_diff(source, last_commit, current_commit)
+    # Read manifest's file_hashes for bootstrap-aware filtering
+    manifest_file_hashes: dict[str, str] = cfg.get("update", {}).get("file_hashes", {})
+
+    # Build diff — passes file_hashes so bootstrap-skipped paths are suppressed
+    # unless --add-untracked is set or file_hashes is empty (legacy repos).
+    diff = _build_diff(
+        source,
+        last_commit,
+        current_commit,
+        file_hashes=manifest_file_hashes,
+        add_untracked=add_untracked,
+    )
 
     if not diff:
         click.echo("Already up-to-date.")
@@ -444,13 +508,32 @@ def update(  # noqa: C901
               help="Relocate parent KBUtilLib source path.")
 @click.option("--check", is_flag=True, default=False, help="Dry-run; print diff without applying.")
 @click.option("--yes", is_flag=True, default=False, help="Bypass all overwrite prompts.")
+@click.option(
+    "--add-untracked",
+    "add_untracked",
+    is_flag=True,
+    default=False,
+    help=(
+        "Propose adding source-template files that are absent from "
+        "[update.file_hashes] (e.g. files kbu bootstrap deliberately "
+        "skipped).  By default these are silently suppressed.  "
+        "Has no effect when [update.file_hashes] is empty (legacy "
+        "new-project repos)."
+    ),
+)
 def update_command(
     set_source: Optional[Path],
     check: bool,
     yes: bool,
+    add_untracked: bool,
 ) -> None:
     """Pull template updates from the parent KBUtilLib install.
 
     Must be run from inside a kbu project directory (one with kbu-project.toml).
+
+    When the manifest was written by ``kbu bootstrap``, files that bootstrap
+    deliberately skipped (e.g. ``.vscode/extensions.json``) are not proposed
+    as additions.  Use ``--add-untracked`` to override this and see all
+    source-template files as candidate additions.
     """
-    update(set_source=set_source, check=check, yes=yes)
+    update(set_source=set_source, check=check, yes=yes, add_untracked=add_untracked)

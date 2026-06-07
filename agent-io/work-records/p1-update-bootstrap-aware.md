@@ -7,7 +7,7 @@ p1-update-bootstrap-aware
 p1-update-bootstrap-aware
 
 ## commit_shas
-(see below — populated after commit)
+- 20dda70d28c91fbf982350361b111ae696f12dad
 
 ## summary
 Added `--add-untracked` flag to `kbu update` and made `_build_diff` bootstrap-aware. When `[update.file_hashes]` in the manifest is non-empty, `_build_diff` now suppresses `status='added'` entries for source-template paths absent from `file_hashes` (files `kbu bootstrap` deliberately skipped, e.g. `.vscode/extensions.json`). When `file_hashes` is empty (legacy new-project repos) or `--add-untracked` is set, the original "all source files are candidate additions" behaviour is preserved. After a successful `--add-untracked` run that adds new files, those files are included in the recomputed `[update.file_hashes]` via the existing `_recompute_file_hashes` walker. The `--check` / `--yes` mutual exclusion is unchanged; `--add-untracked` composes freely with both.

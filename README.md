@@ -15,6 +15,8 @@
 >
 > KBUtilLib provides a flexible, composable set of utilities for working with KBase data, genomics, biochemistry databases, metabolic modeling, and interactive notebook environments.
 
+**New here?** See **[GETTING_STARTED.md](GETTING_STARTED.md)** for the first-time-user onboarding guide — it walks you from a clean machine to "Claude is running in your kbu project, take it from there."
+
 ## Features
 
 - **Modular Architecture**: Inherit from only the utility modules you need

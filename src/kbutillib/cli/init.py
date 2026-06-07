@@ -20,7 +20,7 @@ from typing import Optional
 
 import click
 
-from .manifest import now_utc_iso
+from .manifest import now_utc_iso, read_project_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +433,35 @@ def _probe_jupyter_kernel() -> tuple[str, str]:
         return "FAIL", f"could not run jupyter kernelspec list: {exc}"
 
 
+def _probe_project_origin() -> str:
+    """Return the project-origin info line for the current working directory.
+
+    Reads ``kbu-project.toml`` from cwd.  Returns a plain string (not a
+    ``[STATUS] name: detail`` probe tuple) because this is informational only
+    and never causes doctor to exit 1.
+
+    - Manifest present with ``[project].bootstrapped = true``:
+      ``project origin: bootstrap (<bootstrapped_at>)``
+    - Manifest present but ``bootstrapped`` absent or False:
+      ``project origin: new-project (<created_at>)``
+    - No manifest in cwd:
+      ``project origin: (no kbu-project.toml in cwd)``
+    """
+    try:
+        manifest = read_project_manifest(Path.cwd())
+    except FileNotFoundError:
+        return "project origin: (no kbu-project.toml in cwd)"
+
+    project = manifest.get("project", {})
+    bootstrapped = project.get("bootstrapped", False)
+    if bootstrapped:
+        ts = project.get("bootstrapped_at", "")
+        return f"project origin: bootstrap ({ts})"
+    else:
+        ts = project.get("created_at", "")
+        return f"project origin: new-project ({ts})"
+
+
 # ---------------------------------------------------------------------------
 # Click commands
 # ---------------------------------------------------------------------------
@@ -508,5 +537,7 @@ def doctor_command(verbose: bool) -> None:
         click.echo(f"[{status}] {name}: {detail}")
         if status == "FAIL":
             any_fail = True
+
+    click.echo(_probe_project_origin())
 
     sys.exit(1 if any_fail else 0)

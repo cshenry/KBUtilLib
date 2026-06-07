@@ -517,13 +517,18 @@ class TestDoctorCommand:
             result = _invoke("doctor")
 
         lines = [ln for ln in result.output.strip().splitlines() if ln.strip()]
-        assert len(lines) == 5, f"Expected 5 probe lines, got {len(lines)}: {lines}"
-        for line in lines:
+        # 5 status-probe lines + 1 project-origin info line
+        assert len(lines) == 6, f"Expected 6 output lines, got {len(lines)}: {lines}"
+        probe_lines = lines[:5]
+        for line in probe_lines:
             assert (
                 line.startswith("[PASS]")
                 or line.startswith("[FAIL]")
                 or line.startswith("[SKIP]")
             ), f"Line does not start with status token: {line!r}"
+        assert lines[5].startswith("project origin:"), (
+            f"Last line should be project origin info: {lines[5]!r}"
+        )
 
     def test_doctor_exits_0_when_all_pass_or_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

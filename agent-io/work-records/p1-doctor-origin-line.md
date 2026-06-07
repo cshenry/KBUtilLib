@@ -7,7 +7,7 @@ p1-doctor-origin-line
 p1-doctor-origin-line
 
 ## commit_shas
-(populated after commit)
+- aaa3960b07eb2485cfd2a0bf9d97480ddcf5ed5f
 
 ## summary
 Extended `kbu doctor` to print a `project origin:` info line at the end of its output. The new `_probe_project_origin()` function in `src/kbutillib/cli/init.py` reads `kbu-project.toml` from the current working directory via the existing `read_project_manifest` helper. If `[project].bootstrapped` is true it prints `project origin: bootstrap (<bootstrapped_at>)`; if the field is absent or false it prints `project origin: new-project (<created_at>)`; if no manifest exists it prints `project origin: (no kbu-project.toml in cwd)`. The line is informational only and never contributes to the exit code. One existing test that asserted exactly 5 doctor output lines was updated to expect 6 (5 `[STATUS]` probe lines + 1 origin info line).

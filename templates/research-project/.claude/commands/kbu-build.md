@@ -4,7 +4,7 @@ type: lean-fork
 source_repo: AIAssistant
 source_commit: 3fb8137604798fce4d29cf14d0041eb52aa25773
 source_path: agent-io/skills/ai-conductor.md
-last_reviewed: 2026-06-05
+last_reviewed: 2026-06-08
 -->
 
 # /kbu-build — Scaffold Subproject Notebooks
@@ -46,7 +46,52 @@ Parse out:
 Present a one-paragraph summary of what you are about to build. Confirm with
 the user before proceeding.
 
-## Phase 2: Decompose Into Tasks
+## Phase 2: Detect Adopted-Branch (Notebooks Already Present)
+
+After loading the plan, check whether the subproject already has notebooks:
+
+```bash
+ls subprojects/<name>/notebooks/*.ipynb 2>/dev/null
+```
+
+### If `.ipynb` files are present — verify-and-extend mode (warn only)
+
+The subproject is already populated (likely from `kbu subproject adopt` +
+`/kbu-migrate`, or a prior build pass). Do NOT scaffold; instead verify
+alignment between the manifest and the filesystem:
+
+**Step 1.** Collect manifest slugs from the `[[notebooks]]` entries
+parsed in Phase 1.
+
+**Step 2.** Collect filenames from `subprojects/<name>/notebooks/*.ipynb`.
+
+**Step 3.** For each manifest entry whose slug does not correspond to a
+`.ipynb` file in `notebooks/`, emit:
+
+```
+Manifest lists missing notebook: <slug>
+```
+
+**Step 4.** For each `.ipynb` file in `notebooks/` whose filename (without
+`.ipynb`) does not appear as a slug in the manifest, emit:
+
+```
+Notebook present but not in manifest: <filename>
+```
+
+**Step 5.** Report the warning summary to the user. Do NOT auto-create
+any missing notebooks. Inform the user that a future `--scaffold-missing`
+flag will handle auto-creation.
+
+**Step 6.** Skip to Phase 7 (Advance and Save Session). Phases 3–6
+(scaffold util.py, scaffold notebooks, verify structure) do not run in
+this mode.
+
+### If no `.ipynb` files are present — continue to Phase 3
+
+This is a virgin subproject. Proceed through the full scaffold flow below.
+
+## Phase 3: Decompose Into Tasks
 
 From the plan, derive a concrete build task list in dependency order:
 
@@ -63,7 +108,7 @@ Each notebook must satisfy:
 Present the task list to the user and ask: "Anything to add or change before I
 build?"
 
-## Phase 3: Scaffold util.py
+## Phase 4: Scaffold util.py
 
 Write `subprojects/<name>/notebooks/util.py`. For each function in the plan:
 
@@ -89,7 +134,7 @@ Include standard imports at the top (`pathlib`, `numpy`, `pandas`) as
 appropriate for the project's domain. Keep imports minimal — only what the
 function stubs actually reference.
 
-## Phase 4: Scaffold Notebooks
+## Phase 5: Scaffold Notebooks
 
 For each notebook in the plan (in order), write
 `subprojects/<name>/notebooks/<slug>.ipynb` as a valid Jupyter notebook (JSON
@@ -110,7 +155,7 @@ All cells are stubs — they establish structure and have a `# TODO` comment
 where the researcher writes their science. Do NOT fill in scientific logic that
 the plan did not specify.
 
-## Phase 5: Verify Structure
+## Phase 6: Verify Structure
 
 After writing all files, verify:
 
@@ -131,7 +176,7 @@ for nb in sorted(nb_dir.glob('*.ipynb')):
 
 If any notebook fails JSON parse, fix it before advancing.
 
-## Phase 6: Advance and Save Session
+## Phase 7: Advance and Save Session
 
 ```bash
 kbu subproject advance <name>
@@ -156,3 +201,6 @@ guided execution of the notebooks.
 5. **No files outside `subprojects/<name>/`.** Do not write to `data/` or repo root.
 6. **Cross-reference by slash-command.** Use `/kbu-plan`, `/kbu-run`, `/kbu-diagnose`
    when pointing to other skills.
+7. **Adopted-branch is warn-only.** When notebooks are already present (Phase 2),
+   emit warnings only — never auto-create missing notebooks. A future
+   `--scaffold-missing` flag is out of scope for the current implementation.

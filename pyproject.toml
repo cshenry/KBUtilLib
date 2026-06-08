@@ -1,6 +1,6 @@
 [project]
 name = "KBUtilLib"
-version = "0.0.0"
+version = "1.0.0"
 description = "KBUtilLib"
 readme = "README.md"
 requires-python = ">=3.9"

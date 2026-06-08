@@ -7,7 +7,7 @@ p4-kbu-build-adoption
 task/p4-kbu-build-adoption
 
 ## commit_shas
-(populated after commit)
+- 3981cce3000fc9f55e30eacb57eda2890ac21bb4
 
 ## summary
 

@@ -74,6 +74,10 @@ def _make_stub_template(kbu_root: Path, project_name: str = "PROJECT") -> None:
         '{"folders": [{"path": "{{project_name}}"}]}',
         encoding="utf-8",
     )
+    (tmpl / "README.md").write_text(
+        "# {{project_name}}\n\nA scientific research project built on KBUtilLib.\n",
+        encoding="utf-8",
+    )
     # .gitignore is not copied wholesale; bootstrap uses _GITIGNORE_BLOCK.
 
 
@@ -593,10 +597,11 @@ class TestAC8Check:
 
 
 class TestAC9TemplateSet:
-    def test_bootstrap_handles_exactly_13_entries(self, tmp_path: Path) -> None:
-        """Bootstrap handles exactly the 13 template entries enumerated in the PRD."""
+    def test_bootstrap_handles_exactly_14_entries(self, tmp_path: Path) -> None:
+        """Bootstrap handles 14 template entries: 13 from the PRD + README.md."""
         from kbutillib.cli.bootstrap import _TEMPLATE_ENTRIES
-        assert len(_TEMPLATE_ENTRIES) == 13
+        assert len(_TEMPLATE_ENTRIES) == 14
+        assert "README.md" in _TEMPLATE_ENTRIES
 
     def test_claude_commands_count(self) -> None:
         """There are exactly 9 .claude/commands/ files."""
@@ -989,6 +994,114 @@ class TestAC13CodeWorkspace:
         workspaces = list(tmp_path.glob("*.code-workspace"))
         assert len(workspaces) == 1
         assert workspaces[0].name == "Foo.code-workspace"
+
+
+# ---------------------------------------------------------------------------
+# README.md handling: skip-if-existing, copy-with-substitution otherwise
+# ---------------------------------------------------------------------------
+
+
+class TestReadmeHandling:
+    def _bootstrap(self, tmp_path: Path, project_name: str = "myproj") -> Any:
+        """Run bootstrap with a stub kbu_root + venv + git fakes; return CliRunner result."""
+        _make_git_repo(tmp_path)
+        kbu_root = tmp_path / "KBUtilLib"
+        kbu_root.mkdir()
+        _make_stub_template(kbu_root)
+        _make_venv_python(tmp_path / ".venv" / "bin" / "python")
+
+        env_backup = os.environ.pop("VIRTUAL_ENV", None)
+        try:
+            runner = CliRunner()
+            with (
+                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
+                patch(
+                    "kbutillib.cli.bootstrap.subprocess.run",
+                    side_effect=_make_subprocess_side_effect(),
+                ),
+                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+            ):
+                os.chdir(tmp_path)
+                return runner.invoke(
+                    main,
+                    [
+                        "bootstrap", "--name", project_name,
+                        "--author", "A", "--affiliation", "B", "--orcid", "0",
+                    ],
+                    catch_exceptions=False,
+                )
+        finally:
+            if env_backup is not None:
+                os.environ["VIRTUAL_ENV"] = env_backup
+
+    def test_readme_absent_copies_with_substitution(self, tmp_path: Path) -> None:
+        """No README.md at root → copy template with {{project_name}} substituted."""
+        result = self._bootstrap(tmp_path, project_name="myproj")
+        assert result.exit_code == 0
+        readme = tmp_path / "README.md"
+        assert readme.exists()
+        content = readme.read_text(encoding="utf-8")
+        assert "# myproj" in content
+        assert "{{project_name}}" not in content
+
+    def test_readme_present_preserved(self, tmp_path: Path) -> None:
+        """README.md already at root → leave untouched."""
+        (tmp_path / "README.md").write_text(
+            "# my existing repo\n\nDo not clobber.\n", encoding="utf-8"
+        )
+        result = self._bootstrap(tmp_path, project_name="myproj")
+        assert result.exit_code == 0
+        content = (tmp_path / "README.md").read_text(encoding="utf-8")
+        assert content == "# my existing repo\n\nDo not clobber.\n"
+
+    def test_readme_recorded_in_file_hashes_when_written(self, tmp_path: Path) -> None:
+        """README.md copied by bootstrap → recorded in [update.file_hashes]."""
+        from kbutillib.cli.manifest import read_project_manifest
+        result = self._bootstrap(tmp_path, project_name="myproj")
+        assert result.exit_code == 0
+        cfg = read_project_manifest(tmp_path)
+        assert "README.md" in cfg["update"]["file_hashes"]
+
+    def test_readme_not_recorded_when_user_owned(self, tmp_path: Path) -> None:
+        """README.md present from user → NOT added to [update.file_hashes]."""
+        from kbutillib.cli.manifest import read_project_manifest
+        (tmp_path / "README.md").write_text("# mine\n", encoding="utf-8")
+        result = self._bootstrap(tmp_path, project_name="myproj")
+        assert result.exit_code == 0
+        cfg = read_project_manifest(tmp_path)
+        assert "README.md" not in cfg["update"]["file_hashes"]
+
+    def test_check_mode_shows_readme_plan(self, tmp_path: Path) -> None:
+        """--check dry-run mentions README.md in the file plan."""
+        _make_git_repo(tmp_path)
+        kbu_root = tmp_path / "KBUtilLib"
+        kbu_root.mkdir()
+        _make_stub_template(kbu_root)
+
+        runner = CliRunner()
+        with (
+            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
+            patch(
+                "kbutillib.cli.bootstrap.subprocess.run",
+                side_effect=_make_subprocess_side_effect(),
+            ),
+            patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+        ):
+            os.chdir(tmp_path)
+            result = runner.invoke(
+                main,
+                [
+                    "bootstrap", "--check", "--name", "myproj",
+                    "--author", "A", "--affiliation", "B", "--orcid", "0",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "README.md" in result.output
 
 
 # ---------------------------------------------------------------------------

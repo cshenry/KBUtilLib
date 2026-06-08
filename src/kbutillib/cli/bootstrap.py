@@ -86,6 +86,7 @@ _TEMPLATE_ENTRIES = _CLAUDE_COMMAND_FILES + [
     "subprojects/.gitkeep",
     "{{project_name}}.code-workspace",
     ".gitignore",
+    "README.md",
 ]
 
 
@@ -496,6 +497,19 @@ def bootstrap(  # noqa: C901 — orchestration function
         sp_gitkeep.write_text("", encoding="utf-8")
         files_written["subprojects/.gitkeep"] = "sha256:" + sha256_file(sp_gitkeep)
 
+    # README.md — skip if existing (don't clobber the user's project README;
+    # only deploy when retrofitting a repo without one). Substitutes {{project_name}}.
+    readme_dest = project_root / "README.md"
+    readme_src = template_src / "README.md"
+    if not readme_dest.exists() and readme_src.exists():
+        src_bytes = _read_template_file_bytes(template_src, "README.md", name)
+        if src_bytes is not None:
+            readme_dest.write_bytes(src_bytes)
+            files_written["README.md"] = "sha256:" + sha256_file(readme_dest)
+    elif readme_dest.exists():
+        click.echo("  kept your existing README.md")
+        files_user_owned.append("README.md")
+
     # {{project_name}}.code-workspace — skip if any *.code-workspace exists at root
     existing_workspaces = list(project_root.glob("*.code-workspace"))
     ws_src = template_src / "{{project_name}}.code-workspace"
@@ -742,6 +756,14 @@ def _print_check_file_plan(
         click.echo("  subprojects/.gitkeep: would create subprojects/ and .gitkeep")
     else:
         click.echo("  subprojects/.gitkeep: would create .gitkeep in empty subprojects/")
+
+    # README.md
+    readme_dest = project_root / "README.md"
+    readme_src = template_src / "README.md"
+    if readme_dest.exists():
+        click.echo("  README.md: present — skip (user-owned; never overwritten)")
+    elif readme_src.exists():
+        click.echo("  README.md: would copy with {{project_name}} substitution")
 
     # *.code-workspace
     existing_workspaces = list(project_root.glob("*.code-workspace"))

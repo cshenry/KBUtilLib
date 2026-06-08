@@ -32,7 +32,16 @@ You'll need:
    pyenv global 3.11.14
    ```
 3. **Claude Code CLI** — `claude --version` should work. Install from [claude.com/claude-code](https://claude.com/claude-code) and sign in once before continuing.
-4. **(Optional)** [`venvman`](https://github.com/cshenry/venvman) for per-project virtual environments. If absent, `kbu` falls back to a plain `.venv`.
+4. **(Optional, recommended on macOS)** [Cursor](https://cursor.sh) — IDE with built-in Claude Code integration. After installing the .app, you also need the `cursor` shell command on `$PATH` so `kbu doctor` can see it:
+   - Inside Cursor: open the command palette (`Cmd+Shift+P`) → run **Shell Command: Install 'cursor' command in PATH** (prompts for sudo).
+   - Or manually:
+     ```bash
+     ln -s /Applications/Cursor.app/Contents/Resources/app/bin/cursor ~/bin/cursor   # if ~/bin is on PATH
+     # or, into /usr/local/bin (needs sudo):
+     sudo ln -s /Applications/Cursor.app/Contents/Resources/app/bin/cursor /usr/local/bin/cursor
+     ```
+   Verify with `which cursor`.
+5. **(Optional)** [`venvman`](https://github.com/cshenry/venvman) for per-project virtual environments. If absent, `kbu` falls back to a plain `.venv`.
 
 ---
 

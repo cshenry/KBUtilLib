@@ -7,7 +7,7 @@ p4-kbu-plan-rewrite
 task/p4-kbu-plan-rewrite
 
 ## commit_shas
-- (populated after commit)
+- 84c45e407e04a319a07f0f9c49e9bb50403f56dd
 
 ## summary
 

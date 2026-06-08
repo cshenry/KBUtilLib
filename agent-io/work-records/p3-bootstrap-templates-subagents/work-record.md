@@ -7,7 +7,7 @@ p3-bootstrap-templates-subagents
 task/p3-bootstrap-templates-subagents
 
 ## commit_shas
-(populated after commit)
+- af9fd628518c1b3bf5ae531a35efa286f4bde063
 
 ## summary
 

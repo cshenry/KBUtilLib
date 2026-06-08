@@ -7,7 +7,7 @@ p1-layout-module
 task/p1-layout-module
 
 ## commit_shas
-(populated after commit)
+- 9f95ced0213e6dfda8a4fb1d7fcbe82f573d270c
 
 ## summary
 Created `src/kbutillib/layout.py`, a new module that owns all canonical-layout

@@ -553,10 +553,12 @@ def bootstrap(  # noqa: C901 — orchestration function
                 click.echo("Creating .venv with python -m venv ...")
                 venv_python = _create_plain_venv(project_root)
 
-        # pip install -e <KBUTILLIB_ROOT>
+        # pip install -e <KBUTILLIB_ROOT> plus ipykernel (needed for the kernel
+        # registration step below; ipykernel is in KBUtilLib's [notebook] extra,
+        # not base, so it isn't pulled in by the editable install).
         click.echo(f"Installing KBUtilLib editable from {kbu_root} ...")
         subprocess.run(
-            [str(venv_python), "-m", "pip", "install", "-e", str(kbu_root)],
+            [str(venv_python), "-m", "pip", "install", "-e", str(kbu_root), "ipykernel"],
             check=True,
         )
 

@@ -293,10 +293,12 @@ def _do_init(repo_root: Path) -> None:  # noqa: C901 — subprocess orchestratio
 
     venv_python_str = str(venv_python)
 
-    # pip install -e <repo_root>
+    # pip install -e <repo_root> plus ipykernel (needed for kernel registration
+    # below; ipykernel is in KBUtilLib's [notebook] extra, not base, so it isn't
+    # pulled in by the editable install).
     click.echo(f"Installing KBUtilLib editable from {repo_root} ...")
     subprocess.run(
-        [venv_python_str, "-m", "pip", "install", "-e", str(repo_root)],
+        [venv_python_str, "-m", "pip", "install", "-e", str(repo_root), "ipykernel"],
         check=True,
     )
 

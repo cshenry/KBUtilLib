@@ -1434,7 +1434,10 @@ class TestAC20NoVenv:
             )
 
         pip_calls = [c for c in calls_seen if isinstance(c, list) and "pip" in c]
-        kernel_calls = [c for c in calls_seen if isinstance(c, list) and "ipykernel" in c]
+        kernel_calls = [
+            c for c in calls_seen
+            if isinstance(c, list) and len(c) >= 3 and c[1:3] == ["-m", "ipykernel"]
+        ]
         assert pip_calls == []
         assert kernel_calls == []
 
@@ -1518,7 +1521,10 @@ class TestAC21NoKernel:
 
         assert result.exit_code == 0
         pip_calls = [c for c in calls_seen if isinstance(c, list) and "pip" in c]
-        kernel_calls = [c for c in calls_seen if isinstance(c, list) and "ipykernel" in c]
+        kernel_calls = [
+            c for c in calls_seen
+            if isinstance(c, list) and len(c) >= 3 and c[1:3] == ["-m", "ipykernel"]
+        ]
         assert len(pip_calls) >= 1
         assert kernel_calls == []
 
@@ -1597,7 +1603,10 @@ class TestAC23KernelCommand:
 
         kernel_calls = []
         def _se(cmd, *args, **kwargs):
-            if isinstance(cmd, list) and "ipykernel" in cmd:
+            if (
+                isinstance(cmd, list) and len(cmd) >= 3
+                and cmd[1:3] == ["-m", "ipykernel"]
+            ):
                 kernel_calls.append(cmd)
             r = MagicMock()
             r.returncode = 0

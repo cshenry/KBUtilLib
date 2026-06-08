@@ -116,7 +116,7 @@ known ways. Walk the user through them proactively.
    ```bash
    command -v venvman && echo "VED=${VIRTUAL_ENVIRONMENT_DIRECTORY:-<unset>}"
    ```
-   - If venvman is installed but `VIRTUAL_ENVIRONMENT_DIRECTORY` is unset in the current process, the user probably set it in their shell profile but hasn't re-sourced. Ask them to open a new terminal (or `source ~/.zshrc` / `source ~/.bash_profile`) and re-run, OR run with `--no-venv` and fall back to a plain `.venv`. Surface both options.
+   - If venvman is installed but `VIRTUAL_ENVIRONMENT_DIRECTORY` is unset in the current process, the user probably set it in their shell profile but hasn't re-sourced. Ask them to open a new terminal (or `source ~/.zshrc` / `source ~/.bash_profile`) and re-run. (`kbu init` itself has no `--no-venv` flag — only `kbu bootstrap` does — so the fallback path requires that the venvman probe genuinely fail, e.g. `venvman` not on PATH.)
    - If venvman is not installed at all, that's fine — `kbu init` will fall back to plain `.venv`. No action needed.
 
 2. **Run `kbu init`** and capture both stdout and stderr.
@@ -225,16 +225,29 @@ This refreshes the KBUtilLib clone itself (the source-of-truth for templates
 and slash commands). It does not run `kbu update` inside individual projects —
 that's a per-project action available from the tier-2 dashboard.
 
-1. Confirm with the user that you'll `git pull` in `~/Dropbox/Projects/KBUtilLib`
-   (or wherever this clone lives — derive from `pwd` at skill invocation).
-2. Run:
+The canonical verb is `kbu init --update`, which pulls + reinstalls the
+editable install in the venv `kbu init` originally provisioned.
+
+1. Derive the KBUtilLib clone path from `pwd` at skill invocation (it should
+   be the repo root containing `pyproject.toml` and `src/kbutillib/`).
+2. Check working tree:
    ```bash
-   cd <kbutillib-clone> && git status --porcelain && git pull
-   pip install -e .  # re-install editable in case dependencies changed
+   git -C <kbutillib-clone> status --porcelain
    ```
-3. If the working tree has uncommitted changes, refuse and tell the user to
-   commit or stash first.
-4. After update, recommend the user open each kbu-aware project and run
+   If non-empty, refuse and tell the user to commit or stash first.
+3. Run:
+   ```bash
+   kbu init --update
+   ```
+   This pulls main and reinstalls KBUtilLib editable. Capture output and
+   surface any errors.
+4. As a fallback (e.g. if `kbu init` hasn't been run yet on this machine,
+   so `--update` errors with no marker), run the manual two-step:
+   ```bash
+   cd <kbutillib-clone> && git pull
+   pip install -e .
+   ```
+5. After update, recommend the user open each kbu-aware project and run
    `/kbu-start` → Update inside it (tier-2) to pull the latest templates.
 
 Re-render the dashboard.

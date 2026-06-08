@@ -245,7 +245,7 @@ class TestAdvanceForward:
         sp_dir.mkdir(parents=True, exist_ok=True)
         (sp_dir / "notebooks").mkdir(exist_ok=True)
 
-        if state == "plan":
+        if state in ("plan", "migrate"):
             (sp_dir / "RESEARCH_PLAN.md").write_text("# Plan\n")
         elif state == "p-review":
             f = sp_dir / "REVIEW_plan_1.md"

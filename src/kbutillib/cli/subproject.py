@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
+from jinja2 import Template
+
+from kbutillib import layout as _layout
+from kbutillib.cli.adopt._inventory import write_adoption_notes
 
 from .manifest import (
     now_utc_iso,
@@ -26,6 +32,7 @@ from .manifest import (
 #: Ordered list of all valid states.
 _STATES = [
     "plan",
+    "migrate",
     "p-review",
     "build",
     "b-review",
@@ -38,6 +45,7 @@ _STATES = [
 #: Forward transition table: current → next.
 _FORWARD: dict[str, str] = {
     "plan": "p-review",
+    "migrate": "p-review",
     "p-review": "build",
     "build": "b-review",
     "b-review": "run",
@@ -59,6 +67,7 @@ _REVIEW_STATES = set(_REVERSE.keys())
 #: next_action hint for the tier-2 dashboard.
 _NEXT_ACTION: dict[str, str] = {
     "plan": "Plan",
+    "migrate": "Migrate",
     "p-review": "Review",
     "build": "Build",
     "b-review": "Review",
@@ -110,7 +119,7 @@ def _check_forward_preconditions(
     Returns a reason string (one of the enumerated disabled-reason strings)
     on failure, or ``None`` on success.
     """
-    if current_state == "plan":
+    if current_state in ("plan", "migrate"):
         rp = subproject_dir / "RESEARCH_PLAN.md"
         if not rp.exists():
             return "missing-artifact"
@@ -168,23 +177,92 @@ def _check_forward_preconditions(
 # ── subproject scaffold ────────────────────────────────────────────────────
 
 
-def _scaffold_subproject(subproject_dir: Path, name: str, title: str) -> None:
-    """Create the full subproject directory layout."""
+def _kbutillib_cli_root() -> Path:
+    """Return the absolute path to ``src/kbutillib/cli/`` inside KBUtilLib."""
+    # subproject.py lives at src/kbutillib/cli/subproject.py
+    return Path(__file__).resolve().parent
+
+
+def _scaffold_subproject(
+    subproject_dir: Path,
+    name: str,
+    title: str,
+    adopted: bool = False,
+) -> None:
+    """Create the full subproject directory layout.
+
+    Uses :func:`kbutillib.layout.subproject_subdirs` for the directory list.
+    Renders ``notebooks/util.py`` from the Jinja template at
+    ``src/kbutillib/cli/templates/util.py.tmpl``.
+    Does NOT create ``references.md`` (retired in v2).
+    """
     subproject_dir.mkdir(parents=True, exist_ok=True)
-    # Subdirectories
-    for d in ("notebooks", "nboutput", "data", "user_data", "figures", "sessions"):
+    for d in _layout.subproject_subdirs(adopted=adopted):
         (subproject_dir / d).mkdir(exist_ok=True)
-    # util.py stub
+
+    # Render util.py from template
     util_py = subproject_dir / "notebooks" / "util.py"
     if not util_py.exists():
-        util_py.write_text(
-            f"# {name} — shared notebook utilities\n"
-            "# Add project-wide helpers here.\n"
+        tmpl_path = _kbutillib_cli_root() / "templates" / "util.py.tmpl"
+        tmpl_text = tmpl_path.read_text(encoding="utf-8")
+        rendered = Template(tmpl_text).render(project_name=name)
+        util_py.write_text(rendered, encoding="utf-8")
+
+
+# ── gitignore helper ───────────────────────────────────────────────────────
+
+#: Per-subproject gitignore marker prefix.
+_SUBPROJECT_GITIGNORE_MARKER_OPEN = "# >>> kbu-subproject:{name} >>>"
+_SUBPROJECT_GITIGNORE_MARKER_CLOSE = "# <<< kbu-subproject:{name} <<<"
+
+
+def _append_subproject_gitignore(project_root: Path, name: str) -> None:
+    """Append subproject gitignore lines to root ``.gitignore`` (idempotent).
+
+    Writes lines from :func:`kbutillib.layout.subproject_gitignore_lines`
+    under a per-subproject marker block.  No-ops if the marker block already
+    exists.
+    """
+    gi_path = project_root / ".gitignore"
+    marker_open = _SUBPROJECT_GITIGNORE_MARKER_OPEN.format(name=name)
+    marker_close = _SUBPROJECT_GITIGNORE_MARKER_CLOSE.format(name=name)
+
+    if gi_path.exists():
+        existing = gi_path.read_text(encoding="utf-8", errors="replace")
+        if marker_open in existing:
+            return  # already present — idempotent
+    else:
+        existing = ""
+
+    block_lines = [marker_open] + _layout.subproject_gitignore_lines() + [marker_close, ""]
+    block = "\n".join(block_lines)
+
+    if not existing:
+        gi_path.write_text(block, encoding="utf-8")
+    elif existing.endswith("\n\n") or existing.endswith("\n\n\n"):
+        gi_path.write_text(existing + block, encoding="utf-8")
+    elif existing.endswith("\n"):
+        gi_path.write_text(existing + "\n" + block, encoding="utf-8")
+    else:
+        gi_path.write_text(existing + "\n\n" + block, encoding="utf-8")
+
+
+# ── git repo helpers ───────────────────────────────────────────────────────
+
+
+def _git_toplevel(path: Path) -> Optional[str]:
+    """Return the git worktree root for *path*, or ``None`` if not in a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
         )
-    # references.md
-    refs = subproject_dir / "references.md"
-    if not refs.exists():
-        refs.write_text(f"# References — {title or name}\n")
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -250,7 +328,7 @@ def create_cmd(ctx: click.Context, name: str, title: str) -> None:
         ctx.exit(1)
         return
 
-    _scaffold_subproject(sp_dir, name, title)
+    _scaffold_subproject(sp_dir, name, title, adopted=False)
 
     now = now_utc_iso()
     data: dict = {
@@ -275,6 +353,143 @@ def create_cmd(ctx: click.Context, name: str, title: str) -> None:
     }
     write_subproject_manifest(project_root, name, data)
     click.echo(f"Created subproject '{name}' at {sp_dir}")
+
+
+# ── adopt ───────────────────────────────────────────────────────────────────
+
+
+@subproject_cmd.command(name="adopt")
+@click.argument("path", type=click.Path(exists=False))
+@click.option("--name", "sp_name", required=True, help="Subproject name.")
+@click.option("--title", default="", help="Human-readable title for the subproject.")
+@click.pass_context
+def adopt_cmd(ctx: click.Context, path: str, sp_name: str, title: str) -> None:
+    """Adopt an existing directory as a new subproject named SP_NAME.
+
+    Moves PATH into subprojects/<SP_NAME>/archive/, scaffolds the canonical
+    subproject tree, writes kbu-subproject.toml with status='migrate', and
+    emits a .adoption-notes.md worksheet.
+    """
+    source_path = Path(path).resolve()
+    project_root = _find_project_root(Path.cwd())
+
+    # Pre-flight check 1: must be in a bootstrapped project
+    if not (project_root / "kbu-project.toml").exists():
+        click.echo(
+            "Error: not inside a kbu-bootstrapped project "
+            "(no kbu-project.toml found in any parent directory).",
+            err=True,
+        )
+        ctx.exit(1)
+        return
+
+    # Pre-flight check 2: path must exist and be a directory
+    if not source_path.exists():
+        click.echo(f"Error: path does not exist: {path}", err=True)
+        ctx.exit(1)
+        return
+    if not source_path.is_dir():
+        click.echo(f"Error: path is not a directory: {path}", err=True)
+        ctx.exit(1)
+        return
+
+    sp_dir = project_root / "subprojects" / sp_name
+    archive_dir = sp_dir / "archive"
+
+    # Pre-flight check 3: destination must not exist
+    if sp_dir.exists():
+        click.echo(
+            f"Error: subproject '{sp_name}' already exists at {sp_dir}.",
+            err=True,
+        )
+        ctx.exit(1)
+        return
+
+    # Pre-flight check 4: source must not overlap destination
+    try:
+        source_path.relative_to(sp_dir)
+        # If this succeeds, source is inside destination — refuse
+        click.echo(
+            f"Error: source path '{source_path}' is inside the destination "
+            f"'{sp_dir}'.",
+            err=True,
+        )
+        ctx.exit(1)
+        return
+    except ValueError:
+        pass  # not a subpath — fine
+
+    # Pre-flight check 5: cross-repo git guard
+    source_toplevel = _git_toplevel(source_path)
+    if source_toplevel is not None:
+        project_toplevel = _git_toplevel(project_root)
+        if project_toplevel is None or (
+            Path(source_toplevel).resolve() != Path(project_toplevel).resolve()
+        ):
+            click.echo(
+                f"Error: '{source_path}' is tracked by a different git repo "
+                f"({source_toplevel}) than the current project ({project_toplevel}). "
+                "Refusing to adopt across repo boundaries.",
+                err=True,
+            )
+            ctx.exit(1)
+            return
+
+    # Pre-flight check 6: warn (do not refuse) if zero .ipynb files
+    ipynb_count = sum(1 for _ in source_path.rglob("*.ipynb"))
+    if ipynb_count == 0:
+        click.echo(
+            f"Warning: '{source_path}' contains no .ipynb files. "
+            "Proceeding anyway.",
+            err=True,
+        )
+
+    # ── execution ─────────────────────────────────────────────────────────
+
+    # 1. Move source into archive/
+    sp_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source_path), str(archive_dir))
+
+    # 2. Scaffold canonical subdirs (adopted=True creates archive/ too, but
+    #    it already exists — mkdir exist_ok handles this gracefully).
+    _scaffold_subproject(sp_dir, sp_name, title, adopted=True)
+
+    # 3. Write kbu-subproject.toml with status='migrate'
+    now = now_utc_iso()
+    data: dict = {
+        "subproject": {
+            "name": sp_name,
+            "title": title or sp_name,
+            "status": "migrate",
+            "created_at": now,
+            "last_session_at": now,
+        },
+        "artifacts": {
+            "research_plan": False,
+            "report": False,
+            "reviews": {
+                "plan": [],
+                "build": [],
+                "synthesis": [],
+            },
+        },
+        "notebooks": [],
+        "session_refs": [],
+    }
+    write_subproject_manifest(project_root, sp_name, data)
+
+    # 4. Write .adoption-notes.md
+    write_adoption_notes(sp_dir, archive_dir, source_path)
+
+    # 5. Append subproject gitignore lines to root .gitignore (idempotent)
+    _append_subproject_gitignore(project_root, sp_name)
+
+    click.echo(
+        f"Adopted '{source_path.name}' as subproject '{sp_name}' at {sp_dir}\n"
+        f"  archive/ contains moved content\n"
+        f"  status: migrate\n"
+        f"  Run /kbu-migrate to complete the integration."
+    )
 
 
 # ── list ───────────────────────────────────────────────────────────────────

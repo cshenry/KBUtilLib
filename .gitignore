@@ -44,8 +44,12 @@ data/AICurationCacheCompoundCuration.json
 data/ms_classifier/
 
 # claude-skills runtime artifacts (populated by `claude-skills sync`)
-.claude/commands/
+.claude/commands/*
 .claude/skills/
+
+# Tier-1 dashboard is authored here per kbu-start-v1 PRD (not synced from
+# ClaudeCommands); track it explicitly despite the parent ignore rule.
+!.claude/commands/kbu-start.md
 
 # Template tree — override ignore patterns so template data is tracked
 !templates/student-project/.vscode/

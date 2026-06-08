@@ -2220,6 +2220,28 @@ class TestAC36TemplateOpsModule:
         from kbutillib.cli._template_ops import copy_template_tree
         assert np_mod._copy_template_tree is copy_template_tree
 
+    def test_parse_virtual_env_supports_venv_subdir_format(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """parse_virtual_env_from_activate resolves the current venvman format.
+
+        Regression: the old parser only matched a literal ``VIRTUAL_ENV=`` line.
+        venvman now writes ``VENV_SUBDIR="..."`` and composes the path at
+        activate time from ``${VIRTUAL_ENVIRONMENT_DIRECTORY}/${VENV_SUBDIR}``.
+        """
+        from kbutillib.cli._template_ops import parse_virtual_env_from_activate
+
+        venv_root = tmp_path / "envroot"
+        venv_root.mkdir()
+        monkeypatch.setenv("VIRTUAL_ENVIRONMENT_DIRECTORY", str(venv_root))
+        f = tmp_path / "activate.sh"
+        f.write_text(
+            'VENV_SUBDIR="myproject-py3.11"\n'
+            'VENV_PATH="${VIRTUAL_ENVIRONMENT_DIRECTORY}/${VENV_SUBDIR}"\n',
+            encoding="utf-8",
+        )
+        assert parse_virtual_env_from_activate(f) == venv_root / "myproject-py3.11"
+
 
 # ---------------------------------------------------------------------------
 # AC 37: --first-subproject invocation

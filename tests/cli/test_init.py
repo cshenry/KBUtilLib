@@ -488,6 +488,38 @@ class TestParseActivateSh:
     def test_returns_none_if_file_missing(self, tmp_path: Path) -> None:
         assert _parse_virtual_env_from_activate(tmp_path / "nosuchfile.sh") is None
 
+    def test_parses_venv_subdir_with_env(self, tmp_path: Path, monkeypatch) -> None:
+        """Current venvman format: composes path from VENV_SUBDIR + env var."""
+        venv_root = tmp_path / "envroot"
+        venv_root.mkdir()
+        monkeypatch.setenv("VIRTUAL_ENVIRONMENT_DIRECTORY", str(venv_root))
+        f = tmp_path / "activate.sh"
+        f.write_text(
+            'SCRIPT_DIR="$(pwd)"\nVENV_SUBDIR="myproject-py3.11"\n'
+            'VENV_PATH="${VIRTUAL_ENVIRONMENT_DIRECTORY}/${VENV_SUBDIR}"\n',
+            encoding="utf-8",
+        )
+        result = _parse_virtual_env_from_activate(f)
+        assert result == venv_root / "myproject-py3.11"
+
+    def test_venv_subdir_without_env_returns_none(self, tmp_path: Path, monkeypatch) -> None:
+        """VENV_SUBDIR present but VIRTUAL_ENVIRONMENT_DIRECTORY unset → None."""
+        monkeypatch.delenv("VIRTUAL_ENVIRONMENT_DIRECTORY", raising=False)
+        f = tmp_path / "activate.sh"
+        f.write_text('VENV_SUBDIR="myproject-py3.11"\n', encoding="utf-8")
+        assert _parse_virtual_env_from_activate(f) is None
+
+    def test_legacy_virtual_env_wins_over_venv_subdir(self, tmp_path: Path, monkeypatch) -> None:
+        """If both formats appear, the literal VIRTUAL_ENV= line takes precedence."""
+        monkeypatch.setenv("VIRTUAL_ENVIRONMENT_DIRECTORY", "/should/not/use")
+        f = tmp_path / "activate.sh"
+        legacy_path = tmp_path / "legacy_venv"
+        f.write_text(
+            f'VIRTUAL_ENV="{legacy_path}"\nVENV_SUBDIR="other"\n',
+            encoding="utf-8",
+        )
+        assert _parse_virtual_env_from_activate(f) == legacy_path
+
 
 # ---------------------------------------------------------------------------
 # kbu doctor probes

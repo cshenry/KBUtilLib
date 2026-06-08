@@ -7,7 +7,7 @@ p4-kbu-migrate-skill
 task/p4-kbu-migrate-skill
 
 ## commit_shas
-(populated after commit)
+- 9361122b132d28025ae849ba53ac3be1d4ac2d60
 
 ## summary
 Created `templates/research-project/.claude/commands/kbu-migrate.md`, a new 8-phase

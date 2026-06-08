@@ -117,7 +117,7 @@ Before declaring done:
 
 Then ask: **what would have prevented this bug?** If the answer is a missing
 `util.py` function, a data validation step, or a notebook structure problem,
-flag it explicitly so the student can improve the design.
+flag it explicitly so the researcher can improve the design.
 
 ## Wrap
 

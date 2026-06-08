@@ -123,7 +123,7 @@ Update
 
 ## Step 4 — route to the selected skill
 
-When the student picks an enabled item, invoke the corresponding slash command:
+When the researcher picks an enabled item, invoke the corresponding slash command:
 
 | Pick | Action |
 |------|--------|
@@ -137,7 +137,7 @@ When the student picks an enabled item, invoke the corresponding slash command:
 | Diagnose | `/kbu-diagnose` |
 | Update | `/kbu-update` |
 
-When the student picks a disabled item, explain why it is unavailable (using
+When the researcher picks a disabled item, explain why it is unavailable (using
 the reason string and the subproject's current state), then re-display the
 dashboard menu so they can pick a valid action instead.
 

@@ -9,7 +9,7 @@ last_reviewed: 2026-06-05
 
 ---
 name: kbu-literature-review
-description: Search and review biological literature using MCP tools (PubMed, arXiv, bioRxiv, Google Scholar). Use when the student wants to find papers, review existing research, check what's known about an organism or pathway, or support a hypothesis with citations.
+description: Search and review biological literature using MCP tools (PubMed, arXiv, bioRxiv, Google Scholar). Use when the researcher wants to find papers, review existing research, check what's known about an organism or pathway, or support a hypothesis with citations.
 allowed-tools: Bash, Read, Write, WebSearch, Agent, ToolSearch
 ---
 
@@ -80,7 +80,7 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ### Step 1: Understand the Research Question
 
-Clarify what the student wants. Ask if needed:
+Clarify what the researcher wants. Ask if needed:
 - Specific organism, gene, pathway, or phenotype?
 - Time frame (recent papers only, or comprehensive)?
 
@@ -125,7 +125,7 @@ Focus on Methods, Results, and Discussion sections. For each paper note:
 - Study design, organisms, sample size
 - Key results with specific numbers
 - Limitations
-- Relevance to the student's research question
+- Relevance to the researcher's research question
 
 ### Step 5: Summarize Findings
 
@@ -204,7 +204,7 @@ To enable MCP tools, add the `.mcp.json` snippet above to the project root or
 
 ## Integration
 
-- **Called by**: `/kbu-synthesize` (Step 5), or directly by the student
+- **Called by**: `/kbu-synthesize` (Step 5), or directly by the researcher
 - **Produces**: `subprojects/<name>/references.md`
 - **Reads from**: (none — discovery from external sources)
 - **Used by**: `/kbu-synthesize` for literature context in REPORT.md

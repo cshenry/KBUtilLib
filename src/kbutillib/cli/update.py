@@ -61,7 +61,7 @@ class TemplateDiff:
 
 
 # ---------------------------------------------------------------------------
-# Tracked template paths (relative to templates/student-project/)
+# Tracked template paths (relative to templates/research-project/)
 # ---------------------------------------------------------------------------
 
 _TRACKED_TEMPLATE_SUBDIRS = [".claude/commands", ".vscode"]
@@ -136,8 +136,8 @@ def _build_diff(
 ) -> list[TemplateDiff]:
     """Build a TemplateDiff list comparing last_commit state vs current HEAD.
 
-    Walks ``templates/student-project/.claude/commands/`` and
-    ``templates/student-project/.vscode/`` in the source repo.
+    Walks ``templates/research-project/.claude/commands/`` and
+    ``templates/research-project/.vscode/`` in the source repo.
 
     ``last_commit`` being None (first pull) treats all files as "added".
 
@@ -154,14 +154,14 @@ def _build_diff(
     ``add_untracked`` is ``True``, the legacy behaviour is preserved: all
     source-template files are candidate additions.
     """
-    template_root_rel = "templates/student-project"
+    template_root_rel = "templates/research-project"
     diffs: list[TemplateDiff] = []
 
     # Build sets of relative paths (relative to template root, forward-slash)
     # for both old commit and new (current files on disk).
 
-    # Current files: walk from source / templates/student-project
-    template_abs = source / "templates" / "student-project"
+    # Current files: walk from source / templates/research-project
+    template_abs = source / "templates" / "research-project"
     current_files: dict[str, Path] = {}
     for tracked_sub in _TRACKED_TEMPLATE_SUBDIRS:
         d = template_abs / tracked_sub
@@ -306,7 +306,7 @@ def _apply_diff(
     project_root: Path,
 ) -> None:
     """Apply *diff* by copying/deleting files between source template and project."""
-    template_abs = source / "templates" / "student-project"
+    template_abs = source / "templates" / "research-project"
     for entry in diff:
         dest = project_root / entry.path
         if entry.status in ("added", "modified"):

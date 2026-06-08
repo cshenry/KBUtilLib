@@ -13,7 +13,7 @@ output, and advances the subproject when all notebooks are complete.
 ## Precondition
 
 The target subproject must be in state `run`. If no subproject is in `run`
-state, inform the student and suggest they complete the build and build-review
+state, inform the researcher and suggest they complete the build and build-review
 steps first (via `/kbu-build` and `/kbu-review`), then exit.
 
 ## Step 1 — list notebooks
@@ -32,7 +32,7 @@ Parse the JSON array. Each record has:
 Filter to subprojects that are in `run` state (use the subproject list from
 `kbu subproject list --json` to identify them).
 
-If no notebooks are found for any `run`-state subproject, tell the student
+If no notebooks are found for any `run`-state subproject, tell the researcher
 that no notebooks are registered. They may need to create notebooks under
 `subprojects/<name>/notebooks/` and re-enter the build step.
 
@@ -48,7 +48,7 @@ Use AskUserQuestion with one entry per notebook plus a "Cancel" option.
 
 Notebooks that have `modified_since_run=true` or `last_run_at=""` are
 highlighted as needing a run. Present all notebooks regardless of run status
-so the student can re-run if desired.
+so the researcher can re-run if desired.
 
 ## Step 3 — execute the chosen notebook
 
@@ -71,7 +71,7 @@ produced, any warnings or errors). Skip markdown-only cells. Keep the total
 narration concise — prefer bullet points for multi-value outputs.
 
 If `kbu notebook exec` exits with a non-zero status (cell error or timeout),
-report the error message verbatim, tell the student which cell failed, and
+report the error message verbatim, tell the researcher which cell failed, and
 suggest they fix the notebook before re-running.
 
 ## Step 4 — check completion
@@ -88,7 +88,7 @@ Check all notebooks in the subproject:
 - `modified_since_run` is `false` for every notebook.
 
 If both conditions hold for every notebook in the subproject, the subproject
-can advance to synthesize. Tell the student, then run:
+can advance to synthesize. Tell the researcher, then run:
 
 ```bash
 kbu subproject advance <name>
@@ -102,7 +102,7 @@ run another.
 
 ## Step 5 — save session
 
-At the end of the skill (whether a notebook was executed or the student
+At the end of the skill (whether a notebook was executed or the researcher
 cancelled), save a session record:
 
 ```bash
@@ -112,6 +112,6 @@ kbu session save \
   --summary "<one-sentence summary of what was run and its outcome>"
 ```
 
-If the student cancelled before running anything, use `<name>` for the
+If the researcher cancelled before running anything, use `<name>` for the
 subproject that was selected (or the first run-state subproject if none was
 selected) and note "Session ended without executing a notebook."

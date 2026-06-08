@@ -18,9 +18,9 @@ kbu update --check
 
 `kbu update --check` prints a diff summary of which template files would be
 added, modified, or deleted without making any changes. Capture and display
-this output to the student.
+this output to the researcher.
 
-If the output is `Already up-to-date.`, tell the student the project is
+If the output is `Already up-to-date.`, tell the researcher the project is
 already at the latest template version and exit (no further action needed).
 Still save a session record noting "No update needed."
 
@@ -34,7 +34,7 @@ means:
 - `[DELETED]` — file removed from the template and will be deleted from the project.
 
 If any `[MODIFIED]` files are listed, note that `kbu update` tracks whether
-the student has edited those files locally. If a locally-modified file appears
+the researcher has edited those files locally. If a locally-modified file appears
 in the diff, `kbu update` will normally prompt for confirmation; using
 `--yes` skips that prompt because confirmation is obtained here first.
 
@@ -48,8 +48,8 @@ Apply these template updates?
   No  — cancel, keep the project as-is
 ```
 
-If the student selects No, confirm the update was cancelled and exit. Save a
-session record noting "Update cancelled by student."
+If the researcher selects No, confirm the update was cancelled and exit. Save a
+session record noting "Update cancelled by researcher."
 
 ## Step 4 — apply the update
 
@@ -60,11 +60,11 @@ kbu update --yes
 `--yes` bypasses the interactive overwrite-confirmation prompt inside
 `kbu update` because confirmation was already obtained in Step 3.
 
-Report the output from `kbu update --yes` to the student. The command prints
+Report the output from `kbu update --yes` to the researcher. The command prints
 which commit the templates were pulled from.
 
 If `kbu update --yes` fails (non-zero exit), show the error output and advise
-the student to check that:
+the researcher to check that:
 
 1. The `[kbutillib].source_path` in `kbu-project.toml` points to a valid
    KBUtilLib installation.

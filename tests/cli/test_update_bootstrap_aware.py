@@ -95,7 +95,7 @@ def _make_source_with_two_template_files(tmp_path: Path) -> Path:
     """
     source = tmp_path / "KBUtilLib"
     (source / ".git").mkdir(parents=True)
-    tmpl = source / "templates" / "student-project"
+    tmpl = source / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True)
     (tmpl / ".vscode").mkdir(parents=True)
     (tmpl / ".claude" / "commands" / "kbu-start.md").write_text(
@@ -122,7 +122,7 @@ class TestFilterAdded_NonEmptyHashes_NoAddUntracked:
 
     def _make_file_hashes_for_start_only(self, source: Path) -> dict[str, str]:
         start_path = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         return {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_path))}
 
@@ -170,7 +170,7 @@ class TestFilterAdded_NonEmptyHashes_NoAddUntracked:
         source = _make_source_with_two_template_files(tmp_path)
         # Only kbu-start.md tracked
         start_abs = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
         _make_project_toml(project_root, source_path=str(source), file_hashes=file_hashes)
@@ -201,7 +201,7 @@ class TestFilterAdded_NonEmptyHashes_NoAddUntracked:
         source = _make_source_with_two_template_files(tmp_path)
         # file_hashes contains only kbu-start.md
         start_abs = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
         _make_project_toml(
@@ -244,7 +244,7 @@ class TestFilterAdded_NonEmptyHashes_WithAddUntracked:
         """_build_diff with add_untracked=True emits all source-template additions."""
         source = _make_source_with_two_template_files(tmp_path)
         start_abs = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
 
@@ -268,7 +268,7 @@ class TestFilterAdded_NonEmptyHashes_WithAddUntracked:
         project_root.mkdir()
         source = _make_source_with_two_template_files(tmp_path)
         start_abs = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
         _make_project_toml(project_root, source_path=str(source), file_hashes=file_hashes)
@@ -294,7 +294,7 @@ class TestFilterAdded_NonEmptyHashes_WithAddUntracked:
         project_root.mkdir()
         source = _make_source_with_two_template_files(tmp_path)
         start_abs = (
-            source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+            source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         )
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
         _make_project_toml(
@@ -414,7 +414,7 @@ class TestModifiedBehaviourUnchanged:
         """
         source = tmp_path / "KBUtilLib"
         (source / ".git").mkdir(parents=True)
-        tmpl = source / "templates" / "student-project"
+        tmpl = source / "templates" / "research-project"
         (tmpl / ".claude" / "commands").mkdir(parents=True)
         (tmpl / ".vscode").mkdir(parents=True)
         (tmpl / ".claude" / "commands" / "kbu-start.md").write_text(
@@ -427,7 +427,7 @@ class TestModifiedBehaviourUnchanged:
 
     def _patch_old_hash(self, source: Path, rel_path: str, old_content: bytes):
         """Return a patcher for _git_show_file that returns old_content for rel_path."""
-        full = f"templates/student-project/{rel_path}"
+        full = f"templates/research-project/{rel_path}"
 
         def _fake_show(repo, commit, relpath):
             if relpath == full:
@@ -441,7 +441,7 @@ class TestModifiedBehaviourUnchanged:
         source = self._make_source_with_modified_file(tmp_path)
         old_content = b"# kbu-start v1 OLD\n"
         # file_hashes has kbu-start.md (modified) but NOT extensions.json (skipped)
-        start_abs = source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+        start_abs = source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         old_hex = _sha256_bytes(old_content)
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
 
@@ -466,7 +466,7 @@ class TestModifiedBehaviourUnchanged:
         """Modified files are emitted when file_hashes non-empty + add_untracked=True."""
         source = self._make_source_with_modified_file(tmp_path)
         old_content = b"# kbu-start v1 OLD\n"
-        start_abs = source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+        start_abs = source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
@@ -487,7 +487,7 @@ class TestModifiedBehaviourUnchanged:
         """Modified files are emitted when file_hashes is empty (legacy mode)."""
         source = self._make_source_with_modified_file(tmp_path)
         old_content = b"# kbu-start v1 OLD\n"
-        start_abs = source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md"
+        start_abs = source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
             with patch("kbutillib.cli.update._run_git") as mock_git:
@@ -548,7 +548,7 @@ class TestAddUntrackedUpdatesFileHashes:
         (project_root / ".vscode").mkdir(parents=True)
         source = tmp_path / "KBUtilLib"
         (source / ".git").mkdir(parents=True)
-        tmpl = source / "templates" / "student-project"
+        tmpl = source / "templates" / "research-project"
         (tmpl / ".claude" / "commands").mkdir(parents=True)
         (tmpl / ".vscode").mkdir(parents=True)
         (tmpl / ".claude" / "commands" / "kbu-start.md").write_text(

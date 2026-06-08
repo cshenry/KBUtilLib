@@ -74,7 +74,7 @@ def _make_source_with_template(tmp_path: Path, name: str = "KBUtilLib") -> Path:
     """Create a stub source KBUtilLib directory with template files."""
     source = tmp_path / name
     (source / ".git").mkdir(parents=True)
-    tmpl = source / "templates" / "student-project"
+    tmpl = source / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True)
     (tmpl / ".vscode").mkdir(parents=True)
     (tmpl / ".claude" / "commands" / "kbu-start.md").write_text(
@@ -364,7 +364,7 @@ class TestLocallyModifiedDetection:
         (project_root / ".claude" / "commands").mkdir(parents=True)
 
         f = project_root / ".claude" / "commands" / "kbu-diagnose.md"
-        f.write_text("# modified by student\n", encoding="utf-8")
+        f.write_text("# modified by researcher\n", encoding="utf-8")
 
         # Record different hash (simulate modification)
         file_hashes = {".claude/commands/kbu-diagnose.md": _prefixed("aabbcc")}
@@ -389,7 +389,7 @@ class TestClobberWithWarn:
         source = _make_source_with_template(tmp_path)
 
         f = project_root / ".claude" / "commands" / "kbu-start.md"
-        f.write_text("# modified by student\n", encoding="utf-8")
+        f.write_text("# modified by researcher\n", encoding="utf-8")
 
         recorded_hex = sha256_file(f)
         # Simulate modification: record a different hash so it looks locally modified
@@ -429,7 +429,7 @@ class TestClobberWithWarn:
         source = _make_source_with_template(tmp_path)
 
         f = project_root / ".claude" / "commands" / "kbu-start.md"
-        f.write_text("# modified by student\n", encoding="utf-8")
+        f.write_text("# modified by researcher\n", encoding="utf-8")
         fake_hash = _prefixed("0" * 64)  # different from actual
 
         _make_project_toml(
@@ -468,7 +468,7 @@ class TestClobberWithWarn:
         source = _make_source_with_template(tmp_path)
 
         f = project_root / ".claude" / "commands" / "kbu-start.md"
-        f.write_text("# modified by student\n", encoding="utf-8")
+        f.write_text("# modified by researcher\n", encoding="utf-8")
         fake_hash = _prefixed("0" * 64)
 
         _make_project_toml(
@@ -576,8 +576,8 @@ class TestApplyDiff:
     def test_copies_added_file(self, tmp_path: Path) -> None:
         """_apply_diff copies an 'added' file from source template to project."""
         source = tmp_path / "src"
-        (source / "templates" / "student-project" / ".claude" / "commands").mkdir(parents=True)
-        new_file = source / "templates" / "student-project" / ".claude" / "commands" / "kbu-new.md"
+        (source / "templates" / "research-project" / ".claude" / "commands").mkdir(parents=True)
+        new_file = source / "templates" / "research-project" / ".claude" / "commands" / "kbu-new.md"
         new_file.write_text("# new skill\n", encoding="utf-8")
 
         project = tmp_path / "proj"
@@ -593,8 +593,8 @@ class TestApplyDiff:
     def test_copies_modified_file(self, tmp_path: Path) -> None:
         """_apply_diff overwrites a 'modified' file."""
         source = tmp_path / "src"
-        (source / "templates" / "student-project" / ".claude" / "commands").mkdir(parents=True)
-        (source / "templates" / "student-project" / ".claude" / "commands" / "kbu-start.md").write_text(
+        (source / "templates" / "research-project" / ".claude" / "commands").mkdir(parents=True)
+        (source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md").write_text(
             "# updated content\n", encoding="utf-8"
         )
 

@@ -9,7 +9,7 @@ last_reviewed: 2026-06-05
 
 ---
 name: kbu-review
-description: Run an AI review of a subproject plan or report. Use when the student wants structured feedback during development. Produces a numbered REVIEW_<stage>_<n>.md file with a verdict comment.
+description: Run an AI review of a subproject plan or report. Use when the researcher wants structured feedback during development. Produces a numbered REVIEW_<stage>_<n>.md file with a verdict comment.
 allowed-tools: Bash, Read, Write
 ---
 
@@ -51,7 +51,7 @@ The review stage is auto-detected from the output:
 | `b-review` | Build review | Scaffolded notebooks | `REVIEW_b-review_<n>.md` |
 | `s-review` | Synthesis review | `REPORT.md` | `REVIEW_s-review_<n>.md` |
 
-If the stage is not one of the three above, stop and tell the student:
+If the stage is not one of the three above, stop and tell the researcher:
 
 > "This subproject is not at a review stage. Check `kbu subproject status <name>`
 > to see what step is next."
@@ -157,7 +157,7 @@ save_session({
 })
 ```
 
-### Step 5: Present Summary to Student
+### Step 5: Present Summary to Researcher
 
 Present:
 - Overall verdict (PASS / FAIL).
@@ -186,4 +186,4 @@ Present:
 - **Reads from**: `RESEARCH_PLAN.md` (p-review), `notebooks/` (b-review), `REPORT.md` (s-review)
 - **Produces**: `subprojects/<name>/REVIEW_<stage>_<n>.md`
 - **Advances or reverses**: stage via `kbu subproject advance [--reverse]`
-- **Consumed by**: student iterates until pass; final pass unlocks next stage
+- **Consumed by**: researcher iterates until pass; final pass unlocks next stage

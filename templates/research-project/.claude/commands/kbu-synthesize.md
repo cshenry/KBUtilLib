@@ -9,7 +9,7 @@ last_reviewed: 2026-06-05
 
 ---
 name: kbu-synthesize
-description: Read notebook outputs, compare against literature, and draft findings for a subproject REPORT.md. Use after notebooks have been run and the student wants to interpret results and write up findings.
+description: Read notebook outputs, compare against literature, and draft findings for a subproject REPORT.md. Use after notebooks have been run and the researcher wants to interpret results and write up findings.
 allowed-tools: Bash, Read, Write, Edit, WebSearch, AskUserQuestion
 ---
 
@@ -36,7 +36,7 @@ The subproject must be in the `synthesize` stage. Check via:
 kbu subproject status <name>
 ```
 
-If the stage is earlier than `synthesize`, stop and tell the student:
+If the stage is earlier than `synthesize`, stop and tell the researcher:
 
 > "This subproject is not ready to synthesize — run your analysis notebooks first,
 > then advance to the synthesize stage via `kbu subproject advance <name>`."
@@ -78,7 +78,7 @@ Based on the data, draft findings that address:
 3. **Statistical significance**: Report p-values, effect sizes, confidence intervals where available.
 4. **Unexpected patterns**: Note any surprising results or anomalies.
 
-### Step 4: Present Draft to Student
+### Step 4: Present Draft to Researcher
 
 Show the initial findings interpretation and ask:
 - "Does this interpretation look correct?"

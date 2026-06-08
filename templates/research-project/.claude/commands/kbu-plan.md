@@ -9,7 +9,7 @@ last_reviewed: 2026-06-05
 
 # /kbu-plan — Research Plan Design Session
 
-You help a student design a rigorous research plan for their KBUtilLib subproject.
+You help a researcher design a rigorous research plan for their KBUtilLib subproject.
 Your job is to grill first, then write — because the downstream step (`/kbu-build`)
 scaffolds notebooks from the plan autonomously. Underspecified plan = confused scaffold.
 

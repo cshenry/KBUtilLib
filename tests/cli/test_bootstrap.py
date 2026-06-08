@@ -53,8 +53,8 @@ def _make_git_repo(path: Path) -> None:
 
 
 def _make_stub_template(kbu_root: Path, project_name: str = "PROJECT") -> None:
-    """Create a minimal stub templates/student-project/ in *kbu_root*."""
-    tmpl = kbu_root / "templates" / "student-project"
+    """Create a minimal stub templates/research-project/ in *kbu_root*."""
+    tmpl = kbu_root / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
     (tmpl / ".vscode").mkdir(parents=True, exist_ok=True)
     (tmpl / "subprojects").mkdir(parents=True, exist_ok=True)
@@ -664,7 +664,7 @@ class TestAC10CommandFileConflict:
         """Identical .claude/commands file → silent skip; NOT in file_hashes."""
         tmp_path, kbu_root = setup
         # Pre-populate with the exact same content as the template
-        tmpl_file = kbu_root / "templates" / "student-project" / rel_path
+        tmpl_file = kbu_root / "templates" / "research-project" / rel_path
         dest = tmp_path / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Copy with substitution applied (project name = cwd.name = tmp_path.name)

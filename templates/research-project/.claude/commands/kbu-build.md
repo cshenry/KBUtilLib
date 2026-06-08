@@ -10,7 +10,7 @@ last_reviewed: 2026-06-05
 # /kbu-build — Scaffold Subproject Notebooks
 
 You read the subproject's `RESEARCH_PLAN.md` and scaffold the full notebook
-structure so the student can start doing science immediately. You implement
+structure so the researcher can start doing science immediately. You implement
 directly in this context — no sub-agents, no background tasks.
 
 ## Precondition
@@ -107,7 +107,7 @@ Each notebook must contain:
    step is (reference the next notebook by filename)
 
 All cells are stubs — they establish structure and have a `# TODO` comment
-where the student writes their science. Do NOT fill in scientific logic that
+where the researcher writes their science. Do NOT fill in scientific logic that
 the plan did not specify.
 
 ## Phase 5: Verify Structure
@@ -150,7 +150,7 @@ guided execution of the notebooks.
 
 1. **Execute the plan, don't re-plan.** If you notice a gap, flag it to the user
    and add a `# TODO` cell in the affected notebook rather than redesigning.
-2. **Stubs only.** Scientific logic belongs to the student, not this scaffold.
+2. **Stubs only.** Scientific logic belongs to the researcher, not this scaffold.
 3. **Dependency order.** Always write `util.py` before the notebooks that import it.
 4. **Valid JSON.** Every `.ipynb` file must be parseable before you advance.
 5. **No files outside `subprojects/<name>/`.** Do not write to `data/` or repo root.

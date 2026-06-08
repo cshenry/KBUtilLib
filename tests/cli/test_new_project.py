@@ -33,7 +33,7 @@ def _invoke(*args: str, env: dict | None = None) -> Any:
 
 
 def _make_stub_template(root: Path) -> None:
-    """Create a minimal stub templates/student-project/ tree in *root*.
+    """Create a minimal stub templates/research-project/ tree in *root*.
 
     Includes:
     - .claude/commands/kbu-start.md  (with {{project_name}} placeholder)
@@ -41,7 +41,7 @@ def _make_stub_template(root: Path) -> None:
     - {{project_name}}.code-workspace  (filename uses placeholder)
     - subprojects/.gitkeep
     """
-    tmpl = root / "templates" / "student-project"
+    tmpl = root / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True)
     (tmpl / ".vscode").mkdir(parents=True)
     (tmpl / "subprojects").mkdir(parents=True)

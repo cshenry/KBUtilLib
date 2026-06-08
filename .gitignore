@@ -52,6 +52,6 @@ data/ms_classifier/
 !.claude/commands/kbu-start.md
 
 # Template tree — override ignore patterns so template data is tracked
-!templates/student-project/.vscode/
-!templates/student-project/.vscode/**
-!templates/student-project/**/*.code-workspace
+!templates/research-project/.vscode/
+!templates/research-project/.vscode/**
+!templates/research-project/**/*.code-workspace

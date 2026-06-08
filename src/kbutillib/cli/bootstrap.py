@@ -345,7 +345,7 @@ def bootstrap(  # noqa: C901 — orchestration function
     # Resolve KBUTILLIB_ROOT and template source
     # ------------------------------------------------------------------
     kbu_root = _kbutillib_root()
-    template_src = kbu_root / "templates" / "student-project"
+    template_src = kbu_root / "templates" / "research-project"
 
     # ------------------------------------------------------------------
     # Author triple resolution

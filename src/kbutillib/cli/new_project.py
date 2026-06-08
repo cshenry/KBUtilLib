@@ -1,6 +1,6 @@
-"""``kbu new-project`` — scaffold a new KBUtilLib student project.
+"""``kbu new-project`` — scaffold a new KBUtilLib research project.
 
-Creates a project directory from the ``templates/student-project/`` tree,
+Creates a project directory from the ``templates/research-project/`` tree,
 sets up a per-project venv, editable-installs KBUtilLib, registers a
 Jupyter kernel, writes ``kbu-project.toml``, and runs ``git init``.
 
@@ -115,11 +115,11 @@ def new_project(  # noqa: C901 — orchestration function
     orcid: str,
     first_subproject: Optional[str] = None,
 ) -> None:
-    """Scaffold a new KBUtilLib student project at *path*.
+    """Scaffold a new KBUtilLib research project at *path*.
 
     Steps:
     1. Reject if *path* exists.
-    2. Copy ``templates/student-project/`` tree with ``{{project_name}}`` substitution.
+    2. Copy ``templates/research-project/`` tree with ``{{project_name}}`` substitution.
     3. Platform gate (macOS or KBU_PLATFORM_OVERRIDE=force).
     4. Create per-project venv (venvman or .venv fallback).
     5. pip install -e <KBUTILLIB_ROOT> in venv.
@@ -134,7 +134,7 @@ def new_project(  # noqa: C901 — orchestration function
         sys.exit(1)
 
     kbu_root = _kbutillib_root()
-    template_src = kbu_root / "templates" / "student-project"
+    template_src = kbu_root / "templates" / "research-project"
 
     # Create destination and copy template
     path.mkdir(parents=True)
@@ -273,7 +273,7 @@ def new_project_command(
     orcid: Optional[str],
     first_subproject: Optional[str],
 ) -> None:
-    """Scaffold a new KBUtilLib student project.
+    """Scaffold a new KBUtilLib research project.
 
     PATH is the destination directory (must not exist).
 

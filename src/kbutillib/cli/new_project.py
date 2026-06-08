@@ -171,10 +171,13 @@ def new_project(  # noqa: C901 — orchestration function
 
     venv_python_str = str(venv_python)
 
-    # pip install -e <KBUTILLIB_ROOT>
+    # pip install -e <KBUTILLIB_ROOT> plus ipykernel (needed for the kernel
+    # registration step below; ipykernel is in KBUtilLib's [notebook] extra,
+    # not base, so it isn't pulled in by the editable install). Mirrors the
+    # same fix in kbu init and kbu bootstrap (commit a6fb33d).
     click.echo(f"Installing KBUtilLib editable from {kbu_root} ...")
     subprocess.run(
-        [venv_python_str, "-m", "pip", "install", "-e", str(kbu_root)],
+        [venv_python_str, "-m", "pip", "install", "-e", str(kbu_root), "ipykernel"],
         check=True,
     )
 

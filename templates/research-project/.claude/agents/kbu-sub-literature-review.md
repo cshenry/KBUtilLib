@@ -8,12 +8,13 @@ last_reviewed: 2026-06-05
 -->
 
 ---
-name: kbu-literature-review
+name: kbu-sub-literature-review
+type: agent
 description: Search and review biological literature using MCP tools (PubMed, arXiv, bioRxiv, Google Scholar). Use when the researcher wants to find papers, review existing research, check what's known about an organism or pathway, or support a hypothesis with citations.
 allowed-tools: Bash, Read, Write, WebSearch, Agent, ToolSearch
 ---
 
-# kbu-literature-review
+# kbu-sub-literature-review
 
 Search, read, and synthesize biological literature relevant to a KBU subproject.
 Combines multi-source discovery (PubMed, arXiv, bioRxiv, Google Scholar) with
@@ -21,9 +22,13 @@ full-text analysis and citation network exploration.
 
 ## Usage
 
+Invoked as a subagent from `/kbu-plan` Step 2 or directly by the researcher:
+
 ```
-/kbu-literature-review <topic_or_subproject_name>
+Agent(subagent_type="kbu-sub-literature-review", prompt="<topic>")
 ```
+
+Or invoked interactively via Claude Code's agent runner.
 
 ## MCP Setup
 
@@ -53,7 +58,7 @@ Two MCP servers provide literature access. Add the following to the project's
 Before searching, check whether the MCP servers are active via tool discovery
 (`ToolSearch`). If both `pubmed` and `paper-search` MCP servers are absent,
 fall back to `WebSearch` (see **Fallback** section) and append a `[fallback path]`
-note to `references.md`.
+note to `literature/index.md`.
 
 ### Primary: PubMed MCP (HTTP)
 
@@ -93,7 +98,7 @@ Clarify what the researcher wants. Ask if needed:
 | **Deep review** | 50+ | Top 20 | Yes | Explicitly requested |
 
 Default to **quick scan** for ad-hoc questions and **standard review** for subproject-based
-work or when invoked via `/kbu-synthesize`.
+work or when invoked via `/kbu-plan` Step 2.
 
 ### Step 2: Construct Search Queries
 
@@ -152,26 +157,60 @@ Present results grouped by theme:
 - [What hasn't been studied that this subproject could address]
 ```
 
-### Step 6: Save References
+### Step 6: Save Literature Files
 
-Save to `subprojects/<name>/references.md` (or current directory if no subproject context):
+For each discrete topic reviewed, save a per-topic synthesis file:
+
+```
+subprojects/<name>/literature/<topic-slug>.md
+```
+
+where `<topic-slug>` is a kebab-case slug derived from the topic (e.g.,
+`pangenome-methods`, `nitrogen-fixation-regulation`).
+
+After writing all per-topic files, write or update the index:
+
+```
+subprojects/<name>/literature/index.md
+```
+
+with this structure:
 
 ```markdown
-# References
+# Literature Index
 
-## [Topic or Research Question]
+## Topics Reviewed
+
+| Topic | File | Date | Depth | Papers |
+|---|---|---|---|---|
+| [Topic name] | [topic-slug.md](topic-slug.md) | [date] | [tier] | [N] |
+
+[fallback path] *(if WebSearch fallback was used)*
+```
+
+Each per-topic file follows this structure:
+
+```markdown
+# Literature: [Topic]
 
 Searched: [date], Sources: [list], Query: "[search terms]"
 Review depth: [tier]
-[fallback path] *(if WebSearch fallback was used)*
 
-### Cited References
+## Summary
+
+[2-3 sentence overview]
+
+## Key Findings
+
+### [Theme 1]
+- **Author et al. (Year)** — [Key finding]. DOI: [doi]. PMID: [pmid]
+
+## Gaps in Current Knowledge
+- [Gap 1]
+
+## References
 
 1. Author A, Author B. (Year). "Title." *Journal*, Vol(Issue), Pages. DOI: [doi]. PMID: [pmid]
-
-### Additional References (not cited but relevant)
-
-1. ...
 ```
 
 ### Step 7: Save Session
@@ -180,7 +219,7 @@ Review depth: [tier]
 from assistant.state import save_session
 save_session({
     'project_id': '<subproject_name_or_topic>',
-    'command': 'kbu-literature-review',
+    'command': 'kbu-sub-literature-review',
     'topics_discussed': ['literature search', '<topic>'],
     'decisions_made': ['references saved'],
     'next_steps': ['incorporate citations into RESEARCH_PLAN.md or REPORT.md'],
@@ -195,7 +234,7 @@ If both `pubmed` and `paper-search` MCP servers are absent:
 1. Use `WebSearch` with queries like `site:pubmed.ncbi.nlm.nih.gov [query]` and
    `[topic] biology filetype:pdf`.
 2. Use `WebFetch` to retrieve paper details from DOIs: `https://doi.org/[doi]`.
-3. Append `[fallback path]` to the `references.md` header to note that results
+3. Append `[fallback path]` to the `literature/index.md` header to note that results
    may be less comprehensive than MCP-based search (no full-text retrieval, no
    citation snowballing).
 
@@ -204,7 +243,7 @@ To enable MCP tools, add the `.mcp.json` snippet above to the project root or
 
 ## Integration
 
-- **Called by**: `/kbu-synthesize` (Step 5), or directly by the researcher
-- **Produces**: `subprojects/<name>/references.md`
+- **Called by**: `/kbu-plan` Step 2, or directly by the researcher
+- **Produces**: `subprojects/<name>/literature/<topic-slug>.md` (one per topic) and `subprojects/<name>/literature/index.md`
 - **Reads from**: (none — discovery from external sources)
-- **Used by**: `/kbu-synthesize` for literature context in REPORT.md
+- **Used by**: `/kbu-plan` for literature context in RESEARCH_PLAN.md; `/kbu-synthesize` for REPORT.md

@@ -533,3 +533,127 @@ class TestComputeFileHashes:
     def test_empty_dirs_yield_empty_hashes(self, tmp_path: Path) -> None:
         hashes = _compute_file_hashes(tmp_path, [".claude/commands", ".vscode"])
         assert hashes == {}
+
+    def test_agents_dir_hashed(self, tmp_path: Path) -> None:
+        """.claude/agents/ files are tracked when included in tracked_dirs."""
+        (tmp_path / ".claude" / "agents").mkdir(parents=True)
+        (tmp_path / ".claude" / "agents" / "kbu-sub-review.md").write_text(
+            "---\nname: kbu-sub-review\ntype: agent\n---\n", encoding="utf-8"
+        )
+
+        hashes = _compute_file_hashes(tmp_path, [".claude/agents"])
+        assert ".claude/agents/kbu-sub-review.md" in hashes
+        for v in hashes.values():
+            assert v.startswith("sha256:")
+
+
+# ---------------------------------------------------------------------------
+# AC 42/43: new-project scaffolds shared dirs + layout section
+# ---------------------------------------------------------------------------
+
+
+def _make_full_stub_template(root: Path) -> None:
+    """Create a stub template with shared dirs and agents for new-project tests."""
+    tmpl = root / "templates" / "research-project"
+    (tmpl / ".claude" / "commands").mkdir(parents=True)
+    (tmpl / ".claude" / "agents").mkdir(parents=True)
+    (tmpl / ".vscode").mkdir(parents=True)
+    (tmpl / "subprojects").mkdir(parents=True)
+    for shared_dir in ["data", "models", "genomes"]:
+        (tmpl / shared_dir).mkdir(parents=True)
+        (tmpl / shared_dir / ".gitkeep").write_text("", encoding="utf-8")
+
+    (tmpl / ".claude" / "commands" / "kbu-start.md").write_text(
+        "# kbu-start for {{project_name}}\n", encoding="utf-8",
+    )
+    for agent_name in ["kbu-sub-literature-review", "kbu-sub-review", "kbu-sub-diagnose"]:
+        (tmpl / ".claude" / "agents" / f"{agent_name}.md").write_text(
+            f"---\nname: {agent_name}\ntype: agent\n---\n# {agent_name}\n",
+            encoding="utf-8",
+        )
+    (tmpl / ".vscode" / "extensions.json").write_text(
+        '{"recommendations": ["anthropic.claude-code"]}', encoding="utf-8",
+    )
+    (tmpl / "{{project_name}}.code-workspace").write_text(
+        '{"folders": [{"path": "{{project_name}}"}]}', encoding="utf-8",
+    )
+    (tmpl / "subprojects" / ".gitkeep").write_text("", encoding="utf-8")
+
+
+class TestAC42_43NewProject:
+    """AC #42 + #43 for kbu new-project."""
+
+    @pytest.fixture()
+    def stub_kbu_root(self, tmp_path: Path) -> Path:
+        kbu_root = tmp_path / "KBUtilLib"
+        kbu_root.mkdir()
+        (kbu_root / ".git").mkdir()
+        _make_full_stub_template(kbu_root)
+        return kbu_root
+
+    def _run_new_project(self, tmp_path: Path, kbu_root: Path, dest: Path) -> None:
+        with (
+            patch("kbutillib.cli.new_project._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as mock_run,
+        ):
+            def _side_effect(cmd, *args, **kwargs):
+                cwd = kwargs.get("cwd", ".")
+                if isinstance(cmd, list) and "-m" in cmd and "venv" in cmd:
+                    venv = Path(cwd) / ".venv"
+                    (venv / "bin").mkdir(parents=True, exist_ok=True)
+                    py = venv / "bin" / "python"
+                    py.write_text("#!/usr/bin/env python3")
+                    py.chmod(0o755)
+                r = MagicMock()
+                r.returncode = 0
+                r.stdout = "abc123\n"
+                r.stderr = ""
+                return r
+
+            mock_run.side_effect = _side_effect
+            new_project(
+                path=dest,
+                name="testproj",
+                author="Test User",
+                affiliation="Test Lab",
+                orcid="0000-0001-0002-0003",
+            )
+
+    def test_ac42_shared_dirs_with_gitkeep(self, tmp_path: Path, stub_kbu_root: Path) -> None:
+        """AC #42: new-project copies data/, models/, genomes/ with .gitkeep."""
+        dest = tmp_path / "testproj"
+        self._run_new_project(tmp_path, stub_kbu_root, dest)
+        for shared_dir in ["data", "models", "genomes"]:
+            assert (dest / shared_dir).is_dir(), f"{shared_dir}/ not created"
+            assert (dest / shared_dir / ".gitkeep").exists(), f"{shared_dir}/.gitkeep missing"
+
+    def test_ac43_layout_shared_dirs_in_toml(self, tmp_path: Path, stub_kbu_root: Path) -> None:
+        """AC #43: kbu-project.toml has [layout.shared_dirs] = ["data","models","genomes"]."""
+        dest = tmp_path / "testproj"
+        self._run_new_project(tmp_path, stub_kbu_root, dest)
+        with open(dest / "kbu-project.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        assert "layout" in cfg, "Missing [layout] section in kbu-project.toml"
+        assert cfg["layout"]["shared_dirs"] == ["data", "models", "genomes"]
+
+    def test_ac45_agents_dir_created(self, tmp_path: Path, stub_kbu_root: Path) -> None:
+        """AC #45: .claude/agents/ is present with subagent files."""
+        dest = tmp_path / "testproj"
+        self._run_new_project(tmp_path, stub_kbu_root, dest)
+        agents_dir = dest / ".claude" / "agents"
+        assert agents_dir.is_dir(), ".claude/agents/ not created"
+        for agent_name in ["kbu-sub-literature-review", "kbu-sub-review", "kbu-sub-diagnose"]:
+            assert (agents_dir / f"{agent_name}.md").exists(), f"{agent_name}.md missing"
+
+    def test_agents_tracked_in_file_hashes(self, tmp_path: Path, stub_kbu_root: Path) -> None:
+        """.claude/agents/ files appear in [update.file_hashes]."""
+        dest = tmp_path / "testproj"
+        self._run_new_project(tmp_path, stub_kbu_root, dest)
+        with open(dest / "kbu-project.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        hashes = cfg["update"]["file_hashes"]
+        agent_keys = [k for k in hashes if ".claude/agents/" in k]
+        assert len(agent_keys) == 3, f"Expected 3 agent hashes, got: {agent_keys}"

@@ -20,6 +20,7 @@ from click.testing import CliRunner
 from kbutillib.cli import main
 from kbutillib.cli.bootstrap import (
     _BOOTSTRAP_MACOS_ONLY_MESSAGE,
+    _CLAUDE_AGENT_FILES,
     _CLAUDE_COMMAND_FILES,
     _GITIGNORE_BLOCK,
     _GITIGNORE_MARKER_OPEN,
@@ -54,15 +55,27 @@ def _make_git_repo(path: Path) -> None:
 
 def _make_stub_template(kbu_root: Path, project_name: str = "PROJECT") -> None:
     """Create a minimal stub templates/research-project/ in *kbu_root*."""
+    from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
     tmpl = kbu_root / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
+    (tmpl / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
     (tmpl / ".vscode").mkdir(parents=True, exist_ok=True)
     (tmpl / "subprojects").mkdir(parents=True, exist_ok=True)
+    # Shared dirs with .gitkeep
+    for shared_dir in ["data", "models", "genomes"]:
+        (tmpl / shared_dir).mkdir(parents=True, exist_ok=True)
+        (tmpl / shared_dir / ".gitkeep").write_text("", encoding="utf-8")
 
     for cmd_rel in _CLAUDE_COMMAND_FILES:
         fname = Path(cmd_rel).name
         (tmpl / cmd_rel).write_text(
             f"# {fname} for {{{{project_name}}}}\n",
+            encoding="utf-8",
+        )
+    for agent_rel in _CLAUDE_AGENT_FILES:
+        fname = Path(agent_rel).name
+        (tmpl / agent_rel).write_text(
+            f"---\nname: {fname.replace('.md', '')}\ntype: agent\n---\n# {fname}\n",
             encoding="utf-8",
         )
     (tmpl / ".vscode" / "extensions.json").write_text(
@@ -597,30 +610,52 @@ class TestAC8Check:
 
 
 class TestAC9TemplateSet:
-    def test_bootstrap_handles_exactly_14_entries(self, tmp_path: Path) -> None:
-        """Bootstrap handles 14 template entries: 13 from the PRD + README.md."""
+    def test_bootstrap_handles_expected_entries(self, tmp_path: Path) -> None:
+        """Bootstrap handles 15 template entries: 7 commands + 3 agents + 5 other."""
         from kbutillib.cli.bootstrap import _TEMPLATE_ENTRIES
-        assert len(_TEMPLATE_ENTRIES) == 14
+        assert len(_TEMPLATE_ENTRIES) == 15
         assert "README.md" in _TEMPLATE_ENTRIES
 
     def test_claude_commands_count(self) -> None:
-        """There are exactly 9 .claude/commands/ files."""
-        assert len(_CLAUDE_COMMAND_FILES) == 9
+        """There are exactly 7 .claude/commands/ files (3 moved to agents, kbu-migrate added)."""
+        assert len(_CLAUDE_COMMAND_FILES) == 7
+
+    def test_claude_agents_count(self) -> None:
+        """There are exactly 3 .claude/agents/ subagent files."""
+        from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
+        assert len(_CLAUDE_AGENT_FILES) == 3
 
     def test_expected_command_files(self) -> None:
-        """All 9 command file names are present."""
+        """Command files include new kbu-migrate.md and exclude the 3 moved to agents."""
         expected = {
             ".claude/commands/kbu-start.md",
             ".claude/commands/kbu-plan.md",
             ".claude/commands/kbu-build.md",
             ".claude/commands/kbu-run.md",
             ".claude/commands/kbu-synthesize.md",
-            ".claude/commands/kbu-review.md",
-            ".claude/commands/kbu-literature-review.md",
-            ".claude/commands/kbu-diagnose.md",
             ".claude/commands/kbu-update.md",
+            ".claude/commands/kbu-migrate.md",
         }
         assert set(_CLAUDE_COMMAND_FILES) == expected
+
+    def test_expected_agent_files(self) -> None:
+        """Agent files are the 3 converted subagents."""
+        from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
+        expected = {
+            ".claude/agents/kbu-sub-literature-review.md",
+            ".claude/agents/kbu-sub-review.md",
+            ".claude/agents/kbu-sub-diagnose.md",
+        }
+        assert set(_CLAUDE_AGENT_FILES) == expected
+
+    def test_old_command_files_absent(self) -> None:
+        """kbu-literature-review, kbu-review, kbu-diagnose are not in commands list."""
+        old_files = {
+            ".claude/commands/kbu-literature-review.md",
+            ".claude/commands/kbu-review.md",
+            ".claude/commands/kbu-diagnose.md",
+        }
+        assert not old_files.intersection(set(_CLAUDE_COMMAND_FILES))
 
 
 # ---------------------------------------------------------------------------
@@ -2492,3 +2527,109 @@ class TestAC38CheckFirstSubproject:
             if isinstance(c, list) and "subproject" in c and "create" in c
         ]
         assert sp_calls == []
+
+
+# ---------------------------------------------------------------------------
+# AC 42: bootstrap scaffolds data/, models/, genomes/ with .gitkeep
+# AC 43: kbu-project.toml has [layout.shared_dirs]
+# AC 44: subagent sources have type: agent frontmatter
+# AC 45: subagent sources live at .claude/agents/<name>.md
+# AC 47: old slash-command sources removed; kbu-sub-* subagents created
+# ---------------------------------------------------------------------------
+
+
+class TestAC42_47SharedDirsAndAgents:
+    """AC #42-#47: shared dirs, layout section, subagent files."""
+
+    @pytest.fixture()
+    def setup(self, tmp_path: Path):
+        _make_git_repo(tmp_path)
+        kbu_root = tmp_path / "KBUtilLib"
+        kbu_root.mkdir()
+        _make_stub_template(kbu_root)
+        return tmp_path, kbu_root
+
+    def _run_bootstrap(self, tmp_path: Path, kbu_root: Path) -> Any:
+        se = _make_subprocess_side_effect()
+        runner = CliRunner()
+        with (
+            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("shutil.which", return_value=None),
+        ):
+            os.chdir(tmp_path)
+            return runner.invoke(
+                main,
+                ["bootstrap", "--no-venv",
+                 "--author", "A", "--affiliation", "B", "--orcid", "0"],
+                catch_exceptions=False,
+            )
+
+    def test_ac42_shared_dirs_with_gitkeep(self, setup: Any) -> None:
+        """AC #42: bootstrap scaffolds data/, models/, genomes/ with .gitkeep."""
+        tmp_path, kbu_root = setup
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        for shared_dir in ["data", "models", "genomes"]:
+            assert (tmp_path / shared_dir).is_dir(), f"{shared_dir}/ not created"
+            assert (tmp_path / shared_dir / ".gitkeep").exists(), f"{shared_dir}/.gitkeep missing"
+
+    def test_ac43_layout_shared_dirs_in_toml(self, setup: Any) -> None:
+        """AC #43: kbu-project.toml has [layout.shared_dirs] = ["data","models","genomes"]."""
+        tmp_path, kbu_root = setup
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        with open(tmp_path / "kbu-project.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        assert "layout" in cfg, "Missing [layout] section in kbu-project.toml"
+        assert cfg["layout"]["shared_dirs"] == ["data", "models", "genomes"]
+
+    def test_ac44_subagent_files_have_type_agent(self, setup: Any) -> None:
+        """AC #44: each .claude/agents/ file has type: agent in frontmatter."""
+        tmp_path, kbu_root = setup
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        for agent_rel in _CLAUDE_AGENT_FILES:
+            agent_path = tmp_path / agent_rel
+            assert agent_path.exists(), f"{agent_rel} not copied to project"
+            content = agent_path.read_text(encoding="utf-8")
+            assert "type: agent" in content, f"{agent_rel} missing 'type: agent' in frontmatter"
+
+    def test_ac45_subagent_files_in_agents_dir(self, setup: Any) -> None:
+        """AC #45: subagent sources live at .claude/agents/<name>.md."""
+        tmp_path, kbu_root = setup
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        agents_dir = tmp_path / ".claude" / "agents"
+        assert agents_dir.is_dir(), ".claude/agents/ directory not created"
+        for agent_rel in _CLAUDE_AGENT_FILES:
+            assert (tmp_path / agent_rel).exists(), f"{agent_rel} missing"
+
+    def test_ac47_old_command_files_absent_new_subagents_present(self, setup: Any) -> None:
+        """AC #47: old slash-commands (kbu-review etc.) removed; kbu-sub-* present in agents."""
+        tmp_path, kbu_root = setup
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        # Old files must not be in commands
+        for old_name in ["kbu-literature-review.md", "kbu-review.md", "kbu-diagnose.md"]:
+            old_path = tmp_path / ".claude" / "commands" / old_name
+            assert not old_path.exists(), f"Old command {old_name} should not be present"
+        # New subagent files must be present in agents
+        for agent_rel in _CLAUDE_AGENT_FILES:
+            assert (tmp_path / agent_rel).exists(), f"{agent_rel} should be present"
+
+    def test_shared_dirs_existing_content_untouched(self, setup: Any) -> None:
+        """If shared dir already has content, bootstrap leaves it alone."""
+        tmp_path, kbu_root = setup
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
+        (data_dir / "important.csv").write_text("col1,col2\n1,2\n", encoding="utf-8")
+
+        result = self._run_bootstrap(tmp_path, kbu_root)
+        assert result.exit_code == 0
+        # important.csv must still be there
+        assert (data_dir / "important.csv").exists()
+        # .gitkeep should NOT have been written (dir had content)
+        assert not (data_dir / ".gitkeep").exists()

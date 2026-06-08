@@ -7,7 +7,14 @@ source_path: agent-io/skills/diagnose.md
 last_reviewed: 2026-06-05
 -->
 
-# /kbu-diagnose — Debug a Subproject Problem
+---
+name: kbu-sub-diagnose
+type: agent
+description: Debug a subproject problem. Use when a notebook cell errors, produces wrong output, runs unexpectedly slowly, or a util.py function behaves incorrectly.
+allowed-tools: Bash, Read, Write
+---
+
+# kbu-sub-diagnose — Debug a Subproject Problem
 
 A disciplined diagnosis loop for notebook errors, failing cells, wrong outputs,
 and performance problems in KBUtilLib subprojects.
@@ -124,7 +131,7 @@ flag it explicitly so the researcher can improve the design.
 Save the session after diagnosing (regardless of outcome):
 
 ```bash
-kbu session save --skill kbu-diagnose --subproject <name> --summary "<one-sentence: bug found/fixed or diagnosis reached>"
+kbu session save --skill kbu-sub-diagnose --subproject <name> --summary "<one-sentence: bug found/fixed or diagnosis reached>"
 ```
 
 If the bug was not resolved, include what was learned and what the next

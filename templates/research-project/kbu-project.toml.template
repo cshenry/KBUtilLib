@@ -12,6 +12,9 @@ orcid = "{{author_orcid}}"
 source_path = "{{kbutillib_source_path}}"
 source_commit = "{{kbutillib_source_commit}}"
 
+[layout]
+shared_dirs = ["data", "models", "genomes"]
+
 [update]
 last_pulled_at = "{{created_at}}"
 last_pulled_commit = "{{kbutillib_source_commit}}"

@@ -13,3 +13,14 @@ __pycache__/
 # KBUtilLib
 sessions/
 .kbcache/
+
+# Large files in shared dirs (source: kbutillib.layout.root_gitignore_lines(["data","models","genomes"]))
+data/**/*.h5
+data/**/*.pkl
+data/**/*.parquet
+models/**/*.h5
+models/**/*.pkl
+models/**/*.parquet
+genomes/**/*.h5
+genomes/**/*.pkl
+genomes/**/*.parquet

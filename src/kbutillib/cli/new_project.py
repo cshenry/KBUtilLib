@@ -30,6 +30,7 @@ from ._template_ops import (
     create_plain_venv as _create_plain_venv,
     parse_virtual_env_from_activate as _parse_virtual_env_from_activate,
 )
+from ..layout import DEFAULT_SHARED_DIRS
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ _V1_MACOS_ONLY_MESSAGE = (
 )
 
 #: Tracked subdirectories (relative to project root) that are hashed for update.
-_TRACKED_DIRS = [".claude/commands", ".vscode"]
+_TRACKED_DIRS = [".claude/commands", ".claude/agents", ".vscode"]
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,9 @@ def new_project(  # noqa: C901 — orchestration function
                     "orcid": orcid,
                 }
             ],
+        },
+        "layout": {
+            "shared_dirs": list(DEFAULT_SHARED_DIRS),
         },
         "kbutillib": {
             "source_path": str(kbu_root),

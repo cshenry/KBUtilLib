@@ -37,6 +37,7 @@ from ._template_ops import (
     run_venvman_project as _run_venvman_project,
     create_plain_venv as _create_plain_venv,
 )
+from ..layout import DEFAULT_SHARED_DIRS
 
 
 # ---------------------------------------------------------------------------
@@ -67,21 +68,28 @@ __pycache__/
 # <<< kbu-managed <<<
 """
 
-#: The 9 `.claude/commands/` skill files bootstrap manages.
+#: The `.claude/commands/` skill files bootstrap manages.
+#: Note: kbu-migrate.md is listed here but the template file is written by
+#: the p4-kbu-migrate-skill task. Bootstrap skips missing source files silently.
 _CLAUDE_COMMAND_FILES = [
     ".claude/commands/kbu-start.md",
     ".claude/commands/kbu-plan.md",
     ".claude/commands/kbu-build.md",
     ".claude/commands/kbu-run.md",
     ".claude/commands/kbu-synthesize.md",
-    ".claude/commands/kbu-review.md",
-    ".claude/commands/kbu-literature-review.md",
-    ".claude/commands/kbu-diagnose.md",
     ".claude/commands/kbu-update.md",
+    ".claude/commands/kbu-migrate.md",
+]
+
+#: The `.claude/agents/` subagent files bootstrap manages.
+_CLAUDE_AGENT_FILES = [
+    ".claude/agents/kbu-sub-literature-review.md",
+    ".claude/agents/kbu-sub-review.md",
+    ".claude/agents/kbu-sub-diagnose.md",
 ]
 
 #: Full closed set of template entries bootstrap handles.
-_TEMPLATE_ENTRIES = _CLAUDE_COMMAND_FILES + [
+_TEMPLATE_ENTRIES = _CLAUDE_COMMAND_FILES + _CLAUDE_AGENT_FILES + [
     ".vscode/extensions.json",
     "subprojects/.gitkeep",
     "{{project_name}}.code-workspace",
@@ -415,10 +423,59 @@ def bootstrap(  # noqa: C901 — orchestration function
     files_backed_up: list[tuple[str, str]] = []   # (rel_path, bak_name)
     files_user_owned: list[str] = []         # rel_path (intentionally skipped)
 
-    # Process the 9 .claude/commands/kbu-*.md files
+    # Process .claude/commands/kbu-*.md files
     (project_root / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
 
     for rel_path in _CLAUDE_COMMAND_FILES:
+        dest = project_root / rel_path
+        src = template_src / rel_path
+        if not src.exists():
+            # Template file missing; skip silently
+            continue
+
+        # Read template content with substitution
+        src_content_bytes = _read_template_file_bytes(template_src, rel_path, name)
+        if src_content_bytes is None:
+            continue
+        src_hash = "sha256:" + hashlib.sha256(src_content_bytes).hexdigest()
+
+        if not dest.exists():
+            # Absent → copy
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src_content_bytes)
+            files_written[rel_path] = "sha256:" + sha256_file(dest)
+        else:
+            # Present: compare hashes
+            dest_hash = "sha256:" + sha256_file(dest)
+            if dest_hash == src_hash:
+                # Identical → skip silently
+                pass
+            else:
+                # Different hash → prompt or force
+                if force_overwrite:
+                    proceed = True
+                else:
+                    answer = click.prompt(
+                        f"  {rel_path} differs from template. Overwrite? (will backup original)",
+                        default="y",
+                    )
+                    proceed = answer.strip().lower() == "y"
+
+                if proceed:
+                    # Backup original
+                    bak_suffix = _now_bak_suffix()
+                    bak_name = f"{dest.name}.bak.{bak_suffix}"
+                    bak_path = dest.parent / bak_name
+                    shutil.copy2(str(dest), str(bak_path))
+                    dest.write_bytes(src_content_bytes)
+                    files_written[rel_path] = "sha256:" + sha256_file(dest)
+                    files_backed_up.append((rel_path, bak_name))
+                # else: user declined → leave as-is; not recorded
+
+    # Process .claude/agents/kbu-sub-*.md files
+    (project_root / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+
+    for rel_path in _CLAUDE_AGENT_FILES:
         dest = project_root / rel_path
         src = template_src / rel_path
         if not src.exists():
@@ -522,6 +579,20 @@ def bootstrap(  # noqa: C901 — orchestration function
             files_written[f"{name}.code-workspace"] = "sha256:" + sha256_file(ws_dest)
     # else: skip (existing workspace or template absent)
 
+    # Shared dirs (data/, models/, genomes/) — create with .gitkeep if absent
+    for shared_dir in DEFAULT_SHARED_DIRS:
+        sd = project_root / shared_dir
+        sd_gitkeep = sd / ".gitkeep"
+        if not sd.exists():
+            sd.mkdir(parents=True, exist_ok=True)
+            sd_gitkeep.write_text("", encoding="utf-8")
+            files_written[f"{shared_dir}/.gitkeep"] = "sha256:" + sha256_file(sd_gitkeep)
+        elif not sd_gitkeep.exists() and not any(True for _ in sd.iterdir()):
+            # Dir exists but is empty — write .gitkeep
+            sd_gitkeep.write_text("", encoding="utf-8")
+            files_written[f"{shared_dir}/.gitkeep"] = "sha256:" + sha256_file(sd_gitkeep)
+        # else: dir exists with content → leave alone
+
     # .gitignore
     _handle_gitignore(project_root, check=False)
     # .gitignore is NOT recorded in file_hashes (user-owned, even after marker append)
@@ -615,6 +686,9 @@ def bootstrap(  # noqa: C901 — orchestration function
                     "orcid": orcid,
                 }
             ],
+        },
+        "layout": {
+            "shared_dirs": list(DEFAULT_SHARED_DIRS),
         },
         "kbutillib": {
             "source_path": str(kbu_root),
@@ -715,17 +789,16 @@ def _print_check_file_plan(
     force_overwrite: bool,
 ) -> None:
     """Print the dry-run file plan for all template entries."""
-    # .claude/commands/kbu-*.md files
-    for rel_path in _CLAUDE_COMMAND_FILES:
+    def _check_skill_file(rel_path: str) -> None:
         dest = project_root / rel_path
         src = template_src / rel_path
         if not src.exists():
             click.echo(f"  {rel_path}: template absent — skip")
-            continue
+            return
 
         src_bytes = _read_template_file_bytes(template_src, rel_path, name)
         if src_bytes is None:
-            continue
+            return
         src_hash = "sha256:" + hashlib.sha256(src_bytes).hexdigest()
 
         if not dest.exists():
@@ -739,6 +812,14 @@ def _print_check_file_plan(
                     click.echo(f"  {rel_path}: differs — would overwrite (--force-overwrite; backup .bak.<UTC>)")
                 else:
                     click.echo(f"  {rel_path}: differs — would prompt overwrite (backup .bak.<UTC>)")
+
+    # .claude/commands/kbu-*.md files
+    for rel_path in _CLAUDE_COMMAND_FILES:
+        _check_skill_file(rel_path)
+
+    # .claude/agents/kbu-sub-*.md files
+    for rel_path in _CLAUDE_AGENT_FILES:
+        _check_skill_file(rel_path)
 
     # .vscode/extensions.json
     vscode_json = project_root / ".vscode" / "extensions.json"

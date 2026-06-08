@@ -8,12 +8,13 @@ last_reviewed: 2026-06-05
 -->
 
 ---
-name: kbu-review
+name: kbu-sub-review
+type: agent
 description: Run an AI review of a subproject plan or report. Use when the researcher wants structured feedback during development. Produces a numbered REVIEW_<stage>_<n>.md file with a verdict comment.
 allowed-tools: Bash, Read, Write
 ---
 
-# kbu-review
+# kbu-sub-review
 
 Run an independent AI review of a KBU subproject plan or report. Each run produces a
 numbered `REVIEW_<stage>_<n>.md` file with a verdict comment at the top:
@@ -26,8 +27,10 @@ Use to iterate on feedback before advancing to the next stage.
 
 ## Usage
 
+Invoked as a subagent or directly by the researcher:
+
 ```
-/kbu-review <subproject_name>
+Agent(subagent_type="kbu-sub-review", prompt="<subproject_name>")
 ```
 
 If no `<subproject_name>` is provided, detect from the current working directory
@@ -97,7 +100,7 @@ Write `subprojects/<name>/REVIEW_<stage>_<n>.md` with this structure:
 
 # Review: <Subproject Name> — <Stage> (<n>)
 
-**Reviewer**: Claude (kbu-review)
+**Reviewer**: Claude (kbu-sub-review)
 **Date**: <ISO 8601 date>
 **Stage**: <p-review|b-review|s-review>
 **Verdict**: PASS / FAIL
@@ -149,7 +152,7 @@ Then save a session record:
 from assistant.state import save_session
 save_session({
     'project_id': '<subproject_name>',
-    'command': 'kbu-review',
+    'command': 'kbu-sub-review',
     'topics_discussed': ['review', '<stage>'],
     'decisions_made': ['verdict: pass|fail', 'REVIEW_<stage>_<n>.md written'],
     'next_steps': ['<next step based on verdict>'],
@@ -170,7 +173,7 @@ Present:
 
 **If FAIL:**
 > "Review did not pass. Address the critical issues listed in
-> `subprojects/<name>/REVIEW_<stage>_<n>.md`, then re-run `/kbu-review`."
+> `subprojects/<name>/REVIEW_<stage>_<n>.md`, then re-run the review subagent."
 
 ## Notes
 

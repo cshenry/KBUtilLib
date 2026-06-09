@@ -1,0 +1,76 @@
+{
+  "prd_name": "kbu-conductor-pipeline",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Contract + validator",
+      "parallel_group": [
+        {
+          "task_id": "buildplan-validate",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Add the machine-readable build contract and its hard-gate validator to KBUtilLib, paralleling AIAssistant's taskplan.json / load_taskplan / TaskPlanError. (1) Define the buildplan.json schema documented in agent-io/prds/kbu-conductor-pipeline/fullprompt.md (Module A): top-level {subproject, notebooks[]}, each notebook {slug, purpose, depends_on[], helpers[]}, each helper {name, signature, contract, test:{data_source, data_spec, assertions[]}}. (2) Implement a new `kbu buildplan validate <path>` CLI command in the kbutillib CLI (see src/kbutillib/cli/ for the click command pattern, e.g. subproject.py and manifest.py). It must surface EVERY error (not just the first), mirroring TaskPlanError, and reject: missing/malformed required fields at any level; depends_on referencing a notebook that is not STRICTLY EARLIER in the notebooks list (no self, no forward, no cycles); a helper whose test.assertions is empty; a test.data_source outside {sampled-real, synthetic}; duplicate notebook slugs; duplicate helper names within a notebook. Provide a programmatic entry (e.g. load_buildplan/validate_buildplan returning ok or a list of error strings) that the CLI wraps. (3) Write a pytest unit test under KBUtilLib/tests/ feeding the validator: a valid buildplan (asserts ok); a forward/cyclic depends_on edge (asserts the specific error); a helper with empty assertions (asserts rejected); an out-of-enum data_source (asserts rejected); duplicate slugs and duplicate helper names (asserts rejected); and a case proving ALL errors surface, not just the first. Match existing KBUtilLib CLI and test conventions.",
+          "success_criteria": "`kbu buildplan validate` exists; on a valid buildplan.json it reports success, and on buildplans containing a cyclic/forward depends_on, an empty assertions list, an out-of-enum data_source, duplicate slugs, or duplicate helper names it reports each corresponding error (all at once, not just the first). The new pytest unit test for the validator passes under `pytest`.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Plan skill + build subagents",
+      "parallel_group": [
+        {
+          "task_id": "kbu-plan-skill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Modify templates/research-project/.claude/commands/kbu-plan.md (Module B) so it parallels /ai-design and emits the validated build contract. Keep the existing four-step flow (goals grill, literature subagent, detailed-plan grill, RESEARCH_PLAN.md) and ADD: (1) A mandatory TEST-DESIGN GRILL step after the detailed-plan grill: the skill proposes, per util.py helper, the exact test assertions plus test data_source (sampled-real|synthetic) and data_spec, and grills the user one question per round until each test case is pinned down. (2) A buildplan.json emission step: after the test grill, write subprojects/<name>/buildplan.json conforming to the schema validated by `kbu buildplan validate` (see agent-io/prds/kbu-conductor-pipeline/fullprompt.md Module A for the shape), then run `kbu buildplan validate` and only advance on success. RESEARCH_PLAN.md stays the prose artifact; the manifest [[notebooks]] entries stay a lightweight run-ledger and must NOT be overloaded with build spec. (3) Apply the cross-cutting mandatory-explicit-subagent-delegation rule: the literature step already uses an explicit Agent(subagent_type=\"kbu-sub-literature-review\", ...) call — keep that pattern, and add a hard rule block stating these steps run as subagents with the tell-sign 'If you are reading papers or writing review prose in the main thread, STOP — you skipped the subagent.' Ensure any review of the plan is performed by spawning kbu-sub-review via an explicit Agent() call that writes a verdict file, and the skill confirms a pass verdict file exists before `kbu subproject advance` (closed-loop wiring).",
+          "success_criteria": "kbu-plan.md contains a mandatory test-design grill step; writes subprojects/<name>/buildplan.json and invokes `kbu buildplan validate` before advancing; invokes every delegated step (literature, plan review) via an explicit Agent(subagent_type=\"kbu-sub-...\") call; contains a hard anti-inline rule with the STOP tell-sign; and confirms a pass verdict file on disk before `kbu subproject advance`. No inline-review path remains.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["buildplan-validate"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "kbu-sub-build-subagent",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Create the net-new developer subagent templates/research-project/.claude/agents/kbu-sub-build.md (Module D), the in_context-developer analog from /ai-conductor. Inputs: a subproject path plus ONE notebook's buildplan.json entry. Behavior: write the real implementations of that notebook's helper functions into subprojects/<name>/notebooks/util.py, write their fast tests into subprojects/<name>/notebooks/test_util.py (co-located, pytest-runnable), run the fast tests, and iterate until green. It MUST NOT execute the full notebook (too slow). It returns either a structured work-record, OR a BLOCKED signal when it hits a genuine algorithmic/scientific fork it cannot resolve. BLOCKED protocol (exact): the final message begins with the literal token 'BLOCKED:' followed by the decision statement and a labelled option list (A) ... B) ...). BLOCKED is for genuine scientific/algorithmic forks ONLY — ordinary coding errors are fixed in-loop, never escalated. Match the frontmatter/kind convention of the existing kbu-sub-*.md agents (kbu-sub-review.md, kbu-sub-diagnose.md, kbu-sub-literature-review.md).",
+          "success_criteria": "templates/research-project/.claude/agents/kbu-sub-build.md exists with frontmatter matching the other kbu-sub-* agents; it instructs the subagent to write helpers into util.py and tests into test_util.py, run pytest (not the full notebook), and return either a work-record or a 'BLOCKED:' signal with a labelled option list per the documented protocol; and it restricts BLOCKED to genuine algorithmic forks.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["buildplan-validate"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "kbu-sub-review-subagent",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Modify templates/research-project/.claude/agents/kbu-sub-review.md (Module E) so its verdict targets the buildplan.json test cases. For a build review it must check: does each helper named in the notebook's buildplan entry have a test in test_util.py that exists and passes, and are the notebook's declared outputs produced/declared? It must write the verdict file using the existing marker format `<!-- kbu-review:verdict: pass|fail -->` (the format the subproject state gate parses — see src/kbutillib/cli/subproject.py _parse_verdict) at the review-file path the gate globs for. Preserve its existing plan-review and synthesis-review behavior; only add/clarify the build-review-against-buildplan-test-cases path.",
+          "success_criteria": "kbu-sub-review.md reviews a build against the buildplan's per-helper test cases (each helper's test exists and passes; declared outputs present) and writes a verdict file containing the `<!-- kbu-review:verdict: pass|fail -->` marker at the path the subproject state gate reads. Existing plan/synthesis review behavior is preserved.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["buildplan-validate"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Conductor rewrite",
+      "parallel_group": [
+        {
+          "task_id": "kbu-build-skill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Rewrite templates/research-project/.claude/commands/kbu-build.md (Module C) from a stub-scaffolder into a conductor paralleling /ai-conductor. Remove ALL 'stubs only' / 'scientific logic belongs to the researcher' / NotImplementedError-scaffold language. New control flow: (1) Load subprojects/<name>/buildplan.json and run `kbu buildplan validate` as a re-check; refuse to build on failure. (2) For each notebook in depends_on topological order (independent notebooks in parallel), spawn the kbu-sub-build developer subagent via an explicit Agent(subagent_type=\"kbu-sub-build\", prompt=...) call, passing that notebook's buildplan entry. (3) If the subagent returns a 'BLOCKED:' signal, surface the decision and options to the researcher, get their answer, and re-dispatch the subagent with 'DECISION: <chosen option>' appended. (4) On a normal work-record, spawn kbu-sub-review via explicit Agent() to verify against the buildplan test cases; on a fail verdict, spawn kbu-sub-diagnose via explicit Agent(), then retry the developer subagent — BOUNDED to 2 retries, then escalate to the researcher. (5) Assemble each notebook as a thin orchestration layer calling the verified helpers; NEVER execute the full notebook. (6) Treat the b-review state as the FINAL gate: one closing kbu-sub-review pass confirming every buildplan helper has a passing test and every notebook is assembled; confirm a pass verdict file exists on disk before `kbu subproject advance` (closed-loop wiring). Add the hard anti-inline rule with the STOP tell-sign ('If you are building notebook code, reviewing, or diagnosing in the main thread, STOP — you skipped the subagent'). SEPARATELY, apply the same explicit-Agent()-delegation rule and STOP tell-sign to templates/research-project/.claude/commands/kbu-migrate.md (it already uses an explicit Agent() for literature-review; ensure any review/diagnose it implies is likewise an explicit subagent call, not inline).",
+          "success_criteria": "kbu-build.md loads buildplan.json, runs `kbu buildplan validate`, and fans each notebook out to kbu-sub-build via explicit Agent(subagent_type=\"kbu-sub-build\") calls in depends_on order; it escalates 'BLOCKED:' forks to the user and re-dispatches with DECISION; it spawns kbu-sub-review and kbu-sub-diagnose via explicit Agent() calls with a 2-retry bound; it assembles notebooks without executing the full notebook; it contains no 'stubs only' / NotImplementedError-scaffold language; it confirms a pass verdict file before `kbu subproject advance`; and kbu-migrate.md carries the same explicit-subagent-delegation rule and STOP tell-sign.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["buildplan-validate", "kbu-sub-build-subagent", "kbu-sub-review-subagent"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

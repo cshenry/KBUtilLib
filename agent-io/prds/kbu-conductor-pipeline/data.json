@@ -1,0 +1,18 @@
+{
+  "prd_name": "kbu-conductor-pipeline",
+  "title": "KBU Conductor Pipeline — make /kbu-plan and /kbu-build truly parallel /ai-design and /ai-conductor",
+  "repos": ["KBUtilLib"],
+  "primary_repo": "KBUtilLib",
+  "priority": "high",
+  "confront_rounds": 0,
+  "created_at": "2026-06-09",
+  "summary": "Rebuilds the research-repo plan/build pipeline to genuinely mirror ai-design/ai-conductor. kbu-plan gains a collaborative test-design grill and emits a validated machine-readable buildplan.json (taskplan.json analog) gated by a net-new `kbu buildplan validate` CLI. kbu-build is rewritten from a stub-scaffolder into a conductor: per-notebook fan-out to a net-new kbu-sub-build developer subagent that writes real helper code + fast tests (never executes the full notebook, too slow), reviewed by kbu-sub-review against buildplan test cases, with bounded diagnose-retry and human escalation only on genuine algorithmic forks. Science logic lives in util.py helpers; notebooks are thin orchestration; full real-data execution stays in the run state. Cross-cutting fix: all delegated steps invoked via explicit Agent(subagent_type=...) calls with closed-loop verdict-file wiring, fixing the orphaned kbu-sub-review/kbu-sub-diagnose subagents.",
+  "features": [
+    "kbu-plan: collaborative test-design grill defining exact per-helper assertions + test-data source",
+    "buildplan.json (machine, validated) alongside RESEARCH_PLAN.md (prose); manifest stays run-ledger",
+    "kbu buildplan validate: net-new hard gate (load_taskplan/TaskPlanError analog) + unit test",
+    "kbu-build rewritten as conductor: per-notebook dev/review fan-out, write real helpers + fast tests, assemble notebooks, never run full notebook",
+    "kbu-sub-build net-new developer subagent with BLOCKED escalation protocol for genuine algorithmic forks; bounded diagnose-retry (2)",
+    "Cross-cutting mandatory explicit Agent() subagent delegation + closed-loop verdict-file wiring (fixes orphaned kbu-sub-review/kbu-sub-diagnose)"
+  ]
+}

@@ -258,19 +258,17 @@ The file must follow this structure:
 
 The `<!-- kbu-review:verdict: pass|fail -->` comment **must be the first line** of the file.
 
-### Step 4: Advance or Reverse Stage
+### Step 4: Record the Verdict (do NOT advance the stage)
 
-**On pass:**
-```bash
-kbu subproject advance <name>
-```
+This subagent's job ends at writing the verdict file. **Do not call
+`kbu subproject advance`** here — stage advancement is owned by the
+orchestrating skill (`/kbu-plan`, `/kbu-build`, `/kbu-synthesize`), which
+confirms a `pass` verdict file exists on disk and then advances exactly once.
+The reviewer advancing would double-advance the state machine and skip a stage.
 
-**On fail:**
-```bash
-kbu subproject advance <name> --reverse
-```
-
-Then save a session record:
+Just confirm the `REVIEW_<file_stage>_<n>.md` file is written with the
+`<!-- kbu-review:verdict: pass|fail -->` marker as its first line, then save a
+session record:
 
 ```python
 from assistant.state import save_session
@@ -292,7 +290,8 @@ Present:
 - Key issues to address (on fail) or confirmation to proceed (on pass).
 
 **If PASS:**
-> "Review passed. The subproject has advanced to the next stage.
+> "Review passed and the verdict file is written. The orchestrating skill will
+> confirm the verdict file and advance the stage.
 > Run `kbu subproject status <name>` to see what's next."
 
 **If FAIL:**
@@ -316,6 +315,6 @@ Present:
 ## Integration
 
 - **Reads from**: `RESEARCH_PLAN.md` (p-review), `notebooks/` + `buildplan.json` (b-review), `REPORT.md` (s-review)
-- **Produces**: `subprojects/<name>/REVIEW_<file_stage>_<n>.md`
-- **Advances or reverses**: stage via `kbu subproject advance [--reverse]`
-- **Consumed by**: researcher iterates until pass; final pass unlocks next stage
+- **Produces**: `subprojects/<name>/REVIEW_<file_stage>_<n>.md` (verdict file only — does NOT advance the stage)
+- **Stage advancement**: owned by the orchestrating skill, which confirms the `pass` verdict file then calls `kbu subproject advance`
+- **Consumed by**: the orchestrating skill (closed-loop gate); researcher iterates until pass

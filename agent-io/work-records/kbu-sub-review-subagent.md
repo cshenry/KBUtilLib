@@ -7,7 +7,7 @@ kbu-sub-review-subagent
 kbu-conductor/kbu-sub-review-subagent
 
 ## commit_shas
-- (to be filled after commit)
+- 3e4289b07185a99bf52a83e1d6d972ce4fca495f
 
 ## summary
 Extended `templates/research-project/.claude/agents/kbu-sub-review.md` to add a

@@ -4,14 +4,23 @@ type: lean-fork
 source_repo: AIAssistant
 source_commit: b2d26fb6305b86bb56961e46dfd4e47e22c2ae00
 source_path: agent-io/skills/ai-design.md
-last_reviewed: 2026-06-08
+last_reviewed: 2026-06-09
 -->
 
 # /kbu-plan — Research Plan Design Session
 
 You help a researcher design a rigorous research plan for their KBUtilLib subproject.
-The flow is four steps: grill goals, run a literature review subagent, grill the
-detailed plan, then decompose into tasks. Each step gates the next — do not skip ahead.
+The flow is six steps: grill goals, run a literature review subagent, grill the
+detailed plan, grill the test design, emit the validated build contract, then
+decompose into tasks. Each step gates the next — do not skip ahead.
+
+---
+
+## MANDATORY SUBAGENT DELEGATION RULE
+
+Every delegated step in this skill runs through an explicit `Agent(subagent_type="kbu-sub-…", prompt=…)` call written at the exact point it executes. A prose instruction ("review the build"), a mental summary, or a /slash cross-reference that the model satisfies inline does NOT count.
+
+> **STOP tell-sign:** If you are reading papers, writing review prose, building notebook code, or diagnosing a failure in the main thread — STOP. You skipped the subagent. Go back and issue the `Agent(...)` call.
 
 ## Precondition
 
@@ -63,8 +72,7 @@ Derive a concise topic list from the confirmed goals. Select a depth tier:
 - **Standard review** (default) for subproject-based work
 - **Deep review** only when explicitly requested
 
-Invoke the literature review subagent, passing the subproject path, topic list, and
-depth tier:
+Invoke the literature review subagent via an explicit `Agent` call — never inline:
 
 ```
 Agent(subagent_type="kbu-sub-literature-review", prompt="Subproject: subprojects/<name>. Topics: <topic1>, <topic2>, .... Depth: <tier>. Review the listed topics and write per-topic synthesis files at subprojects/<name>/literature/<topic-slug>.md and a literature/index.md. Return a short summary of topics covered and total papers found.")
@@ -173,8 +181,146 @@ Write `subprojects/<name>/RESEARCH_PLAN.md` with this structure:
 
 Do not write production code or notebooks — that is `/kbu-build`'s job.
 
-Do NOT proceed to Step 4 until `RESEARCH_PLAN.md` is written and the user
+Do NOT proceed to Step 3b until `RESEARCH_PLAN.md` is written and the user
 has reviewed it.
+
+---
+
+## Step 3b — Test-Design Grill
+
+For each helper function listed in the `util.py` section of the confirmed plan,
+grill the test design **one question per round**, always recommending an answer.
+The goal is to pin down the exact test specification for every helper so the
+build contract is unambiguous.
+
+For each helper, work through:
+
+**Data source:**
+- Should the test use `sampled-real` data (a slice of an actual dataset already in
+  `data/`) or `synthetic` data (a small hand-crafted or randomly generated fixture)?
+- Recommend `sampled-real` when real data is available and small enough to include;
+  recommend `synthetic` when the function is pure computation or no real data is
+  available yet.
+
+**Data spec:**
+- If `sampled-real`: which file and how to sample it (e.g. `data/raw.tsv head -200`)?
+- If `synthetic`: exact dimensions and generation rule (e.g. `10×5 random float
+  matrix`, `["gene_a", "gene_b"] mapped to {"ko": True, "wt": False}`)?
+
+**Assertions:**
+- What specific, checkable properties must hold after the function runs?
+  (e.g. "result has shape (200, 3)", "no NaN values in column 'fitness'",
+  "total rows equals input rows minus header")
+- Pin down at least one assertion per helper; aim for two or three.
+
+Work through every helper in turn. Do not proceed to the next helper until the
+current one has a confirmed `data_source`, `data_spec`, and at least one
+non-empty assertion.
+
+After all helpers are resolved, present a consolidated summary:
+
+```
+Helper: <name>
+  data_source: sampled-real | synthetic
+  data_spec: <...>
+  assertions:
+    - <assertion 1>
+    - <assertion 2>
+```
+
+Ask: "Are these test specs correct, or should we revise any?"
+Revise until the user confirms.
+
+Do NOT proceed to Step 3c until all helper test specs are confirmed.
+
+---
+
+## Step 3c — Emit buildplan.json and Validate
+
+Compose `subprojects/<name>/buildplan.json` from the confirmed plan structure
+and the confirmed test specs. The file must conform to the KBU conductor schema:
+
+```json
+{
+  "subproject": "<name>",
+  "notebooks": [
+    {
+      "slug": "01_<slug>",
+      "purpose": "<one-sentence purpose>",
+      "depends_on": [],
+      "helpers": [
+        {
+          "name": "<function_name>",
+          "signature": "<function_name>(<params>) -> <return_type>",
+          "contract": "<what the function must do, in prose>",
+          "test": {
+            "data_source": "sampled-real | synthetic",
+            "data_spec": "<e.g. 'data/raw.tsv head -200' or '10x5 random matrix'>",
+            "assertions": ["<exact checkable assertion>", "..."]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Rules:
+- `depends_on` entries must reference notebook slugs that appear STRICTLY earlier
+  in the `notebooks` list (no forward references, no self-references).
+- Each helper's `test.assertions` must be non-empty.
+- `test.data_source` must be exactly `sampled-real` or `synthetic`.
+- `RESEARCH_PLAN.md` is the prose artifact; the manifest `[[notebooks]]` entries
+  are a lightweight run-ledger. Do NOT embed build spec in either — it belongs
+  exclusively in `buildplan.json`.
+
+Write the file, then validate it:
+
+```bash
+kbu buildplan validate subprojects/<name>/buildplan.json
+```
+
+If validation fails, show the errors to the user, fix each one, and re-run
+`kbu buildplan validate` until it exits 0 before advancing.
+
+Do NOT proceed to Step 3d until `kbu buildplan validate` exits 0.
+
+---
+
+## Step 3d — Plan Review (Subagent, Closed-Loop)
+
+With `RESEARCH_PLAN.md` written and `buildplan.json` validated, spawn the plan
+reviewer subagent via an explicit `Agent` call:
+
+```
+Agent(subagent_type="kbu-sub-review", prompt="<name>")
+```
+
+The subagent writes `subprojects/<name>/REVIEW_p-review_<n>.md` with a verdict
+comment on the first line:
+
+```
+<!-- kbu-review:verdict: pass|fail -->
+```
+
+After the subagent returns, confirm the verdict file exists and read its first
+line:
+
+```bash
+ls subprojects/<name>/REVIEW_p-review_*.md | sort -V | tail -1
+head -1 "$(ls subprojects/<name>/REVIEW_p-review_*.md | sort -V | tail -1)"
+```
+
+- If the first line is `<!-- kbu-review:verdict: pass -->` — proceed to Step 4.
+- If the first line is `<!-- kbu-review:verdict: fail -->` — present the critical
+  issues to the user, revise `RESEARCH_PLAN.md` accordingly, and re-spawn the
+  reviewer subagent. Repeat until a `pass` verdict file exists on disk.
+
+Do NOT call `kbu subproject advance` until a `pass` verdict file exists on disk.
+An inline assessment ("the plan looks good") is not a verdict file and does not
+satisfy this gate.
+
+Do NOT proceed to Step 4 until a `pass` verdict file exists.
 
 ---
 
@@ -234,7 +380,8 @@ manifest wins.
 
 ## Phase 5: Advance and Save Session
 
-After Step 4 is complete, advance the subproject state and save the session:
+After Step 4 is complete and a `pass` verdict file exists on disk
+(confirmed in Step 3d), advance the subproject state and save the session:
 
 ```bash
 kbu subproject advance <name>
@@ -242,9 +389,13 @@ kbu session save --skill kbu-plan --subproject <name> --summary "<one-sentence s
 ```
 
 Tell the user:
-- Files written: `subprojects/<name>/RESEARCH_PLAN.md`, `subprojects/<name>/TASKS.md`,
-  `subprojects/<name>/literature/` (per-topic files + `index.md`), manifest
-  `[[notebooks]]` entries in `kbu-subproject.toml`
+- Files written:
+  - `subprojects/<name>/RESEARCH_PLAN.md`
+  - `subprojects/<name>/buildplan.json` (validated)
+  - `subprojects/<name>/REVIEW_p-review_<n>.md` (pass verdict)
+  - `subprojects/<name>/TASKS.md`
+  - `subprojects/<name>/literature/` (per-topic files + `index.md`)
+  - manifest `[[notebooks]]` entries in `kbu-subproject.toml`
 - The new subproject state (should be `p-review`)
 - That they can now run `/kbu-build` to scaffold the notebooks
 
@@ -256,11 +407,19 @@ Tell the user:
 2. **No code.** You are a planner — write plan documents, not implementations.
 3. **Stay in the subproject.** All file writes go under `subprojects/<name>/`
    (or root shared dirs when relocating shared data — but no data moves in this skill).
-4. **Literature review runs in a subagent.** Never inline paper text into the
-   main thread — always delegate to `kbu-sub-literature-review` via the Agent tool.
-5. **Manifest is the source of truth for notebooks.** Write `TASKS.md` from the
+4. **Delegated steps run in explicit subagents.** Literature review and plan review
+   must be invoked through `Agent(subagent_type="kbu-sub-…", prompt=…)` calls.
+   Never inline either step — see the MANDATORY SUBAGENT DELEGATION RULE at the top.
+5. **Closed-loop review gate.** The subproject may not advance until a `pass`
+   verdict file (`REVIEW_p-review_<n>.md`) exists on disk. An inline assessment
+   does not satisfy this gate.
+6. **buildplan.json must validate.** `kbu buildplan validate` must exit 0 before
+   advancing. Never skip this check.
+7. **Build spec belongs in buildplan.json only.** Do not put helper contracts or
+   test specs in `RESEARCH_PLAN.md` or the manifest `[[notebooks]]` entries.
+8. **Manifest is the source of truth for notebooks.** Write `TASKS.md` from the
    manifest, not the other way around.
-6. **Cross-reference skills by slash-command name.** Use `/kbu-build`, `/kbu-run`,
+9. **Cross-reference skills by slash-command name.** Use `/kbu-build`, `/kbu-run`,
    `/kbu-diagnose` when pointing the user to next steps.
-7. **Be honest about gaps.** If the user cannot answer a grill question, mark it
-   `TBD` in the Notes section rather than guessing.
+10. **Be honest about gaps.** If the user cannot answer a grill question, mark it
+    `TBD` in the Notes section rather than guessing.

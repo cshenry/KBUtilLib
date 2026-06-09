@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from .bootstrap import bootstrap_command
+from .buildplan import buildplan_cmd
 from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
@@ -24,6 +25,7 @@ def main() -> None:
 
 
 main.add_command(bootstrap_command, name="bootstrap")
+main.add_command(buildplan_cmd, name="buildplan")
 main.add_command(doctor_command, name="doctor")
 main.add_command(init_command, name="init")
 main.add_command(init_notebook_cmd, name="init-notebook")

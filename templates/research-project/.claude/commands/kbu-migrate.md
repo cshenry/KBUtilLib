@@ -4,10 +4,25 @@ type: original
 source_repo: KBUtilLib
 source_commit: 2aba905a467882fd70d76b2fb3863b7a6263a144
 source_path: agent-io/prds/kbutillib-v2/fullprompt.md
-last_reviewed: 2026-06-08
+last_reviewed: 2026-06-09
 -->
 
 # /kbu-migrate — Migrate Adopted Subproject
+
+---
+
+## MANDATORY SUBAGENT DELEGATION RULE
+
+Every delegated step in this skill runs through an explicit
+`Agent(subagent_type="kbu-sub-…", prompt=…)` call written at the exact point
+it executes. A prose instruction ("review the plan"), a mental summary, or a
+/slash cross-reference that you satisfy inline does NOT count.
+
+> **STOP tell-sign:** If you are reading papers, writing review prose, building
+> notebook code, or diagnosing a failure in the main thread — STOP. You skipped
+> the subagent. Go back and issue the `Agent(...)` call.
+
+---
 
 You help a researcher migrate an existing notebook directory that was adopted via
 `kbu subproject adopt` into a fully structured KBUtilLib subproject. Unlike `/kbu-plan`
@@ -360,19 +375,24 @@ Tell the user:
 
 ## Rules
 
-1. **Infer before asking.** Read what is in `archive/` before asking the researcher
+1. **Delegated steps run in explicit subagents.** Literature review must be
+   invoked through `Agent(subagent_type="kbu-sub-literature-review", prompt=…)`.
+   Any future review or diagnose steps implied by this skill must likewise be
+   explicit `Agent(subagent_type="kbu-sub-…", prompt=…)` calls — never inline.
+   See the MANDATORY SUBAGENT DELEGATION RULE at the top.
+2. **Infer before asking.** Read what is in `archive/` before asking the researcher
    to explain it. Come with an informed proposal, not a blank grill.
-2. **No silent moves.** Every file relocation in Phase 4 and Phase 8 requires user
+3. **No silent moves.** Every file relocation in Phase 4 and Phase 8 requires user
    confirmation before execution.
-3. **Path rewrites are project-root relative (AC #52).** Never rewrite to a
+4. **Path rewrites are project-root relative (AC #52).** Never rewrite to a
    hard-coded absolute path or a naive relative `../` path. Always anchor to
    `PROJECT_ROOT = Path(__file__).resolve().parents[N]`.
-4. **TOML manifest is independent of NotebookSession SQLite (AC #53).** Do not
+5. **TOML manifest is independent of NotebookSession SQLite (AC #53).** Do not
    read or write the SQLite catalog. Do not auto-sync the two systems.
-5. **`archive/` is not deleted.** Surviving notebooks move to `notebooks/`; the
+6. **`archive/` is not deleted.** Surviving notebooks move to `notebooks/`; the
    rest of `archive/` stays for the researcher to review. Flag large binaries but
    do not add `.gitignore` entries without user approval.
-6. **One question per grill round.** Walk the grill tree one branch at a time;
+7. **One question per grill round.** Walk the grill tree one branch at a time;
    do not dump all questions at once.
-7. **Cross-reference by slash-command.** Use `/kbu-build`, `/kbu-run`, and
+8. **Cross-reference by slash-command.** Use `/kbu-build`, `/kbu-run`, and
    `/kbu-synthesize` when pointing to next steps.

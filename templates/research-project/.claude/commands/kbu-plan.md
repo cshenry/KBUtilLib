@@ -296,7 +296,7 @@ reviewer subagent via an explicit `Agent` call:
 Agent(subagent_type="kbu-sub-review", prompt="<name>")
 ```
 
-The subagent writes `subprojects/<name>/REVIEW_p-review_<n>.md` with a verdict
+The subagent writes `subprojects/<name>/REVIEW_plan_<n>.md` with a verdict
 comment on the first line:
 
 ```
@@ -307,8 +307,8 @@ After the subagent returns, confirm the verdict file exists and read its first
 line:
 
 ```bash
-ls subprojects/<name>/REVIEW_p-review_*.md | sort -V | tail -1
-head -1 "$(ls subprojects/<name>/REVIEW_p-review_*.md | sort -V | tail -1)"
+ls subprojects/<name>/REVIEW_plan_*.md | sort -V | tail -1
+head -1 "$(ls subprojects/<name>/REVIEW_plan_*.md | sort -V | tail -1)"
 ```
 
 - If the first line is `<!-- kbu-review:verdict: pass -->` — proceed to Step 4.
@@ -392,7 +392,7 @@ Tell the user:
 - Files written:
   - `subprojects/<name>/RESEARCH_PLAN.md`
   - `subprojects/<name>/buildplan.json` (validated)
-  - `subprojects/<name>/REVIEW_p-review_<n>.md` (pass verdict)
+  - `subprojects/<name>/REVIEW_plan_<n>.md` (pass verdict)
   - `subprojects/<name>/TASKS.md`
   - `subprojects/<name>/literature/` (per-topic files + `index.md`)
   - manifest `[[notebooks]]` entries in `kbu-subproject.toml`
@@ -411,7 +411,7 @@ Tell the user:
    must be invoked through `Agent(subagent_type="kbu-sub-…", prompt=…)` calls.
    Never inline either step — see the MANDATORY SUBAGENT DELEGATION RULE at the top.
 5. **Closed-loop review gate.** The subproject may not advance until a `pass`
-   verdict file (`REVIEW_p-review_<n>.md`) exists on disk. An inline assessment
+   verdict file (`REVIEW_plan_<n>.md`) exists on disk. An inline assessment
    does not satisfy this gate.
 6. **buildplan.json must validate.** `kbu buildplan validate` must exit 0 before
    advancing. Never skip this check.

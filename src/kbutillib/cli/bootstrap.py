@@ -86,6 +86,7 @@ _CLAUDE_AGENT_FILES = [
     ".claude/agents/kbu-sub-literature-review.md",
     ".claude/agents/kbu-sub-review.md",
     ".claude/agents/kbu-sub-diagnose.md",
+    ".claude/agents/kbu-sub-build.md",
 ]
 
 #: Full closed set of template entries bootstrap handles.

@@ -611,9 +611,9 @@ class TestAC8Check:
 
 class TestAC9TemplateSet:
     def test_bootstrap_handles_expected_entries(self, tmp_path: Path) -> None:
-        """Bootstrap handles 15 template entries: 7 commands + 3 agents + 5 other."""
+        """Bootstrap handles 16 template entries: 7 commands + 4 agents + 5 other."""
         from kbutillib.cli.bootstrap import _TEMPLATE_ENTRIES
-        assert len(_TEMPLATE_ENTRIES) == 15
+        assert len(_TEMPLATE_ENTRIES) == 16
         assert "README.md" in _TEMPLATE_ENTRIES
 
     def test_claude_commands_count(self) -> None:
@@ -621,9 +621,9 @@ class TestAC9TemplateSet:
         assert len(_CLAUDE_COMMAND_FILES) == 7
 
     def test_claude_agents_count(self) -> None:
-        """There are exactly 3 .claude/agents/ subagent files."""
+        """There are exactly 4 .claude/agents/ subagent files."""
         from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
-        assert len(_CLAUDE_AGENT_FILES) == 3
+        assert len(_CLAUDE_AGENT_FILES) == 4
 
     def test_expected_command_files(self) -> None:
         """Command files include new kbu-migrate.md and exclude the 3 moved to agents."""
@@ -639,12 +639,13 @@ class TestAC9TemplateSet:
         assert set(_CLAUDE_COMMAND_FILES) == expected
 
     def test_expected_agent_files(self) -> None:
-        """Agent files are the 3 converted subagents."""
+        """Agent files are the 3 converted subagents plus the net-new kbu-sub-build."""
         from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
         expected = {
             ".claude/agents/kbu-sub-literature-review.md",
             ".claude/agents/kbu-sub-review.md",
             ".claude/agents/kbu-sub-diagnose.md",
+            ".claude/agents/kbu-sub-build.md",
         }
         assert set(_CLAUDE_AGENT_FILES) == expected
 

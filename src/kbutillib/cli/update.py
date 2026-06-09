@@ -1,8 +1,8 @@
 """``kbu update`` — pull template updates from the parent KBUtilLib install.
 
-Diffs ``.claude/commands/`` and ``.vscode/`` between the recorded
-``last_pulled_commit`` and the current HEAD of the parent KBUtilLib source.
-Warns before clobbering locally-modified template files.
+Diffs ``.claude/commands/``, ``.claude/agents/`` and ``.vscode/`` between
+the recorded ``last_pulled_commit`` and the current HEAD of the parent
+KBUtilLib source.  Warns before clobbering locally-modified template files.
 
 v1 tier-2 command — must be run from inside a project created by
 ``kbu new-project`` or ``kbu bootstrap`` (i.e., a directory containing
@@ -64,10 +64,10 @@ class TemplateDiff:
 # Tracked template paths (relative to templates/research-project/)
 # ---------------------------------------------------------------------------
 
-_TRACKED_TEMPLATE_SUBDIRS = [".claude/commands", ".vscode"]
+_TRACKED_TEMPLATE_SUBDIRS = [".claude/commands", ".claude/agents", ".vscode"]
 
 #: Same paths relative to project root (after copy).
-_TRACKED_PROJECT_DIRS = [".claude/commands", ".vscode"]
+_TRACKED_PROJECT_DIRS = [".claude/commands", ".claude/agents", ".vscode"]
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,8 @@ def _build_diff(
 ) -> list[TemplateDiff]:
     """Build a TemplateDiff list comparing last_commit state vs current HEAD.
 
-    Walks ``templates/research-project/.claude/commands/`` and
+    Walks ``templates/research-project/.claude/commands/``,
+    ``templates/research-project/.claude/agents/`` and
     ``templates/research-project/.vscode/`` in the source repo.
 
     ``last_commit`` being None (first pull) treats all files as "added".

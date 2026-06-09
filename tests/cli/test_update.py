@@ -647,6 +647,46 @@ class TestFormatDiffSummary:
 
 
 # ---------------------------------------------------------------------------
+# .claude/agents/ is synced (regression: update previously ignored agents)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentsTracked:
+    def test_build_diff_includes_agents(self, tmp_path: Path) -> None:
+        """An agent template file is proposed as an addition.
+
+        Regression guard: ``kbu update`` historically only walked
+        ``.claude/commands`` and ``.vscode``, so new/changed subagents under
+        ``.claude/agents`` never propagated to bootstrapped repos.
+        """
+        source = _make_source_with_template(tmp_path)
+        agents_dir = source / "templates" / "research-project" / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "kbu-sub-build.md").write_text("# build agent\n", encoding="utf-8")
+
+        diff = _build_diff(
+            source,
+            last_commit=None,
+            current_commit="newsha",
+            file_hashes={},
+            add_untracked=False,
+        )
+        paths = {d.path for d in diff}
+        assert ".claude/agents/kbu-sub-build.md" in paths
+
+    def test_recompute_file_hashes_includes_agents(self, tmp_path: Path) -> None:
+        """``_recompute_file_hashes`` hashes files under ``.claude/agents``."""
+        project_root = tmp_path / "proj"
+        (project_root / ".claude" / "agents").mkdir(parents=True)
+        (project_root / ".claude" / "agents" / "kbu-sub-build.md").write_text(
+            "# build agent\n", encoding="utf-8"
+        )
+
+        hashes = _recompute_file_hashes(project_root)
+        assert ".claude/agents/kbu-sub-build.md" in hashes
+
+
+# ---------------------------------------------------------------------------
 # CLI registration
 # ---------------------------------------------------------------------------
 

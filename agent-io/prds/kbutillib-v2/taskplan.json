@@ -1,0 +1,114 @@
+{
+  "prd_name": "kbutillib-v2",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Phase 1 — Foundation modules (NEW pure files, parallel)",
+      "parallel_group": [
+        {
+          "task_id": "p1-layout-module",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the `kbutillib.layout` module per the PRD at agent-io/prds/kbutillib-v2/fullprompt.md (sections: Implementation Decisions → 'Layout module', 'Specifics folded from confront round 1 → Layout module', and Acceptance Criteria #1–#8). Create `src/kbutillib/layout.py` with: DEFAULT_SHARED_DIRS tuple; read_shared_dirs(project_root) using tomllib; subproject_subdirs(adopted) returning exact ordered lists; subproject_gitignore_lines() and root_gitignore_lines(shared_dirs) returning exact ordered patterns per AC #4 and #5. Add unit tests at `tests/test_layout.py` covering AC #1–#8 (each AC = at least one test case). No CLI changes, no other modules touched. Use tomllib (stdlib, Python 3.11+) — no external TOML libs.",
+          "success_criteria": "tests/test_layout.py exists, covers Acceptance Criteria #1 through #8, and passes via `pytest tests/test_layout.py -v`. The module `kbutillib.layout` is importable and exposes the documented public API. No other tests in the repo regress.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "p1-inventory-scanner",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the adoption inventory scanner per PRD agent-io/prds/kbutillib-v2/fullprompt.md (Implementation Decisions → 'Adoption inventory scanner', 'Specifics folded from confront round 1 → Adoption inventory scanner — precise rules', and Acceptance Criteria #32–#38). Create `src/kbutillib/cli/adopt/__init__.py` (empty package marker) and `src/kbutillib/cli/adopt/_inventory.py` with: an AdoptionInventory dataclass with fields notebooks, subdirs, oversize_files, path_refs (types per PRD); scan_archive(archive_dir: Path) -> AdoptionInventory; write_adoption_notes(subproject_dir: Path, archive_dir: Path, source_path: Path) -> None. Use nbformat to read notebook markdown cells. Path-ref regex set per PRD §'Adoption inventory scanner'. Add unit tests at `tests/test_adopt_inventory.py` covering AC #32–#38 with a fixture directory tree (use tmp_path). NO modifications to subproject.py or any other CLI module — this task only ADDS the new module + tests.",
+          "success_criteria": "tests/test_adopt_inventory.py exists, covers Acceptance Criteria #32 through #38 with fixture-based assertions, and passes via `pytest tests/test_adopt_inventory.py -v`. The module `kbutillib.cli.adopt._inventory` is importable. No other tests in the repo regress.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Phase 2 — Subproject CLI: state machine + scaffold refactor + adopt command",
+      "parallel_group": [
+        {
+          "task_id": "p2-subproject-cli",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Refactor `src/kbutillib/cli/subproject.py` and related files per PRD agent-io/prds/kbutillib-v2/fullprompt.md (sections: 'State machine update', 'Subproject scaffolding update', '`kbu subproject adopt` CLI command', and Acceptance Criteria #9–#31). Required changes: (1) Add 'migrate' to _STATES immediately after 'plan'; add `_FORWARD['migrate'] = 'p-review'`; add `_NEXT_ACTION['migrate'] = 'Migrate'`; extend `_check_forward_preconditions` to handle 'migrate' branch (same RESEARCH_PLAN.md check as 'plan'). No _REVERSE entry for migrate. (2) Refactor `_scaffold_subproject` to: use `kbutillib.layout.subproject_subdirs(adopted=...)` for the dir list; render `notebooks/util.py` from existing `src/kbutillib/cli/templates/util.py.tmpl` via Jinja {{ project_name }} substitution (REPLACE the inline write_text stub at lines ~178-182); DROP references.md scaffolding entirely; add an `adopted: bool = False` parameter. (3) Add a NEW `adopt` subcommand to `subproject_cmd` group implementing all 6 pre-flight refusal rules (cwd bootstrapped check; path exists+is-directory; destination doesn't exist; path doesn't overlap destination; cross-repo git guard via `git -C <path> rev-parse --show-toplevel` comparison; warn-only on zero .ipynb files); shutil.move(path, archive_dir); call `_scaffold_subproject(adopted=True)`; write kbu-subproject.toml with status='migrate' and empty notebooks=[]; call `kbutillib.cli.adopt._inventory.write_adoption_notes(...)`; append `kbutillib.layout.subproject_gitignore_lines()` to root .gitignore (idempotent, using existing append-marker pattern if present). (4) Extend existing tests in `tests/test_subproject.py` (or add `tests/test_subproject_adopt.py`) to cover Acceptance Criteria #9–#31. Use Click's CliRunner. Use tmp_path fixtures with init'd git repos for the cross-repo-guard tests. Update create_cmd to call _scaffold_subproject(adopted=False) explicitly. Existing subproject tests must continue to pass.",
+          "success_criteria": "All Acceptance Criteria #9–#31 from agent-io/prds/kbutillib-v2/fullprompt.md are testable and pass. The `kbu subproject adopt` command works end-to-end (verifiable via CliRunner). The state machine handles 'migrate' state. All pre-existing tests in tests/ continue to pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p1-layout-module", "p1-inventory-scanner"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Phase 3 — Bootstrap + new-project + templates + subagent renames",
+      "parallel_group": [
+        {
+          "task_id": "p3-bootstrap-templates-subagents",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Update bootstrap, new-project, templates, and subagent file locations per PRD agent-io/prds/kbutillib-v2/fullprompt.md (sections: 'Templates', 'Skills / agents source layout', '`kbu migrate` command' is OUT OF SCOPE for this task — see p4-kbu-migrate-cli; and Acceptance Criteria #42–#47). Required changes in `templates/research-project/`: (a) Add empty `data/.gitkeep`, `models/.gitkeep`, `genomes/.gitkeep` at template root. (b) Update `kbu-project.toml.template` to append `[layout]\\nshared_dirs = [\"data\", \"models\", \"genomes\"]\\n` block. (c) Update `.gitignore` template to add patterns from `kbutillib.layout.root_gitignore_lines(['data','models','genomes'])` (use the constants, not literal strings). (d) Create new dir `templates/research-project/.claude/agents/`. (e) MOVE files (not copy): `.claude/commands/kbu-literature-review.md` → `.claude/agents/kbu-sub-literature-review.md`; `.claude/commands/kbu-review.md` → `.claude/agents/kbu-sub-review.md`; `.claude/commands/kbu-diagnose.md` → `.claude/agents/kbu-sub-diagnose.md`. (f) For each moved file: update `name:` frontmatter to new kbu-sub-* slug; add `type: agent` to frontmatter; update internal cross-references where the file references its own name; update output paths to `subprojects/<name>/literature/<topic-slug>.md` + `literature/index.md` (for the lit-review subagent) per PRD §'Skills / agents source layout' and §'/kbu-plan 4-step flow'. Required changes in `src/kbutillib/cli/bootstrap.py`: update the hardcoded `.claude/commands/kbu-*.md` file list (currently 9 files at lines ~72-80) — remove kbu-literature-review.md, kbu-review.md, kbu-diagnose.md from the commands list, and add kbu-migrate.md (will be written by p4-kbu-migrate-skill — but bootstrap should be ready for it); add a parallel list for `.claude/agents/kbu-sub-*.md` (3 files); ensure `.claude/agents/` directory creation happens during bootstrap; update conflict-handling logic to apply uniformly across both dirs. Required changes in `src/kbutillib/cli/new_project.py`: mirror the bootstrap changes for new-project flow if it has any hardcoded skill file references. Update or add tests at tests/test_bootstrap.py and tests/test_new_project.py to verify Acceptance Criteria #42, #43, #44, #45, #47. The PRD's #44-47 (subagent sources have type: agent frontmatter, live in .claude/agents/, etc.) MUST be verifiable post-bootstrap on a tmp fixture project.",
+          "success_criteria": "After running `kbu bootstrap` and `kbu new-project` on tmp fixture projects, the produced project has: root data/, models/, genomes/ dirs with .gitkeep; kbu-project.toml with [layout.shared_dirs]; .claude/agents/ dir with the 3 kbu-sub-* files (each having type: agent in frontmatter); .claude/commands/ without the 3 old files (kbu-literature-review, kbu-review, kbu-diagnose). Acceptance Criteria #42-#47 are testable and pass. Existing bootstrap and new-project tests continue to pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p1-layout-module"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Phase 4 — kbu migrate CLI + skill sources (parallel)",
+      "parallel_group": [
+        {
+          "task_id": "p4-kbu-migrate-cli",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the `kbu migrate` repo-level layout migration command per PRD agent-io/prds/kbutillib-v2/fullprompt.md (section '`kbu migrate` command (NEW, repo-level)' and Acceptance Criteria #39–#41). Create `src/kbutillib/cli/migrate.py` with a `migrate_cmd` Click command. Register it in the main CLI entry point (likely `src/kbutillib/cli/__init__.py` or similar — check where other commands are registered). Behavior per PRD: (1) Verify cwd is bootstrapped (use `_find_project_root` pattern). (2) If `[layout.shared_dirs]` absent in kbu-project.toml, add it with kbutillib.layout.DEFAULT_SHARED_DIRS via TOML rewrite. (3) For each shared dir not present at root, create + .gitkeep. (4) Walk subprojects/<name>/. For each subproject: prompt to relocate data/ contents (4 options per PRD); prompt to relocate user_data/; prompt for references.md (convert to literature/index.md, keep, or delete); add .cache/ and literature/ dirs if missing. (5) Append per-subproject gitignore lines per kbutillib.layout.subproject_gitignore_lines() to root .gitignore. Interactive by default (Click prompts). Add tests at tests/test_migrate.py with CliRunner and mocked stdin covering #39-#41 — light integration test, not exhaustive. NO conflicts with p2-subproject-cli or p3 changes — this is a NEW file plus a registration line.",
+          "success_criteria": "kbu migrate command registered and invocable. Acceptance Criteria #39, #40, #41 pass via tests/test_migrate.py with mocked stdin. Existing tests continue to pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p1-layout-module", "p2-subproject-cli"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "p4-kbu-plan-rewrite",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Rewrite `templates/research-project/.claude/commands/kbu-plan.md` to the new 4-step grilled flow per PRD agent-io/prds/kbutillib-v2/fullprompt.md (sections '`/kbu-plan` 4-step flow' and User Story #1-#4, #16; Acceptance Criteria #48, #50). The rewritten skill: (1) Step 1 — state goals + grill goals (one question per round, recommend an answer). (2) Step 2 — invoke kbu-sub-literature-review subagent via `Agent(subagent_type=\"kbu-sub-literature-review\", prompt=...)` passing topic list + depth tier; subagent writes literature/<topic-slug>.md + literature/index.md. (3) Step 3 — grill the detailed plan structure (hypothesis → success criteria → data → methods → notebooks → outputs → out-of-scope), then write RESEARCH_PLAN.md. (4) Step 4 — populate manifest [[notebooks]] entries + render TASKS.md as flat numbered list. Phase 5 (advance + session save) uses existing `kbu subproject advance` + session save pattern. Preserve the existing kbu skill provenance frontmatter block at top (type: lean-fork, source_repo, source_commit, source_path, last_reviewed) — update last_reviewed to today's date. Do NOT add any code/CLI changes — this is a pure markdown rewrite. Verify the file passes a quick markdown smoke (parseable frontmatter, no broken refs).",
+          "success_criteria": "templates/research-project/.claude/commands/kbu-plan.md is rewritten to the 4-step flow specified by PRD; references kbu-sub-literature-review via Agent tool invocation; writes the four documented artifacts (RESEARCH_PLAN.md, literature/, manifest notebooks list, TASKS.md). Acceptance Criteria #48 and #50 (kbu-plan invokes subagent via Agent tool) are met by inspection.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p3-bootstrap-templates-subagents"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "p4-kbu-migrate-skill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Create `templates/research-project/.claude/commands/kbu-migrate.md` per PRD agent-io/prds/kbutillib-v2/fullprompt.md (section '`/kbu-migrate` skill (NEW)', User Stories #11-#14, Acceptance Criteria #49, #50, #52, #53). The new skill: precondition is subproject state == 'migrate'; runs 8 phases per PRD §'/kbu-migrate skill (NEW)' covering: (1) read existing artifacts from archive/ and .adoption-notes.md; (2) infer-then-confirm hypothesis from notebook content; (3) literature review (subagent invocation, topic list seeded from notebook subject matter); (4) path/data relocation pass — walk .adoption-notes.md, propose destinations for each non-notebook item, rewrite in-notebook relative paths per PRD §'Path-rewrite policy in /kbu-migrate' (project-root anchor); (5) util.py audit; (6) NotebookSession migration scan; (7) detailed plan + grill plan; (8) decompose to tasks + move surviving notebooks from archive/ to notebooks/ + populate manifest notebooks list + render TASKS.md. Same artifact contract as /kbu-plan (RESEARCH_PLAN.md, literature/, TASKS.md, populated manifest). Advance migrate → p-review at the end. Frontmatter: include the kbu skill provenance block (type: original, source_repo: KBUtilLib, source_commit: <head>, source_path: agent-io/prds/kbutillib-v2/fullprompt.md, last_reviewed: today). Pure markdown — no code changes. Should reference Acceptance Criterion #52 (project-root relative path rewrites) explicitly in Step 4 instructions.",
+          "success_criteria": "templates/research-project/.claude/commands/kbu-migrate.md exists and contains the 8-phase migration flow per PRD. References kbu-sub-literature-review via Agent tool invocation. Documents project-root-relative path rewriting per AC #52. Bootstrap (p3) was already updated to install this file into new projects.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p2-subproject-cli", "p3-bootstrap-templates-subagents"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "p4-kbu-build-adoption",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Modify `templates/research-project/.claude/commands/kbu-build.md` to add the adopted-branch (notebooks-already-present) behavior per PRD agent-io/prds/kbutillib-v2/fullprompt.md (section '`/kbu-build` adopted-branch — warn-only by default', User Story #14, Acceptance Criterion #51). Add a Phase early in the skill (after loading subproject state) that detects whether `notebooks/*.ipynb` already exist. If yes: enter verify-and-extend mode (warn-only): for each manifest [[notebooks]] entry without a matching file, emit warning `Manifest lists missing notebook: <slug>`; for each .ipynb in notebooks/ not in manifest, emit warning `Notebook present but not in manifest: <filename>`; do NOT auto-create. If no .ipynb present: the existing scaffold-from-plan behavior runs as today. Preserve the existing skill provenance frontmatter block; update last_reviewed to today's date. Pure markdown — no code changes.",
+          "success_criteria": "templates/research-project/.claude/commands/kbu-build.md has the adopted-branch behavior documented with the exact warning strings from AC #51. The original scaffold-from-plan branch is preserved for virgin subprojects.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["p2-subproject-cli"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

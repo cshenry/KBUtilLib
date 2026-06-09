@@ -1,0 +1,17 @@
+{
+  "prd_name": "kbutillib-v2",
+  "title": "KBUtilLib 2.0 — research-project layout, plan workflow, and adoption",
+  "repos": ["KBUtilLib"],
+  "primary_repo": "KBUtilLib",
+  "priority": "high",
+  "confront_rounds": 1,
+  "created_at": "2026-06-08",
+  "summary": "Restructures KBUtilLib research-project layout (root data/models/genomes + leaner subproject tree), redesigns /kbu-plan as a 4-step grilled flow with literature-review subagent, adds kbu subproject adopt + /kbu-migrate for onboarding existing notebook dirs, and introduces a kbu-*/kbu-sub-* naming policy with command/agent kind routing in claude-skills sync.",
+  "features": [
+    "kbu-plan 4-step grilled flow (goals, literature subagent, detailed plan, task decomposition)",
+    "Root data/, models/, genomes/ shared dirs (extensible via [layout.shared_dirs])",
+    "Subproject layout: drop data/+user_data/, add literature/+.cache/ (hidden)",
+    "kbu subproject adopt + archive-first move + /kbu-migrate skill",
+    "Naming policy: kbu-* commands + kbu-sub-* subagents (.claude/agents/) via kind: frontmatter"
+  ]
+}

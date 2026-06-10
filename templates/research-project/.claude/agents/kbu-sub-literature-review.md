@@ -1,3 +1,9 @@
+---
+name: kbu-sub-literature-review
+description: Search and review biological literature using MCP tools (PubMed, arXiv, bioRxiv, Google Scholar). Use when the researcher wants to find papers, review existing research, check what's known about an organism or pathway, or support a hypothesis with citations.
+tools: Bash, Read, Write, WebSearch, Agent, ToolSearch
+---
+
 <!--
 kbu skill provenance
 type: harvested
@@ -6,13 +12,6 @@ source_commit: 940c3b0ee7bbf63bc576bd6e8c25210ad692df8e
 source_path: .claude/skills/literature-review/SKILL.md
 last_reviewed: 2026-06-05
 -->
-
----
-name: kbu-sub-literature-review
-type: agent
-description: Search and review biological literature using MCP tools (PubMed, arXiv, bioRxiv, Google Scholar). Use when the researcher wants to find papers, review existing research, check what's known about an organism or pathway, or support a hypothesis with citations.
-allowed-tools: Bash, Read, Write, WebSearch, Agent, ToolSearch
----
 
 # kbu-sub-literature-review
 

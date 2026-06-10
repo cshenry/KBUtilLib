@@ -1,16 +1,15 @@
+---
+name: kbu-sub-build
+description: Implement helper functions for one notebook's buildplan.json entry. Writes implementations into subprojects/<name>/notebooks/util.py and fast pytest tests into subprojects/<name>/notebooks/test_util.py, runs the tests, and iterates until green. Returns a structured work-record or a BLOCKED signal for genuine algorithmic/scientific forks.
+tools: Bash, Read, Write, Edit
+---
+
 <!--
 kbu skill provenance
 type: net-new
 source_repo: KBUtilLib
 last_reviewed: 2026-06-09
 -->
-
----
-name: kbu-sub-build
-type: agent
-description: Implement helper functions for one notebook's buildplan.json entry. Writes implementations into subprojects/<name>/notebooks/util.py and fast pytest tests into subprojects/<name>/notebooks/test_util.py, runs the tests, and iterates until green. Returns a structured work-record or a BLOCKED signal for genuine algorithmic/scientific forks.
-allowed-tools: Bash, Read, Write, Edit
----
 
 # kbu-sub-build
 

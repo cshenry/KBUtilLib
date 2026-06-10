@@ -180,11 +180,51 @@ Create or update `subprojects/<name>/REPORT.md`:
 Add any new papers found during synthesis to `subprojects/<name>/references.md`.
 If the file doesn't exist, create it following the format from `/kbu-literature-review`.
 
-### Step 8: Advance Stage and Save Session
+### Step 8: Synthesis Review (Subagent, Closed-Loop)
+
+Spawn the review subagent **explicitly** — never review the report inline:
+
+```
+Agent(subagent_type="kbu-sub-review", prompt="<name>")
+```
+
+The subagent reads `REPORT.md`, assesses it, and writes
+`subprojects/<name>/REVIEW_synthesis_<n>.md` with a verdict marker on its first line:
+
+```
+<!-- kbu-review:verdict: pass|fail -->
+```
+
+After the subagent returns, confirm the verdict file on disk:
 
 ```bash
-kbu subproject advance <name>
+ls subprojects/<name>/REVIEW_synthesis_*.md | sort -V | tail -1
+head -1 "$(ls subprojects/<name>/REVIEW_synthesis_*.md | sort -V | tail -1)"
 ```
+
+- If `<!-- kbu-review:verdict: fail -->`: present the critical issues, revise
+  `REPORT.md`, then re-spawn the reviewer. Repeat until a `pass` verdict file exists.
+- If `<!-- kbu-review:verdict: pass -->`: proceed to Step 9.
+
+Do NOT advance until a `pass` verdict file exists on disk. An inline assessment
+("the report looks good") does not satisfy this gate.
+
+### Step 9: Advance Stage and Save Session
+
+Only after a `pass` `REVIEW_synthesis_*.md` exists, advance the subproject
+**through its review stage to `complete`**. Both gated transitions are satisfied
+— `REPORT.md` exists (Step 6) and a passing `REVIEW_synthesis_*.md` exists (Step 8):
+- `synthesize → s-review` (gate: `REPORT.md` exists)
+- `s-review → complete` (gate: a passing `REVIEW_synthesis_*.md` exists)
+
+```bash
+kbu subproject advance <name>   # synthesize → s-review
+kbu subproject advance <name>   # s-review → complete
+kbu subproject status <name>    # confirm: state must now be "complete"
+```
+
+If `kbu subproject status` does not report `complete` after the two advances,
+STOP and report the actual state — do not claim synthesis is complete.
 
 Then save a session record:
 
@@ -194,18 +234,17 @@ save_session({
     'project_id': '<subproject_name>',
     'command': 'kbu-synthesize',
     'topics_discussed': ['synthesis', 'literature comparison'],
-    'decisions_made': ['findings drafted', 'REPORT.md written'],
-    'next_steps': ['run /kbu-review to get feedback on the report'],
-    'summary': 'Synthesized analysis outputs into REPORT.md with literature context',
+    'decisions_made': ['findings drafted', 'REPORT.md written', 'synthesis review passed'],
+    'next_steps': ['subproject complete'],
+    'summary': 'Synthesized analysis outputs into REPORT.md with literature context; synthesis review passed',
 })
 ```
 
-### Step 9: Suggest Next Steps
+### Step 10: Suggest Next Steps
 
-> "Findings drafted in `subprojects/<name>/REPORT.md`. Next steps:
-> 1. Review the Key Findings and Interpretation sections.
-> 2. Run `/kbu-review` to get feedback on the report.
-> 3. Iterate on the report until the review passes, then the subproject advances automatically."
+> "Findings synthesized in `subprojects/<name>/REPORT.md` and the synthesis
+> review passed — the subproject is now `complete`. Review the Key Findings and
+> Interpretation sections, and cite the report in downstream work."
 
 ## Integration
 

@@ -1,3 +1,9 @@
+---
+name: kbu-sub-diagnose
+description: Debug a subproject problem. Use when a notebook cell errors, produces wrong output, runs unexpectedly slowly, or a util.py function behaves incorrectly.
+tools: Bash, Read, Write
+---
+
 <!--
 kbu skill provenance
 type: lean-fork
@@ -6,13 +12,6 @@ source_commit: 7ec5c53b0464eef924d35c92bea44ebc6cba1753
 source_path: agent-io/skills/diagnose.md
 last_reviewed: 2026-06-05
 -->
-
----
-name: kbu-sub-diagnose
-type: agent
-description: Debug a subproject problem. Use when a notebook cell errors, produces wrong output, runs unexpectedly slowly, or a util.py function behaves incorrectly.
-allowed-tools: Bash, Read, Write
----
 
 # kbu-sub-diagnose — Debug a Subproject Problem
 

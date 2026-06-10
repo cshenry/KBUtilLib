@@ -381,12 +381,25 @@ manifest wins.
 ## Phase 5: Advance and Save Session
 
 After Step 4 is complete and a `pass` verdict file exists on disk
-(confirmed in Step 3d), advance the subproject state and save the session:
+(confirmed in Step 3d), advance the subproject **through its review stage to
+`build`**, then save the session.
+
+The plan review already ran at the `plan` state and wrote a `pass`
+`REVIEW_plan_<n>.md`, so both gated transitions are satisfied and `/kbu-plan`
+leaves the subproject ready for `/kbu-build` (whose precondition is state
+`build`):
+- `plan → p-review` (gate: `RESEARCH_PLAN.md` exists)
+- `p-review → build` (gate: a passing `REVIEW_plan_*.md` exists)
 
 ```bash
-kbu subproject advance <name>
+kbu subproject advance <name>   # plan → p-review
+kbu subproject advance <name>   # p-review → build
+kbu subproject status <name>    # confirm: state must now be "build"
 kbu session save --skill kbu-plan --subproject <name> --summary "<one-sentence summary of what was designed>"
 ```
+
+If `kbu subproject status` does not report `build` after the two advances,
+STOP and report the actual state — do not claim the plan stage is complete.
 
 Tell the user:
 - Files written:
@@ -396,8 +409,8 @@ Tell the user:
   - `subprojects/<name>/TASKS.md`
   - `subprojects/<name>/literature/` (per-topic files + `index.md`)
   - manifest `[[notebooks]]` entries in `kbu-subproject.toml`
-- The new subproject state (should be `p-review`)
-- That they can now run `/kbu-build` to scaffold the notebooks
+- The new subproject state (should be `build`)
+- That they can now run `/kbu-build` to build the notebooks
 
 ---
 

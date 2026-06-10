@@ -305,17 +305,27 @@ not satisfy this gate.
 ## Phase 6: Advance and Save Session
 
 Only after `grep` confirms a `REVIEW_build_*.md` file contains
-`<!-- kbu-review:verdict: pass -->`:
+`<!-- kbu-review:verdict: pass -->`, advance the subproject **through its
+review stage to `run`** (so it is ready for `/kbu-run`, whose precondition is
+state `run`). Both gated transitions are satisfied — the assembled notebooks +
+`util.py` exist (Phase 4) and a passing `REVIEW_build_*.md` exists (Phase 5):
+- `build → b-review` (gate: assembled notebooks + `util.py` exist)
+- `b-review → run` (gate: a passing `REVIEW_build_*.md` exists)
 
 ```bash
-kbu subproject advance <name>
+kbu subproject advance <name>   # build → b-review
+kbu subproject advance <name>   # b-review → run
+kbu subproject status <name>    # confirm: state must now be "run"
 kbu session save --skill kbu-build --subproject <name> --summary "<one-sentence summary: N notebooks assembled, all helpers tested>"
 ```
+
+If `kbu subproject status` does not report `run` after the two advances, STOP
+and report the actual state — do not claim the build stage is complete.
 
 Tell the user:
 - Files written: list each `<slug>.ipynb`, `util.py`, `test_util.py`, and all
   `REVIEW_build_<n>.md` files
-- The new subproject state (should be `b-review`)
+- The new subproject state (should be `run`)
 - That they can now open notebooks in JupyterLab and supply the TODO arguments,
   then run `/kbu-run` for guided execution
 

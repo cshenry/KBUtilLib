@@ -75,7 +75,7 @@ def _make_stub_template(kbu_root: Path, project_name: str = "PROJECT") -> None:
     for agent_rel in _CLAUDE_AGENT_FILES:
         fname = Path(agent_rel).name
         (tmpl / agent_rel).write_text(
-            f"---\nname: {fname.replace('.md', '')}\ntype: agent\n---\n# {fname}\n",
+            f"---\nname: {fname.replace('.md', '')}\ntools: Bash, Read, Write\n---\n# {fname}\n",
             encoding="utf-8",
         )
     (tmpl / ".vscode" / "extensions.json").write_text(
@@ -2533,7 +2533,7 @@ class TestAC38CheckFirstSubproject:
 # ---------------------------------------------------------------------------
 # AC 42: bootstrap scaffolds data/, models/, genomes/ with .gitkeep
 # AC 43: kbu-project.toml has [layout.shared_dirs]
-# AC 44: subagent sources have type: agent frontmatter
+# AC 44: subagent sources have Claude Code-registrable frontmatter (line-1 YAML, name + tools)
 # AC 45: subagent sources live at .claude/agents/<name>.md
 # AC 47: old slash-command sources removed; kbu-sub-* subagents created
 # ---------------------------------------------------------------------------
@@ -2587,8 +2587,13 @@ class TestAC42_47SharedDirsAndAgents:
         assert "layout" in cfg, "Missing [layout] section in kbu-project.toml"
         assert cfg["layout"]["shared_dirs"] == ["data", "models", "genomes"]
 
-    def test_ac44_subagent_files_have_type_agent(self, setup: Any) -> None:
-        """AC #44: each .claude/agents/ file has type: agent in frontmatter."""
+    def test_ac44_subagent_files_have_registrable_frontmatter(self, setup: Any) -> None:
+        """AC #44: each .claude/agents/ file has Claude Code-registrable frontmatter.
+
+        The YAML frontmatter must start at line 1 (no leading comment) and declare
+        `name:` and `tools:` (not the legacy `allowed-tools:`), or the harness will
+        not register the file as an invocable subagent type.
+        """
         tmp_path, kbu_root = setup
         result = self._run_bootstrap(tmp_path, kbu_root)
         assert result.exit_code == 0
@@ -2596,7 +2601,15 @@ class TestAC42_47SharedDirsAndAgents:
             agent_path = tmp_path / agent_rel
             assert agent_path.exists(), f"{agent_rel} not copied to project"
             content = agent_path.read_text(encoding="utf-8")
-            assert "type: agent" in content, f"{agent_rel} missing 'type: agent' in frontmatter"
+            assert content.startswith("---\n"), (
+                f"{agent_rel} frontmatter must start at line 1 (got: {content[:40]!r})"
+            )
+            frontmatter = content.split("---", 2)[1]
+            assert "name:" in frontmatter, f"{agent_rel} frontmatter missing 'name:'"
+            assert "tools:" in frontmatter, f"{agent_rel} frontmatter missing 'tools:'"
+            assert "allowed-tools:" not in frontmatter, (
+                f"{agent_rel} uses legacy 'allowed-tools:' (Claude Code expects 'tools:')"
+            )
 
     def test_ac45_subagent_files_in_agents_dir(self, setup: Any) -> None:
         """AC #45: subagent sources live at .claude/agents/<name>.md."""

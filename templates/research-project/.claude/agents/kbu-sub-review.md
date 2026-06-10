@@ -1,3 +1,9 @@
+---
+name: kbu-sub-review
+description: Run an AI review of a subproject plan or report. Use when the researcher wants structured feedback during development. Produces a numbered REVIEW_<stage>_<n>.md file with a verdict comment.
+tools: Bash, Read, Write
+---
+
 <!--
 kbu skill provenance
 type: harvested
@@ -6,13 +12,6 @@ source_commit: 940c3b0ee7bbf63bc576bd6e8c25210ad692df8e
 source_path: .claude/skills/berdl-review/SKILL.md
 last_reviewed: 2026-06-05
 -->
-
----
-name: kbu-sub-review
-type: agent
-description: Run an AI review of a subproject plan or report. Use when the researcher wants structured feedback during development. Produces a numbered REVIEW_<stage>_<n>.md file with a verdict comment.
-allowed-tools: Bash, Read, Write
----
 
 # kbu-sub-review
 
@@ -46,17 +45,22 @@ Check the current stage:
 kbu subproject status <name>
 ```
 
-The review stage is auto-detected from the output:
+The review type is auto-detected from the output. The orchestrating skill
+(`/kbu-plan`, `/kbu-build`, `/kbu-synthesize`) runs this review **while the
+subproject is still at the action state** — it owns advancement and only
+advances *after* a `pass` verdict file exists on disk (closed-loop wiring). So
+both the action state and its paired review state map to the same review:
 
 | Current stage | Review type | Source document | Output file |
 |---|---|---|---|
-| `p-review` | Plan review | `RESEARCH_PLAN.md` | `REVIEW_plan_<n>.md` |
-| `b-review` | Build review | Scaffolded notebooks + `buildplan.json` | `REVIEW_build_<n>.md` |
-| `s-review` | Synthesis review | `REPORT.md` | `REVIEW_synthesis_<n>.md` |
+| `plan`, `migrate`, or `p-review` | Plan review | `RESEARCH_PLAN.md` | `REVIEW_plan_<n>.md` |
+| `build` or `b-review` | Build review | notebooks + `buildplan.json` | `REVIEW_build_<n>.md` |
+| `synthesize` or `s-review` | Synthesis review | `REPORT.md` | `REVIEW_synthesis_<n>.md` |
 
-If the stage is not one of the three above, stop and tell the researcher:
+If the stage is not one of those above (e.g. `run`, `complete`), stop and tell
+the researcher:
 
-> "This subproject is not at a review stage. Check `kbu subproject status <name>`
+> "This subproject is not at a reviewable stage. Check `kbu subproject status <name>`
 > to see what step is next."
 
 ### Step 2: Read the Source Document
@@ -83,7 +87,7 @@ Depending on the detected stage:
 
 ### Step 2b: Build Review Against buildplan.json
 
-This section applies only when the stage is `b-review`.
+This section applies for a build review — when the stage is `build` or `b-review`.
 
 #### 2b-1: Load the buildplan
 
@@ -197,13 +201,14 @@ ls subprojects/<name>/REVIEW_synthesis_*.md 2>/dev/null | sort -V | tail -1
 If none exist for this stage, start at 1.
 
 Write `subprojects/<name>/REVIEW_<file_stage>_<n>.md` where `<file_stage>` is
-`plan`, `build`, or `synthesis` (mapped from the current stage):
+`plan`, `build`, or `synthesis` (mapped from the current stage — both the
+action state and its paired review state map to the same file-stage key):
 
 | Current stage | File stage key |
 |---|---|
-| `p-review` | `plan` |
-| `b-review` | `build` |
-| `s-review` | `synthesis` |
+| `plan`, `migrate`, or `p-review` | `plan` |
+| `build` or `b-review` | `build` |
+| `synthesize` or `s-review` | `synthesis` |
 
 The file must follow this structure:
 

@@ -210,7 +210,7 @@ class TestAppendSessionRef:
                 "report": False,
                 "reviews": {"plan": [], "build": [], "synthesis": []},
             },
-            "notebooks": [{"path": "01.ipynb", "last_run_at": now, "modified_since_run": False}],
+            "notebooks": [{"slug": "01", "last_run_at": now, "modified_since_run": False}],
             "session_refs": [],
         }
         write_subproject_manifest(tmp_path, name, data)
@@ -231,7 +231,7 @@ class TestAppendSessionRef:
         data = read_subproject_manifest(tmp_path, "sp1")
         # notebooks should still be there
         assert len(data["notebooks"]) == 1
-        assert data["notebooks"][0]["path"] == "01.ipynb"
+        assert data["notebooks"][0]["slug"] == "01"
         # subproject section should be intact
         assert data["subproject"]["status"] == "plan"
 
@@ -273,7 +273,7 @@ class TestAppendNotebookEntryOrUpdate:
             },
             "notebooks": [
                 {
-                    "path": "01_explore.ipynb",
+                    "slug": "01_explore",
                     "last_run_at": "2026-01-01T10:00:00Z",
                     "modified_since_run": True,
                 }
@@ -285,26 +285,26 @@ class TestAppendNotebookEntryOrUpdate:
     def test_updates_existing_entry(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
         new_ts = now_utc_iso()
-        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore.ipynb", new_ts)
+        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore", new_ts)
         data = read_subproject_manifest(tmp_path, "sp1")
         nb = data["notebooks"][0]
-        assert nb["path"] == "01_explore.ipynb"
+        assert nb["slug"] == "01_explore"
         assert nb["last_run_at"] == new_ts
         assert nb["modified_since_run"] is False
 
     def test_appends_new_entry(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
         new_ts = now_utc_iso()
-        append_notebook_entry_or_update(tmp_path, "sp1", "02_analysis.ipynb", new_ts)
+        append_notebook_entry_or_update(tmp_path, "sp1", "02_analysis", new_ts)
         data = read_subproject_manifest(tmp_path, "sp1")
         assert len(data["notebooks"]) == 2
-        paths = [nb["path"] for nb in data["notebooks"]]
-        assert "02_analysis.ipynb" in paths
+        slugs = [nb["slug"] for nb in data["notebooks"]]
+        assert "02_analysis" in slugs
 
     def test_preserves_other_notebooks_and_sessions(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
         new_ts = now_utc_iso()
-        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore.ipynb", new_ts)
+        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore", new_ts)
         data = read_subproject_manifest(tmp_path, "sp1")
         # session_refs must still be there
         assert len(data["session_refs"]) == 1
@@ -316,11 +316,11 @@ class TestAppendNotebookEntryOrUpdate:
     def test_update_does_not_duplicate(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
         ts1 = now_utc_iso()
-        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore.ipynb", ts1)
+        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore", ts1)
         ts2 = now_utc_iso()
-        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore.ipynb", ts2)
+        append_notebook_entry_or_update(tmp_path, "sp1", "01_explore", ts2)
         data = read_subproject_manifest(tmp_path, "sp1")
-        # Still only one entry for 01_explore.ipynb
-        count = sum(1 for nb in data["notebooks"] if nb["path"] == "01_explore.ipynb")
+        # Still only one entry for the 01_explore slug
+        count = sum(1 for nb in data["notebooks"] if nb["slug"] == "01_explore")
         assert count == 1
         assert data["notebooks"][0]["last_run_at"] == ts2

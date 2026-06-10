@@ -106,14 +106,6 @@ def _subproject_order(project_root: Path) -> list[str]:
     return [name for name, _ in names_with_ts]
 
 
-def _notebook_rel_path(sp_dir: Path, nb_path: Path) -> str:
-    """Return *nb_path* relative to *sp_dir* as a POSIX string."""
-    try:
-        return nb_path.relative_to(sp_dir).as_posix()
-    except ValueError:
-        return nb_path.name
-
-
 # ── list_notebooks ─────────────────────────────────────────────────────────
 
 
@@ -149,15 +141,15 @@ def list_notebooks(project_root: Path) -> list[dict[str, Any]]:
             sp_data = {}
         recorded: dict[str, dict[str, Any]] = {}
         for entry in sp_data.get("notebooks", []):
-            rel = entry.get("path", "")
-            if rel:
-                recorded[rel] = entry
+            slug = entry.get("slug", "")
+            if slug:
+                recorded[slug] = entry
 
-        # Enumerate notebooks sorted by filename
+        # Enumerate notebooks sorted by filename. The manifest keys entries by
+        # slug (filename without .ipynb), so look up by the notebook's stem.
         nb_files = sorted(nb_dir.glob("*.ipynb"), key=lambda p: p.name)
         for nb_path in nb_files:
-            rel_path = _notebook_rel_path(sp_dir, nb_path)
-            entry = recorded.get(rel_path, {})
+            entry = recorded.get(nb_path.stem, {})
             last_run_at = entry.get("last_run_at", "")
 
             # Compute modified_since_run
@@ -204,10 +196,11 @@ def mark_run(path: Path) -> None:
             f"Cannot determine subproject for notebook: {path}\n"
             "Ensure the notebook is inside subprojects/<name>/notebooks/."
         )
-    sp_dir = project_root / "subprojects" / sp_name
-    rel_path = _notebook_rel_path(sp_dir, path)
     ts = now_utc_iso()
-    append_notebook_entry_or_update(project_root, sp_name, rel_path, ts)
+    # Key by slug (filename without .ipynb) to match the canonical [[notebooks]]
+    # entries written by kbu-plan / buildplan.json — not a path string, which
+    # previously created duplicate entries and left the original looking unrun.
+    append_notebook_entry_or_update(project_root, sp_name, path.stem, ts)
 
 
 # ── exec_notebook ──────────────────────────────────────────────────────────

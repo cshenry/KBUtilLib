@@ -267,7 +267,7 @@ class TestMarkRun:
         data = read_subproject_manifest(root, "sp1")
         assert len(data["notebooks"]) == 1
         entry = data["notebooks"][0]
-        assert entry["path"] == "notebooks/nb.ipynb"
+        assert entry["slug"] == "nb"
         assert entry["last_run_at"] != ""
         assert entry["modified_since_run"] is False
 
@@ -303,9 +303,40 @@ class TestMarkRun:
         mark_run(nb2)
 
         data = read_subproject_manifest(root, "sp1")
-        paths = {e["path"] for e in data["notebooks"]}
-        assert "notebooks/nb1.ipynb" in paths
-        assert "notebooks/nb2.ipynb" in paths
+        slugs = {e["slug"] for e in data["notebooks"]}
+        assert "nb1" in slugs
+        assert "nb2" in slugs
+
+    def test_mark_run_updates_planned_slug_entry_no_duplicate(self, tmp_path: Path) -> None:
+        """Regression: mark_run must update the existing slug-keyed entry that
+        kbu-plan writes (keyed by ``slug``, no ``path``), not append a duplicate
+        keyed by a path string. The old behavior left the planned entry looking
+        unrun (``last_run_at == ""``) and blocked the run -> synthesize advance.
+        """
+        root = _make_project(tmp_path)
+        sp_dir = _create_subproject(root, "sp1")
+        nb_path = _write_notebook(sp_dir / "notebooks", "01_load.ipynb", [{"source": "1"}])
+
+        # Seed the manifest exactly as kbu-plan does: a slug-keyed, unrun entry.
+        data = read_subproject_manifest(root, "sp1")
+        data["notebooks"] = [{
+            "slug": "01_load",
+            "purpose": "load the data",
+            "last_run_at": "",
+            "modified_since_run": True,
+        }]
+        write_subproject_manifest(root, "sp1", data)
+
+        mark_run(nb_path)
+
+        data = read_subproject_manifest(root, "sp1")
+        # Exactly one entry — the planned one was updated, not duplicated.
+        assert len(data["notebooks"]) == 1
+        entry = data["notebooks"][0]
+        assert entry["slug"] == "01_load"
+        assert entry["purpose"] == "load the data"  # pre-existing fields preserved
+        assert entry["last_run_at"] != ""
+        assert entry["modified_since_run"] is False
 
     def test_mark_run_outside_subproject_raises(self, tmp_path: Path) -> None:
         """mark_run raises ValueError for a notebook not inside a subproject."""
@@ -514,5 +545,5 @@ class TestExecNotebook:
         data = read_subproject_manifest(root, "sp1")
         nb_entries = data.get("notebooks", [])
         assert len(nb_entries) == 1
-        assert nb_entries[0]["path"] == "notebooks/nb.ipynb"
+        assert nb_entries[0]["slug"] == "nb"
         assert nb_entries[0]["last_run_at"] != ""

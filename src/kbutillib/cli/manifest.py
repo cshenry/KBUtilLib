@@ -136,16 +136,18 @@ def append_session_ref(
 def append_notebook_entry_or_update(
     project_root: Path,
     subproject_name: str,
-    path: str,
+    slug: str,
     last_run_at: str,
 ) -> None:
     """Update ``last_run_at`` for an existing notebook entry or append a new one.
 
-    *path* is the notebook path relative to the subproject directory
-    (e.g. ``"01_data_exploration.ipynb"``).  If an entry with this path
-    already exists in ``[[notebooks]]``, its ``last_run_at`` is updated and
-    ``modified_since_run`` is set to ``false``.  Otherwise a new entry is
-    appended.
+    *slug* is the notebook's stable key — its filename without the ``.ipynb``
+    extension (e.g. ``"01_data_exploration"``).  This is the same ``slug`` key
+    that ``kbu-plan`` writes into ``[[notebooks]]`` and that ``buildplan.json``
+    uses, so run metadata merges into the canonical entry instead of creating a
+    duplicate keyed by a path string.  If an entry with this slug already
+    exists, its ``last_run_at`` is updated and ``modified_since_run`` is set to
+    ``false``.  Otherwise a new entry is appended.
 
     All other manifest fields are preserved.
     """
@@ -153,14 +155,14 @@ def append_notebook_entry_or_update(
     notebooks: list[dict[str, Any]] = data.get("notebooks", [])
     found = False
     for entry in notebooks:
-        if entry.get("path") == path:
+        if entry.get("slug") == slug:
             entry["last_run_at"] = last_run_at
             entry["modified_since_run"] = False
             found = True
             break
     if not found:
         notebooks.append({
-            "path": path,
+            "slug": slug,
             "last_run_at": last_run_at,
             "modified_since_run": False,
         })

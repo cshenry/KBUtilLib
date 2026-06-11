@@ -840,6 +840,173 @@ class MSReconstructionUtils(KBModelUtils):
 
         return current_output, solutions, output_solution, output_solution_media
 
+    def run_comprehensive_gapfill_on_model(
+        self,
+        mdlutl: Any,
+        templates: List[Any],
+        media: Optional[Any] = None,
+        core_template: Optional[Any] = None,
+        source_models: Optional[List[Any]] = None,
+        additional_tests: Optional[List[Dict]] = None,
+        atp_safe: bool = True,
+        reaction_exclusion_list: Optional[List[str]] = None,
+        objective: str = "bio1",
+        minimum_objective: float = 0.01,
+        base_media: Optional[Any] = None,
+        base_media_target_element: str = "C",
+        reaction_scores: Optional[Dict] = {},
+    ) -> tuple:
+        """Run comprehensive gapfilling on an existing reconstructed model.
+
+        Comprehensive gapfilling first maximizes the number of the model's own
+        reactions that can simultaneously carry flux on complete media, then finds
+        the minimum-cost set of database reactions that sustains those active
+        reactions while still producing biomass. The result is a biomass-positive
+        model with the largest feasible fraction of its native reactions unblocked.
+
+        This is a thin wrapper around MSGapfill.run_multi_gapfill with
+        gapfilling_mode='Comprehensive'. It mirrors the construction of
+        gapfill_metabolic_model exactly (ATP tests, MSGapfill construction,
+        return tuple shape).
+
+        Args:
+            mdlutl: MSModelUtil object to gapfill (mutated in place)
+            templates: List of template objects providing gapfill candidates
+            media: Media object to gapfill on. If None, KBaseMedia/Complete is
+                loaded and used (comprehensive gapfilling on complete media).
+            core_template: Core template object (for ATP tests). Loaded from
+                self.templates["core"] if not provided.
+            source_models: Source models for additional reaction candidates
+            additional_tests: Additional constraint tests for gapfilling
+            atp_safe: Whether to compute and apply ATP-safe test conditions
+            reaction_exclusion_list: Reaction IDs to exclude from gapfilling
+            objective: Objective reaction ID to optimize (default: "bio1")
+            minimum_objective: Minimum objective flux for gapfilling feasibility
+            base_media: Base media object for element-uptake filtering
+            base_media_target_element: Target element for base media filtering
+            reaction_scores: Reaction score dict passed to MSGapfill
+
+        Returns:
+            Tuple of (current_output, solutions, output_solution, output_solution_media)
+            where current_output is a dict recording Growth / GS GF / Reactions /
+            Model genes; solutions is the per-media solution dict from
+            run_multi_gapfill; output_solution is a pFBA Solution on the first
+            growing medium (or None); and output_solution_media is that medium
+            (or None). The mdlutl model is mutated in place.
+        """
+        import cobra
+
+        # Set defaults for mutable arguments
+        if source_models is None:
+            source_models = []
+        if additional_tests is None:
+            additional_tests = []
+        if reaction_exclusion_list is None:
+            reaction_exclusion_list = []
+
+        # Load core template if not provided
+        if core_template is None:
+            core_template = self.get_template(self.templates["core"], None)
+
+        # Resolve complete media: if not provided, load KBaseMedia/Complete via
+        # the same media-resolution path the rest of this module uses.
+        if media is None:
+            complete_media = self.get_media("KBaseMedia/Complete", None)
+        else:
+            complete_media = media
+
+        # Initialize output dict (same shape as gapfill_metabolic_model)
+        current_output = {
+            "Model": None,
+            "Genome": None,
+            "Genes": None,
+            "Class": None,
+            "Model genes": None,
+            "Reactions": None,
+            "Core GF": None,
+            "GS GF": None,
+            "Growth": None,
+            "Comments": [],
+        }
+
+        # Compute ATP-safe test conditions (mirrors gapfill_metabolic_model)
+        atp_tests = []
+        if atp_safe:
+            atp_tests = mdlutl.get_atp_tests(
+                core_template=core_template,
+                atp_media_filename=self.modelseedpy_data_dir + "/atp_medias.tsv",
+                recompute=False,
+            )
+
+        all_tests = additional_tests + atp_tests
+
+        # Construct MSGapfill (identical call signature to gapfill_metabolic_model)
+        msgapfill = self.MSGapfill(
+            mdlutl,
+            templates,
+            source_models,
+            all_tests,
+            blacklist=reaction_exclusion_list,
+            default_target=objective,
+            minimum_obj=minimum_objective,
+            base_media=base_media,
+            base_media_target_element=base_media_target_element,
+        )
+
+        # Set reaction scores
+        msgapfill.reaction_scores = reaction_scores
+
+        # Run comprehensive gapfilling on complete media
+        mdlutl.gfutl.cumulative_gapfilling = []
+        growth_array = []
+        media_list = [complete_media]
+        solutions = msgapfill.run_multi_gapfill(
+            media_list,
+            target=objective,
+            default_minimum_objective=minimum_objective,
+            gapfilling_mode="Comprehensive",
+            binary_check=False,
+            prefilter=True,
+            run_sensitivity_analysis=True,
+            integrate_solutions=True,
+            # Comprehensive gapfilling adds many reactions collectively necessary
+            # for activation maximization. Individual-KO pruning would incorrectly
+            # classify them as individually removable. Disable pruning so the
+            # activated reaction set is fully integrated.
+            remove_unneeded_reactions=False,
+        )
+
+        output_solution = None
+        output_solution_media = None
+        # Guard against None return (solver infeasible / no gapfill solution)
+        if solutions is None:
+            solutions = {}
+        for med in media_list:
+            if med in solutions and "growth" in solutions[med]:
+                growth_array.append(med.id + ":" + str(solutions[med]["growth"]))
+                if solutions[med]["growth"] > 0 and output_solution is None:
+                    mdlutl.pkgmgr.getpkg("KBaseMediaPkg").build_package(med)
+                    mdlutl.pkgmgr.getpkg("ElementUptakePkg").build_package({"C": 60})
+                    output_solution = cobra.flux_analysis.pfba(mdlutl.model)
+                    output_solution_media = med
+
+        solution_rxn_types = ["new", "reversed"]
+        if output_solution and output_solution_media in solutions:
+            gfsolution = solutions[output_solution_media]
+            for rxn_type in solution_rxn_types:
+                for rxn_id in gfsolution[rxn_type]:
+                    if gfsolution[rxn_type][rxn_id] == ">":
+                        output_solution.fluxes[rxn_id] = 1000
+                    else:
+                        output_solution.fluxes[rxn_id] = -1000
+
+        current_output["Growth"] = "<br>".join(growth_array)
+        current_output["GS GF"] = len(mdlutl.gfutl.cumulative_gapfilling)
+        current_output["Reactions"] = mdlutl.nonexchange_reaction_count()
+        current_output["Model genes"] = len(mdlutl.model.genes)
+
+        return current_output, solutions, output_solution, output_solution_media
+
     def kb_gapfill_metabolic_models(
         self,
         workspace: str,

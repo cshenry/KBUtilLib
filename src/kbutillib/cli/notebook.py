@@ -327,11 +327,15 @@ def exec_notebook(path: Path, allow_errors: bool = False) -> None:
 
     # 4. Execute
     timeout = _cell_timeout()
+    # ``resources`` metadata path makes the kernel run in the notebook's own
+    # directory so relative references (e.g. ``%run util.py``) resolve against
+    # the notebook, not the process cwd.
     client = nbclient.NotebookClient(
         nb,
         timeout=timeout,
         kernel_name=kernel_name,
         allow_errors=allow_errors,
+        resources={"metadata": {"path": str(path.parent)}},
     )
 
     client.execute()

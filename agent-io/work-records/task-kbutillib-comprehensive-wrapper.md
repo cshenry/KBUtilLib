@@ -7,7 +7,7 @@ task-kbutillib-comprehensive-wrapper
 task/kbutillib-comprehensive-wrapper
 
 ## commit_shas
-(populated after commit)
+- d9dbe7c
 
 ## summary
 Added `MSReconstructionUtils.run_comprehensive_gapfill_on_model` to `src/kbutillib/ms_reconstruction_utils.py`. The method mirrors `gapfill_metabolic_model`'s construction exactly: loads KBaseMedia/Complete when no media is provided, computes ATP-safe tests when requested, constructs `MSGapfill` with the same argument names, and calls `run_multi_gapfill` with `gapfilling_mode='Comprehensive'`. Returns the same 4-tuple `(current_output, solutions, output_solution, output_solution_media)` as `gapfill_metabolic_model`. A pytest test file exercises the wrapper end-to-end on a forward-only e_coli_core model (forward-only to keep Stage 1 MILP tractable with GLPK), asserting correct tuple shape, non-empty solutions dict, positive growth, and increased reaction count.

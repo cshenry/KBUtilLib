@@ -92,6 +92,7 @@ class MSReconstructionUtils(KBModelUtils):
         builder: Any,
         reaction_gene_hash: Dict[str, List[str]],
         template: Any,
+        template_reactions_only: bool = False,
     ) -> List[Any]:
         """Add reactions to model based on reaction-to-gene mapping.
 
@@ -103,6 +104,12 @@ class MSReconstructionUtils(KBModelUtils):
             builder: MSBuilder object for creating reactions
             reaction_gene_hash: Dictionary mapping reaction IDs to lists of gene IDs
             template: Template object for the model
+            template_reactions_only: If True, only add reactions that exist in the
+                template; the ModelSEED-database fallback (which would otherwise pull
+                any mass-balanced reaction) is skipped, and reactions absent from the
+                template are silently dropped. If False (default), reactions missing
+                from the template fall back to any mass-balanced ("MI"/"CI"-free)
+                ModelSEED-database reaction.
 
         Returns:
             List of reactions that were added to the model
@@ -119,8 +126,9 @@ class MSReconstructionUtils(KBModelUtils):
                 # Try to get reaction from template first
                 if rxn_id + "_c" in template.reactions:
                     template_reaction = template.reactions.get_by_id(rxn_id + "_c")
-                # Fall back to ModelSEED database
-                elif rxn_id in modelseeddb.reactions:
+                # Fall back to ModelSEED database (any mass-balanced reaction),
+                # unless restricted to template reactions only.
+                elif not template_reactions_only and rxn_id in modelseeddb.reactions:
                     rxnobj = modelseeddb.reactions.get_by_id(rxn_id)
                     if "MI" not in rxnobj.status and "CI" not in rxnobj.status:
                         template_reaction = rxnobj.to_template_reaction({0: "c", 1: "e"})
@@ -147,7 +155,9 @@ class MSReconstructionUtils(KBModelUtils):
 
                     mdlutl.model.add_reactions([reaction])
                     reactions_added.append(reaction)
-                else:
+                elif not template_reactions_only:
+                    # In template-only mode, reactions absent from the template are
+                    # expected and dropped silently (otherwise this floods stdout).
                     print(f"Reaction {rxn_id} not found in template or database!")
             else:
                 # Update existing reaction with additional genes
@@ -181,6 +191,7 @@ class MSReconstructionUtils(KBModelUtils):
         gapfilling_delta: float = 0,
         remove_noncore_genome_reactions: bool = False,
         reactions_to_add: Optional[Dict[str, List[str]]] = None,
+        template_reactions_only: bool = False,
     ) -> tuple:
         """Build a single metabolic model from an MSGenome object.
 
@@ -207,6 +218,12 @@ class MSReconstructionUtils(KBModelUtils):
                 (excludes bio, DM_, EX_, SK_ reactions)
             reactions_to_add: Dictionary mapping reaction IDs to lists of gene IDs
                 to add to the model. Reactions are pulled from template or ModelSEED DB.
+            template_reactions_only: If True, reactions in ``reactions_to_add`` are only
+                added when present in the template (the ModelSEED-DB fallback is skipped);
+                reactions absent from the template are dropped silently. If False (default),
+                reactions missing from the template fall back to any mass-balanced
+                ModelSEED-DB reaction. Passed through to
+                :meth:`_add_reactions_from_gene_mapping`.
 
         Returns:
             Tuple of (current_output dict, MSModelUtil object) or (current_output dict, None) if skipped
@@ -312,7 +329,8 @@ class MSReconstructionUtils(KBModelUtils):
         # Add reactions from reaction-to-gene mapping
         if reactions_to_add:
             self._add_reactions_from_gene_mapping(
-                mdlutl, builder, reactions_to_add, active_gs_template
+                mdlutl, builder, reactions_to_add, active_gs_template,
+                template_reactions_only=template_reactions_only,
             )
 
         # Run ATP correction

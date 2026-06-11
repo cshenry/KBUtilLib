@@ -1,0 +1,38 @@
+{
+  "prd_name": "comprehensive-gapfill",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "ModelSEEDpy core",
+      "parallel_group": [
+        {
+          "task_id": "msgapfill-comprehensive",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "In ModelSEEDpy (modelseedpy/core/msgapfill.py), implement comprehensive gapfilling per agent-io/prds/comprehensive-gapfill/fullprompt.md (Modules A and B) in the KBUtilLib repo's PRD dir; read that PRD first.\n\nModule A: add MSGapfill.run_comprehensive_gapfilling(self, media, target=None, minimum_obj=None, binary_check=False, prefilter=True, activation_cap=0.001). It operates on self.gfmodel/self.gfpkgmgr exactly as run_gapfilling does. Two-stage optimization: (1) set_base_objective(target, minimum_obj) installs the biomass>=minimum_obj constraint and the standard gapfilling minimization objective; set the complete media supplied by the caller; reuse run_gapfilling's test_gapfill_database/prefilter feasibility guard. (2) Build ReactionActivationPkg filtered to the ORIGINAL model's own reaction ids (orig_ids = set(r.id for r in self.model.reactions), intersected with gfmodel reactions): rapkg.build_package(rxn_filter=orig_ids, max_value=activation_cap) -- this also builds RevBinPkg over the same filter, which is REQUIRED for correctness (without it a reaction can set forward=reverse=activation_cap with net flux 0 and activate both directions for free). (3) Stage 1: save current objective, build a max objective summing all rapkg.variables['fra'] and ['rra'] coefficients=1, optimize; return None if not optimal. (4) Lock: for each fra/rra variable with primal >= activation_cap - 1e-9, set var.lb = activation_cap (direction-preserving); track locked vars. (5) Stage 2: restore via set_base_objective(target, minimum_obj), optimize, compute_gapfilled_solution(); apply binary_check_gapfilling_solution() iff binary_check; reconcile test_conditions via run_test_conditions exactly as run_gapfilling; attach media/target/minobjective/binary_check keys so the dict matches run_gapfilling's shape. (6) Cleanup (mandatory): release all activation locks (var.lb=0) so gfmodel is reusable.\n\nModule B: in run_multi_gapfill, add a per-media-loop branch for gapfilling_mode=='Comprehensive' parallel to the Sequential/Independent branch: call run_comprehensive_gapfilling(media, target_i, threshold_i, binary_check, prefilter=False) (prefilter already handled by test_and_adjust_gapfilling_conditions at the top), integrate with Sequential cumulative semantics including the between-media penalty recompute, and add the matching post-loop objective restoration (compute_gapfilling_penalties + build_gapfilling_objective_function) exactly like the existing Sequential post-loop block. Reuse the existing top-of-function condition testing and end-of-function sensitivity analysis unchanged.\n\nUse exact package-name strings getpkg('ReactionActivation'), getpkg('GapfillingPkg'), getpkg('KBaseMediaPkg') and variable dicts variables['fra']/['rra']. Add a pytest integration test (under ModelSEEDpy tests/) on a small toy model + template where some native reactions are blocked under standard gapfilling, asserting: (a) the comprehensive model grows (biomass slim_optimize > 0 on complete media); (b) strictly more original-model reactions carry nonzero flux (pFBA) than after run_multi_gapfill(gapfilling_mode='Sequential') on the same inputs; (c) re-running standard gapfilling on the comprehensive model removes no native reactions. Add a second test asserting gfmodel reusability (a standard run_gapfilling on the same MSGapfill instance after a comprehensive run behaves normally). Do not change the default behavior of any existing gapfilling mode.",
+          "success_criteria": "modelseedpy/core/msgapfill.py defines MSGapfill.run_comprehensive_gapfilling and run_multi_gapfill accepts gapfilling_mode='Comprehensive'. A pytest integration test passes demonstrating that, on a toy model+template, comprehensive gapfilling returns a biomass-positive model in which strictly more original-model reactions carry nonzero pFBA flux than standard Sequential gapfilling, and a reusability test confirms a subsequent standard run_gapfilling on the same MSGapfill instance still behaves normally. No existing gapfilling mode's default behavior changes. Full test suite for the touched module passes.",
+          "repos": ["ModelSEEDpy"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "KBUtilLib wrapper",
+      "parallel_group": [
+        {
+          "task_id": "kbutillib-comprehensive-wrapper",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "In KBUtilLib (src/kbutillib/ms_reconstruction_utils.py), add MSReconstructionUtils.run_comprehensive_gapfill_on_model per agent-io/prds/comprehensive-gapfill/fullprompt.md (Module C); read that PRD first. This depends on the ModelSEEDpy MSGapfill.run_comprehensive_gapfilling method and gapfilling_mode='Comprehensive' added in the prior phase -- ensure the locally installed modelseedpy provides them before relying on them.\n\nSignature: run_comprehensive_gapfill_on_model(self, mdlutl, templates, media=None, core_template=None, source_models=None, additional_tests=None, atp_safe=True, reaction_exclusion_list=None, objective='bio1', minimum_objective=0.01, base_media=None, base_media_target_element='C', reaction_scores={}). Mirror the existing gapfill_metabolic_model method's construction: resolve complete media (if media is None, load KBaseMedia/Complete via the same media-resolution path the module already uses); compute ATP tests when atp_safe (reuse the get_atp_tests block); construct MSGapfill(mdlutl, templates, source_models, all_tests, blacklist=reaction_exclusion_list, default_target=objective, minimum_obj=minimum_objective, base_media=base_media, base_media_target_element=base_media_target_element); set reaction_scores; call msgapfill.run_multi_gapfill([complete_media], target=objective, default_minimum_objective=minimum_objective, gapfilling_mode='Comprehensive', binary_check=False, prefilter=True, run_sensitivity_analysis=True, integrate_solutions=True). Return a tuple consistent with gapfill_metabolic_model: (current_output, solutions, output_solution, output_solution_media) with current_output recording Growth/GS GF/Reactions/Model genes; the mdlutl is mutated in place. Add a pytest test mirroring existing KBUtilLib reconstruction/gapfill test patterns: on a small saved model + template, run_comprehensive_gapfill_on_model returns a biomass-positive model and a non-empty solution dict, and the model's reaction count increases vs the input.",
+          "success_criteria": "src/kbutillib/ms_reconstruction_utils.py defines MSReconstructionUtils.run_comprehensive_gapfill_on_model that builds an MSGapfill from an input mdlutl and runs comprehensive gapfilling on KBaseMedia/Complete, returning a tuple matching gapfill_metabolic_model. A pytest test passes exercising the wrapper end-to-end on a small saved model+template, asserting biomass>0, a non-empty solution dict, and an increased reaction count vs input.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["msgapfill-comprehensive"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

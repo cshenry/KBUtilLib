@@ -1,0 +1,17 @@
+{
+  "prd_name": "comprehensive-gapfill",
+  "title": "Comprehensive Gapfilling (reaction-activation two-stage)",
+  "repos": ["ModelSEEDpy", "KBUtilLib"],
+  "owning_repo": "KBUtilLib",
+  "created": "2026-06-11",
+  "author": "Chris Henry",
+  "confront_rounds": 0,
+  "decisions": {
+    "activation_scope": "original-model reactions only (filter on gfmodel); candidates recruited as means, never locked",
+    "growth_constraint": "biomass >= minimum_obj enforced in both stages",
+    "api_location": "gapfilling_mode='Comprehensive' in run_multi_gapfill, dispatching to MSGapfill.run_comprehensive_gapfilling",
+    "complete_media": "KBaseMedia/Complete via KBaseMediaPkg",
+    "lock_semantics": "default cap 0.001; raise lb of capped fra/rra to 0.001, direction-preserving; release after Stage 2",
+    "revbin": "required for correctness (prevents net-zero futile dual activation)"
+  }
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from .beril import beril_cmd
 from .bootstrap import bootstrap_command
 from .buildplan import buildplan_cmd
 from .init import doctor_command, init_command
@@ -24,6 +25,7 @@ def main() -> None:
     """kbu -- KBUtilLib developer CLI."""
 
 
+main.add_command(beril_cmd, name="beril")
 main.add_command(bootstrap_command, name="bootstrap")
 main.add_command(buildplan_cmd, name="buildplan")
 main.add_command(doctor_command, name="doctor")

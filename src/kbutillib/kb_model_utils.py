@@ -438,7 +438,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
 
         reactions = []
         SBO_ANNOTATION = "sbo"
-        modelseeddb = self.biochem_db()
+        modelseeddb = self.biochem_db
         biochemdbrxn = False
         for rxn_id in residual_reaction_gene_hash:
             if rxn_id + "_c0" not in mdlutl.model.reactions:

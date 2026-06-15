@@ -115,7 +115,7 @@ class MSReconstructionUtils(KBModelUtils):
             List of reactions that were added to the model
         """
         SBO_ANNOTATION = "sbo"
-        modelseeddb = self.biochem_db()
+        modelseeddb = self.biochem_db
         reactions_added = []
 
         for rxn_id, gene_ids in reaction_gene_hash.items():
@@ -310,6 +310,10 @@ class MSReconstructionUtils(KBModelUtils):
         current_output["Core GF"] = "NA"
 
         mdlutl = self.MSModelUtil.get(mdl)
+        # Expose the initialised builder so callers can add more reactions (with
+        # correct compartment/species maps) AFTER the build+gapfill — e.g. an
+        # ATP-safe annotation overlay. The builder's base_model is this model.
+        mdlutl.recon_builder = builder
 
         # Remove non-core genome reactions if requested
         if remove_noncore_genome_reactions:

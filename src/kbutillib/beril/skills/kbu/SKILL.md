@@ -1,0 +1,72 @@
+---
+name: kbu
+description: >
+  KBUtilLib metabolic-modeling primer for BERIL notebooks.
+  Use when: starting a BERIL modeling session, opening any project that
+  involves COBRA/MSModelUtil/KBase reconstruction or FBA, or any time
+  kbu-notebook or kbu-fba guidance is needed and the session context is
+  not yet loaded.
+allowed-tools:
+  - Read
+  - Bash
+user-invocable: true
+---
+
+# /kbu — KBUtilLib BERIL Primer
+
+## Step 1: Load modeling preferences
+
+Read the active preferences file into the session context:
+
+```
+Read <BERIL_ROOT>/.claude/kbu/preferences.md
+```
+
+The YAML block in that file sets the active values for all `execution.*`,
+`sampling.*`, `solver.*`, `gapfill.*`, `organism.*`, `media.*`, and
+`version.*` keys.  Honour these values throughout the session.  If the
+file does not exist, apply the defaults documented in
+`src/kbutillib/beril/skills/kbu/preferences.md` (the template shipped
+with KBUtilLib).
+
+## Step 2: Active modeling guidelines
+
+The following guidelines apply for the duration of this session:
+
+1. **Graduated execution policy.** Every computation is evaluated against
+   the 🟢/🟡/🔴 tiers defined in the `kbu-notebook` and `kbu-fba`
+   skills before running.  Do not run 🟡 or 🔴 work without explicit
+   approval.
+
+2. **Notebook discipline.** All interactive modeling notebooks follow
+   the conventions in `kbu-notebook`.  One `util.py` per notebook dir,
+   every cell starts `%run util.py`.
+
+3. **FBA discipline.** All reconstruction and FBA work follows the arc
+   in `kbu-fba`: build → gapfill → FBA (pFBA) → FVA.  Always use
+   `MSFBAUtils.run_fva`; never call `cobra.flux_variability_analysis`
+   directly (it is broken in this environment).
+
+4. **BERDL access.** Use `KBBERDLUtils` for all KBase/BERDL data
+   retrieval (genomes, media, models).  Do not call KBase SDK clients
+   directly unless `KBBERDLUtils` lacks the required accessor.
+
+5. **Cache discipline.** Expensive computations must be cached in
+   `.kbcache/` alongside `util.py`.  Retrieve from cache before
+   re-running.  Never commit `.kbcache/` to git or allow BERIL to back
+   it up (it is derived data and can be large).
+
+## Step 3: Skill pointers
+
+- **kbu-notebook** — notebook construction discipline (one `util.py`,
+  `%run util.py`, graduated execution, `.kbcache/` layout, BERIL
+  integration).
+- **kbu-fba** — modeling arc (build → gapfill → FBA → FVA), function
+  signatures, sampling defaults, FVA mandate.
+
+Both skills are auto-discoverable.  Invoke them when the relevant
+context is needed.
+
+> Note: this primer does NOT modify or patch BERIL's `/berdl_start`
+> skill.  It runs alongside the existing BERIL lifecycle, adding
+> modeling discipline on top of BERIL's project/session management.

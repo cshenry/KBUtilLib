@@ -1,0 +1,42 @@
+{
+  "prd_name": "kbu-beril-augmentation",
+  "title": "KBUtilLib → BERIL augmentation: deployer + /kbu primer + kbu-notebook + kbu-fba",
+  "owning_repo": "KBUtilLib",
+  "repos": ["KBUtilLib"],
+  "priority": "high",
+  "status": "draft",
+  "confront_rounds": 1,
+  "created": "2026-06-14",
+  "companion_prd": "kbu-harness",
+  "grounding": {
+    "audit": "agent-io/audits/2026-06-13-kbu-vs-beril-directive-audit.md",
+    "reference_deployer": "~/Dropbox/Projects/craft",
+    "deploy_target": "~/Dropbox/Projects/BERIL-research-observatory",
+    "canonical_util_py": "~/Dropbox/Projects/ModelingLOE/notebooks/gapfill_loe/util.py"
+  },
+  "modules": [
+    {"id": 1, "name": "kbu beril deployer", "path": "src/kbutillib/cli/beril.py", "kind": "new", "tested": true},
+    {"id": 2, "name": "skill bundle (/kbu, kbu-notebook, kbu-fba) + preferences.md + util.py templates", "path": "src/kbutillib/beril/skills/", "kind": "new", "tested": true},
+    {"id": 3, "name": "NotebookSession BERIL-root mapping", "path": "src/kbutillib/notebook/session.py", "kind": "modify", "tested": true},
+    {"id": 4, "name": "jupyter-dev supersede (home-repo source)", "path": "(home_repo source — look up in skill registry)", "kind": "modify", "tested": false}
+  ],
+  "key_decisions": [
+    "Track upstream BERIL; never fork. Deploy untracked skills + gitignored config; survives beril start release re-checkout (verified).",
+    "KBUtilLib owns a CRAFT-style deployer; does not join CRAFT. Separate distribution channel from claude-skills sync.",
+    "kbu beril install pip-installs kbutillib into the BERIL env (idempotent, PEP-668 fallback, env-detect); doctor verifies import + version.",
+    "3 deployed units: /kbu primer (manual), kbu-notebook, kbu-fba (auto-discoverable). Preferences in .claude/kbu/preferences.md.",
+    "kbu-fba covers full arc reconstruct->gapfill->analyze; run_fva not cobra FVA.",
+    "kbu-notebook = %run util.py + NotebookSession.for_notebook + cell independence + cache-as-you-go + portability; supersedes jupyter-dev; maps onto BERIL projects/{id}/ dirs; scoped to local COBRA/MSModelUtil modeling notebooks.",
+    "Graduated execution policy: green run-free / yellow sample-then-consult on ANY of {runtime>threshold, self-flagged uncertainty, large fan-out, compute-intensive} / red full-run on sign-off, user picks where. Thresholds in preferences.md.",
+    "Manifest SPLIT: keep provenance-DAG reads; drop org/run-state (Manifest.render) role."
+  ],
+  "tests": [
+    "Module 1 deployer: temp fake BERIL root — untracked deploy, preferences render-if-absent + never-clobber, idempotent re-install, version-match pip skip, doctor green/red, survive simulated git checkout.",
+    "Module 3 NotebookSession: for_notebook resolves storage root + .kbcache onto BERIL projects/{id}/ shape; provenance reads without kbu-project.toml.",
+    "Module 2 skill smoke: each SKILL.md parses, util.py template imports, preferences.md has threshold keys."
+  ],
+  "out_of_scope": [
+    "PRD B kbu-harness (container repo, rsync, design-deploy skill, in-harness execution, MD dev-log).",
+    "Upstream contribution into KBase BERIL; joining CRAFT; changing BERIL tracked files / berdl_start onboarding; BERIL Spark/query notebook conventions."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "prd_name": "kbu-beril-augmentation",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Bundle, session, jupyter-dev",
+      "parallel_group": [
+        {
+          "task_id": "skill-bundle",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Build the KBUtilLib BERIL skill bundle (PRD kbu-beril-augmentation, Module 2). Create a new in-tree dir `src/kbutillib/beril/skills/` containing three skill units, each a directory with a `SKILL.md`:\n\n1. `kbu/SKILL.md` — the `/kbu` primer. Frontmatter (BERIL's real Claude Code schema): `name: kbu`, `description` with a 'Use when …' trigger, `allowed-tools: Read, Bash`, `user-invocable: true`. Body: read `<BERIL_ROOT>/.claude/kbu/preferences.md` (the YAML block) into the session, brief the active modeling guidelines, and point at kbu-notebook / kbu-fba. Do NOT patch BERIL's /berdl_start.\n\n2. `kbu-notebook/SKILL.md` — the notebook-construction discipline (auto-discoverable; no user-invocable needed). Description scopes it to 'local COBRA/MSModelUtil metabolic-modeling notebooks'. Body encodes: one `util.py` per notebook dir holding ALL imports + helpers + `session = NotebookSession.for_notebook(__file__, project_name=...)`; every cell starts `%run util.py` (no per-cell imports); every cell independently executable (load from cache/files → analyze with cache-as-you-go → save to cache + output files); portability via `~/.kbu-sys-paths`. Inline a minimal `util.py` skeleton verbatim, modeled on `~/Dropbox/Projects/ModelingLOE/notebooks/gapfill_loe/util.py`. Map onto BERIL's `projects/{id}/notebooks/<nb>/` dirs; `.kbcache/` (gitignored, derived) anchors beside util.py — document it must not be committed or double-tracked by BERIL backup; curated outputs go to BERIL's data/figures. Include the graduated execution policy (see below). Note it SUPERSEDES jupyter-dev.\n\n3. `kbu-fba/SKILL.md` — the modeling arc (auto-discoverable). Description scopes to local COBRA/MSModelUtil FBA. Body: full arc build→gapfill→analyze using `MSReconstructionUtils.build_metabolic_model`, `gapfill_metabolic_model` + `run_comprehensive_gapfill_on_model`, `MSFBAUtils.run_fba` (pFBA), `MSFBAUtils.run_fva` (MANDATE this; FORBID `cobra.flux_variability_analysis` as guidance — it is broken), `set_media`, `set_objective_from_string` (MAX{rxn}/MIN{rxn}). BERDL access via `KBBERDLUtils`. FBA sample defaults for the 🟡 tier: reconstruction=1 genome, gapfill=1 medium with max_solutions=1, FVA=top-10 reactions by |flux|, overridable via sampling.* preferences keys.\n\nGraduated execution policy (in BOTH kbu-notebook and kbu-fba): 🟢 cheap & certain → run freely (TDD); 🟡 ANY of {est. runtime over execution.runtime_threshold_seconds, agent self-flagged algorithmic uncertainty, fan-out over execution.fanout_threshold, compute/cost intensity} → run a SAMPLE at reduced scope, cache it, STOP and consult; 🔴 full run only after user sign-off, user picks where it runs. Runtime rubric: <5s 🟢 / 5–60s 🟡 / >60s 🔴 (runtime_threshold_seconds default 60).\n\nAlso create:\n- `src/kbutillib/beril/skills/kbu/preferences.md` — the editable preferences TEMPLATE. Include a fenced ```yaml``` block with keys: execution.runtime_threshold_seconds (60), execution.fanout_threshold, sampling.reconstruction_n (1), sampling.gapfill_media_n (1), sampling.gapfill_max_solutions (1), sampling.fva_reaction_n (10), solver.name, gapfill.comprehensive (bool), organism.focus, media.default, version.\n- a `util.py` template (e.g. `src/kbutillib/beril/skills/kbu-notebook/util.py.tmpl`) — the canonical skeleton.\n\nAdd a smoke test `tests/test_beril_skill_bundle.py`: each SKILL.md parses with valid frontmatter; the util.py template imports cleanly; preferences.md contains the threshold keys (AC #11). Follow KBUtilLib's existing tests/ conventions. Satisfies ACs #9, #10, #11, #12, #13, #14, #17, #20.",
+          "success_criteria": "src/kbutillib/beril/skills/ contains kbu/, kbu-notebook/, kbu-fba/ each with a valid-frontmatter SKILL.md (name/description-with-Use-when/allowed-tools; kbu has user-invocable:true); a preferences.md template with the required YAML keys; a util.py template; kbu-fba mandates run_fva and forbids cobra FVA; both notebook+fba skills encode the graduated execution policy with the <5/5-60/>60 rubric; and tests/test_beril_skill_bundle.py passes (each SKILL.md parses, util.py template imports, preferences.md has the threshold keys).",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "notebook-session-confirm",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "PRD kbu-beril-augmentation, Module 3 — confirm-and-test, NO behavior change. `NotebookSession.for_notebook()` already anchors `.kbcache/` at `Path(notebook_file).parent/'.kbcache'` (src/kbutillib/notebook/session.py) and `Manifest` already does not reference `kbu-project.toml`. Do NOT change session.py or manifest.py behavior. Instead, ADD a test (e.g. tests/test_notebook_session_beril.py) that: (1) creates a temp dir shaped like a BERIL project `projects/<id>/notebooks/<nb>/` with a `util.py` in it; (2) asserts `NotebookSession.for_notebook(<path-to-util.py>, project_name=<id>)` anchors `.kbcache/` beside that util.py (sibling), with no `kbu-project.toml` anywhere; (3) exercises the Manifest provenance reads (`what_writes`/`what_reads`/`stale`) and asserts they work without any kbu-project.toml/subproject org files present. Follow existing tests/ conventions (reuse mini_model/shared_env fixtures only if helpful). Satisfies AC #15.",
+          "success_criteria": "A new test asserts NotebookSession.for_notebook anchors .kbcache/ beside a util.py at a BERIL projects/{id}/notebooks/<nb>/ path with no kbu-project.toml, and that Manifest provenance reads (what_writes/what_reads/stale) work without org/run-state files; src/kbutillib/notebook/session.py and manifest.py have no behavior changes; the test passes.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "jupyter-dev-supersede",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "PRD kbu-beril-augmentation, Module 4 — supersede the jupyter-dev skill at its home-repo SOURCE (not the deployed `.claude/commands/` copy, which is claude-skills-sync-managed and would be overwritten). Steps: (1) Resolve jupyter-dev's `home_repo`/`home_path` by reading `~/Dropbox/Projects/ClaudeCommands/state/skill_registry.json` (find the jupyter-dev entry). (2) Edit the source markdown at that home path to REMOVE every directive that conflicts with the kbu-notebook canonical pattern: forbidding `%run util.py`; mandating `from util import session`; the stale `NotebookSession(name=, notebook_folder=)` signature; and the subprojects/`kbu init-notebook`/`nboutput/` wiring. (3) Replace with a pointer to the kbu-notebook skill as the canonical modeling-notebook discipline (one util.py with all imports + the NotebookSession, every cell `%run util.py`, cell independence, cache-as-you-go). DO NOT run `claude-skills sync` — the cross-machine redeploy is a documented manual follow-up the user runs. Commit the source edit. Satisfies AC #18.",
+          "success_criteria": "The jupyter-dev home-repo source file (resolved via ClaudeCommands/state/skill_registry.json) no longer forbids %run util.py, no longer mandates 'from util import session', drops the stale NotebookSession(name=,notebook_folder=) signature and the subprojects/nboutput wiring, and points to kbu-notebook as canonical; the deployed .claude/commands copy is untouched; no claude-skills sync was run.",
+          "repos": ["ClaudeCommands"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Deployer",
+      "parallel_group": [
+        {
+          "task_id": "deployer",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "PRD kbu-beril-augmentation, Module 1 — the `kbu beril` deployer command group on KBUtilLib's existing `kbu` CLI (new file e.g. src/kbutillib/cli/beril.py), modeled on CRAFT's `~/Dropbox/Projects/craft/src/craft/cli.py` shape (per-step `── name`, ✓/✗ lines, summary block, return codes 0 all-ok / 1 partial / 2 none). Implement TWO subcommands only — `install` and `doctor` (NO `configure`; BERIL owns provider config).\n\n`kbu beril install <BERIL_ROOT> [--dry-run]`:\n- Validate root: requires `<BERIL_ROOT>/.claude/skills/` AND `<BERIL_ROOT>/PROJECT.md`; exit non-zero with a clear message otherwise. Warn (not fail) if `<BERIL_ROOT>/.git` absent.\n- Copy the three skill dirs from `src/kbutillib/beril/skills/` (kbu, kbu-notebook, kbu-fba) into `<BERIL_ROOT>/.claude/skills/`, overwriting in place (idempotent).\n- Render `<BERIL_ROOT>/.claude/kbu/preferences.md` from the template ONLY if absent; if present, leave byte-for-byte unchanged and report it was preserved.\n- Interpreter discovery (in order): `<BERIL_ROOT>/.venv/bin/python` if present; else the interpreter running the deployer; else `python3` on PATH. Print the chosen path; record it in `<BERIL_ROOT>/.claude/kbu/install.json`.\n- pip-install/upgrade the `KBUtilLib` distribution into the chosen interpreter; SKIP when installed version (via `importlib.metadata.version('KBUtilLib')` under that interpreter; ImportError/PackageNotFound ⇒ not installed) already equals the deployer's KBUtilLib version; retry once with `--break-system-packages` on a PEP-668 error. Print the exact pip command.\n- `--dry-run`: print all planned actions + resolved paths (interpreter, skill dirs, preferences render-or-preserve, pip command) and perform NO pip install and NO file copy.\n\n`kbu beril doctor <BERIL_ROOT>`: pure read; report ✓/✗ for: three skill dirs present, `import kbutillib` succeeds under the chosen interpreter (reuse install.json's interpreter), installed version matches the deployer, preferences.md present. Return 0 only if all ✓.\n\nTests (tests/test_beril_deployer.py) against a temp FAKE BERIL root (`PROJECT.md` + `.claude/skills/` + `git init` + empty commit + tag v0): the three skill dirs land and are untracked (`git status --porcelain`); preferences.md renders-if-absent and is never clobbered; re-install idempotent; pip step skipped when a MOCKED version probe matches; doctor green on clean install and non-zero when a skill dir is missing or import fails; after `git checkout v0` the skill dirs + `.claude/kbu/` survive; `--dry-run` leaves the fake root unchanged. Satisfies ACs #1–#9, #16, #19.",
+          "success_criteria": "kbu beril install and doctor are implemented (no configure); install does untracked skill-dir copy, render-if-absent-never-clobber preferences, interpreter discovery + install.json, guarded idempotent pip with PEP-668 retry, and --dry-run no-op; doctor reports the four checks with correct exit codes; tests/test_beril_deployer.py passes against a temp fake BERIL root including the git checkout v0 survival and --dry-run no-op assertions.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["skill-bundle"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import click
 from .beril import beril_cmd
 from .bootstrap import bootstrap_command
 from .buildplan import buildplan_cmd
+from .harness import harness_cmd
 from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
@@ -26,6 +27,7 @@ def main() -> None:
 
 
 main.add_command(beril_cmd, name="beril")
+main.add_command(harness_cmd, name="harness")
 main.add_command(bootstrap_command, name="bootstrap")
 main.add_command(buildplan_cmd, name="buildplan")
 main.add_command(doctor_command, name="doctor")

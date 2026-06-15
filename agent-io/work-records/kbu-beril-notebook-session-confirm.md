@@ -7,7 +7,7 @@ kbu-beril-notebook-session-confirm
 kbu-beril/notebook-session-confirm
 
 ## commit_shas
-(populated after commit)
+- 534d555611d337423c80641d02db43e0228245eb
 
 ## summary
 Added `tests/notebook/test_notebook_session_beril.py` — a confirm-and-test module for PRD kbu-beril-augmentation Module 3. The test creates a BERIL-style project tree (`projects/<id>/notebooks/<nb>/util.py`) with no `kbu-project.toml` or any org/run-state files present, then asserts that `NotebookSession.for_notebook()` anchors `.kbcache/` beside `util.py` (as a sibling), and that the Manifest provenance methods (`what_writes`, `what_reads`, `stale`) work correctly in that environment. No changes were made to `session.py` or `manifest.py`.

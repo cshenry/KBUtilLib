@@ -1914,6 +1914,561 @@ class MSFBAUtils(KBModelUtils):
 
         return results
 
+    # ── Template Evaluation Suite — per-model test functions ─────────────
+
+    def classify_reactions_by_fva(self, model, media=None, essential_fraction=0.2):
+        """Classify every reaction by its FVA flux range.
+
+        Two FVA passes via ``run_fva`` (never cobra.flux_variability_analysis):
+
+        * **Unconstrained pass** (fraction_of_optimum=0): classifies reactions as
+          dead, forward_only, reverse_only, or reversible.
+        * **Growth-forced pass** (fraction_of_optimum=essential_fraction, one pass
+          per biomass): classifies reactions as essential (0 not in [MIN, MAX]).
+
+        When both bio1 and bio2 exist in the model, the growth-forced pass runs
+        separately for each biomass and essential sets are reported per-biomass
+        plus a union.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            media: Media to apply (optional).
+            essential_fraction: Fraction of optimum for growth-forced pass (default 0.2).
+
+        Returns:
+            dict with keys:
+              dead, forward_only, reverse_only, reversible — lists of reaction ids.
+              essential — dict keyed by biomass id and "union".
+        """
+        tol = 1e-7
+        mdlutl = self._check_and_convert_model(model)
+
+        # ── unconstrained pass (fraction_of_optimum=0) ──────────────────
+        self.log_info("classify_reactions_by_fva: running unconstrained pass")
+        fva_unconstrained = self.run_fva(mdlutl, media=media, fraction_of_optimum=0)
+
+        dead = []
+        forward_only = []
+        reverse_only = []
+        reversible = []
+        for rxn_id, bounds in fva_unconstrained.items():
+            mn = bounds["MIN"]
+            mx = bounds["MAX"]
+            if abs(mn) <= tol and abs(mx) <= tol:
+                dead.append(rxn_id)
+            elif mn >= -tol and mx > tol:
+                forward_only.append(rxn_id)
+            elif mx <= tol and mn < -tol:
+                reverse_only.append(rxn_id)
+            else:
+                reversible.append(rxn_id)
+
+        # ── growth-forced pass — one per biomass ──────────────────────────
+        cobra_model = mdlutl.model
+        biomass_ids = [
+            r.id for r in cobra_model.reactions
+            if r.id.startswith("bio") or "biomass" in r.id.lower()
+        ]
+        # Limit to bio1 / bio2 convention
+        bio_rxns = [rid for rid in biomass_ids if rid in ("bio1", "bio2")]
+        if not bio_rxns:
+            bio_rxns = biomass_ids[:2]  # fall back to first two
+
+        essential_per_bio = {}
+        essential_union = set()
+
+        for bio_id in bio_rxns:
+            self.log_info(
+                f"classify_reactions_by_fva: growth-forced pass for {bio_id}"
+                f" (fraction={essential_fraction})"
+            )
+            try:
+                fva_forced = self.run_fva(
+                    mdlutl,
+                    media=media,
+                    objective=f"MAX{{{bio_id}}}",
+                    fraction_of_optimum=essential_fraction,
+                )
+            except Exception as e:
+                self.log_info(
+                    f"classify_reactions_by_fva: growth-forced pass for {bio_id} failed: {e}"
+                )
+                essential_per_bio[bio_id] = []
+                continue
+            essential_bio = []
+            for rxn_id, bounds in fva_forced.items():
+                mn = bounds["MIN"]
+                mx = bounds["MAX"]
+                # essential when 0 is NOT in [mn, mx]
+                if not (mn <= 0 <= mx):
+                    essential_bio.append(rxn_id)
+            essential_per_bio[bio_id] = essential_bio
+            essential_union.update(essential_bio)
+
+        essential_per_bio["union"] = sorted(essential_union)
+
+        return {
+            "dead": dead,
+            "forward_only": forward_only,
+            "reverse_only": reverse_only,
+            "reversible": reversible,
+            "essential": essential_per_bio,
+        }
+
+    def find_closed_mode_reactions(self, model, media=None):
+        """Find reactions that carry flux in a closed (no-exchange) system.
+
+        Zeroes all EX_/DM_/SK_ exchange and drain reactions (plus any identified
+        by MSModelUtil.exchange_hash()), leaves ATPM and biomass unconstrained,
+        runs an unconstrained FVA, returns reactions that can still carry flux.
+        Restores all bounds before returning.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            media: Media to apply (optional).
+
+        Returns:
+            list of reaction ids that can carry flux in a closed system.
+        """
+        tol = 1e-7
+        mdlutl = self._check_and_convert_model(model)
+        cobra_model = mdlutl.model
+
+        # Collect exchange/drain/SK reactions to zero
+        drain_prefixes = ("EX_", "DM_", "SK_")
+        skip_ids = {"ATPM"}
+        # also add biomass reaction ids to the skip set
+        for rxn in cobra_model.reactions:
+            if rxn.id.startswith("bio") or "biomass" in rxn.id.lower():
+                skip_ids.add(rxn.id)
+
+        # Reactions from exchange_hash
+        try:
+            exchange_hash_rxns = set()
+            for met, rxn_obj in mdlutl.exchange_hash().items():
+                exchange_hash_rxns.add(rxn_obj.id)
+        except Exception:
+            exchange_hash_rxns = set()
+
+        saved_bounds = {}
+        for rxn in cobra_model.reactions:
+            if rxn.id in skip_ids:
+                continue
+            if (
+                any(rxn.id.startswith(p) for p in drain_prefixes)
+                or rxn.id in exchange_hash_rxns
+            ):
+                saved_bounds[rxn.id] = (rxn.lower_bound, rxn.upper_bound)
+                rxn.lower_bound = 0
+                rxn.upper_bound = 0
+
+        self.log_info(
+            f"find_closed_mode_reactions: zeroed {len(saved_bounds)} exchange/drain reactions"
+        )
+
+        try:
+            fva_closed = self.run_fva(mdlutl, media=None, fraction_of_optimum=0)
+            closed_rxns = [
+                rxn_id
+                for rxn_id, bounds in fva_closed.items()
+                if abs(bounds["MIN"]) > tol or abs(bounds["MAX"]) > tol
+            ]
+        finally:
+            # Restore all zeroed bounds
+            for rxn_id, (lb, ub) in saved_bounds.items():
+                rxn = cobra_model.reactions.get_by_id(rxn_id)
+                if lb > rxn.upper_bound:
+                    rxn.upper_bound = ub
+                    rxn.lower_bound = lb
+                else:
+                    rxn.lower_bound = lb
+                    rxn.upper_bound = ub
+
+        self.log_info(
+            f"find_closed_mode_reactions: {len(closed_rxns)} reactions carry flux in closed mode"
+        )
+        return closed_rxns
+
+    def get_biolog_phenotypes(self, element=None):
+        """Load the committed Biolog phenotype stash from package data.
+
+        Loads all four C/N/S/P MSGrowthPhenotypes sets, or a single set by
+        element letter.  Requires no KBase authentication.
+
+        Args:
+            element: One of 'C', 'N', 'S', 'P', or None for all four.
+
+        Returns:
+            dict mapping element letter to MSGrowthPhenotypes, or a single
+            MSGrowthPhenotypes when element is specified.
+
+        Raises:
+            KeyError: If element is not one of C/N/S/P.
+            FileNotFoundError: If the stash file has not been committed yet.
+        """
+        import importlib.resources as pkg_resources
+        from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
+
+        valid_elements = {"C", "N", "S", "P"}
+        if element is not None and element not in valid_elements:
+            raise KeyError(f"get_biolog_phenotypes: unknown element '{element}'. Use one of {valid_elements}")
+
+        # Load via importlib.resources (works from installed package and editable install)
+        try:
+            # Python 3.9+ path
+            ref = pkg_resources.files("kbutillib.data").joinpath("biolog_phenotypes.json")
+            data = json.loads(ref.read_text(encoding="utf-8"))
+        except (AttributeError, TypeError):
+            # Python 3.8 fallback
+            with pkg_resources.open_text("kbutillib.data", "biolog_phenotypes.json") as f:
+                data = json.load(f)
+
+        result = {}
+        for elem, pheno_dict in data.items():
+            result[elem] = MSGrowthPhenotypes.from_dict(pheno_dict)
+
+        if element is not None:
+            if element not in result:
+                raise KeyError(f"get_biolog_phenotypes: element '{element}' not found in stash")
+            return result[element]
+        return result
+
+    def refresh_biolog_phenotypes(self, workspace="KBaseMedia"):
+        """Enumerate Biolog media from KBase and write the committed stash.
+
+        Enumerates Carbon-*/Nitrogen-*/Sulfate-*/Phosphate-* media from the
+        given workspace, extracts the differentiating (primary) compound per
+        media, builds four MSGrowthPhenotypes sets, and writes them to
+        src/kbutillib/data/biolog_phenotypes.json.
+
+        Requires KBase authentication.
+
+        Args:
+            workspace: KBase workspace name containing Biolog media (default "KBaseMedia").
+
+        Returns:
+            dict mapping element letter to count of phenotypes built.
+        """
+        from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes, MSGrowthPhenotype
+        from modelseedpy.core.msmedia import MSMedia
+
+        ELEMENT_PREFIXES = {
+            "C": ("Carbon-", "C"),
+            "N": ("Nitrogen-", "N"),
+            "S": ("Sulfate-", "S"),
+            "P": ("Phosphate-", "P"),
+        }
+        ELEMENT_LIMITS = {
+            "C": 10,
+            "N": 10,
+            "S": 10,
+            "P": 10,
+        }
+
+        self.log_info(f"refresh_biolog_phenotypes: enumerating media from workspace '{workspace}'")
+        raw_list = self.kbase_api.list_objects(workspace, object_type="KBaseBiochem.Media")
+        # raw_list is a list of workspace object info arrays; item[1] is the name
+        all_object_names = {item[1]: item for item in raw_list}
+
+        stash = {}
+        counts = {}
+
+        for elem, (prefix, target_element) in ELEMENT_PREFIXES.items():
+            self.log_info(f"refresh_biolog_phenotypes: processing {elem} ({prefix}*)")
+            media_names = sorted([k for k in all_object_names.keys() if k.startswith(prefix)])
+            self.log_info(f"  found {len(media_names)} media")
+
+            # Collect all compound sets to find the shared base (intersection)
+            all_cpd_sets = []
+            media_cpd_map = {}  # media_name -> {cpd_id: (lower_bound, upper_bound)}
+
+            for name in media_names:
+                try:
+                    # Use raw get_object to get dict directly
+                    data = self.kbase_api.get_object(name, workspace)
+                    if data is None:
+                        continue
+                    cpd_map = {}
+                    for cpd in data.get("mediacompounds", []):
+                        cpd_id = cpd["compound_ref"].split("/")[-1]
+                        cpd_map[cpd_id] = (
+                            float(-cpd.get("maxFlux", 100)),
+                            float(-cpd.get("minFlux", -100)),
+                        )
+                    media_cpd_map[name] = cpd_map
+                    all_cpd_sets.append(set(cpd_map.keys()))
+                except Exception as e:
+                    self.log_info(f"  skipping {name}: {e}")
+
+            if not all_cpd_sets:
+                self.log_info(f"  no accessible media for {elem}, skipping")
+                continue
+
+            # Shared base = intersection of all compound sets
+            base_cpd_set = set.intersection(*all_cpd_sets)
+
+            # Build base media from the intersection of the first media's bounds
+            # (all shared cpds have same bounds across media, use first)
+            first_name = media_names[0]
+            first_map = media_cpd_map.get(first_name, {})
+            base_media_dict = {}
+            for cpd_id in base_cpd_set:
+                lb, ub = first_map.get(cpd_id, (-100, 100))
+                base_media_dict[cpd_id] = {"id": cpd_id, "lower_bound": lb, "upper_bound": ub}
+            base_media = MSMedia.from_dict(base_media_dict)
+            base_media.id = f"base_{prefix.rstrip('-').lower()}"
+            base_media.name = f"Base {prefix.rstrip('-')} Media"
+
+            # Build one phenotype per media
+            phenotypes = MSGrowthPhenotypes(
+                id=f"biolog_{elem}",
+                name=f"Biolog {elem} panel",
+                base_media=None,
+                base_uptake=0,
+                base_excretion=1000,
+            )
+            pheno_list = []
+            for name in media_names:
+                cpd_map = media_cpd_map.get(name)
+                if cpd_map is None:
+                    continue
+                unique_cpds = set(cpd_map.keys()) - base_cpd_set
+                if not unique_cpds:
+                    # No differentiating compound (unusual); skip
+                    self.log_info(f"  {name}: no unique compound vs base, skipping")
+                    continue
+                primary_compound_id = sorted(unique_cpds)[0]  # take first if multiple
+
+                # Build base media for this phenotype (base + primary compound)
+                pheno_base_dict = dict(base_media_dict)
+                lb, ub = cpd_map.get(primary_compound_id, (-100, 100))
+                pheno_base_dict[primary_compound_id] = {
+                    "id": primary_compound_id, "lower_bound": lb, "upper_bound": ub
+                }
+
+                pheno = MSGrowthPhenotype(
+                    id=name,
+                    name=name,
+                    base_media=base_media,
+                    primary_compounds=[primary_compound_id],
+                    target_element=target_element,
+                    target_element_limit=ELEMENT_LIMITS[elem],
+                )
+                pheno_list.append(pheno)
+
+            phenotypes.add_phenotypes(pheno_list)
+            stash[elem] = phenotypes.to_dict()
+            counts[elem] = len(pheno_list)
+            self.log_info(f"  built {len(pheno_list)} phenotypes for {elem}")
+
+        # Write the stash to the data directory
+        import importlib.resources as pkg_resources
+        import pathlib
+
+        try:
+            data_ref = pkg_resources.files("kbutillib.data")
+            stash_path = pathlib.Path(str(data_ref)) / "biolog_phenotypes.json"
+        except (AttributeError, TypeError):
+            # Fallback: locate relative to this module file
+            stash_path = pathlib.Path(__file__).parent / "data" / "biolog_phenotypes.json"
+
+        stash_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(stash_path, "w", encoding="utf-8") as f:
+            json.dump(stash, f, indent=2)
+        self.log_info(f"refresh_biolog_phenotypes: wrote stash to {stash_path}")
+
+        return counts
+
+    def simulate_biolog(self, model, elements=("C", "N", "S", "P"), growth_threshold=0.01):
+        """Simulate Biolog phenotype panels on a model.
+
+        Runs MSGrowthPhenotypes.simulate_phenotypes for the requested element
+        panels and returns the functional (growing) media per element.  When
+        both bio1 and bio2 exist, runs per-biomass (MAX{bio1}, MAX{bio2}) and
+        reports per-biomass plus union.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            elements: Tuple of element letters to simulate (default all four).
+            growth_threshold: Minimum biomass flux to call growth (1/h, default 0.01).
+
+        Returns:
+            dict keyed by element, each value a dict with biomass_id keys and
+            a "union" key, each containing a list of growing media names.
+        """
+        mdlutl = self._check_and_convert_model(model)
+        cobra_model = mdlutl.model
+
+        # Determine biomass reactions present
+        bio_rxns = [r.id for r in cobra_model.reactions if r.id in ("bio1", "bio2")]
+        if not bio_rxns:
+            bio_rxns = [
+                r.id for r in cobra_model.reactions
+                if r.id.startswith("bio") or "biomass" in r.id.lower()
+            ][:2]
+
+        phenotypes_by_elem = self.get_biolog_phenotypes()
+        results = {}
+
+        for elem in elements:
+            elem = elem.upper()
+            if elem not in phenotypes_by_elem:
+                self.log_info(f"simulate_biolog: element '{elem}' not in stash, skipping")
+                continue
+
+            phenoset = phenotypes_by_elem[elem]
+            elem_result = {}
+            union_growing = set()
+
+            for bio_id in bio_rxns:
+                self.log_info(f"simulate_biolog: simulating {elem} panel for {bio_id}")
+                growing = []
+                for pheno in phenoset.phenotypes:
+                    try:
+                        media = pheno.build_media()
+                        self.set_media(mdlutl, media)
+                        self.set_objective_from_string(mdlutl, f"MAX{{{bio_id}}}")
+                        flux = cobra_model.slim_optimize()
+                        if flux is not None and flux > growth_threshold:
+                            growing.append(pheno.id)
+                    except Exception as e:
+                        self.log_info(
+                            f"simulate_biolog: error simulating {pheno.id} for {bio_id}: {e}"
+                        )
+                elem_result[bio_id] = growing
+                union_growing.update(growing)
+
+            elem_result["union"] = sorted(union_growing)
+            results[elem] = elem_result
+
+        return results
+
+    def test_production_potential(self, model, media=None, threshold=1e-6):
+        """Test whether each cytosolic metabolite can be produced.
+
+        For each cytosolic (_c or _c0) metabolite, adds a temporary drain
+        reaction (DM_tmp_<met_id>), maximizes its flux, records the metabolite
+        as producible if flux > threshold, then removes the reaction.  Uses a
+        cobra context manager to guarantee no leaked reactions.
+
+        Growth is NOT required during this test.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            media: Media to apply (optional).
+            threshold: Minimum flux to call producible (default 1e-6).
+
+        Returns:
+            list of metabolite ids that can be produced.
+        """
+        import cobra
+
+        mdlutl = self._check_and_convert_model(model)
+        cobra_model = mdlutl.model
+
+        if media is not None:
+            self.set_media(mdlutl, media)
+
+        # Find cytosolic metabolites
+        cytosolic_mets = []
+        for met in cobra_model.metabolites:
+            (base_id, compartment, index) = self._parse_id(met.id)
+            if compartment == "c":
+                cytosolic_mets.append(met)
+
+        self.log_info(
+            f"test_production_potential: testing {len(cytosolic_mets)} cytosolic metabolites"
+        )
+
+        original_objective = cobra_model.objective
+        producible = []
+
+        for met in cytosolic_mets:
+            dm_id = f"DM_tmp_{met.id}"
+            with cobra_model:
+                # Add temporary drain: metabolite -> (empty)
+                dm_rxn = cobra.Reaction(dm_id)
+                dm_rxn.lower_bound = 0
+                dm_rxn.upper_bound = 1000
+                dm_rxn.add_metabolites({met: -1})
+                cobra_model.add_reactions([dm_rxn])
+                # Maximize drain flux
+                cobra_model.objective = dm_rxn
+                cobra_model.objective.direction = "max"
+                flux = cobra_model.slim_optimize()
+                if flux is not None and not (flux != flux) and flux > threshold:
+                    producible.append(met.id)
+            # Context manager guarantees reaction is removed here
+
+        cobra_model.objective = original_objective
+        self.log_info(
+            f"test_production_potential: {len(producible)} producible metabolites"
+        )
+        return producible
+
+    def test_degradation_potential(self, model, media=None, threshold=1e-6):
+        """Test whether each cytosolic metabolite can be degraded (consumed).
+
+        For each cytosolic (_c or _c0) metabolite, adds a temporary source
+        reaction (SK_tmp_<met_id>), maximizes its flux, records the metabolite
+        as consumable if flux > threshold, then removes the reaction.  Uses a
+        cobra context manager to guarantee no leaked reactions.
+
+        Growth is NOT required during this test.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            media: Media to apply (optional).
+            threshold: Minimum flux to call consumable (default 1e-6).
+
+        Returns:
+            list of metabolite ids that can be degraded.
+        """
+        import cobra
+
+        mdlutl = self._check_and_convert_model(model)
+        cobra_model = mdlutl.model
+
+        if media is not None:
+            self.set_media(mdlutl, media)
+
+        # Find cytosolic metabolites
+        cytosolic_mets = []
+        for met in cobra_model.metabolites:
+            (base_id, compartment, index) = self._parse_id(met.id)
+            if compartment == "c":
+                cytosolic_mets.append(met)
+
+        self.log_info(
+            f"test_degradation_potential: testing {len(cytosolic_mets)} cytosolic metabolites"
+        )
+
+        original_objective = cobra_model.objective
+        consumable = []
+
+        for met in cytosolic_mets:
+            sk_id = f"SK_tmp_{met.id}"
+            with cobra_model:
+                # Add temporary source: (empty) -> metabolite
+                sk_rxn = cobra.Reaction(sk_id)
+                sk_rxn.lower_bound = 0
+                sk_rxn.upper_bound = 1000
+                sk_rxn.add_metabolites({met: 1})
+                cobra_model.add_reactions([sk_rxn])
+                # Maximize source flux = maximize how much the network can consume
+                cobra_model.objective = sk_rxn
+                cobra_model.objective.direction = "max"
+                flux = cobra_model.slim_optimize()
+                if flux is not None and not (flux != flux) and flux > threshold:
+                    consumable.append(met.id)
+            # Context manager guarantees reaction is removed here
+
+        cobra_model.objective = original_objective
+        self.log_info(
+            f"test_degradation_potential: {len(consumable)} consumable metabolites"
+        )
+        return consumable
+
 # ── Composition-based implementation ─────────────────────────────────────
 
 class MSFBAUtilsImpl:

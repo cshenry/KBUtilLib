@@ -132,16 +132,21 @@ def no_assistant(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def no_claudecommands(monkeypatch: pytest.MonkeyPatch):
-    """Patch _find_claudecommands_root to return None."""
-    monkeypatch.setattr(
-        "kbutillib.cli.notebook_init._CLAUDECOMMANDS_ROOT",
-        Path("/nonexistent/ClaudeCommands"),
+    """Set KBUTILLIB_CLAUDECOMMANDS_ROOT to a non-existent path so ClaudeCommands
+    is treated as absent."""
+    monkeypatch.setenv(
+        "KBUTILLIB_CLAUDECOMMANDS_ROOT",
+        "/nonexistent/ClaudeCommands",
     )
 
 
 @pytest.fixture()
 def fake_claudecommands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a fake ClaudeCommands tree with stub skill files."""
+    """Create a fake ClaudeCommands tree with stub skill files.
+
+    Sets KBUTILLIB_CLAUDECOMMANDS_ROOT so _claudecommands_root() returns
+    the fake tree instead of the default Dropbox path.
+    """
     cc_root = tmp_path / "ClaudeCommands"
     skills_dir = cc_root / "agent-io" / "skills"
     skills_dir.mkdir(parents=True)
@@ -149,10 +154,7 @@ def fake_claudecommands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         (skills_dir / f"{skill}.md").write_text(
             f"# {skill}\nstub content\n", encoding="utf-8"
         )
-    monkeypatch.setattr(
-        "kbutillib.cli.notebook_init._CLAUDECOMMANDS_ROOT",
-        cc_root,
-    )
+    monkeypatch.setenv("KBUTILLIB_CLAUDECOMMANDS_ROOT", str(cc_root))
     return cc_root
 
 

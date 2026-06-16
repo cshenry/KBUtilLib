@@ -24,12 +24,27 @@ Design decisions
 - Bundle deployment: direct-copy from ClaudeCommands ``agent-io/skills/``
   (``claude-skills sync-repos`` cannot target an arbitrary path without a
   project_registry.yaml entry; direct-copy is the correct fallback path
-  per the PRD clarification #3/#6).  The copy is isolated in
-  ``_deploy_bundle()`` so Phase 4 can adjust if needed.
+  per the PRD clarification #3/#6).  ``claude-skills sync-repos`` requires
+  the target repo to already be registered in
+  ``AIAssistant/state/project_registry.yaml`` AND the skill's
+  ``deploys_to_repos`` list to include the target repo name — neither
+  condition holds for a freshly created work-notebook repo at deploy time.
+  The direct-copy is therefore the permanent deployment strategy; it is
+  isolated in ``_deploy_bundle()`` so the source path can be overridden
+  via the ``KBUTILLIB_CLAUDECOMMANDS_ROOT`` environment variable (useful
+  for testing with a non-wip ClaudeCommands checkout).
 - Registry: when ``assistant.state`` is importable, use
   ``find_by_repo_path`` to attach or ``add_project`` to register.  When
   not importable, write the binding with the name-derived project_id and
   print a notice.
+
+Environment overrides
+---------------------
+``KBUTILLIB_CLAUDECOMMANDS_ROOT``
+    Override the ClaudeCommands root directory used as the skill source.
+    Default: ``~/Dropbox/Projects/ClaudeCommands``.
+    Useful for: testing against a specific git worktree that has the
+    work-notebook skills on ``main`` before they land on ``wip``.
 
 IMPORTANT: Never deploy BERIL skills (kbu, kbu-notebook, kbu-fba,
 kbu-start, kbu-migrate, kbu-sub-*) into work-notebook repos.  The
@@ -39,6 +54,7 @@ allowed set is exactly {jupyter-dev, kbu-run, synthesize}.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -64,14 +80,23 @@ from .worknb_util import render_worknb_util_template, smart_merge_worknb_util
 #: Work-notebook bundle: exactly these three skills — no BERIL skills.
 _WORKNB_BUNDLE: tuple[str, ...] = ("jupyter-dev", "kbu-run", "synthesize")
 
-#: Expected location of ClaudeCommands (Dropbox-synced).
-_CLAUDECOMMANDS_ROOT: Path = Path("~/Dropbox/Projects/ClaudeCommands").expanduser()
-
-#: Skills source directory inside ClaudeCommands.
-_CC_SKILLS_DIR: Path = _CLAUDECOMMANDS_ROOT / "agent-io" / "skills"
+#: Default expected location of ClaudeCommands (Dropbox-synced, parking-branch model).
+#: Override with KBUTILLIB_CLAUDECOMMANDS_ROOT env var (useful for testing
+#: against a worktree that has the work-notebook skills on main before wip).
+_CLAUDECOMMANDS_ROOT_DEFAULT: Path = Path(
+    "~/Dropbox/Projects/ClaudeCommands"
+).expanduser()
 
 #: Default Dropbox projects root.
 _DROPBOX_PROJECTS: Path = Path("~/Dropbox/Projects").expanduser()
+
+
+def _claudecommands_root() -> Path:
+    """Return the ClaudeCommands root, honoring the env var override."""
+    override = os.environ.get("KBUTILLIB_CLAUDECOMMANDS_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    return _CLAUDECOMMANDS_ROOT_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -137,32 +162,46 @@ def _write_code_workspace(repo_root: Path) -> None:
 
 
 def _find_claudecommands_root() -> Optional[Path]:
-    """Return the ClaudeCommands root if it exists, else None."""
-    if _CLAUDECOMMANDS_ROOT.is_dir():
-        return _CLAUDECOMMANDS_ROOT
+    """Return the ClaudeCommands root if it exists, else None.
+
+    Checks the path returned by :func:`_claudecommands_root`, which honours
+    the ``KBUTILLIB_CLAUDECOMMANDS_ROOT`` environment variable override.
+    """
+    cc_root = _claudecommands_root()
+    if cc_root.is_dir():
+        return cc_root
     return None
 
 
 def _deploy_bundle(repo_root: Path) -> None:
     """Deploy the work-notebook skill bundle into *repo_root*/.claude/commands/.
 
-    Strategy (per PRD clarification #3/#6):
+    Strategy (per PRD clarification #3/#6 and worknb-deploy-integration):
+
+    ``claude-skills sync-repos`` cannot target an arbitrary path because it
+    requires the target repo to be registered in
+    ``AIAssistant/state/project_registry.yaml`` AND the skill's
+    ``deploys_to_repos`` list to include the repo name — neither condition
+    holds for a freshly created work-notebook repo.  Direct-copy is therefore
+    the permanent deployment strategy.
+
+    Steps:
     1. If ClaudeCommands is absent → print notice, return (exit 0).
     2. Otherwise, direct-copy the three skill files from
        ``ClaudeCommands/agent-io/skills/`` into
        ``<repo_root>/.claude/commands/``.  Each skill may have a companion
        ``<skill>/`` context directory; copy that too if present.
-    3. BERIL skills are never deployed here.
+    3. The allowlist is hard-coded to ``_WORKNB_BUNDLE``.
+       BERIL skills are never deployed here.
 
-    This function is intentionally isolated so Phase 4
-    (worknb-deploy-integration) can swap to claude-skills if/when the
-    CLI gains an arbitrary-path deploy mode.
+    The ClaudeCommands root is resolved via :func:`_claudecommands_root`,
+    which honours the ``KBUTILLIB_CLAUDECOMMANDS_ROOT`` env var.
     """
     cc_root = _find_claudecommands_root()
     if cc_root is None:
         click.echo(
             "[notice] ClaudeCommands not found at "
-            f"{_CLAUDECOMMANDS_ROOT} — skipping bundle deployment.",
+            f"{_claudecommands_root()} — skipping bundle deployment.",
             err=False,
         )
         return

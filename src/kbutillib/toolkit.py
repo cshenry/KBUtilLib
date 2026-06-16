@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .kb_model_utils import KBModelUtilsImpl
     from .ms_fba_utils import MSFBAUtilsImpl
     from .ms_reconstruction_utils import MSReconstructionUtilsImpl
+    from .ms_template_utils import MSTemplateUtilsImpl
     from .escher_utils import EscherUtilsImpl
     from .model_standardization_utils import ModelStandardizationUtilsImpl
     from .kb_genome_utils import KBGenomeUtilsImpl
@@ -79,6 +80,7 @@ class KBUtilLib:
         self._model = None
         self._fba = None
         self._recon = None
+        self._template = None
         self._escher = None
         self._standardize = None
         self._genome = None
@@ -148,6 +150,13 @@ class KBUtilLib:
             from .ms_reconstruction_utils import MSReconstructionUtilsImpl
             self._recon = MSReconstructionUtilsImpl(self.env, self.model)
         return self._recon
+
+    @property
+    def template(self) -> MSTemplateUtilsImpl:
+        if self._template is None:
+            from .ms_template_utils import MSTemplateUtilsImpl
+            self._template = MSTemplateUtilsImpl(self.env, self.model)
+        return self._template
 
     @property
     def escher(self) -> EscherUtilsImpl:

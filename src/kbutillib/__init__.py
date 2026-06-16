@@ -109,6 +109,12 @@ except ImportError as e:
     MSFBAUtils = None
 
 try:
+    from .ms_template_utils import MSTemplateUtils
+except ImportError as e:
+    _import_error("ms_template_utils", e)
+    MSTemplateUtils = None
+
+try:
     from .kb_sdk_utils import KBSDKUtils
 except ImportError as e:
     _import_error("kb_sdk_utils", e)
@@ -266,6 +272,11 @@ except ImportError:
     MSFBAUtilsImpl = None
 
 try:
+    from .ms_template_utils import MSTemplateUtilsImpl
+except ImportError:
+    MSTemplateUtilsImpl = None
+
+try:
     from .ms_reconstruction_utils import MSReconstructionUtilsImpl
 except ImportError:
     MSReconstructionUtilsImpl = None
@@ -400,6 +411,7 @@ __all__ = [
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSFBAUtils",
+    "MSTemplateUtils",
     "MSReconstructionUtils",
     "PatricWSUtils",
     "PipelineState",
@@ -428,6 +440,7 @@ __all__ = [
     "ModelStandardizationUtilsImpl",
     "MSBiochemUtilsImpl",
     "MSFBAUtilsImpl",
+    "MSTemplateUtilsImpl",
     "MSReconstructionUtilsImpl",
     "PatricWSUtilsImpl",
     "RCSBPDBUtilsImpl",

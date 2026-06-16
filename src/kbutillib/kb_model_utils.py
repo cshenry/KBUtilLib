@@ -33,11 +33,45 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         # Import required modules after ensuring dependencies
         self._import_modules()
 
-        # Configuring cobrakbase API
-        os.environ["KB_AUTH_TOKEN"] = self.get_token("kbase")
-        self.kbase_api = self.cobrakbase.KBaseAPI()
-        self.kbase_api.ws_client = self.ws_client()
+        # Propagate the KBase token into the environment only when a non-None
+        # token is available.  Never write None to the env var — that causes a
+        # TypeError on all Python versions and silently breaks subprocesses.
+        _token = self.get_token("kbase")
+        if _token is not None:
+            os.environ["KB_AUTH_TOKEN"] = _token
+
+        # KBaseAPI construction is deferred to first use via the kbase_api
+        # property so that no-token instances (local-only FBA/FVA) construct
+        # without error.
+        self._kbase_api = None
         self._msrecon = None
+
+    @property
+    def kbase_api(self):
+        """Lazy accessor for the cobrakbase KBaseAPI client.
+
+        Constructs the client on first access so that instances without a KBase
+        token can be constructed cleanly.  Raises RuntimeError with a clear
+        message when no token is available.
+        """
+        if self._kbase_api is None:
+            token = self.get_token("kbase")
+            if token is None:
+                token = os.environ.get("KB_AUTH_TOKEN") or os.environ.get("KBASE_AUTH_TOKEN")
+            if token is None:
+                raise RuntimeError(
+                    "No KBase token: set KB_AUTH_TOKEN or KBASE_AUTH_TOKEN"
+                )
+            # Ensure the env var is set so cobrakbase can pick it up.
+            os.environ["KB_AUTH_TOKEN"] = token
+            self._kbase_api = self.cobrakbase.KBaseAPI()
+            self._kbase_api.ws_client = self.ws_client()
+        return self._kbase_api
+
+    @kbase_api.setter
+    def kbase_api(self, value):
+        """Allow direct assignment of a pre-built KBaseAPI instance (e.g. in tests)."""
+        self._kbase_api = value
 
     @property
     def msrecon(self):

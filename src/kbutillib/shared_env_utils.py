@@ -80,13 +80,18 @@ class SharedEnvUtils(BaseUtils):
         # Loading environment variables
         self.load_environment_variables()
 
-        # Promote KB_AUTH_TOKEN from environment into _token_hash['kbase'] without
+        # Promote KBase token from environment into _token_hash['kbase'] without
         # persisting to disk.  This gives env-var tokens precedence over file-sourced
         # tokens while still allowing the explicit `token=` constructor param (applied
         # below) to take the highest precedence.
-        if "KB_AUTH_TOKEN" in os.environ:
-            self._token_hash["kbase"] = os.environ["KB_AUTH_TOKEN"]
-            self.log_debug("KB_AUTH_TOKEN found in environment; using as kbase token (not persisted)")
+        #
+        # Bridge both directions: KB_AUTH_TOKEN and KBASE_AUTH_TOKEN are treated as
+        # synonyms, with KB_AUTH_TOKEN taking precedence when both are set.
+        _kb_env_token = os.environ.get("KB_AUTH_TOKEN") or os.environ.get("KBASE_AUTH_TOKEN")
+        if _kb_env_token:
+            self._token_hash["kbase"] = _kb_env_token
+            _src = "KB_AUTH_TOKEN" if os.environ.get("KB_AUTH_TOKEN") else "KBASE_AUTH_TOKEN"
+            self.log_debug(f"{_src} found in environment; using as kbase token (not persisted)")
 
         # Initialize dependency manager (auto_init=False so callers control when to resolve)
         self.dependency_manager = DependencyManager(auto_init=False)

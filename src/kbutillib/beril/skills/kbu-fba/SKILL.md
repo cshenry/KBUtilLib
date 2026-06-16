@@ -322,6 +322,54 @@ fva = session.kbu.fba.run_fva(mdlutl, fraction_of_optimum=1.0)
 
 ---
 
+## Applying a constraint package to an existing model
+
+The build → gapfill arc is not always the starting point.  A common
+alternative is to load a finished model from a JSON file and apply a
+thermodynamic constraint package before solving.
+
+### Interaction pattern
+
+```python
+import cobra
+from modelseedpy.core.msmodelutl import MSModelUtil
+
+# 1. Load a finished model from a saved JSON file and wrap it.
+cobra_model = cobra.io.load_json_model("my_model.json")
+mdlutl = MSModelUtil.get(cobra_model)
+
+# 2. Build the constraint package against the wrapped model.
+#    FullThermoPkg adds thermodynamic free-energy constraints (TFBA).
+#    Required parameter: modelseed_path pointing to your ModelSEED database.
+mdlutl.pkgmgr.getpkg("FullThermoPkg").build_package({
+    "modelseed_path": "path/to/ModelSEEDDatabase",
+    "temperature": 298,          # K (default)
+    "default_max_conc": 0.02,    # M (default)
+    "default_min_conc": 1e-6,    # M (default)
+})
+
+# 3. Run FBA or FVA — the constraint package already applied in step 2
+#    constrains the solve automatically.
+solution = session.kbu.fba.run_fba(mdlutl, objective="MAX{bio1}")
+fva     = session.kbu.fba.run_fva(mdlutl, fraction_of_optimum=1.0)
+```
+
+### In-place contract
+
+`MSFBAUtils.run_fba` and `MSFBAUtils.run_fva` operate on the
+`MSModelUtil` object **in place** — they call
+`configure_fba_formulation` to set media and objective, then solve the
+model in its current LP state.  They do **not** copy or reset the model
+before solving.  Any constraint package (e.g. `FullThermoPkg`) built
+externally on the same `mdlutl` before the call therefore survives into
+the solve and the thermodynamic constraints remain active.
+
+Key consequence: build the package once, then call `run_fba` or
+`run_fva` as many times as needed — the package variables and
+constraints persist across calls on the same `mdlutl`.
+
+---
+
 ## Graduated execution policy
 
 Applies to every stage of this arc.

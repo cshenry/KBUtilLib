@@ -93,37 +93,71 @@ _bootstrap_sys_paths()
 
 ## 5. Canonical `util.py` skeleton
 
-See `src/kbutillib/beril/skills/kbu-notebook/util.py.tmpl` for the
-minimal template.  A project's `util.py` extends this with
-project-specific constants and helpers.
+The unified template is at `src/kbutillib/cli/templates/util.py.tmpl`
+(the file rendered by `kbu init-notebook`).  A project's `util.py`
+extends this with project-specific constants and helpers below the marker.
 
 Key invariants of the skeleton:
 
 - `__file__`-anchored paths: all path constants are resolved relative to
   `Path(__file__).resolve().parent` so the notebook works from any cwd.
+- **FLAT path math:** `NOTEBOOK_DIR = Path(__file__).resolve().parent`;
+  `PROJECT_ROOT = NOTEBOOK_DIR.parent` (one level up — FLAT, not nested).
 - `session` is a module-level name; cells use `session.cache.save(...)`,
   `session.kbu.fba.run_fba(...)`, etc.
-- Imports that may not be installed are wrapped in `try/except ImportError`
-  and set to `None` so util.py loads even in a minimal environment.
+- Heavy imports (`numpy`, `pandas`, `cobra`) are each wrapped in
+  `try/except ImportError` and set to `None` so `%run util.py` succeeds
+  even in a minimal or partially broken venv.
+- There is a smart-merge marker `# === project-specific helpers below ===`
+  that lets `kbu init-notebook --force` update the header while preserving
+  project helpers below it.
 
-## 6. BERIL project layout mapping
+```python
+from kbutillib.notebook import NotebookSession
+# Note: kbutillib.beril is a resources directory (it holds skills/),
+# NOT an importable API.  Always import from kbutillib.notebook.
 
-Inside a BERIL project the canonical layout is:
+session: NotebookSession = NotebookSession.for_notebook(
+    __file__,
+    project_name="<project_id>",
+)
+
+NOTEBOOK_DIR: Path = Path(__file__).resolve().parent
+PROJECT_ROOT: Path = NOTEBOOK_DIR.parent          # one level up (FLAT)
+DATA_DIR:     Path = PROJECT_ROOT / "data"
+FIGURES_DIR:  Path = PROJECT_ROOT / "figures"
+```
+
+## 6. BERIL project layout (FLAT)
+
+`kbu init-notebook` writes the **FLAT** shape: `notebooks/util.py` sits
+directly under the project root, **not** inside a per-notebook sub-dir.
+All `.ipynb` files are siblings of `util.py`.  One shared `.kbcache/`
+lives inside `notebooks/`.
 
 ```
-projects/<project_id>/
+<project_root>/
   notebooks/
-    <notebook_name>/
-      util.py              ← the util.py for this notebook
-      .kbcache/            ← gitignored, BERIL-backup-excluded derived data
-      <notebook_name>.ipynb
-  data/                   ← curated input data (committed / BERIL-tracked)
-  figures/                ← curated output figures (committed / BERIL-tracked)
+    util.py              ← the shared util.py (rendered from cli/templates/util.py.tmpl)
+    .kbcache/            ← gitignored; anchored by __file__ in util.py
+    <notebook_name>.ipynb
+    ...
+  data/                  ← curated input data (committed / BERIL-tracked)
+  figures/               ← curated output figures (committed / BERIL-tracked)
 ```
+
+Path constant math (matches the template exactly):
+
+| Constant       | Value                              |
+|----------------|------------------------------------|
+| `NOTEBOOK_DIR` | `Path(__file__).resolve().parent`  |
+| `PROJECT_ROOT` | `NOTEBOOK_DIR.parent`              |
+| `DATA_DIR`     | `PROJECT_ROOT / "data"`            |
+| `FIGURES_DIR`  | `PROJECT_ROOT / "figures"`         |
 
 ### `.kbcache/` rules
 
-- Located beside `util.py` in the notebook directory.
+- Located at `notebooks/.kbcache/` alongside `util.py`.
 - Must appear in `.gitignore` (and in BERIL's backup exclusion list if
   BERIL backs up the project directory).
 - Contains only derived / re-computable data.  Never commit cache files.
@@ -132,9 +166,18 @@ projects/<project_id>/
 
 ### Outputs
 
-- Curated figures: save to `../../figures/` relative to the notebook dir.
-- Curated data exports: save to `../../data/` relative to the notebook dir.
+- Curated figures: save to `../figures/` relative to the notebooks dir
+  (i.e. `FIGURES_DIR`).
+- Curated data exports: save to `../data/` relative to the notebooks dir
+  (i.e. `DATA_DIR`).
 - Both `data/` and `figures/` are committed and BERIL-tracked.
+
+## 7a. BERIL Lifecycle
+
+After `kbu init-notebook` completes, run `/berdl_start` from the BERIL
+project root to re-enter BERIL's lifecycle.  The scaffolded notebooks/
+directory is the entry point; BERIL will register the project and track
+subsequent notebook outputs from there.
 
 ## 7. Graduated execution policy
 

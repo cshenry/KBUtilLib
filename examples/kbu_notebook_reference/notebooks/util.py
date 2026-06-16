@@ -1,0 +1,90 @@
+"""kbu_notebook_reference util -- runs as %run util.py at the top of every cell.
+
+Provides: common imports, project NotebookSession (named `session`), flat
+path constants, and project-specific helper functions (added below the marker).
+
+Usage in every notebook cell::
+
+    %run util.py
+
+After that line the cell can use `session`, path constants, and helpers
+defined here directly.  Do NOT add per-cell imports.
+"""
+from __future__ import annotations
+
+# === System path bootstrap =================================================
+# Prepend machine-specific Python paths to sys.path BEFORE any heavy imports.
+# Reads ~/.kbu-sys-paths (plain text, one path per line, # comments OK).
+# Silent no-op if the file isn't present or unreadable.
+import sys as _sys
+from pathlib import Path as _Path
+
+def _bootstrap_sys_paths() -> None:
+    user_file = _Path.home() / ".kbu-sys-paths"
+    if not user_file.exists():
+        return
+    try:
+        for raw in user_file.read_text().splitlines():
+            s = raw.split("#", 1)[0].strip()
+            if not s:
+                continue
+            expanded = str(_Path(s).expanduser())
+            if expanded and expanded not in _sys.path:
+                _sys.path.insert(0, expanded)
+    except Exception:
+        pass
+
+_bootstrap_sys_paths()
+# ===========================================================================
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # type: ignore
+
+try:
+    import cobra
+    from cobra import Reaction, Metabolite  # noqa: F401
+except ImportError:
+    cobra = None  # type: ignore
+    Reaction = None  # type: ignore
+    Metabolite = None  # type: ignore
+
+from kbutillib.notebook import NotebookSession
+
+# __file__-anchored session: works regardless of cwd.
+# for_notebook() anchors .kbcache/ alongside this util.py.
+session: NotebookSession = NotebookSession.for_notebook(
+    __file__,
+    project_name="kbu_notebook_reference",
+)
+
+# ---------------------------------------------------------------------------
+# Flat path constants
+# Resolve all paths relative to __file__ so the notebook works from any cwd.
+# FLAT layout: notebooks/util.py lives one level below the project root.
+# ---------------------------------------------------------------------------
+
+#: Directory containing this util.py (the notebooks/ directory).
+NOTEBOOK_DIR: Path = Path(__file__).resolve().parent
+
+#: Project root — one level up from the notebooks/ directory.
+PROJECT_ROOT: Path = NOTEBOOK_DIR.parent
+
+#: Curated input data shared across all notebooks in this project.
+DATA_DIR: Path = PROJECT_ROOT / "data"
+
+#: Curated output figures shared across all notebooks in this project.
+FIGURES_DIR: Path = PROJECT_ROOT / "figures"
+
+# === project-specific helpers below ===

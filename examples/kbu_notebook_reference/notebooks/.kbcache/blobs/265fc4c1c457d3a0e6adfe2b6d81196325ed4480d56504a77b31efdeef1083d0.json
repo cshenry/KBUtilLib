@@ -1,0 +1,6 @@
+{
+  "description": "Reference exemplar: trivial addition result",
+  "input_a": 6,
+  "input_b": 7,
+  "result": 13
+}

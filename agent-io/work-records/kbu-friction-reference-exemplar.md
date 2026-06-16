@@ -7,7 +7,7 @@ kbu-friction-reference-exemplar
 kbu-friction/reference-exemplar
 
 ## commit_shas
-(filled after commit)
+- 9c34abf12a1c06ee56bc4bf10d7bf997a910ece7
 
 ## summary
 

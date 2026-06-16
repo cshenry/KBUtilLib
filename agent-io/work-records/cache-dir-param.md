@@ -7,7 +7,7 @@ cache-dir-param
 worknb/cache-dir-param
 
 ## commit_shas
-(populated after commit)
+- a5b0904b (full: a5b0904)
 
 ## summary
 Added an optional `cache_dir: str | None = None` keyword argument to

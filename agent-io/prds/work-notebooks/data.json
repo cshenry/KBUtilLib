@@ -1,0 +1,41 @@
+{
+  "prd_name": "work-notebooks",
+  "title": "Work-Notebooks — light notebook authoring mode",
+  "owning_repo": "KBUtilLib",
+  "repos": ["KBUtilLib", "ClaudeCommands"],
+  "priority": "normal",
+  "confront_rounds": 1,
+  "summary": "Add a light 'work-notebook' mode alongside the BERIL kbu path: an idempotent kbu notebook-init scaffolder, an in-repo kbu-run authoring loop, and a kbu-workbench maintainer console. Drops manifest/state-machine/subprojects; keeps and parametrizes the NotebookSession cache layer; rewrites jupyter-dev as the work-notebook structure skill; forks a manifest-free synthesize. Two disjoint skill-deployment surfaces (work-notebook vs BERIL).",
+  "modules": [
+    {"id": 1, "name": "kbu notebook-init CLI", "repo": "KBUtilLib", "kind": "code", "tested": true},
+    {"id": 2, "name": "work-notebook layout profile", "repo": "KBUtilLib", "kind": "code", "tested": false},
+    {"id": 3, "name": "NotebookSession cache-dir parametrization", "repo": "KBUtilLib", "kind": "code", "tested": true},
+    {"id": 4, "name": "work-notebook util.py template", "repo": "KBUtilLib", "kind": "template", "tested": false},
+    {"id": 5, "name": "kbu-run command", "repo": "ClaudeCommands", "kind": "skill", "tested": false},
+    {"id": 6, "name": "jupyter-dev skill rewrite", "repo": "ClaudeCommands", "kind": "skill", "tested": false},
+    {"id": 7, "name": "synthesize work-notebook fork", "repo": "ClaudeCommands", "kind": "skill", "tested": false},
+    {"id": 8, "name": "kbu-workbench maintainer console", "repo": "ClaudeCommands", "kind": "skill", "tested": false}
+  ],
+  "key_decisions": [
+    "Parallel surface to BERIL; BERIL path left untouched (no migration).",
+    "Two disjoint skill-deployment surfaces; no shared skill files.",
+    "CLI: single idempotent kbu notebook-init <repo> --project <topic> [--update].",
+    "Notebook naming: bare NN_snake_case.ipynb (BERIL-match); PRJ-<topic>/ folders; NBCache/NBOutput; models/genomes/data under notebooks/.",
+    "Keep + parametrize NotebookSession cache dir (NBCache for work, .kbcache default for BERIL).",
+    "kbu-run hands off to JupyterLab for running; debugs on report; saves AIAssistant session records.",
+    "notebook-init registers repo in AIAssistant registry + writes notebooks/.kbu-run.json project binding.",
+    "jupyter-dev rewritten as authoritative work-notebook structure skill.",
+    "synthesize forked manifest-free -> REPORT.md per PRJ.",
+    "New distinct home command kbu-workbench; kbu-start left to BERIL.",
+    "Bundle update folded into kbu notebook-init --update.",
+    "Bundle deployment gated on ClaudeCommands presence (claude-skills work-notebook collection); graceful degradation otherwise.",
+    "Modeling-skill fork (BERIL-free kbu-fba) deferred to fast-follow PRD."
+  ],
+  "out_of_scope": [
+    "Migrating BERIL repos (ModelingLOE/ANME/observatory).",
+    "Forking kbu-fba into a BERIL-free modeling skill (deferred).",
+    "Removing BERIL manifest/state-machine/subagent code from the codebase.",
+    "Programmatic notebook execution as default.",
+    "Cross-machine deployment beyond primary-laptop."
+  ]
+}

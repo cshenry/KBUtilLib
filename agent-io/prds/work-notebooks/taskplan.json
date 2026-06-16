@@ -1,0 +1,125 @@
+{
+  "prd_name": "work-notebooks",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Foundations and skills",
+      "parallel_group": [
+        {
+          "task_id": "cache-dir-param",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 3, folded clarification #9, ACs 15-16). In KBUtilLib, extend NotebookSession.for_notebook() and the underlying constructor to accept an optional cache_dir keyword: NotebookSession.for_notebook(notebook_file=None, *, project_name=None, cache_dir: str | None = None). When cache_dir is None, preserve the current default (.kbcache) with ZERO behavioral change for BERIL. When set (e.g. 'NBCache'), place the cache catalog and blobs in that directory alongside the notebook. Thread cache_dir through to the existing kbcache_dir constructor parameter. Add tests: (a) default remains .kbcache; (b) a cached object written with cache_dir='NBCache' round-trips (write then read) from NBCache/. Follow the existing notebook/session.py cache tests as prior art.",
+          "success_criteria": "NotebookSession.for_notebook() accepts cache_dir; omitted -> .kbcache (BERIL default unchanged); cache_dir='NBCache' writes/reads cache under NBCache/. New tests pass and existing notebook/session tests still pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "layout-profile",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 2, folded clarification #5, AC 14). In KBUtilLib layout.py, add a work-notebook layout descriptor DISTINCT from the existing BERIL subproject_subdirs (do not modify BERIL layout functions). It defines shared roots ('models','genomes','data') under notebooks/, per-PRJ subdirs ('NBCache','NBOutput'), and the gitignore lines for a single root-level marker block delimited by '# >>> kbu work-notebook gitignore >>>' / '# <<< kbu work-notebook gitignore <<<' containing exactly notebooks/PRJ-*/NBCache/, notebooks/PRJ-*/NBOutput/, and .ipynb_checkpoints/. Provide a helper that appends/replaces this block idempotently.",
+          "success_criteria": "layout.py exposes a work-notebook layout descriptor (shared roots models/genomes/data, per-PRJ NBCache/NBOutput) and an idempotent gitignore-block helper using the specified markers; BERIL layout functions are unchanged.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "jupyter-dev-rewrite",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 6, AC 22) and the existing ClaudeCommands jupyter-dev source (agent-io/skills/jupyter-dev.md). REWRITE jupyter-dev to be the authoritative work-notebook structure skill: the PRJ-<topic>/ layout, util.py loaded via %run, cell-independence / cache-as-you-go discipline, NBCache/ and NBOutput/ semantics, NN_<snake_case_title>.ipynb numbering (lowercase ASCII, non-[a-z0-9]->_, collapse, trim; collision -> next free number), and the shared models/genomes/data roots under notebooks/. Remove the current redirect to kbu-notebook and any conflicting layout guidance (e.g. datacache/, lowercase nboutput/). Header must mark it work-notebook scope only; no BERIL references. Add/keep its skill_registry.json entry consistent.",
+          "success_criteria": "jupyter-dev source describes the work-notebook structure (PRJ-/util.py via %run/NBCache/NBOutput/NN_ numbering/models-genomes-data roots), contains no kbu-notebook redirect and no conflicting layout (no datacache/, no lowercase nboutput/), and references no BERIL skills.",
+          "repos": ["ClaudeCommands"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "kbu-run-skill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 5, folded clarifications #4/#7, advisory #2/#3, ACs 18-21, 27). Author a NEW kbu-run command skill in ClaudeCommands (agent-io/skills/kbu-run.md), work-notebook scope only, no BERIL references. It runs interactively inside a work-notebook repo with phases: (1) Orient from the filesystem only (list PRJ-* folders, show numbered notebooks in the active PRJ, read util.py and notebooks/.kbu-run.json; no manifest read/write); (2) Grill one notebook at a time (purpose, input data, analysis, expected output) and assign the next zero-padded NN_<snake_case_title>.ipynb (normalization per #7; collision -> next free number); (3) Build per the jupyter-dev cell discipline, extending util.py helpers; (4) Hand off to interactive JupyterLab to RUN cells (no programmatic execution by default), help debug on reported errors; (5) Invoke the manifest-free synthesize to write/update the PRJ REPORT.md; (6) Save an AIAssistant session record via assistant.state.save_session with command='kbu-run' and the standard fields (project_id, topics_discussed, decisions_made, work_submitted, next_steps, summary), degrading gracefully when AIAssistant is absent; (7) Loop or wrap. Add its skill_registry.json entry.",
+          "success_criteria": "kbu-run skill exists in ClaudeCommands, work-notebook scope only, describing the orient->grill->build->JupyterLab-handoff->synthesize->save_session loop, filesystem-only orientation (no manifest), the NN_ naming+collision rule, and a save_session payload with command='kbu-run' and the standard session fields. No BERIL references.",
+          "repos": ["ClaudeCommands"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "synthesize-fork",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 7, folded clarification #4, AC 23) and the existing BERIL synthesize skill (BERIL-research-observatory/.claude/skills/synthesize/SKILL.md) as the fork source. Create a manifest-free FORK in ClaudeCommands (agent-io/skills/synthesize.md), work-notebook scope only: read the active PRJ-<topic>/ NBOutput/ + notebook results, interpret against each notebook's stated purpose, optionally cross-reference literature, and write/update REPORT.md in the PRJ folder. Remove ALL BERIL coupling: no beril.yaml, no project status lifecycle, no manifest status checks, no RESEARCH_PLAN.md dependency. Add its skill_registry.json entry. Do not modify the BERIL synthesize skill.",
+          "success_criteria": "A new manifest-free synthesize skill exists in ClaudeCommands that writes REPORT.md per PRJ from NBOutput/+notebook results, with no reference to beril.yaml/status lifecycle/RESEARCH_PLAN.md; the BERIL synthesize skill is untouched.",
+          "repos": ["ClaudeCommands"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "kbu-workbench-skill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 8, folded clarification #10, AC 24). Author a NEW maintainer console skill kbu-workbench in ClaudeCommands (agent-io/skills/kbu-workbench.md), run inside the KBUtilLib repo. It is a markdown command skill (NOT a Python CLI subcommand) that offers menu actions: create a new work-notebook repo (kbu notebook-init <repo> --project <topic>), add a PRJ to an existing repo, refresh a repo's deployed bundle (kbu notebook-init <repo> --update), and machine initialize (kbu init). Help text describes the work-notebook flow, not the BERIL state machine. Do NOT touch kbu-start (it stays BERIL's). Add its skill_registry.json entry.",
+          "success_criteria": "kbu-workbench skill exists in ClaudeCommands as a markdown command (no Python subcommand) with create / add-PRJ / refresh-bundle / machine-init actions and work-notebook help text; kbu-start is unmodified.",
+          "repos": ["ClaudeCommands"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "util.py template",
+      "parallel_group": [
+        {
+          "task_id": "util-template",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 4, folded clarifications #9/#11, AC 17). In KBUtilLib, add a NEW %run-loadable work-notebook util.py template (separate from the BERIL util.py.tmpl) rendered into each PRJ-<topic>/. It exposes path constants PROJECT_ROOT, NOTEBOOKS_DIR, MODELS_DIR, GENOMES_DIR, DATA_DIR, NBOUTPUT_DIR (the PRJ-local NBOutput/), and instantiates session = NotebookSession.for_notebook(__file__, project_name=<repo_basename>, cache_dir='NBCache') so the cache lands in the PRJ-local NBCache/. Preserve a '# === project-specific helpers below ===' marker and reuse the existing smart-merge logic so --update re-render does not clobber hand-written helpers. Depends on the cache_dir parameter from cache-dir-param and the layout descriptor from layout-profile.",
+          "success_criteria": "A work-notebook util.py template renders a %run-loadable file exposing PROJECT_ROOT/NOTEBOOKS_DIR/MODELS_DIR/GENOMES_DIR/DATA_DIR/NBOUTPUT_DIR and a session via NotebookSession.for_notebook(__file__, project_name=<repo_basename>, cache_dir='NBCache'); it preserves the helpers marker for smart-merge.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["cache-dir-param", "layout-profile"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "notebook-init CLI",
+      "parallel_group": [
+        {
+          "task_id": "notebook-init",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (Module 1, folded clarifications #1/#2/#3/#5/#6/#8, advisory #1/#4, ACs 1-14, 26; Testing Decisions). In KBUtilLib, add the idempotent CLI subcommand 'kbu notebook-init <repo> [--project <topic>] [--update]' (adapt from new_project.py + init_notebook.py + layout.py). Behavior: bare name -> ~/Dropbox/Projects/<name>, full path verbatim. Repo missing -> bootstrap (git init; <repo_basename>.code-workspace with at least {\"folders\":[{\"path\":\".\"}]}, extra keys allowed; .claude/ initialized via claude-skills when ClaudeCommands present else empty dir + notice; notebooks/ with models/genomes/data + first PRJ-<topic>/). Repo present, notebooks/ missing -> scaffold notebooks tree + first PRJ. notebooks/ present -> add named PRJ-<topic>/ (topic normalized per advisory #1); refuse (non-zero, no writes) if PRJ exists. --update -> re-deploy the work-notebook bundle into .claude only. Each PRJ gets the rendered work-notebook util.py, empty NBCache/ and NBOutput/, and the idempotent gitignore block. Registry+binding: when assistant.state importable, attach to an existing registry entry by repo_path else register id worknb-<repo_basename>, and write notebooks/.kbu-run.json {\"project_id\":...}; when not importable, write the binding with worknb-<repo_basename> + notice. Bundle deployment: deploy the work-notebook collection (jupyter-dev,kbu-run,synthesize) via claude-skills when ClaudeCommands present (CONFIRM the exact claude-skills invocation via the claude-commands-expert skill; do NOT invent CLI syntax); direct-copy fallback from ClaudeCommands agent-io/skills/{jupyter-dev,kbu-run,synthesize}.md if claude-skills cannot target an arbitrary path; skip+notice+exit 0 if ClaudeCommands absent. CRITICAL: never deploy BERIL skills to a work-notebook repo. TESTS (primary target): the three branch cases against a temp dir, clobber-refusal (non-zero, no writes), --update idempotency, the produced filesystem tree + gitignore block + .code-workspace + .kbu-run.json; exercise registry/bundle steps in their AIAssistant-absent / ClaudeCommands-absent degraded form so tests need no live services.",
+          "success_criteria": "kbu notebook-init implements all three branch cases + clobber-refusal + --update; produces the specified tree (models/genomes/data, PRJ-<normalized-topic>/ with util.py/NBCache/NBOutput), .code-workspace, gitignore block, and .kbu-run.json with project_id worknb-<repo_basename>; deploys only the work-notebook bundle and never BERIL skills; degrades gracefully without AIAssistant/ClaudeCommands. Scaffolding tests (branches, clobber-refusal, idempotency, degraded mode) pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["util-template", "layout-profile"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Deployment integration and end-to-end",
+      "parallel_group": [
+        {
+          "task_id": "worknb-deploy-integration",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Read agent-io/prds/work-notebooks/fullprompt.md (folded clarifications #3/#4/#6, ACs 9/10/13). Using the claude-commands-expert skill, define a 'work-notebook' skill collection in ClaudeCommands skill_registry.json containing EXACTLY jupyter-dev, kbu-run, synthesize, and confirm the exact claude-skills invocation kbu notebook-init must use to deploy that collection to an arbitrary repo path (adjust notebook-init's deployment call in KBUtilLib if the confirmed invocation differs from what was built). Then run an end-to-end verification on a throwaway temp repo: kbu notebook-init creates the repo and its .claude contains EXACTLY jupyter-dev, kbu-run, synthesize and NO BERIL skill (kbu/kbu-notebook/kbu-fba/kbu-start/kbu-migrate/kbu-sub-*); and that no BERIL repo's .claude is altered. Document the verification result in agent-io/prds/work-notebooks/ as a short note.",
+          "success_criteria": "A 'work-notebook' collection (exactly jupyter-dev/kbu-run/synthesize) is defined in ClaudeCommands; kbu notebook-init's deployment uses the confirmed claude-skills invocation; an end-to-end run shows a created repo's .claude contains exactly those three skills and zero BERIL skills, with no BERIL repo altered.",
+          "repos": ["ClaudeCommands", "KBUtilLib"],
+          "depends_on": ["notebook-init", "jupyter-dev-rewrite", "kbu-run-skill", "synthesize-fork"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

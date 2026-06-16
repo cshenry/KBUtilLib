@@ -60,6 +60,11 @@ except ImportError:
     Reaction = None  # type: ignore
     Metabolite = None  # type: ignore
 
+try:
+    from modelseedpy.core.msmodelutl import MSModelUtil  # type: ignore
+except ImportError:
+    MSModelUtil = None  # type: ignore
+
 from kbutillib.notebook import NotebookSession
 
 # __file__-anchored session: works regardless of cwd.

@@ -1,9 +1,5 @@
 # KBUtilLib Modeling Preferences
 
-To configure: copy this file to `<BERIL_ROOT>/.claude/kbu/preferences.md`
-and edit the values to suit the project.  The `/kbu` primer reads this file
-at the start of every modeling session.
-
 ```yaml
 # Sentinel: set to true once you have reviewed and configured this file.
 configured: false
@@ -45,7 +41,7 @@ sampling:
 solver:
   # LP/MILP solver backend passed to COBRA.  Typical values: glpk, cplex,
   # gurobi.  Leave blank to use the COBRA default.
-  name:
+  name:  # unset — no code-level default; COBRA picks solver automatically
 
 # ---------------------------------------------------------------------------
 # Gapfill
@@ -60,7 +56,7 @@ gapfill:
 # ---------------------------------------------------------------------------
 organism:
   # Free-text hint used in session summaries (e.g. "Methanothrix soehngenii").
-  focus:
+  focus:  # unset — project-specific; no code-level default
 
 # ---------------------------------------------------------------------------
 # Media defaults
@@ -68,7 +64,7 @@ organism:
 media:
   # Default medium ID (KBase workspace ref or ModelSEED media ID) used when
   # no medium is specified explicitly.
-  default:
+  default:  # unset — project-specific; no code-level default
 
 # ---------------------------------------------------------------------------
 # Schema version (do not edit manually)

@@ -1,0 +1,23 @@
+{
+  "prd_name": "kbu-skills-friction-fix",
+  "title": "Fix kbu skill-bundle friction (BERIL proving-ground audit)",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "source_audit": "BERIL-research-observatory/agent-io/audits/2026-06-15-kbu-skills-friction.md",
+  "confront_rounds": 1,
+  "decisions": {
+    "notebook_layout": "flat (matches BERIL); PROJECT_ROOT = NOTEBOOK_DIR.parent",
+    "template_helpers_block": "dropped; notebooks import helpers explicitly",
+    "fba_idiom": "session.kbu.* canonical; bare MSFBAUtils escape hatch",
+    "beril_integration": "docs-only this round; no beril.yaml writes",
+    "token_injection": "KB_AUTH_TOKEN env var promoted into kbase token, env wins over files"
+  },
+  "out_of_scope": [
+    "CLI writing beril.yaml",
+    "Cloudflare off-cluster BERDL challenge (infra)",
+    "re-running energy_loop_analysis (needs BERDL)",
+    "claude-skills sync redeploy (manual post-merge)",
+    "broken Homebrew python@3.13 under CLI venv (machine fix)"
+  ]
+}

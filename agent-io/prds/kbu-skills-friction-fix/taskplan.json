@@ -1,0 +1,71 @@
+{
+  "prd_name": "kbu-skills-friction-fix",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "code-fixes",
+      "parallel_group": [
+        {
+          "task_id": "venv-provisioning-doctor",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Task A of agent-io/prds/kbu-skills-friction-fix/fullprompt.md (Venv provisioning + diagnostics). (1) In machine_configs/_default.yaml add 'requests_toolbelt >=0.10.0' and 'tomli-w >=1.0' to notebook_deps, plus any other KBUtilLib pyproject.toml runtime dep verified absent from a resolved notebook venv; do NOT add cobra/modelseedpy/cobrakbase (they come via editable_installs). (2) Extend the existing kbu doctor (cli/init.py / cli/beril.py) to wrap import of kbutillib.ms_fba_utils and kbutillib.ms_reconstruction_utils in try/except: on ModuleNotFoundError print '[FAIL] fba-import: missing dependency: {e.name}', on other exceptions print exception type + first message line; keep doctor runnable when optional modules are absent. Also attempt 'import tomli_w' on the current interpreter and warn on failure that the kbu CLI venv needs reconciliation. These checks MUST run on Linux (not macOS-gated). (3) In src/kbutillib/__init__ collapse the per-module optional-import failure prints to a single stderr line '[KBUtilLib] {N} optional modules unavailable: {csv} (set KBUTILLIB_VERBOSE_IMPORTS=1 for detail)'; emit per-module detail only when KBUTILLIB_VERBOSE_IMPORTS=1. Satisfy Acceptance Criteria 1,2,3,14,17. Commit any new tests under tests/ with 'git add -f' (.gitignore ignores test_*.py); do NOT modify .gitignore. Keep tests/test_composition_smoke.py green.",
+          "success_criteria": "machine_configs/_default.yaml notebook_deps lists requests_toolbelt and tomli-w (and not cobra/modelseedpy/cobrakbase); `kbu doctor` import-checks the two FBA modules and prints '[FAIL] fba-import: missing dependency: <name>' on a simulated missing dep, runs on Linux, and warns on missing tomli_w; `import kbutillib` prints at most one optional-modules summary line by default and per-module detail under KBUTILLIB_VERBOSE_IMPORTS=1; composition smoke tests pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "template-unify",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Task B of agent-io/prds/kbu-skills-friction-fix/fullprompt.md (Unify the util.py template, FLAT layout). Make cli/templates/util.py.tmpl the single source of truth with this exact body: the ~/.kbu-sys-paths bootstrap block; guarded numpy/pandas/cobra imports (each in try/except ImportError); 'from kbutillib.notebook import NotebookSession'; session = NotebookSession.for_notebook(__file__, project_name=\"{{ project_name }}\"); flat path constants NOTEBOOK_DIR = Path(__file__).resolve().parent, PROJECT_ROOT = NOTEBOOK_DIR.parent, DATA_DIR = PROJECT_ROOT/'data', FIGURES_DIR = PROJECT_ROOT/'figures'; the smart-merge marker '# === project-specific helpers below ==='; NO kbutillib.notebook.helpers/.schema import block; NO session_for() shim. Delete src/kbutillib/beril/skills/kbu-notebook/util.py.tmpl. Confirm cli/init_notebook.py writes the FLAT shape (notebooks/util.py, sibling .ipynb, one shared notebooks/.kbcache/) and that _smart_merge_util finds the marker (kbu init-notebook --force must round-trip and preserve user helpers below the marker). Update the kbu-notebook skill's layout section to FLAT with PROJECT_ROOT = NOTEBOOK_DIR.parent (one level) and point its template reference at cli/templates/util.py.tmpl. Update any test asserting the old template body (e.g. tests/test_beril_skill_bundle.py). Satisfy Acceptance Criteria 4,5,6. Commit new tests with 'git add -f'; do NOT modify .gitignore. Keep tests/test_composition_smoke.py green.",
+          "success_criteria": "Exactly one util.py template exists (cli/templates/util.py.tmpl) with guarded imports, __file__ anchoring, PROJECT_ROOT=NOTEBOOK_DIR.parent, the smart-merge marker, and no helpers/schema block; beril/skills/kbu-notebook/util.py.tmpl is removed; `kbu init-notebook` renders the flat shape and `kbu init-notebook --force` succeeds without a marker error and preserves user helpers; no parent.parent remains in template or kbu-notebook skill; tests updated and green.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "token-injection",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Task E of agent-io/prds/kbu-skills-friction-fix/fullprompt.md (KB_AUTH_TOKEN injection). In SharedEnvUtils.__init__ (src/kbutillib/shared_env_utils.py), after token files and env vars are loaded, if os.environ contains KB_AUTH_TOKEN, set _token_hash['kbase'] to that value WITHOUT persisting to disk, with precedence OVER any file-sourced kbase token. get_token('kbase') must return the env value when KB_AUTH_TOKEN is set and fall back to the file value when it is unset. The existing token= constructor param must continue to take precedence as before. Add a focused unit test: with KB_AUTH_TOKEN set and a dummy kbase token file, get_token('kbase') returns the env value; with KB_AUTH_TOKEN unset, it returns the file value. Satisfy Acceptance Criteria 11 and 12. Commit the new test with 'git add -f' (.gitignore ignores test_*.py); do NOT modify .gitignore. Keep tests/test_composition_smoke.py green.",
+          "success_criteria": "With KB_AUTH_TOKEN exported, SharedEnvUtils().get_token('kbase') returns the env value (overriding ~/.kbase/token) and does not write it to disk; with KB_AUTH_TOKEN unset it returns the file value; the committed unit test asserts both directions and passes; composition smoke tests pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "docs-and-exemplar",
+      "parallel_group": [
+        {
+          "task_id": "skill-docs",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Task C of agent-io/prds/kbu-skills-friction-fix/fullprompt.md (skill-doc corrections) across the kbu / kbu-notebook / kbu-fba skills under src/kbutillib/beril/skills/. (1) State the import 'from kbutillib.notebook import NotebookSession' and clarify kbutillib.beril is a resources path, not an importable API. (2) Declare session.kbu.* canonical (e.g. session.kbu.fba.run_fba(...), which exists at toolkit.py:138); show bare MSFBAUtils(...) only as an escape hatch. (3) Pin the VERIFIED FBA object-type contract: build_metabolic_model(genome: MSGenome, ...) -> (current_output: dict, mdlutl: MSModelUtil); gapfill_metabolic_model(mdlutl: MSModelUtil, genome: MSGenome, ...) -> (current_output, solutions, output_solution, output_solution_media) with mdlutl passed in and mutated; run_fba(model: MSModelUtil, ...) and run_fva(model: MSModelUtil, ...); show the explicit build->gapfill->run handoff passing mdlutl. Re-confirm types and the facade property names against live ms_fba_utils/ms_reconstruction_utils/toolkit.py while editing. (4) Document the objective DSL grammar near first use by reading modelseedpy ObjectivePkg.build_package (set_objective_from_string -> model.pkgmgr.getpkg('ObjectivePkg')): at minimum MAX{<rxn_id>}/MIN{<rxn_id>}, and whether linear combinations/coefficients are supported. (5) Add a BERIL Lifecycle section instructing the user to run /berdl_start after kbu init-notebook. (6) Document the offline fallback using VERIFIED APIs only: from modelseedpy.core.msgenome import MSGenome, build a genome from a local FAA, pass to build_metabolic_model; explicitly state KBBERDLUtils.get_genome does NOT exist (use the MSGenome path) and name the endpoint used by get_genometables_from_kbase. (7) Document that setting KB_AUTH_TOKEN supplies the KBase token (precedence over files) so no ~/.kbase/token stashing is needed. (8) In src/kbutillib/beril/skills/kbu/preferences.md strip the 'Copy this file ...' header and add a top-level 'configured: false' sentinel. Satisfy Acceptance Criteria 7,8,9,10,15 (plus the import/idiom/token doc points). Do NOT modify .gitignore.",
+          "success_criteria": "The kbu/kbu-notebook/kbu-fba skills state the NotebookSession import and that kbutillib.beril is a resources path; declare session.kbu.* canonical; document the verified FBA type contract (build returns (dict, MSModelUtil); gapfill takes mdlutl in and returns the 4-tuple; run_fba/run_fva take MSModelUtil) with an explicit handoff; document the MAX{}/MIN{} objective grammar; include a /berdl_start hand-back section; document the offline MSGenome-from-FAA fallback with NO reference to a get_genome method; document KB_AUTH_TOKEN; and preferences.md has no 'Copy this file' header and carries configured: false.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["template-unify", "token-injection"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "reference-exemplar",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Task D of agent-io/prds/kbu-skills-friction-fix/fullprompt.md (reference exemplar). Create examples/kbu_notebook_reference/ demonstrating the canonical FLAT notebook layout end-to-end: notebooks/util.py rendered from the unified cli/templates/util.py.tmpl (project_name filled in); one small notebooks/reference.ipynb whose single cell does '%run util.py', computes a trivial result, and saves it via the session cache (session cache save/load). Commit a TINY NON-SQLite cached artifact demonstrating the round-trip; do NOT commit a SQLite .kbcache catalog DB (keep it ignored) -- reconcile with the 'never commit .kbcache' guidance either by using an artifacts/ location or a clearly-noted one-file exemplar exception. Keep the example fully offline (no BERDL dependency). Satisfy Acceptance Criterion 13. Do NOT modify .gitignore.",
+          "success_criteria": "examples/kbu_notebook_reference/ exists with notebooks/util.py matching the unified template (flat PROJECT_ROOT, guarded imports, marker), a reference.ipynb with a single %run util.py cell that computes and caches an artifact, and a committed tiny non-SQLite cached artifact; no SQLite .kbcache catalog DB is committed; the notebook cell runs without error in a healthy venv.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["template-unify"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+"""{{ repo_basename }} — work-notebook util
+
+Run at the top of every notebook cell with::
+
+    %run util.py
+
+After that line, the cell can use the path constants and ``session`` directly.
+Do NOT add per-cell imports.
+
+Path layout (all resolved relative to this file so the notebook works from
+any cwd)::
+
+    <repo>/
+      notebooks/
+        PRJ-{{ topic }}/
+          util.py          <- this file
+          NBCache/         <- per-PRJ NotebookSession cache (gitignored)
+          NBOutput/        <- per-PRJ outputs (gitignored)
+        models/
+        genomes/
+        data/
+"""
+from __future__ import annotations
+
+import sys as _sys
+from pathlib import Path as _Path
+
+
+# === sys.path bootstrap =====================================================
+# Prepend machine-specific Python paths before any heavy imports.
+# Reads ~/.kbu-sys-paths (one path per line; # comments OK).
+# Silent no-op if the file is missing or unreadable.
+
+def _bootstrap_sys_paths() -> None:
+    user_file = _Path.home() / ".kbu-sys-paths"
+    if not user_file.exists():
+        return
+    try:
+        for raw in user_file.read_text().splitlines():
+            s = raw.split("#", 1)[0].strip()
+            if not s:
+                continue
+            expanded = str(_Path(s).expanduser())
+            if expanded and expanded not in _sys.path:
+                _sys.path.insert(0, expanded)
+    except Exception:
+        pass
+
+
+_bootstrap_sys_paths()
+# ============================================================================
+
+from pathlib import Path
+
+from kbutillib.notebook import NotebookSession
+
+# ---------------------------------------------------------------------------
+# Path constants
+# Anchored relative to __file__ so they work regardless of cwd.
+#
+# PRJ layout:
+#   <repo>/notebooks/PRJ-{{ topic }}/util.py   <- __file__
+#   <repo>/notebooks/                           <- NOTEBOOKS_DIR
+#   <repo>/                                     <- PROJECT_ROOT
+# ---------------------------------------------------------------------------
+
+#: This PRJ directory (contains util.py, NBCache/, NBOutput/).
+_PRJ_DIR: Path = Path(__file__).resolve().parent
+
+#: The notebooks/ directory shared across all PRJs.
+NOTEBOOKS_DIR: Path = _PRJ_DIR.parent
+
+#: Repository root — one level above notebooks/.
+PROJECT_ROOT: Path = NOTEBOOKS_DIR.parent
+
+#: Shared models directory (notebooks/models/).
+MODELS_DIR: Path = NOTEBOOKS_DIR / "models"
+
+#: Shared genomes directory (notebooks/genomes/).
+GENOMES_DIR: Path = NOTEBOOKS_DIR / "genomes"
+
+#: Shared data directory (notebooks/data/).
+DATA_DIR: Path = NOTEBOOKS_DIR / "data"
+
+#: Per-PRJ output directory (gitignored).
+NBOUTPUT_DIR: Path = _PRJ_DIR / "NBOutput"
+
+# ---------------------------------------------------------------------------
+# NotebookSession
+# Cache lands in the PRJ-local NBCache/ directory (gitignored).
+# ---------------------------------------------------------------------------
+
+session: NotebookSession = NotebookSession.for_notebook(
+    __file__,
+    project_name="{{ repo_basename }}",
+    cache_dir="NBCache",
+)
+
+# === project-specific helpers below ===

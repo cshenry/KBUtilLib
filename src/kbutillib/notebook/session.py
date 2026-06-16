@@ -58,13 +58,25 @@ class NotebookSession:
         notebook_file: Optional[str] = None,
         *,
         project_name: Optional[str] = None,
+        cache_dir: Optional[str] = None,
     ) -> "NotebookSession":
-        """Detect notebook context, locate-or-create .kbcache/, open catalog.
+        """Detect notebook context, locate-or-create cache directory, open catalog.
 
         If *notebook_file* is not given, auto-detection is attempted.
-        The ``.kbcache/`` directory is placed alongside the notebook
-        (sibling of ``*.ipynb``), or in the current working directory
-        if detection fails.
+        The cache directory is placed alongside the notebook (sibling of
+        ``*.ipynb``), or in the current working directory if detection fails.
+
+        Parameters
+        ----------
+        notebook_file:
+            Path to the notebook (or ``util.py``) that anchors the session.
+            When omitted, the environment is auto-detected.
+        project_name:
+            Optional project namespace used to scope catalog entries.
+        cache_dir:
+            Name of the cache directory placed alongside *notebook_file*.
+            When ``None`` (default), the BERIL-compatible ``.kbcache`` name is
+            used.  Pass ``"NBCache"`` for the work-notebook convention.
         """
         if notebook_file:
             nb_path = Path(notebook_file).resolve()
@@ -74,7 +86,8 @@ class NotebookSession:
             notebook_name = detect_notebook_name()
             base_dir = Path.cwd()
 
-        kbcache_dir = base_dir / ".kbcache"
+        cache_dirname = cache_dir if cache_dir is not None else ".kbcache"
+        kbcache_dir = base_dir / cache_dirname
         return cls(
             kbcache_dir=kbcache_dir,
             notebook_name=notebook_name,

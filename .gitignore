@@ -27,9 +27,9 @@ Thumbs.db
 .idea/
 # Pytest cache
 .pytest_cache/
-# Test files created during development
-test_*.py
-*_test.py
+# Scratch test files created during development (root level only, not tests/ dir)
+/test_*.py
+/*_test.py
 DEPENDENCY_MANAGEMENT_SUMMARY.md
 OPTIONAL_IMPORTS_SUMMARY.md
 # Cursor workspace files

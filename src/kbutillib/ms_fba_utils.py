@@ -1,15 +1,1082 @@
-"""KBase model utilities for constraint-based metabolic modeling."""
+"""KBase model utilities for constraint-based metabolic modeling.
 
+Energy/redox/mass loop (EGC) detection utilities
+-------------------------------------------------
+The five EGC-detection helpers (``build_full_model_from_template``,
+``add_probe_reaction``, ``minimize_active_reactions``,
+``enumerate_alternative_reaction_sets``, and ``find_flux_loops``) rely on the
+following ModelSEEDpy APIs.  No version SHA is pinned in pyproject.toml; these
+are the stable public surfaces used as of modelseedpy 0.4.x.
+
+    from modelseedpy.core.mstemplate import MSTemplate, MSTemplateReaction
+    MSTemplateReaction.to_reaction(cobra_model, index)
+        Builds a cobra.Reaction from the template reaction in compartment
+        ``{reaction.compartment}{index}``; carries lower_bound/upper_bound
+        from the template directionality.
+
+    from modelseedpy.core.msmodelutl import MSModelUtil
+    MSModelUtil.get(cobra_model)
+        Wraps a cobra.Model in an MSModelUtil (singleton per model object).
+    MSModelUtil.find_reaction(stoichiometry)
+        Returns [reaction, direction_int] where direction_int is 1 (forward)
+        or -1 (reverse), or None if no match exists.
+    MSModelUtil.msid_hash()
+        Returns {msid: [cobra.Metabolite, ...]} for every metabolite in the
+        model whose annotation contains a ModelSEED compound id.
+    MSModelUtil.assign_reliability_scores_to_reactions()
+        Returns {rxn_id: {">": float, "<": float}} reliability scores.
+    MSModelUtil.is_core(rxn)
+        Returns True if the reaction is in the core reaction set.
+
+    model.pkgmgr.getpkg("ReactionUsePkg").build_package(filter_dict)
+        Adds fu/ru binary variables + constraints for the reactions in
+        filter_dict = {rxn_id: ">"|"<"|"="}.  Variables are accessible as
+        model.pkgmgr.getpkg("ReactionUsePkg").variables["fu"] and ["ru"].
+
+    from optlang.symbolics import Zero
+        The zero symbolic constant used when constructing LP objectives.
+"""
+
+import logging
 import pickle
+import time
 from typing import Any, Dict
 import pandas as pd
 import re
 import json
 
 from cobra.flux_analysis import flux_variability_analysis
-from cobra.flux_analysis import pfba 
+from cobra.flux_analysis import pfba
 
 from .kb_model_utils import KBModelUtils
+
+logger = logging.getLogger(__name__)
+
+# ── EGC probe catalog ────────────────────────────────────────────────────────
+# Module-level constant keyed by group.  Each entry is a list of probe specs:
+#   {"name": str, "stoichiometry": {msid: coef}, "seed_annotation": str}
+# stoichiometry coefficients follow the cobra convention: negative = reactant.
+# Compartment suffixes are added at run-time by add_probe_reaction.
+
+EGC_PROBE_CATALOG: Dict[str, list] = {
+    "atp": [
+        {
+            "name": "atp_hydrolysis",
+            "stoichiometry": {
+                "cpd00002": -1,  # ATP
+                "cpd00001": -1,  # H2O
+                "cpd00008": 1,   # ADP
+                "cpd00009": 1,   # Pi
+                "cpd00067": 1,   # H+
+            },
+            "seed_annotation": "rxn00062",
+        }
+    ],
+    # Redox probes: reduced -> oxidized + H2 [+ H+ as needed for charge balance]
+    # Gated behind enable_redox_probes.  Each probe specifies:
+    #   reduced msid, oxidized msid, cpd00067 (H+) coefficient (0 or 1),
+    #   H2 msid = cpd11749 (dihydrogen in ModelSEED).
+    # cpd00067 coefficient on product side handles charge balance:
+    #   NADH (charge -1) -> NAD (charge -1) + H2 (charge 0)  → charge balanced
+    #   NADPH (charge -2) -> NADP (charge -2) + H2 (charge 0) → balanced
+    # Couples with unresolvable compound ids are skipped at runtime.
+    "redox": [
+        {
+            "name": "nadh_drain",
+            "stoichiometry": {
+                "cpd00004": -1,   # NADH
+                "cpd00003": 1,    # NAD+
+                "cpd11749": 1,    # H2
+            },
+            "seed_annotation": "PROBE_NADH",
+        },
+        {
+            "name": "nadph_drain",
+            "stoichiometry": {
+                "cpd00005": -1,   # NADPH
+                "cpd00006": 1,    # NADP+
+                "cpd11749": 1,    # H2
+            },
+            "seed_annotation": "PROBE_NADPH",
+        },
+        {
+            "name": "fadh2_drain",
+            "stoichiometry": {
+                "cpd00982": -1,   # FADH2 (cpd00982 in ModelSEED)
+                "cpd00015": 1,    # FAD
+                "cpd11749": 1,    # H2
+                "cpd00067": 1,    # H+ (charge: FADH2=-2, FAD=-2, H2=0 → need +2H but H2=2H → balanced as is)
+            },
+            "seed_annotation": "PROBE_FADH2",
+        },
+        {
+            "name": "fdred_drain",
+            "stoichiometry": {
+                "cpd11620": -1,   # ferredoxin reduced (cpd11620)
+                "cpd11621": 1,    # ferredoxin oxidized (cpd11621)
+                "cpd11749": 1,    # H2
+            },
+            "seed_annotation": "PROBE_FDRED",
+        },
+        {
+            "name": "ubiquinol_drain",
+            "stoichiometry": {
+                "cpd15561": -1,   # ubiquinol (cpd15561)
+                "cpd15560": 1,    # ubiquinone (cpd15560)
+                "cpd11749": 1,    # H2
+                "cpd00067": 1,    # H+ for charge balance (QH2 neutral, Q neutral → +2H, H2=2H)
+            },
+            "seed_annotation": "PROBE_QH2",
+        },
+        {
+            "name": "gsh_drain",
+            "stoichiometry": {
+                "cpd00111": -2,   # 2 GSH
+                "cpd00154": 1,    # GSSG
+                "cpd11749": 1,    # H2
+            },
+            "seed_annotation": "PROBE_GSH",
+        },
+        {
+            "name": "trxred_drain",
+            "stoichiometry": {
+                "cpd12689": -1,   # thioredoxin reduced (cpd12689)
+                "cpd12690": 1,    # thioredoxin oxidized (cpd12690)
+                "cpd11749": 1,    # H2
+            },
+            "seed_annotation": "PROBE_TRXRED",
+        },
+    ],
+    # Mass sinks: exactly these four metabolites, irreversible drain
+    "mass": [
+        {
+            "name": "co2_sink",
+            "stoichiometry": {"cpd00011": -1},  # CO2
+            "seed_annotation": "PROBE_CO2",
+        },
+        {
+            "name": "acetate_sink",
+            "stoichiometry": {"cpd00029": -1},  # acetate
+            "seed_annotation": "PROBE_ACETATE",
+        },
+        {
+            "name": "formate_sink",
+            "stoichiometry": {"cpd00047": -1},  # formate
+            "seed_annotation": "PROBE_FORMATE",
+        },
+        {
+            "name": "nh3_sink",
+            "stoichiometry": {"cpd00013": -1},  # NH3
+            "seed_annotation": "PROBE_NH3",
+        },
+    ],
+}
+# "all" is the union; built lazily to avoid duplicates if catalog is modified
+EGC_PROBE_CATALOG["all"] = (
+    EGC_PROBE_CATALOG["atp"]
+    + EGC_PROBE_CATALOG["redox"]
+    + EGC_PROBE_CATALOG["mass"]
+)
+
+_TOL = 1e-6   # active threshold: |flux| > _TOL
+_ZERO = 1e-9  # zero threshold: |flux| <= _ZERO
+_SUPPORT_CAP = 500  # max ReactionUse filter size
+
+
+# ── Module-level standalone helpers (callable from tests without auth) ────────
+
+
+def _safe_reliability_scores(mdlutl):
+    """Return reliability scores, falling back to empty defaults if biochem DB unavailable."""
+    try:
+        return mdlutl.assign_reliability_scores_to_reactions()
+    except Exception as e:
+        logger.warning(f"assign_reliability_scores_to_reactions unavailable ({e}); using defaults")
+        scores = {}
+        for rxn in mdlutl.model.reactions:
+            scores[rxn.id] = {">": 0.0, "<": 0.0}
+        return scores
+
+
+def _safe_is_core(mdlutl, rxn):
+    """Return is_core, falling back to False if biochem DB unavailable."""
+    try:
+        return mdlutl.is_core(rxn)
+    except Exception:
+        return False
+
+
+def _strip_reaction_use_pkg(model_cobra, pkgmgr):
+    """Remove all fu_/ru_ variables and constraints from the model.
+
+    Tries the clean ``ReactionUsePkg.clear()`` path first; falls back to
+    removing variables/constraints by name prefix through optlang.
+    """
+    try:
+        pkg = pkgmgr.getpkg("ReactionUsePkg")
+        if hasattr(pkg, "clear"):
+            pkg.clear()
+            return
+    except Exception:
+        pass
+    # Fallback: remove by name prefix
+    to_remove_vars = [
+        v for v in model_cobra.variables if v.name.startswith(("fu_", "ru_"))
+    ]
+    to_remove_cons = [
+        c for c in model_cobra.constraints if c.name.startswith(("fu_", "ru_", "exclusion"))
+    ]
+    model_cobra.remove_cons_vars(to_remove_vars + to_remove_cons)
+
+
+def build_full_model_from_template_standalone(template, index="0"):
+    """Build a closed cobra.Model from an MSTemplate, wrapped as MSModelUtil.
+
+    Every template reaction is included via MSTemplateReaction.to_reaction.
+    Template directionality is preserved (the defect surface).  Any reaction
+    whose id starts with EX_, DM_, SK_, or bio has lb=ub=0 (boundary guard).
+
+    Parameters
+    ----------
+    template : MSTemplate
+        A loaded ModelSEED template object.
+    index : str, optional
+        Compartment index appended by to_reaction (default "0").
+
+    Returns
+    -------
+    MSModelUtil
+        Wrapped closed model.
+    """
+    import cobra
+    from modelseedpy.core.msmodelutl import MSModelUtil
+
+    cobra_model = cobra.Model(f"template_closed_{getattr(template, 'id', 'model')}")
+    for tmpl_rxn in template.reactions:
+        try:
+            rxn = tmpl_rxn.to_reaction(cobra_model, index)
+            cobra_model.add_reactions([rxn])
+        except Exception as e:
+            logger.warning(f"build_full_model_from_template: skipping {tmpl_rxn.id}: {e}")
+    # Zero boundary/maintenance reactions
+    boundary_prefixes = ("EX_", "DM_", "SK_", "bio")
+    for rxn in cobra_model.reactions:
+        if any(rxn.id.startswith(p) for p in boundary_prefixes):
+            rxn.lower_bound = 0
+            rxn.upper_bound = 0
+    return MSModelUtil.get(cobra_model)
+
+
+def add_probe_reaction_standalone(mdlutl, probe, compartment="c0"):
+    """Add or reuse a probe reaction on the wrapped model.
+
+    Generalizes MSModelUtil.add_atp_hydrolysis to an arbitrary probe spec.
+
+    Parameters
+    ----------
+    mdlutl : MSModelUtil
+        Wrapped cobra.Model to add the probe to.
+    probe : dict
+        Probe spec with keys ``name``, ``stoichiometry`` (msid→coef),
+        ``seed_annotation``.
+    compartment : str, optional
+        Target compartment (default "c0").
+
+    Returns
+    -------
+    dict
+        ``{"reaction": cobra.Reaction, "direction": ">", "new": bool}``
+        new=False when an existing reaction was reused.
+    """
+    from modelseedpy.core.msmodelutl import MSModelUtil
+
+    name = probe["name"]
+    raw_stoich = probe["stoichiometry"]
+    seed_ann = probe["seed_annotation"]
+
+    # Resolve msids to cobra.Metabolite objects in the target compartment
+    id_hash = mdlutl.msid_hash()
+    stoichiometry = {}
+    for msid, coef in raw_stoich.items():
+        if msid not in id_hash:
+            # metabolite not in model; add a new one
+            import cobra as _cobra
+            new_met = _cobra.Metabolite(
+                f"{msid}_{compartment}",
+                name=msid,
+                compartment=compartment,
+            )
+            new_met.annotation = {"seed.compound": msid}
+            stoichiometry[new_met] = coef
+        else:
+            # pick the metabolite in the right compartment
+            met_in_comp = [m for m in id_hash[msid] if m.compartment == compartment]
+            if met_in_comp:
+                stoichiometry[met_in_comp[0]] = coef
+            else:
+                # use first available metabolite (different compartment)
+                stoichiometry[id_hash[msid][0]] = coef
+
+    # Check for an existing matching reaction in the FORWARD direction.
+    # find_reaction returns [rxn, dir_int] where dir_int=1 means forward match
+    # (query stoichiometry matches rxn's own metabolite coefficients exactly),
+    # dir_int=-1 means reverse match. Only reuse on forward match so the probe
+    # always reads in the expected direction.
+    existing = mdlutl.find_reaction(stoichiometry)
+    if existing is not None:
+        rxn, dir_int = existing
+        if dir_int == 1:
+            return {"reaction": rxn, "direction": ">", "new": False}
+
+    # Create the probe reaction
+    probe_id = f"PROBE_{name}_{compartment}"
+    if probe_id in [r.id for r in mdlutl.model.reactions]:
+        # Already present (e.g. second call) — reuse
+        rxn = mdlutl.model.reactions.get_by_id(probe_id)
+        return {"reaction": rxn, "direction": ">", "new": False}
+
+    import cobra as _cobra
+    probe_rxn = _cobra.Reaction(
+        probe_id,
+        name=f"{name} probe [{compartment}]",
+        lower_bound=0,
+        upper_bound=1000,
+    )
+    probe_rxn.annotation["seed.reaction"] = seed_ann
+    probe_rxn.add_metabolites(stoichiometry)
+    mdlutl.model.add_reactions([probe_rxn])
+    return {"reaction": probe_rxn, "direction": ">", "new": True}
+
+
+def minimize_active_reactions_standalone(
+    mdlutl,
+    objective=None,
+    active_filter=None,
+    fraction_of_optimum=1.0,
+    tol=_TOL,
+    zero_tol=_ZERO,
+):
+    """Return the count-minimal set of active reactions supporting an objective.
+
+    Phase 1 (if active_filter is None): LP-maximize the objective, then
+    LP-minimize total flux to get the pFBA-style support.  Phase 2: introduce
+    fu/ru binary variables only for the support reactions (capped at
+    _SUPPORT_CAP by |flux|) and minimize Σ(fu+ru) via MILP.
+
+    Parameters
+    ----------
+    mdlutl : MSModelUtil
+        Wrapped model (will be mutated temporarily; caller must strip
+        ReactionUsePkg afterward if they want a clean model).
+    objective : str or None
+        Objective string (e.g. "MAX{PROBE_atp_hydrolysis_c0}").  Ignored when
+        active_filter is provided.
+    active_filter : dict or None
+        Pre-computed {rxn_id: direction ">" or "<"}.
+    fraction_of_optimum : float
+        Pin the objective at this fraction of its max value (default 1.0).
+    tol : float
+        Activity threshold (default 1e-6).
+    zero_tol : float
+        Zero threshold (default 1e-9).
+
+    Returns
+    -------
+    dict
+        ``{"reactions": [...], "size": int, "solution": cobra.Solution}``
+        Each reaction entry: {id, direction, flux, reliability_score, is_core}.
+    """
+    import time as _time
+    from optlang.symbolics import Zero
+
+    t0 = _time.time()
+    model = mdlutl.model
+
+    if active_filter is None:
+        if objective is None:
+            raise ValueError("minimize_active_reactions: need objective or active_filter")
+        # Phase 1a: LP-maximize objective
+        original_obj = model.objective
+        obj_str = objective
+        # Set objective via ObjectivePkg if available; else set directly
+        try:
+            mdlutl.pkgmgr.getpkg("ObjectivePkg").build_package(obj_str)
+        except Exception:
+            _set_objective_simple(model, obj_str)
+
+        sol_max = model.optimize()
+        if sol_max.status != "optimal":
+            logger.warning(f"minimize_active_reactions: maximization infeasible ({sol_max.status})")
+            return {"reactions": [], "size": 0, "solution": sol_max}
+
+        vmax = sol_max.objective_value
+        if vmax <= tol:
+            return {"reactions": [], "size": 0, "solution": sol_max}
+
+        # Phase 1b: pin objective at fraction_of_optimum * vmax
+        pin_lb = vmax * fraction_of_optimum
+        # Set minimize total flux with the objective pinned
+        _pin_objective(model, obj_str, pin_lb)
+
+        # LP-minimize total flux
+        pfba_terms = []
+        for rxn in model.reactions:
+            pfba_terms.append(rxn.forward_variable)
+            pfba_terms.append(rxn.reverse_variable)
+        min_flux_obj = model.problem.Objective(sum(pfba_terms), direction="min")
+        orig_obj = model.objective
+        model.objective = min_flux_obj
+        sol_pfba = model.optimize()
+        model.objective = orig_obj
+        # NOTE: do NOT unpin objective here — keep pin through MILP phase so
+        # the probe (or any other pinned objective reaction) still forces flux
+        # through the active set during the MILP minimization.
+
+        if sol_pfba.status != "optimal":
+            _unpin_objective(model, obj_str)
+            logger.warning(f"minimize_active_reactions: pFBA infeasible ({sol_pfba.status})")
+            return {"reactions": [], "size": 0, "solution": sol_pfba}
+
+        # Build active filter from pFBA solution
+        active_filter = {}
+        for rxn in model.reactions:
+            flux = sol_pfba.fluxes.get(rxn.id, 0.0)
+            if flux > tol:
+                active_filter[rxn.id] = ">"
+            elif flux < -tol:
+                active_filter[rxn.id] = "<"
+        current_solution = sol_pfba
+        unpin_after_milp = True
+    else:
+        current_solution = None
+        unpin_after_milp = False
+
+    if not active_filter:
+        if unpin_after_milp:
+            _unpin_objective(model, obj_str)
+        return {"reactions": [], "size": 0, "solution": current_solution}
+
+    # Cap at _SUPPORT_CAP by |flux| if active_filter was provided without solution
+    if current_solution is not None and len(active_filter) > _SUPPORT_CAP:
+        sorted_rxns = sorted(
+            active_filter.keys(),
+            key=lambda rid: abs(current_solution.fluxes.get(rid, 0.0)),
+            reverse=True,
+        )
+        capped = sorted_rxns[:_SUPPORT_CAP]
+        logger.info(
+            f"minimize_active_reactions: support ({len(active_filter)}) exceeds cap "
+            f"({_SUPPORT_CAP}); using top-{_SUPPORT_CAP} by |flux|"
+        )
+        active_filter = {rid: active_filter[rid] for rid in capped}
+
+    t_phase2 = _time.time()
+    logger.info(f"minimize_active_reactions: phase-2 MILP on {len(active_filter)} reactions")
+
+    # Phase 2: build fu/ru binaries and minimize reaction count.
+    # Zero all reactions NOT in active_filter so the solver must route flux
+    # through the active set (mirrors binary_check_gapfilling_solution's
+    # knockout_gf_reactions_outside_solution pattern).
+    inactive_bounds = {}  # rxn_id -> (orig_lb, orig_ub)
+    for rxn in model.reactions:
+        if rxn.id not in active_filter:
+            # Only zero reactions that can naturally carry zero flux (lb <= 0).
+            # Reactions with lb > 0 are externally pinned (e.g. the probe)
+            # and must be left as-is so they keep providing driving force.
+            if rxn.lower_bound > 0:
+                continue
+            if rxn.lower_bound != 0 or rxn.upper_bound != 0:
+                inactive_bounds[rxn.id] = (rxn.lower_bound, rxn.upper_bound)
+                # Set lb=0 first (always valid since lb <= 0 < ub or lb=ub=0)
+                # then ub=0.
+                rxn.lower_bound = 0
+                rxn.upper_bound = 0
+
+    ru_pkg = mdlutl.pkgmgr.getpkg("ReactionUsePkg")
+    ru_pkg.build_package(active_filter)
+
+    obj_coef = {}
+    for rxn_id, direction in active_filter.items():
+        if direction in (">", "=") and rxn_id in ru_pkg.variables["fu"]:
+            obj_coef[ru_pkg.variables["fu"][rxn_id]] = 1
+        if direction in ("<", "=") and rxn_id in ru_pkg.variables["ru"]:
+            obj_coef[ru_pkg.variables["ru"][rxn_id]] = 1
+
+    min_count_obj = model.problem.Objective(Zero, direction="min")
+    orig_obj = model.objective
+    model.objective = min_count_obj
+    min_count_obj.set_linear_coefficients(obj_coef)
+    sol_milp = model.optimize()
+    model.objective = orig_obj
+
+    # Unpin objective now that MILP is done
+    if unpin_after_milp:
+        _unpin_objective(model, obj_str)
+
+    # Restore bounds of zeroed reactions
+    for rxn_id, (lb, ub) in inactive_bounds.items():
+        rxn = model.reactions.get_by_id(rxn_id)
+        if lb > rxn.upper_bound:
+            rxn.upper_bound = ub
+            rxn.lower_bound = lb
+        else:
+            rxn.lower_bound = lb
+            rxn.upper_bound = ub
+
+    t_done = _time.time()
+    logger.info(
+        f"minimize_active_reactions: MILP done in {t_done - t_phase2:.2f}s "
+        f"(total {t_done - t0:.2f}s), status={sol_milp.status}"
+    )
+
+    if sol_milp.status != "optimal":
+        logger.warning(f"minimize_active_reactions: MILP infeasible ({sol_milp.status})")
+        return {"reactions": [], "size": 0, "solution": sol_milp}
+
+    # Collect reactions that are active in the MILP solution.
+    # Use raw flux values from sol_milp (works for both MILP and LP solvers).
+    # For solvers that support binary MILPs, the fu/ru primal > 0.5 test is
+    # also applicable; for LP-relaxation solvers (GLPK), rely on flux values.
+    scores = _safe_reliability_scores(mdlutl)
+    result_rxns = []
+    for rxn_id, direction in active_filter.items():
+        flux_val = sol_milp.fluxes.get(rxn_id, 0.0)
+        fu_primal = (
+            ru_pkg.variables["fu"][rxn_id].primal
+            if rxn_id in ru_pkg.variables["fu"]
+            else 0.0
+        )
+        ru_primal = (
+            ru_pkg.variables["ru"][rxn_id].primal
+            if rxn_id in ru_pkg.variables["ru"]
+            else 0.0
+        )
+        # Active check: prefer binary primal > 0.5 (MILP solver), fall back to flux
+        fu_active = direction in (">", "=") and (fu_primal > 0.5 or flux_val > tol)
+        ru_active = direction in ("<", "=") and (ru_primal > 0.5 or flux_val < -tol)
+        if fu_active or ru_active:
+            rxn = model.reactions.get_by_id(rxn_id)
+            dir_used = ">" if (flux_val > 0 and fu_active) or (not ru_active) else "<"
+            sc = scores.get(rxn_id, {}).get(dir_used, 0.0)
+            result_rxns.append(
+                {
+                    "id": rxn_id,
+                    "direction": dir_used,
+                    "flux": float(flux_val),
+                    "reliability_score": float(sc),
+                    "is_core": _safe_is_core(mdlutl, rxn),
+                }
+            )
+
+    return {"reactions": result_rxns, "size": len(result_rxns), "solution": sol_milp}
+
+
+def enumerate_alternative_reaction_sets_standalone(
+    mdlutl,
+    solution,
+    tol=_TOL,
+    zero_tol=_ZERO,
+):
+    """For each active reaction, report alternatives, coupled reactions, and essentiality.
+
+    Generalizes MSModelUtil.analyze_minimal_reaction_set.
+
+    Parameters
+    ----------
+    mdlutl : MSModelUtil
+        Wrapped model.  Objective will be temporarily replaced.
+    solution : dict
+        Result from minimize_active_reactions_standalone containing
+        ``"reactions"`` list.
+    tol : float
+        Activity threshold.
+    zero_tol : float
+        Zero threshold.
+
+    Returns
+    -------
+    dict
+        Per-reaction perturbation map: {rxn_id: {alternatives, coupled, essential,
+        direction, flux, reliability_score, is_core, equation, failed}}.
+    """
+    from optlang.symbolics import Zero
+
+    model = mdlutl.model
+    rxn_list = solution.get("reactions", [])
+    if not rxn_list:
+        return {}
+
+    # Categorize all model reactions as initially-zero (for alternative detection)
+    active_ids = {r["id"] for r in rxn_list}
+    initial_zero = {}
+    for rxn in model.reactions:
+        if rxn.id in active_ids:
+            continue
+        initial_zero[rxn.id] = {">": True, "<": True}
+
+    # Build minimal-deviation objective: minimize sum(fwd+rev) over zero reactions
+    obj_coef = {}
+    for rxn in model.reactions:
+        if rxn.id not in active_ids:
+            obj_coef[rxn.forward_variable] = 1
+            obj_coef[rxn.reverse_variable] = 1
+
+    original_objective = model.objective
+    min_dev_obj = model.problem.Objective(Zero, direction="min")
+    model.objective = min_dev_obj
+    min_dev_obj.set_linear_coefficients(obj_coef)
+
+    scores = _safe_reliability_scores(mdlutl)
+    output = {}
+
+    for item in rxn_list:
+        rxn_id = item["id"]
+        direction = item["direction"]
+        rxn = model.reactions.get_by_id(rxn_id)
+        sc = item.get("reliability_score", scores.get(rxn_id, {}).get(direction, 0.0))
+        is_c = item.get("is_core", _safe_is_core(mdlutl, rxn))
+
+        # Knock out the reaction in the direction it is used.
+        # Save original bounds and zero the used direction.
+        orig_lb = rxn.lower_bound
+        orig_ub = rxn.upper_bound
+        result = {
+            "alternatives": [],
+            "coupled": [],
+            "essential": False,
+            "failed": False,
+            "direction": direction,
+            "flux": item.get("flux", 0.0),
+            "reliability_score": float(sc),
+            "is_core": is_c,
+            "equation": rxn.build_reaction_string(use_metabolite_names=True),
+        }
+
+        # Short-circuit: if the reaction is pinned (lb > 0 for forward, ub < 0
+        # for reverse), knocking it out contradicts its lower bound → essential
+        # without needing to solve.
+        if direction == ">" and orig_lb > zero_tol:
+            result["essential"] = True
+            output[rxn_id] = result
+            continue
+        if direction == "<" and orig_ub < -zero_tol:
+            result["essential"] = True
+            output[rxn_id] = result
+            continue
+
+        if direction == ">":
+            # Zero forward: set lb=min(orig_lb,0) first to avoid lb>ub=0 conflict
+            if rxn.lower_bound > 0:
+                rxn.lower_bound = 0
+            rxn.upper_bound = 0
+        else:
+            # Zero reverse: set ub=max(orig_ub,0) first, then lb=0
+            if rxn.upper_bound < 0:
+                rxn.upper_bound = 0
+            rxn.lower_bound = 0
+
+        ko_sol = model.optimize()
+
+        if ko_sol.status not in ("optimal",):
+            # GLPK may return "infeasible", "undefined", or other non-optimal
+            # status when the knockout makes the problem infeasible.
+            result["essential"] = True
+            result["failed"] = True
+        else:
+            # Check for coupled reactions (other active ones that dropped to zero)
+            for other in rxn_list:
+                if other["id"] == rxn_id:
+                    continue
+                other_flux = ko_sol.fluxes.get(other["id"], 0.0)
+                if abs(other_flux) <= zero_tol:
+                    result["coupled"].append([other["id"], other["direction"]])
+            # Check for alternatives (initially-zero reactions that now carry flux)
+            for zid in initial_zero:
+                zflux = ko_sol.fluxes.get(zid, 0.0)
+                if zflux > tol and ">" in initial_zero[zid]:
+                    result["alternatives"].append([zid, ">"])
+                elif zflux < -tol and "<" in initial_zero[zid]:
+                    result["alternatives"].append([zid, "<"])
+
+        # Restore original bounds in safe order.
+        # If orig_lb > current ub, must expand ub first; otherwise can set lb first.
+        if orig_lb > rxn.upper_bound:
+            rxn.upper_bound = orig_ub
+            rxn.lower_bound = orig_lb
+        else:
+            rxn.lower_bound = orig_lb
+            rxn.upper_bound = orig_ub
+
+        output[rxn_id] = result
+
+    model.objective = original_objective
+    return output
+
+
+def find_flux_loops_standalone(
+    mdlutl,
+    objective="all",
+    compartment="c0",
+    max_loops_per_probe=5,
+    tol=_TOL,
+    zero_tol=_ZERO,
+    fraction_of_optimum=1.0,
+    flux_min_threshold=_TOL,
+    enable_redox_probes=True,
+    log_fn=None,
+):
+    """Find energy/redox/mass loops (EGCs) in a closed metabolic model.
+
+    Operates on an already-built closed model (see build_full_model_from_template
+    or pass a cobra.Model stand-in wrapped via MSModelUtil.get).
+
+    Parameters
+    ----------
+    mdlutl : MSModelUtil
+        Closed model (no open boundary fluxes).
+    objective : str, cobra.Reaction, or None
+        "all", "atp", "redox", "mass" (group names), or a single cobra.Reaction.
+        None is equivalent to "all".
+    compartment : str
+        Target compartment for probes (default "c0").
+    max_loops_per_probe : int
+        Maximum distinct loops to enumerate per probe (default 5).
+    tol : float
+        Activity threshold (default 1e-6).
+    zero_tol : float
+        Zero threshold (default 1e-9).
+    fraction_of_optimum : float
+        Fraction at which to pin the probe flux (default 1.0).
+    flux_min_threshold : float
+        Minimum probe flux to consider non-trivial (default 1e-6).
+    enable_redox_probes : bool
+        Include redox probes (default True).
+    log_fn : callable or None
+        Logging function (default: logger.info).
+
+    Returns
+    -------
+    dict
+        {probe_name: [loop_record, ...], ...}  An empty list means no loop.
+        Each loop_record has exactly: target_flux, size, reactions.
+        Each reaction entry has: id, direction_used, flux, equation,
+        reliability_score, is_core, alternatives, coupled, essential.
+    """
+    import cobra as _cobra
+    from optlang.symbolics import Zero
+
+    if log_fn is None:
+        log_fn = logger.info
+
+    model = mdlutl.model
+
+    # ── Snapshot all reaction bounds before any modification ──────────────
+    bounds_snapshot = {r.id: (r.lower_bound, r.upper_bound) for r in model.reactions}
+
+    # ── Resolve probe list ────────────────────────────────────────────────
+    if isinstance(objective, _cobra.Reaction):
+        probes_to_run = [{"_custom": objective}]
+    else:
+        group = objective if objective is not None else "all"
+        if group == "all":
+            catalog_groups = ["atp", "redox", "mass"]
+        elif group in EGC_PROBE_CATALOG:
+            catalog_groups = [group]
+        else:
+            raise ValueError(f"find_flux_loops: unknown objective group '{group}'")
+        probes_to_run = []
+        for g in catalog_groups:
+            if g == "redox" and not enable_redox_probes:
+                continue
+            probes_to_run.extend(EGC_PROBE_CATALOG[g])
+
+    results = {}
+
+    for probe_spec in probes_to_run:
+        # ── Add probe ─────────────────────────────────────────────────────
+        if "_custom" in probe_spec:
+            custom_rxn = probe_spec["_custom"]
+            # If the id already exists in the model, check stoichiometry match
+            existing_ids = [r.id for r in model.reactions]
+            if custom_rxn.id in existing_ids:
+                existing_rxn = model.reactions.get_by_id(custom_rxn.id)
+                if existing_rxn.metabolites != custom_rxn.metabolites:
+                    raise ValueError(
+                        f"find_flux_loops: custom probe id '{custom_rxn.id}' collides "
+                        f"with existing reaction with different stoichiometry"
+                    )
+                probe_info = {"reaction": existing_rxn, "direction": ">", "new": False}
+            else:
+                model.add_reactions([custom_rxn])
+                probe_info = {"reaction": custom_rxn, "direction": ">", "new": True}
+            probe_name = custom_rxn.id
+        else:
+            probe_info = add_probe_reaction_standalone(mdlutl, probe_spec, compartment)
+            probe_name = probe_spec["name"]
+
+        probe_rxn = probe_info["reaction"]
+        probe_id = probe_rxn.id
+        probe_direction = probe_info["direction"]
+        probe_is_new = probe_info["new"]
+        results[probe_name] = []
+
+        # ── Per-probe blocking state (for integer-cut restore) ─────────────
+        blocked_bounds = {}  # rxn_id -> list of (attr, original_value)
+
+        # ── LP-maximize probe ─────────────────────────────────────────────
+        _set_objective_simple(model, f"MAX{{{probe_id}}}")
+        sol_max = model.optimize()
+
+        if sol_max.status != "optimal" or sol_max.objective_value <= tol:
+            log_fn(f"find_flux_loops [{probe_name}]: vmax={getattr(sol_max, 'objective_value', 0):.2e} <= tol — no loop")
+            _cleanup_probe(model, mdlutl, probe_rxn, probe_is_new, blocked_bounds, bounds_snapshot, probe_id)
+            continue
+
+        vmax = sol_max.objective_value
+        log_fn(f"find_flux_loops [{probe_name}]: vmax={vmax:.4f}, enumerating loops")
+
+        loop_count = 0
+        loop_hashes_seen = set()
+
+        while loop_count < max_loops_per_probe:
+            # Re-maximize to get current best vmax (after blocking)
+            _set_objective_simple(model, f"MAX{{{probe_id}}}")
+            sol_max2 = model.optimize()
+            if sol_max2.status != "optimal" or sol_max2.objective_value <= tol:
+                break
+            vmax = sol_max2.objective_value
+
+            # Pin probe at fraction_of_optimum * vmax
+            pin_lb = max(vmax * fraction_of_optimum, flux_min_threshold)
+            probe_rxn.lower_bound = pin_lb
+
+            # LP-minimize total flux (pFBA-style support reduction)
+            pfba_terms = []
+            for rxn in model.reactions:
+                pfba_terms.append(rxn.forward_variable)
+                pfba_terms.append(rxn.reverse_variable)
+            min_flux_obj = model.problem.Objective(sum(pfba_terms), direction="min")
+            model.objective = min_flux_obj
+            sol_pfba = model.optimize()
+            # Keep probe pinned for MILP phase below (unpin after minimize)
+
+            if sol_pfba.status != "optimal":
+                probe_rxn.lower_bound = 0  # unpin
+                log_fn(f"find_flux_loops [{probe_name}]: pFBA infeasible after pinning — stopping")
+                break
+
+            # Build active filter from pFBA support (excluding the probe itself)
+            active_filter = {}
+            for rxn in model.reactions:
+                if rxn.id == probe_id:
+                    continue
+                flux = sol_pfba.fluxes.get(rxn.id, 0.0)
+                if flux > tol:
+                    active_filter[rxn.id] = ">"
+                elif flux < -tol:
+                    active_filter[rxn.id] = "<"
+
+            if not active_filter:
+                probe_rxn.lower_bound = 0  # unpin
+                break
+
+            # Cap if necessary
+            if len(active_filter) > _SUPPORT_CAP:
+                sorted_ids = sorted(
+                    active_filter,
+                    key=lambda rid: abs(sol_pfba.fluxes.get(rid, 0.0)),
+                    reverse=True,
+                )
+                log_fn(
+                    f"find_flux_loops [{probe_name}]: support cap applied "
+                    f"({len(active_filter)} -> {_SUPPORT_CAP})"
+                )
+                active_filter = {rid: active_filter[rid] for rid in sorted_ids[:_SUPPORT_CAP]}
+
+            # Phase 2: minimize reaction count (probe stays pinned so binaries are valid)
+            t0 = time.time()
+            min_result = minimize_active_reactions_standalone(
+                mdlutl,
+                active_filter=active_filter,
+                fraction_of_optimum=fraction_of_optimum,
+                tol=tol,
+                zero_tol=zero_tol,
+            )
+            log_fn(
+                f"find_flux_loops [{probe_name}]: minimize_active_reactions "
+                f"size={min_result['size']} in {time.time()-t0:.2f}s"
+            )
+
+            if not min_result["reactions"]:
+                _strip_reaction_use_pkg(model, mdlutl.pkgmgr)
+                probe_rxn.lower_bound = 0  # unpin
+                break
+
+            # Dedup by direction-set hash
+            loop_hash = frozenset(
+                (r["id"], r["direction"]) for r in min_result["reactions"]
+            )
+            if loop_hash in loop_hashes_seen:
+                _strip_reaction_use_pkg(model, mdlutl.pkgmgr)
+                probe_rxn.lower_bound = 0  # unpin
+                # Block this set anyway and try again
+                _apply_integer_cut(model, min_result["reactions"], blocked_bounds)
+                loop_count += 1
+                continue
+            loop_hashes_seen.add(loop_hash)
+
+            # Perturbation scan (probe still pinned so knockout tests are meaningful)
+            t1 = time.time()
+            perturb = enumerate_alternative_reaction_sets_standalone(
+                mdlutl, min_result, tol=tol, zero_tol=zero_tol
+            )
+            log_fn(
+                f"find_flux_loops [{probe_name}]: enumerate_alternatives "
+                f"in {time.time()-t1:.2f}s"
+            )
+
+            # Now unpin the probe before stripping and integer-cut
+            probe_rxn.lower_bound = 0
+
+            # Strip ReactionUse vars between loops
+            _strip_reaction_use_pkg(model, mdlutl.pkgmgr)
+
+            # Assemble reaction records
+            rxn_records = []
+            for r in min_result["reactions"]:
+                rid = r["id"]
+                rxn_obj = model.reactions.get_by_id(rid)
+                p = perturb.get(rid, {})
+                rxn_records.append(
+                    {
+                        "id": rid,
+                        "direction_used": r["direction"],
+                        "flux": r["flux"],
+                        "equation": rxn_obj.build_reaction_string(use_metabolite_names=True),
+                        "reliability_score": r["reliability_score"],
+                        "is_core": r["is_core"],
+                        "alternatives": p.get("alternatives", []),
+                        "coupled": p.get("coupled", []),
+                        "essential": p.get("essential", False),
+                    }
+                )
+
+            loop_record = {
+                "target_flux": float(vmax),
+                "size": min_result["size"],
+                "reactions": rxn_records,
+            }
+            results[probe_name].append(loop_record)
+            loop_count += 1
+
+            # Integer-cut: block the minimal set
+            _apply_integer_cut(model, min_result["reactions"], blocked_bounds)
+
+        # ── Clean up this probe ────────────────────────────────────────────
+        _strip_reaction_use_pkg(model, mdlutl.pkgmgr)
+        _cleanup_probe(model, mdlutl, probe_rxn, probe_is_new, blocked_bounds, bounds_snapshot, probe_id)
+
+    # Verify model state matches snapshot
+    for rxn in model.reactions:
+        if rxn.id in bounds_snapshot:
+            orig_lb, orig_ub = bounds_snapshot[rxn.id]
+            if rxn.lower_bound != orig_lb or rxn.upper_bound != orig_ub:
+                logger.warning(
+                    f"find_flux_loops: bound mismatch on {rxn.id} after cleanup "
+                    f"({rxn.lower_bound},{rxn.upper_bound}) vs ({orig_lb},{orig_ub})"
+                )
+                rxn.lower_bound = orig_lb
+                rxn.upper_bound = orig_ub
+
+    return results
+
+
+# ── Private helpers ───────────────────────────────────────────────────────────
+
+def _set_objective_simple(model, obj_str):
+    """Set model objective from 'MAX{rxn_id}' or 'MIN{rxn_id}' strings."""
+    m = re.match(r"(MAX|MIN)\{(.+)\}", obj_str)
+    if m:
+        direction = "max" if m.group(1) == "MAX" else "min"
+        rxn_id = m.group(2)
+        rxn = model.reactions.get_by_id(rxn_id)
+        model.objective = rxn
+        model.objective.direction = direction
+    else:
+        raise ValueError(f"_set_objective_simple: cannot parse '{obj_str}'")
+
+
+def _pin_objective(model, obj_str, lb):
+    """Add a constraint that pins the objective >= lb."""
+    m = re.match(r"(MAX|MIN)\{(.+)\}", obj_str)
+    if m:
+        rxn_id = m.group(2)
+        rxn = model.reactions.get_by_id(rxn_id)
+        # Store original lower bound and pin
+        rxn._pin_orig_lb = rxn.lower_bound
+        rxn.lower_bound = lb
+
+
+def _unpin_objective(model, obj_str):
+    """Restore original lower bound set by _pin_objective."""
+    m = re.match(r"(MAX|MIN)\{(.+)\}", obj_str)
+    if m:
+        rxn_id = m.group(2)
+        rxn = model.reactions.get_by_id(rxn_id)
+        if hasattr(rxn, "_pin_orig_lb"):
+            rxn.lower_bound = rxn._pin_orig_lb
+            del rxn._pin_orig_lb
+
+
+def _apply_integer_cut(model, rxn_list, blocked_bounds):
+    """Block each reaction in rxn_list in its used direction (integer-cut).
+
+    Records each original bound in blocked_bounds for later restoration.
+    """
+    for r in rxn_list:
+        rid = r["id"]
+        direction = r["direction"]
+        rxn = model.reactions.get_by_id(rid)
+        if rid not in blocked_bounds:
+            blocked_bounds[rid] = {}
+        if direction == ">" and "ub" not in blocked_bounds[rid]:
+            blocked_bounds[rid]["ub"] = rxn.upper_bound
+            rxn.upper_bound = 0
+        elif direction == "<" and "lb" not in blocked_bounds[rid]:
+            blocked_bounds[rid]["lb"] = rxn.lower_bound
+            rxn.lower_bound = 0
+
+
+def _cleanup_probe(model, mdlutl, probe_rxn, probe_is_new, blocked_bounds, bounds_snapshot, probe_id):
+    """Remove the probe reaction and restore all blocked bounds."""
+    # Restore blocked bounds
+    for rid, bound_dict in blocked_bounds.items():
+        try:
+            rxn = model.reactions.get_by_id(rid)
+            if "ub" in bound_dict:
+                rxn.upper_bound = bound_dict["ub"]
+            if "lb" in bound_dict:
+                rxn.lower_bound = bound_dict["lb"]
+        except Exception:
+            pass
+
+    # Remove probe reaction if we added it
+    if probe_is_new:
+        try:
+            rxn = model.reactions.get_by_id(probe_id)
+            model.remove_reactions([rxn], remove_orphans=False)
+        except Exception:
+            pass
+    else:
+        # Restore probe bounds from snapshot
+        if probe_id in bounds_snapshot:
+            try:
+                rxn = model.reactions.get_by_id(probe_id)
+                lb, ub = bounds_snapshot[probe_id]
+                rxn.lower_bound = lb
+                rxn.upper_bound = ub
+            except Exception:
+                pass
 
 class MSFBAUtils(KBModelUtils):
     """Tools for running a wide range of FBA analysis on metabolic models in KBase
@@ -22,6 +1089,162 @@ class MSFBAUtils(KBModelUtils):
             **kwargs: Additional keyword arguments passed to SharedEnvironment
         """
         super().__init__(**kwargs)
+
+    # ── EGC detection methods ─────────────────────────────────────────────
+
+    def build_full_model_from_template(self, template, index="0"):
+        """Build a fully-closed cobra.Model from an MSTemplate, wrapped as MSModelUtil.
+
+        Every template reaction is included via MSTemplateReaction.to_reaction.
+        Template directionality is preserved (the defect surface).  Any reaction
+        whose id starts with EX_, DM_, SK_, or bio has lb=ub=0 (boundary guard).
+
+        Args:
+            template: MSTemplate object or template id resolvable via get_template().
+            index: Compartment index (default "0").
+
+        Returns:
+            MSModelUtil wrapping the closed model.
+        """
+        if isinstance(template, str):
+            template = self.get_template(template)
+        return build_full_model_from_template_standalone(template, index=index)
+
+    def add_probe_reaction(self, model, probe, compartment="c0"):
+        """Add or reuse a probe reaction on the model.
+
+        Generalizes MSModelUtil.add_atp_hydrolysis to an arbitrary probe spec.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            probe: Probe spec dict with keys name, stoichiometry (msid->coef),
+                seed_annotation.
+            compartment: Target compartment (default "c0").
+
+        Returns:
+            dict with keys reaction (cobra.Reaction), direction (">"), new (bool).
+        """
+        mdlutl = self._check_and_convert_model(model)
+        return add_probe_reaction_standalone(mdlutl, probe, compartment=compartment)
+
+    def minimize_active_reactions(
+        self,
+        model,
+        objective=None,
+        active_filter=None,
+        fraction_of_optimum=1.0,
+        tol=_TOL,
+        zero_tol=_ZERO,
+    ):
+        """Return the count-minimal set of active reactions supporting an objective.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            objective: Objective string like "MAX{rxn_id}" (ignored if active_filter given).
+            active_filter: Pre-computed {rxn_id: ">" or "<"} (optional).
+            fraction_of_optimum: Pin fraction (default 1.0).
+            tol: Activity threshold (default 1e-6).
+            zero_tol: Zero threshold (default 1e-9).
+
+        Returns:
+            dict with keys reactions (list), size (int), solution.
+        """
+        mdlutl = self._check_and_convert_model(model)
+        return minimize_active_reactions_standalone(
+            mdlutl,
+            objective=objective,
+            active_filter=active_filter,
+            fraction_of_optimum=fraction_of_optimum,
+            tol=tol,
+            zero_tol=zero_tol,
+        )
+
+    def enumerate_alternative_reaction_sets(
+        self,
+        model,
+        solution,
+        tol=_TOL,
+        zero_tol=_ZERO,
+    ):
+        """For each active reaction, report alternatives, coupled reactions, and essentiality.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            solution: Result from minimize_active_reactions with "reactions" key.
+            tol: Activity threshold (default 1e-6).
+            zero_tol: Zero threshold (default 1e-9).
+
+        Returns:
+            dict mapping rxn_id to {alternatives, coupled, essential, direction,
+            flux, reliability_score, is_core, equation, failed}.
+        """
+        mdlutl = self._check_and_convert_model(model)
+        return enumerate_alternative_reaction_sets_standalone(
+            mdlutl, solution, tol=tol, zero_tol=zero_tol
+        )
+
+    def find_flux_loops(
+        self,
+        template,
+        objective="all",
+        compartment="c0",
+        max_loops_per_probe=5,
+        tol=_TOL,
+        zero_tol=_ZERO,
+        fraction_of_optimum=1.0,
+        flux_min_threshold=_TOL,
+        enable_redox_probes=True,
+    ):
+        """Find energy/redox/mass loops (EGCs) in a template or pre-built model.
+
+        Builds a closed model from the template, then for each probe in the
+        target group: LP-maximizes probe flux, pins it, LP-minimizes total flux,
+        finds the count-minimal reaction set, enumerates alternatives/coupled/
+        essential reactions, and iteratively blocks found loops up to
+        max_loops_per_probe.
+
+        Args:
+            template: MSTemplate object, template id string, or an MSModelUtil of
+                a pre-built closed model (when template is already an MSModelUtil,
+                it is used directly without rebuilding).
+            objective: "all", "atp", "redox", "mass", None, or a cobra.Reaction.
+            compartment: Target compartment for probes (default "c0").
+            max_loops_per_probe: Max loops to enumerate per probe (default 5).
+            tol: Activity threshold (default 1e-6).
+            zero_tol: Zero threshold (default 1e-9).
+            fraction_of_optimum: Pin fraction (default 1.0).
+            flux_min_threshold: Min probe flux to be non-trivial (default 1e-6).
+            enable_redox_probes: Include redox probes (default True).
+
+        Returns:
+            dict keyed by probe name; each value is a list of loop records
+            (empty list = no loop for that probe).
+        """
+        import cobra as _cobra
+        from modelseedpy.core.msmodelutl import MSModelUtil as _MSModelUtil
+
+        if isinstance(template, _MSModelUtil):
+            mdlutl = template
+        elif isinstance(template, _cobra.Model):
+            mdlutl = _MSModelUtil.get(template)
+        elif isinstance(template, str):
+            tmpl = self.get_template(template)
+            mdlutl = build_full_model_from_template_standalone(tmpl)
+        else:
+            mdlutl = build_full_model_from_template_standalone(template)
+
+        return find_flux_loops_standalone(
+            mdlutl,
+            objective=objective,
+            compartment=compartment,
+            max_loops_per_probe=max_loops_per_probe,
+            tol=tol,
+            zero_tol=zero_tol,
+            fraction_of_optimum=fraction_of_optimum,
+            flux_min_threshold=flux_min_threshold,
+            enable_redox_probes=enable_redox_probes,
+            log_fn=self.log_info,
+        )
 
     def set_media(self, model, media):
         """Sets the media for the model"""

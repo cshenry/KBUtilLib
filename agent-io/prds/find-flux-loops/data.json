@@ -1,0 +1,51 @@
+{
+  "prd_name": "find-flux-loops",
+  "title": "find_flux_loops \u2014 energy/redox/mass loop (EGC) detection in MSFBAUtils",
+  "project_id": "kbutillib",
+  "driving_project": "EnergyLoopAnalysis (subprojects/FindingCurrentLoops)",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "confront_rounds": 1,
+  "scope": "Add four utilities to MSFBAUtils (ms_fba_utils.py) to audit a ModelSEED MSTemplate for energy-generating cycles: build closed full model from template, add balanced probe drains (atp/redox/mass catalog), LP-maximize in closed system, minimize active reaction set via ReactionUse binaries on active reactions only, scan perturbation space, report loop+directions.",
+  "key_decisions": {
+    "purpose": "QC EGC audit (not biological loop enumeration)",
+    "input": "MSTemplate only; build full closed cobra model via MSTemplateReaction.to_reaction preserving directionality",
+    "targets": "synthetic balanced probe reactions added from a module catalog keyed by group (atp/redox/mass/all) or a custom reaction object",
+    "redox_probe": "balanced drain releasing H2 (reduced -> oxidized + H2 +/- H+); no H2 sink opened; convention tunable after empirical run",
+    "scaling": "LP-max probe -> LP-min total flux -> ReactionUsePkg fu/ru binaries ONLY on active reactions -> minimize sum of binaries; strip binaries between loops; no global MILP",
+    "output": "defect list per probe: loop reactions + direction_used + flux + reliability_score + is_core + alternatives/coupled/essential; no fix prescribed",
+    "enumeration": "per-reaction knockout perturbation scan (generalizes analyze_minimal_reaction_set) + integer-cut between distinct loops up to max_loops_per_probe"
+  },
+  "functions": [
+    "find_flux_loops(template, objective='all', compartment='c0', ...)",
+    "build_full_model_from_template(template, index='0')",
+    "add_probe_reaction(model, probe, compartment='c0')",
+    "minimize_active_reactions(model, objective=None, active_filter=None, ...)",
+    "enumerate_alternative_reaction_sets(model, solution, ...)"
+  ],
+  "prior_art": {
+    "add_probe_reaction": "MSModelUtil.add_atp_hydrolysis (msmodelutl.py:2011)",
+    "minimize_active_reactions": "binary_check_gapfilling_solution + ReactionUsePkg (gapfillingpkg.py:634-655, reactionusepkg.py)",
+    "enumerate_alternative_reaction_sets": "MSModelUtil.analyze_minimal_reaction_set (msmodelutl.py:1813)",
+    "iterative_enumeration": "MSFBAUtils.unblock_objective_with_exchanges (ms_fba_utils.py:271)"
+  },
+  "test_targets": [
+    "find_flux_loops end-to-end (known EGC reported; clean template -> empty)",
+    "minimize_active_reactions (count-minimal vs flux-minimal toy)",
+    "enumerate_alternative_reaction_sets (interchangeable -> alternatives; essential flagged)",
+    "add_probe_reaction (correct stoichiometry/annotation; reuse existing not duplicate)",
+    "model unmodified after audit (probes + use-vars stripped)"
+  ],
+  "out_of_scope": [
+    "fix diagnosis / dG-based culprit detection",
+    "loopless/thermodynamic constraints (unnecessary in closed system)",
+    "biological open-substrate loop enumeration",
+    "automatic template repair",
+    "global min-count MILP over all template reactions",
+    "GPR handling, multi-compartment probes"
+  ],
+  "open_items": [
+    "redox probe H2-recycling dependency: run on a real ModelSEED template early and inspect redox results before finalizing the redox catalog convention"
+  ]
+}

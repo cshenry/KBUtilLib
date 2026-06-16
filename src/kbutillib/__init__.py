@@ -5,6 +5,7 @@ SharedEnvUtils instance and zero or more sibling *Impl instances.
 The KBUtilLib facade provides lazy-property access to all sub-utilities.
 """
 
+import os
 import sys
 
 # Core utilities - these should always be available
@@ -25,9 +26,42 @@ from .model_directionality import (
 from .model_helpers import _parse_id, _check_and_convert_model
 
 
+# Collected optional-import failures.  Populated by _import_error(); flushed
+# to stderr by _flush_import_errors() at module-load time.
+_OPTIONAL_IMPORT_FAILURES: list[tuple[str, str]] = []
+
+
 def _import_error(module_name: str, error: Exception) -> None:
-    """Print import error details to stderr for debugging."""
-    print(f"[KBUtilLib] Failed to import {module_name}: {type(error).__name__}: {error}", file=sys.stderr)
+    """Collect an optional-import failure for deferred reporting.
+
+    When ``KBUTILLIB_VERBOSE_IMPORTS=1`` the detail line is printed immediately
+    (matching the previous behaviour).  Otherwise it is queued and a single
+    summary line is emitted after all optional imports have been attempted.
+    """
+    detail = f"[KBUtilLib] Failed to import {module_name}: {type(error).__name__}: {error}"
+    if os.environ.get("KBUTILLIB_VERBOSE_IMPORTS") == "1":
+        print(detail, file=sys.stderr)
+    else:
+        _OPTIONAL_IMPORT_FAILURES.append((module_name, detail))
+
+
+def _flush_import_errors() -> None:
+    """Emit a single summary line for any queued optional-import failures.
+
+    Called once, at the end of this module's optional-import block.  Clears
+    ``_OPTIONAL_IMPORT_FAILURES`` so re-imports (e.g. in tests with
+    ``importlib.reload``) see a fresh slate.
+    """
+    if not _OPTIONAL_IMPORT_FAILURES:
+        return
+    names = ", ".join(m for m, _ in _OPTIONAL_IMPORT_FAILURES)
+    n = len(_OPTIONAL_IMPORT_FAILURES)
+    print(
+        f"[KBUtilLib] {n} optional module{'s' if n != 1 else ''} unavailable: "
+        f"{names} (set KBUTILLIB_VERBOSE_IMPORTS=1 for detail)",
+        file=sys.stderr,
+    )
+    _OPTIONAL_IMPORT_FAILURES.clear()
 
 
 # ── Legacy classes (inheritance-based, kept for backward compat) ────────
@@ -319,6 +353,10 @@ except ImportError:
 
 # Retired
 examples = None
+
+# Emit a single summary line for any optional-import failures collected above.
+# Must be called after all optional-import try/except blocks.
+_flush_import_errors()
 
 
 __all__ = [

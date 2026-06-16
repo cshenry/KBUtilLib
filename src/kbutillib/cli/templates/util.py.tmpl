@@ -1,7 +1,14 @@
 """{{ project_name }} util -- runs as %run util.py at the top of every cell.
 
-Provides: common imports, project NotebookSession (named `session`), and
-project-specific helper functions (added below the marker by migration tasks).
+Provides: common imports, project NotebookSession (named `session`), flat
+path constants, and project-specific helper functions (added below the marker).
+
+Usage in every notebook cell::
+
+    %run util.py
+
+After that line the cell can use `session`, path constants, and helpers
+defined here directly.  Do NOT add per-cell imports.
 """
 from __future__ import annotations
 
@@ -30,41 +37,54 @@ def _bootstrap_sys_paths() -> None:
 _bootstrap_sys_paths()
 # ===========================================================================
 
-import json, math, os, re
+import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
-import pandas as pd
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # type: ignore
+
 try:
     import cobra
-    from cobra import Reaction, Metabolite
+    from cobra import Reaction, Metabolite  # noqa: F401
 except ImportError:
     cobra = None  # type: ignore
+    Reaction = None  # type: ignore
+    Metabolite = None  # type: ignore
 
 from kbutillib.notebook import NotebookSession
-from kbutillib.notebook.helpers import (  # noqa: F401 — generic helpers available to all notebooks
-    COMPARTMENT_MAP, normalize_compartment,
-    get_reaction_directionality, standardize_exchange_id, get_exchange_map,
-    build_gene_reaction_map, reaction_equation_with_names,
-    is_diffusion_reaction, compare_reaction_stoichiometry,
-    find_significant_differences, classify_fva_flux,
-)
-from kbutillib.notebook.schema import (
-    Sample, Computation, ExternalDataset, Experiment,
-    Strain, Mutation, Media,
-    Vector, VectorType, EntityKind, EntityRef,
-)
 
-# Auto-detect notebook name from IPython runtime.
+# __file__-anchored session: works regardless of cwd.
+# for_notebook() anchors .kbcache/ alongside this util.py.
 session: NotebookSession = NotebookSession.for_notebook(
-    None, project_name="{{ project_name }}"
+    __file__,
+    project_name="{{ project_name }}",
 )
 
+# ---------------------------------------------------------------------------
+# Flat path constants
+# Resolve all paths relative to __file__ so the notebook works from any cwd.
+# FLAT layout: notebooks/util.py lives one level below the project root.
+# ---------------------------------------------------------------------------
 
-def session_for(notebook_file: Optional[str] = None) -> NotebookSession:
-    """Back-compat shim. Prefer the module-level `session`."""
-    return NotebookSession.for_notebook(notebook_file, project_name="{{ project_name }}")
+#: Directory containing this util.py (the notebooks/ directory).
+NOTEBOOK_DIR: Path = Path(__file__).resolve().parent
 
+#: Project root — one level up from the notebooks/ directory.
+PROJECT_ROOT: Path = NOTEBOOK_DIR.parent
+
+#: Curated input data shared across all notebooks in this project.
+DATA_DIR: Path = PROJECT_ROOT / "data"
+
+#: Curated output figures shared across all notebooks in this project.
+FIGURES_DIR: Path = PROJECT_ROOT / "figures"
 
 # === project-specific helpers below ===

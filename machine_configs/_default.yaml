@@ -14,4 +14,6 @@ notebook_deps:
   - tqdm
   - setuptools
   - wheel
-  - openpyxl   # pandas .xlsx reader (proteomics data is routinely Excel)
+  - openpyxl          # pandas .xlsx reader (proteomics data is routinely Excel)
+  - requests_toolbelt >=0.10.0  # KBUtilLib runtime dep; belt-and-suspenders for notebook venvs
+  - tomli-w >=1.0               # KBUtilLib runtime dep; required by cli/manifest.py

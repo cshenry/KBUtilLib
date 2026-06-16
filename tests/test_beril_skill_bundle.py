@@ -35,7 +35,10 @@ _KBU_SKILL_MD = _KBU_DIR / "SKILL.md"
 _NOTEBOOK_SKILL_MD = _KBU_NOTEBOOK_DIR / "SKILL.md"
 _FBA_SKILL_MD = _KBU_FBA_DIR / "SKILL.md"
 _PREFERENCES_MD = _KBU_DIR / "preferences.md"
-_UTIL_TMPL = _KBU_NOTEBOOK_DIR / "util.py.tmpl"
+# Unified template lives in the CLI templates directory (Task B: single source of truth).
+_UTIL_TMPL = _REPO_ROOT / "src" / "kbutillib" / "cli" / "templates" / "util.py.tmpl"
+# The beril/skills/kbu-notebook copy was deleted; this path must NOT exist.
+_OLD_UTIL_TMPL = _KBU_NOTEBOOK_DIR / "util.py.tmpl"
 
 
 # ---------------------------------------------------------------------------
@@ -161,11 +164,18 @@ class TestSkillFrontmatter:
 
 
 class TestUtilTemplate:
-    """The util.py.tmpl must parse as valid Python (AC #11 precondition)."""
+    """The unified util.py.tmpl must pass all Task B acceptance criteria (AC 4, 5, 6)."""
 
     def test_util_tmpl_exists(self):
-        """util.py.tmpl exists at the expected path."""
-        assert _UTIL_TMPL.exists(), f"Missing util.py.tmpl at {_UTIL_TMPL}"
+        """Unified util.py.tmpl exists at cli/templates/ (AC 4)."""
+        assert _UTIL_TMPL.exists(), f"Missing unified util.py.tmpl at {_UTIL_TMPL}"
+
+    def test_old_util_tmpl_deleted(self):
+        """beril/skills/kbu-notebook/util.py.tmpl has been deleted (AC 4)."""
+        assert not _OLD_UTIL_TMPL.exists(), (
+            f"Duplicate util.py.tmpl still exists at {_OLD_UTIL_TMPL}; "
+            "it must be deleted — cli/templates/util.py.tmpl is the single source of truth."
+        )
 
     def test_util_tmpl_is_valid_python(self):
         """util.py.tmpl parses without syntax errors via ast.parse."""
@@ -176,7 +186,7 @@ class TestUtilTemplate:
             pytest.fail(f"util.py.tmpl has a syntax error: {exc}")
 
     def test_util_tmpl_has_bootstrap(self):
-        """util.py.tmpl contains the sys-path bootstrap (_bootstrap_sys_paths)."""
+        """util.py.tmpl contains the sys-path bootstrap (_bootstrap_sys_paths) (AC 4)."""
         source = _UTIL_TMPL.read_text(encoding="utf-8")
         assert "_bootstrap_sys_paths" in source, (
             "util.py.tmpl must include the _bootstrap_sys_paths function "
@@ -184,13 +194,143 @@ class TestUtilTemplate:
         )
 
     def test_util_tmpl_has_notebook_session(self):
-        """util.py.tmpl imports and instantiates NotebookSession."""
+        """util.py.tmpl imports and instantiates NotebookSession with __file__ (AC 4)."""
         source = _UTIL_TMPL.read_text(encoding="utf-8")
-        assert "NotebookSession" in source, (
-            "util.py.tmpl must import and use NotebookSession"
+        assert "from kbutillib.notebook import NotebookSession" in source, (
+            "util.py.tmpl must use 'from kbutillib.notebook import NotebookSession'"
         )
         assert "for_notebook" in source, (
-            "util.py.tmpl must call NotebookSession.for_notebook(__file__, ...)"
+            "util.py.tmpl must call NotebookSession.for_notebook()"
+        )
+        assert "for_notebook(\n    __file__" in source or "for_notebook(__file__" in source, (
+            "util.py.tmpl must pass __file__ to for_notebook() for cwd-independent anchoring"
+        )
+
+    def _assert_import_is_guarded(self, source: str, import_token: str) -> None:
+        """Assert that any line containing import_token is preceded by a 'try:' line."""
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if import_token in stripped and stripped.startswith("import "):
+                # Look back for a 'try:' line at the top level
+                for j in range(i - 1, max(i - 5, -1), -1):
+                    prev = lines[j].strip()
+                    if prev == "try:":
+                        break  # found guard
+                    if prev and not prev.startswith("#"):
+                        pytest.fail(
+                            f"'{stripped}' is not inside a try/except ImportError block. "
+                            f"It must be guarded."
+                        )
+
+    def test_util_tmpl_guarded_numpy(self):
+        """numpy import is guarded in try/except ImportError (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "import numpy" in source, "util.py.tmpl must import numpy"
+        self._assert_import_is_guarded(source, "numpy")
+        # The except clause must set np = None
+        assert "np = None" in source, "util.py.tmpl numpy guard must set np = None"
+
+    def test_util_tmpl_guarded_pandas(self):
+        """pandas import is guarded in try/except ImportError (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "import pandas" in source, "util.py.tmpl must import pandas"
+        self._assert_import_is_guarded(source, "pandas")
+        # The except clause must set pd = None
+        assert "pd = None" in source, "util.py.tmpl pandas guard must set pd = None"
+
+    def test_util_tmpl_guarded_cobra(self):
+        """cobra import is guarded in try/except ImportError (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "import cobra" in source, "util.py.tmpl must import cobra"
+        self._assert_import_is_guarded(source, "cobra")
+        # The except clause must set cobra = None
+        assert "cobra = None" in source, "util.py.tmpl cobra guard must set cobra = None"
+
+    def test_util_tmpl_no_helpers_import(self):
+        """util.py.tmpl must NOT import kbutillib.notebook.helpers (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "kbutillib.notebook.helpers" not in source, (
+            "util.py.tmpl must NOT import kbutillib.notebook.helpers "
+            "(unguarded helpers import removed from unified template)"
+        )
+
+    def test_util_tmpl_no_schema_import(self):
+        """util.py.tmpl must NOT import kbutillib.notebook.schema (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "kbutillib.notebook.schema" not in source, (
+            "util.py.tmpl must NOT import kbutillib.notebook.schema "
+            "(removed from unified template)"
+        )
+
+    def test_util_tmpl_no_session_for_shim(self):
+        """util.py.tmpl must NOT contain the session_for() back-compat shim (AC 4)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "def session_for(" not in source, (
+            "util.py.tmpl must NOT contain the session_for() shim "
+            "(dropped in unified template)"
+        )
+
+    def test_util_tmpl_flat_project_root(self):
+        """util.py.tmpl defines PROJECT_ROOT = NOTEBOOK_DIR.parent (one level) (AC 5)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "PROJECT_ROOT" in source, "util.py.tmpl must define PROJECT_ROOT"
+        assert "NOTEBOOK_DIR.parent" in source, (
+            "util.py.tmpl must set PROJECT_ROOT = NOTEBOOK_DIR.parent (FLAT, one level)"
+        )
+        assert "parent.parent" not in source, (
+            "util.py.tmpl must NOT use parent.parent — FLAT layout is one level up"
+        )
+
+    def test_util_tmpl_has_smart_merge_marker(self):
+        """util.py.tmpl contains the smart-merge marker for --force round-trips (AC 6)."""
+        source = _UTIL_TMPL.read_text(encoding="utf-8")
+        assert "# === project-specific helpers below ===" in source, (
+            "util.py.tmpl must contain the smart-merge marker "
+            "'# === project-specific helpers below ==='"
+        )
+
+    def test_smart_merge_round_trip(self, tmp_path):
+        """kbu init-notebook --force smart-merge finds the marker and preserves helpers (AC 6)."""
+        import sys
+        import importlib
+
+        # Render the template with a fake project name (replicate CLI render logic)
+        import jinja2
+        tmpl_dir = str(_UTIL_TMPL.parent)
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(tmpl_dir),
+            keep_trailing_newline=True,
+        )
+        tmpl = env.get_template("util.py.tmpl")
+        rendered = tmpl.render(project_name="test-project")
+
+        # Write initial util.py with user-added helper below the marker
+        util_py = tmp_path / "util.py"
+        user_helper = "\n\ndef my_custom_helper():\n    return 42\n"
+        initial_content = rendered + user_helper
+        util_py.write_text(initial_content)
+
+        # Now simulate --force: smart-merge with a re-render
+        re_rendered = tmpl.render(project_name="test-project-renamed")
+
+        # Import the smart-merge logic
+        repo_src = str(_REPO_ROOT / "src")
+        if repo_src not in sys.path:
+            sys.path.insert(0, repo_src)
+        from kbutillib.cli.init_notebook import _smart_merge_util
+
+        merged = _smart_merge_util(util_py.read_text(), re_rendered)
+        assert merged is not None, (
+            "_smart_merge_util returned None — marker not found in the rendered template"
+        )
+        # Header should reflect re-render (new project name)
+        assert "test-project-renamed" in merged, (
+            "Merged util.py should contain the updated project name from re-render"
+        )
+        # User helper must be preserved
+        assert "my_custom_helper" in merged, (
+            "Smart-merge must preserve user helpers below the marker"
         )
 
 
@@ -368,4 +508,33 @@ class TestNotebookSkillContent:
         text = _NOTEBOOK_SKILL_MD.read_text(encoding="utf-8")
         assert "jupyter-dev" in text or "supersedes" in text.lower(), (
             "kbu-notebook/SKILL.md must state that it supersedes jupyter-dev"
+        )
+
+    def test_notebook_skill_flat_project_root(self):
+        """kbu-notebook SKILL.md defines PROJECT_ROOT as NOTEBOOK_DIR.parent (AC 5)."""
+        text = _NOTEBOOK_SKILL_MD.read_text(encoding="utf-8")
+        assert "PROJECT_ROOT" in text, (
+            "kbu-notebook/SKILL.md must document PROJECT_ROOT"
+        )
+        assert "NOTEBOOK_DIR.parent" in text, (
+            "kbu-notebook/SKILL.md must show PROJECT_ROOT = NOTEBOOK_DIR.parent (FLAT, one level)"
+        )
+        assert "parent.parent" not in text, (
+            "kbu-notebook/SKILL.md must NOT use parent.parent — FLAT layout is one level up"
+        )
+
+    def test_notebook_skill_template_ref_points_to_cli(self):
+        """kbu-notebook SKILL.md references cli/templates/util.py.tmpl (AC 4)."""
+        text = _NOTEBOOK_SKILL_MD.read_text(encoding="utf-8")
+        assert "cli/templates/util.py.tmpl" in text, (
+            "kbu-notebook/SKILL.md must reference cli/templates/util.py.tmpl "
+            "(the unified single-source template)"
+        )
+
+    def test_notebook_skill_no_old_tmpl_ref(self):
+        """kbu-notebook SKILL.md must not reference the deleted beril/skills tmpl path (AC 4)."""
+        text = _NOTEBOOK_SKILL_MD.read_text(encoding="utf-8")
+        assert "beril/skills/kbu-notebook/util.py.tmpl" not in text, (
+            "kbu-notebook/SKILL.md must not reference the deleted "
+            "beril/skills/kbu-notebook/util.py.tmpl"
         )

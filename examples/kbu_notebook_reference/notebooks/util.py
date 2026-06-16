@@ -1,24 +1,23 @@
-"""<notebook_name>/util.py -- runs as %run util.py at the top of every cell.
+"""kbu_notebook_reference util -- runs as %run util.py at the top of every cell.
 
-Provides: common imports, project NotebookSession (named `session`),
-root-anchored path constants, and all project-specific helper functions.
+Provides: common imports, project NotebookSession (named `session`), flat
+path constants, and project-specific helper functions (added below the marker).
 
 Usage in every notebook cell::
 
     %run util.py
 
-After that line the cell can use `session`, path constants, and all helpers
+After that line the cell can use `session`, path constants, and helpers
 defined here directly.  Do NOT add per-cell imports.
 """
 from __future__ import annotations
 
-# === System path bootstrap ================================================
+# === System path bootstrap =================================================
 # Prepend machine-specific Python paths to sys.path BEFORE any heavy imports.
 # Reads ~/.kbu-sys-paths (plain text, one path per line, # comments OK).
 # Silent no-op if the file isn't present or unreadable.
 import sys as _sys
 from pathlib import Path as _Path
-
 
 def _bootstrap_sys_paths() -> None:
     user_file = _Path.home() / ".kbu-sys-paths"
@@ -35,14 +34,13 @@ def _bootstrap_sys_paths() -> None:
     except Exception:
         pass
 
-
 _bootstrap_sys_paths()
-# =========================================================================
+# ===========================================================================
 
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 try:
     import numpy as np
@@ -68,22 +66,20 @@ from kbutillib.notebook import NotebookSession
 # for_notebook() anchors .kbcache/ alongside this util.py.
 session: NotebookSession = NotebookSession.for_notebook(
     __file__,
-    project_name="<project_id>",   # ← replace with the BERIL project ID
+    project_name="kbu_notebook_reference",
 )
 
-# -------------------------------------------------------------------------
-# Root-anchored path constants
+# ---------------------------------------------------------------------------
+# Flat path constants
 # Resolve all paths relative to __file__ so the notebook works from any cwd.
-# -------------------------------------------------------------------------
+# FLAT layout: notebooks/util.py lives one level below the project root.
+# ---------------------------------------------------------------------------
 
-#: Directory containing this util.py (the notebook directory).
+#: Directory containing this util.py (the notebooks/ directory).
 NOTEBOOK_DIR: Path = Path(__file__).resolve().parent
 
-#: BERIL project root (two levels up from the notebook dir:
-#:   projects/<project_id>/notebooks/<notebook_name>/util.py
-#:                         ↑ notebooks/               ↑ NOTEBOOK_DIR
-#:              ↑ PROJECT_ROOT
-PROJECT_ROOT: Path = NOTEBOOK_DIR.parent.parent
+#: Project root — one level up from the notebooks/ directory.
+PROJECT_ROOT: Path = NOTEBOOK_DIR.parent
 
 #: Curated input data shared across all notebooks in this project.
 DATA_DIR: Path = PROJECT_ROOT / "data"
@@ -91,7 +87,4 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 #: Curated output figures shared across all notebooks in this project.
 FIGURES_DIR: Path = PROJECT_ROOT / "figures"
 
-# -------------------------------------------------------------------------
-# Project-specific helpers
-# Add functions below this line.
-# -------------------------------------------------------------------------
+# === project-specific helpers below ===

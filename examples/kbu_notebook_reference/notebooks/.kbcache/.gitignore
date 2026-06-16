@@ -1,0 +1,14 @@
+# Never commit the SQLite catalog — it is regenerated at runtime from the blobs.
+# The catalog.sqlite records provenance metadata (access_log, cell hashes) that
+# are session-local and will differ on every machine.
+catalog.sqlite
+
+# Never commit the vectors/ sub-store (SQLite-backed).
+vectors/
+
+# Never commit the access_log write-ahead log (WAL file created by SQLite).
+catalog.sqlite-wal
+catalog.sqlite-shm
+
+# Blob files *.json ARE committed as the exemplar artifact — do NOT add *.json
+# here.  Only the catalog and its WAL are excluded.

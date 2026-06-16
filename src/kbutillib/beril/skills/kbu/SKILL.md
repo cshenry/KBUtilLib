@@ -29,6 +29,30 @@ file does not exist, apply the defaults documented in
 `src/kbutillib/beril/skills/kbu/preferences.md` (the template shipped
 with KBUtilLib).
 
+## Step 1a: NotebookSession import
+
+The correct import for the session bootstrap is:
+
+```python
+from kbutillib.notebook import NotebookSession
+```
+
+> Note: `kbutillib.beril` is a **resources path** — it holds skill
+> bundles (`skills/`) used by Claude Code.  It is NOT an importable
+> Python API.  Always import from `kbutillib.notebook`.
+
+## Step 1b: KBase authentication
+
+Set `KB_AUTH_TOKEN` in your environment before starting:
+
+```bash
+export KB_AUTH_TOKEN="your-kbase-token-here"
+```
+
+KBUtilLib reads this variable automatically and uses it as the KBase
+token, with precedence over any token file.  No `~/.kbase/token` stash
+is needed.
+
 ## Step 2: Active modeling guidelines
 
 The following guidelines apply for the duration of this session:
@@ -44,12 +68,12 @@ The following guidelines apply for the duration of this session:
 
 3. **FBA discipline.** All reconstruction and FBA work follows the arc
    in `kbu-fba`: build → gapfill → FBA (pFBA) → FVA.  Always use
-   `MSFBAUtils.run_fva`; never call `cobra.flux_variability_analysis`
+   `session.kbu.fba.run_fva`; never call `cobra.flux_variability_analysis`
    directly (it is broken in this environment).
 
 4. **BERDL access.** Use `KBBERDLUtils` for all KBase/BERDL data
-   retrieval (genomes, media, models).  Do not call KBase SDK clients
-   directly unless `KBBERDLUtils` lacks the required accessor.
+   retrieval (media, genome-table databases).  Do not call KBase SDK
+   clients directly unless `KBBERDLUtils` lacks the required accessor.
 
 5. **Cache discipline.** Expensive computations must be cached in
    `.kbcache/` alongside `util.py`.  Retrieve from cache before

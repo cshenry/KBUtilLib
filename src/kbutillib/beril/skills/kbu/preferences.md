@@ -1,10 +1,13 @@
 # KBUtilLib Modeling Preferences
 
-Copy this file to `<BERIL_ROOT>/.claude/kbu/preferences.md` and edit the
-values to suit the project.  The `/kbu` primer reads this file at the
-start of every modeling session.
+To configure: copy this file to `<BERIL_ROOT>/.claude/kbu/preferences.md`
+and edit the values to suit the project.  The `/kbu` primer reads this file
+at the start of every modeling session.
 
 ```yaml
+# Sentinel: set to true once you have reviewed and configured this file.
+configured: false
+
 # ---------------------------------------------------------------------------
 # Execution control
 # ---------------------------------------------------------------------------

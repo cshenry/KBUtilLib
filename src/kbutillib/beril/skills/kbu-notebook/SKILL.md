@@ -97,6 +97,16 @@ The unified template is at `src/kbutillib/cli/templates/util.py.tmpl`
 (the file rendered by `kbu init-notebook`).  A project's `util.py`
 extends this with project-specific constants and helpers below the marker.
 
+The correct import for the session bootstrap is:
+
+```python
+from kbutillib.notebook import NotebookSession
+```
+
+> Note: `kbutillib.beril` is a **resources path** — it holds skill
+> bundles (`skills/`) used by Claude Code.  It is NOT an importable
+> Python API.  Always import from `kbutillib.notebook`.
+
 Key invariants of the skeleton:
 
 - `__file__`-anchored paths: all path constants are resolved relative to

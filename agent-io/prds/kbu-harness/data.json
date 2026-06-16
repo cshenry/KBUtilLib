@@ -1,0 +1,40 @@
+{
+  "prd_name": "kbu-harness",
+  "title": "kbu-harness — per-project local programmatic-execution harness for BERIL modeling projects",
+  "companion_prd": "kbu-beril-augmentation",
+  "status_note": "PRD B of two; ships after PRD A (kbu-beril-augmentation, shipped 2026-06-14).",
+  "repos": ["KBUtilLib"],
+  "confront_rounds": 2,
+  "confront_round_2": "task-ba4bea1d (codex/h100, 2026-06-15). 15 stalls, all minor refinements (no structural issues). Folded all 15 + 2 free-critiques: relax rsync -aHAX->-aH, drop git-commit from h100 task, add --h100-inbox/KBU_H100_INBOX override. Added ACs #31-#37. No drops. User stopped at round 2 (diminishing returns).",
+  "confront_round_1": "task-dbc53f46 (codex/h100, 2026-06-15). 50 stalls + free critique; folded ~44 into Implementation Decisions + 30 Acceptance Criteria; dropped #22 (devlog file-lock), #25 (Windows-as-stall), #29/#44 (status spec). Critical finding: the old-co-scientist strip is load-bearing (kept bootstrap/update/new_project import layout.py+manifest.py; ~11 test files) -> strip DEFERRED to its own follow-up PRD; PRD B is now harness-only. First attempt task-3693031e produced a truncated artifact (1 stall, no FREE CRITIQUE) and was re-run.",
+  "foundational_decisions": {
+    "harness_role": "per-project LOCAL programmatic-execution container; runs modeling notebooks via nbconvert --execute (which BERIL forbids); user chooses per run local-here vs dispatch-to-h100",
+    "sync_endpoints": "local BERIL clone <BERIL_ROOT>/projects/{id}/ <-> sibling harness repo; JupyterHub/Spark out of scope",
+    "harness_repo": "its own git repo, one per BERIL project, under a harness root on Dropbox/Projects (default ~/Dropbox/Projects/kbu-harness/<id>/) so it syncs to h100",
+    "skill_placement": "ALL harness-side; no new BERIL skill; kbu harness init scaffolds harness + deploys kbu-run skill into it; BERIL never knows about the harness",
+    "execution_paths": "both local nbconvert and h100 dispatch via ai-cowork; graduated-execution full-run checkpoint surfaces local-vs-h100 per run",
+    "runner_shape": "CLI primitive (kbu harness run: nbconvert --execute --inplace) + kbu-run Claude skill on top (classify/verify/devlog/confirm-push); mirrors ai-conductor wrapping Maestro",
+    "sync_payload": "rsync whole projects/{id}/ tree both ways, .kbcache/ included (sampled work carries forward+back), exclude .git/.venv/__pycache__",
+    "init_scaffold": "FULL container: git repo + venv (kbutillib+requirements+solver) + BERIL-mirror dirs + .claude/skills kbu-run bundle + empty DEVLOG.md + harness.toml source record + initial pull",
+    "h100_dispatch": "ai-cowork task pointing at the Dropbox-synced harness path; results flow back via Dropbox; no new transport; Chris-lab-specific (degrades gracefully)",
+    "push_back": "on success kbu-run stops+confirms, then rsyncs executed notebooks-with-outputs+data+figures+.kbcache back to BERIL projects/{id}/ and reminds user to commit in BERIL",
+    "failure_handling": "STOP-AND-REPORT on first failure; kbu-run never edits code; capture traceback to DEVLOG.md and escalate; no diagnose-retry, no code mutation",
+    "old_skill_strip": "DEFERRED to its own follow-up PRD (reversed by confront round 1). Strip is load-bearing: kept cli/bootstrap.py + cli/update.py + cli/new_project.py import ..layout.DEFAULT_SHARED_DIRS and .manifest; ~11 test files reference the targets. PRD B is harness-only."
+  },
+  "modules": [
+    {"name": "kbu harness CLI + kbutillib/harness library", "kind": "deep module", "verbs": ["init", "pull", "push", "run", "doctor", "status"], "internals": ["scaffold.py", "sync.py", "runner.py", "devlog.py", "config.py"], "tested": true},
+    {"name": "kbu-run skill", "kind": "markdown skill", "deployed_to": "<harness>/.claude/skills/kbu-run/", "user_invocable": true, "tested": "smoke"},
+    {"name": "old co-scientist strip", "kind": "DEFERRED to follow-up PRD", "tested": null}
+  ],
+  "tests": ["harness library core (init scaffold, pull/push round-trip incl .kbcache, doctor, harness.toml, dry-run, force/refusal)", "notebook runner (generated clean+throwing ipynb, no code edit, h100 task-file)", "dev-log append-only", "skill-bundle smoke", "doctor matrix (missing venv/import-fail/bad toml/missing beril_root/missing nbconvert)"],
+  "md_dev_log": "DEVLOG.md at harness root, append-only, one '## <ISO-ts> — <pull|run|push>' entry per action with notebooks/scope/where/outcome/runtime/blocker",
+  "reuse": "kbu-bootstrap venv/template helpers (kbutillib/cli/_template_ops.py) for the harness venv",
+  "grounding": [
+    "agent-io/prds/kbu-beril-augmentation/",
+    "agent-io/audits/2026-06-13-kbu-vs-beril-directive-audit.md",
+    "~/Dropbox/Projects/BERIL-research-observatory (PROJECT.md)",
+    "~/Dropbox/Projects/craft (CLI surface convention only)",
+    "~/Dropbox/Projects/ModelingLOE/notebooks/gapfill_loe/util.py"
+  ],
+  "constraints": ["worker IS Claude (Max plan) — no Anthropic API / no subprocess claude", "local execution is portable default; h100 ai-cowork dispatch is Chris-lab-specific and degrades gracefully"]
+}

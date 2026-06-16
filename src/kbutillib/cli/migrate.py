@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Optional
 
 import click
-import tomli_w
 
 from kbutillib import layout as _layout
 from kbutillib.cli.subproject import (
@@ -75,6 +74,13 @@ def _add_layout_shared_dirs(project_root: Path) -> bool:
     layout_section["shared_dirs"] = list(_layout.DEFAULT_SHARED_DIRS)
     data["layout"] = layout_section
 
+    try:
+        import tomli_w  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "tomli-w is required to write TOML manifests. "
+            "Install it with: pip install 'tomli-w>=1.0'"
+        ) from exc
     with toml_path.open("wb") as fh:
         tomli_w.dump(data, fh)
     return True

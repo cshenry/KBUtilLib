@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
 
+import types
+
 import pytest
 import yaml
 
@@ -27,6 +29,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC_ROOT = _REPO_ROOT / "src"
 
 
 # ---------------------------------------------------------------------------
@@ -153,19 +156,22 @@ class TestProbeFbaImports:
         assert "cobra" in detail
 
     def test_probe_reports_missing_dep_name(self) -> None:
-        """The FAIL message includes the specific missing dependency name."""
+        """The FAIL message includes the specific missing dependency name.
+
+        Strategy: inject sys.modules stubs so the probe deterministically
+        reaches kbutillib.ms_reconstruction_utils.
+
+        - ms_fba_utils is stubbed as a successful module so the probe passes
+          it (otherwise cobra-missing causes an early return on ms_fba_utils).
+        - ms_reconstruction_utils is *not* stubbed; the probe imports it fresh.
+          Its import chain hits kb_ws_utils → requests_toolbelt which is absent
+          from the venv, yielding ModuleNotFoundError(name='requests_toolbelt').
+        """
         probe = self._get_probe()
 
-        real_import = __import__
+        stub_fba = types.ModuleType("kbutillib.ms_fba_utils")
 
-        def fake_import(name, *args, **kwargs):
-            if name == "kbutillib.ms_reconstruction_utils":
-                err = ModuleNotFoundError("No module named 'requests_toolbelt'")
-                err.name = "requests_toolbelt"
-                raise err
-            return real_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=fake_import):
+        with patch.dict(sys.modules, {"kbutillib.ms_fba_utils": stub_fba}):
             status, detail = probe()
 
         assert status == "FAIL"
@@ -271,10 +277,26 @@ class TestOptionalImportBanner:
         extra_env: dict[str, str] | None = None,
         block_modules: list[str] | None = None,
     ) -> tuple[int, str, str]:
-        """Run `import kbutillib` in a subprocess and capture stdout/stderr."""
+        """Run `import kbutillib` in a subprocess and capture stdout/stderr.
+
+        PYTHONPATH is prepended with the worktree's ``src/`` directory so the
+        subprocess picks up the task-branch source rather than the wip-installed
+        version from the canonical venv's editable install (which points to the
+        Dropbox wip working tree).
+        """
         import subprocess
 
         env = os.environ.copy()
+        # Ensure the subprocess sees the worktree's kbutillib, not the
+        # wip-installed one.  The canonical venv is an editable install
+        # pointing to ~/Dropbox/Projects/KBUtilLib/src; prepending _SRC_ROOT
+        # overrides it.
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(_SRC_ROOT) + os.pathsep + existing_pythonpath
+            if existing_pythonpath
+            else str(_SRC_ROOT)
+        )
         if extra_env:
             env.update(extra_env)
 

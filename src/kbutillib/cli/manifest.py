@@ -12,8 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import tomli_w
-
 
 # ── timestamp ──────────────────────────────────────────────────────────────
 
@@ -64,7 +62,18 @@ def write_project_manifest(project_root: Path, data: dict[str, Any]) -> None:
     """Write *data* to ``kbu-project.toml`` in *project_root*.
 
     Creates the directory if it does not exist.
+
+    Requires ``tomli-w`` (``pip install 'tomli-w>=1.0'``).  The dependency is
+    imported lazily so that ``kbu doctor`` and other read-only CLI paths remain
+    available even in a venv that lacks tomli-w.
     """
+    try:
+        import tomli_w  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "tomli-w is required to write TOML manifests. "
+            "Install it with: pip install 'tomli-w>=1.0'"
+        ) from exc
     project_root.mkdir(parents=True, exist_ok=True)
     p = _project_manifest_path(project_root)
     with open(p, "wb") as fh:
@@ -102,7 +111,18 @@ def write_subproject_manifest(
     """Write *data* to ``kbu-subproject.toml`` for *subproject_name*.
 
     Creates the subproject directory if it does not exist.
+
+    Requires ``tomli-w`` (``pip install 'tomli-w>=1.0'``).  The dependency is
+    imported lazily so that ``kbu doctor`` and other read-only CLI paths remain
+    available even in a venv that lacks tomli-w.
     """
+    try:
+        import tomli_w  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "tomli-w is required to write TOML manifests. "
+            "Install it with: pip install 'tomli-w>=1.0'"
+        ) from exc
     d = _subproject_dir(project_root, subproject_name)
     d.mkdir(parents=True, exist_ok=True)
     p = _subproject_manifest_path(project_root, subproject_name)

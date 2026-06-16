@@ -7,7 +7,7 @@
 `find-flux-loops-impl`
 
 ## commit_shas
-(populated after commit)
+- `593448112bb4f700f4f3c83680a4005aa9a25abe`
 
 ## summary
 

@@ -450,6 +450,53 @@ def _probe_jupyter_kernel() -> tuple[str, str]:
         return "FAIL", f"could not run jupyter kernelspec list: {exc}"
 
 
+def _probe_fba_imports() -> tuple[str, str]:
+    """Probe: kbutillib.ms_fba_utils and ms_reconstruction_utils are importable.
+
+    Runs on all platforms (Linux, macOS, Windows) — not gated behind a macOS
+    check — because BERIL workers run on Linux.
+
+    Returns:
+        - ``("PASS", ...)`` if both modules import without error.
+        - ``("FAIL", "[FAIL] fba-import: missing dependency: <name>")`` on
+          ``ModuleNotFoundError`` (exposes the first missing transitive dep).
+        - ``("FAIL", "<ExcType>: <first line>")`` on any other exception.
+    """
+    modules = [
+        "kbutillib.ms_fba_utils",
+        "kbutillib.ms_reconstruction_utils",
+    ]
+    for mod in modules:
+        try:
+            __import__(mod)
+        except ModuleNotFoundError as exc:
+            dep = exc.name or str(exc)
+            return "FAIL", f"[FAIL] fba-import: missing dependency: {dep}"
+        except Exception as exc:  # noqa: BLE001
+            first_line = str(exc).splitlines()[0] if str(exc) else ""
+            return "FAIL", f"{type(exc).__name__}: {first_line}"
+    return "PASS", "ms_fba_utils and ms_reconstruction_utils import OK"
+
+
+def _probe_tomli_w() -> tuple[str, str]:
+    """Probe: tomli_w is importable in the current interpreter.
+
+    Runs on all platforms — not gated behind a macOS check.  If the current
+    interpreter lacks tomli_w the CLI venv has drifted from the declared
+    KBUtilLib dependency closure and needs reconciliation.
+    """
+    try:
+        import tomli_w  # noqa: F401
+        return "PASS", "tomli_w importable"
+    except ImportError:
+        return (
+            "WARN",
+            "tomli_w not found in current interpreter; "
+            "the kbu CLI venv needs dependency reconciliation "
+            "(pip install 'tomli-w>=1.0' into the active venv)",
+        )
+
+
 def _probe_project_origin() -> str:
     """Return the project-origin info line for the current working directory.
 
@@ -546,6 +593,8 @@ def doctor_command(verbose: bool) -> None:
         ("claude-extension", lambda: _probe_claude_extension(verbose=verbose)),
         ("kbu-version", _probe_kbu_version),
         ("jupyter-kernel", _probe_jupyter_kernel),
+        ("fba-imports", _probe_fba_imports),
+        ("tomli-w", _probe_tomli_w),
     ]
 
     any_fail = False

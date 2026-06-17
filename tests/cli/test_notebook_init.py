@@ -33,6 +33,7 @@ from kbutillib.cli.notebook_init import (
     _deploy_bundle,
     _register_or_attach,
     _resolve_repo,
+    _write_code_workspace,
     normalize_topic,
     notebook_init,
 )
@@ -730,6 +731,134 @@ class TestBundleSafety:
         """The _WORKNB_BUNDLE tuple must not contain any BERIL skill name."""
         overlap = set(_WORKNB_BUNDLE) & self._BERIL_SKILLS
         assert not overlap, f"BERIL skill in _WORKNB_BUNDLE: {overlap}"
+
+
+# ---------------------------------------------------------------------------
+# .code-workspace ensured in every scaffold branch (idempotent, non-clobber)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteCodeWorkspaceHelper:
+    """Unit-level checks on the _write_code_workspace helper itself."""
+
+    def test_writes_when_missing_and_returns_true(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "FreshRepo"
+        repo_root.mkdir()
+        result = _write_code_workspace(repo_root)
+        assert result is True
+        ws_path = repo_root / "FreshRepo.code-workspace"
+        assert ws_path.is_file()
+        data = json.loads(ws_path.read_text(encoding="utf-8"))
+        assert data == {"folders": [{"path": "."}]}
+
+    def test_returns_false_and_preserves_when_present(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "CustomRepo"
+        repo_root.mkdir()
+        ws_path = repo_root / "CustomRepo.code-workspace"
+        custom = '{"folders": [{"path": "."}], "settings": {"editor.tabSize": 2}}\n'
+        ws_path.write_text(custom, encoding="utf-8")
+
+        result = _write_code_workspace(repo_root)
+        assert result is False
+        assert ws_path.read_text(encoding="utf-8") == custom
+
+
+class TestScaffoldNotebooksWorkspace:
+    """Branch (b): _scaffold_notebooks must ensure <repo>.code-workspace."""
+
+    def _make_bare_repo(self, path: Path) -> None:
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=str(path), capture_output=True)
+
+    def test_creates_code_workspace_when_missing(
+        self,
+        tmp_path: Path,
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        repo_root = tmp_path / "ExistingRepo"
+        self._make_bare_repo(repo_root)
+        assert not (repo_root / "ExistingRepo.code-workspace").exists()
+
+        notebook_init(repo=str(repo_root), topic="flux", update=False)
+
+        ws_path = repo_root / "ExistingRepo.code-workspace"
+        assert ws_path.is_file()
+        data = json.loads(ws_path.read_text(encoding="utf-8"))
+        assert "folders" in data
+        assert data["folders"][0]["path"] == "."
+
+    def test_preserves_existing_code_workspace(
+        self,
+        tmp_path: Path,
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        repo_root = tmp_path / "ExistingRepo"
+        self._make_bare_repo(repo_root)
+        ws_path = repo_root / "ExistingRepo.code-workspace"
+        custom = '{"folders": [{"path": "."}], "settings": {"foo": "bar"}}\n'
+        ws_path.write_text(custom, encoding="utf-8")
+
+        notebook_init(repo=str(repo_root), topic="flux", update=False)
+
+        # Untouched.
+        assert ws_path.read_text(encoding="utf-8") == custom
+
+
+class TestAddPrjWorkspace:
+    """Branch (c): _add_prj must also ensure <repo>.code-workspace."""
+
+    def _make_repo_with_notebooks(self, path: Path) -> None:
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=str(path), capture_output=True)
+        nb = path / "notebooks"
+        nb.mkdir()
+        (nb / "models").mkdir()
+        (nb / "genomes").mkdir()
+        (nb / "data").mkdir()
+        (nb / ".kbu-run.json").write_text(
+            json.dumps({"project_id": f"worknb-{path.name}"}),
+            encoding="utf-8",
+        )
+
+    def test_creates_code_workspace_when_missing(
+        self,
+        tmp_path: Path,
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        repo_root = tmp_path / "NbRepo"
+        self._make_repo_with_notebooks(repo_root)
+        assert not (repo_root / "NbRepo.code-workspace").exists()
+
+        notebook_init(repo=str(repo_root), topic="newprj", update=False)
+
+        ws_path = repo_root / "NbRepo.code-workspace"
+        assert ws_path.is_file()
+        data = json.loads(ws_path.read_text(encoding="utf-8"))
+        assert "folders" in data
+        assert data["folders"][0]["path"] == "."
+
+    def test_preserves_existing_code_workspace(
+        self,
+        tmp_path: Path,
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        repo_root = tmp_path / "NbRepo"
+        self._make_repo_with_notebooks(repo_root)
+        ws_path = repo_root / "NbRepo.code-workspace"
+        custom = (
+            '{"folders": [{"path": ".", "name": "custom"}],'
+            ' "settings": {"editor.formatOnSave": true}}\n'
+        )
+        ws_path.write_text(custom, encoding="utf-8")
+
+        notebook_init(repo=str(repo_root), topic="newprj", update=False)
+
+        # Untouched.
+        assert ws_path.read_text(encoding="utf-8") == custom
 
 
 # ---------------------------------------------------------------------------

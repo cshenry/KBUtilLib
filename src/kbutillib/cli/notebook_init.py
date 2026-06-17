@@ -12,10 +12,16 @@ Behavior branches on detected state:
   1. **Repo missing** → full bootstrap: ``git init``, ``.code-workspace``,
      ``.claude/``, ``notebooks/`` with shared roots + first PRJ.
   2. **Repo present, notebooks/ missing** → scaffold notebooks tree + first PRJ.
+     Also ensures ``<repo>.code-workspace`` exists (non-clobbering).
   3. **notebooks/ present** → add the named ``PRJ-<topic>/``.
      Refuse (non-zero, no writes) if that PRJ already exists.
+     Also ensures ``<repo>.code-workspace`` exists (non-clobbering).
   4. **--update** → re-deploy the work-notebook bundle into ``.claude``;
      do not touch notebooks/PRJs.
+
+The Cursor ``<repo>.code-workspace`` file is therefore ensured by every
+scaffold branch (1, 2, 3).  It is never overwritten if it already exists,
+so user customizations are preserved.
 
 Design decisions
 ----------------
@@ -143,17 +149,25 @@ def _resolve_repo(repo: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _write_code_workspace(repo_root: Path) -> None:
-    """Write a minimal Cursor ``.code-workspace`` file at *repo_root*.
+def _write_code_workspace(repo_root: Path) -> bool:
+    """Ensure a minimal Cursor ``.code-workspace`` file exists at *repo_root*.
 
     The file is ``<repo_basename>.code-workspace`` and contains at least
     ``{"folders": [{"path": "."}]}``.  Extra keys (extensions,
     tasks) are permitted per advisory #4; the required entry is
     ``folders``.
+
+    Idempotent and non-clobbering: if the workspace file already exists,
+    the helper leaves it untouched (a user may have customized it) and
+    returns ``False``.  When it actually writes a new file, returns
+    ``True``.
     """
     ws_path = repo_root / f"{repo_root.name}.code-workspace"
+    if ws_path.exists():
+        return False
     content = json.dumps({"folders": [{"path": "."}]}, indent=2) + "\n"
     ws_path.write_text(content, encoding="utf-8")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +383,8 @@ def _bootstrap_repo(
     click.echo(f"  git init: {repo_root}")
 
     # .code-workspace.
-    _write_code_workspace(repo_root)
-    click.echo(f"  Created: {repo_root.name}.code-workspace")
+    if _write_code_workspace(repo_root):
+        click.echo(f"  Created: {repo_root.name}.code-workspace")
 
     # .claude/ + bundle.
     _init_claude_dir(repo_root)
@@ -402,8 +416,17 @@ def _scaffold_notebooks(
     norm_topic: str,
     repo_basename: str,
 ) -> None:
-    """Branch 2: repo exists but notebooks/ missing — scaffold + first PRJ."""
+    """Branch 2: repo exists but notebooks/ missing — scaffold + first PRJ.
+
+    Also ensures the Cursor ``<repo>.code-workspace`` file exists (without
+    overwriting an existing one), so the workspace is present in every
+    scaffold branch — not just the full bootstrap.
+    """
     click.echo(f"Scaffolding notebooks/ tree in existing repo at {repo_root} ...")
+
+    # .code-workspace (ensure, never clobber).
+    if _write_code_workspace(repo_root):
+        click.echo(f"  Created: {repo_root.name}.code-workspace")
 
     notebooks_dir = repo_root / "notebooks"
     notebooks_dir.mkdir()
@@ -434,7 +457,12 @@ def _add_prj(
     norm_topic: str,
     repo_basename: str,
 ) -> None:
-    """Branch 3: notebooks/ exists — add named PRJ-<topic>/."""
+    """Branch 3: notebooks/ exists — add named PRJ-<topic>/.
+
+    Also ensures the Cursor ``<repo>.code-workspace`` file exists (without
+    overwriting an existing one), so the workspace is present in every
+    scaffold branch — not just the full bootstrap.
+    """
     notebooks_dir = repo_root / "notebooks"
     prj_dir = notebooks_dir / f"PRJ-{norm_topic}"
 
@@ -450,6 +478,10 @@ def _add_prj(
     click.echo(
         f"Adding PRJ-{norm_topic}/ to existing notebooks/ tree ..."
     )
+
+    # .code-workspace (ensure, never clobber).
+    if _write_code_workspace(repo_root):
+        click.echo(f"  Created: {repo_root.name}.code-workspace")
 
     _scaffold_prj(notebooks_dir, norm_topic, repo_basename)
     click.echo(f"  Created: {prj_dir.relative_to(repo_root)}/")
@@ -542,10 +574,16 @@ def notebook_init_cmd(repo: str, topic: Optional[str], update: bool) -> None:
     \b
     - Repo missing       → full bootstrap (git init, .code-workspace, .claude/,
                            notebooks/ with shared roots + first PRJ-<topic>/)
-    - Repo present,      → scaffold notebooks/ + first PRJ-<topic>/
-      notebooks/ missing
-    - notebooks/ present → add the named PRJ-<topic>/ (error if it exists)
+    - Repo present,      → scaffold notebooks/ + first PRJ-<topic>/;
+      notebooks/ missing   also ensures <repo>.code-workspace exists
+                           (non-clobbering)
+    - notebooks/ present → add the named PRJ-<topic>/ (error if it exists);
+                           also ensures <repo>.code-workspace exists
+                           (non-clobbering)
     - --update           → re-deploy the work-notebook bundle into .claude/
+
+    The Cursor <repo>.code-workspace file is ensured in every scaffold
+    branch and never overwritten if it already exists.
 
     Work-notebook bundle deployed: jupyter-dev, kbu-run, synthesize.
     No BERIL skill is ever deployed here.

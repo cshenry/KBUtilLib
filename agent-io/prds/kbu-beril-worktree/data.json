@@ -1,0 +1,44 @@
+{
+  "prd_name": "kbu-beril-worktree",
+  "title": "kbu-beril-worktree — parallel BERIL sessions via git worktrees, managed by the kbu CLI",
+  "companion_prds": ["kbu-beril-augmentation", "kbu-harness"],
+  "status_note": "Third kbu↔BERIL augmentation PRD. One repo (KBUtilLib only); no BERIL change.",
+  "repos": ["KBUtilLib"],
+  "confront_rounds": 1,
+  "confront_round_1": "task-cd4747d6 (codex/h100, 2026-06-16, artifact 3d0432df). 15 stalls + 7 free critiques; ZERO structural issues (all precision gaps: exact paths, ID charset, output schema, exit codes, argv/env contract). Folded all 15 into Implementation Decisions + 23 Acceptance Criteria; adopted 1 free critique as binding (doctor checks symlink targets readable). One correction to adversary rec #8: replicate run_start's exact Vertex env-key mapping, NOT os.environ.update(get_vertex_config()) (that dict is config, not env vars). No drops.",
+  "foundational_decisions": {
+    "core_insight": "git worktrees share ONE .git; the projects/<id> branch lives in primary BERIL git the whole time, so there is NO merge-back. rm removes the worktree DIRECTORY ONLY and KEEPS the branch.",
+    "home": "kbu beril worktree {new,open,start,rm,ls,set-root,doctor} — nested click group under existing beril_cmd in src/kbutillib/cli/beril.py; thin CLI over a new kbutillib/beril_worktree/ library package (mirrors kbutillib/harness/).",
+    "rm_semantics": "git worktree remove dir only; NEVER git branch -d; git worktree prune for stale entries; idempotent no-op if absent; refuse if dirty unless --force.",
+    "recreate": "new adopts an existing projects/<id> branch (no -b) or creates it off main; branching off the main REF works even though the primary checkout is parked on a project branch.",
+    "merge_to_main": "out of scope for kbu; recreate worktree + open Claude + /submit (BERIL reviewed-PR gate). kbu never touches main.",
+    "symlinks": "every new symlinks .env -> beril_root/.env and .venv-berdl -> beril_root/.venv-berdl; both gitignored; one place to refresh token, no venv re-bootstrap.",
+    "cursor_shape": "Shape B — one Cursor window per worktree; workspace file at <worktree_root>/<id>.code-workspace OUTSIDE the git tree (BERIL stays pristine); mirrors BERIL.code-workspace settings; ${workspaceFolder}/.venv-berdl/bin/python resolves via symlink.",
+    "launch_split": "open <id> = cursor (Claude extension, Chris); start <id> = CLI-agent proxy (JupyterHub users).",
+    "launch_proxy": "FULL kbu proxy, ONE repo (Chris chose this over a BERIL-side guard to avoid shared-repo PR friction). DRIFT MITIGATION (binding): import beril_cli helpers (get_default_agent, get_vertex_config from beril_cli.config; _sync_auth_token from beril_cli.start); replicate ONLY run_start orchestration shell minus _checkout_release (chdir, sync token, vertex env, opus default, /berdl_start onboard, os.execvp). Do NOT copy helper bodies. Factor pre-execvp assembly into a pure (binary, argv, env) function for testing.",
+    "drift_tripwire": "kbu beril worktree doctor + a unit test assert beril_cli + the 3 borrowed symbols import; fail loud naming the missing symbol on a BERIL rename.",
+    "config": "kbu's OWN config at ~/.kbutillib/config.yaml (via SharedEnvUtils), a `beril` section {root, worktree_root}. Resolution: beril_root = --beril-root > BERIL_ROOT > config > error; worktree_root = --root > WORKING_BERIL_DIRECTORY > config > default <beril_root>/../WorkingBERIL. Chris worktree_root = ~/Dropbox/Projects/WorkingBERIL/. Never write BERIL's config.",
+    "hazard": "beril start inside a worktree runs unconditional _checkout_release (git checkout release-tag) -> detaches worktree off projects/<id>. Documented; use kbu beril worktree start instead."
+  },
+  "modules": [
+    {"name": "kbutillib/beril_worktree library", "kind": "deep module", "files": ["manager.py", "launch.py", "config.py"], "interface": ["BerilWorktree.new", "BerilWorktree.remove", "BerilWorktree.list", "BerilWorktree.open"], "tested": true},
+    {"name": "kbu beril worktree CLI group", "kind": "thin click wrapper in cli/beril.py", "verbs": ["new", "open", "start", "rm", "ls", "set-root", "doctor"], "tested": true},
+    {"name": "launch proxy", "kind": "import-reuse of beril_cli, minus _checkout_release", "tested": "argv/env assembly + import guard (not os.execvp)"}
+  ],
+  "tests": ["manager core against scratch temp git repo (new/adopt/rm-keeps-branch/idempotent-rm/dirty-refusal/force/symlinks-gitignored/workspace-file-outside-tree)", "config resolution precedence (flag>env>config>default) + set-root persists to ~/.kbutillib/config.yaml not BERIL config", "ls porcelain parsing (live vs reopenable)", "launch proxy import tripwire + argv/env assembly (opus default, /berdl_start onboard, --skip-onboard, no checkout)", "doctor matrix (beril_cli importable/not; each borrowed symbol present/renamed)"],
+  "out_of_scope": ["any BERIL-repo change", "merging project branches to main (/submit owns it)", "cross-machine worktree orchestration", "Spark/BERDL contention scheduling", "non-Cursor IDEs", "multi-root single-window mode (Shape A)"],
+  "grounding": [
+    "~/Dropbox/Projects/BERIL-research-observatory/beril_cli/start.py",
+    "~/Dropbox/Projects/BERIL-research-observatory/beril_cli/config.py",
+    "~/Dropbox/Projects/BERIL-research-observatory/beril_cli/cli.py",
+    "~/Dropbox/Projects/BERIL-research-observatory/BERIL.code-workspace",
+    "~/Dropbox/Projects/BERIL-research-observatory/PROJECT.md",
+    "AIAssistant/agent-io/plans/2026-06-16-beril-parallel-worktree-sessions.md",
+    "KBUtilLib/agent-io/prds/kbu-beril-augmentation/",
+    "KBUtilLib/agent-io/prds/kbu-harness/",
+    "KBUtilLib/src/kbutillib/cli/beril.py",
+    "KBUtilLib/src/kbutillib/harness/ (library+CLI module precedent)",
+    "KBUtilLib/src/kbutillib/shared_env_utils.py (~/.kbutillib config)"
+  ],
+  "constraints": ["worker IS Claude (Max plan) — no Anthropic API / no subprocess claude; proxy uses os.execvp to hand off the terminal, not a model call", "one repo: KBUtilLib only, no BERIL PR"]
+}

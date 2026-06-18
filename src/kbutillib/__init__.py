@@ -219,6 +219,12 @@ except ImportError as e:
     ToolUnavailableError = None
 
 try:
+    from .prokka_utils import ProkkaUtils
+except ImportError as e:
+    _import_error("prokka_utils", e)
+    ProkkaUtils = None
+
+try:
     from .kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
@@ -427,6 +433,7 @@ __all__ = [
     "AnnotationResult",
     "AnnotatorUtils",
     "MMSeqsUtils",
+    "ProkkaUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSFBAUtils",

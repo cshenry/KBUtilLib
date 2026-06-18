@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level2/version4"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      level="2" version="4">
+  <model id="transyt_model" name="Transyt Results">
+    <listOfReactions>
+      <reaction id="R_T0001" name="Glucose ABC transporter" reversible="false">
+        <notes>
+          <html:p>TC: 3.A.1.1.1</html:p>
+        </notes>
+        <listOfReactants>
+          <speciesReference species="M_glc__D_e" stoichiometry="1"/>
+          <speciesReference species="M_atp_c" stoichiometry="1"/>
+          <speciesReference species="M_h2o_c" stoichiometry="1"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="M_glc__D_c" stoichiometry="1"/>
+          <speciesReference species="M_adp_c" stoichiometry="1"/>
+          <speciesReference species="M_pi_c" stoichiometry="1"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <cn> 0 </cn>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction id="R_T0002" name="Phosphotransferase system, glucose" reversible="false">
+        <notes>
+          <html:p>TC: 4.A.1.1.1</html:p>
+        </notes>
+        <listOfReactants>
+          <speciesReference species="M_glc__D_e" stoichiometry="1"/>
+          <speciesReference species="M_pep_c" stoichiometry="1"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="M_g6p_c" stoichiometry="1"/>
+          <speciesReference species="M_pyr_c" stoichiometry="1"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <cn> 0 </cn>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction id="R_T0003" name="Lactose permease" reversible="false">
+        <notes>
+          <html:p>TC: 2.A.1.5.1</html:p>
+        </notes>
+        <listOfReactants>
+          <speciesReference species="M_lcts_e" stoichiometry="1"/>
+          <speciesReference species="M_h_e" stoichiometry="1"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="M_lcts_c" stoichiometry="1"/>
+          <speciesReference species="M_h_c" stoichiometry="1"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <cn> 0 </cn>
+          </math>
+        </kineticLaw>
+      </reaction>
+    </listOfReactions>
+    <listOfGeneProducts>
+      <geneProduct id="gene_prot1" name="prot1" metaid="prot1">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+            <rdf:Description rdf:about="#prot1">
+              <bqbiol:isEncodedBy xmlns:bqbiol="http://biomodels.net/biology-qualifiers/">
+                <rdf:Bag>
+                  <rdf:li rdf:resource="http://identifiers.org/uniprot/P00000"/>
+                </rdf:Bag>
+              </bqbiol:isEncodedBy>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </geneProduct>
+      <geneProduct id="gene_prot2" name="prot2" metaid="prot2">
+      </geneProduct>
+      <geneProduct id="gene_prot3" name="prot3" metaid="prot3">
+      </geneProduct>
+    </listOfGeneProducts>
+    <listOfGeneProductAssociations>
+      <geneProductAssociation reaction="R_T0001">
+        <geneProductRef geneProduct="gene_prot1"/>
+      </geneProductAssociation>
+      <geneProductAssociation reaction="R_T0002">
+        <geneProductRef geneProduct="gene_prot2"/>
+      </geneProductAssociation>
+      <geneProductAssociation reaction="R_T0003">
+        <geneProductRef geneProduct="gene_prot1"/>
+      </geneProductAssociation>
+      <geneProductAssociation reaction="R_T0003">
+        <geneProductRef geneProduct="gene_prot3"/>
+      </geneProductAssociation>
+    </listOfGeneProductAssociations>
+  </model>
+</sbml>

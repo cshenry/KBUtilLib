@@ -58,3 +58,8 @@ skani:
 ai_curation:
   backend: "argo"  # AI backend: "argo" or "claude-code"
   claude_code_executable: "claude-code"  # Path to claude-code executable if using claude-code backend
+
+# Transyt Configuration (transport-reaction annotation via Docker)
+transyt:
+  docker_image: "merlin-sysbio/kb_transyt:latest"  # Docker image tag/digest for Transyt
+  neo4j_timeout: 120  # Maximum seconds to wait for Neo4j readiness before launching JAR

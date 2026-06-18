@@ -225,6 +225,12 @@ except ImportError as e:
     ProkkaUtils = None
 
 try:
+    from .transyt_utils import TransytUtils
+except ImportError as e:
+    _import_error("transyt_utils", e)
+    TransytUtils = None
+
+try:
     from .kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
@@ -449,6 +455,7 @@ __all__ = [
     "Term",
     "ThermoUtils",
     "ToolUnavailableError",
+    "TransytUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",

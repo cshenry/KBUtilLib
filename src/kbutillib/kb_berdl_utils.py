@@ -132,11 +132,18 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
         Raises:
             ValueError: If no KBase token is available
         """
-        token = self.get_token(namespace="berdl")
+        # Resolve the KBase token the canonical way: the standard "kbase"
+        # namespace used by every other utility module (kb_ws_utils,
+        # kb_callback_utils, ...), falling back to the KB_AUTH_TOKEN environment
+        # variable that the KBase runtime sets — exactly as the KBase base
+        # client and catalog client do (installed_clients/baseclient.py,
+        # kbase_catalog_client.py).
+        token = self.get_token(namespace="kbase") or os.environ.get("KB_AUTH_TOKEN")
         if not token:
             raise ValueError(
-                "No KBase token available. Set token via set_token() or "
-                "ensure ~/.kbase/token exists."
+                "No KBase token available. Provide it the standard way: the "
+                "KB_AUTH_TOKEN environment variable (set by the KBase runtime), "
+                "~/.kbase/token, or set_token()."
             )
 
         return {
@@ -242,8 +249,17 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
 
             result = response.json()
 
-            # Parse the response - structure may vary based on API response format
-            data = result if isinstance(result, list) else result.get("data", result.get("rows", []))
+            # Parse the response - structure may vary based on API response format.
+            # The current BERDL delta API returns rows under "result" alongside a
+            # "pagination" block; older shapes used "data"/"rows" or a bare list.
+            if isinstance(result, list):
+                data = result
+                pagination: Dict[str, Any] = {}
+            else:
+                data = result.get(
+                    "result", result.get("data", result.get("rows", []))
+                )
+                pagination = result.get("pagination", {}) or {}
 
             # Extract column names from first row if data exists
             columns = list(data[0].keys()) if data and isinstance(data[0], dict) else []
@@ -255,7 +271,9 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
                 "data": data,
                 "columns": columns,
                 "row_count": len(data),
-                "query": sql
+                "total_count": pagination.get("total_count"),
+                "has_more": pagination.get("has_more"),
+                "query": sql,
             }
 
         except requests.exceptions.Timeout:
@@ -556,7 +574,7 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
             response.raise_for_status()
             result = response.json()
 
-            self.log_info(f"Retrieved database schema structure")
+            self.log_info("Retrieved database schema structure")
 
             return {
                 "success": True,

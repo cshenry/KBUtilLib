@@ -203,6 +203,22 @@ except ImportError as e:
     MMSeqsUtils = None
 
 try:
+    from .annotator_utils import (
+        AnnotationRecord,
+        AnnotationResult,
+        AnnotatorUtils,
+        Term,
+        ToolUnavailableError,
+    )
+except ImportError as e:
+    _import_error("annotator_utils", e)
+    AnnotationRecord = None
+    AnnotationResult = None
+    AnnotatorUtils = None
+    Term = None
+    ToolUnavailableError = None
+
+try:
     from .kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
@@ -407,6 +423,9 @@ __all__ = [
     "KBSDKUtils",
     "KBUniProtUtils",
     "KBWSUtils",
+    "AnnotationRecord",
+    "AnnotationResult",
+    "AnnotatorUtils",
     "MMSeqsUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
@@ -420,7 +439,9 @@ __all__ = [
     "Reads",
     "ReadSet",
     "SKANIUtils",
+    "Term",
     "ThermoUtils",
+    "ToolUnavailableError",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",

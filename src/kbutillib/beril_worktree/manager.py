@@ -83,8 +83,7 @@ class BerilWorktree:
         - Creates ``.env`` and ``.venv-berdl`` symlinks inside the worktree.
         - Symlinks the kbu skill bundles (see :data:`_SKILL_LINKS`) from
           ``beril_root`` so every worktree shares one deployed copy.
-        - Writes a ``<worktree_root>/<id>.code-workspace`` file outside the
-          worktree directory.
+        - Writes a ``<id>.code-workspace`` file inside the worktree directory.
         - If *open_cursor* is True, attempts to open the workspace in Cursor.
 
         Args:
@@ -431,14 +430,17 @@ class BerilWorktree:
             link.symlink_to(target)
 
     def _write_workspace(self, project_id: str) -> None:
-        """Write <worktree_root>/<id>.code-workspace outside the git tree.
+        """Write <worktree>/<id>.code-workspace inside the worktree directory.
 
         Content: a single ``folders`` entry with name ``BERIL: <id>`` and
-        path ``./<id>``, plus the ``settings`` and ``extensions`` top-level
-        keys copied from ``<beril_root>/BERIL.code-workspace`` when present,
-        or empty objects otherwise (AC #8).
+        path ``.`` (the worktree itself), plus the ``settings`` and
+        ``extensions`` top-level keys copied from
+        ``<beril_root>/BERIL.code-workspace`` when present, or empty objects
+        otherwise.  The file lives inside the worktree and is covered by the
+        ``*.code-workspace`` ignore rule, so it is never committed.
         """
-        ws_file = self.worktree_root / f"{project_id}.code-workspace"
+        wt_path = self._worktree_path(project_id)
+        ws_file = wt_path / f"{project_id}.code-workspace"
         beril_ws = self.beril_root / "BERIL.code-workspace"
 
         settings: dict = {}
@@ -452,7 +454,7 @@ class BerilWorktree:
                 pass  # Fall through to empty objects.
 
         workspace = {
-            "folders": [{"name": f"BERIL: {project_id}", "path": f"./{project_id}"}],
+            "folders": [{"name": f"BERIL: {project_id}", "path": "."}],
             "settings": settings,
             "extensions": extensions,
         }

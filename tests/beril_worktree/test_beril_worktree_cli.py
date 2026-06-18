@@ -62,7 +62,7 @@ def scratch_beril(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (beril / ".gitignore").write_text(
-        ".env\n*.env\n.venv-berdl/\n.venv-berdl\n",
+        ".env\n*.env\n.venv-berdl/\n.venv-berdl\n*.code-workspace\n",
         encoding="utf-8",
     )
     (beril / "README.md").write_text("# BERIL\n", encoding="utf-8")

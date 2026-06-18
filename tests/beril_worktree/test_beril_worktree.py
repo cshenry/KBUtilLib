@@ -79,7 +79,7 @@ def scratch_beril(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (beril / ".gitignore").write_text(
-        ".env\n*.env\n.venv-berdl/\n.venv-berdl\n",
+        ".env\n*.env\n.venv-berdl/\n.venv-berdl\n*.code-workspace\n",
         encoding="utf-8",
     )
     (beril / "README.md").write_text("# BERIL\n", encoding="utf-8")
@@ -407,37 +407,38 @@ class TestWorkspace:
     ) -> None:
         """Workspace file is valid JSON."""
         pid = "ws-test"
-        manager.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        wt = manager.new(pid)
+        ws_file = wt / f"{pid}.code-workspace"
         assert ws_file.is_file()
 
         content = json.loads(ws_file.read_text(encoding="utf-8"))
         assert isinstance(content, dict)
 
-    def test_workspace_outside_worktree(
+    def test_workspace_inside_worktree(
         self, manager, scratch_beril: Path, worktree_root: Path
     ) -> None:
-        """Workspace file lives in worktree_root, not inside the worktree directory."""
-        pid = "ws-outside"
+        """Workspace file lives inside the worktree directory, not in worktree_root."""
+        pid = "ws-inside"
         wt = manager.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        ws_file = wt / f"{pid}.code-workspace"
 
-        # ws_file is in worktree_root, not inside wt/
-        assert ws_file.parent == worktree_root
-        assert not ws_file.is_relative_to(wt)
+        # ws_file is inside wt/, not a sibling in worktree_root
+        assert ws_file.is_file()
+        assert ws_file.parent == wt
+        assert not (worktree_root / f"{pid}.code-workspace").exists()
 
     def test_workspace_folder_path(
         self, manager, scratch_beril: Path, worktree_root: Path
     ) -> None:
-        """The single folder entry uses path './<id>'."""
+        """The single folder entry uses path '.' (the worktree itself)."""
         pid = "ws-path"
-        manager.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        wt = manager.new(pid)
+        ws_file = wt / f"{pid}.code-workspace"
         data = json.loads(ws_file.read_text(encoding="utf-8"))
 
         assert len(data["folders"]) == 1
         folder = data["folders"][0]
-        assert folder["path"] == f"./{pid}"
+        assert folder["path"] == "."
         assert folder["name"] == f"BERIL: {pid}"
 
     def test_workspace_copies_settings_and_extensions(
@@ -445,8 +446,8 @@ class TestWorkspace:
     ) -> None:
         """Settings and extensions are copied from BERIL.code-workspace."""
         pid = "ws-settings"
-        manager.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        wt = manager.new(pid)
+        ws_file = wt / f"{pid}.code-workspace"
         data = json.loads(ws_file.read_text(encoding="utf-8"))
 
         assert data["settings"] == {"editor.fontSize": 14}
@@ -463,8 +464,8 @@ class TestWorkspace:
 
         mgr = BerilWorktree(beril_root=scratch_beril, worktree_root=worktree_root)
         pid = "ws-no-beril"
-        mgr.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        wt = mgr.new(pid)
+        ws_file = wt / f"{pid}.code-workspace"
         data = json.loads(ws_file.read_text(encoding="utf-8"))
 
         assert data["settings"] == {}
@@ -480,8 +481,8 @@ class TestWorkspace:
 
         mgr = BerilWorktree(beril_root=scratch_beril, worktree_root=worktree_root)
         pid = "ws-malformed"
-        mgr.new(pid)
-        ws_file = worktree_root / f"{pid}.code-workspace"
+        wt = mgr.new(pid)
+        ws_file = wt / f"{pid}.code-workspace"
         data = json.loads(ws_file.read_text(encoding="utf-8"))
 
         assert data["settings"] == {}

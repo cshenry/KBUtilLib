@@ -20,6 +20,17 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 # Branch prefix for all BERIL project branches.
 _BRANCH_PREFIX = "projects/"
 
+# kbu skill bundles to replicate into every worktree.  One canonical copy is
+# deployed in ``beril_root`` (by ``kbu beril install``); worktrees symlink to
+# it so every parallel session shares the same skills.  These bundles are
+# gitignored and never committed — the symlink keeps them out of every tree.
+_SKILL_LINKS = (
+    ".claude/kbu",
+    ".claude/skills/kbu",
+    ".claude/skills/kbu-fba",
+    ".claude/skills/kbu-notebook",
+)
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -70,6 +81,8 @@ class BerilWorktree:
         - Creates branch ``projects/<id>`` off *from_branch* when the branch
           does not exist; adopts the existing branch without ``-b`` otherwise.
         - Creates ``.env`` and ``.venv-berdl`` symlinks inside the worktree.
+        - Symlinks the kbu skill bundles (see :data:`_SKILL_LINKS`) from
+          ``beril_root`` so every worktree shares one deployed copy.
         - Writes a ``<worktree_root>/<id>.code-workspace`` file outside the
           worktree directory.
         - If *open_cursor* is True, attempts to open the workspace in Cursor.
@@ -102,6 +115,7 @@ class BerilWorktree:
 
         self._add_worktree(project_id, from_branch=from_branch)
         self._symlink_env(project_id)
+        self._symlink_skills(project_id)
         self._write_workspace(project_id)
 
         if open_cursor:
@@ -385,6 +399,36 @@ class BerilWorktree:
                     "target is created.",
                     stacklevel=3,
                 )
+
+    def _symlink_skills(self, project_id: str) -> None:
+        """Symlink the kbu skill bundles from ``beril_root`` into the worktree.
+
+        Each entry in :data:`_SKILL_LINKS` is symlinked from the worktree to
+        the matching path in ``beril_root`` so every parallel session shares a
+        single deployed copy of the kbu skills.  Unlike ``.env`` / ``.venv-berdl``
+        (where a placeholder dangling symlink is acceptable), a skill symlink is
+        useless without its target, so a missing target is **skipped** with a
+        warning rather than creating a broken link.  Parent directories
+        (e.g. ``.claude/skills``) are created as needed.
+        """
+        wt_path = self._worktree_path(project_id)
+        for rel in _SKILL_LINKS:
+            target = self.beril_root / rel
+            link = wt_path / rel
+            if link.exists() or link.is_symlink():
+                # Already present (idempotent).
+                continue
+            if not target.exists():
+                warnings.warn(
+                    f"kbu skill bundle missing in beril_root: {target}\n"
+                    f"Skipping symlink {link}. Run 'kbu beril install' in "
+                    f"{self.beril_root} to deploy the kbu skills, then recreate "
+                    "the worktree (or symlink manually).",
+                    stacklevel=3,
+                )
+                continue
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
 
     def _write_workspace(self, project_id: str) -> None:
         """Write <worktree_root>/<id>.code-workspace outside the git tree.

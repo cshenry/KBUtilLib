@@ -351,6 +351,56 @@ class TestSymlinks:
         assert (wt / ".venv-berdl").is_symlink(), "Symlink must be created despite missing target"
 
 
+class TestSkillSymlinks:
+    SKILL_LINKS = (
+        ".claude/kbu",
+        ".claude/skills/kbu",
+        ".claude/skills/kbu-fba",
+        ".claude/skills/kbu-notebook",
+    )
+
+    def _seed_skills(self, beril: Path) -> None:
+        """Deploy stub kbu skill bundles in the scratch BERIL root."""
+        for rel in self.SKILL_LINKS:
+            d = beril / rel
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(f"# {rel}\n", encoding="utf-8")
+
+    def test_skill_symlinks_created(
+        self, manager, scratch_beril: Path, worktree_root: Path
+    ) -> None:
+        """kbu skill bundles are symlinked into the worktree, pointing at beril_root."""
+        self._seed_skills(scratch_beril)
+        pid = "skill-link-test"
+        wt = manager.new(pid)
+
+        for rel in self.SKILL_LINKS:
+            link = wt / rel
+            assert link.is_symlink(), f"{rel} must be a symlink"
+            assert link.resolve() == (scratch_beril / rel).resolve(), (
+                f"{rel} must resolve to the beril_root copy"
+            )
+
+    def test_skill_symlink_missing_target_skips_with_warning(
+        self, manager, scratch_beril: Path, worktree_root: Path
+    ) -> None:
+        """A missing skill bundle is skipped (no broken link) with a warning."""
+        # Do NOT seed the skill dirs — targets are absent.
+        pid = "skill-missing-test"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            wt = manager.new(pid)
+
+        warn_msgs = [str(w.message) for w in caught]
+        assert any("skill bundle missing" in m for m in warn_msgs), (
+            "Expected a warning about missing kbu skill bundles"
+        )
+        # No broken symlinks should have been created.
+        for rel in self.SKILL_LINKS:
+            link = wt / rel
+            assert not link.is_symlink(), f"{rel} must not be a (broken) symlink"
+
+
 class TestWorkspace:
     def test_workspace_valid_json(
         self, manager, scratch_beril: Path, worktree_root: Path

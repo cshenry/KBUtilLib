@@ -203,6 +203,40 @@ except ImportError as e:
     MMSeqsUtils = None
 
 try:
+    from .annotator_utils import (
+        AnnotationRecord,
+        AnnotationResult,
+        AnnotatorUtils,
+        Term,
+        ToolUnavailableError,
+    )
+except ImportError as e:
+    _import_error("annotator_utils", e)
+    AnnotationRecord = None
+    AnnotationResult = None
+    AnnotatorUtils = None
+    Term = None
+    ToolUnavailableError = None
+
+try:
+    from .prokka_utils import ProkkaUtils
+except ImportError as e:
+    _import_error("prokka_utils", e)
+    ProkkaUtils = None
+
+try:
+    from .dram2_utils import DRAM2Utils
+except ImportError as e:
+    _import_error("dram2_utils", e)
+    DRAM2Utils = None
+
+try:
+    from .transyt_utils import TransytUtils
+except ImportError as e:
+    _import_error("transyt_utils", e)
+    TransytUtils = None
+
+try:
     from .kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
@@ -407,7 +441,12 @@ __all__ = [
     "KBSDKUtils",
     "KBUniProtUtils",
     "KBWSUtils",
+    "AnnotationRecord",
+    "AnnotationResult",
+    "AnnotatorUtils",
+    "DRAM2Utils",
     "MMSeqsUtils",
+    "ProkkaUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSFBAUtils",
@@ -420,7 +459,10 @@ __all__ = [
     "Reads",
     "ReadSet",
     "SKANIUtils",
+    "Term",
     "ThermoUtils",
+    "ToolUnavailableError",
+    "TransytUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",

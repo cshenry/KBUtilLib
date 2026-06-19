@@ -1,0 +1,13 @@
+##gff-version 3
+##sequence-region g0 1 900
+##sequence-region g1 1 600
+##sequence-region g2 1 750
+##sequence-region g3 1 1500
+##sequence-region g4 1 300
+g0	Prodigal:002006	CDS	1	900	.	+	0	ID=g0_1;Parent=g0_gene1;locus_tag=prokka_00001;inference=ab initio prediction:Prodigal:002006,similar to AA sequence:UniProtKB:P00331;product=Alcohol dehydrogenase;gene=adhA;eC_number=1.1.1.1;COG=COG0604
+g1	Prodigal:002006	CDS	1	600	.	+	0	ID=g1_1;Parent=g1_gene1;locus_tag=prokka_00002;inference=ab initio prediction:Prodigal:002006;product=Fumarate reductase flavoprotein subunit;gene=frdA;eC_number=1.3.5.1
+g2	Prodigal:002006	CDS	1	450	.	+	0	ID=g2_1;Parent=g2_gene1;locus_tag=prokka_00003;inference=ab initio prediction:Prodigal:002006;product=Homoserine kinase;gene=thrA;eC_number=2.7.2.4
+g2	Prodigal:002006	CDS	101	850	.	+	0	ID=g2_2;Parent=g2_gene2;locus_tag=prokka_00004;inference=ab initio prediction:Prodigal:002006;product=Serine hydroxymethyltransferase;eC_number=2.1.2.1
+g3	Barrnap:0.9	rRNA	1	1500	.	+	.	ID=g3_1;Parent=g3_gene1;locus_tag=prokka_00005;product=16S ribosomal RNA
+g4	Prodigal:002006	CDS	1	300	.	+	0	ID=g4_1;Parent=g4_gene1;locus_tag=prokka_00006;inference=ab initio prediction:Prodigal:002006;product=6-phosphofructokinase;gene=pfkA
+##FASTA

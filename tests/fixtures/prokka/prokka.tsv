@@ -1,0 +1,7 @@
+locus_tag	ftype	length_bp	gene	EC_number	COG	product
+prokka_00001	CDS	900	adhA	1.1.1.1	COG0604	Alcohol dehydrogenase
+prokka_00002	CDS	600	frdA	1.3.5.1;1.3.5.4	COG1053,COG0479	Fumarate reductase flavoprotein subunit
+prokka_00003	CDS	450	thrA	2.7.2.4	COG0527	Homoserine kinase
+prokka_00004	CDS	750		2.1.2.1		Serine hydroxymethyltransferase
+prokka_00005	rRNA	1500			COG0202	16S ribosomal RNA
+prokka_00006	CDS	300	pfkA			6-phosphofructokinase

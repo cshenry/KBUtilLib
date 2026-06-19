@@ -225,6 +225,12 @@ except ImportError as e:
     ProkkaUtils = None
 
 try:
+    from .dram2_utils import DRAM2Utils
+except ImportError as e:
+    _import_error("dram2_utils", e)
+    DRAM2Utils = None
+
+try:
     from .transyt_utils import TransytUtils
 except ImportError as e:
     _import_error("transyt_utils", e)
@@ -438,6 +444,7 @@ __all__ = [
     "AnnotationRecord",
     "AnnotationResult",
     "AnnotatorUtils",
+    "DRAM2Utils",
     "MMSeqsUtils",
     "ProkkaUtils",
     "ModelStandardizationUtils",

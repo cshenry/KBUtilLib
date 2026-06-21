@@ -1,0 +1,76 @@
+{
+  "prd_name": "annotation-tool-modules",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Foundation",
+      "parallel_group": [
+        {
+          "task_id": "annotator-base",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the shared annotation base in KBUtilLib per the PRD at ~/Dropbox/Projects/KBUtilLib/agent-io/prds/annotation-tool-modules/fullprompt.md (read it fully, including Implementation Decisions, the Confront-resolved specifications, and Acceptance Criteria). Create src/kbutillib/annotator_utils.py defining: the dataclasses Term, AnnotationRecord, AnnotationResult (non-frozen, value-comparable, in-memory only); ToolUnavailableError(tool, detail); and AnnotatorUtils(SharedEnvUtils) with annotate(sequences: dict[str,str], **params) -> AnnotationResult (abstract/raises NotImplementedError in base), an abstract side-effect-free is_available() -> bool, _require_available() raising ToolUnavailableError with message 'TOOL not available: DETAIL. Install: HINT', and the shared input alphabet guards (DNA = IUPAC nucleotide + -/* ; protein = AA incl B/Z/X + -/* ; case-insensitive, whitespace ignored; raise ValueError if >10% out-of-alphabet). Export AnnotatorUtils, Term, AnnotationRecord, AnnotationResult from src/kbutillib/__init__.py under those exact names (follow the existing export pattern used for MMSeqsUtils/SKANIUtils). Add tests/guard/test_dependency_direction.py that scans src/kbutillib/**/*.py for any import of genome_annotation_aggregator and fails if found. Add offline unit tests for the guards and dataclasses. Match the MMSeqsUtils/SKANIUtils module conventions. Keep the repo's fail_under=100 gate green for the new code.",
+          "success_criteria": "src/kbutillib/annotator_utils.py defines AnnotatorUtils, Term, AnnotationRecord, AnnotationResult, and ToolUnavailableError, all exported from src/kbutillib/__init__.py under those exact names; alphabet guards behave per spec with unit tests; tests/guard/test_dependency_direction.py exists and passes; the test suite for the new module passes.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Tool modules",
+      "parallel_group": [
+        {
+          "task_id": "prokka-module",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement ProkkaUtils in src/kbutillib/prokka_utils.py per the PRD at ~/Dropbox/Projects/KBUtilLib/agent-io/prds/annotation-tool-modules/fullprompt.md (PROKKA mechanism + Confront-resolved specs 4-9). ProkkaUtils(AnnotatorUtils).annotate(genes: dict[str,str], gcode: int = 11, kingdom: str | None = None, threads: int = 1) -> AnnotationResult. Input value = NUCLEOTIDE CDS (reject protein via the DNA guard). Emulate the KBase kb_prokka genome re-annotation trick: remap each caller id -> deterministic safe id 'g{index}', write one single-gene-contig FASTA record per gene (>safe_id + nucleotide seq), run 'prokka --outdir <tmp> --prefix prokka --gcode <gcode> [--kingdom <k>] --cpus <threads> --force --quiet <fasta>' (NO --proteins), parse the .tsv (CDS rows only) capturing product (free-text Term), EC_number (EC), gene (GENE), COG (COG) with multi-value splitting, and map every record back to the caller id via the safe-id map. Multi-ORF per contig: longest by length_bp, ties -> smallest start. Zero-ORF genes are simply absent. Reject kingdom outside {None,Bacteria,Archaea,Viruses}. is_available() probes 'prokka --version'; provenance captures prokka + DB versions. Split pure _parse_tsv from _run_prokka. Offline unit test with a committed golden .tsv fixture under tests/fixtures/prokka/ covering remap (incl a >32-char id), CDS field capture, multi-ORF, zero-ORF; live test @pytest.mark.integration + skipif(not is_available()). Export ProkkaUtils from __init__.py. Keep fail_under=100 green.",
+          "success_criteria": "ProkkaUtils.annotate writes single-gene-contig FASTA with g{index} safe ids, runs prokka without --proteins, parses .tsv CDS rows into product/EC/gene/COG Terms keyed back to caller ids, handles >32-char ids without aborting, applies longest-CDS tie-break; offline golden-fixture unit test passes with no prokka installed; live skipif-gated test present; ProkkaUtils exported from __init__.py.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["annotator-base"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "transyt-module",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement TransytUtils in src/kbutillib/transyt_utils.py per the PRD at ~/Dropbox/Projects/KBUtilLib/agent-io/prds/annotation-tool-modules/fullprompt.md (Transyt mechanism + Confront-resolved specs 9-10). TransytUtils(AnnotatorUtils).annotate(proteins: dict[str,str], tax_id: str, reference_database: str = 'ModelSEED', metabolites: list[str] | None = None) -> AnnotationResult. Input value = amino-acid protein (reject nucleotide via the protein guard). Raise a clear error if tax_id is missing. Stage an input dir with protein.faa + params.txt (taxID, reference_database=ModelSEED, scoring defaults) + optional metabolites.txt; invoke Transyt via Docker using the image at config transyt.docker_image with an --entrypoint bash override that runs 'neo4j start && <neo4j readiness poll, curl http://localhost:7474/ up to transyt.neo4j_timeout seconds, default 120> && java --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true -Dworkdir=/workdir -Xmx4096m -jar /opt/transyt/transyt.jar 3 /workdir/processingDir/' with the input dir bind-mounted at /workdir/processingDir. Parse results/transyt.xml (SBML) -> Term('TC', family, 'transporter') and results/reactions_references.txt -> Term('MSRXN', msrxn, 'reaction'); metabolites -> Term('MSCPD', mscpd, 'compound'); keyed back to caller gene ids. Exit code 8 / empty results -> empty records (not an error). is_available() = docker image inspect <tag> succeeds (no raise on absent). Provenance = image tag/digest + transyt version. Also add a slimmed KBUtilLib-owned Dockerfile under docker/transyt/ derived from merlin-sysbio/kb_transyt (strip SDK layers; clean entrypoint = start Neo4j -> run JAR -> emit results; mirror/vendor the U Minho transyt.jar/data.tar.gz/workdir.tar.gz downloads). Split pure _parse from _run (docker). Offline unit test with committed golden transyt.xml + reactions_references.txt fixtures under tests/fixtures/transyt/; live test @pytest.mark.integration + skipif(not is_available()). The image build + live run are exercised wherever the image exists (not required to pass offline tests). Export TransytUtils from __init__.py. Keep fail_under=100 green.",
+          "success_criteria": "TransytUtils.annotate raises on missing tax_id, stages protein.faa+params.txt, invokes Transyt via the configured Docker image with a Neo4j readiness poll (no fixed sleep), parses transyt.xml + reactions_references.txt into TC/MSRXN/MSCPD Terms keyed to caller ids, and returns empty records on exit-8; is_available() returns False (no raise) when the image is absent; offline golden-fixture unit test passes with no Docker image; a docker/transyt/ Dockerfile is present; TransytUtils exported from __init__.py.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["annotator-base"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "dram2-module",
+          "lane": "maestro",
+          "role": "developer",
+          "prompt": "Implement DRAM2Utils in src/kbutillib/dram2_utils.py per the PRD at ~/Dropbox/Projects/KBUtilLib/agent-io/prds/annotation-tool-modules/fullprompt.md (DRAM2 mechanism + Confront-resolved spec 8). This task runs ON h100 where DRAM2 is installed (at /storage/chenry/DRAM2 on poplar, NFS-mounted and accessible from native h100 under a different path — confirm the exact h100-native path before running). GATING NOTE: DRAM2's reference databases are still downloading; this task can only complete once `dram2 annotate` runs end-to-end on h100, so do NOT dispatch it until DRAM2 is fully runnable. DRAM2Utils(AnnotatorUtils).annotate(proteins: dict[str,str], **params) -> AnnotationResult, input value = amino-acid protein (reject nucleotide via the protein guard). DISCOVER and PIN against the live h100 DRAM2 install: run the real `dram2 --help` (or the installed entrypoint) to find the exact annotate subcommand + flags; write the proteins to a .faa; run DRAM2 annotate on the called genes; parse the real output annotations table; pin the exact invocation and output column schema in the module — do NOT guess the CLI from memory. Emit namespaced Terms (KO/KEGG -> 'KO', Pfam -> 'PF', EC -> 'EC', CAZy/dbCAN -> 'CAZY', unknown columns -> namespace=None free-text), keyed back via the .faa header == caller id. is_available() probes the DRAM2 env/CLI. Provenance = DRAM2 version + DB versions. Split pure _parse from _run. Commit a small golden fixture captured from a REAL h100 DRAM2 run under tests/fixtures/dram2/ (demo.faa + annotations.tsv). Offline unit test parses the golden fixture (passes with no DRAM2); live test @pytest.mark.integration + skipif(not is_available()) AND env-gated by KBU_DRAM2_LIVE=1. Export DRAM2Utils from __init__.py. Keep fail_under=100 green.",
+          "success_criteria": "DRAM2Utils.annotate runs the DRAM2 annotate invocation pinned against the live h100 install, parses the real annotations table into namespaced Terms keyed to caller ids; a golden fixture captured from a real h100 run is committed under tests/fixtures/dram2/; the offline unit test passes with no DRAM2 installed; the live test is gated by KBU_DRAM2_LIVE=1 and is_available(); DRAM2Utils exported from __init__.py.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["annotator-base"],
+          "machine": "h100",
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "GAA narrow wraps",
+      "parallel_group": [
+        {
+          "task_id": "gaa-narrow-wraps",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Refit GenomeAnnotationAggregator's annotation plugins to be NARROW WRAPS over the new KBUtilLib annotation modules, per the PRD at ~/Dropbox/Projects/KBUtilLib/agent-io/prds/annotation-tool-modules/fullprompt.md (GAA narrow wraps + Confront-resolved spec 11). Read GAA's genome_annotation_aggregator/annotation_runner.py, local_binary_adapter.py, kbase_adapter.py, sequence_store.py, function_resolver.py first. (1) Local PROKKA: rewrite the CLI_PROKKA plugin to call kbutillib.ProkkaUtils.annotate(genes) via an INJECTABLE annotator constructor dependency (replacing the LocalBinaryAdapter mock with an injected fake in tests), map AnnotationResult.records through the existing SequenceStore -> seq_hash and FunctionResolver, and write protein_annotations rows with source='CLI_PROKKA' + version provenance. DELETE the PROKKA (and PaperBLAST) subprocess logic + command templates from local_binary_adapter.py. Ensure the local tool_id is CLI_PROKKA (renamed from PROKKA). (2) Local DRAM2: add a local DRAM2 plugin (source id 'DRAM2') calling kbutillib.DRAM2Utils via injected annotator. (3) Local Transyt: add a local TRANSYT plugin (source id 'TRANSYT') calling kbutillib.TransytUtils (pass tax_id) via injected annotator. Amend the tool registry in annotation_runner.py AND CLAUDE.md with CLI_PROKKA, DRAM2, TRANSYT local source ids. Mirror the existing DramPlugin/Glm4ecPlugin/TransytPlugin shape; do not invent new store APIs. Offline tests inject fake annotators returning canned AnnotationResults and assert correct protein_annotations rows (source id + provenance), idempotent re-runs (storage dedup), and that a CLI_PROKKA row is distinguishable from a KBASE_PROKKA row for the same protein. Do NOT touch the KBase-app plugins/baselines (KBASE_PROKKA, KBase DRAM/Transyt) or kbase_adapter.py.",
+          "success_criteria": "GAA's CLI_PROKKA, local DRAM2, and local TRANSYT plugins call the KBUtilLib modules via injected annotators and write protein_annotations rows with correct source ids + provenance; the PROKKA/PaperBLAST subprocess logic is removed from local_binary_adapter.py; the tool registry (annotation_runner.py + CLAUDE.md) lists CLI_PROKKA/DRAM2/TRANSYT; offline tests pass by injecting fakes (no real binaries), prove CLI_PROKKA vs KBASE_PROKKA distinguishability and idempotent re-runs; KBase-app plugins and kbase_adapter.py are unchanged.",
+          "repos": ["GenomeAnnotationAggregator"],
+          "depends_on": ["prokka-module", "dram2-module", "transyt-module"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

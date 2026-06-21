@@ -1,0 +1,43 @@
+{
+  "prd_name": "template-evaluation-suite",
+  "title": "Template Evaluation Suite (ms_fba_util tests + ms_template_util)",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "priority": "normal",
+  "confront_rounds": 1,
+  "created": "2026-06-15",
+  "source_project": "kbutillib",
+  "related_projects": [
+    "modelingloe"
+  ],
+  "decisions": {
+    "module_split": "ms_fba_util gets 7 reusable per-model tests + Biolog stash; new ms_template_util gets full-template-model build + evaluate_template_quality + render + diff; ms_reconstruction_util untouched",
+    "template_scope": "generic over any template; build whatever biomasses present, graft missing GP/GN from standard template",
+    "reaction_classification": "two FVA passes per media: unconstrained (fraction=0) -> dead + directionality; growth-forced fraction=0.2 -> essential (forced nonzero)",
+    "essential_definition": "FVA forced-flux at 20% optimum (not 100%, to avoid overprediction)",
+    "biolog_stash": "4 MSGrowthPhenotypes sets (C/N/S/P) target_element-constrained; built once from KBaseMedia, committed JSON in package data dir; refresh fn rebuilds from KBase",
+    "production_degradation_scope": "cytosolic (_c) metabolites only; pure capability (no growth coupling); threshold 1e-6",
+    "diff_perturbation_level": "model-level direct edit (no template rebuild)",
+    "diff_attribution": "both independent (default) and cumulative",
+    "tests": "all: 7 ms_fba_util tests + evaluate_template_quality + diff_template_evaluation + Biolog stash round-trip",
+    "phasing": "Phase 1 = ms_fba_util tests + Biolog stash; Phase 2 = ms_template_util (depends on Phase 1)"
+  },
+  "prior_art": {
+    "build_full_template_model": "modelseedpy MSBuilder.build_full_template_model",
+    "run_fva": "MSFBAUtils.run_fva (cobra flux_variability_analysis is broken)",
+    "biolog": "modelseedpy MSGrowthPhenotypes/MSGrowthPhenotype (target_element + ElementUptakePkg)",
+    "drains": "MSModelUtil.add_exchanges_for_metabolites"
+  },
+  "confront_history": [
+    {
+      "round": 1,
+      "task_id": "task-af9acd16",
+      "date": "2026-06-16",
+      "stalls_found": 15,
+      "stalls_folded": 15,
+      "stalls_dropped": 0
+    }
+  ]
+}

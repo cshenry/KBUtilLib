@@ -1,0 +1,27 @@
+{
+  "prd_name": "annotation-tool-modules",
+  "title": "Annotation Tool Modules (DRAM2, PROKKA, Transyt) — KBUtilLib APIs + GAA narrow wraps",
+  "repos": ["KBUtilLib", "GenomeAnnotationAggregator"],
+  "primary_repo": "KBUtilLib",
+  "created": "2026-06-17",
+  "confront_rounds": 1,
+  "tools": [
+    {"name": "PROKKA", "module": "prokka_utils.ProkkaUtils", "input": "nucleotide CDS", "invocation": "local binary", "test_host": "local", "gaa_source": "CLI_PROKKA"},
+    {"name": "DRAM2", "module": "dram2_utils.DRAM2Utils", "input": "amino-acid protein", "invocation": "local binary (h100)", "test_host": "h100", "gaa_source": "DRAM2"},
+    {"name": "Transyt", "module": "transyt_utils.TransytUtils", "input": "amino-acid protein", "invocation": "docker", "test_host": "docker-host", "gaa_source": "TRANSYT"}
+  ],
+  "key_decisions": [
+    "Separate module per tool + shared AnnotatorUtils base; consistent interface = return type + availability contract, not uniform input",
+    "Input is {id: seq} dict for all tools; value molecule per-tool (PROKKA=nucleotide CDS, others=AA)",
+    "PROKKA emulates kb_prokka genome re-annotation (single-gene contigs, no --proteins); capture product/EC/gene/COG; remap >32-char ids",
+    "Transyt via Docker (reuse merlin-sysbio/kb_transyt, then slim derivative); mandatory tax_id",
+    "DRAM2 CLI/output pinned against h100 install at build time; built+tested on h100, not installed locally",
+    "Seam A: KBUtilLib returns structured-native, GAA FunctionResolver normalizes; one-directional dependency GAA->KBUtilLib",
+    "GAA plugins are narrow wraps with injectable annotator; delete subprocess logic from GAA local_binary_adapter.py",
+    "Tests: offline unit (mock+golden) for all four; live skipif-gated for PROKKA(local)/DRAM2(h100)/Transyt(docker)"
+  ],
+  "research": {
+    "kb_prokka": "kbaseapps/ProkkaAnnotation annotate_genome/write_genome_to_fasta — DNA single-gene contigs, map by GFF rec.id, 32-char abort, product+EC only",
+    "transyt": "merlin-sysbio/kb_transyt — Java JAR + Neo4j 4.0.2 + BLAST + DB; mode 3 + input dir; tax_id mandatory; SBML + reactions_references.txt out; dlagoa@anl.gov"
+  }
+}

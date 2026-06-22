@@ -129,6 +129,12 @@ except ImportError as e:
     ThermoUtils = None
 
 try:
+    from .predictive_thermo_utils import PredictiveThermoUtils
+except ImportError as e:
+    _import_error("predictive_thermo_utils", e)
+    PredictiveThermoUtils = None
+
+try:
     from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError as e:
     _import_error("kb_reads_utils", e)
@@ -287,6 +293,11 @@ except ImportError:
     ThermoUtilsImpl = None
 
 try:
+    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+except ImportError:
+    PredictiveThermoUtilsImpl = None
+
+try:
     from .mmseqs_utils import MMSeqsUtilsImpl
 except ImportError:
     MMSeqsUtilsImpl = None
@@ -371,6 +382,7 @@ __all__ = [
     "ReadSet",
     "SKANIUtils",
     "ThermoUtils",
+    "PredictiveThermoUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",
@@ -395,6 +407,7 @@ __all__ = [
     "RCSBPDBUtilsImpl",
     "SKANIUtilsImpl",
     "ThermoUtilsImpl",
+    "PredictiveThermoUtilsImpl",
     # Endpoints
     "base_url",
     "env_from_url",

@@ -25,6 +25,22 @@ dependencies = [
 ]
 
 
+[project.optional-dependencies]
+# Optional thermodynamics predictor backends. The predictive_thermo facade
+# degrades gracefully when these are absent, so they are not core deps.
+# equilibrator-api is MIT-licensed (Beber et al., GitLab/equilibrator).
+equilibrator = [
+  "equilibrator-api >=0.6.0",
+]
+# Umbrella for all currently pip-installable thermo backends. dGPredictor and
+# molGPK are research code with custom installs (local clone / unreleased) and
+# are intentionally NOT listed here; the facade detects and uses them at runtime
+# when configured, and degrades gracefully when they are absent.
+thermo = [
+  "equilibrator-api >=0.6.0",
+]
+
+
 [project.urls]
 Homepage = "https://github.com/cshenry/KBUtilLib"
 Repository = "https://github.com/cshenry/KBUtilLib"

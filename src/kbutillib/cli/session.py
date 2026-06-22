@@ -1,7 +1,10 @@
 """``kbu session`` — session save/list/show for kbu subprojects.
 
-Routes session records to AIAssistant's SQLite store when available, or falls
-back to local YAML files under ``subprojects/<name>/sessions/``.
+Writes local YAML session records under ``subprojects/<name>/sessions/``.
+When AIAssistant is detected AND a project binding exists in kbu-project.toml,
+also emits a JSON drop-file to ``<aia_root>/state/session-inbox/`` for the
+platform ingester to pick up.  No direct ``assistant.*`` import; the old
+``_route_save_aia`` path (direct SQLite write + auto-register) has been removed.
 """
 
 from __future__ import annotations
@@ -94,67 +97,6 @@ def _route_save_local(payload: dict[str, Any], subproject: str) -> str:
     return payload["session_id"]
 
 
-# ── AIAssistant route ──────────────────────────────────────────────────────
-
-
-def _route_save_aia(
-    payload: dict[str, Any],
-    subproject: str,
-    aia_root: Path,
-) -> str:
-    """Save *payload* via ``assistant.state.save_session``.
-
-    Prepends ``<aia_root>/src`` to ``sys.path`` so the import works from
-    any working directory.  Constructs ``project_id`` as
-    ``kbu-<repo_basename>-<subproject>``.  Attempts to auto-register the
-    project via ``assistant.state.registry.update_project``; a missing
-    ``update_project`` symbol is non-fatal (logs a warning and skips
-    registration).
-
-    Returns the session_id returned by ``save_session``.
-
-    Raises:
-        ImportError: if ``assistant.state`` itself cannot be imported.
-            Callers must handle this and fall back to local YAML.
-    """
-    src_path = str(aia_root / "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-
-    # This import is intentionally late so path manipulation takes effect.
-    import assistant.state as _aia_state  # noqa: PLC0415 (local import by design)
-
-    repo_basename = Path.cwd().name
-    project_id = f"kbu-{repo_basename}-{subproject}"
-
-    # Auto-register project (non-fatal if update_project is absent).
-    try:
-        from assistant.state.registry import update_project  # noqa: PLC0415
-        update_project(
-            project_id,
-            {"type": "project", "status": "active"},
-            create_if_missing=True,
-        )
-    except (ImportError, AttributeError) as exc:
-        click.echo(
-            f"Warning: could not auto-register project '{project_id}' "
-            f"in AIAssistant registry: {exc}",
-            err=True,
-        )
-    except Exception as exc:
-        # registry errors are non-fatal
-        click.echo(
-            f"Warning: registry update_project raised an unexpected error "
-            f"for '{project_id}': {exc}",
-            err=True,
-        )
-
-    save_payload = dict(payload)
-    save_payload["project_id"] = project_id
-
-    return _aia_state.save_session(save_payload)
-
-
 # ── Click group ────────────────────────────────────────────────────────────
 
 
@@ -209,8 +151,7 @@ def save_cmd(  # noqa: PLR0913
 
     session_id = _new_session_id()
 
-    # Build the canonical payload.  Keys match assistant.state.save_session's
-    # documented interface exactly.
+    # Build the canonical payload.
     payload: dict[str, Any] = {
         "session_id": session_id,
         "command": skill,
@@ -231,26 +172,44 @@ def save_cmd(  # noqa: PLR0913
         if k not in payload:
             payload[k] = v
 
-    # Route: try AIAssistant first, fall back to local YAML.
-    aia_root = _detect_aiassistant()
-    used_aia = False
-    if aia_root is not None:
-        try:
-            saved_id = _route_save_aia(payload, subproject, aia_root)
-            session_id = saved_id
-            used_aia = True
-        except ImportError as exc:
-            click.echo(
-                f"Warning: could not import assistant.state ({exc}); "
-                "falling back to local YAML.",
-                err=True,
-            )
+    # Always write the local YAML record.
+    session_id = _route_save_local(payload, subproject)
 
-    if not used_aia:
-        session_id = _route_save_local(payload, subproject)
+    # Conditionally emit a drop-file when AIAssistant is present AND a binding
+    # exists.  No auto-derivation, no auto-registration, no direct DB import.
+    project_root = _find_project_root(Path.cwd())
+    aia_root = _detect_aiassistant()
+
+    if aia_root is not None:
+        from .binding import resolve_binding  # noqa: PLC0415
+        bound_id = resolve_binding(project_root)
+
+        if bound_id is not None:
+            # Augment payload with bound project info and emit the drop-file.
+            from .binding import set_binding as _sb  # noqa: PLC0415, F401
+            try:
+                from .manifest import read_project_manifest  # noqa: PLC0415
+                mdata = read_project_manifest(project_root)
+                aia_data = mdata.get("aiassistant", {})
+                bound_name = aia_data.get("project_name") or bound_id
+            except Exception:
+                bound_name = bound_id
+
+            drop_payload = dict(payload)
+            drop_payload["project_id"] = bound_id
+            drop_payload["project_name"] = bound_name
+
+            try:
+                from .dropfile_emitter import emit_session_dropfile  # noqa: PLC0415
+                emit_session_dropfile(aia_root, drop_payload)
+            except Exception as exc:
+                # Drop-file failure is non-fatal; local YAML record is already written.
+                click.echo(
+                    f"Warning: could not emit session drop-file: {exc}",
+                    err=True,
+                )
 
     # Always append a lightweight ref to the subproject manifest.
-    project_root = _find_project_root(Path.cwd())
     try:
         append_session_ref(
             project_root,

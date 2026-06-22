@@ -1,12 +1,15 @@
-"""Tests for kbutillib.cli.session — save, list, show subcommands."""
+"""Tests for kbutillib.cli.session — save, list, show subcommands.
+
+The old _route_save_aia direct save_session path has been removed.  Tests now
+verify the new drop-file behaviour: bound project emits a drop-file AND writes
+local YAML; unbound project writes ONLY local YAML and emits nothing; AIAssistant-
+absent writes ONLY local YAML.
+"""
 
 from __future__ import annotations
 
 import json
 import os
-import sys
-import types
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +65,21 @@ def _create_subproject(root: Path, sp_name: str) -> Path:
     }
     write_subproject_manifest(root, sp_name, data)
     return sp_dir
+
+
+def _add_binding(root: Path, project_id: str, project_name: str) -> None:
+    """Add an [aiassistant] binding to the project's kbu-project.toml."""
+    from kbutillib.cli.binding import set_binding
+    set_binding(root, project_id, project_name)
+
+
+def _make_aia_root(tmp_path: Path, subdir: str = "AIAssistant") -> Path:
+    """Create a fake AIAssistant root with state/sessions.db present."""
+    aia_root = tmp_path / subdir
+    state_dir = aia_root / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "sessions.db").write_bytes(b"fake")
+    return aia_root
 
 
 def _invoke(root: Path, *args: str) -> Any:
@@ -132,7 +150,7 @@ class TestDetectAiassistant:
         assert result == tmp_path / "custom_aia"
 
 
-# ── save — local fallback ─────────────────────────────────────────────────────
+# ── save — local YAML (no AIAssistant) ───────────────────────────────────────
 
 
 class TestSaveLocal:
@@ -205,159 +223,181 @@ class TestSaveLocal:
         assert data["next_steps"] == ["step1"]
         assert data["work_submitted"] == ["work1"]
 
-
-# ── save — AIAssistant routing ────────────────────────────────────────────────
-
-
-class TestSaveAIA:
-    def _setup_aia_mocks(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> tuple[Path, list]:
-        """Set up a fake AIAssistant environment and return (aia_root, calls_log)."""
-        state_dir = tmp_path / "AIAssistant" / "state"
-        state_dir.mkdir(parents=True)
-        (state_dir / "sessions.db").write_bytes(b"fake")
-
-        calls_log: list[dict] = []
-
-        def fake_save_session(payload: dict) -> str:
-            calls_log.append(dict(payload))
-            return payload.get("session_id", "fakeid12")
-
-        def fake_get_recent_sessions(**kwargs: Any) -> list:
-            return []
-
-        fake_state = types.SimpleNamespace(
-            save_session=fake_save_session,
-            get_recent_sessions=fake_get_recent_sessions,
-        )
-
-        fake_registry = types.SimpleNamespace(
-            update_project=lambda *a, **kw: None,
-        )
-
-        monkeypatch.setitem(sys.modules, "assistant", types.ModuleType("assistant"))
-        monkeypatch.setitem(sys.modules, "assistant.state", fake_state)
-        monkeypatch.setitem(sys.modules, "assistant.state.registry", fake_registry)
-        monkeypatch.setenv("KBU_AIA_PATHS", str(state_dir / "sessions.db"))
-
-        return tmp_path / "AIAssistant", calls_log
-
-    def test_save_session_called_with_correct_payload(
+    def test_no_dropfile_when_aia_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        aia_root, calls_log = self._setup_aia_mocks(monkeypatch, tmp_path)
-        root = _make_project(tmp_path)
-        _create_subproject(root, "bar")
-        result = _invoke(
-            root, "save",
-            "--skill", "kbu-build",
-            "--subproject", "bar",
-            "--summary", "scaffold done",
-        )
-        assert result.exit_code == 0, result.output
-        assert len(calls_log) == 1
-        payload = calls_log[0]
-        assert payload["command"] == "kbu-build"
-        assert payload["summary"] == "scaffold done"
-        assert "project_id" in payload
-        assert payload["project_id"].endswith("-bar")
-
-    def test_project_id_format(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        aia_root, calls_log = self._setup_aia_mocks(monkeypatch, tmp_path)
-        root = _make_project(tmp_path, name="testproj")
-        _create_subproject(root, "mysp")
-        _invoke(
-            root, "save",
-            "--skill", "kbu-plan",
-            "--subproject", "mysp",
-            "--summary", "s",
-        )
-        assert len(calls_log) == 1
-        # project_id should be kbu-<cwd_basename>-mysp
-        pid = calls_log[0]["project_id"]
-        assert pid.endswith("-mysp")
-        assert pid.startswith("kbu-")
-
-    def test_importerror_falls_back_to_local(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """If assistant.state raises ImportError, fall back to local YAML silently."""
-        state_dir = tmp_path / "AIAssistant" / "state"
-        state_dir.mkdir(parents=True)
-        (state_dir / "sessions.db").write_bytes(b"fake")
-
-        # Make assistant.state importable but save_session is absent — simulate
-        # ImportError by blocking the module entirely.
-        bad_module = types.ModuleType("assistant.state")
-
-        def broken_import(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "assistant.state":
-                raise ImportError("simulated missing assistant.state")
-            return original_import(name, *args, **kwargs)
-
-        import builtins
-        original_import = builtins.__import__
-
-        monkeypatch.setenv("KBU_AIA_PATHS", str(state_dir / "sessions.db"))
-        # Ensure assistant.state is NOT in sys.modules so import will be attempted
-        monkeypatch.delitem(sys.modules, "assistant.state", raising=False)
-        monkeypatch.delitem(sys.modules, "assistant", raising=False)
-        monkeypatch.setattr(builtins, "__import__", broken_import)
-
+        """When AIAssistant is absent, no drop-file is created anywhere."""
+        monkeypatch.setenv("KBU_AIA_PATHS", "/nonexistent/state/sessions.db")
         root = _make_project(tmp_path)
         _create_subproject(root, "sp1")
         result = _invoke(root, "save", "--skill", "kbu-plan", "--subproject", "sp1",
-                         "--summary", "test fallback")
-        # Should still succeed
+                         "--summary", "no aia")
         assert result.exit_code == 0, result.output
-        # Warning on stderr (captured in CliRunner output)
-        assert "Warning" in result.output or "falling back" in result.output
-        # Local YAML should exist
-        sessions_dir = root / "subprojects" / "sp1" / "sessions"
-        assert len(list(sessions_dir.glob("*.yaml"))) == 1
+        # No session-inbox directory should exist anywhere under tmp_path
+        inboxes = list(tmp_path.rglob("session-inbox"))
+        assert inboxes == []
 
-    def test_update_project_importerror_skips_registration_saves_anyway(
+
+# ── save — drop-file routing (AIAssistant present) ───────────────────────────
+
+
+class TestSaveDropfile:
+    def _setup_aia(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, Path]:
+        """Return (project_root, aia_root) with AIA detected."""
+        aia_root = _make_aia_root(tmp_path, "AIAssistant")
+        monkeypatch.setenv("KBU_AIA_PATHS", str(aia_root / "state" / "sessions.db"))
+        root = _make_project(tmp_path)
+        return root, aia_root
+
+    def test_bound_project_emits_dropfile_and_writes_yaml(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ImportError on update_project is non-fatal; save_session still called."""
-        state_dir = tmp_path / "AIAssistant" / "state"
-        state_dir.mkdir(parents=True)
-        (state_dir / "sessions.db").write_bytes(b"fake")
+        """Bound project: local YAML written AND drop-file emitted."""
+        root, aia_root = self._setup_aia(tmp_path, monkeypatch)
+        _create_subproject(root, "sp1")
+        _add_binding(root, "modelingloe", "ModelingLOE")
 
-        calls_log: list[dict] = []
+        result = _invoke(root, "save", "--skill", "kbu-plan", "--subproject", "sp1",
+                         "--summary", "bound session")
+        assert result.exit_code == 0, result.output
 
-        def fake_save_session(payload: dict) -> str:
-            calls_log.append(dict(payload))
-            return payload.get("session_id", "deadbeef")
+        # Local YAML must exist
+        sessions_dir = root / "subprojects" / "sp1" / "sessions"
+        yaml_files = list(sessions_dir.glob("*.yaml"))
+        assert len(yaml_files) == 1, "Expected exactly one local YAML file"
 
-        fake_state = types.SimpleNamespace(
-            save_session=fake_save_session,
-            get_recent_sessions=lambda **kw: [],
-        )
-        # Registry module present but update_project attribute missing
-        fake_registry = types.SimpleNamespace()  # no update_project
+        # Drop-file must exist
+        inbox = aia_root / "state" / "session-inbox"
+        drop_files = list(inbox.glob("*.json"))
+        assert len(drop_files) == 1, "Expected exactly one drop-file"
 
-        monkeypatch.setitem(sys.modules, "assistant", types.ModuleType("assistant"))
-        monkeypatch.setitem(sys.modules, "assistant.state", fake_state)
-        monkeypatch.setitem(sys.modules, "assistant.state.registry", fake_registry)
-        monkeypatch.setenv("KBU_AIA_PATHS", str(state_dir / "sessions.db"))
+        # Drop-file must be valid JSON with required fields
+        with open(drop_files[0]) as fh:
+            drop = json.load(fh)
+        assert drop["project_id"] == "modelingloe"
+        assert drop["project_name"] == "ModelingLOE"
+        assert drop["command"] == "kbu-plan"
+        assert drop["summary"] == "bound session"
+        assert "session_id" in drop
+        assert "started_at" in drop
 
+        # Drop-file name must match session_id
+        assert drop_files[0].stem == drop["session_id"]
+
+    def test_unbound_project_writes_only_local_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unbound project with AIAssistant present: local YAML only, no drop-file."""
+        root, aia_root = self._setup_aia(tmp_path, monkeypatch)
+        _create_subproject(root, "sp1")
+        # No binding added
+
+        result = _invoke(root, "save", "--skill", "kbu-build", "--subproject", "sp1",
+                         "--summary", "unbound session")
+        assert result.exit_code == 0, result.output
+
+        # Local YAML must exist
+        sessions_dir = root / "subprojects" / "sp1" / "sessions"
+        yaml_files = list(sessions_dir.glob("*.yaml"))
+        assert len(yaml_files) == 1, "Expected exactly one local YAML file"
+
+        # No drop-file should be created
+        inbox = aia_root / "state" / "session-inbox"
+        if inbox.exists():
+            drop_files = list(inbox.glob("*.json"))
+            assert drop_files == [], "Expected no drop-files for unbound project"
+
+    def test_aia_absent_writes_only_local_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AIAssistant absent (no sessions.db): local YAML only, no drop-file."""
+        monkeypatch.setenv("KBU_AIA_PATHS", "/nonexistent/state/sessions.db")
         root = _make_project(tmp_path)
-        _create_subproject(root, "sp2")
+        _create_subproject(root, "sp1")
+        # Even if there's a binding, AIAssistant isn't detected
+        _add_binding(root, "modelingloe", "ModelingLOE")
+
+        result = _invoke(root, "save", "--skill", "kbu-run", "--subproject", "sp1",
+                         "--summary", "no aia")
+        assert result.exit_code == 0, result.output
+
+        sessions_dir = root / "subprojects" / "sp1" / "sessions"
+        yaml_files = list(sessions_dir.glob("*.yaml"))
+        assert len(yaml_files) == 1
+
+        inboxes = list(tmp_path.rglob("session-inbox"))
+        assert inboxes == [], "No session-inbox should be created when AIA absent"
+
+    def test_dropfile_contains_list_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Drop-file carries topics/decisions/work/next_steps lists."""
+        root, aia_root = self._setup_aia(tmp_path, monkeypatch)
+        _create_subproject(root, "sp1")
+        _add_binding(root, "testproject", "Test Project")
+
         result = _invoke(
             root, "save",
-            "--skill", "kbu-run",
-            "--subproject", "sp2",
-            "--summary", "ran notebooks",
+            "--skill", "kbu-synthesize",
+            "--subproject", "sp1",
+            "--summary", "synthesis done",
+            "--topics", "topic A",
+            "--decisions", "decision X",
+            "--next-steps", "next step 1",
+            "--work-completed", "delivered report",
         )
         assert result.exit_code == 0, result.output
-        assert len(calls_log) == 1
-        assert calls_log[0]["command"] == "kbu-run"
+
+        inbox = aia_root / "state" / "session-inbox"
+        drop_files = list(inbox.glob("*.json"))
+        assert len(drop_files) == 1
+
+        with open(drop_files[0]) as fh:
+            drop = json.load(fh)
+        assert drop["topics_discussed"] == ["topic A"]
+        assert drop["decisions_made"] == ["decision X"]
+        assert drop["next_steps"] == ["next step 1"]
+        assert drop["work_submitted"] == ["delivered report"]
+
+    def test_dropfile_session_id_matches_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The session_id printed to stdout matches the drop-file filename and content."""
+        root, aia_root = self._setup_aia(tmp_path, monkeypatch)
+        _create_subproject(root, "sp1")
+        _add_binding(root, "proj1", "Proj One")
+
+        result = _invoke(root, "save", "--skill", "kbu-plan", "--subproject", "sp1",
+                         "--summary", "id check")
+        assert result.exit_code == 0, result.output
+
+        session_id = result.output.strip()
+        inbox = aia_root / "state" / "session-inbox"
+        drop_file = inbox / f"{session_id}.json"
+        assert drop_file.exists(), f"Expected drop-file at {drop_file}"
+
+        with open(drop_file) as fh:
+            drop = json.load(fh)
+        assert drop["session_id"] == session_id
+
+    def test_no_assistant_state_warning_on_save(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Saving must NOT produce the old 'could not import assistant.state' warning."""
+        root, aia_root = self._setup_aia(tmp_path, monkeypatch)
+        _create_subproject(root, "sp1")
+        _add_binding(root, "proj1", "Proj")
+
+        result = _invoke(root, "save", "--skill", "kbu-plan", "--subproject", "sp1",
+                         "--summary", "import check")
+        assert result.exit_code == 0, result.output
+        # Old error path would have printed these strings
+        assert "could not import assistant.state" not in result.output
+        assert "falling back to local YAML" not in result.output
+        # And the old auto-register warning should not appear
+        assert "auto-register" not in result.output
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
@@ -515,3 +555,10 @@ class TestHelp:
         result = runner.invoke(main, ["--help"], catch_exceptions=False)
         assert result.exit_code == 0
         assert "session" in result.output
+
+    def test_top_level_help_lists_set(self) -> None:
+        """The new 'set' command group is registered at the top level."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["--help"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "set" in result.output

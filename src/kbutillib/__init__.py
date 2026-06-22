@@ -175,6 +175,12 @@ except ImportError as e:
     PredictiveThermoUtils = None
 
 try:
+    from .network_expansion_utils import NetworkExpansionUtils
+except ImportError as e:
+    _import_error("network_expansion_utils", e)
+    NetworkExpansionUtils = None
+
+try:
     from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError as e:
     _import_error("kb_reads_utils", e)
@@ -383,6 +389,11 @@ except ImportError:
     PredictiveThermoUtilsImpl = None
 
 try:
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
+except ImportError:
+    NetworkExpansionUtilsImpl = None
+
+try:
     from .mmseqs_utils import MMSeqsUtilsImpl
 except ImportError:
     MMSeqsUtilsImpl = None
@@ -487,6 +498,7 @@ __all__ = [
     "TransytUtils",
     "OntomapUtils",
     "PredictiveThermoUtils",
+    "NetworkExpansionUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",
@@ -514,6 +526,7 @@ __all__ = [
     "ThermoUtilsImpl",
     "OntomapUtilsImpl",
     "PredictiveThermoUtilsImpl",
+    "NetworkExpansionUtilsImpl",
     # Endpoints
     "base_url",
     "env_from_url",

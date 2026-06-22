@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .ai_curation_utils import AICurationUtilsImpl
     from .thermo_utils import ThermoUtilsImpl
     from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
     from .mmseqs_utils import MMSeqsUtilsImpl
     from .skani_utils import SKANIUtilsImpl
     from .kb_berdl_utils import KBBERDLUtilsImpl
@@ -94,6 +95,7 @@ class KBUtilLib:
         self._curation = None
         self._thermo = None
         self._predictive_thermo = None
+        self._network_expansion = None
         self._mmseqs = None
         self._skani = None
         self._berdl = None
@@ -240,6 +242,15 @@ class KBUtilLib:
             from .predictive_thermo_utils import PredictiveThermoUtilsImpl
             self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.thermo)
         return self._predictive_thermo
+
+    @property
+    def network_expansion(self) -> "NetworkExpansionUtilsImpl":
+        """Cheminformatics network-expansion facade (pickaxe / retrorules
+        backends with graceful degradation)."""
+        if self._network_expansion is None:
+            from .network_expansion_utils import NetworkExpansionUtilsImpl
+            self._network_expansion = NetworkExpansionUtilsImpl(self.env)
+        return self._network_expansion
 
     @property
     def mmseqs(self) -> MMSeqsUtilsImpl:

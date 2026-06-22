@@ -44,6 +44,19 @@ thermo = [
   "equilibrator-api >=0.6.0",
 ]
 
+# Optional cheminformatics / metabolic-network-expansion backends. The
+# network_expansion facade degrades gracefully when these are absent.
+# RDKit (BSD) powers the RetroRules backend's SMARTS application. The RetroRules
+# rule set itself is a data download (CC-BY-4.0, retrorules.org), not a pip dep;
+# point KBUtilLib at the flat-rules TSV via config/env. minedatabase (Pickaxe)
+# is research code: it is on PyPI but pins ancient deps, so in practice install
+# it with `pip install --no-deps minedatabase` plus python-libsbml/lxml/pymongo,
+# or use a source checkout. It is therefore intentionally NOT auto-listed here;
+# the facade detects and uses it at runtime when present.
+cheminformatics = [
+  "rdkit >=2022.3",
+]
+
 
 [project.urls]
 Homepage = "https://github.com/cshenry/KBUtilLib"

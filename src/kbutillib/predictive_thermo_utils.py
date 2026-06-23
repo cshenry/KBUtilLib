@@ -11,8 +11,11 @@ formation energies and pKa / microspecies properties) across several backends:
   biochemistry universe.
 * ``modelseed``    — ModelSEED-DB lookups via the existing ThermoUtils (always
   available; no new dependency).
-* ``dgpredictor``  — Maranas-lab reaction ΔG predictor (stub until integrated).
-* ``molgpk``       — pKa / microspecies predictor (stub until integrated).
+* ``dgpredictor``  — Maranas-lab reaction ΔG predictor (subprocess-isolated;
+  configure via ``thermo.dgpredictor.repo_path`` / ``DGPREDICTOR_REPO``).
+* ``molgpk``       — pKa / major-microspecies predictor via OPAM2
+  (subprocess-isolated; configure via ``thermo.molgpk.repo_path`` /
+  ``MOLGPK_REPO``).
 
 Dispatch model
 --------------
@@ -328,7 +331,7 @@ class PredictiveThermoUtils(SharedEnvUtils):
     ) -> CompoundThermoEstimate:
         """Estimate pKa values and the major microspecies for a compound.
 
-        Routed exclusively to the ``molgpk`` backend (stub until integrated).
+        Routed exclusively to the ``molgpk`` backend (OPAM2 / MolGpKa-on-MSDB).
 
         Args:
             compound_id: Compound identifier accepted by molGPK.
@@ -349,6 +352,54 @@ class PredictiveThermoUtils(SharedEnvUtils):
         except BackendUnavailableError as exc:
             est.warnings.append(f"[molgpk] unavailable: {exc}")
             return est
+
+    def compounds_microspecies(
+        self,
+        compound_ids: Sequence[str],
+        ph: float = 7.0,
+        **kwargs: Any,
+    ) -> List[CompoundThermoEstimate]:
+        """Batch pKa / major-microspecies for many compounds in one molGPK call.
+
+        This is the efficient path for annotating a compound set: the molGPK
+        model is loaded once for the whole list instead of once per compound.
+        Routed exclusively to the ``molgpk`` backend.
+
+        Args:
+            compound_ids: Compound identifiers (SMILES/InChI) accepted by molGPK.
+            ph: pH at which to report the predominant microspecies.
+            **kwargs: Forwarded to the backend (e.g. ``tph``).
+
+        Returns:
+            A list of :class:`CompoundThermoEstimate`, positionally aligned with
+            ``compound_ids``. If molGPK is unavailable, every entry carries a
+            warning and empty ``pka_values`` (no fabrication).
+        """
+        ids = list(compound_ids)
+        be = self.get_backend("molgpk")
+        if not be.available:
+            reason = be.unavailable_reason
+            return [
+                CompoundThermoEstimate(
+                    compound_id=cid,
+                    backend="molgpk",
+                    ph=ph,
+                    warnings=[f"[molgpk] unavailable: {reason}"],
+                )
+                for cid in ids
+            ]
+        try:
+            return be.compounds_dgf(ids, ph=ph, **kwargs)
+        except BackendUnavailableError as exc:
+            return [
+                CompoundThermoEstimate(
+                    compound_id=cid,
+                    backend="molgpk",
+                    ph=ph,
+                    warnings=[f"[molgpk] unavailable: {exc}"],
+                )
+                for cid in ids
+            ]
 
 
 class PredictiveThermoUtilsImpl:

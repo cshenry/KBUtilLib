@@ -17,6 +17,7 @@ Core invariants under test:
 from __future__ import annotations
 
 import math
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -148,7 +149,11 @@ def test_dgpredictor_stub_is_unavailable_and_never_fabricates():
         be.reaction_dg_prime("r", {"x": -1})
 
 
-def test_molgpk_stub_is_unavailable_and_never_fabricates():
+def test_molgpk_stub_is_unavailable_and_never_fabricates(monkeypatch):
+    # Hermetic: clear any ambient OPAM2 configuration so we test the
+    # not-configured contract regardless of the dev environment.
+    for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
+        monkeypatch.delenv(var, raising=False)
     be = MolGPKBackend()
     assert be.available is False
     assert "not configured" in (be.unavailable_reason or "")
@@ -266,7 +271,9 @@ def _facade_only_modelseed(thermo_utils):
     return facade
 
 
-def test_backend_status_reports_all_backends():
+def test_backend_status_reports_all_backends(monkeypatch):
+    for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
+        monkeypatch.delenv(var, raising=False)
     facade = _facade(_FakeThermoUtils())
     status = facade.backend_status()
     assert set(status) == {
@@ -314,7 +321,9 @@ def test_explicit_unknown_backend_raises():
         facade.get_backend("does-not-exist")
 
 
-def test_microspecies_routes_to_molgpk_and_degrades():
+def test_microspecies_routes_to_molgpk_and_degrades(monkeypatch):
+    for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
+        monkeypatch.delenv(var, raising=False)
     facade = _facade(_FakeThermoUtils())
     est = facade.compound_microspecies("cpd00001")
     assert isinstance(est, CompoundThermoEstimate)
@@ -428,3 +437,231 @@ def test_msdb_backend_unavailable_when_root_missing(tmp_path):
     assert backend.unavailable_reason
     with pytest.raises(BackendUnavailableError):
         backend.compound_dgf("cpd00002")
+
+
+# ── molGPK backend (OPAM2 subprocess worker) ─────────────────────────────
+
+
+def _make_configured_molgpk(tmp_path):
+    """Build a MolGPKBackend pointed at a fake OPAM2 repo on disk.
+
+    Creates the worker script + both ModelSEED-tuned model checkpoints (padded
+    past the LFS-pointer size gate) so ``available`` is True without OPAM2 or
+    torch actually installed. The subprocess itself is monkeypatched per-test.
+    """
+    repo = tmp_path / "OPAM2"
+    (repo / "models").mkdir(parents=True)
+    (repo / "kbutillib_molgpk_worker.py").write_text("# placeholder worker\n")
+    blob = b"x" * 20_000  # bigger than _MIN_MODEL_BYTES (10k)
+    (repo / "models" / "weight_acid_modelseed.pth").write_bytes(blob)
+    (repo / "models" / "weight_base_modelseed.pth").write_bytes(blob)
+    return MolGPKBackend(repo_path=str(repo), python_exe="python3"), repo
+
+
+def test_molgpk_available_when_repo_and_models_present(tmp_path):
+    be, _ = _make_configured_molgpk(tmp_path)
+    assert be.available is True
+    assert be.unavailable_reason is None
+    assert be.capabilities == frozenset({"pka", "major_microspecies"})
+
+
+def test_molgpk_detects_lfs_pointer_models(tmp_path):
+    repo = tmp_path / "OPAM2"
+    (repo / "models").mkdir(parents=True)
+    (repo / "kbutillib_molgpk_worker.py").write_text("# worker\n")
+    # Tiny files masquerading as checkpoints (unpulled LFS pointers).
+    (repo / "models" / "weight_acid_modelseed.pth").write_bytes(b"version https://git-lfs")
+    (repo / "models" / "weight_base_modelseed.pth").write_bytes(b"version https://git-lfs")
+    be = MolGPKBackend(repo_path=str(repo))
+    assert be.available is False
+    assert "Git LFS" in (be.unavailable_reason or "")
+
+
+def test_molgpk_compound_dgf_parses_worker_success(tmp_path, monkeypatch):
+    be, _ = _make_configured_molgpk(tmp_path)
+
+    payload = {
+        "ok": True,
+        "pka_values": [3.55, 6.90],
+        "acid_pka": {"9": 3.55},
+        "base_pka": {"0": 6.90},
+        "major_microspecies": "[NH3+]CC(=O)[O-]",
+        "microspecies": ["[NH3+]CC(=O)[O-]"],
+        "ph": 7.0,
+        "model": "modelseed",
+    }
+
+    def _fake_run(cmd, **kwargs):
+        import json as _json
+
+        return SimpleNamespace(returncode=0, stdout=_json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend.subprocess.run", _fake_run
+    )
+
+    est = be.compound_dgf("NCC(=O)O", ph=7.0)
+    assert isinstance(est, CompoundThermoEstimate)
+    assert est.backend == "molgpk"
+    assert est.dgf is None  # molGPK feeds equilibrator; never fabricates ΔGf
+    assert est.major_microspecies == "[NH3+]CC(=O)[O-]"
+    assert est.pka_values == [3.55, 6.90]
+    assert est.raw["model"] == "modelseed"
+    assert not est.warnings
+
+
+def test_molgpk_compound_failure_is_graceful_not_unavailable(tmp_path, monkeypatch):
+    be, _ = _make_configured_molgpk(tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        import json as _json
+
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_json.dumps({"ok": False, "error": "could not parse structure"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend.subprocess.run", _fake_run
+    )
+
+    est = be.compound_dgf("not_a_molecule", ph=7.0)
+    # A per-compound failure is NOT a backend-unavailable condition: returns an
+    # estimate with no values and a warning, so dispatch can fall through.
+    assert est.major_microspecies is None
+    assert est.pka_values == []
+    assert any("could not parse" in w for w in est.warnings)
+
+
+def test_molgpk_hard_worker_failure_raises_unavailable(tmp_path, monkeypatch):
+    be, _ = _make_configured_molgpk(tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        # Non-zero exit = missing torch/torch-geometric etc.
+        return SimpleNamespace(
+            returncode=3, stdout="", stderr="OPAM2 import failed: No module named 'torch'"
+        )
+
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend.subprocess.run", _fake_run
+    )
+
+    with pytest.raises(BackendUnavailableError):
+        be.compound_dgf("CC(=O)O")
+
+
+def test_molgpk_reaction_dg_not_supported(tmp_path):
+    be, _ = _make_configured_molgpk(tmp_path)
+    with pytest.raises(BackendUnavailableError):
+        be.reaction_dg_prime("r", {"x": -1})
+
+
+# Live end-to-end against a real OPAM2 checkout + opam2 interpreter. Skipped
+# unless both env vars point at a working install (mirrors the cheminformatics
+# live-test gating so CI stays green without torch/torch-geometric).
+@pytest.mark.skipif(
+    not (os.environ.get("MOLGPK_REPO") and os.environ.get("MOLGPK_PYTHON")),
+    reason="set MOLGPK_REPO and MOLGPK_PYTHON to run the live OPAM2 integration test",
+)
+def test_molgpk_live_microspecies_glycine():
+    be = MolGPKBackend(
+        repo_path=os.environ["MOLGPK_REPO"],
+        python_exe=os.environ["MOLGPK_PYTHON"],
+    )
+    assert be.available is True, be.unavailable_reason
+    est = be.compound_dgf("NCC(=O)O", ph=7.0)  # glycine
+    # Dominant species at pH 7 is the zwitterion.
+    assert est.major_microspecies == "[NH3+]CC(=O)[O-]"
+    assert len(est.pka_values) == 2
+
+
+def test_molgpk_batch_parses_and_aligns(tmp_path, monkeypatch):
+    be, _ = _make_configured_molgpk(tmp_path)
+
+    batch_payload = {
+        "ok": True,
+        "results": [
+            {
+                "ok": True,
+                "pka_values": [4.76],
+                "acid_pka": {"1": 4.76},
+                "base_pka": {},
+                "major_microspecies": "CC(=O)[O-]",
+                "microspecies": ["CC(=O)[O-]"],
+                "ph": 7.0,
+                "model": "modelseed",
+            },
+            {"ok": False, "error": "could not parse structure"},
+        ],
+    }
+
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        import json as _json
+
+        captured["input"] = kwargs.get("input")
+        return SimpleNamespace(
+            returncode=0, stdout=_json.dumps(batch_payload), stderr=""
+        )
+
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend.subprocess.run", _fake_run
+    )
+
+    ests = be.compounds_dgf(["CC(=O)O", "not_a_molecule"], ph=7.0)
+    # One subprocess for the whole batch (model loaded once).
+    assert "compounds" in (captured["input"] or "")
+    assert len(ests) == 2
+    # Positional alignment with the input list.
+    assert ests[0].compound_id == "CC(=O)O"
+    assert ests[0].major_microspecies == "CC(=O)[O-]"
+    assert ests[0].pka_values == [4.76]
+    # One bad compound does not sink the batch: it degrades gracefully.
+    assert ests[1].compound_id == "not_a_molecule"
+    assert ests[1].pka_values == []
+    assert any("could not parse" in w for w in ests[1].warnings)
+
+
+def test_molgpk_batch_empty_returns_empty(tmp_path):
+    be, _ = _make_configured_molgpk(tmp_path)
+    assert be.compounds_dgf([]) == []
+
+
+def test_molgpk_batch_misaligned_result_raises(tmp_path, monkeypatch):
+    be, _ = _make_configured_molgpk(tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        import json as _json
+
+        # Worker returns the wrong number of results.
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_json.dumps({"ok": True, "results": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend.subprocess.run", _fake_run
+    )
+
+    with pytest.raises(BackendUnavailableError):
+        be.compounds_dgf(["CC(=O)O", "NCC(=O)O"])
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("MOLGPK_REPO") and os.environ.get("MOLGPK_PYTHON")),
+    reason="set MOLGPK_REPO and MOLGPK_PYTHON to run the live OPAM2 integration test",
+)
+def test_molgpk_live_batch_microspecies():
+    be = MolGPKBackend(
+        repo_path=os.environ["MOLGPK_REPO"],
+        python_exe=os.environ["MOLGPK_PYTHON"],
+    )
+    assert be.available is True, be.unavailable_reason
+    ests = be.compounds_dgf(["CC(=O)O", "NCC(=O)O"], ph=7.0)  # acetate, glycine
+    assert len(ests) == 2
+    assert ests[0].major_microspecies == "CC(=O)[O-]"
+    assert ests[1].major_microspecies == "[NH3+]CC(=O)[O-]"
+

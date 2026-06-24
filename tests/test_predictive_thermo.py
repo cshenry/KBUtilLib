@@ -141,7 +141,11 @@ def test_equilibrator_unavailable_does_not_raise_on_construction():
             be.reaction_dg_prime("r", {"kegg:C00002": -1, "kegg:C00008": 1})
 
 
-def test_dgpredictor_stub_is_unavailable_and_never_fabricates():
+def test_dgpredictor_unavailable_without_repo_and_never_fabricates(monkeypatch):
+    # Hermetic: clear any ambient dGPredictor configuration so we test the
+    # not-configured contract regardless of the dev environment.
+    for var in ("DGPREDICTOR_REPO", "DGPREDICTOR_PYTHON"):
+        monkeypatch.delenv(var, raising=False)
     be = DGPredictorBackend()
     assert be.available is False
     assert "not configured" in (be.unavailable_reason or "")
@@ -664,4 +668,38 @@ def test_molgpk_live_batch_microspecies():
     assert len(ests) == 2
     assert ests[0].major_microspecies == "CC(=O)[O-]"
     assert ests[1].major_microspecies == "[NH3+]CC(=O)[O-]"
+
+
+@pytest.mark.skipif(
+    not (
+        os.environ.get("DGPREDICTOR_REPO")
+        and os.environ.get("DGPREDICTOR_PYTHON")
+    ),
+    reason=(
+        "set DGPREDICTOR_REPO and DGPREDICTOR_PYTHON to run the live "
+        "dGPredictor (ModelSEED fork) integration test"
+    ),
+)
+def test_dgpredictor_live_reaction_dg():
+    be = DGPredictorBackend(
+        repo_path=os.environ["DGPREDICTOR_REPO"],
+        python_exe=os.environ["DGPREDICTOR_PYTHON"],
+    )
+    assert be.available is True, be.unavailable_reason
+
+    # By ModelSEED accession.
+    est = be.reaction_dg_prime("rxn00001", {}, ph=7.0, ionic_strength=0.25)
+    assert est.dg_prime is not None, est.warnings
+    assert math.isfinite(est.dg_prime)
+    assert est.dg_prime_uncertainty is not None
+    assert est.raw.get("units") == "kJ/mol"
+
+    # By explicit ModelSEED stoichiometry: ATP + H2O -> ADP + Pi (exergonic).
+    est2 = be.reaction_dg_prime(
+        "atp_hydrolysis",
+        {"cpd00002": -1, "cpd00001": -1, "cpd00008": 1, "cpd00009": 1},
+        ph=7.0,
+    )
+    assert est2.dg_prime is not None, est2.warnings
+    assert est2.dg_prime < 0  # ATP hydrolysis is exergonic
 

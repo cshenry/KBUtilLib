@@ -521,7 +521,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         gene_term_hash = anno_ont.get_gene_term_hash(
             prioritized_event_list, ontologies, merge_all, False
         )
-        self.print_json_debug_file("gene_term_hash", gene_term_hash)
+        # print_json_debug_file dropped: dead reference (no active definition).
         residual_reaction_gene_hash = {}
         for gene in gene_term_hash:
             for term in gene_term_hash[gene]:
@@ -696,7 +696,8 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         data = mdlutl.model.get_data()
         # If the workspace is None, then saving data to file
         if not workspace:
-            self.print_json_debug_file(mdlutl.wsid + ".json", data)
+            # print_json_debug_file dropped: dead reference (no active definition).
+            pass
         else:
             # Setting the workspace
             if workspace:

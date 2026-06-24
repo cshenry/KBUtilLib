@@ -83,11 +83,21 @@ Henry protocol: every design choice recorded as context / decision / consequence
   One conda env (rdkit+torch+torch-geometric+openbabel+sklearn/scipy/pandas/joblib) serves
   both, matching Henry's "common installation footprint" mandate.
 
-## ADR-007 (pending): pickaxe -- wrap minedatabase vs lean reimplementation
+## ADR-007 (resolved 2026-06-24): pickaxe = wrap the Tyo-NU MINE-Database
 - Context: Henry said "implementing the pickaxe tool in python"; the canonical pickaxe
-  (minedatabase) is already python/rdkit. Ambiguous whether he wants a wrapper or a
-  dependency-light reimplementation.
-- Decision: PENDING -- resolve when cheminformatics work starts (after thermo). Not a
-  blocker now. Default lean: wrap minedatabase first (fast, validated), reimplement only if
-  Henry wants fewer deps.
-- Consequences: deferred; recorded so it is not forgotten.
+  (minedatabase) is already python/rdkit. It was ambiguous whether he wanted a wrapper or a
+  dependency-light reimplementation, and which fork. Andrew (relaying the Tyo lab) confirmed
+  the version to use: github.com/tyo-nu/MINE-Database.
+- Decision: WRAP the Tyo-NU minedatabase package (not reimplement). The PyPI wheel ships code
+  only, so we point the PickaxeBackend at the cloned repo's bundled rule TSVs via
+  cheminformatics.pickaxe.data_dir (or env KBUTILLIB_PICKAXE_DATA_DIR), and make the package
+  importable in the active interpreter. The repo pins python_requires <3.10 in setup.cfg but
+  runs fine on 3.11; rather than edit Andrew's repo, we expose it via a site-packages .pth so
+  `pip install -e` is not needed and their setup.cfg is untouched. Runtime deps added to the
+  shared env: python-libsbml, lxml, pymongo (rdkit already present).
+- Consequences: real Tyo pickaxe expansion works through the kbu.chem facade
+  (NetworkExpansionUtils.expand). Validated: D-glucose, 1 generation, metacyc_generalized ->
+  901 new compounds / 1696 new reactions. retrorules remains the secondary backend (needs a
+  RetroRules dump TSV; optional). A dependency-light reimplementation was NOT pursued — the
+  Tyo package is the lab-blessed, validated implementation, so wrapping it is correct and
+  avoids drift from their rule semantics.

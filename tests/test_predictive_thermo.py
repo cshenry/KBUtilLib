@@ -276,7 +276,13 @@ def _facade_only_modelseed(thermo_utils):
 
 
 def test_backend_status_reports_all_backends(monkeypatch):
-    for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
+    for var in (
+        "MOLGPK_REPO",
+        "OPAM2_REPO",
+        "MOLGPK_PYTHON",
+        "DGPREDICTOR_REPO",
+        "DGPREDICTOR_PYTHON",
+    ):
         monkeypatch.delenv(var, raising=False)
     facade = _facade(_FakeThermoUtils())
     status = facade.backend_status()

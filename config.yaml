@@ -85,3 +85,18 @@ thermo:
     # Interpreter needs rdkit + torch + torch-geometric.
     repo_path: ""    # e.g. "/path/to/OPAM2"
     python: ""       # e.g. "/path/to/conda/envs/<env>/bin/python"
+
+# Cheminformatics network expansion (kbu.chem / NetworkExpansionUtils)
+# Pickaxe = Tyo-NU MINE-Database (github.com/tyo-nu/MINE-Database), the version
+# the Tyo lab confirmed (via Andrew) to use. The PyPI wheel ships code only, so
+# point the backend at a clone's bundled rule TSVs. Can also be set via env var
+# KBUTILLIB_PICKAXE_DATA_DIR. The minedatabase package must be importable in the
+# active interpreter (rdkit + python-libsbml + lxml + pymongo); the repo pins
+# python_requires <3.10 but runs on 3.11 — expose it via a site-packages .pth if
+# `pip install -e` is rejected by that pin.
+cheminformatics:
+  pickaxe:
+    data_dir: ""     # e.g. "/path/to/MINE-Database/minedatabase/data"
+    rule_set: "metacyc_generalized"  # or metacyc_intermediate / bnice / enzymatic / chemical_damage
+  retrorules:
+    rules_tsv: ""    # optional: path to retrorules_rr02_flat_all.tsv

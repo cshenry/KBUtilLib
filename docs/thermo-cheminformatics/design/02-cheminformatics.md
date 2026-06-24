@@ -23,10 +23,13 @@ starting set of substrates).
   diameters for retrosynthesis / metabolic expansion. Consumed AS rule sets fed into the
   pickaxe-style expander.
 
-### 3. Tyo-lab pickaxe (a branch of ours)
-- Henry: "the tyo lab pickaxe (a branch of ours)". A fork/branch of the MINE pickaxe with
-  lab-specific rules or features. Need the exact branch/repo -- minor, ask alongside the
-  pickaxe wrap/reimplement question, after thermo.
+### 3. Tyo-lab pickaxe (a branch of ours) -- RESOLVED 2026-06-24
+- Henry: "the tyo lab pickaxe (a branch of ours)". Andrew (relaying the Tyo lab) confirmed the
+  repo to use: github.com/tyo-nu/MINE-Database. This IS the minedatabase package the
+  PickaxeBackend wraps, with the bundled rule TSVs (metacyc_generalized/intermediate, BNICE
+  enzymatic, chemical_damage). So "Tyo pickaxe" and the pickaxe backend are the same thing:
+  point cheminformatics.pickaxe.data_dir at the clone's minedatabase/data. No separate
+  tyo_pickaxe_backend.py is needed. Validated live (glucose -> 1696 reactions).
 
 ## Layout (in KBUtilLib)
 

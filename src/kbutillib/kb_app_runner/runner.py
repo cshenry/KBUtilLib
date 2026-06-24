@@ -140,9 +140,16 @@ class AppRunner:
         spec = self._nms.get(app_id, tag)
         ui_names = spec.narrative_names()
 
-        params_list = self._build_params_list(app_id, params, ui_names, spec)
-
+        # Resolve workspace identity first so narrative_system_variable mappings
+        # (e.g. workspace -> output_workspace) can be injected during the remap.
         wsid = self._resolve_wsid(workspace)
+        ws_name = self._resolve_ws_name(workspace, wsid)
+
+        params_list = self._build_params_list(
+            app_id, params, ui_names, spec,
+            workspace_name=ws_name, workspace_id=wsid,
+        )
+
         service_ver = pin_version or spec.service_ver
 
         logger.info(
@@ -261,12 +268,32 @@ class AppRunner:
         self._ws.set_ws(workspace)
         return self._ws.ws_id
 
+    def _resolve_ws_name(self, workspace: int | str, wsid: int) -> str | None:
+        """Return the workspace NAME for *workspace*.
+
+        Used to populate the ``workspace`` narrative_system_variable, which many
+        apps map to a service param (e.g. ``output_workspace``) and then use as a
+        workspace *name* for saving — so a numeric id string will not do.
+        Returns ``None`` if the name cannot be resolved (the mapping is then
+        skipped, preserving the prior behaviour).
+        """
+        if isinstance(workspace, str) and not workspace.isdigit():
+            return workspace  # already a name
+        try:
+            self._ws.set_ws(wsid)
+            return self._ws.ws_name
+        except Exception:  # noqa: BLE001
+            return None
+
     def _build_params_list(
         self,
         app_id: str,
         params: dict | list,
         ui_names: frozenset[str],
         spec: Any,
+        *,
+        workspace_name: str | None = None,
+        workspace_id: int | None = None,
     ) -> list:
         """Apply the 4-branch param detection rule and return a params list."""
         # Branch 1: already a list → service-shape passthrough.
@@ -284,7 +311,10 @@ class AppRunner:
 
         # Branch 3: all keys are UI keys → remap through input_mapping.
         if ui_keys and not service_keys:
-            remapped = _apply_input_mapping(params, spec.input_mapping)
+            remapped = _apply_input_mapping(
+                params, spec.input_mapping,
+                workspace_name=workspace_name, workspace_id=workspace_id,
+            )
             return [remapped]
 
         # Branch 4: no UI keys → service-shape dict; wrap in list.
@@ -299,37 +329,54 @@ class AppRunner:
 def _apply_input_mapping(
     ui_params: dict[str, Any],
     input_mapping: tuple,
+    *,
+    workspace_name: str | None = None,
+    workspace_id: int | None = None,
 ) -> dict[str, Any]:
     """Translate UI-shape params through the NMS ``kb_service_input_mapping``.
 
     Each mapping entry has the form::
 
         {
-            "input_parameter": "<ui_param_name>",  # or "narrative_system_variable"
+            "input_parameter": "<ui_param_name>",        # UI parameter, OR
+            "narrative_system_variable": "<var_name>",   # system-injected value
             "target_property": "<service_param_name>",
-            "target_type_transform": "<optional>",  # ignored at this layer
+            "target_type_transform": "<optional>",       # ignored at this layer
         }
 
-    Entries without ``input_parameter`` (e.g. ``narrative_system_variable``)
-    are system-injected values the Narrative UI populates automatically;
-    they are skipped here because the ``workspace=`` argument handles
-    workspace injection at the EE2 call site.
+    ``input_parameter`` entries are renamed from the caller's UI params.
+    ``narrative_system_variable`` entries are values the Narrative injects
+    automatically — most importantly ``workspace`` (the workspace NAME) and
+    ``workspace_id`` (numeric), which apps frequently map to service params such
+    as ``output_workspace`` / ``workspace_name`` and then use for saving output
+    objects.  EE2's own ``workspace`` argument does NOT synthesize these, so they
+    are injected here from the resolved workspace identity.  Unknown system
+    variables are skipped.
 
     Args:
         ui_params: Caller-supplied UI-shape params dict.
         input_mapping: The ``kb_service_input_mapping`` tuple from
             :class:`~.nms.AppSpec`.
+        workspace_name: Resolved workspace name (for ``workspace`` system var).
+        workspace_id: Resolved numeric wsid (for ``workspace_id`` system var).
 
     Returns:
         Service-shape params dict with keys renamed per the mapping.
     """
     service_params: dict[str, Any] = {}
     for entry in input_mapping:
-        if "input_parameter" not in entry:
-            # System-variable (e.g. workspace) — skip; caller supplies workspace separately.
+        target: str = entry.get("target_property", "")
+        if not target:
             continue
-        ui_key: str = entry["input_parameter"]
-        target: str = entry["target_property"]
-        if ui_key in ui_params:
-            service_params[target] = ui_params[ui_key]
+        if "input_parameter" in entry:
+            ui_key: str = entry["input_parameter"]
+            if ui_key in ui_params:
+                service_params[target] = ui_params[ui_key]
+        elif "narrative_system_variable" in entry:
+            var = entry["narrative_system_variable"]
+            if var == "workspace" and workspace_name is not None:
+                service_params[target] = workspace_name
+            elif var == "workspace_id" and workspace_id is not None:
+                service_params[target] = workspace_id
+            # other system variables (token, user_id, ...) are not injected here
     return service_params

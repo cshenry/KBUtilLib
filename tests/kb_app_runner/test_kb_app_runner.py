@@ -94,6 +94,7 @@ def _make_ws_mock(wsid: int = 261700) -> MagicMock:
     """Return a mock KBWSUtils that resolves workspace to *wsid*."""
     ws = MagicMock()
     ws.ws_id = wsid
+    ws.ws_name = f"narrative_{wsid}"   # real str so system-var injection is serializable
     ws.set_ws = MagicMock()
     return ws
 
@@ -213,6 +214,36 @@ class TestNMSSpecCache:
 
         sent = mock_post.call_args.kwargs["json"]
         assert sent["params"][0] == {"ids": ["kb_fastqc/runFastQC"]}
+
+    def test_input_mapping_injects_workspace_system_var(self):
+        """narrative_system_variable 'workspace' → target gets the workspace NAME."""
+        from kbutillib.kb_app_runner.runner import _apply_input_mapping
+
+        mapping = (
+            {"input_parameter": "object_ref", "target_property": "object_ref"},
+            {"narrative_system_variable": "workspace", "target_property": "output_workspace"},
+            {"narrative_system_variable": "workspace_id", "target_property": "workspace_id"},
+        )
+        out = _apply_input_mapping(
+            {"object_ref": "263213/g1"}, mapping,
+            workspace_name="narrative_263213", workspace_id=263213,
+        )
+        assert out == {
+            "object_ref": "263213/g1",
+            "output_workspace": "narrative_263213",
+            "workspace_id": 263213,
+        }
+
+    def test_input_mapping_skips_unresolved_workspace(self):
+        """Without a resolved name, the workspace system var is omitted (no crash)."""
+        from kbutillib.kb_app_runner.runner import _apply_input_mapping
+
+        mapping = (
+            {"input_parameter": "object_ref", "target_property": "object_ref"},
+            {"narrative_system_variable": "workspace", "target_property": "output_workspace"},
+        )
+        out = _apply_input_mapping({"object_ref": "263213/g1"}, mapping)
+        assert out == {"object_ref": "263213/g1"}  # output_workspace omitted
 
     def test_cache_keyed_by_app_and_tag(self):
         """Same app, different tags → two cache entries → two RPCs."""

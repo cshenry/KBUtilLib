@@ -441,6 +441,24 @@ class TransytUtils(AnnotatorUtils):
             self.get_config_value("transyt.neo4j_timeout", default=120)
         )
 
+    def _docker_workdir_base(self) -> str:
+        """Base dir for the per-run input dir (``tempfile.TemporaryDirectory``).
+
+        The input dir is bind-mounted into the container, so it MUST live under
+        a path Docker shares.  ``$TMPDIR`` on macOS is ``/var/folders/...``,
+        which Docker Desktop does NOT share by default — a bind mount of it
+        appears empty inside the container, so transyt finds no ``protein.faa``.
+        Use a dir under the kbutillib home (``~/.kbutillib/transyt_work``),
+        which is under the user's home and shared by default.  Override with
+        ``transyt.docker_workdir``.
+        """
+        base = (
+            self.get_config_value("transyt.docker_workdir", default="")
+            or str(Path.home() / ".kbutillib" / "transyt_work")
+        )
+        Path(base).mkdir(parents=True, exist_ok=True)
+        return base
+
     # ------------------------------------------------------------------
     # Availability probe
     # ------------------------------------------------------------------
@@ -534,7 +552,9 @@ class TransytUtils(AnnotatorUtils):
             **_DEFAULT_SCORING,
         }
 
-        with tempfile.TemporaryDirectory(prefix="transyt_") as tmpdir:
+        with tempfile.TemporaryDirectory(
+            prefix="transyt_", dir=self._docker_workdir_base()
+        ) as tmpdir:
             indir = Path(tmpdir) / "processingDir"
             indir.mkdir()
 

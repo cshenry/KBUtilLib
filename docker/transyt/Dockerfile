@@ -47,7 +47,10 @@
 FROM ubuntu:20.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV NEO4J_VERSION=4.0.2
+# Latest installable 4.0.x patch (the exact 4.0.2 .deb was pruned from the
+# neo4j apt pool).  The Transyt data snapshot is a 4.0.x store and opens on any
+# 4.0.x patch — the store format is stable across patch releases within 4.0.
+ENV NEO4J_VERSION=1:4.0.12
 ENV JAVA_VERSION=11
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -107,26 +110,35 @@ RUN if [ -f /opt/transyt/transyt.jar.local ] && \
 
 WORKDIR /workdir
 
-# Unpack Neo4j database snapshot
+# Unpack Neo4j database snapshot.
+# The tarball is rooted at `data/` (data/databases/{neo4j,system}, data/dbms,
+# data/transactions), so it must be extracted into the Neo4j HOME
+# (/var/lib/neo4j) — NOT /var/lib/neo4j/data, which would double the path to
+# /var/lib/neo4j/data/data/databases/... and leave Neo4j serving an empty DB.
+# The transyt graph lives in the default `neo4j` database.
 COPY vendor/data.tar.gz* /tmp/data.tar.gz.local
 RUN if [ -f /tmp/data.tar.gz.local ] && \
        [ "$(wc -c < /tmp/data.tar.gz.local)" -gt 1000 ]; then \
-      tar -xzf /tmp/data.tar.gz.local -C /var/lib/neo4j/data && \
+      tar -xzf /tmp/data.tar.gz.local -C /var/lib/neo4j && \
       rm /tmp/data.tar.gz.local; \
     elif [ -n "${DATA_URL}" ]; then \
-      curl -fsSL "${DATA_URL}" | tar -xz -C /var/lib/neo4j/data; \
+      curl -fsSL "${DATA_URL}" | tar -xz -C /var/lib/neo4j; \
     else \
       echo "WARNING: data.tar.gz not found. Neo4j will start with an empty database." >&2; \
     fi
 
-# Unpack workdir scaffold (optional)
+# Unpack workdir scaffold (provides /workdir/system/configurations.txt, which
+# the transyt JAR requires).  The tarball is rooted at `workdir/`, so it must be
+# extracted into `/` (giving /workdir/system/...) — NOT /workdir, which would
+# double the path to /workdir/workdir/system/... and the JAR would abort with
+# "default configurations can not be loaded".
 COPY vendor/workdir.tar.gz* /tmp/workdir.tar.gz.local
 RUN if [ -f /tmp/workdir.tar.gz.local ] && \
        [ "$(wc -c < /tmp/workdir.tar.gz.local)" -gt 1000 ]; then \
-      tar -xzf /tmp/workdir.tar.gz.local -C /workdir && \
+      tar -xzf /tmp/workdir.tar.gz.local -C / && \
       rm /tmp/workdir.tar.gz.local; \
     elif [ -n "${WORKDIR_URL}" ]; then \
-      curl -fsSL "${WORKDIR_URL}" | tar -xz -C /workdir; \
+      curl -fsSL "${WORKDIR_URL}" | tar -xz -C /; \
     fi
 
 # Set correct ownership for Neo4j

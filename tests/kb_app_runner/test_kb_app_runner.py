@@ -190,6 +190,43 @@ class TestNMSSpecCache:
 
         assert mock_post.call_count == 2
 
+    def test_tag_forwarded_in_payload(self):
+        """A non-None tag is sent as `tag` inside the get_method_spec params."""
+        from kbutillib.kb_app_runner.nms import NMSSpecCache
+
+        mock_post = _make_nms_mock(FASTQC_SPEC_RAW)
+        cache = NMSSpecCache()
+        with patch("kbutillib.kb_app_runner.nms.requests.post", mock_post):
+            cache.get("kb_fastqc/runFastQC", "beta")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["params"][0] == {"ids": ["kb_fastqc/runFastQC"], "tag": "beta"}
+
+    def test_no_tag_omits_tag_key(self):
+        """tag=None omits the `tag` key entirely (released-spec default)."""
+        from kbutillib.kb_app_runner.nms import NMSSpecCache
+
+        mock_post = _make_nms_mock(FASTQC_SPEC_RAW)
+        cache = NMSSpecCache()
+        with patch("kbutillib.kb_app_runner.nms.requests.post", mock_post):
+            cache.get("kb_fastqc/runFastQC")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["params"][0] == {"ids": ["kb_fastqc/runFastQC"]}
+
+    def test_cache_keyed_by_app_and_tag(self):
+        """Same app, different tags → two cache entries → two RPCs."""
+        from kbutillib.kb_app_runner.nms import NMSSpecCache
+
+        mock_post = _make_nms_mock(FASTQC_SPEC_RAW)
+        cache = NMSSpecCache()
+        with patch("kbutillib.kb_app_runner.nms.requests.post", mock_post):
+            cache.get("kb_fastqc/runFastQC", "beta")
+            cache.get("kb_fastqc/runFastQC", "beta")   # cached → no new RPC
+            cache.get("kb_fastqc/runFastQC")           # different (app, tag) key
+
+        assert mock_post.call_count == 2
+
     def test_parse_sra_spec(self):
         """Cache correctly parses the SRA import fixture."""
         from kbutillib.kb_app_runner.nms import NMSSpecCache

@@ -72,34 +72,49 @@ class NMSSpecCache:
 
     def __init__(self, nms_rpc: str | None = None) -> None:
         self._url = nms_rpc or self.NMS_RPC
-        self._cache: dict[str, AppSpec] = {}
+        self._cache: dict[tuple[str, str | None], AppSpec] = {}
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def get(self, app_id: str) -> AppSpec:
+    def get(self, app_id: str, tag: str | None = None) -> AppSpec:
         """Return the :class:`AppSpec` for *app_id*, using the in-process cache.
 
-        Issues exactly one NMS ``get_method_spec`` RPC per *app_id* across
-        the lifetime of this :class:`NMSSpecCache` instance.
+        Issues exactly one NMS ``get_method_spec`` RPC per ``(app_id, tag)``
+        across the lifetime of this :class:`NMSSpecCache` instance.
+
+        Args:
+            app_id: KBase app identifier.
+            tag: Release tag (``"release"``, ``"beta"``, ``"dev"``).  ``None``
+                requests the released spec (NMS default).  Beta/dev-only apps
+                must pass the matching tag or NMS returns "wasn't tagged with
+                release tag".  Release and beta specs are cached separately.
 
         Raises:
             SpecNotFound: If NMS returns an error or an empty spec list.
         """
-        if app_id not in self._cache:
-            self._cache[app_id] = self.get_uncached(app_id)
-        return self._cache[app_id]
+        key = (app_id, tag)
+        if key not in self._cache:
+            self._cache[key] = self.get_uncached(app_id, tag)
+        return self._cache[key]
 
-    def get_uncached(self, app_id: str) -> AppSpec:
+    def get_uncached(self, app_id: str, tag: str | None = None) -> AppSpec:
         """Fetch and parse the NMS spec for *app_id*, bypassing the cache.
 
+        Args:
+            app_id: KBase app identifier.
+            tag: Release tag forwarded to ``get_method_spec`` when set.
+
         Raises:
             SpecNotFound: If NMS returns an error or an empty spec list.
         """
-        logger.debug("NMS get_method_spec: %s", app_id)
+        logger.debug("NMS get_method_spec: %s (tag=%s)", app_id, tag)
+        ids_params: dict[str, Any] = {"ids": [app_id]}
+        if tag is not None:
+            ids_params["tag"] = tag
         payload = {
             "version": "1.1",
             "method": "NarrativeMethodStore.get_method_spec",
-            "params": [{"ids": [app_id]}],
+            "params": [ids_params],
         }
         try:
             resp = requests.post(self._url, json=payload, timeout=30)

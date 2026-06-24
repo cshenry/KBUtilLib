@@ -99,6 +99,7 @@ class AppRunner:
         workspace: int | str,
         *,
         pin_version: str | None = None,
+        tag: str | None = None,
         meta: dict | None = None,
     ) -> JobHandle:
         """Submit an EE2 job for *app_id*.
@@ -121,19 +122,22 @@ class AppRunner:
             params: UI-shape dict or service-shape dict/list.
             workspace: Numeric wsid or workspace name string.
             pin_version: Override the NMS-supplied ``service_ver``.
+            tag: Release tag (``"release"``/``"beta"``/``"dev"``) for the NMS
+                spec lookup.  Required for beta/dev-only apps; ``None`` uses the
+                released spec.
             meta: Arbitrary metadata forwarded to the :class:`JobHandle`.
 
         Returns:
             A :class:`JobHandle` wrapping the submitted EE2 job_id.
 
         Raises:
-            SpecNotFound: If NMS does not recognise *app_id*.
+            SpecNotFound: If NMS does not recognise *app_id* (for the given tag).
             AmbiguousParams: If *params* contains both UI and service keys.
         """
         if self._jobs is None:
             raise RuntimeError("AppRunner requires a job_store (KBJobUtils) to submit jobs.")
 
-        spec = self._nms.get(app_id)
+        spec = self._nms.get(app_id, tag)
         ui_names = spec.narrative_names()
 
         params_list = self._build_params_list(app_id, params, ui_names, spec)

@@ -2343,6 +2343,117 @@ class MSFBAUtils(KBModelUtils):
 
         return results
 
+    def simulate_growth_phenotypes(
+        self,
+        model,
+        media,
+        observed=None,
+        growth_threshold=0.01,
+        observed_threshold=1e-6,
+        add_missing_exchanges=False,
+        biomass="bio1",
+    ):
+        """Simulate a model against a list of full media phenotypes.
+
+        Runs one FBA per media: sets the media on the model, optionally adds
+        missing exchange/transport reactions (the "free transport" toggle),
+        maximizes biomass, and calls growth when the biomass flux exceeds
+        ``growth_threshold``.  When ``observed`` values are supplied, each
+        media is binarized (observed > ``observed_threshold`` == growth) and
+        classified CP/CN/FP/FN against the simulation, yielding an accuracy.
+
+        This runs a direct FBA loop rather than
+        ``MSGrowthPhenotypes.simulate_phenotypes`` deliberately: that path
+        (a) KeyErrors on ``missing_transports`` when add_missing_exchanges is
+        False, and (b) pulls in gapfilling machinery not wanted here.  Media
+        objects are still built with ModelSEEDpy's MSMedia, and bound changes
+        are isolated per-media via the cobra model context manager so the
+        media are mutually independent.
+
+        Args:
+            model: cobra.Model or MSModelUtil.
+            media: dict {media_id: MSMedia | KBase media dict/object}.  Each
+                value is coerced to MSMedia.
+            observed: optional dict {media_id: float} of observed growth values
+                (e.g. a spreadsheet column).  Media absent here are simulated
+                but not scored.
+            growth_threshold: minimum biomass flux to call simulated growth.
+            observed_threshold: observed value above which the reference is
+                called growth (binarization cutoff).
+            add_missing_exchanges: if True, add missing exchanges for media
+                compounds before solving ("free transport").
+            biomass: biomass reaction id to maximize (default "bio1").
+
+        Returns:
+            dict with keys:
+              "details": list of per-media row dicts (media_id, simulated_flux,
+                  simulated_growth, observed_value, observed_growth, class).
+              "summary": dict with accuracy, CP, CN, FP, FN, P, N counts.
+        """
+        from modelseedpy.core.msmedia import MSMedia
+
+        def _coerce_media(m):
+            if isinstance(m, MSMedia):
+                return m
+            if isinstance(m, dict):
+                if "mediacompounds" in m:
+                    return MSMedia.from_kbase_object(m)
+                return MSMedia.from_dict(m)
+            # Assume a KBase media object instance
+            return MSMedia.from_kbase_object(m)
+
+        mdlutl = self._check_and_convert_model(model)
+        cobra_model = mdlutl.model
+        objstr = f"MAX{{{biomass}}}"
+
+        summary = {"accuracy": None, "CP": 0, "CN": 0, "FP": 0, "FN": 0, "P": 0, "N": 0}
+        rows = []
+
+        for mid, raw in media.items():
+            try:
+                msmedia = _coerce_media(raw)
+            except Exception as e:
+                self.log_info(f"simulate_growth_phenotypes: skipping media '{mid}': {e}")
+                continue
+            # Isolate all bound / reaction changes to this media only.
+            with cobra_model:
+                if add_missing_exchanges:
+                    mdlutl.add_missing_exchanges(msmedia)
+                self.set_media(mdlutl, msmedia)
+                self.set_objective_from_string(mdlutl, objstr)
+                flux = cobra_model.slim_optimize()
+            # slim_optimize returns nan on infeasible; nan-safe growth call.
+            sim_growth = bool(flux is not None and flux == flux and flux > growth_threshold)
+
+            obs_val = None if observed is None else observed.get(mid)
+            obs_growth = None if obs_val is None else bool(float(obs_val) > observed_threshold)
+
+            if obs_growth is None:
+                cls = "P" if sim_growth else "N"
+            elif obs_growth and sim_growth:
+                cls = "CP"
+            elif (not obs_growth) and (not sim_growth):
+                cls = "CN"
+            elif (not obs_growth) and sim_growth:
+                cls = "FP"
+            else:
+                cls = "FN"
+            summary[cls] += 1
+
+            rows.append({
+                "media_id": mid,
+                "simulated_flux": None if flux is None or flux != flux else float(flux),
+                "simulated_growth": sim_growth,
+                "observed_value": None if obs_val is None else float(obs_val),
+                "observed_growth": obs_growth,
+                "class": cls,
+            })
+
+        scored = summary["CP"] + summary["CN"] + summary["FP"] + summary["FN"]
+        if scored > 0:
+            summary["accuracy"] = (summary["CP"] + summary["CN"]) / scored
+        return {"details": rows, "summary": summary}
+
     def test_production_potential(self, model, media=None, threshold=1e-6):
         """Test whether each cytosolic metabolite can be produced.
 

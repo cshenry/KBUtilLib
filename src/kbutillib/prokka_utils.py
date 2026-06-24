@@ -262,25 +262,74 @@ class ProkkaUtils(AnnotatorUtils):
         self._prokka_exe: str = self.get_config_value(
             "prokka.executable", default="prokka"
         )
+        #: When set, prokka runs inside this Docker image instead of as a local
+        #: executable.  ProkkaUtils bind-mounts its work dir at ``/work`` and
+        #: translates the --outdir / input-FASTA paths.  Empty string => local
+        #: executable mode (the default).
+        self._docker_image: str = (
+            self.get_config_value("prokka.docker_image", default="") or ""
+        )
 
     # ------------------------------------------------------------------
     # Availability probe
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True if ``prokka`` is on PATH and exits successfully.
+        """Return True if prokka can run, side-effect-free.
 
-        Side-effect-free: no logging, no mutation.
+        In Docker mode (``prokka.docker_image`` set) this checks that the image
+        is present locally (``docker image inspect``).  Otherwise it checks that
+        the configured executable runs (``prokka --version`` exits 0).
 
         Returns:
-            True if ``prokka --version`` exits with code 0, False otherwise.
+            True if prokka is runnable via the active mode, False otherwise.
         """
+        if self._docker_image:
+            return self._docker_image_present()
         try:
             result = subprocess.run(
                 [self._prokka_exe, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _docker_workdir_base(self) -> str | None:
+        """Base dir for the per-run work dir (``tempfile.TemporaryDirectory``).
+
+        Returns None in local mode (system default ``$TMPDIR``).
+
+        In Docker mode the work dir is bind-mounted into the container, so it
+        MUST live under a path Docker Desktop shares.  ``$TMPDIR`` on macOS is
+        ``/var/folders/...``, which Docker Desktop does NOT share by default —
+        a bind mount of it appears empty inside the container and prokka fails
+        with "not a readable non-empty FASTA file".  Use a dir under the
+        kbutillib home (``~/.kbutillib/prokka_work``), which lives under the
+        user's home and is shared by default.  Override with
+        ``prokka.docker_workdir``.
+        """
+        if not self._docker_image:
+            return None
+        base = (
+            self.get_config_value("prokka.docker_workdir", default="")
+            or str(Path.home() / ".kbutillib" / "prokka_work")
+        )
+        Path(base).mkdir(parents=True, exist_ok=True)
+        return base
+
+    def _docker_image_present(self) -> bool:
+        """Return True if ``docker image inspect <docker_image>`` exits 0."""
+        if not self._docker_image:
+            return False
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", self._docker_image],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -349,7 +398,7 @@ class ProkkaUtils(AnnotatorUtils):
 
         run_id = uuid.uuid4().hex
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=self._docker_workdir_base()) as tmpdir:
             tmp = Path(tmpdir)
 
             # Write single-gene-contig FASTA
@@ -421,18 +470,49 @@ class ProkkaUtils(AnnotatorUtils):
         """
         outdir.mkdir(parents=True, exist_ok=True)
 
-        cmd: list[str] = [
-            self._prokka_exe,
-            "--outdir", str(outdir),
-            "--prefix", "prokka",
-            "--gcode", str(gcode),
-            "--cpus", str(threads),
-            "--force",
-            "--quiet",
-        ]
-        if kingdom is not None:
-            cmd.extend(["--kingdom", kingdom])
-        cmd.append(str(fasta_path))
+        if self._docker_image:
+            # Docker mode: prokka writes to a bind-mounted work dir.  The input
+            # FASTA and outdir share a parent (the caller's TemporaryDirectory);
+            # mount it at /work and address both via /work/<name> so the host
+            # side of the mount receives prokka.tsv / prokka.gff.
+            work = outdir.parent.resolve()
+            if fasta_path.parent.resolve() != work:
+                raise ValueError(
+                    "Docker mode requires the input FASTA and outdir to share a "
+                    f"parent dir; got fasta={fasta_path.parent} outdir={outdir.parent}"
+                )
+            prokka_args: list[str] = [
+                "prokka",
+                "--outdir", f"/work/{outdir.name}",
+                "--prefix", "prokka",
+                "--gcode", str(gcode),
+                "--cpus", str(threads),
+                "--force",
+                "--quiet",
+            ]
+            if kingdom is not None:
+                prokka_args.extend(["--kingdom", kingdom])
+            prokka_args.append(f"/work/{fasta_path.name}")
+            cmd = [
+                "docker", "run", "--rm",
+                "--platform", "linux/amd64",
+                "-v", f"{work}:/work",
+                self._docker_image,
+                *prokka_args,
+            ]
+        else:
+            cmd = [
+                self._prokka_exe,
+                "--outdir", str(outdir),
+                "--prefix", "prokka",
+                "--gcode", str(gcode),
+                "--cpus", str(threads),
+                "--force",
+                "--quiet",
+            ]
+            if kingdom is not None:
+                cmd.extend(["--kingdom", kingdom])
+            cmd.append(str(fasta_path))
 
         command_str = shlex.join(cmd)
 
@@ -477,13 +557,20 @@ class ProkkaUtils(AnnotatorUtils):
         m = re.search(r"This is prokka\s+(\S+)", stderr)
         if m:
             return m.group(1)
-        # Fallback: probe via --version
+        # Fallback: probe via --version (Docker-aware — --quiet can suppress the
+        # in-run "This is prokka X" banner).
+        version_argv = (
+            ["docker", "run", "--rm", "--platform", "linux/amd64",
+             self._docker_image, "prokka", "--version"]
+            if self._docker_image
+            else [self._prokka_exe, "--version"]
+        )
         try:
             vr = subprocess.run(
-                [self._prokka_exe, "--version"],
+                version_argv,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=60,
             )
             # prokka --version writes to stderr: "prokka 1.14.6"
             for line in (vr.stderr + vr.stdout).splitlines():

@@ -2396,10 +2396,27 @@ class MSFBAUtils(KBModelUtils):
             if isinstance(m, MSMedia):
                 return m
             if isinstance(m, dict):
+                # Unwrap a workspace object envelope (get_object returns
+                # {info, data, provenance, ...}) to its media data payload.
+                if "mediacompounds" not in m and isinstance(m.get("data"), dict) \
+                        and "mediacompounds" in m["data"]:
+                    m = m["data"]
                 if "mediacompounds" in m:
-                    return MSMedia.from_kbase_object(m)
+                    # Plain KBase media data dict -> bounds hash, mirroring
+                    # MSMedia.from_kbase_object's sign convention
+                    # (lower_bound = -maxFlux, upper_bound = -minFlux).
+                    bounds = {}
+                    for c in m["mediacompounds"]:
+                        cid = str(c.get("compound_ref", c.get("id", ""))).split("/")[-1]
+                        if not cid:
+                            continue
+                        bounds[cid] = (
+                            -1 * c.get("maxFlux", 100),
+                            -1 * c.get("minFlux", -100),
+                        )
+                    return MSMedia.from_dict(bounds)
                 return MSMedia.from_dict(m)
-            # Assume a KBase media object instance
+            # Assume an attribute-style KBase media object instance
             return MSMedia.from_kbase_object(m)
 
         mdlutl = self._check_and_convert_model(model)

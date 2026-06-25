@@ -146,6 +146,12 @@ def test_dgpredictor_unavailable_without_repo_and_never_fabricates(monkeypatch):
     # not-configured contract regardless of the dev environment.
     for var in ("DGPREDICTOR_REPO", "DGPREDICTOR_PYTHON"):
         monkeypatch.delenv(var, raising=False)
+    # Also neutralize the DependencyManager so a dependencies.yaml that declares
+    # a dGPredictor checkout in the dev environment does not make it resolve.
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.dgpredictor_backend._dependency_repo_path",
+        lambda name: None,
+    )
     be = DGPredictorBackend()
     assert be.available is False
     assert "not configured" in (be.unavailable_reason or "")
@@ -158,6 +164,12 @@ def test_molgpk_stub_is_unavailable_and_never_fabricates(monkeypatch):
     # not-configured contract regardless of the dev environment.
     for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
         monkeypatch.delenv(var, raising=False)
+    # Also neutralize the DependencyManager so a dependencies.yaml that declares
+    # an OPAM2 checkout in the dev environment does not make the backend resolve.
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend._dependency_repo_path",
+        lambda name: None,
+    )
     be = MolGPKBackend()
     assert be.available is False
     assert "not configured" in (be.unavailable_reason or "")
@@ -284,6 +296,16 @@ def test_backend_status_reports_all_backends(monkeypatch):
         "DGPREDICTOR_PYTHON",
     ):
         monkeypatch.delenv(var, raising=False)
+    # Neutralize the DependencyManager so a dev-environment dependencies.yaml
+    # declaring these checkouts does not make the backends resolve.
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend._dependency_repo_path",
+        lambda name: None,
+    )
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.dgpredictor_backend._dependency_repo_path",
+        lambda name: None,
+    )
     facade = _facade(_FakeThermoUtils())
     status = facade.backend_status()
     assert set(status) == {
@@ -334,6 +356,10 @@ def test_explicit_unknown_backend_raises():
 def test_microspecies_routes_to_molgpk_and_degrades(monkeypatch):
     for var in ("MOLGPK_REPO", "OPAM2_REPO", "MOLGPK_PYTHON"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        "kbutillib.thermo_predictors.molgpk_backend._dependency_repo_path",
+        lambda name: None,
+    )
     facade = _facade(_FakeThermoUtils())
     est = facade.compound_microspecies("cpd00001")
     assert isinstance(est, CompoundThermoEstimate)

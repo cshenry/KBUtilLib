@@ -133,10 +133,36 @@ class PickaxeBackend:
 
     # ── availability ────────────────────────────────────────────────────
 
+    def _ensure_dependency_on_path(self) -> None:
+        """Put a declared MINE-Database source checkout on sys.path.
+
+        Uses KBUtilLib's DependencyManager (dependencies.yaml) — the same
+        mechanism that wires ModelSEEDpy / ModelSEEDDatabase / cobrakbase — so a
+        ``minedatabase`` source checkout becomes importable without a pip install
+        or a site-packages .pth shim (the Tyo repo pins python <3.10, which
+        blocks ``pip install -e`` on 3.11). Best-effort and never raises.
+        """
+        try:
+            import sys
+
+            from ..dependency_manager import get_dependency_path
+
+            dep = get_dependency_path("MINE-Database")
+            if dep:
+                dep_str = str(dep)
+                if dep_str not in sys.path:
+                    sys.path.insert(0, dep_str)
+        except Exception:  # pragma: no cover - best-effort
+            pass
+
     def _probe(self) -> bool:
         """Attempt to import minedatabase and locate its bundled data dir."""
         if self._available is not None:
             return self._available
+        # Ensure a declared MINE-Database source checkout (dependencies.yaml) is
+        # on sys.path before importing — this is the canonical KBUtilLib way to
+        # consume a research repo, and avoids needing a pip install or a .pth.
+        self._ensure_dependency_on_path()
         try:
             import minedatabase  # noqa: F401
             from minedatabase.pickaxe import Pickaxe  # noqa: F401
@@ -204,6 +230,15 @@ class PickaxeBackend:
         candidates.append(pkg_dir / "data")
         # A MINE-Database source checkout next to the installed package.
         candidates.append(pkg_dir.parent / "MINE-Database" / "minedatabase" / "data")
+        # A MINE-Database checkout declared in KBUtilLib's dependencies.yaml.
+        try:
+            from ..dependency_manager import get_dependency_path
+
+            dep = get_dependency_path("MINE-Database")
+            if dep:
+                candidates.append(Path(dep) / "minedatabase" / "data")
+        except Exception:
+            pass
 
         for cand in candidates:
             try:

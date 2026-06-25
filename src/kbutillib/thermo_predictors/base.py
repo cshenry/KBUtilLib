@@ -23,6 +23,27 @@ class BackendUnavailableError(RuntimeError):
     """
 
 
+def dependency_repo_path(dep_name: str) -> Optional[str]:
+    """Resolve a research-repo backend path from KBUtilLib's DependencyManager.
+
+    Lets the dGPredictor / molGPK backends find their source checkout when it is
+    declared in ``dependencies.yaml`` (the same mechanism used for ModelSEEDpy /
+    ModelSEEDDatabase / cobrakbase) without the user having to also set a
+    ``thermo.*.repo_path`` config key or an environment variable.
+
+    Returns the absolute path as a string if the dependency is registered and
+    present on disk, else ``None``. Import + lookup are best-effort and never
+    raise (a missing/empty dependencies.yaml simply yields ``None``).
+    """
+    try:
+        from ..dependency_manager import get_dependency_path
+
+        path = get_dependency_path(dep_name)
+        return str(path) if path else None
+    except Exception:  # pragma: no cover - best-effort resolver
+        return None
+
+
 # Sentinel used throughout to flag "value genuinely not known" as distinct from
 # a numeric zero. Backends must never substitute a fabricated number for an
 # unknown value.

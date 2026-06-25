@@ -69,6 +69,7 @@ from .base import (
     BackendUnavailableError,
     CompoundThermoEstimate,
     ReactionThermoEstimate,
+    dependency_repo_path as _dependency_repo_path,
 )
 
 #: Config keys (dot-notation).
@@ -165,6 +166,7 @@ class MolGPKBackend:
             or self._cfg(CONFIG_REPO_PATH)
             or os.environ.get(ENV_REPO_PATH)
             or os.environ.get(ENV_REPO_PATH_ALT)
+            or _dependency_repo_path("OPAM2")
         )
         if not repo:
             self._unavailable_reason = _not_configured()

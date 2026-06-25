@@ -1,5 +1,5 @@
-# Transyt reaction to ModelSEED reaction/metabolite mapping
-# Format: transyt_rxn_id\tmodelseed_rxn_id\tmodelseed_cpd_ids (semicolon-separated)
-R_T0001	rxn05145	cpd00027;cpd00002
-R_T0002	rxn00549	cpd00027
-R_T0003	rxn05116	cpd00208
+# TranSyT reaction -> ModelSEED reaction mapping.
+# Format: transyt_rxn_id\t[modelseed_rxn_id]  (TranSyT emits the id bracketed)
+# Only reactions matched to a ModelSEED template appear here; the rest carry
+# their stoichiometry in the SBML and are emitted as TRANSYT_RXN equations.
+TR0001	[rxn05145]

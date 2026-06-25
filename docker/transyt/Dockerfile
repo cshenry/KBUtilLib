@@ -76,6 +76,13 @@ RUN echo "dbms.security.auth_enabled=false" >> /etc/neo4j/neo4j.conf && \
     echo "dbms.connector.bolt.listen_address=:7687" >> /etc/neo4j/neo4j.conf && \
     echo "dbms.connector.http.listen_address=:7474" >> /etc/neo4j/neo4j.conf
 
+# BLAST+ (blastp): TranSyT aligns the query proteins against its bundled TCDB
+# fasta before querying the graph.  Without it the run fails with
+# "Cannot run program blastp" and annotates 0 transporters.  (The upstream
+# kb_transyt image installed ncbi-blast+ for the same reason.)
+RUN apt-get update && apt-get install -y --no-install-recommends ncbi-blast+ \
+    && rm -rf /var/lib/apt/lists/*
+
 # ---------------------------------------------------------------------------
 # Stage 2: Add Transyt JAR and pre-loaded Neo4j database
 #

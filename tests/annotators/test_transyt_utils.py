@@ -2,22 +2,13 @@
 
 Test strategy
 -------------
-The Docker-dependent code paths (_run_docker, annotate when image present)
-are exercised only in the ``@pytest.mark.integration`` tests which are
-skipped unless the configured Docker image is locally present.
-
-The pure parse functions (_parse_transyt_xml, _parse_reaction_tc,
-_parse_reactions_references, _build_annotation_records) are tested
-fully offline using the committed golden fixtures under
-``tests/fixtures/transyt/``.
-
-Coverage gate
--------------
-The ``_run_docker`` and live ``annotate`` paths are excluded from the
-offline coverage requirement via the ``@pytest.mark.integration`` skip
-mechanism (the lines are only reached when the image is present).  All
-other lines — including is_available() returning False, the ValueError
-raises, and every parse function — are covered by the offline tests.
+The Docker-dependent code paths (_run_docker, annotate when the image is
+present) are exercised only with Docker mocked out.  The pure parse functions
+(_parse_transyt_xml, _parse_species, _parse_reactions, _parse_scores_method1,
+_parse_reactions_references, _reaction_equation, _build_annotation_records) are
+tested fully offline against the committed real-structure fixtures under
+``tests/fixtures/transyt/`` (SBML Level 3 Version 2 + fbc, as the current
+TranSyT actually emits).
 """
 
 from __future__ import annotations
@@ -35,9 +26,12 @@ from kbutillib.annotator_utils import (
 from kbutillib.transyt_utils import (
     TransytUtils,
     _build_annotation_records,
-    _parse_reaction_tc,
+    _parse_reactions,
     _parse_reactions_references,
+    _parse_scores_method1,
+    _parse_species,
     _parse_transyt_xml,
+    _reaction_equation,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,11 +41,7 @@ from kbutillib.transyt_utils import (
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "transyt"
 _XML_FIXTURE = _FIXTURES / "transyt.xml"
 _REF_FIXTURE = _FIXTURES / "reactions_references.txt"
-
-
-# ---------------------------------------------------------------------------
-# Test doubles / helpers
-# ---------------------------------------------------------------------------
+_SCORES_FIXTURE = _FIXTURES / "scoresMethod1.txt"
 
 
 def _make_utils(**kwargs) -> TransytUtils:
@@ -65,7 +55,7 @@ def _make_utils(**kwargs) -> TransytUtils:
 
 
 # ---------------------------------------------------------------------------
-# is_available() — returns False without raising when image absent
+# is_available()
 # ---------------------------------------------------------------------------
 
 
@@ -125,9 +115,7 @@ class TestAnnotateValidation:
 
     def test_raises_on_nucleotide_input(self):
         tu = _make_utils()
-        # Nucleotide sequence containing U (not in protein alphabet) — guard rejects.
-        # Need more than 10% U in a sequence to trigger the threshold.
-        nuc = "U" * 100  # 100% U, clearly not protein
+        nuc = "U" * 100
         with pytest.raises(ValueError, match="protein"):
             tu.annotate(proteins={"g1": nuc}, tax_id="562")
 
@@ -139,7 +127,7 @@ class TestAnnotateValidation:
 
 
 # ---------------------------------------------------------------------------
-# _parse_transyt_xml — golden fixture
+# _parse_transyt_xml — gene → reactions (L3V2/fbc, refs nested in reactions)
 # ---------------------------------------------------------------------------
 
 
@@ -150,107 +138,205 @@ class TestParseTransytXml:
         assert _XML_FIXTURE.exists(), f"Missing fixture: {_XML_FIXTURE}"
 
     def test_returns_dict(self):
-        result = _parse_transyt_xml(_XML_FIXTURE)
-        assert isinstance(result, dict)
+        assert isinstance(_parse_transyt_xml(_XML_FIXTURE), dict)
 
-    def test_gene_prot1_has_two_reactions(self):
+    def test_prot1_has_two_reactions(self):
         result = _parse_transyt_xml(_XML_FIXTURE)
-        assert "prot1" in result
-        rxns = result["prot1"]
-        assert len(rxns) == 2
-        assert "R_T0001" in rxns
-        assert "R_T0003" in rxns
+        assert set(result["prot1"]) == {"TR0001", "TO0003"}
 
-    def test_gene_prot2_has_one_reaction(self):
-        result = _parse_transyt_xml(_XML_FIXTURE)
-        assert "prot2" in result
-        assert result["prot2"] == ["R_T0002"]
+    def test_prot2_has_one_reaction(self):
+        assert _parse_transyt_xml(_XML_FIXTURE)["prot2"] == ["TZ0002"]
 
-    def test_gene_prot3_has_one_reaction(self):
+    def test_prot3_has_one_reaction(self):
+        # TO0003 lists both prot1 and prot3 as gene products.
+        assert _parse_transyt_xml(_XML_FIXTURE)["prot3"] == ["TO0003"]
+
+    def test_uses_fbc_label_not_prefixed_id(self):
+        # Gene ids are the fbc:label ("prot1"), never the fbc:id ("G_prot1").
         result = _parse_transyt_xml(_XML_FIXTURE)
-        assert "prot3" in result
-        assert result["prot3"] == ["R_T0003"]
+        assert "G_prot1" not in result
 
     def test_returns_empty_for_invalid_xml(self, tmp_path):
         bad = tmp_path / "bad.xml"
         bad.write_text("not xml <<<<<", encoding="utf-8")
         assert _parse_transyt_xml(bad) == {}
 
+    def test_dedup_same_reaction(self, tmp_path):
+        xml = """<?xml version='1.0'?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core"
+      xmlns:fbc="http://www.sbml.org/sbml/level3/version1/fbc/version2">
+  <model id="m">
+    <fbc:listOfGeneProducts>
+      <fbc:geneProduct fbc:id="G_g1" fbc:label="g1"/>
+    </fbc:listOfGeneProducts>
+    <listOfReactions>
+      <reaction id="RX1" reversible="false">
+        <fbc:geneProductAssociation>
+          <fbc:geneProductRef fbc:geneProduct="G_g1"/>
+          <fbc:geneProductRef fbc:geneProduct="G_g1"/>
+        </fbc:geneProductAssociation>
+      </reaction>
+    </listOfReactions>
+  </model>
+</sbml>"""
+        f = tmp_path / "dup.xml"
+        f.write_text(xml, encoding="utf-8")
+        assert _parse_transyt_xml(f)["g1"].count("RX1") == 1
+
+    def test_geneproduct_without_label_falls_back_to_id(self, tmp_path):
+        xml = """<?xml version='1.0'?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core"
+      xmlns:fbc="http://www.sbml.org/sbml/level3/version1/fbc/version2">
+  <model id="m">
+    <fbc:listOfGeneProducts>
+      <fbc:geneProduct fbc:id="G_only"/>
+    </fbc:listOfGeneProducts>
+    <listOfReactions>
+      <reaction id="RX1" reversible="false">
+        <fbc:geneProductAssociation>
+          <fbc:geneProductRef fbc:geneProduct="G_only"/>
+        </fbc:geneProductAssociation>
+      </reaction>
+    </listOfReactions>
+  </model>
+</sbml>"""
+        f = tmp_path / "nolabel.xml"
+        f.write_text(xml, encoding="utf-8")
+        # No label/name → falls back to the fbc:id "G_only".
+        assert "G_only" in _parse_transyt_xml(f)
+
 
 # ---------------------------------------------------------------------------
-# _parse_reaction_tc — golden fixture
+# _parse_species
 # ---------------------------------------------------------------------------
 
 
-class TestParseReactionTc:
-    """Unit tests for _parse_reaction_tc using the golden fixture."""
+class TestParseSpecies:
+    def test_modelseed_species(self):
+        spec = _parse_species(_XML_FIXTURE)
+        info = spec["M_cpd00027_e0"]
+        assert info["modelseed"] is True
+        assert info["cpd"] == "cpd00027"
+        assert info["compartment"] == "e0"
+        assert info["name"] == "D-Glucose"
 
-    def test_returns_dict(self):
-        result = _parse_reaction_tc(_XML_FIXTURE)
-        assert isinstance(result, dict)
+    def test_non_modelseed_species(self):
+        info = _parse_species(_XML_FIXTURE)["M_mystery_c0"]
+        assert info["modelseed"] is False
+        assert info["cpd"] is None
+        assert info["name"] == "Mystery compound"
 
-    def test_r_t0001_has_tc(self):
-        result = _parse_reaction_tc(_XML_FIXTURE)
-        assert "R_T0001" in result
-        assert result["R_T0001"] == "3.A.1.1.1"
-
-    def test_r_t0002_has_tc(self):
-        result = _parse_reaction_tc(_XML_FIXTURE)
-        assert "R_T0002" in result
-        assert result["R_T0002"] == "4.A.1.1.1"
-
-    def test_r_t0003_has_tc(self):
-        result = _parse_reaction_tc(_XML_FIXTURE)
-        assert "R_T0003" in result
-        assert result["R_T0003"] == "2.A.1.5.1"
-
-    def test_returns_empty_for_invalid_xml(self, tmp_path):
+    def test_invalid_xml_returns_empty(self, tmp_path):
         bad = tmp_path / "bad.xml"
-        bad.write_text("not xml <<<<<", encoding="utf-8")
-        assert _parse_reaction_tc(bad) == {}
+        bad.write_text("<<<", encoding="utf-8")
+        assert _parse_species(bad) == {}
 
 
 # ---------------------------------------------------------------------------
-# _parse_reactions_references — golden fixture
+# _parse_reactions
+# ---------------------------------------------------------------------------
+
+
+class TestParseReactions:
+    def test_reversible_flag(self):
+        rxns = _parse_reactions(_XML_FIXTURE)
+        assert rxns["TR0001"]["reversible"] is True
+        assert rxns["TZ0002"]["reversible"] is False
+
+    def test_reactants_and_products(self):
+        tr = _parse_reactions(_XML_FIXTURE)["TR0001"]
+        assert ("M_cpd00027_e0", "1") in tr["reactants"]
+        assert ("M_cpd00002_c0", "1") in tr["reactants"]
+        assert ("M_cpd00027_c0", "1") in tr["products"]
+
+    def test_stoichiometry_preserved(self):
+        to = _parse_reactions(_XML_FIXTURE)["TO0003"]
+        assert to["reactants"] == [("M_mystery_c0", "2")]
+
+    def test_invalid_xml_returns_empty(self, tmp_path):
+        bad = tmp_path / "bad.xml"
+        bad.write_text("<<<", encoding="utf-8")
+        assert _parse_reactions(bad) == {}
+
+
+# ---------------------------------------------------------------------------
+# _parse_scores_method1 — the only source of TC numbers
+# ---------------------------------------------------------------------------
+
+
+class TestParseScoresMethod1:
+    def test_fixture_exists(self):
+        assert _SCORES_FIXTURE.exists()
+
+    def test_prot1_tc_families(self):
+        scores = _parse_scores_method1(_SCORES_FIXTURE)
+        assert scores["prot1"] == [("3.A.1.1.1", "0.0"), ("2.A.1.5.1", "1.5E-50")]
+
+    def test_prot2_tc_family(self):
+        assert _parse_scores_method1(_SCORES_FIXTURE)["prot2"] == [
+            ("4.A.1.1.1", "2.0E-30")
+        ]
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert _parse_scores_method1(tmp_path / "nope.txt") == {}
+
+    def test_blank_lines_ignored(self, tmp_path):
+        f = tmp_path / "s.txt"
+        f.write_text(">g\n\n1.A.1.1.1 - Evalue: 0.0\t[RX1]\n", encoding="utf-8")
+        assert _parse_scores_method1(f)["g"] == [("1.A.1.1.1", "0.0")]
+
+
+# ---------------------------------------------------------------------------
+# _reaction_equation
+# ---------------------------------------------------------------------------
+
+
+class TestReactionEquation:
+    def test_reversible_modelseed_equation(self):
+        rxns = _parse_reactions(_XML_FIXTURE)
+        spec = _parse_species(_XML_FIXTURE)
+        eq = _reaction_equation(rxns["TR0001"], spec)
+        assert eq == "cpd00027[e0] + cpd00002[c0] <=> cpd00027[c0] + cpd00008[c0]"
+
+    def test_irreversible_arrow(self):
+        rxns = _parse_reactions(_XML_FIXTURE)
+        spec = _parse_species(_XML_FIXTURE)
+        eq = _reaction_equation(rxns["TZ0002"], spec)
+        assert eq == "cpd00208[e0] => cpd00208[c0]"
+
+    def test_non_modelseed_compound_and_stoichiometry(self):
+        rxns = _parse_reactions(_XML_FIXTURE)
+        spec = _parse_species(_XML_FIXTURE)
+        eq = _reaction_equation(rxns["TO0003"], spec)
+        # M_mystery_c0 → name fallback "Mystery compound[c]"; stoich 2 shown.
+        assert eq == "(2) Mystery compound[c] => cpd00027[c0]"
+
+
+# ---------------------------------------------------------------------------
+# _parse_reactions_references
 # ---------------------------------------------------------------------------
 
 
 class TestParseReactionsReferences:
-    """Unit tests for _parse_reactions_references using the golden fixture."""
-
     def test_fixture_exists(self):
-        assert _REF_FIXTURE.exists(), f"Missing fixture: {_REF_FIXTURE}"
+        assert _REF_FIXTURE.exists()
 
-    def test_returns_dict(self):
-        result = _parse_reactions_references(_REF_FIXTURE)
-        assert isinstance(result, dict)
-
-    def test_r_t0001_mapping(self):
-        result = _parse_reactions_references(_REF_FIXTURE)
-        assert "R_T0001" in result
-        msrxn, cpds = result["R_T0001"]
+    def test_tr0001_maps_to_modelseed_rxn(self):
+        # Bracketed "[rxn05145]" is stripped to the bare id.
+        msrxn, cpds = _parse_reactions_references(_REF_FIXTURE)["TR0001"]
         assert msrxn == "rxn05145"
-        assert "cpd00027" in cpds
-        assert "cpd00002" in cpds
-
-    def test_r_t0002_mapping(self):
-        result = _parse_reactions_references(_REF_FIXTURE)
-        msrxn, cpds = result["R_T0002"]
-        assert msrxn == "rxn00549"
-        assert "cpd00027" in cpds
-
-    def test_r_t0003_mapping(self):
-        result = _parse_reactions_references(_REF_FIXTURE)
-        msrxn, cpds = result["R_T0003"]
-        assert msrxn == "rxn05116"
-        assert "cpd00208" in cpds
+        assert cpds == []
 
     def test_comments_skipped(self, tmp_path):
         f = tmp_path / "refs.txt"
-        f.write_text("# comment\nR_T9999\trxn99999\tcpd11111\n", encoding="utf-8")
+        f.write_text("# comment\nR_T9999\trxn99999\n", encoding="utf-8")
         result = _parse_reactions_references(f)
-        assert "R_T9999" in result
-        assert len(result) == 1
+        assert list(result) == ["R_T9999"]
+
+    def test_brackets_stripped(self, tmp_path):
+        f = tmp_path / "refs.txt"
+        f.write_text("R_T1\t[rxn00001]\n", encoding="utf-8")
+        assert _parse_reactions_references(f)["R_T1"][0] == "rxn00001"
 
     def test_empty_file(self, tmp_path):
         f = tmp_path / "empty.txt"
@@ -258,182 +344,135 @@ class TestParseReactionsReferences:
         assert _parse_reactions_references(f) == {}
 
     def test_missing_file(self, tmp_path):
-        result = _parse_reactions_references(tmp_path / "nonexistent.txt")
-        assert result == {}
+        assert _parse_reactions_references(tmp_path / "nope.txt") == {}
 
-    def test_missing_compound_column(self, tmp_path):
+    def test_optional_compound_column(self, tmp_path):
         f = tmp_path / "refs.txt"
-        f.write_text("R_T1\trxn00001\n", encoding="utf-8")
-        result = _parse_reactions_references(f)
-        msrxn, cpds = result["R_T1"]
+        f.write_text("R_T1\trxn00001\tcpd00001;cpd00002\n", encoding="utf-8")
+        msrxn, cpds = _parse_reactions_references(f)["R_T1"]
         assert msrxn == "rxn00001"
-        assert cpds == []
-
-    def test_empty_compound_field(self, tmp_path):
-        f = tmp_path / "refs.txt"
-        f.write_text("R_T1\trxn00001\t\n", encoding="utf-8")
-        result = _parse_reactions_references(f)
-        msrxn, cpds = result["R_T1"]
-        assert cpds == []
+        assert cpds == ["cpd00001", "cpd00002"]
 
 
 # ---------------------------------------------------------------------------
-# _build_annotation_records — logic tests
+# _build_annotation_records — rich schema
 # ---------------------------------------------------------------------------
 
 
 class TestBuildAnnotationRecords:
-    """Unit tests for _build_annotation_records."""
+    """Unit tests for _build_annotation_records with the rich schema."""
 
-    def _run_with_fixtures(self, input_ids: list[str]):
-        gene_to_rxns = _parse_transyt_xml(_XML_FIXTURE)
-        rxn_to_tc = _parse_reaction_tc(_XML_FIXTURE)
-        rxn_to_msrxn_cpds = _parse_reactions_references(_REF_FIXTURE)
+    def _run(self, input_ids: list[str]):
         return _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, input_ids
+            _parse_transyt_xml(_XML_FIXTURE),
+            _parse_scores_method1(_SCORES_FIXTURE),
+            _parse_reactions(_XML_FIXTURE),
+            _parse_species(_XML_FIXTURE),
+            _parse_reactions_references(_REF_FIXTURE),
+            input_ids,
         )
 
-    def test_prot1_has_tc_terms(self):
-        records = self._run_with_fixtures(["prot1", "prot2", "prot3"])
-        prot1 = next(r for r in records if r.gene_id == "prot1")
-        tc_terms = [t for t in prot1.terms if t.namespace == "TC"]
-        assert len(tc_terms) >= 1
-        tc_vals = {t.id for t in tc_terms}
-        assert "3.A.1.1.1" in tc_vals or "2.A.1.5.1" in tc_vals
+    def _terms(self, records, gene, namespace):
+        rec = next(r for r in records if r.gene_id == gene)
+        return [t for t in rec.terms if t.namespace == namespace]
 
-    def test_prot1_has_msrxn_terms(self):
-        records = self._run_with_fixtures(["prot1", "prot2", "prot3"])
-        prot1 = next(r for r in records if r.gene_id == "prot1")
-        msrxn_terms = [t for t in prot1.terms if t.namespace == "MSRXN"]
-        assert len(msrxn_terms) >= 1
+    def test_prot1_tc_terms(self):
+        records = self._run(["prot1", "prot2", "prot3"])
+        tc = {t.id for t in self._terms(records, "prot1", "TC")}
+        assert tc == {"3.A.1.1.1", "2.A.1.5.1"}
 
-    def test_prot1_has_mscpd_terms(self):
-        records = self._run_with_fixtures(["prot1", "prot2", "prot3"])
-        prot1 = next(r for r in records if r.gene_id == "prot1")
-        mscpd_terms = [t for t in prot1.terms if t.namespace == "MSCPD"]
-        assert len(mscpd_terms) >= 1
+    def test_tc_term_carries_evalue(self):
+        records = self._run(["prot1"])
+        tc = self._terms(records, "prot1", "TC")[0]
+        assert "evalue" in tc.evidence
 
-    def test_terms_keyed_to_caller_ids(self):
-        records = self._run_with_fixtures(["prot1", "prot2", "prot3"])
-        ids = {r.gene_id for r in records}
-        assert ids.issubset({"prot1", "prot2", "prot3"})
+    def test_mapped_reaction_is_msrxn_with_equation(self):
+        records = self._run(["prot1"])
+        msrxn = self._terms(records, "prot1", "MSRXN")
+        assert len(msrxn) == 1
+        assert msrxn[0].id == "rxn05145"
+        assert "<=>" in msrxn[0].value  # the equation is the term value
+        assert msrxn[0].evidence["transyt_rxn_id"] == "TR0001"
 
-    def test_genes_not_in_input_excluded(self):
-        # Only ask for prot2; prot1 and prot3 should be excluded
-        records = self._run_with_fixtures(["prot2"])
-        assert all(r.gene_id == "prot2" for r in records)
+    def test_unmapped_reaction_is_transyt_rxn_with_equation(self):
+        records = self._run(["prot1"])
+        tr = self._terms(records, "prot1", "TRANSYT_RXN")
+        # TO0003 is not in reactions_references → kept as a TRANSYT_RXN.
+        assert any(t.id == "TO0003" for t in tr)
+        assert all("=>" in t.value or "<=>" in t.value for t in tr)
+
+    def test_modelseed_compound_terms(self):
+        records = self._run(["prot1"])
+        cpds = {t.id for t in self._terms(records, "prot1", "MSCPD")}
+        assert {"cpd00027", "cpd00002", "cpd00008"}.issubset(cpds)
+
+    def test_non_modelseed_compound_uses_cpd_namespace(self):
+        records = self._run(["prot1"])
+        cpd = self._terms(records, "prot1", "CPD")
+        assert any(t.id == "Mystery compound" for t in cpd)
+
+    def test_only_requested_genes_included(self):
+        records = self._run(["prot2"])
+        assert {r.gene_id for r in records} == {"prot2"}
 
     def test_empty_input_returns_empty(self):
-        records = self._run_with_fixtures([])
-        assert records == []
+        assert self._run([]) == []
 
-    def test_gene_with_no_tc_or_mapping_absent(self):
-        # Gene with reactions that have no TC and no ref mapping
-        gene_to_rxns = {"ghost_gene": ["R_T9999"]}
-        rxn_to_tc: dict = {}
-        rxn_to_msrxn_cpds: dict = {}
+    def test_gene_with_only_tc_still_emitted(self):
+        # A gene with a TC prediction but no reactions still yields a record.
         records = _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, ["ghost_gene"]
-        )
-        # No terms → no record
-        assert records == []
-
-    def test_dedup_tc_same_gene_same_tc(self):
-        # Two reactions with the same TC — should emit TC Term only once
-        gene_to_rxns = {"g1": ["R_A", "R_B"]}
-        rxn_to_tc = {"R_A": "3.A.1.1.1", "R_B": "3.A.1.1.1"}
-        rxn_to_msrxn_cpds: dict = {}
-        records = _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, ["g1"]
-        )
-        tc_terms = [t for t in records[0].terms if t.namespace == "TC"]
-        assert len(tc_terms) == 1
-
-    def test_term_namespaces_correct(self):
-        records = self._run_with_fixtures(["prot1", "prot2", "prot3"])
-        for rec in records:
-            for term in rec.terms:
-                assert term.namespace in {"TC", "MSRXN", "MSCPD"}
-
-    def test_term_evidence_contains_transyt_rxn_id(self):
-        records = self._run_with_fixtures(["prot1"])
-        for rec in records:
-            for term in rec.terms:
-                assert "transyt_rxn_id" in term.evidence
-
-    def test_msrxn_none_mapping_emits_only_cpds(self):
-        """When msrxn is None in a mapping, only MSCPD terms are emitted."""
-        gene_to_rxns = {"g1": ["R_A"]}
-        rxn_to_tc: dict[str, str] = {}
-        rxn_to_msrxn_cpds = {"R_A": (None, ["cpd00001"])}
-        records = _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, ["g1"]
+            {}, {"g1": [("9.A.1.1.1", "1e-9")]}, {}, {}, {}, ["g1"]
         )
         assert len(records) == 1
-        assert all(t.namespace == "MSCPD" for t in records[0].terms)
+        assert records[0].terms[0].namespace == "TC"
 
-    def test_dedup_cpd_same_gene_two_reactions(self):
-        """Same cpd from two reactions appears only once in terms."""
-        gene_to_rxns = {"g1": ["R_A", "R_B"]}
-        rxn_to_tc: dict[str, str] = {}
-        rxn_to_msrxn_cpds = {
-            "R_A": ("rxn00001", ["cpd00001"]),
-            "R_B": ("rxn00002", ["cpd00001"]),  # same cpd
-        }
+    def test_gene_absent_when_no_terms(self):
         records = _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, ["g1"]
+            {"g1": ["RXmissing"]}, {}, {}, {}, {}, ["g1"]
         )
-        cpd_terms = [t for t in records[0].terms if t.namespace == "MSCPD"]
-        assert len(cpd_terms) == 1
+        assert records == []
 
-    def test_dedup_msrxn_same_gene_two_reactions(self):
-        """Same msrxn from two reactions appears only once."""
-        gene_to_rxns = {"g1": ["R_A", "R_B"]}
-        rxn_to_tc: dict[str, str] = {}
-        rxn_to_msrxn_cpds = {
-            "R_A": ("rxn00001", []),
-            "R_B": ("rxn00001", []),  # same rxn
-        }
+    def test_namespaces_are_expected_set(self):
+        records = self._run(["prot1", "prot2", "prot3"])
+        ns = {t.namespace for r in records for t in r.terms}
+        assert ns <= {"TC", "MSRXN", "TRANSYT_RXN", "MSCPD", "CPD"}
+
+    def test_dedup_tc(self):
         records = _build_annotation_records(
-            gene_to_rxns, rxn_to_tc, rxn_to_msrxn_cpds, ["g1"]
+            {}, {"g1": [("1.A.1.1.1", "0"), ("1.A.1.1.1", "0")]}, {}, {}, {}, ["g1"]
         )
-        msrxn_terms = [t for t in records[0].terms if t.namespace == "MSRXN"]
-        assert len(msrxn_terms) == 1
+        assert len(self._terms(records, "g1", "TC")) == 1
 
 
 # ---------------------------------------------------------------------------
-# TransytUtils._stage_inputs — input file staging
+# _stage_inputs — input file staging (params.txt is TAB-delimited)
 # ---------------------------------------------------------------------------
 
 
 class TestStageInputs:
-    """Unit tests for the input staging logic."""
-
     def test_protein_faa_written(self, tmp_path):
         tu = _make_utils()
         indir = tmp_path / "proc"
         indir.mkdir()
         tu._stage_inputs(indir, {"gene1": "MKTAY", "gene2": "MNFST"}, "562", "ModelSEED", None)
         faa = (indir / "protein.faa").read_text()
-        assert ">gene1" in faa
-        assert "MKTAY" in faa
-        assert ">gene2" in faa
+        assert ">gene1" in faa and "MKTAY" in faa and ">gene2" in faa
 
-    def test_params_txt_contains_tax_id(self, tmp_path):
+    def test_params_txt_tax_id_is_tab_delimited(self, tmp_path):
         tu = _make_utils()
         indir = tmp_path / "proc"
         indir.mkdir()
         tu._stage_inputs(indir, {"p1": "MKTAY"}, "562", "ModelSEED", None)
         params = (indir / "params.txt").read_text()
-        assert "taxID=562" in params
+        assert "taxID\t562" in params
+        assert "taxID=562" not in params  # NOT the '=' form (TranSyT can't parse it)
 
-    def test_params_txt_contains_reference_database(self, tmp_path):
+    def test_params_txt_reference_database_is_tab_delimited(self, tmp_path):
         tu = _make_utils()
         indir = tmp_path / "proc"
         indir.mkdir()
         tu._stage_inputs(indir, {"p1": "MKTAY"}, "562", "ModelSEED", None)
-        params = (indir / "params.txt").read_text()
-        assert "reference_database=ModelSEED" in params
+        assert "reference_database\tModelSEED" in (indir / "params.txt").read_text()
 
     def test_metabolites_txt_written_when_provided(self, tmp_path):
         tu = _make_utils()
@@ -441,8 +480,7 @@ class TestStageInputs:
         indir.mkdir()
         tu._stage_inputs(indir, {"p1": "MKTAY"}, "562", "ModelSEED", ["cpd00001", "cpd00002"])
         met = (indir / "metabolites.txt").read_text()
-        assert "cpd00001" in met
-        assert "cpd00002" in met
+        assert "cpd00001" in met and "cpd00002" in met
 
     def test_no_metabolites_txt_when_none(self, tmp_path):
         tu = _make_utils()
@@ -453,648 +491,123 @@ class TestStageInputs:
 
 
 # ---------------------------------------------------------------------------
-# _build_docker_command — command shape
+# _build_docker_command — command shape + memory config
 # ---------------------------------------------------------------------------
 
 
 class TestBuildDockerCommand:
-    """Unit tests for the Docker command builder."""
-
-    def test_returns_list(self):
+    def _cmd(self, **attrs):
         tu = _make_utils()
         tu._docker_image = "test_image:v1"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        assert isinstance(cmd, list)
+        for k, v in attrs.items():
+            setattr(tu, k, v)
+        return tu._build_docker_command(Path("/tmp/fakedir"))
 
     def test_starts_with_docker_run(self):
-        tu = _make_utils()
-        tu._docker_image = "test_image:v1"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        assert cmd[:2] == ["docker", "run"]
+        assert self._cmd()[:2] == ["docker", "run"]
 
     def test_contains_image(self):
-        tu = _make_utils()
-        tu._docker_image = "my_image:tag"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        assert "my_image:tag" in cmd
+        assert "test_image:v1" in self._cmd()
 
-    def test_contains_entrypoint_bash(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        assert "--entrypoint" in cmd
-        ep_idx = cmd.index("--entrypoint")
-        assert cmd[ep_idx + 1] == "bash"
+    def test_entrypoint_bash(self):
+        cmd = self._cmd()
+        assert cmd[cmd.index("--entrypoint") + 1] == "bash"
 
-    def test_contains_bind_mount(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        v_idx = cmd.index("-v")
-        mount_spec = cmd[v_idx + 1]
-        assert str(indir) in mount_spec
-        assert "/workdir/processingDir" in mount_spec
+    def test_bind_mount(self):
+        cmd = self._cmd()
+        spec = cmd[cmd.index("-v") + 1]
+        assert "/tmp/fakedir" in spec and "/workdir/processingDir" in spec
 
-    def test_inner_script_has_no_fixed_sleep(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        # The last element is the inner bash -lc script
-        inner = cmd[-1]
-        # Must not use a bare fixed sleep (sleep N without a loop) for Neo4j
-        # The poll loop uses `sleep 1` inside a while loop — that's fine.
-        # Ensure there is a loop construct (while) rather than just `sleep <big_number>`.
-        assert "while" in inner, "Neo4j readiness must use a loop, not a fixed sleep"
+    def test_neo4j_readiness_uses_loop(self):
+        assert "while" in self._cmd()[-1]
 
-    def test_inner_script_has_neo4j_start(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        inner = cmd[-1]
-        assert "neo4j start" in inner
-
-    def test_inner_script_has_jar_invocation(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        inner = cmd[-1]
-        assert "transyt.jar" in inner
+    def test_inner_has_neo4j_and_jar(self):
+        inner = self._cmd()[-1]
+        assert "neo4j start" in inner and "transyt.jar" in inner
 
     def test_neo4j_timeout_in_poll(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        tu._neo4j_timeout = 90
-        indir = Path("/tmp/fakedir")
-        cmd = tu._build_docker_command(indir)
-        inner = cmd[-1]
-        assert "90" in inner
+        assert "90" in self._cmd(_neo4j_timeout=90)[-1]
+
+    def test_jvm_xmx_configurable(self):
+        assert "-Xmx1500m" in self._cmd(_jvm_xmx="1500m")[-1]
+
+    def test_neo4j_heap_configurable(self):
+        inner = self._cmd(_neo4j_heap="512m", _neo4j_pagecache="256m")[-1]
+        assert "NEO4J_dbms_memory_heap_max__size=512m" in inner
+        assert "NEO4J_dbms_memory_pagecache_size=256m" in inner
 
 
 # ---------------------------------------------------------------------------
-# annotate() — mocked Docker path (happy path + exit-8 empty result)
+# annotate() — Docker mocked out
 # ---------------------------------------------------------------------------
 
 
 class TestAnnotateMocked:
     """Tests for annotate() with Docker mocked out."""
 
-    def _make_with_available(self) -> TransytUtils:
-        tu = _make_utils()
-        tu._docker_image = "mock_image:latest"
-        return tu
-
-    def test_annotate_returns_annotation_result(self, tmp_path):
-        tu = self._make_with_available()
-        # Patch is_available to True; _run_docker to exit 0 with fixture results
-        results_dir = tmp_path / "results"
-        results_dir.mkdir()
+    def _fake_run_docker(self, indir):
         import shutil
+        dest = indir / "results"
+        dest.mkdir(exist_ok=True)
+        shutil.copy(_XML_FIXTURE, dest / "transyt.xml")
+        shutil.copy(_REF_FIXTURE, dest / "reactions_references.txt")
+        shutil.copy(_SCORES_FIXTURE, dest / "scoresMethod1.txt")
+        return ("docker run --rm -v x:/workdir/processingDir ...", 0)
 
-        shutil.copy(_XML_FIXTURE, results_dir / "transyt.xml")
-        shutil.copy(_REF_FIXTURE, results_dir / "reactions_references.txt")
-
-        def _fake_run_docker(indir):
-            # Copy results into indir/results
-            dest = indir / "results"
-            dest.mkdir(exist_ok=True)
-            shutil.copy(_XML_FIXTURE, dest / "transyt.xml")
-            shutil.copy(_REF_FIXTURE, dest / "reactions_references.txt")
-            return ("docker run ...", 0)
-
+    def _annotate(self, tu, **kwargs):
         with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
+            with patch.object(tu, "_run_docker", side_effect=self._fake_run_docker):
                 with patch.object(tu, "_get_image_digest", return_value="sha256:abc"):
-                    result = tu.annotate(
-                        proteins={"prot1": "MKTAYIAKQ", "prot2": "MNFSTPDQ"},
-                        tax_id="562",
-                    )
+                    return tu.annotate(**kwargs)
 
-        assert isinstance(result, AnnotationResult)
-        assert result.tool == "transyt"
-        assert result.run_id != ""
-        assert result.parameters["tax_id"] == "562"
-        assert result.parameters["reference_database"] == "ModelSEED"
-
-    def test_annotate_exit8_returns_empty_records(self):
-        tu = self._make_with_available()
-
-        def _fake_run_docker(indir):
-            return ("docker run ...", 8)
-
-        with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value=""):
-                    result = tu.annotate(
-                        proteins={"p1": "MKTAY"},
-                        tax_id="562",
-                    )
-
-        assert result.records == []
-        assert result.tool == "transyt"
-
-    def test_annotate_stores_command_string(self, tmp_path):
-        tu = self._make_with_available()
-        import shutil
-
-        def _fake_run_docker(indir):
-            dest = indir / "results"
-            dest.mkdir(exist_ok=True)
-            shutil.copy(_XML_FIXTURE, dest / "transyt.xml")
-            shutil.copy(_REF_FIXTURE, dest / "reactions_references.txt")
-            return ("docker run --rm -v /tmp/x:/workdir/processingDir ...", 0)
-
-        with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value=""):
-                    result = tu.annotate(
-                        proteins={"prot1": "MKTAY"},
-                        tax_id="562",
-                    )
-
-        assert "docker run" in result.command
-
-    def test_annotate_records_keyed_to_caller_ids(self):
-        tu = self._make_with_available()
-        import shutil
-
-        def _fake_run_docker(indir):
-            dest = indir / "results"
-            dest.mkdir(exist_ok=True)
-            shutil.copy(_XML_FIXTURE, dest / "transyt.xml")
-            shutil.copy(_REF_FIXTURE, dest / "reactions_references.txt")
-            return ("docker run ...", 0)
-
-        proteins = {"prot1": "MKTAY", "prot2": "MNFST", "prot3": "MAABCD"}
-        with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value=""):
-                    result = tu.annotate(proteins=proteins, tax_id="562")
-
-        record_ids = {r.gene_id for r in result.records}
-        assert record_ids.issubset(set(proteins.keys()))
-
-    def test_annotate_metabolites_parameter_stored(self):
-        tu = self._make_with_available()
-
-        def _fake_run_docker(indir):
-            return ("docker run ...", 8)
-
-        with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value=""):
-                    result = tu.annotate(
-                        proteins={"p1": "MKTAY"},
-                        tax_id="562",
-                        metabolites=["cpd00027"],
-                    )
-
-        assert result.parameters["metabolites"] == ["cpd00027"]
-
-
-# ---------------------------------------------------------------------------
-# _parse_transyt_xml — edge cases for coverage
-# ---------------------------------------------------------------------------
-
-
-class TestParseTransytXmlEdgeCases:
-    """Edge-case coverage for _parse_transyt_xml branches."""
-
-    def test_xml_without_sbml_namespace(self, tmp_path):
-        """XML with plain element names (no SBML namespace) is parsed."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml>
-  <model id="m">
-    <listOfGeneProducts>
-      <geneProduct id="gp1" name="mygene"/>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="R_T1">
-        <geneProductRef geneProduct="gp1"/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "plain.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        assert "mygene" in result or "gp1" in result  # fallback name or id
-
-    def test_association_with_empty_reaction_id(self, tmp_path):
-        """Associations with empty reaction attribute are skipped."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProducts>
-      <geneProduct id="gp1" name="g1"/>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="">
-        <geneProductRef geneProduct="gp1"/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "empty_rxn.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        # Empty reaction id is skipped; gene absent
-        assert result == {}
-
-    def test_no_model_element(self, tmp_path):
-        """SBML with no model element returns empty dict."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-</sbml>"""
-        f = tmp_path / "nomodel.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        assert result == {}
-
-    def test_rxn_id_dedup_same_reaction_twice(self, tmp_path):
-        """The same reaction id is not added twice for the same gene."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProducts>
-      <geneProduct id="gp1" name="g1"/>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="R_T1">
-        <geneProductRef geneProduct="gp1"/>
-      </geneProductAssociation>
-      <geneProductAssociation reaction="R_T1">
-        <geneProductRef geneProduct="gp1"/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "dup.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        assert result.get("g1", []).count("R_T1") == 1
-
-    def test_gene_product_without_id_attr_skipped(self, tmp_path):
-        """geneProduct elements with missing id attribute are skipped in id map."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProducts>
-      <geneProduct name="orphan_gene"/>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "noid.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        # No id → not in id_to_name, no refs → empty
-        assert result == {}
-
-    def test_model_no_gene_product_list(self, tmp_path):
-        """Model with no listOfGeneProducts still processes associations."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="R_T1">
-        <geneProductRef geneProduct="unknown_gp"/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "nogplist.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        # gp falls back to its id string
-        assert "unknown_gp" in result
-
-    def test_model_no_association_list(self, tmp_path):
-        """Model with no listOfGeneProductAssociations returns empty dict."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProducts>
-      <geneProduct id="gp1" name="g1"/>
-    </listOfGeneProducts>
-  </model>
-</sbml>"""
-        f = tmp_path / "noassoc.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        assert result == {}
-
-    def test_gpr_ref_with_empty_geneproduct_attr(self, tmp_path):
-        """geneProductRef with empty geneProduct attr → empty fallback → skipped."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfGeneProducts>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="R_T1">
-        <geneProductRef geneProduct=""/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
-  </model>
-</sbml>"""
-        f = tmp_path / "emptyref.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_transyt_xml(f)
-        # geneProduct="" → id_to_name.get("", "") = "" → gene_name = "" → skipped
-        assert result == {}
-
-
-class TestParseReactionTcEdgeCases:
-    """Edge-case coverage for _parse_reaction_tc and _extract_tc_from_reaction."""
-
-    def test_reaction_without_notes_not_in_output(self, tmp_path):
-        """Reactions with no notes element yield no TC entry."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfReactions>
-      <reaction id="R_T1" reversible="false"/>
-    </listOfReactions>
-  </model>
-</sbml>"""
-        f = tmp_path / "nonotes.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_reaction_tc(f)
-        assert "R_T1" not in result
-
-    def test_reaction_notes_without_tc_pattern(self, tmp_path):
-        """Reactions with notes but no TC: line yield no TC entry."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfReactions>
-      <reaction id="R_T1" reversible="false">
-        <notes>
-          <html:p xmlns:html="http://www.w3.org/1999/xhtml">No TC here</html:p>
-        </notes>
-      </reaction>
-    </listOfReactions>
-  </model>
-</sbml>"""
-        f = tmp_path / "notcinnotes.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_reaction_tc(f)
-        assert "R_T1" not in result
-
-    def test_reaction_with_non_notes_children_only(self, tmp_path):
-        """Reactions whose children are listOfReactants etc. (no notes) yield no TC."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfReactions>
-      <reaction id="R_T1" reversible="false">
-        <listOfReactants/>
-        <listOfProducts/>
-      </reaction>
-    </listOfReactions>
-  </model>
-</sbml>"""
-        f = tmp_path / "nonnotes.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_reaction_tc(f)
-        assert "R_T1" not in result
-
-    def test_reaction_without_sbml_namespace(self, tmp_path):
-        """Reactions without SBML namespace are parsed via fallback."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml>
-  <model id="m">
-    <listOfReactions>
-      <reaction id="R_TX" reversible="false">
-        <notes>
-          <p xmlns="http://www.w3.org/1999/xhtml">TC: 1.A.1.1.1</p>
-        </notes>
-      </reaction>
-    </listOfReactions>
-  </model>
-</sbml>"""
-        f = tmp_path / "nons.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_reaction_tc(f)
-        assert result.get("R_TX") == "1.A.1.1.1"
-
-    def test_reaction_with_empty_id_skipped(self, tmp_path):
-        """Reactions with empty id attribute are skipped."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-    <listOfReactions>
-      <reaction id="" reversible="false">
-        <notes><html:p xmlns:html="http://www.w3.org/1999/xhtml">TC: 1.A.1.1.1</html:p></notes>
-      </reaction>
-    </listOfReactions>
-  </model>
-</sbml>"""
-        f = tmp_path / "emptyid.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        result = _parse_reaction_tc(f)
-        assert result == {}
-
-    def test_model_no_reactions_list(self, tmp_path):
-        """Model with no listOfReactions returns empty dict."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4">
-  <model id="m">
-  </model>
-</sbml>"""
-        f = tmp_path / "noreactions.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        assert _parse_reaction_tc(f) == {}
-
-    def test_no_model_element(self, tmp_path):
-        """No model element returns empty dict."""
-        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4"/>"""
-        f = tmp_path / "nomodel.xml"
-        f.write_text(xml_content, encoding="utf-8")
-        assert _parse_reaction_tc(f) == {}
-
-
-class TestParseReactionsReferencesEdgeCases:
-    """Edge-case coverage for _parse_reactions_references."""
-
-    def test_line_with_only_rxn_id(self, tmp_path):
-        """Lines with only the rxn_id column produce None msrxn and empty cpds."""
-        f = tmp_path / "refs.txt"
-        f.write_text("R_T9\n", encoding="utf-8")
-        result = _parse_reactions_references(f)
-        assert "R_T9" in result
-        msrxn, cpds = result["R_T9"]
-        assert msrxn is None
-        assert cpds == []
-
-
-# ---------------------------------------------------------------------------
-# _run_docker and _get_image_digest — subprocess mock tests
-# ---------------------------------------------------------------------------
-
-
-class TestRunDockerMocked:
-    """Tests for _run_docker using subprocess mocking."""
-
-    def test_run_docker_returns_cmd_str_and_exit_code(self):
+    def test_returns_annotation_result(self):
         tu = _make_utils()
-        tu._docker_image = "test_img:latest"
-
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        with patch("subprocess.run", return_value=mock_proc) as mock_run:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                indir = Path(tmpdir) / "proc"
-                indir.mkdir()
-                cmd_str, code = tu._run_docker(indir)
-        assert isinstance(cmd_str, str)
-        assert "docker" in cmd_str
-        assert code == 0
-        mock_run.assert_called_once()
-
-    def test_run_docker_returns_exit_8(self):
-        tu = _make_utils()
-        tu._docker_image = "test_img:latest"
-
-        mock_proc = MagicMock()
-        mock_proc.returncode = 8
-        with patch("subprocess.run", return_value=mock_proc):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                indir = Path(tmpdir) / "proc"
-                indir.mkdir()
-                _, code = tu._run_docker(indir)
-        assert code == 8
-
-
-class TestGetImageDigestMocked:
-    """Tests for _get_image_digest using subprocess mocking."""
-
-    def test_returns_digest_on_success(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.stdout = "sha256:abc123\n"
-        with patch("subprocess.run", return_value=mock_proc):
-            digest = tu._get_image_digest()
-        assert digest == "sha256:abc123"
-
-    def test_returns_empty_on_failure(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        with patch("subprocess.run", return_value=mock_proc):
-            digest = tu._get_image_digest()
-        assert digest == ""
-
-    def test_returns_empty_on_file_not_found(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        with patch("subprocess.run", side_effect=FileNotFoundError("no docker")):
-            assert tu._get_image_digest() == ""
-
-    def test_returns_empty_on_timeout(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 10)):
-            assert tu._get_image_digest() == ""
-
-    def test_returns_empty_on_os_error(self):
-        tu = _make_utils()
-        tu._docker_image = "img:latest"
-        with patch("subprocess.run", side_effect=OSError("os error")):
-            assert tu._get_image_digest() == ""
-
-
-# ---------------------------------------------------------------------------
-# annotate() — missing results files after non-8 exit (coverage branch)
-# ---------------------------------------------------------------------------
-
-
-class TestAnnotateMissingResults:
-    """Test the branch where exit != 8 but results files are absent."""
-
-    def test_empty_records_when_results_missing_and_exit0(self):
-        import tempfile
-
-        tu = _make_utils()
-        tu._docker_image = "mock_image:latest"
-
-        def _fake_run_docker(indir):
-            # Exit 0 but write NO results files
-            return ("docker run ...", 0)
-
-        with patch.object(tu, "is_available", return_value=True):
-            with patch.object(tu, "_run_docker", side_effect=_fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value=""):
-                    result = tu.annotate(
-                        proteins={"p1": "MKTAY"},
-                        tax_id="562",
-                    )
-
-        assert result.records == []
-
-
-# ---------------------------------------------------------------------------
-# Import needed for tempfile in new test classes
-# ---------------------------------------------------------------------------
-import tempfile  # noqa: E402 (intentional late import for clarity)
-
-
-# ---------------------------------------------------------------------------
-# Export tests
-# ---------------------------------------------------------------------------
-
-
-class TestExports:
-    """Verify TransytUtils is exported from kbutillib.__init__."""
-
-    def test_transyt_utils_exported(self):
-        import kbutillib
-
-        assert hasattr(kbutillib, "TransytUtils")
-        assert kbutillib.TransytUtils is not None
-
-    def test_transyt_utils_is_correct_class(self):
-        import kbutillib
-
-        assert kbutillib.TransytUtils is TransytUtils
-
-
-# ---------------------------------------------------------------------------
-# Live integration tests (skipped unless Docker image is present)
-# ---------------------------------------------------------------------------
-
-_TRANSYT_UTILS_FOR_SKIP = TransytUtils(
-    config_file=False, token_file=None, kbase_token_file=None
-)
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    not _TRANSYT_UTILS_FOR_SKIP.is_available(),
-    reason="Transyt Docker image not locally present",
-)
-class TestTransytLiveIntegration:
-    """Live integration tests — only run when the Docker image is present."""
-
-    def test_annotate_returns_result(self):
-        tu = TransytUtils(config_file=False, token_file=None, kbase_token_file=None)
-        result = tu.annotate(
-            proteins={"test_prot": "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWERVMGDGERQFSTSKSVTLKSTLEAIPHESIELPEDGIEYCCRTNAITDEFLETIADKFYINAEKELREHPIFEEAKEIFNSGKDLFEQYREELEKEYGINK"},
-            tax_id="562",
+        tu._docker_image = "mock:latest"
+        result = self._annotate(
+            tu, proteins={"prot1": "MKTAY", "prot2": "MNFST"}, tax_id="562"
         )
         assert isinstance(result, AnnotationResult)
         assert result.tool == "transyt"
-        assert result.run_id != ""
+        assert result.parameters["tax_id"] == "562"
+        assert result.parameters["reference_database"] == "ModelSEED"
+
+    def test_records_have_tc_and_reaction_terms(self):
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        result = self._annotate(
+            tu, proteins={"prot1": "MKTAY", "prot2": "MNFST", "prot3": "MAAA"},
+            tax_id="562",
+        )
+        prot1 = next(r for r in result.records if r.gene_id == "prot1")
+        namespaces = {t.namespace for t in prot1.terms}
+        assert "TC" in namespaces
+        assert "MSRXN" in namespaces or "TRANSYT_RXN" in namespaces
+
+    def test_records_keyed_to_caller_ids(self):
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        proteins = {"prot1": "MKTAY", "prot2": "MNFST", "prot3": "MAAA"}
+        result = self._annotate(tu, proteins=proteins, tax_id="562")
+        assert {r.gene_id for r in result.records}.issubset(set(proteins))
+
+    def test_exit8_returns_empty_records(self):
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        with patch.object(tu, "is_available", return_value=True):
+            with patch.object(tu, "_run_docker", side_effect=lambda d: ("cmd", 8)):
+                with patch.object(tu, "_get_image_digest", return_value=""):
+                    result = tu.annotate(proteins={"p1": "MKTAY"}, tax_id="562")
+        assert result.records == []
+        assert result.tool == "transyt"
+
+    def test_metabolites_parameter_stored(self):
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        with patch.object(tu, "is_available", return_value=True):
+            with patch.object(tu, "_run_docker", side_effect=lambda d: ("cmd", 8)):
+                with patch.object(tu, "_get_image_digest", return_value=""):
+                    result = tu.annotate(
+                        proteins={"p1": "MKTAY"}, tax_id="562",
+                        metabolites=["cpd00027"],
+                    )
+        assert result.parameters["metabolites"] == ["cpd00027"]

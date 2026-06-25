@@ -1,98 +1,66 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<sbml xmlns="http://www.sbml.org/sbml/level2/version4"
-      xmlns:html="http://www.w3.org/1999/xhtml"
-      level="2" version="4">
-  <model id="transyt_model" name="Transyt Results">
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<!-- Minimal real-structure TranSyT output (SBML L3V2 + fbc) for offline tests.
+     3 genes (prot1, prot2, prot3); TR0001 maps to a ModelSEED reaction
+     (reactions_references.txt), TZ0002/TO0003 do not; M_mystery_c0 is a
+     non-ModelSEED species exercising the CPD fallback. -->
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" level="3" version="2"
+      xmlns:fbc="http://www.sbml.org/sbml/level3/version1/fbc/version2" fbc:required="false">
+  <model id="transyt_test">
+    <listOfCompartments>
+      <compartment constant="true" id="c" name="internal"/>
+      <compartment constant="true" id="e" name="external"/>
+    </listOfCompartments>
+    <listOfSpecies>
+      <species id="M_cpd00027_e0" name="D-Glucose" compartment="e" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_cpd00027_c0" name="D-Glucose" compartment="c" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_cpd00002_c0" name="ATP" compartment="c" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_cpd00008_c0" name="ADP" compartment="c" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_cpd00208_e0" name="Thymidine" compartment="e" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_cpd00208_c0" name="Thymidine" compartment="c" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+      <species id="M_mystery_c0" name="Mystery compound" compartment="c" constant="false" boundaryCondition="false" hasOnlySubstanceUnits="false"/>
+    </listOfSpecies>
+    <fbc:listOfGeneProducts>
+      <fbc:geneProduct fbc:id="G_prot1" fbc:label="prot1" fbc:name="prot1" metaid="G_prot1"/>
+      <fbc:geneProduct fbc:id="G_prot2" fbc:label="prot2" fbc:name="prot2" metaid="G_prot2"/>
+      <fbc:geneProduct fbc:id="G_prot3" fbc:label="prot3" fbc:name="prot3" metaid="G_prot3"/>
+    </fbc:listOfGeneProducts>
     <listOfReactions>
-      <reaction id="R_T0001" name="Glucose ABC transporter" reversible="false">
-        <notes>
-          <html:p>TC: 3.A.1.1.1</html:p>
-        </notes>
+      <reaction id="TR0001" name="TR0001" reversible="true" fbc:lowerFluxBound="lb" fbc:upperFluxBound="ub">
+        <fbc:geneProductAssociation>
+          <fbc:geneProductRef fbc:geneProduct="G_prot1"/>
+        </fbc:geneProductAssociation>
         <listOfReactants>
-          <speciesReference species="M_glc__D_e" stoichiometry="1"/>
-          <speciesReference species="M_atp_c" stoichiometry="1"/>
-          <speciesReference species="M_h2o_c" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00027_e0" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00002_c0" stoichiometry="1"/>
         </listOfReactants>
         <listOfProducts>
-          <speciesReference species="M_glc__D_c" stoichiometry="1"/>
-          <speciesReference species="M_adp_c" stoichiometry="1"/>
-          <speciesReference species="M_pi_c" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00027_c0" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00008_c0" stoichiometry="1"/>
         </listOfProducts>
-        <kineticLaw>
-          <math xmlns="http://www.w3.org/1998/Math/MathML">
-            <cn> 0 </cn>
-          </math>
-        </kineticLaw>
       </reaction>
-      <reaction id="R_T0002" name="Phosphotransferase system, glucose" reversible="false">
-        <notes>
-          <html:p>TC: 4.A.1.1.1</html:p>
-        </notes>
+      <reaction id="TZ0002" name="TZ0002" reversible="false" fbc:lowerFluxBound="lb0" fbc:upperFluxBound="ub">
+        <fbc:geneProductAssociation>
+          <fbc:geneProductRef fbc:geneProduct="G_prot2"/>
+        </fbc:geneProductAssociation>
         <listOfReactants>
-          <speciesReference species="M_glc__D_e" stoichiometry="1"/>
-          <speciesReference species="M_pep_c" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00208_e0" stoichiometry="1"/>
         </listOfReactants>
         <listOfProducts>
-          <speciesReference species="M_g6p_c" stoichiometry="1"/>
-          <speciesReference species="M_pyr_c" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00208_c0" stoichiometry="1"/>
         </listOfProducts>
-        <kineticLaw>
-          <math xmlns="http://www.w3.org/1998/Math/MathML">
-            <cn> 0 </cn>
-          </math>
-        </kineticLaw>
       </reaction>
-      <reaction id="R_T0003" name="Lactose permease" reversible="false">
-        <notes>
-          <html:p>TC: 2.A.1.5.1</html:p>
-        </notes>
+      <reaction id="TO0003" name="TO0003" reversible="false" fbc:lowerFluxBound="lb0" fbc:upperFluxBound="ub">
+        <fbc:geneProductAssociation>
+          <fbc:geneProductRef fbc:geneProduct="G_prot1"/>
+          <fbc:geneProductRef fbc:geneProduct="G_prot3"/>
+        </fbc:geneProductAssociation>
         <listOfReactants>
-          <speciesReference species="M_lcts_e" stoichiometry="1"/>
-          <speciesReference species="M_h_e" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_mystery_c0" stoichiometry="2"/>
         </listOfReactants>
         <listOfProducts>
-          <speciesReference species="M_lcts_c" stoichiometry="1"/>
-          <speciesReference species="M_h_c" stoichiometry="1"/>
+          <speciesReference constant="true" species="M_cpd00027_c0" stoichiometry="1"/>
         </listOfProducts>
-        <kineticLaw>
-          <math xmlns="http://www.w3.org/1998/Math/MathML">
-            <cn> 0 </cn>
-          </math>
-        </kineticLaw>
       </reaction>
     </listOfReactions>
-    <listOfGeneProducts>
-      <geneProduct id="gene_prot1" name="prot1" metaid="prot1">
-        <annotation>
-          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-            <rdf:Description rdf:about="#prot1">
-              <bqbiol:isEncodedBy xmlns:bqbiol="http://biomodels.net/biology-qualifiers/">
-                <rdf:Bag>
-                  <rdf:li rdf:resource="http://identifiers.org/uniprot/P00000"/>
-                </rdf:Bag>
-              </bqbiol:isEncodedBy>
-            </rdf:Description>
-          </rdf:RDF>
-        </annotation>
-      </geneProduct>
-      <geneProduct id="gene_prot2" name="prot2" metaid="prot2">
-      </geneProduct>
-      <geneProduct id="gene_prot3" name="prot3" metaid="prot3">
-      </geneProduct>
-    </listOfGeneProducts>
-    <listOfGeneProductAssociations>
-      <geneProductAssociation reaction="R_T0001">
-        <geneProductRef geneProduct="gene_prot1"/>
-      </geneProductAssociation>
-      <geneProductAssociation reaction="R_T0002">
-        <geneProductRef geneProduct="gene_prot2"/>
-      </geneProductAssociation>
-      <geneProductAssociation reaction="R_T0003">
-        <geneProductRef geneProduct="gene_prot1"/>
-      </geneProductAssociation>
-      <geneProductAssociation reaction="R_T0003">
-        <geneProductRef geneProduct="gene_prot3"/>
-      </geneProductAssociation>
-    </listOfGeneProductAssociations>
   </model>
 </sbml>

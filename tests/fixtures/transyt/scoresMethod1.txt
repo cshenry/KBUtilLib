@@ -1,0 +1,9 @@
+>prot1
+3.A.1.1.1 - Evalue: 0.0	[TR0001, TO0003]
+2.A.1.5.1 - Evalue: 1.5E-50	[TR0001]
+
+>prot2
+4.A.1.1.1 - Evalue: 2.0E-30	[TZ0002]
+
+>prot3
+2.A.1.5.1 - Evalue: 3.0E-20	[TO0003]

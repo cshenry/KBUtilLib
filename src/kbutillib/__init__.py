@@ -237,6 +237,12 @@ except ImportError as e:
     TransytUtils = None
 
 try:
+    from .ontomap_utils import OntomapUtils
+except ImportError as e:
+    _import_error("ontomap_utils", e)
+    OntomapUtils = None
+
+try:
     from .kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
@@ -395,6 +401,11 @@ try:
 except ImportError:
     RCSBPDBUtilsImpl = None
 
+try:
+    from .ontomap_utils import OntomapUtilsImpl
+except ImportError:
+    OntomapUtilsImpl = None
+
 
 # Retired
 examples = None
@@ -463,6 +474,7 @@ __all__ = [
     "ThermoUtils",
     "ToolUnavailableError",
     "TransytUtils",
+    "OntomapUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",
@@ -488,6 +500,7 @@ __all__ = [
     "RCSBPDBUtilsImpl",
     "SKANIUtilsImpl",
     "ThermoUtilsImpl",
+    "OntomapUtilsImpl",
     # Endpoints
     "base_url",
     "env_from_url",

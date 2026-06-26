@@ -7,7 +7,7 @@ dram2-id-remap-impl
 conductor/dram2-id-remap/impl
 
 ## commit_shas
-(filled after commit)
+- e891617d6502e93a42a60a32ed201b6148967e0d
 
 ## summary
 

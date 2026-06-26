@@ -1,0 +1,38 @@
+{
+  "prd_name": "dram2-input-genes-id-remap",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Implement + offline tests",
+      "parallel_group": [
+        {
+          "task_id": "dram2-id-remap-impl",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the DRAM2Utils --input_genes id-remap + run-hardening per the PRD at KBUtilLib/agent-io/prds/dram2-input-genes-id-remap/fullprompt.md (read it first). Work on KBUtilLib branch wip. Confine ALL changes to src/kbutillib/dram2_utils.py and tests/annotators/test_dram2_utils.py. Implement Decisions 1-10 and satisfy Acceptance Criteria 1-15 and 17 (Criterion 16 is the separate Phase-2 live h100 validation; do NOT attempt a live DRAM2 run here). Key points: (A) rename emitted FASTA-header ids to g_<n> assigned by enumerating the proteins dict in insertion order; _write_faa returns the {emitted_id: caller_id} map and looks up gene_coords by caller_id (synthetic fallback start=1,stop=3*len(seq),strand=1; strand normalized 1/-1). (B) Change _parse_annotations_tsv to (tsv_text, emitted_to_caller): translate each row query_id back to the caller id, drop rows whose query_id is absent from the map, emit records in caller (insertion) order; record.gene_id is the ORIGINAL caller locus_id. All DB namespace tagging (KO/PF/EC/CAZY/free-text, EC split + EC: strip) unchanged. (C) Build the subprocess env explicitly in _run_nextflow: env['NXF_VER']=dram2.nxf_ver (default '24.10.5'); when dram2.env_path (a single colon-separated string) is non-empty, env['PATH']=env_path + os.pathsep + current PATH. Do NOT source dram2-env.sh. (D) Replace tempfile.TemporaryDirectory with tempfile.mkdtemp(prefix='dram2_', dir=work_root) + try/finally, where work_root=dram2.work_root (default <launch_dir>/scratch, created if absent; never /tmp). (E) Keep-on-failure: on Nextflow non-zero OR any pre-parse exception, ALWAYS preserve the scratch dir and create <work_root>/failed-<run_id>/, copying outdir/pipeline_info (if present, recursively) and <launch_dir>/.nextflow.log (if present, as nextflow.log); skip missing sources without raising; log the preserved path at ERROR; re-raise the original error. On success delete scratch unless keep_work. Add opt-in keep-on-success via dram2.keep_work config and a new optional annotate(..., keep_work: bool|None=None) kwarg (param overrides config). (F) is_available() additionally WARNS (does not return False) when Path(pipeline) does not resolve under launch_dir. (G) __init__ reads new config keys dram2.nxf_ver, dram2.env_path, dram2.work_root, dram2.keep_work; add a code comment that on native h100 dram2.nextflow should be /scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native. (H) annotate().parameters MUST include work_dir (absolute) and kept (bool) on every run. Update the module docstring's 'the .faa header IS the caller id' claim (header id is now synthetic g_<n>; caller id recovered via the reverse map). Adapt the existing offline golden-fixture parse tests to pass identity {id:id} maps. Add offline unit tests covering: the b0001 round-trip, _write_faa map+coords, parser translation + unknown-query_id drop, the env builder (NXF_VER + PATH prefix via monkeypatched subprocess.run), and keep-on-failure preservation (mock subprocess.run non-zero + staged fake pipeline_info/). Do NOT modify any file under GenomeAnnotationAggregator/. Run pytest tests/annotators/test_dram2_utils.py and ensure it is green. Write a work-record under agent-io/work-records/.",
+          "success_criteria": "pytest tests/annotators/test_dram2_utils.py passes, including a new offline b0001 round-trip test where non-prodigal ids are emitted as g_<n> (last _-split token is a base-10 int) and the parsed AnnotationResult records carry b0001-style gene_id values; all pre-existing golden-fixture parse assertions still pass after adaptation to identity maps; the public annotate() signature gains only the optional keep_work keyword; annotate().parameters contains work_dir and kept; and git shows no file under GenomeAnnotationAggregator/ was modified.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Live h100 validation",
+      "parallel_group": [
+        {
+          "task_id": "dram2-id-remap-live-h100",
+          "lane": "maestro",
+          "role": "developer",
+          "prompt": "Live h100 end-to-end validation of the DRAM2Utils id-remap fix (Acceptance Criterion 16 of KBUtilLib/agent-io/prds/dram2-input-genes-id-remap/fullprompt.md). Run ON h100 against the real DRAM2 install. Steps: (1) Ensure the KBUtilLib wip branch carrying the Phase-1 fix is the installed/editable kbutillib in the environment you use (pull wip + pip install -e if needed; verify dram2_utils.py has the g_<n> remap by importing _write_faa and confirming it returns a map). (2) Configure DRAM2Utils via config or kwargs: dram2.launch_dir=/scratch1/fliu/hub_scratch/chenry/DRAM2, dram2.pipeline=/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf, dram2.nextflow=/scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native, dram2.nxf_ver=24.10.5, dram2.env_path set to the env_nf/bin + micromamba bin dirs needed for java+micromamba on PATH, dram2.profile per the working profile (conda or docker per dram2-docker-profile-validation.md). (3) Obtain the Keio proteins (b0001-style store locus_ids): check whether the Keio genome from the prior dram2-e2e-validation run is present in the GAA store on h100, and if it is NOT, seed it first (re-run the seed step from that work-record / its seed_store_cli artifacts) so the task is self-contained; then derive the {locus_id: protein_seq} dict from the store. Do NOT hardcode a FASTA path. (4) With KBU_DRAM2_LIVE=1, call DRAM2Utils.annotate(proteins, gene_coords, databases=['kofam']). Confirm the pipeline completes COMBINE_ANNOTATIONS WITHOUT the 'ValueError: invalid literal for int() with base 10: b0001' crash, and that the returned AnnotationRecords carry b0001-style gene_ids. (5) Capture the execution_trace and a sample of returned records into a work-record under agent-io/work-records/. If the run fails, preserve and report the contents of the <work_root>/failed-<run_id>/ dir (set dram2.keep_work / rely on keep-on-failure).",
+          "success_criteria": "On the real h100 DRAM2 install, the Keio genome (b0001-style locus_ids, kofam) runs end-to-end through COMBINE_ANNOTATIONS with no int('b0001') ValueError, and DRAM2Utils.annotate returns AnnotationRecords whose gene_id values are b0001-style store locus_ids; a work-record committed under agent-io/work-records/ contains the execution_trace evidence and a sample of the remapped records.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["dram2-id-remap-impl"],
+          "machine": "h100",
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

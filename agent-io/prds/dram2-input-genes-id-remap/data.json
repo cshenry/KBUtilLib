@@ -1,0 +1,30 @@
+{
+  "prd_name": "dram2-input-genes-id-remap",
+  "title": "DRAM2Utils --input_genes id-remap + run-hardening",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "priority": "high",
+  "created": "2026-06-26",
+  "confront_rounds": 1,
+  "decisions": {
+    "input_strategy": "A (rename emitted ids + reverse-map query_id->locus_id inside DRAM2Utils); B (--input_fasta) rejected as incompatible with GAA seq-hash cross-genome batching",
+    "emitted_id_scheme": "g_<n> (1-based per-batch integer); store locus_id never written into the FASTA header",
+    "env_ownership": "config keys dram2.nxf_ver (default 24.10.5) + dram2.env_path (PATH prepend); DRAM2Utils builds subprocess env explicitly; dram2-env.sh not sourced",
+    "scratch_root": "dram2.work_root (default=launch_dir on /scratch1); mkdtemp not TemporaryDirectory; never /tmp",
+    "failure_evidence": "keep-on-failure preserves scratch dir + copies pipeline_info/ + .nextflow.log to <work_root>/failed-<run_id>/; dram2.keep_work opt-in for success",
+    "gaa_changes": "none required"
+  },
+  "acceptance": [
+    "annotate(proteins, gene_coords, databases=['kofam']) on a real genome with b0001-style locus_ids completes COMBINE_ANNOTATIONS exit 0 and returns records whose gene_id maps back to the original store locus_ids",
+    "offline unit test: protein dict with non-prodigal ids (b0001) round-trips (emitted id numeric final token; output remaps to b0001)",
+    "documented non-stale way to get NXF_VER=24.10.5 + PATH without sourcing dram2-env.sh",
+    "failure path preserves work dir + pipeline_info for debugging"
+  ],
+  "confront_dropped": [
+    "#9 input_fasta misconfig guard",
+    "#10 versioned parser shim"
+  ],
+  "confront_folded": "stalls 1-8 + FC4 (scratch subdir) + FC6 (is_available warn); 17 Acceptance Criteria appended to fullprompt.md"
+}

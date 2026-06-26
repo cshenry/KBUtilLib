@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from .rcsb_pdb_utils import RCSBPDBUtilsImpl
     from .kbase_catalog_client import CatalogClient
     from .kb_job_utils import KBJobUtils
+    from .ontomap_utils import OntomapUtilsImpl
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class KBUtilLib:
         self._pdb = None
         self._catalog = None
         self._jobs = None
+        self._ontomap = None
 
     # ── sub-utility lazy properties ──────────────────────────────────
 
@@ -284,3 +286,10 @@ class KBUtilLib:
             from .kb_job_utils import KBJobUtils
             self._jobs = KBJobUtils(self.env)
         return self._jobs
+
+    @property
+    def ontomap(self) -> "OntomapUtilsImpl":
+        if self._ontomap is None:
+            from .ontomap_utils import OntomapUtilsImpl
+            self._ontomap = OntomapUtilsImpl(self.env)
+        return self._ontomap

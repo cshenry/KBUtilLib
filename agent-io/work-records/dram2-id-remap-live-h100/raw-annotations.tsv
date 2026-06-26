@@ -1,0 +1,51 @@
+query_id	input_fasta	start_position	stop_position	strandedness	rank	gene_number	kofam_id	kofam_EC	kofam_bitScore	kofam_description	kofam_score_rank	heme_regulatory_motif_count
+g_1		190	255	1	E	1	K08278		47.0	thr operon leader peptide	47.0	0
+g_10		9928	10494	-1	E	2	K07034		241.8	uncharacterized protein	241.8	0
+g_11		10643	11356	-1	E	3						0
+g_12		11382	11786	-1	E	4						0
+g_13		12163	14079	1	E	5	K04043		949.7	molecular chaperone DnaK	949.7	0
+g_14		14168	15298	1	E	6	K03686		546.2	molecular chaperone DnaJ	546.2	3
+g_15		15445	16557	1	E	7	K07495		40.0	putative transposase	40.0	0
+g_16		16751	16960	-1	E	8	K18919		108.3	protein HokC/D	108.3	0
+g_17		17489	18655	1	E	9	K03313		556.5	Na+:H+ antiporter, NhaA family	556.5	0
+g_18		18715	19620	1	E	10	K03717		396.3	LysR family transcriptional regulator, transcriptional activator of nhaA	396.3	0
+g_19		19811	20314	-1	E	11	K07480		314.3	insertion element IS1 protein InsB	314.3	0
+g_2		337	2799	1	E	12	K12524	EC:2.7.2.4; EC:1.1.1.3	1173.9	bifunctional aspartokinase / homoserine dehydrogenase 1 [EC:2.7.2.4 1.1.1.3]	1173.9	0
+g_20		20233	20508	-1	E	13	K07480		70.1	insertion element IS1 protein InsB	70.1	0
+g_21		20815	21078	-1	E	14	K02968		111.3	small subunit ribosomal protein S20	111.3	0
+g_22		21181	21399	1	E	15						0
+g_23		21407	22348	1	E	16	K11753	EC:2.7.1.26; EC:2.7.7.2	437.5	riboflavin kinase / FMN adenylyltransferase [EC:2.7.1.26 2.7.7.2]	437.5	0
+g_24		22391	25207	1	E	17	K01870	EC:6.1.1.5	1062.7	isoleucyl-tRNA synthetase [EC:6.1.1.5]	1062.7	0
+g_25		25207	25701	1	E	18	K03101	EC:3.4.23.36	184.8	signal peptidase II [EC:3.4.23.36]	184.8	0
+g_26		25826	26275	1	E	19	K03774	EC:5.2.1.8	228.2	FKBP-type peptidyl-prolyl cis-trans isomerase SlpA [EC:5.2.1.8]	228.2	0
+g_27		26277	27227	1	E	20	K03527	EC:1.17.7.4	473.2	4-hydroxy-3-methylbut-2-en-1-yl diphosphate reductase [EC:1.17.7.4]	473.2	0
+g_28		27293	28207	1	E	21	K12700	EC:3.2.2.-	595.9	non-specific riboncleoside hydrolase [EC:3.2.2.-]	595.9	0
+g_29		28374	29195	1	E	22	K00215	EC:1.17.1.8	338.2	4-hydroxy-tetrahydrodipicolinate reductase [EC:1.17.1.8]	338.2	0
+g_3		2801	3733	1	E	23	K00872	EC:2.7.1.39	302.3	homoserine kinase [EC:2.7.1.39]	302.3	0
+g_30		29651	30799	1	E	24	K01956	EC:6.3.5.5	664.9	carbamoyl-phosphate synthase small subunit [EC:6.3.5.5]	664.9	0
+g_31		30817	34038	1	E	25	K01955	EC:6.3.5.5	1831.5	carbamoyl-phosphate synthase large subunit [EC:6.3.5.5]	1831.5	0
+g_32		34300	34695	1	E	26	K08277		235.3	transcriptional activator CaiF	235.3	0
+g_33		34781	35371	-1	E	27	K08279		386.7	carnitine operon protein CaiE	386.7	0
+g_34		35377	36162	-1	E	28	K08299	EC:4.2.1.149	400.7	crotonobetainyl-CoA hydratase [EC:4.2.1.149]	400.7	0
+g_35		36271	37824	-1	E	29	K02182	EC:6.2.1.48	630.6	carnitine-CoA ligase [EC:6.2.1.48]	630.6	0
+g_36		37898	39115	-1	E	30	K08298	EC:2.8.3.21	718.8	L-carnitine CoA-transferase [EC:2.8.3.21]	718.8	0
+g_37		39244	40386	-1	E	31	K08297	EC:1.3.8.13	755.3	crotonobetainyl-CoA dehydrogenase [EC:1.3.8.13]	755.3	0
+g_38		40417	41931	-1	E	32	K05245		920.1	L-carnitine/gamma-butyrobetaine antiporter	920.1	0
+g_39		42403	43173	1	E	33	K03521		191.0	electron transfer flavoprotein beta subunit	191.0	0
+g_4		3734	5020	1	E	34	K06037	EC:4.2.3.-	284.3	O-phospho-L-threonine phospho-lyase [EC:4.2.3.-]	284.3	0
+g_40		43188	44129	1	E	35	K03522		244.2	electron transfer flavoprotein alpha subunit	244.2	0
+g_41		44180	45466	1	E	36	K00313	EC:1.5.5.-	571.0	electron transfer flavoprotein-quinone oxidoreductase [EC:1.5.5.-]	571.0	0
+g_42		45463	45750	1	E	37	K03855		106.7	ferredoxin like protein	106.7	0
+g_43		45807	47138	1	E	38	K08368		589.7	MFS transporter, putative metabolite transport protein	589.7	0
+g_44		47246	47776	1	E	39	K11746		267.9	glutathione-regulated potassium-efflux system ancillary protein KefF	267.9	0
+g_45		47769	49631	1	E	40	K11745		893.8	glutathione-regulated potassium-efflux system ancillary protein KefC	893.8	0
+g_46		49823	50302	1	E	41	K00287	EC:1.5.1.3	219.0	dihydrofolate reductase [EC:1.5.1.3]	219.0	0
+g_47		50380	51222	-1	E	42	K01525	EC:3.6.1.41	428.5	bis(5'-nucleosyl)-tetraphosphatase (symmetrical) [EC:3.6.1.41]	428.5	0
+g_48		51229	51606	-1	E	43	K06195		192.2	ApaG protein	192.2	0
+g_49		51609	52430	-1	E	44	K02528	EC:2.1.1.182	315.9	16S rRNA (adenine1518-N6/adenine1519-N6)-dimethyltransferase [EC:2.1.1.182]	315.9	0
+g_5		5234	5530	1	E	45						0
+g_50		52427	53416	-1	E	46	K00097	EC:1.1.1.262	494.1	4-hydroxythreonine-4-phosphate dehydrogenase [EC:1.1.1.262]	494.1	0
+g_6		5683	6459	-1	E	47	K09861		315.7	uncharacterized protein	315.7	0
+g_7		6529	7959	-1	E	48	K03310		539.5	alanine or glycine:cation symporter, AGCS family	539.5	0
+g_8		8238	9191	1	E	49	K00616	EC:2.2.1.2	386.6	transaldolase [EC:2.2.1.2]	386.6	0
+g_9		9306	9893	1	E	50	K03831	EC:2.7.7.75	362.8	molybdopterin adenylyltransferase [EC:2.7.7.75]	362.8	0

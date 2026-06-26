@@ -1,0 +1,57 @@
+{
+  "n_proteins_sent": 50,
+  "first_3_caller_ids": [
+    "b0001",
+    "b0002",
+    "b0003"
+  ],
+  "databases": [
+    "kofam"
+  ],
+  "threads": 4,
+  "config": {
+    "dram2": {
+      "launch_dir": "/scratch1/fliu/hub_scratch/chenry/DRAM2",
+      "pipeline": "/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf",
+      "nextflow": "/scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native",
+      "nxf_ver": "24.10.5",
+      "env_path": "/scratch1/fliu/hub_scratch/chenry/DRAM2/env/env_nf/bin:/scratch1/fliu/hub_scratch/chenry/DRAM2/bin",
+      "profile": "conda",
+      "config": "/scratch1/fliu/hub_scratch/chenry/DRAM2/dram2.config",
+      "work_root": "/scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch",
+      "keep_work": true
+    }
+  },
+  "kbutillib_path": "/mnt/homes/chenry/.maestro/worktrees/task-1520f857/src/kbutillib/dram2_utils.py",
+  "error": null,
+  "tool": "dram2",
+  "tool_version": "24.10.5",
+  "db_version": "kofam",
+  "run_id": "98428bef10d645d7a877a6283fd76dd9",
+  "command": "/scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native run /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf -profile conda -c /scratch1/fliu/hub_scratch/chenry/DRAM2/dram2.config --annotate --input_genes /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/input_genes --outdir /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/out -work-dir /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work -ansi-log false --threads 4 --use_kofam",
+  "parameters": {
+    "databases": [
+      "kofam"
+    ],
+    "threads": 4,
+    "pipeline": "/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf",
+    "launch_dir": "/scratch1/fliu/hub_scratch/chenry/DRAM2",
+    "profile": "conda",
+    "extra_config": "/scratch1/fliu/hub_scratch/chenry/DRAM2/dram2.config",
+    "input_protein_count": 50,
+    "work_dir": "/scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd",
+    "kept": true,
+    "gene_coords": true
+  },
+  "n_records": 46,
+  "unique_gene_ids_in_records": 46,
+  "n_records_with_b_prefixed_gene_id": 46,
+  "first_5_b_prefixed_gene_ids_in_records": [
+    "b0001",
+    "b0002",
+    "b0003",
+    "b0004",
+    "b0006"
+  ],
+  "all_gene_ids_are_b_prefixed": true
+}

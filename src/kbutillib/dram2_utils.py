@@ -19,16 +19,30 @@ This module:
 - guards that input is amino-acid (rejects nucleotide via
   :func:`_guard_protein`),
 - writes the proteins to a single ``input.faa`` in a temp ``input_genes``
-  directory (the ``.faa`` header IS the caller id; results map back via
-  that header → ``query_id``),
-- invokes the pinned DRAM2 ``nextflow run`` command, and
+  directory, assigning synthetic prodigal-safe ids ``g_1, g_2, …``
+  (1-based, in ``proteins`` insertion order) as the FASTA header ids
+  and recording the ``{emitted_id -> caller_id}`` reverse map so that
+  DRAM2 output rows can be translated back to the original caller ids,
+- invokes the pinned DRAM2 ``nextflow run`` command with an explicitly
+  constructed subprocess environment (``NXF_VER`` pinned; optional
+  ``PATH`` prefix from config), and
 - parses the ``raw-annotations.tsv`` published under
-  ``{outdir}/RAW/raw-annotations.tsv``.
+  ``{outdir}/RAW/raw-annotations.tsv``, translating each row's
+  ``query_id`` (a synthetic ``g_<n>``) back to the caller id via the
+  reverse map before constructing ``AnnotationRecord`` objects.
+
+Note: the ``.faa`` header id is now a synthetic ``g_<n>`` token, NOT the
+caller id.  The caller id is recovered from the ``{emitted_id ->
+caller_id}`` reverse map built by ``_write_faa`` and passed to
+``_parse_annotations_tsv``.  The public ``AnnotationResult.records[].gene_id``
+value is always the original caller id.
 
 CLI invocation pinned on h100 (2026-06-18)
 -----------------------------------------
 Pipeline:     ``/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf``
               (also reachable via the env var ``$DRAM2_PIPELINE``)
+              On the native h100 host set
+              ``dram2.nextflow = /scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native``
 Engine:       Nextflow 24.10.5 in micromamba env ``$CONDA_ENVS_PATH/env_nf``
 Profile:      ``conda`` (drives per-process conda envs via micromamba)
 Launch dir:   ``$DRAM2_ROOT`` — the config resolves database paths as
@@ -48,7 +62,9 @@ contains a fixed prefix block followed by per-database tuples::
         <db>_id  <db>_EC  <db>_bitScore  <db>_description
         [<db>_gene_name] [<db>_score_rank] [<db>_rank] [<db>_family] ...
 
-``query_id`` is the caller id (preserved exactly from the FASTA header).
+``query_id`` is the emitted synthetic id (``g_<n>``), translated back to
+the caller id via the reverse map before ``AnnotationRecord.gene_id`` is
+set.
 
 Namespace tagging
 -----------------
@@ -82,6 +98,7 @@ installed.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -107,10 +124,14 @@ from .annotator_utils import (
 _TOOL = "dram2"
 _INSTALL_HINT = (
     "Install DRAM2 (Nextflow pipeline). On h100 the install root is "
-    "/storage/chenry/DRAM2 (via $DRAM2_ROOT); set "
+    "/scratch1/fliu/hub_scratch/chenry/DRAM2 (via $DRAM2_ROOT); set "
     "dram2.pipeline / dram2.launch_dir / dram2.nextflow in config.yaml "
-    "or rely on the $DRAM2_PIPELINE env var sourced from dram2-env.sh."
+    "or rely on the $DRAM2_PIPELINE env var. "
+    "On the native h100 host set "
+    "dram2.nextflow = /scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native"
 )
+
+_LOG = logging.getLogger(__name__)
 
 # Default published location of the combined raw annotations file (set by
 # DRAM2's modules.config: `withName: COMBINE_ANNOTATIONS { publishDir =
@@ -159,6 +180,9 @@ _PREFIX_COLUMNS: frozenset[str] = frozenset({
     "gene_number",
 })
 
+# Default Nextflow version to pin (overridable via dram2.nxf_ver in config).
+_DEFAULT_NXF_VER = "24.10.5"
+
 
 # ---------------------------------------------------------------------------
 # Pure parse helpers (offline-unit-testable)
@@ -167,7 +191,7 @@ _PREFIX_COLUMNS: frozenset[str] = frozenset({
 
 def _parse_annotations_tsv(
     tsv_text: str,
-    input_caller_ids: list[str],
+    emitted_to_caller: dict[str, str],
 ) -> list[AnnotationRecord]:
     """Parse a DRAM2 ``raw-annotations.tsv`` and return AnnotationRecords.
 
@@ -186,20 +210,23 @@ def _parse_annotations_tsv(
     - For ``<db>_description`` columns: emits a free-text Term
       ``(None, None, description)``.
 
-    Empty values are skipped.  Rows whose ``query_id`` is not in
-    *input_caller_ids* are dropped (guards against spurious ids).
+    Empty values are skipped.  Rows whose ``query_id`` is not a key in
+    *emitted_to_caller* are dropped (guards against spurious ids from
+    runs that mix batches).
 
     Args:
         tsv_text: Full text of the ``raw-annotations.tsv`` file.
-        input_caller_ids: Caller-supplied protein ids (as passed to
-            ``annotate``).  Only rows whose ``query_id`` matches one of
-            these ids are retained.
+        emitted_to_caller: Mapping ``{emitted_id -> caller_id}`` as
+            returned by ``_write_faa``.  Only rows whose ``query_id``
+            (the emitted synthetic ``g_<n>`` id) is a key in this map
+            are retained; the corresponding caller id is set as
+            ``AnnotationRecord.gene_id``.
 
     Returns:
         List of ``AnnotationRecord``.  Genes with no Terms emitted are
-        omitted.  Records appear in input-call order — the parser
-        preserves first-seen order from *input_caller_ids* rather than
-        TSV row order.
+        omitted.  Records appear in ``proteins`` insertion order — the
+        order of *emitted_to_caller* values (which mirrors the original
+        caller's dict insertion order).
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -210,8 +237,7 @@ def _parse_annotations_tsv(
         return []
     col: dict[str, int] = {name: idx for idx, name in enumerate(header)}
 
-    caller_set = set(input_caller_ids)
-    # Group terms by caller id, preserving discovery order via the input list.
+    # Group terms by CALLER id (translated from emitted_id).
     per_gene: dict[str, list[Term]] = {}
 
     # Pre-compute the columns we will emit Terms from.  Build three lists so
@@ -237,9 +263,11 @@ def _parse_annotations_tsv(
         while len(parts) < len(header):
             parts.append("")
 
-        query_id = parts[col["query_id"]].strip()
-        if query_id not in caller_set:
+        emitted_id = parts[col["query_id"]].strip()
+        # Translate emitted id -> caller id; drop rows not in the map
+        if emitted_id not in emitted_to_caller:
             continue
+        caller_id = emitted_to_caller[emitted_id]
 
         row_terms: list[Term] = []
         for name, idx in id_columns:
@@ -288,14 +316,19 @@ def _parse_annotations_tsv(
             )
 
         if row_terms:
-            per_gene.setdefault(query_id, []).extend(row_terms)
+            per_gene.setdefault(caller_id, []).extend(row_terms)
 
-    # Emit records in input-call order, skipping ids with no terms.
+    # Emit records in caller insertion order (i.e. emitted_to_caller values
+    # order, which mirrors the proteins dict order), skipping ids with no terms.
     records: list[AnnotationRecord] = []
-    for cid in input_caller_ids:
-        terms = per_gene.get(cid)
+    seen_caller_ids: set[str] = set()
+    for caller_id in emitted_to_caller.values():
+        if caller_id in seen_caller_ids:
+            continue
+        seen_caller_ids.add(caller_id)
+        terms = per_gene.get(caller_id)
         if terms:
-            records.append(AnnotationRecord(gene_id=cid, terms=terms))
+            records.append(AnnotationRecord(gene_id=caller_id, terms=terms))
     return records
 
 
@@ -337,19 +370,32 @@ class DRAM2Utils(AnnotatorUtils):
     to ``launchDir``, the pipeline must be launched from a specific
     install root (``$DRAM2_ROOT``).  The module reads that root and the
     pipeline path from config (``dram2.launch_dir``, ``dram2.pipeline``)
-    or the ``$DRAM2_ROOT`` / ``$DRAM2_PIPELINE`` environment variables
-    set by sourcing ``dram2-env.sh`` on h100.
+    or the ``$DRAM2_ROOT`` / ``$DRAM2_PIPELINE`` environment variables.
 
     Config keys (read via ``get_config_value``):
         ``dram2.nextflow`` — path to the ``nextflow`` binary (default
-            ``"nextflow"`` — must be on PATH).
+            ``"nextflow"`` — must be on PATH).  On the native h100 host
+            set this to
+            ``/scratch1/fliu/hub_scratch/chenry/DRAM2/bin/nextflow-native``.
         ``dram2.pipeline`` — path to ``main.nf`` (default ``$DRAM2_PIPELINE``
-            env var if set, else empty → unavailable).
+            env var if set, else empty -> unavailable).
         ``dram2.launch_dir`` — directory the pipeline is launched from
-            (default ``$DRAM2_ROOT`` env var if set, else empty → unavailable).
+            (default ``$DRAM2_ROOT`` env var if set, else empty -> unavailable).
         ``dram2.profile`` — Nextflow profile (default ``"conda"``).
         ``dram2.config`` — optional extra ``-c <file>`` config path (default
             empty / omit).
+        ``dram2.nxf_ver`` — Nextflow engine version to pin via ``NXF_VER``
+            in the subprocess environment (default ``"24.10.5"``).
+        ``dram2.env_path`` — colon-separated list of directories to prepend
+            to ``PATH`` in the subprocess environment (e.g.
+            ``"/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"``).
+            Default empty — ``PATH`` is inherited unchanged.  YAML list
+            values are NOT supported; supply as a single colon-joined string.
+        ``dram2.work_root`` — directory under which ``mkdtemp``-based scratch
+            dirs are created (default ``<launch_dir>/scratch``; created if
+            absent; never ``/tmp`` unless explicitly set).
+        ``dram2.keep_work`` — when True, preserve the scratch dir after a
+            successful run (default False).
 
     Example::
 
@@ -380,6 +426,21 @@ class DRAM2Utils(AnnotatorUtils):
         self._extra_config: str = self.get_config_value(
             "dram2.config", default=""
         )
+        # Run-hardening config keys
+        self._nxf_ver: str = self.get_config_value(
+            "dram2.nxf_ver", default=_DEFAULT_NXF_VER
+        )
+        # dram2.env_path: single colon-separated string, NOT a YAML list.
+        # Example: "/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"
+        self._env_path: str = self.get_config_value(
+            "dram2.env_path", default=""
+        )
+        self._work_root: str = self.get_config_value(
+            "dram2.work_root", default=""
+        )
+        self._keep_work: bool = bool(self.get_config_value(
+            "dram2.keep_work", default=False
+        ))
 
     # ------------------------------------------------------------------
     # Availability probe
@@ -398,8 +459,13 @@ class DRAM2Utils(AnnotatorUtils):
         3. ``dram2.launch_dir`` is set and points to an existing directory
            (typically ``$DRAM2_ROOT``).
 
-        Side-effect-free: no logging, no mutation, no subprocess launches
-        of the pipeline itself.
+        Additionally emits a WARNING (but does NOT return False) when the
+        configured ``pipeline`` path does not resolve under ``launch_dir``.
+        This catches the stale-``DRAM2_ROOT`` class of misconfiguration early
+        (e.g. pipeline on ``/scratch1/...`` but launch_dir still pointing to
+        the old ``/storage/...`` install root).
+
+        Side-effect-free aside from the optional warning log.
         """
         if not self._nextflow_exe or shutil.which(self._nextflow_exe) is None:
             return False
@@ -407,6 +473,18 @@ class DRAM2Utils(AnnotatorUtils):
             return False
         if not self._launch_dir or not Path(self._launch_dir).is_dir():
             return False
+        # Warn (don't fail) when pipeline is not under launch_dir
+        try:
+            pipeline_resolved = Path(self._pipeline).resolve()
+            launch_resolved = Path(self._launch_dir).resolve()
+            pipeline_resolved.relative_to(launch_resolved)
+        except ValueError:
+            _LOG.warning(
+                "DRAM2Utils misconfiguration: pipeline %r does not resolve "
+                "under launch_dir %r.  Database paths may not resolve correctly.",
+                self._pipeline,
+                self._launch_dir,
+            )
         return True
 
     # ------------------------------------------------------------------
@@ -420,6 +498,7 @@ class DRAM2Utils(AnnotatorUtils):
         gene_coords: dict[str, tuple[int, int, int]] | None = None,
         run_config: str | None = None,
         threads: int = 1,
+        keep_work: bool | None = None,
         **params: Any,
     ) -> AnnotationResult:
         """Annotate proteins with DRAM2.
@@ -427,7 +506,9 @@ class DRAM2Utils(AnnotatorUtils):
         Args:
             proteins: Mapping of ``{caller_id: amino_acid_sequence}``.
                 Sequences must be amino-acid; nucleotide-looking input
-                is rejected by the protein alphabet guard.
+                is rejected by the protein alphabet guard.  Must be a
+                standard insertion-ordered dict; behavior is undefined
+                for unordered mappings.
             databases: Iterable of DRAM2 database short names to enable
                 (e.g. ``["kofam", "dbcan"]``).  Each name ``X``
                 appends a ``--use_X`` flag to the Nextflow invocation.
@@ -435,14 +516,20 @@ class DRAM2Utils(AnnotatorUtils):
             gene_coords: Optional mapping of ``{caller_id: (start, stop,
                 strand)}`` supplying genomic coordinates for prodigal-
                 style FASTA headers.  When provided, the FASTA header for
-                each id is written as ``>{id} # {start} # {stop} #
-                {strand} #`` (strand normalised to numeric ``1``/``-1``).
-                When absent, synthetic coords are produced
+                each id is written as ``>{emitted_id} # {start} # {stop} #
+                {strand} #`` (coords looked up by CALLER id; strand
+                normalised to numeric ``1``/``-1``).  When absent,
+                synthetic coords are produced
                 (``start=1, stop=3*len(seq), strand=1``).
             run_config: Optional path to an extra Nextflow ``-c`` config
                 file.  When given, overrides the ``dram2.config`` value
                 from the instance config (``self._extra_config``).
             threads: ``--threads`` value passed to the pipeline.
+            keep_work: When True, preserve the scratch dir after a
+                successful run.  When False, delete it.  When None
+                (default), the ``dram2.keep_work`` config value is used.
+                On failure the scratch dir is ALWAYS preserved regardless
+                of this flag.
             **params: Extra parameters merged into the recorded
                 ``AnnotationResult.parameters`` dict.  Not forwarded to
                 the Nextflow CLI.
@@ -458,25 +545,104 @@ class DRAM2Utils(AnnotatorUtils):
               full provenance).
             - ``run_id``: uuid4 hex.
             - ``command``: shlex-quoted ``nextflow run`` argv.
-            - ``parameters``: resolved values including defaults.
-            - ``records``: one per caller id that produced ≥1 Term;
-              genes with zero hits are absent.
+            - ``parameters``: resolved values including defaults, plus
+              ``work_dir`` (absolute scratch path) and ``kept`` (bool).
+            - ``records``: one per caller id that produced >=1 Term;
+              genes with zero hits are absent; ``gene_id`` is always
+              the original caller id.
 
         Raises:
             ToolUnavailableError: when ``is_available()`` is False.
             ValueError: when the input sequences fail the protein guard.
             subprocess.CalledProcessError: when ``nextflow run`` exits
-                non-zero.
+                non-zero (scratch dir preserved before re-raise).
         """
         self._require_available()
         _guard_protein(proteins)
 
         databases = tuple(databases) if databases is not None else _DEFAULT_DATABASES
 
+        # Resolve keep_work: kwarg wins over config
+        effective_keep_work = self._keep_work if keep_work is None else keep_work
+
         # run_config overrides the instance-level extra_config when provided.
         effective_config = run_config if run_config is not None else self._extra_config
 
         run_id = uuid.uuid4().hex
+
+        # Resolve work_root: config key > default (<launch_dir>/scratch)
+        if self._work_root:
+            work_root = Path(self._work_root)
+        else:
+            work_root = Path(self._launch_dir) / "scratch"
+        work_root.mkdir(parents=True, exist_ok=True)
+
+        scratch: str | None = None
+        work_dir_abs: str = ""
+        kept: bool = False
+
+        try:
+            scratch = tempfile.mkdtemp(prefix="dram2_", dir=str(work_root))
+            work_dir_abs = str(Path(scratch).resolve())
+            tmp = Path(scratch)
+            genes_dir = tmp / "input_genes"
+            genes_dir.mkdir()
+            outdir = tmp / "out"
+            workdir = tmp / "work"
+            outdir.mkdir()
+            workdir.mkdir()
+
+            # Write proteins as prodigal-style multi-FASTA with synthetic
+            # g_<n> ids. DRAM2 preserves the first whitespace token of each
+            # header as `query_id`; the emitted_to_caller map is used to
+            # translate results back to caller ids.
+            faa_path = genes_dir / "input.faa"
+            emitted_to_caller = self._write_faa(faa_path, proteins, gene_coords=gene_coords)
+
+            tsv_text, tool_version, command = self._run_nextflow(
+                genes_dir=genes_dir,
+                outdir=outdir,
+                workdir=workdir,
+                databases=databases,
+                threads=threads,
+                effective_config=effective_config,
+                run_id=run_id,
+                work_root=work_root,
+            )
+
+        except Exception as exc:
+            # Keep-on-failure: always preserve scratch + copy debug artifacts
+            if scratch is not None:
+                kept = True
+                failed_dir = work_root / f"failed-{run_id}"
+                try:
+                    failed_dir.mkdir(parents=True, exist_ok=True)
+                    # Copy pipeline_info/ from outdir if present
+                    src_info = Path(scratch) / "out" / "pipeline_info"
+                    if src_info.exists():
+                        shutil.copytree(src_info, failed_dir / "pipeline_info")
+                    # Copy .nextflow.log from launch_dir if present
+                    nxf_log = Path(self._launch_dir) / ".nextflow.log"
+                    if nxf_log.exists():
+                        shutil.copy2(str(nxf_log), str(failed_dir / "nextflow.log"))
+                except Exception:
+                    # Never raise a secondary error while handling the primary
+                    pass
+                _LOG.error(
+                    "DRAM2 run %s failed; scratch dir preserved at %s; "
+                    "debug artifacts copied to %s",
+                    run_id,
+                    scratch,
+                    failed_dir,
+                )
+            raise
+
+        # On success: delete scratch unless keep_work
+        if effective_keep_work:
+            kept = True
+        else:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
 
         parameters: dict[str, Any] = {
             "databases": list(databases),
@@ -486,6 +652,8 @@ class DRAM2Utils(AnnotatorUtils):
             "profile": self._profile,
             "extra_config": effective_config,
             "input_protein_count": len(proteins),
+            "work_dir": work_dir_abs,
+            "kept": kept,
             **params,
         }
         if gene_coords is not None:
@@ -493,30 +661,7 @@ class DRAM2Utils(AnnotatorUtils):
         if run_config is not None:
             parameters["run_config"] = run_config
 
-        with tempfile.TemporaryDirectory(prefix="dram2_") as tmpdir:
-            tmp = Path(tmpdir)
-            genes_dir = tmp / "input_genes"
-            genes_dir.mkdir()
-            outdir = tmp / "out"
-            workdir = tmp / "work"
-            outdir.mkdir()
-            workdir.mkdir()
-
-            # Write proteins as a prodigal-style multi-FASTA; DRAM2 preserves
-            # the first whitespace token of each header as `query_id`.
-            faa_path = genes_dir / "input.faa"
-            self._write_faa(faa_path, proteins, gene_coords=gene_coords)
-
-            tsv_text, tool_version, command = self._run_nextflow(
-                genes_dir=genes_dir,
-                outdir=outdir,
-                workdir=workdir,
-                databases=databases,
-                threads=threads,
-                effective_config=effective_config,
-            )
-
-        records = _parse_annotations_tsv(tsv_text, list(proteins.keys()))
+        records = _parse_annotations_tsv(tsv_text, emitted_to_caller)
 
         return AnnotationResult(
             tool=_TOOL,
@@ -537,33 +682,43 @@ class DRAM2Utils(AnnotatorUtils):
         path: Path,
         proteins: dict[str, str],
         gene_coords: dict[str, tuple[int, int, int]] | None = None,
-    ) -> None:
-        """Write ``{id: seq}`` to *path* as a prodigal-style multi-FASTA.
+    ) -> dict[str, str]:
+        """Write ``{caller_id: seq}`` to *path* as a prodigal-style multi-FASTA.
+
+        Assigns synthetic prodigal-safe ids ``g_1, g_2, ...`` (1-based index
+        over *proteins* in insertion order) as the FASTA header ids.
+        DRAM2's ``combine_annotations.py`` splits each id on ``_``, takes the
+        last token, and ``int()``s it (the prodigal ``contig_geneNumber``
+        convention); ``g_<n>`` satisfies that requirement for any caller id.
 
         Every header is written as::
 
-            >{id} # {start} # {stop} # {strand} #
+            >g_{n} # {start} # {stop} # {strand} #
 
-        where ``{id}`` is the dict key (preserved as the first whitespace
-        token — DRAM2 maps this to ``query_id``), and the numeric
-        coordinate fields satisfy the prodigal convention DRAM2 parses.
+        where coordinates are looked up by the **caller id** in *gene_coords*
+        (unchanged synthetic fallback: ``start=1, stop=3*len(seq), strand=1``).
 
         Strand is always normalised to ``1`` (forward) or ``-1`` (reverse).
         Any truthy positive value is normalised to ``1``; any negative or
         zero value is normalised to ``-1``.
-
-        When *gene_coords* is ``None`` or does not contain an entry for a
-        given id, synthetic coordinates are produced:
-        ``start=1, stop=3*len(seq), strand=1``.
 
         Args:
             path: Destination ``.faa`` path (created/overwritten).
             proteins: ``{caller_id: amino_acid_sequence}`` mapping.
             gene_coords: Optional ``{caller_id: (start, stop, strand)}``
                 mapping supplying real genomic coordinates.
+
+        Returns:
+            ``{emitted_id: caller_id}`` reverse map covering every input
+            protein in insertion order.  Callers pass this to
+            ``_parse_annotations_tsv`` to translate DRAM2 output rows back
+            to the original caller ids.
         """
         lines: list[str] = []
-        for cid, seq in proteins.items():
+        emitted_to_caller: dict[str, str] = {}
+        for n, (cid, seq) in enumerate(proteins.items(), start=1):
+            emitted_id = f"g_{n}"
+            emitted_to_caller[emitted_id] = cid
             seq = seq.strip()
             if gene_coords is not None and cid in gene_coords:
                 start, stop, strand_raw = gene_coords[cid]
@@ -572,9 +727,10 @@ class DRAM2Utils(AnnotatorUtils):
                 start = 1
                 stop = 3 * len(seq)
                 strand = 1
-            lines.append(f">{cid} # {start} # {stop} # {strand} #")
+            lines.append(f">{emitted_id} # {start} # {stop} # {strand} #")
             lines.append(seq)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return emitted_to_caller
 
     def _build_nextflow_command(
         self,
@@ -624,6 +780,25 @@ class DRAM2Utils(AnnotatorUtils):
             cmd.append(f"--use_{db}")
         return cmd
 
+    def _build_subprocess_env(self) -> dict[str, str]:
+        """Build the subprocess environment for Nextflow.
+
+        Constructs an env dict from ``os.environ`` with:
+        - ``NXF_VER`` set to ``self._nxf_ver`` (default ``"24.10.5"``)
+        - ``PATH`` prefixed with ``self._env_path`` (if non-empty)
+
+        ``self._env_path`` is a single colon-separated string (NOT a list),
+        e.g. ``"/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"``.
+
+        Returns:
+            New env dict (copy of os.environ plus the overrides above).
+        """
+        env: dict[str, str] = {**os.environ, "NXF_VER": self._nxf_ver}
+        if self._env_path:
+            current_path = os.environ.get("PATH", "")
+            env["PATH"] = self._env_path + os.pathsep + current_path
+        return env
+
     def _run_nextflow(
         self,
         genes_dir: Path,
@@ -632,11 +807,16 @@ class DRAM2Utils(AnnotatorUtils):
         databases: tuple[str, ...],
         threads: int,
         effective_config: str = "",
+        run_id: str = "",
+        work_root: Path | None = None,
     ) -> tuple[str, str | None, str]:
         """Run the DRAM2 Nextflow pipeline and return (tsv_text, version, cmd).
 
         The subprocess is launched with ``cwd = self._launch_dir`` because
         DRAM2's config resolves database paths as ``${launchDir}/databases/<db>``.
+        The subprocess environment is built explicitly via ``_build_subprocess_env``
+        (NXF_VER pinned; optional PATH prefix from config); ``dram2-env.sh``
+        is NOT sourced.
 
         Args:
             genes_dir: Host-side directory containing ``input.faa``.
@@ -648,6 +828,8 @@ class DRAM2Utils(AnnotatorUtils):
             effective_config: Resolved ``-c`` config path (``run_config``
                 wins over ``self._extra_config`` when both are set;
                 resolution happens in ``annotate``).
+            run_id: UUID hex for this run (unused here; kept for API symmetry).
+            work_root: Root dir (unused here; kept for API symmetry).
 
         Returns:
             Tuple of (raw-annotations.tsv text, pipeline version string,
@@ -668,6 +850,7 @@ class DRAM2Utils(AnnotatorUtils):
             effective_config=effective_config,
         )
         cmd_str = shlex.join(argv)
+        env = self._build_subprocess_env()
 
         result = subprocess.run(
             argv,
@@ -675,6 +858,7 @@ class DRAM2Utils(AnnotatorUtils):
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
         if result.returncode != 0:
             raise subprocess.CalledProcessError(

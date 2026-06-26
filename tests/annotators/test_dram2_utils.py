@@ -41,6 +41,7 @@ from kbutillib.annotator_utils import (
 )
 from kbutillib.dram2_utils import (
     DRAM2Utils,
+    _DEFAULT_DATABASES,
     _parse_annotations_tsv,
     _parse_dram2_version,
 )
@@ -514,6 +515,161 @@ class TestWriteFaa:
 
 
 # ---------------------------------------------------------------------------
+# _write_faa — prodigal-header emission (offline, new in m1-kbutillib-dram2utils)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFaaProdigalHeaders:
+    """Verify that _write_faa always emits prodigal-style headers.
+
+    DRAM2 parses the ``start_position``, ``stop_position``, and
+    ``strandedness`` columns from the FASTA header in the prodigal format::
+
+        >{query_id} # {start} # {stop} # {strand} #
+
+    These tests exercise the synthetic-coords path (no gene_coords), the
+    real-coords path, and strand normalisation — all offline, no Nextflow.
+    """
+
+    def test_synthetic_coords_when_no_gene_coords(self, tmp_path: Path):
+        """When gene_coords is absent, header uses start=1, stop=3*len, strand=1."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        seq = "MKTAY"  # len=5 → stop=15
+        utils._write_faa(path, {"g1": seq})
+        lines = path.read_text(encoding="utf-8").splitlines()
+        header = lines[0]
+        assert header == ">g1 # 1 # 15 # 1 #"
+        assert lines[1] == seq
+
+    def test_synthetic_coords_stop_is_three_times_len(self, tmp_path: Path):
+        """stop = 3 * len(seq) for each sequence under synthetic coords."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        utils._write_faa(path, {"short": "MK", "longer": "MKTAYIAKQR"})
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        # short: len=2 → stop=6; longer: len=10 → stop=30
+        short_header = next(l for l in lines if l.startswith(">short"))
+        long_header = next(l for l in lines if l.startswith(">longer"))
+        assert short_header == ">short # 1 # 6 # 1 #"
+        assert long_header == ">longer # 1 # 30 # 1 #"
+
+    def test_real_coords_used_when_gene_coords_provided(self, tmp_path: Path):
+        """When gene_coords contains the id, real coords are used in the header."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        gene_coords = {"g1": (100, 400, 1)}
+        utils._write_faa(path, {"g1": "MKTAY"}, gene_coords=gene_coords)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == ">g1 # 100 # 400 # 1 #"
+
+    def test_strand_positive_normalised_to_1(self, tmp_path: Path):
+        """Any positive strand value (e.g. +1 or +2) is normalised to 1."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        gene_coords = {"g1": (1, 100, 2)}  # strand=2 → should normalise to 1
+        utils._write_faa(path, {"g1": "MKTAY"}, gene_coords=gene_coords)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == ">g1 # 1 # 100 # 1 #"
+
+    def test_strand_negative_normalised_to_minus_1(self, tmp_path: Path):
+        """Negative strand raw values are normalised to -1."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        gene_coords = {"g1": (200, 500, -1)}
+        utils._write_faa(path, {"g1": "MKTAY"}, gene_coords=gene_coords)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == ">g1 # 200 # 500 # -1 #"
+
+    def test_mixed_coords_and_synthetic(self, tmp_path: Path):
+        """When gene_coords only covers some ids, the rest get synthetic coords."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        gene_coords = {"g1": (50, 200, -1)}  # g2 not in gene_coords
+        utils._write_faa(
+            path, {"g1": "MKTAY", "g2": "AYI"}, gene_coords=gene_coords
+        )
+        lines = path.read_text(encoding="utf-8").splitlines()
+        g1_header = next(l for l in lines if l.startswith(">g1"))
+        g2_header = next(l for l in lines if l.startswith(">g2"))
+        assert g1_header == ">g1 # 50 # 200 # -1 #"
+        assert g2_header == ">g2 # 1 # 9 # 1 #"  # len("AYI")=3 → stop=9
+
+    def test_query_id_is_first_whitespace_token(self, tmp_path: Path):
+        """The dict key is the first token in the header (before the first space).
+
+        DRAM2 reads ``query_id`` from the first whitespace-delimited token of
+        the FASTA header.  An id with spaces would break that — but the module
+        uses plain dict keys verbatim, so the key itself must not contain
+        spaces.  This test verifies the token after ``>`` and before the
+        first space is exactly the dict key.
+        """
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        utils._write_faa(path, {"myprotein_001": "MKT"})
+        header = path.read_text(encoding="utf-8").splitlines()[0]
+        # Strip leading '>'
+        first_token = header[1:].split()[0]
+        assert first_token == "myprotein_001"
+
+    def test_header_format_matches_prodigal_pattern(self, tmp_path: Path):
+        """Header must match the prodigal pattern: >{id} # {n} # {n} # {s} #"""
+        import re
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        utils._write_faa(
+            path, {"gene_1": "MKTAYIAK"}, gene_coords={"gene_1": (1, 300, -1)}
+        )
+        header = path.read_text(encoding="utf-8").splitlines()[0]
+        pattern = re.compile(r"^>(\S+) # (\d+) # (\d+) # (-?1) #$")
+        m = pattern.match(header)
+        assert m is not None, f"header {header!r} does not match prodigal pattern"
+        assert m.group(1) == "gene_1"
+        assert m.group(4) == "-1"
+
+
+# ---------------------------------------------------------------------------
+# _DEFAULT_DATABASES — metabolic set, no pfam (offline)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultDatabases:
+    """Verify _DEFAULT_DATABASES contains the expected metabolic databases.
+
+    pfam is intentionally excluded from the default set for the inner-loop
+    context; this test pins that decision so it cannot silently revert.
+    """
+
+    def test_default_databases_equals_metabolic_set(self):
+        """_DEFAULT_DATABASES must be exactly (kofam, dbcan, merops, vog)."""
+        assert _DEFAULT_DATABASES == ("kofam", "dbcan", "merops", "vog")
+
+    def test_pfam_absent_from_default_databases(self):
+        """pfam must not be in the default database set."""
+        assert "pfam" not in _DEFAULT_DATABASES
+
+    def test_default_databases_is_tuple(self):
+        """_DEFAULT_DATABASES must be a tuple (immutable constant)."""
+        assert isinstance(_DEFAULT_DATABASES, tuple)
+
+    def test_annotate_uses_default_databases_when_none_passed(
+        self, tmp_path: Path
+    ):
+        """annotate() with databases=None must record _DEFAULT_DATABASES in
+        result.parameters and result.db_version."""
+        utils = _make_available_utils(tmp_path)
+        tsv_text = _GOLDEN_TSV.read_text(encoding="utf-8")
+        mock_run = MagicMock(
+            return_value=(tsv_text, "v2.0.0-beta17", "nextflow run ...")
+        )
+        with patch.object(utils, "_run_nextflow", mock_run):
+            result = utils.annotate({"g1": "MKTAYIAKQ" * 10})
+        assert result.parameters["databases"] == list(_DEFAULT_DATABASES)
+        assert result.db_version == ",".join(_DEFAULT_DATABASES)
+
+
+# ---------------------------------------------------------------------------
 # _build_nextflow_command — argv shape pinned against the live h100 install
 # ---------------------------------------------------------------------------
 
@@ -550,10 +706,10 @@ class TestBuildNextflowCommand:
 
     def test_extra_config_appended(self, tmp_path: Path):
         utils = _make_available_utils(tmp_path)
-        utils._extra_config = "/tmp/extra.config"
         cmd = utils._build_nextflow_command(
             genes_dir=tmp_path, outdir=tmp_path, workdir=tmp_path,
             databases=(), threads=1,
+            effective_config="/tmp/extra.config",
         )
         assert "-c" in cmd
         ci = cmd.index("-c")

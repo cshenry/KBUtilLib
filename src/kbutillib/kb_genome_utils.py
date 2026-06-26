@@ -1271,11 +1271,29 @@ class KBGenomeUtilsImpl:
         """
         from .kb_job_utils.state import JobState
 
+        # The remote AssemblyUtil EE2 job cannot read a local file path (off
+        # cluster, the path is invisible to the job runner).  Stage the FASTA to
+        # the blobstore via a direct HTTP upload and pass the shock_id instead.
+        shock_id, _handle_id = self._ws.upload_blob_file(str(fasta_path))
+
+        # AssemblyUtil rejects a numeric value passed as workspace_name
+        # ("Workspace names cannot be integers"); a numeric workspace must be
+        # supplied as workspace_id.  Route accordingly (docstring promises both).
+        if isinstance(workspace, int) or (
+            isinstance(workspace, str) and workspace.isdigit()
+        ):
+            ws_param = {"workspace_id": int(workspace)}
+        else:
+            ws_param = {"workspace_name": workspace}
+
+        # AssemblyUtil consumes a staged file via a top-level "shock_id" (the
+        # nested "file" structure requires a job-local "path", which is invisible
+        # off-cluster).  Pass shock_id at the top level.
         record = self._jobs.run_job(
             method="AssemblyUtil.save_assembly_from_fasta",
             params=[{
-                "file": {"path": str(fasta_path)},
-                "workspace_name": workspace,
+                "shock_id": shock_id,
+                **ws_param,
                 "assembly_name": name,
             }],
         )

@@ -1198,76 +1198,87 @@ class KBReadsUtils(KBWSUtils):
             Workspace reference to uploaded assembly, or None if failed
         """
         try:
-            # Upload FASTA file to Shock
-            shock_id = self._upload_to_shock(str(fasta_path))
-
-            if not shock_id:
-                self.log_error(f"Failed to upload {fasta_path} to Shock")
+            # Stage the FASTA blob to the blobstore and create a handle in one
+            # direct call (off-cluster capable; no AssemblyUtil SDK module / EE2
+            # job).  upload_blob_file is inherited from KBWSUtils.
+            shock_id, handle_id = self.upload_blob_file(str(fasta_path))
+            if not shock_id or not handle_id:
+                self.log_error(f"Failed to stage {fasta_path} to the blobstore")
                 return None
 
-            # Create handle for Shock file
-            handle_id = self._create_handle(shock_id, fasta_path.name)
-
-            if not handle_id:
-                self.log_error(f"Failed to create handle for {fasta_path}")
-                return None
-
-            # Parse FASTA to get assembly statistics
-            num_contigs = 0
+            # Parse the FASTA into per-contig records and build the contigs map
+            # plus assembly statistics that KBaseGenomeAnnotations.Assembly needs.
+            contigs: Dict[str, Any] = {}
             dna_size = 0
             gc_count = 0
+            base_counts: Dict[str, int] = {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0}
+            cur_id: Optional[str] = None
+            cur_seq: List[str] = []
+
+            def _finish(cid: Optional[str], parts: List[str]) -> None:
+                if not cid:
+                    return
+                seq = "".join(parts).upper()
+                clen = len(seq)
+                contigs[cid] = {
+                    "contig_id": cid,
+                    "name": cid,
+                    "length": clen,
+                    "gc_content": (
+                        (seq.count("G") + seq.count("C")) / clen if clen else 0.0
+                    ),
+                    "md5": hashlib.md5(seq.encode()).hexdigest(),
+                }
 
             with open(fasta_path, "r") as f:
-                sequence = ""
                 for line in f:
                     line = line.strip()
+                    if not line:
+                        continue
                     if line.startswith(">"):
-                        if sequence:
-                            # Process previous sequence
-                            dna_size += len(sequence)
-                            gc_count += sequence.upper().count(
-                                "G"
-                            ) + sequence.upper().count("C")
-                            sequence = ""
-                        num_contigs += 1
+                        _finish(cur_id, cur_seq)
+                        cur_id = line[1:].split()[0]
+                        cur_seq = []
                     else:
-                        sequence += line
+                        cur_seq.append(line)
+                        dna_size += len(line)
+                        up = line.upper()
+                        gc_count += up.count("G") + up.count("C")
+                        for _b in base_counts:
+                            base_counts[_b] += up.count(_b)
+                _finish(cur_id, cur_seq)
 
-                # Process last sequence
-                if sequence:
-                    dna_size += len(sequence)
-                    gc_count += sequence.upper().count("G") + sequence.upper().count(
-                        "C"
-                    )
+            num_contigs = len(contigs)
+            gc_content = (gc_count / dna_size) if dna_size > 0 else 0.0
+            # Assembly md5: md5 over the comma-joined sorted per-contig md5s.
+            assembly_md5 = hashlib.md5(
+                ",".join(sorted(c["md5"] for c in contigs.values())).encode()
+            ).hexdigest()
 
-            gc_content = (gc_count / dna_size * 100) if dna_size > 0 else 0.0
-
-            # Create assembly object
+            # Create a complete Assembly object
             assembly_obj = {
                 "assembly_id": assembly_id,
+                "name": assembly_id,
                 "fasta_handle_ref": handle_id,
+                "md5": assembly_md5,
                 "num_contigs": num_contigs,
                 "dna_size": dna_size,
                 "gc_content": gc_content,
+                "base_counts": base_counts,
+                "contigs": contigs,
                 "type": assembly_type,
-                "external_source": "User upload",
+                "external_source": "GAA upload",
             }
 
             if taxon_ref:
                 assembly_obj["taxon_ref"] = taxon_ref
 
-            # Save to workspace
-            save_result = self._ws_client.save_objects(
-                {
-                    "workspace": workspace_name,
-                    "objects": [
-                        {
-                            "type": "KBaseGenomeAnnotations.Assembly",
-                            "data": assembly_obj,
-                            "name": assembly_id,
-                        }
-                    ],
-                }
+            # Save via set_ws + save_objects (numeric-workspace-safe transport).
+            save_result = self.save_ws_object(
+                assembly_id,
+                workspace_name,
+                assembly_obj,
+                "KBaseGenomeAnnotations.Assembly",
             )
 
             obj_info = save_result[0]

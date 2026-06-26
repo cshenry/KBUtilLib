@@ -182,10 +182,20 @@ class KBWSUtils(SharedEnvUtils):
         self.log_info(f"Uploading file to Shock: {filepath}")
 
         filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath)
 
         with open(filepath, "rb") as f:
+            # Shock requires each multipart part to carry a Content-Length header
+            # ("Valid Content-Length header >= 0 required for upload form part").
+            # MultipartEncoder's streaming parts omit it by default, so add it
+            # explicitly via the 4-tuple (filename, fileobj, content_type, headers).
             encoder = MultipartEncoder(
-                fields={"upload": (filename, f, "application/octet-stream")}
+                fields={"upload": (
+                    filename,
+                    f,
+                    "application/octet-stream",
+                    {"Content-Length": str(filesize)},
+                )}
             )
             headers = {
                 "Authorization": "OAuth " + self.get_token(namespace="kbase"),
@@ -862,9 +872,19 @@ class KBWSUtilsImpl:
         """
         logger.info(f"Uploading file to Shock: {filepath}")
         filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath)
         with open(filepath, "rb") as f:
+            # Shock requires each multipart part to carry a Content-Length header
+            # ("Valid Content-Length header >= 0 required for upload form part").
+            # MultipartEncoder's streaming parts omit it by default, so add it
+            # explicitly via the 4-tuple (filename, fileobj, content_type, headers).
             encoder = MultipartEncoder(
-                fields={"upload": (filename, f, "application/octet-stream")}
+                fields={"upload": (
+                    filename,
+                    f,
+                    "application/octet-stream",
+                    {"Content-Length": str(filesize)},
+                )}
             )
             headers = {
                 "Authorization": "OAuth " + self.get_token(namespace="kbase"),

@@ -7,7 +7,7 @@ gaa-ontomap-council
 gaa-ontomap-council/ontomap-wrapper
 
 ## commit_shas
-(populated after commit)
+- f60c3a976fc9d9bb832c8a4997a6c176508357c0
 
 ## summary
 Added `OntomapUtils`, a composable utility class wrapping Vibhav Setlur's `ontomap` capability-2

@@ -611,3 +611,92 @@ class TestAnnotateMocked:
                         metabolites=["cpd00027"],
                     )
         assert result.parameters["metabolites"] == ["cpd00027"]
+
+
+# ---------------------------------------------------------------------------
+# annotate() — regression: cleanup PermissionError must not mask the result
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotateCleanupFailure:
+    """Regression for the root-owned tmpdir cleanup bug.
+
+    The transyt container runs as root, so files it leaves under tmpdir
+    are root-owned. The original implementation used
+    ``with tempfile.TemporaryDirectory(...) as tmpdir`` and placed the
+    ``return AnnotationResult(...)`` outside the with-block; on block
+    exit ``TemporaryDirectory`` calls ``shutil.rmtree(tmpdir)``, which
+    raised ``PermissionError`` on the root-owned files and masked the
+    successfully-parsed result, collapsing rows_written to 0.
+
+    These tests assert the fix: cleanup is best-effort (``ignore_errors``)
+    and the parsed ``AnnotationResult`` is returned regardless.
+    """
+
+    def _fake_run_docker(self, indir):
+        import shutil as _shutil
+        dest = indir / "results"
+        dest.mkdir(exist_ok=True)
+        _shutil.copy(_XML_FIXTURE, dest / "transyt.xml")
+        _shutil.copy(_REF_FIXTURE, dest / "reactions_references.txt")
+        _shutil.copy(_SCORES_FIXTURE, dest / "scoresMethod1.txt")
+        return ("docker run ...", 0)
+
+    def test_rmtree_permission_error_does_not_mask_result(self):
+        """rmtree raising PermissionError mid-cleanup must not propagate."""
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+
+        def raising_rmtree(path, ignore_errors=False, **kwargs):
+            # Mirror the real bug: rmtree raises on root-owned files.
+            # If the production code passed ignore_errors=True, this
+            # branch is never hit and no exception escapes the test.
+            if ignore_errors:
+                return None
+            raise PermissionError(
+                f"[Errno 13] Permission denied: {path}/results/transyt.xml"
+            )
+
+        with patch.object(tu, "is_available", return_value=True), \
+             patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
+             patch.object(tu, "_get_image_digest", return_value="sha256:abc"), \
+             patch("kbutillib.transyt_utils.shutil.rmtree",
+                   side_effect=raising_rmtree):
+            # The call MUST NOT raise PermissionError.
+            result = tu.annotate(
+                proteins={"prot1": "MKTAY", "prot2": "MNFST", "prot3": "MAAA"},
+                tax_id="562",
+            )
+
+        assert isinstance(result, AnnotationResult)
+        assert result.tool == "transyt"
+        # The fixture parses to records for prot1 / prot2 / prot3.
+        gene_ids = {r.gene_id for r in result.records}
+        assert "prot1" in gene_ids, (
+            f"Expected parsed records to survive cleanup failure; got "
+            f"records for genes {gene_ids!r}"
+        )
+
+    def test_rmtree_called_with_ignore_errors(self):
+        """Production code must invoke rmtree with ignore_errors=True."""
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+
+        with patch.object(tu, "is_available", return_value=True), \
+             patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
+             patch.object(tu, "_get_image_digest", return_value=""), \
+             patch("kbutillib.transyt_utils.shutil.rmtree") as rmtree_mock:
+            tu.annotate(proteins={"prot1": "MKTAY"}, tax_id="562")
+
+        assert rmtree_mock.called, "rmtree must be called to clean up tmpdir"
+        # At least one call must pass ignore_errors=True — the hard guarantee.
+        ok = any(
+            call.kwargs.get("ignore_errors") is True
+            or (len(call.args) >= 2 and call.args[1] is True)
+            for call in rmtree_mock.call_args_list
+        )
+        assert ok, (
+            "rmtree must be invoked with ignore_errors=True so cleanup "
+            "failures on root-owned transyt outputs cannot mask the parsed "
+            f"AnnotationResult. Calls: {rmtree_mock.call_args_list!r}"
+        )

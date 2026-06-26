@@ -67,8 +67,10 @@ beyond reading the files).
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -657,9 +659,16 @@ class TransytUtils(AnnotatorUtils):
             **_DEFAULT_SCORING,
         }
 
-        with tempfile.TemporaryDirectory(
+        # Manual tmpdir lifecycle (not `with TemporaryDirectory(...)`): the
+        # transyt container runs as root and leaves root-owned files under
+        # tmpdir. TemporaryDirectory's cleanup is `shutil.rmtree(tmpdir)`,
+        # which raises PermissionError on root-owned files and would mask the
+        # successfully-parsed AnnotationResult. `ignore_errors=True` is the
+        # required guarantee: cleanup is best-effort, never raises.
+        tmpdir = tempfile.mkdtemp(
             prefix="transyt_", dir=self._docker_workdir_base()
-        ) as tmpdir:
+        )
+        try:
             indir = Path(tmpdir) / "processingDir"
             indir.mkdir()
 
@@ -688,15 +697,34 @@ class TransytUtils(AnnotatorUtils):
                         xml_path, ref_path, scores_path, list(proteins.keys())
                     )
 
-        return AnnotationResult(
-            tool=_TOOL,
-            tool_version=tool_version,
-            db_version=None,
-            run_id=run_id,
-            command=cmd,
-            parameters=parameters,
-            records=records,
-        )
+            return AnnotationResult(
+                tool=_TOOL,
+                tool_version=tool_version,
+                db_version=None,
+                run_id=run_id,
+                command=cmd,
+                parameters=parameters,
+                records=records,
+            )
+        finally:
+            # Best-effort reclaim of root-owned files via a throwaway chown,
+            # then unconditional best-effort rmtree. Both are guarded so they
+            # can never raise and mask the result above.
+            try:
+                subprocess.run(
+                    [
+                        "docker", "run", "--rm",
+                        "-v", f"{tmpdir}:/c",
+                        self._docker_image,
+                        "chown", "-R",
+                        f"{os.getuid()}:{os.getgid()}", "/c",
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except Exception:  # pragma: no cover
+                pass
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Input staging

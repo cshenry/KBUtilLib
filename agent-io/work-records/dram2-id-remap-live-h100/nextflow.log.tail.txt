@@ -1,0 +1,200 @@
+  [0;34mdbcan_fam_activities   : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/dbcan/dbcan.fam-activities.tsv[0m
+  [0;34mdbcan_subfam_activities: [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/dbcan/dbcan.fam-activities.tsv[0m
+  [0;34mvog_db                 : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/vogdb/[0m
+  [0;34mvog_list               : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/vogdb/vog_annotations_latest.tsv.gz[0m
+  [0;34mcamper_hmm_db          : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/camper/hmm/[0m
+  [0;34mcamper_hmm_list        : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/camper/hmm/camper_hmm_scores.tsv[0m
+  [0;34mcamper_mmseqs_db       : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/camper/mmseqs/[0m
+  [0;34mcamper_mmseqs_list     : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/camper/mmseqs/camper_scores.tsv[0m
+  [0;34mcanthyd_hmm_db         : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/canthyd/hmm/[0m
+  [0;34mcant_hyd_hmm_list      : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/canthyd/hmm/cant_hyd_HMM_scores.tsv[0m
+  [0;34mcanthyd_mmseqs_db      : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/canthyd/mmseqs/[0m
+  [0;34mcanthyd_mmseqs_list    : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/canthyd/mmseqs/cant_hyd_BLAST_scores.tsv[0m
+  [0;34mfegenie_db             : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/fegenie/[0m
+  [0;34mfegenie_list           : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/fegenie/fegenie_iron_cut_offs.txt[0m
+  [0;34msulfur_db              : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/sulfur/[0m
+  [0;34mmethyl_db              : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/methyl/[0m
+  [0;34msql_descriptions_db    : [0;32m/scratch1/fliu/hub_scratch/chenry/DRAM2/databases/db_descriptions/description_db.sqlite[0m
+  [0;34mkegg_e_value           : [0;32m1e-5[0m
+  [0;34mkofam_e_value          : [0;32m1e-5[0m
+  [0;34mvog_e_value            : [0;32m1e-5[0m
+  [0;34mcamper_e_value         : [0;32m1e-5[0m
+  [0;34muniref_e_value         : [0;32m1e-5[0m
+  [0;34mcanthyd_e_value        : [0;32m1e-5[0m
+  [0;34msulfur_e_value         : [0;32m1e-5[0m
+  [0;34mfegenie_e_value        : [0;32m1e-5[0m
+
+[1mFormat Kegg Options[0m
+  [0;34mkegg_download_date     : [0;32mnull[0m
+
+[1mProcess Options[0m
+  [0;34mtiny_cpus_limit        : [0;32m1[0m
+  [0;34msmall_cpus_limit       : [0;32m2[0m
+  [0;34mmedium_cpus_limit      : [0;32m6[0m
+  [0;34mbig_cpus_limit         : [0;32m12[0m
+  [0;34mhuge_cpus_limit        : [0;32m24[0m
+  [0;34mtiny_gb_mem_limit      : [0;32m1[0m
+  [0;34msmall_gb_mem_limit     : [0;32m12[0m
+  [0;34mmedium_gb_mem_limit    : [0;32m36[0m
+  [0;34mbig_gb_mem_limit       : [0;32m72[0m
+  [0;34mhuge_gb_mem_limit      : [0;32m200[0m
+  [0;34mtiny_hr_time_limit     : [0;32m1[0m
+  [0;34msmall_hr_time_limit    : [0;32m4[0m
+  [0;34mmedium_hr_time_limit   : [0;32m8[0m
+  [0;34mbig_hr_time_limit      : [0;32m16[0m
+  [0;34mhuge_hr_time_limit     : [0;32m168[0m
+
+[1mGeneric options[0m
+  [0;34mthreads                : [0;32m4[0m
+  [0;34mtrace_report_suffix    : [0;32m2026-06-26_17-10-17[0m
+
+!! Only displaying parameters that differ from the pipeline defaults !!
+-[2m----------------------------------------------------[0m-
+Jun-26 17:10:29.195 [main] DEBUG nextflow.validation.SchemaValidator - Starting parameters validation
+Jun-26 17:10:29.348 [main] DEBUG nextflow.validation.SchemaValidator - Finishing parameters validation
+Jun-26 17:10:29.431 [main] WARN  nextflow.script.ScriptBinding - Access to undefined parameter `use_viral` -- Initialise it to a default value eg. `params.use_viral = some_value`
+Jun-26 17:10:29.491 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_single` matches labels `process_single` for process with name WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:GENE_LOCS
+Jun-26 17:10:29.493 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:GENE_LOCS` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:GENE_LOCS
+Jun-26 17:10:29.501 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.502 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.506 [main] DEBUG nextflow.executor.Executor - [warm up] executor > local
+Jun-26 17:10:29.511 [main] DEBUG n.processor.LocalPollingMonitor - Creating local task monitor for executor 'local' > cpus=336; memory=3 TB; capacity=336; pollInterval=100ms; dumpInterval=5m
+Jun-26 17:10:29.513 [main] DEBUG n.processor.TaskPollingMonitor - >>> barrier register (monitor: local)
+Jun-26 17:10:29.559 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_tiny` matches labels `process_tiny` for process with name WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:MMSEQS_INDEX
+Jun-26 17:10:29.560 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:MMSEQS_INDEX` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:MMSEQS_INDEX
+Jun-26 17:10:29.563 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.563 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.570 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_small` matches labels `process_small` for process with name WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:HMM_SEARCH_KOFAM
+Jun-26 17:10:29.571 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:HMM_SEARCH` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:HMM_SEARCH_KOFAM
+Jun-26 17:10:29.575 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.575 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.581 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_tiny` matches labels `process_tiny` for process with name WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:PARSE_HMM_KOFAM
+Jun-26 17:10:29.582 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:PARSE_HMM` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:PARSE_HMM_KOFAM
+Jun-26 17:10:29.585 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.585 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.598 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:KOFAM_HMM_FORMATTER` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:KOFAM_HMM_FORMATTER
+Jun-26 17:10:29.601 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.601 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.617 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_small` matches labels `process_small` for process with name WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:COMBINE_ANNOTATIONS
+Jun-26 17:10:29.618 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:COMBINE_ANNOTATIONS` matches process WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:COMBINE_ANNOTATIONS
+Jun-26 17:10:29.621 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.621 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.704 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withLabel:process_single` matches labels `process_single` for process with name WRIGHTONLABCSU_DRAM:DRAM:MULTIQC
+Jun-26 17:10:29.705 [main] DEBUG nextflow.script.ProcessConfig - Config settings `withName:MULTIQC` matches process WRIGHTONLABCSU_DRAM:DRAM:MULTIQC
+Jun-26 17:10:29.709 [main] DEBUG nextflow.executor.ExecutorFactory - << taskConfig executor: null
+Jun-26 17:10:29.709 [main] DEBUG nextflow.executor.ExecutorFactory - >> processorType: 'local'
+Jun-26 17:10:29.729 [main] DEBUG nextflow.Session - Config process names validation disabled as requested
+Jun-26 17:10:29.731 [main] DEBUG nextflow.Session - Igniting dataflow network (37)
+Jun-26 17:10:29.736 [PathVisitor-1] DEBUG nextflow.file.PathVisitor - files for syntax: glob; folder: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/input_genes/; pattern: *.faa; options: [checkIfExists:true]
+Jun-26 17:10:29.737 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:GENE_LOCS
+Jun-26 17:10:29.738 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:MMSEQS_INDEX
+Jun-26 17:10:29.739 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:HMM_SEARCH_KOFAM
+Jun-26 17:10:29.739 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:PARSE_HMM_KOFAM
+Jun-26 17:10:29.739 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:KOFAM_HMM_FORMATTER
+Jun-26 17:10:29.740 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:COMBINE_ANNOTATIONS
+Jun-26 17:10:29.742 [main] DEBUG nextflow.processor.TaskProcessor - Starting process > WRIGHTONLABCSU_DRAM:DRAM:MULTIQC
+Jun-26 17:10:29.744 [main] DEBUG nextflow.script.ScriptRunner - Parsed script files:
+  Script_85cef1280c83ab53: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/collect_rna/rrna_collect.nf
+  Script_7e8c6359d039f6f8: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/collect_rna.nf
+  Script_fcd8fc2b6a360ebc: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/generic_hmm_formatter.nf
+  Script_ca6a85bfec92436f: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/database/cat_kegg_pep.nf
+  Script_f62db3a8f0d7dc64: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/add_and_combine/count_annotations.nf
+  Script_9280d8b4cb45a7c7: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/dram.nf
+  Script_07375f2998068f76: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/distill/combine_distill.nf
+  Script_3f2b221beb35db9a: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/distill.nf
+  Script_4017a099ad87bb23: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/add_and_combine/generate_gff_genbank.nf
+  Script_1d15d4e70ed33bcc: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/call/quast.nf
+  Script_645afce19523a6db: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/fegenie_hmm_formatter.nf
+  Script_73cc8ae43933982b: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/add_and_combine/add_bin_quality.nf
+  Script_4955288afd8ca61e: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/../modules/nf-core/multiqc/main.nf
+  Script_906bc4f83fe11763: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/kegg_hmm_formatter.nf
+  Script_9f002eb86c8b39aa: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/dbcan_hmm_formatter.nf
+  Script_6d5d1ee64f69c2de: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/kofam_hmm_formatter.nf
+  Script_dbab5af5dc2bb5db: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/main.nf
+  Script_a8f5838ce281a18b: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./subworkflows/local/utils_nfcore_dram_pipeline/main.nf
+  Script_1ea3b56df0c0e782: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/call.nf
+  Script_eaf5aecc5cb3d67f: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/../subworkflows/local/utils_pipeline_setup.nf
+  Script_a60ff80d67e53afe: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/hmmsearch.nf
+  Script_ec374c057b62b8b1: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/combine_annotations.nf
+  Script_a687a4d87298cc57: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/database/format_kegg_db.nf
+  Script_41c9dbf17d09dbfa: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/collect_rna/trna_scan.nf
+  Script_f496790529d53506: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/mmseqs_index.nf
+  Script_215a636da7ab24a2: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/../subworkflows/local/utils_nfcore_dram_pipeline/../../nf-core/utils_nfschema_plugin/main.nf
+  Script_bdb800ca61c1d260: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/collect_rna/trna_collect.nf
+  Script_8765e6ccad4e59e6: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/distill/distill.nf
+  Script_5c4e8d4051efa81e: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./subworkflows/local/utils_nfcore_dram_pipeline/../../nf-core/utils_nfcore_pipeline/main.nf
+  Script_41ab10c004c45b00: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/mmseqs_search.nf
+  Script_d49281f6e80eb957: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/gene_locs.nf
+  Script_ba9b8925e07fbcce: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/add_and_combine/add_annotations.nf
+  Script_344df4685a43f407: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/add_and_combine/add_taxa.nf
+  Script_685cd3021940049d: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/adjectives/adjectives.nf
+  Script_3519b42eea272afe: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/add_and_count.nf
+  Script_f04dee9695c4d057: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/canthyd_hmm_formatter.nf
+  Script_26fe6e63397c8b90: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/rename/rename_fasta.nf
+  Script_4f612cfd8c52e8cd: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/../subworkflows/local/utils_nfcore_dram_pipeline/../../nf-core/utils_nextflow_pipeline/main.nf
+  Script_03d0a8f71cbec692: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/sulfur_hmm_formatter.nf
+  Script_80ce767976f54ec7: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/vog_hmm_formatter.nf
+  Script_541bccb9b4c06cc1: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/merge.nf
+  Script_9185dfbb9ba1e75e: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/merge_annotations.nf
+  Script_cbcd6d62fc7c4629: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/camper_hmm_formatter.nf
+  Script_84da9aa8879950fa: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/product/product_heatmap.nf
+  Script_36f21512921cd33c: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/parse_hmmsearch.nf
+  Script_a854305f87572af0: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/call/call_genes_prodigal.nf
+  Script_8c79f990d34a59ee: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/collect_rna/rrna_scan.nf
+  Script_3e5d224ae168c645: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/subworkflows/local/annotate.nf
+  Script_8a333731c14cc2be: /scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/add_sql_descriptions.nf
+Jun-26 17:10:29.744 [main] DEBUG nextflow.script.ScriptRunner - > Awaiting termination 
+Jun-26 17:10:29.744 [main] DEBUG nextflow.Session - Session await
+Jun-26 17:10:29.818 [Actor Thread 78] DEBUG nextflow.conda.CondaCache - micromamba found local env for environment=/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/modules/local/annotate/environment.yml; path=/scratch1/fliu/hub_scratch/chenry/DRAM2/nxf_conda/env-fd46c7768a790ad1-f25d581e073c803fd2df039b7aadc6c8
+Jun-26 17:10:29.941 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:10:29.943 [Task submitter] INFO  nextflow.Session - [08/76344f] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:MMSEQS_INDEX (input)
+Jun-26 17:10:29.960 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:10:29.961 [Task submitter] INFO  nextflow.Session - [06/87ffc9] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:HMM_SEARCH_KOFAM (input)
+Jun-26 17:10:29.976 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:10:29.977 [Task submitter] INFO  nextflow.Session - [01/e32cac] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:GENE_LOCS (input)
+Jun-26 17:10:30.143 [Actor Thread 58] DEBUG nextflow.sort.BigSort - Sort completed -- entries: 1; slices: 1; internal sort time: 0.032 s; external sort time: 0.053 s; total time: 0.085 s
+Jun-26 17:10:30.144 [Actor Thread 43] DEBUG nextflow.sort.BigSort - Sort completed -- entries: 1; slices: 1; internal sort time: 0.019 s; external sort time: 0.053 s; total time: 0.072 s
+Jun-26 17:10:30.167 [Actor Thread 60] DEBUG nextflow.sort.BigSort - Sort completed -- entries: 1; slices: 1; internal sort time: 0.035 s; external sort time: 0.003 s; total time: 0.038 s
+Jun-26 17:10:30.184 [Actor Thread 43] DEBUG nextflow.file.FileCollector - Saved collect-files list to: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/collect-file/97a8899637d21ef1603b9f5faff77101
+Jun-26 17:10:30.185 [Actor Thread 58] DEBUG nextflow.file.FileCollector - Saved collect-files list to: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/collect-file/3fae773b84f8d90d9ad45adf9a669015
+Jun-26 17:10:30.209 [Actor Thread 60] DEBUG nextflow.file.FileCollector - Saved collect-files list to: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/collect-file/df887c07cdf03adaca93b0ad72ce8746
+Jun-26 17:10:30.226 [Actor Thread 95] DEBUG nextflow.conda.CondaCache - micromamba found local env for environment=/scratch1/fliu/hub_scratch/chenry/DRAM2/repo/./workflows/../modules/nf-core/multiqc/environment.yml; path=/scratch1/fliu/hub_scratch/chenry/DRAM2/nxf_conda/env-152dac747f07927d-eec4e05336245ea50db6412788f8c4da
+Jun-26 17:10:30.243 [Actor Thread 43] DEBUG nextflow.file.FileCollector - Deleting file collector temp dir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/tmp/nxf-5473988064747476727
+Jun-26 17:10:30.243 [Actor Thread 58] DEBUG nextflow.file.FileCollector - Deleting file collector temp dir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/tmp/nxf-9062375533292018830
+Jun-26 17:10:30.246 [Actor Thread 60] DEBUG nextflow.file.FileCollector - Deleting file collector temp dir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/tmp/nxf-14171019155649654240
+Jun-26 17:10:30.280 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:10:30.281 [Task submitter] INFO  nextflow.Session - [2a/e48a66] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:MULTIQC
+Jun-26 17:10:31.103 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 2; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:GENE_LOCS (input); status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/01/e32cacfdce702d7454a78899989abd]
+Jun-26 17:10:31.104 [Task monitor] DEBUG nextflow.util.ThreadPoolBuilder - Creating thread pool 'TaskFinalizer' minSize=10; maxSize=1008; workQueue=LinkedBlockingQueue[-1]; allowCoreThreadTimeout=false
+Jun-26 17:10:31.152 [TaskFinalizer-1] DEBUG nextflow.util.ThreadPoolBuilder - Creating thread pool 'PublishDir' minSize=10; maxSize=1008; workQueue=LinkedBlockingQueue[-1]; allowCoreThreadTimeout=false
+Jun-26 17:10:37.186 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 1; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:MMSEQS_INDEX (input); status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/08/76344fe52366daa67eb12b04127255]
+Jun-26 17:10:43.259 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 4; name: WRIGHTONLABCSU_DRAM:DRAM:MULTIQC; status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/2a/e48a66a8aad199ce25a3806cc7b8f4]
+Jun-26 17:10:43.350 [TaskFinalizer-3] DEBUG nextflow.processor.TaskProcessor - Process WRIGHTONLABCSU_DRAM:DRAM:MULTIQC > Skipping output binding because one or more optional files are missing: fileoutparam<2>
+Jun-26 17:11:18.732 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 3; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:HMM_SEARCH_KOFAM (input); status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/06/87ffc9abe3750cf996a415a122c53c]
+Jun-26 17:11:18.796 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:11:18.796 [Task submitter] INFO  nextflow.Session - [b7/fb315d] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:PARSE_HMM_KOFAM (input)
+Jun-26 17:11:21.462 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 5; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:PARSE_HMM_KOFAM (input); status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/b7/fb315dabc3fa75226392b9f46bbdc8]
+Jun-26 17:11:21.524 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:11:21.525 [Task submitter] INFO  nextflow.Session - [a1/1ce7b9] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:KOFAM_HMM_FORMATTER (input)
+Jun-26 17:11:23.514 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 6; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:KOFAM_HMM_FORMATTER (input); status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/a1/1ce7b9efa79125716979d1ec14f58a]
+Jun-26 17:11:23.593 [Task submitter] DEBUG n.executor.local.LocalTaskHandler - Launch cmd line: /bin/bash -ue .command.run
+Jun-26 17:11:23.594 [Task submitter] INFO  nextflow.Session - [18/3109af] Submitted process > WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:COMBINE_ANNOTATIONS
+Jun-26 17:11:29.836 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[id: 7; name: WRIGHTONLABCSU_DRAM:DRAM:ANNOTATE:COMBINE_ANNOTATIONS; status: COMPLETED; exit: 0; error: -; workDir: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/work/18/3109af5a58e6aa3487399db4faf2ab]
+Jun-26 17:11:29.843 [main] DEBUG nextflow.Session - Session await > all processes finished
+Jun-26 17:11:29.937 [Task monitor] DEBUG n.processor.TaskPollingMonitor - <<< barrier arrives (monitor: local) - terminating tasks monitor poll loop
+Jun-26 17:11:29.937 [main] DEBUG nextflow.Session - Session await > all barriers passed
+Jun-26 17:11:29.940 [main] DEBUG nextflow.util.ThreadPoolManager - Thread pool 'TaskFinalizer' shutdown completed (hard=false)
+Jun-26 17:11:29.941 [main] DEBUG nextflow.util.ThreadPoolManager - Thread pool 'PublishDir' shutdown completed (hard=false)
+Jun-26 17:11:29.949 [main] INFO  nextflow.Nextflow - -[0;35m[WrightonLabCSU/dram][0;32m Pipeline completed successfully[0m-
+Jun-26 17:11:29.950 [main] DEBUG nextflow.Nextflow - Moving .nextflow.log to: /scratch1/fliu/hub_scratch/chenry/dram2-id-remap-live-validation/keio-validation/scratch/dram2_o5qeppkd/out/pipeline_info/.nextflow.log
+Jun-26 17:11:29.972 [main] DEBUG n.trace.WorkflowStatsObserver - Workflow completed > WorkflowStats[succeededCount=7; failedCount=0; ignoredCount=0; cachedCount=0; pendingCount=0; submittedCount=0; runningCount=0; retriesCount=0; abortedCount=0; succeedDuration=2m 11s; failedDuration=0ms; cachedDuration=0ms;loadCpus=0; loadMemory=0; peakRunning=4; peakCpus=5; peakMemory=37 GB; ]
+Jun-26 17:11:29.972 [main] DEBUG nextflow.trace.TraceFileObserver - Workflow completed -- saving trace file
+Jun-26 17:11:29.976 [main] DEBUG nextflow.trace.ReportObserver - Workflow completed -- rendering execution report
+Jun-26 17:11:30.335 [main] DEBUG nextflow.trace.TimelineObserver - Workflow completed -- rendering execution timeline
+Jun-26 17:11:30.434 [main] DEBUG nextflow.cache.CacheDB - Closing CacheDB done
+Jun-26 17:11:30.652 [main] INFO  org.pf4j.AbstractPluginManager - Stop plugin 'nf-validation@1.1.4'
+Jun-26 17:11:30.652 [main] DEBUG nextflow.plugin.BasePlugin - Plugin stopped nf-validation
+Jun-26 17:11:30.652 [main] INFO  org.pf4j.AbstractPluginManager - Stop plugin 'nf-schema@2.0.1'
+Jun-26 17:11:30.652 [main] DEBUG nextflow.plugin.BasePlugin - Plugin stopped nf-schema
+Jun-26 17:11:30.653 [main] DEBUG nextflow.util.ThreadPoolManager - Thread pool 'FileTransfer' shutdown completed (hard=false)
+Jun-26 17:11:30.654 [main] DEBUG nextflow.script.ScriptRunner - > Execution complete -- Goodbye

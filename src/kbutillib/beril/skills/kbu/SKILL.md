@@ -14,6 +14,28 @@ user-invocable: true
 
 # /kbu — KBUtilLib BERIL Primer
 
+## Step 0: You are probably in a git worktree
+
+Chris runs BERIL with a **primary-on-main, studies-in-worktrees** layout so
+multiple modeling sessions run in parallel without colliding:
+
+- The **primary checkout** (`~/Dropbox/Projects/BERIL-research-observatory`)
+  stays parked on `main`. Don't expect study work to live there.
+- **Each study runs in its own worktree** under
+  `~/Dropbox/Projects/BERILWorktrees/<id>`, on branch `projects/<id>`. You are
+  most likely inside one of these right now — `git branch --show-current` will
+  read `projects/<id>`, not `main`. That is correct, not a mistake to fix.
+- **Sibling worktrees are other live sessions.** Stay inside your own worktree
+  dir; never edit, commit into, or `cd` into the primary checkout or a sibling.
+- `.env`, `.venv-berdl`, and the `.claude/` skill bundles are **symlinks into
+  the primary checkout** — intentional and shared. Do not "repair", replace, or
+  commit them.
+- **Never run `beril start` in a worktree** (it runs `_checkout_release` and
+  detaches the branch). Use `kbu beril worktree start <id>` instead.
+
+Worktrees are managed with `kbu beril worktree {new,ls,rm,open,start} <id>`.
+If you're unsure which worktree you're in, run `git branch --show-current`.
+
 ## Step 1: Load modeling preferences
 
 Read the active preferences file into the session context:

@@ -1199,6 +1199,451 @@ class KBGenomeUtils(KBWSUtils):
 
         return features, cdss, mrnas, non_coding_features
 
+    # ──────────────────────────────────────────────────────────────────────
+    # NCBI assembly fetch + datalake pangenome genome import
+    # ──────────────────────────────────────────────────────────────────────
+
+    def fetch_ncbi_assembly(
+        self,
+        accession: str,
+        output_dir,
+        *,
+        timeout: int = 180,
+        overwrite: bool = False,
+    ) -> str:
+        """Download a genome assembly FASTA from the NCBI Datasets v2 REST API.
+
+        Uses the public ``api.ncbi.nlm.nih.gov/datasets`` endpoint (no API key
+        required for modest use) to download the genomic FASTA for *accession*.
+        All ``.fna`` records in the returned archive are concatenated into a
+        single file ``<output_dir>/<accession>.fna`` (one file even for
+        multi-contig WGS assemblies).  The result is cached: a subsequent call
+        for the same accession returns the cached file unless ``overwrite``.
+
+        Args:
+            accession: NCBI assembly accession, e.g. ``'GCF_000046845.1'`` or
+                ``'GCA_002694305.1'``.
+            output_dir: Directory to write the unpacked genomic FASTA into
+                (created if absent).
+            timeout: HTTP timeout in seconds.
+            overwrite: Re-download even when a non-empty cached file exists.
+
+        Returns:
+            Path (str) to the genomic ``.fna`` file for *accession*.
+
+        Raises:
+            RuntimeError: If the download contains no ``.fna`` record.
+        """
+        import io
+        import os
+        import urllib.request
+        import zipfile
+
+        os.makedirs(output_dir, exist_ok=True)
+        out_fna = os.path.join(output_dir, f"{accession}.fna")
+        if os.path.exists(out_fna) and not overwrite and os.path.getsize(out_fna) > 0:
+            self.log_info(f"NCBI assembly cached: {out_fna}")
+            return out_fna
+
+        url = (
+            "https://api.ncbi.nlm.nih.gov/datasets/v2alpha/genome/accession/"
+            f"{accession}/download?include_annotation_type=GENOME_FASTA"
+        )
+        self.log_info(f"Fetching NCBI assembly {accession} ...")
+        req = urllib.request.Request(url, headers={"Accept": "application/zip"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            fna_names = [n for n in z.namelist() if n.endswith(".fna")]
+            if not fna_names:
+                raise RuntimeError(
+                    f"No .fna record in NCBI download for {accession}: "
+                    f"{z.namelist()}"
+                )
+            with open(out_fna, "wb") as fh:
+                for n in fna_names:
+                    fh.write(z.read(n))
+        self.log_info(f"  wrote {out_fna} ({os.path.getsize(out_fna):,} bytes)")
+        return out_fna
+
+    @staticmethod
+    def _derive_ncbi_accession(genome_id: str) -> Optional[str]:
+        """Pull a GCF/GCA assembly accession out of a datalake genome id.
+
+        ``RS_GCF_000046845.1`` → ``GCF_000046845.1``;
+        ``GB_GCA_002694305.1`` → ``GCA_002694305.1``.  Returns None when the id
+        carries no embedded accession (e.g. a user genome like
+        ``user_Acinetobacter_baylyi_ADP1_RAST`` — supply it via accession_map).
+        """
+        import re
+
+        m = re.search(r"(GC[AF]_\d+\.\d+)", genome_id or "")
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _protein_matches(translated: str, stored: str) -> bool:
+        """True when a translated CDS matches a stored protein.
+
+        Trailing stop codons are ignored and the first residue is allowed to
+        differ (alternative start codons GTG/TTG translate to V/L but are read
+        as M biologically), so only residues 2..n must be identical.
+        """
+        a = (translated or "").rstrip("*")
+        b = (stored or "").rstrip("*")
+        if not a or not b or len(a) != len(b):
+            return False
+        return a[1:] == b[1:]
+
+    def _extract_cds_dna(
+        self,
+        contig_seq: str,
+        start: int,
+        end: int,
+        protein: str,
+        genetic_code: int,
+        known_strand: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Extract a CDS DNA span and resolve its strand against *protein*.
+
+        Datalake coordinates are 1-based inclusive; minus-strand genes may be
+        stored with ``start > end``, so the span is taken as
+        ``contig[min..max]``.  When ``known_strand`` is None (the pangenome
+        tables carry no strand), both orientations are translated and the one
+        whose product matches *protein* is selected — recovering strand and the
+        correct CDS DNA from the data alone.
+
+        Returns ``(strand, dna)`` where ``translate(dna) ≈ protein``, or
+        ``(None, None)`` when neither orientation reconciles.
+        """
+        lo, hi = (start, end) if start <= end else (end, start)
+        sub = contig_seq[lo - 1 : hi].upper()
+        if not sub:
+            return None, None
+
+        def _coding(strand: str) -> str:
+            # Orient 5'->3' for the strand, then trim a trailing partial codon
+            # (datalake spans are 1-based inclusive and run one base long).
+            oriented = sub if strand == "+" else self.reverse_complement(sub)
+            return oriented[: len(oriented) - len(oriented) % 3]
+
+        candidates = [known_strand] if known_strand in ("+", "-") else ["+", "-"]
+        for strand in candidates:
+            dna = _coding(strand)
+            if self._protein_matches(self.translate_sequence(dna, genetic_code), protein):
+                return strand, dna
+
+        # known strand asserted but translation disagreed (e.g. selenocysteine,
+        # programmed frameshift): trust the asserted strand, keep its coding DNA.
+        if known_strand in ("+", "-"):
+            return known_strand, _coding(known_strand)
+        return None, None
+
+    def _build_pangenome_genome_dicts(
+        self,
+        db_path,
+        assembly_dir,
+        *,
+        genome_ids: Optional[List[str]] = None,
+        accession_map: Optional[Dict[str, str]] = None,
+        metadata_map: Optional[Dict[str, Dict[str, str]]] = None,
+        genetic_code: int = 11,
+        source: str = "Datalake",
+    ) -> List[Dict[str, Any]]:
+        """Build KBaseGenomes.Genome dicts from a datalake SQLite (no save).
+
+        Reads the per-genome feature tables (``genome_features`` for user/query
+        genomes, ``pan_genome_features`` for pangenome relatives), fetches each
+        genome's contigs from NCBI (see :meth:`fetch_ncbi_assembly`), extracts
+        per-feature DNA and recovers strand (see :meth:`_extract_cds_dna`), and
+        assembles a Genome dict whose CDS features carry ``location``,
+        ``dna_sequence`` and ``protein_translation``.
+
+        See :meth:`import_pangenome_genomes_from_datalake` for arg semantics.
+        Returns one result dict per genome with the built ``genome`` payload,
+        the local ``fasta_path``, and reconciliation stats — but performs no
+        workspace writes.
+        """
+        import os
+        import sqlite3
+
+        accession_map = dict(accession_map or {})
+        metadata_map = dict(metadata_map or {})
+        con = sqlite3.connect(str(db_path))
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        def _has(table: str) -> bool:
+            return cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone() is not None
+
+        # (genome_id, source_table) for every genome present.
+        targets: List[Tuple[str, str]] = []
+        if _has("genome_features"):
+            for r in cur.execute("SELECT DISTINCT genome_id FROM genome_features"):
+                targets.append((r[0], "genome_features"))
+        if _has("pan_genome_features"):
+            for r in cur.execute("SELECT DISTINCT genome_id FROM pan_genome_features"):
+                targets.append((r[0], "pan_genome_features"))
+        if genome_ids is not None:
+            keep = set(genome_ids)
+            targets = [t for t in targets if t[0] in keep]
+
+        gtax: Dict[str, str] = {}
+        if _has("genome"):
+            for r in cur.execute("SELECT id, gtdb_taxonomy FROM genome"):
+                gtax[r["id"]] = r["gtdb_taxonomy"]
+
+        results: List[Dict[str, Any]] = []
+        for gid, table in targets:
+            acc = accession_map.get(gid) or self._derive_ncbi_accession(gid)
+            if not acc:
+                self.log_warning(
+                    f"GAA: no NCBI accession for genome {gid!r}; supply it via "
+                    f"accession_map. Skipping."
+                )
+                results.append({"genome_id": gid, "status": "no_accession"})
+                continue
+
+            try:
+                fna = self.fetch_ncbi_assembly(acc, assembly_dir)
+            except Exception as exc:  # noqa: BLE001
+                self.log_warning(f"GAA: NCBI fetch failed for {gid} ({acc}): {exc}")
+                results.append(
+                    {"genome_id": gid, "accession": acc, "status": "fetch_failed",
+                     "error": str(exc)}
+                )
+                continue
+
+            contigs = self._parse_fasta(fna)
+            rows = list(cur.execute(
+                f"SELECT feature_id, contig_id, start, end, strand, sequence "
+                f"FROM {table} WHERE genome_id=?",
+                (gid,),
+            ))
+
+            features: List[Dict[str, Any]] = []
+            n_recovered = n_unmatched = n_no_seq = n_no_contig = 0
+            for r in rows:
+                prot = (r["sequence"] or "").strip()
+                if not prot:
+                    n_no_seq += 1
+                    continue
+                cseq = contigs.get(r["contig_id"])
+                if not cseq:
+                    n_no_contig += 1
+                    continue
+                strand, dna = self._extract_cds_dna(
+                    cseq, r["start"], r["end"], prot, genetic_code, r["strand"]
+                )
+                if strand is None:
+                    n_unmatched += 1
+                    continue
+                if r["strand"] not in ("+", "-"):
+                    n_recovered += 1
+                lo, hi = min(r["start"], r["end"]), max(r["start"], r["end"])
+                length = hi - lo + 1
+                # KBase location: minus-strand start is the high coordinate.
+                loc_start = lo if strand == "+" else hi
+                features.append({
+                    "id": r["feature_id"],
+                    "type": "gene",
+                    "location": [[r["contig_id"], loc_start, strand, length]],
+                    "functions": [],
+                    "aliases": [],
+                    "dna_sequence": dna,
+                    "dna_sequence_length": len(dna),
+                    "md5": hashlib.md5(dna.encode()).hexdigest(),
+                    "protein_translation": prot,
+                    "protein_translation_length": len(prot),
+                    "protein_md5": hashlib.md5(prot.encode()).hexdigest(),
+                })
+
+            genome = self._assemble_genome_dict(
+                gid, acc, contigs, features, gtax.get(gid), genetic_code, source,
+                metadata=metadata_map.get(gid),
+            )
+            self.log_info(
+                f"{gid}: {len(features)} CDS built "
+                f"({n_recovered} strand-recovered, {n_unmatched} unmatched, "
+                f"{n_no_seq} no-protein, {n_no_contig} contig-missing)"
+            )
+            results.append({
+                "genome_id": gid,
+                "accession": acc,
+                "fasta_path": fna,
+                "genome": genome,
+                "n_features": len(features),
+                "n_strand_recovered": n_recovered,
+                "n_unmatched": n_unmatched,
+                "n_no_protein": n_no_seq,
+                "n_contig_missing": n_no_contig,
+                "status": "built",
+            })
+        con.close()
+        return results
+
+    def _assemble_genome_dict(
+        self,
+        genome_id: str,
+        source_id: str,
+        contigs: Dict[str, str],
+        features: List[Dict[str, Any]],
+        taxonomy: Optional[str],
+        genetic_code: int,
+        source: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Assemble a KBaseGenomes.Genome dict from contigs + built features.
+
+        Mirrors :meth:`build_genome_from_fasta_gff` (contig metadata, GC, md5,
+        domain derivation) but takes pre-built CDS features (carrying stored
+        protein translations) rather than re-translating from a GFF.  ``metadata``
+        may carry ``scientific_name`` / ``taxonomy`` overrides (e.g. for user
+        genomes whose datalake row has no GTDB lineage).
+        """
+        metadata = metadata or {}
+        contig_ids = sorted(contigs.keys())
+        contig_lengths = [len(contigs[c]) for c in contig_ids]
+        joined = "".join(contigs[c] for c in contig_ids).upper()
+        atgc = sum(1 for b in joined if b in "ATGC")
+        gc_content = (joined.count("G") + joined.count("C")) / atgc if atgc else 0.0
+        genome_md5 = hashlib.md5(joined.encode()).hexdigest()
+
+        taxonomy = (metadata.get("taxonomy") or taxonomy or "").strip()
+        first = taxonomy.split(";")[0].strip().lower()
+        if "archaea" in first:
+            domain = "Archaea"
+        elif "eukaryot" in first:
+            domain = "Eukaryota"
+        else:
+            domain = "Bacteria"
+        # KBaseGenomes.Genome requires a non-empty taxonomy; fall back to domain.
+        if not taxonomy:
+            taxonomy = domain
+
+        # Scientific name: explicit override > last populated GTDB rank > genome id.
+        scientific_name = metadata.get("scientific_name") or genome_id
+        if not metadata.get("scientific_name"):
+            for seg in reversed(taxonomy.split(";")):
+                seg = seg.strip()
+                if len(seg) > 3 and seg[1:3] == "__" and seg[3:]:
+                    scientific_name = seg[3:]
+                    break
+
+        cdss = self._create_cds_features(features)
+        feature_counts: Dict[str, int] = {}
+        for ftr in features + cdss:
+            ftype = ftr.get("type", "unknown")
+            feature_counts[ftype] = feature_counts.get(ftype, 0) + 1
+
+        return {
+            "id": genome_id,
+            "scientific_name": scientific_name,
+            "domain": domain,
+            "taxonomy": taxonomy,
+            "genetic_code": genetic_code,
+            "dna_size": sum(contig_lengths),
+            "num_contigs": len(contig_ids),
+            "contig_ids": contig_ids,
+            "contig_lengths": contig_lengths,
+            "gc_content": gc_content,
+            "md5": genome_md5,
+            "molecule_type": "DNA",
+            "source": source,
+            "source_id": source_id,
+            "assembly_ref": "",
+            "features": features,
+            "cdss": cdss,
+            "mrnas": [],
+            "non_coding_features": [],
+            "feature_counts": feature_counts,
+            # Fields required / expected by the KBaseGenomes.Genome workspace type.
+            # (taxon_ref is omitted: the type rejects an empty ws ref and we have
+            # no taxon object to point at.)
+            "genome_tiers": ["ExternalDB", "User"],
+            "warnings": [],
+            "publications": [],
+        }
+
+    def import_pangenome_genomes_from_datalake(
+        self,
+        db_path,
+        assembly_dir,
+        *,
+        genome_ids: Optional[List[str]] = None,
+        accession_map: Optional[Dict[str, str]] = None,
+        metadata_map: Optional[Dict[str, Dict[str, str]]] = None,
+        genetic_code: int = 11,
+        source: str = "Datalake",
+        save: bool = False,
+        workspace=None,
+        name_suffix: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Import pangenome genomes from a datalake SQLite DB, fetching DNA from NCBI.
+
+        For each genome in the datalake DB (the query genome in
+        ``genome_features`` and pangenome relatives in ``pan_genome_features``):
+        derive its NCBI assembly accession from the genome id (or
+        ``accession_map``), download the contigs from NCBI, reconstruct
+        per-feature DNA + strand from the stored coordinates and protein, and
+        build a complete ``KBaseGenomes.Genome`` object.
+
+        Args:
+            db_path: Path to the datalake SQLite database.
+            assembly_dir: Directory to cache downloaded NCBI genomic FASTAs.
+            genome_ids: Optional subset of datalake genome ids to import;
+                default imports every genome found.
+            accession_map: ``{datalake_genome_id: NCBI_accession}`` overrides,
+                required for genomes whose id carries no embedded GCF/GCA
+                accession (e.g. user genomes).
+            genetic_code: NCBI genetic code table number (default 11, bacterial).
+            source: ``source`` label stored on the Genome object.
+            save: When True, save each Genome (with its assembly) to *workspace*.
+                Saving requires the composition facade (``kbu.genome``) because
+                the assembly upload runs as an AssemblyUtil EE2 job.
+            workspace: Target workspace id/name; required when ``save=True``.
+            name_suffix: Optional suffix appended to the saved object name
+                (object base name is ``genome_id + name_suffix``).
+
+        Returns:
+            One result dict per genome: ``{genome_id, accession, fasta_path,
+            genome, n_features, n_strand_recovered, n_unmatched, n_no_protein,
+            n_contig_missing, status}`` — plus ``assembly_ref`` / ``genome_ref``
+            when saved.  Genomes that could not be resolved have ``status`` of
+            ``no_accession`` / ``fetch_failed`` instead of ``built`` / ``saved``.
+        """
+        self.initialize_call(
+            "import_pangenome_genomes_from_datalake",
+            {"db_path": str(db_path), "save": save, "workspace": workspace},
+            print_params=True,
+        )
+        results = self._build_pangenome_genome_dicts(
+            db_path,
+            assembly_dir,
+            genome_ids=genome_ids,
+            accession_map=accession_map,
+            metadata_map=metadata_map,
+            genetic_code=genetic_code,
+            source=source,
+        )
+        if save:
+            if workspace is None:
+                raise ValueError("workspace is required when save=True")
+            for r in results:
+                if r.get("status") != "built":
+                    continue
+                base_name = r["genome_id"] + name_suffix
+                assembly_ref, genome_ref = self.save_genome_with_assembly(
+                    r["fasta_path"], r["genome"], workspace, base_name
+                )
+                r["assembly_ref"] = assembly_ref
+                r["genome_ref"] = genome_ref
+                r["status"] = "saved"
+        return results
+
 
 # ── Composition-based implementation ─────────────────────────────────────
 
@@ -1319,13 +1764,22 @@ class KBGenomeUtilsImpl:
                 f"state '{record.state}': {record.error_message}"
             )
 
-        # AssemblyUtil.save_assembly_from_fasta returns {"assembly_ref": "<ws_id/obj_id/ver>"}
-        # Verified against AssemblyUtil KIDL spec (AssemblyUtil.spec, 2026-06-02).
-        raw = record.ee2_raw
-        result = raw.get("result", [{}])
+        # AssemblyUtil.save_assembly_from_fasta returns the new assembly ref.
+        # EE2 nests the app return under job_output.result (older shapes used a
+        # top-level "result"); the element is either a {"assembly_ref": ...} dict
+        # or a bare "<ws_id/obj_id/ver>" string depending on the AssemblyUtil
+        # version — handle both.
+        raw = record.ee2_raw or {}
+        job_output = raw.get("job_output") or {}
+        result = job_output.get("result", raw.get("result", []))
         if isinstance(result, list) and result:
             result = result[0]
-        assembly_ref = result.get("assembly_ref")
+        if isinstance(result, dict):
+            assembly_ref = result.get("assembly_ref")
+        elif isinstance(result, str):
+            assembly_ref = result
+        else:
+            assembly_ref = None
         if not assembly_ref:
             raise RuntimeError(
                 f"save_assembly_from_fasta job {record.job_id} result "
@@ -1361,6 +1815,52 @@ class KBGenomeUtilsImpl:
         genome_dict["assembly_ref"] = assembly_ref
         genome_ref = self._delegate.save_genome_object(genome_dict, workspace, base_name)
         return assembly_ref, genome_ref
+
+    def import_pangenome_genomes_from_datalake(
+        self,
+        db_path,
+        assembly_dir,
+        *,
+        genome_ids: Optional[List[str]] = None,
+        accession_map: Optional[Dict[str, str]] = None,
+        metadata_map: Optional[Dict[str, Dict[str, str]]] = None,
+        genetic_code: int = 11,
+        source: str = "Datalake",
+        save: bool = False,
+        workspace=None,
+        name_suffix: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Facade variant of ``import_pangenome_genomes_from_datalake``.
+
+        Builds genome dicts via the delegate's network-free core, then (when
+        ``save=True``) persists each with its assembly through this facade's
+        EE2-backed :meth:`save_genome_with_assembly`.  See the legacy
+        ``KBGenomeUtils.import_pangenome_genomes_from_datalake`` for argument and
+        return semantics.
+        """
+        results = self._delegate._build_pangenome_genome_dicts(
+            db_path,
+            assembly_dir,
+            genome_ids=genome_ids,
+            accession_map=accession_map,
+            metadata_map=metadata_map,
+            genetic_code=genetic_code,
+            source=source,
+        )
+        if save:
+            if workspace is None:
+                raise ValueError("workspace is required when save=True")
+            for r in results:
+                if r.get("status") != "built":
+                    continue
+                base_name = r["genome_id"] + name_suffix
+                assembly_ref, genome_ref = self.save_genome_with_assembly(
+                    r["fasta_path"], r["genome"], workspace, base_name
+                )
+                r["assembly_ref"] = assembly_ref
+                r["genome_ref"] = genome_ref
+                r["status"] = "saved"
+        return results
 
     def __getattr__(self, name):
         return getattr(self._delegate, name)

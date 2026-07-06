@@ -1,31 +1,24 @@
 {
   "verdict": "pass",
-  "reason": "All 89 offline tests pass, 1 live test skipped (Docker image absent), transyt_utils.py reaches 100% branch coverage, annotator_utils.py reaches 100% when the full annotators suite runs, all TransytUtils success criteria verified.",
-  "task_id": "transyt-module",
+  "reason": "All 86 offline tests pass (1 live h100 test correctly skipped); b0001 round-trip, env builder, keep-on-failure, and all PRD criteria verified; no GAA files touched.",
+  "task_id": "dram2-id-remap-impl",
   "criteria": {
-    "annotate_raises_on_missing_tax_id": "pass",
-    "stages_protein_faa_and_params_txt": "pass",
-    "neo4j_readiness_poll_no_fixed_sleep": "pass",
-    "parses_transyt_xml_and_reactions_references_into_tc_msrxn_mscpd_terms": "pass",
-    "returns_empty_records_on_exit_8": "pass",
-    "is_available_returns_false_no_raise_when_image_absent": "pass",
-    "offline_golden_fixture_test_passes": "pass",
-    "docker_transyt_dockerfile_present": "pass",
-    "transyt_utils_exported_from_init": "pass",
-    "fail_under_100_coverage_gate_green": "pass"
+    "pytest_passes_with_b0001_roundtrip": "pass",
+    "golden_fixture_parse_tests_adapted_to_identity_maps": "pass",
+    "annotate_signature_only_adds_keep_work": "pass",
+    "parameters_contains_work_dir_and_kept": "pass",
+    "no_gaa_files_modified": "pass",
+    "write_faa_emits_g_n_ids_returns_reverse_map": "pass",
+    "parse_annotations_tsv_translates_emitted_to_caller": "pass",
+    "subprocess_env_has_nxf_ver_and_path_prefix": "pass",
+    "scratch_under_work_root_not_tmp": "pass",
+    "keep_on_failure_preserves_scratch_and_copies_artifacts": "pass",
+    "is_available_warns_not_fails_on_pipeline_outside_launch_dir": "pass"
   },
   "tests_run": [
     {
-      "cmd": "pytest tests/annotators/test_transyt_utils.py -q",
-      "outcome": "89 passed, 1 skipped"
-    },
-    {
-      "cmd": "pytest tests/annotators/ tests/guard/ --cov=kbutillib.transyt_utils --cov=kbutillib.annotator_utils --cov-report=term-missing -q",
-      "outcome": "142 passed, 1 skipped, 100% branch coverage on both transyt_utils.py and annotator_utils.py"
-    },
-    {
-      "cmd": "pytest tests/guard/test_dependency_direction.py -v",
-      "outcome": "1 passed — no GAA imports found in kbutillib"
+      "cmd": "pytest tests/annotators/test_dram2_utils.py -v (from worktree ~/.maestro/worktrees/dram2-id-remap-impl, venv kbutillib-py3.11)",
+      "outcome": "86 passed, 1 skipped (TestDram2LiveIntegration gated by KBU_DRAM2_LIVE=1)"
     }
   ]
 }

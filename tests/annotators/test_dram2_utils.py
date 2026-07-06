@@ -981,6 +981,59 @@ class TestBuildSubprocessEnv:
         assert captured_env.get("NXF_VER") == "24.10.5"
         assert captured_env.get("PATH", "").startswith("/fake/bin")
 
+    def test_scratch_root_unset_omits_tmp_and_conda_vars(self):
+        """When scratch_root is empty, TMPDIR/NXF_CONDA_CACHEDIR/CONDA_PKGS_DIRS
+        are NOT added to the env (inherited from os.environ only if already set)."""
+        utils = _make_utils()
+        assert utils._scratch_root == ""
+        # Baseline: capture whatever os.environ has for these keys
+        baseline_tmpdir = os.environ.get("TMPDIR")
+        baseline_conda_cache = os.environ.get("NXF_CONDA_CACHEDIR")
+        baseline_conda_pkgs = os.environ.get("CONDA_PKGS_DIRS")
+
+        env = utils._build_subprocess_env()
+
+        # The builder must not INJECT these keys when scratch_root is unset.
+        # It may still pass through what os.environ already had (via the
+        # {**os.environ, ...} spread), so assert equality with baseline.
+        assert env.get("TMPDIR") == baseline_tmpdir
+        assert env.get("NXF_CONDA_CACHEDIR") == baseline_conda_cache
+        assert env.get("CONDA_PKGS_DIRS") == baseline_conda_pkgs
+
+    def test_scratch_root_set_pins_tmp_and_conda_vars(self, tmp_path: Path):
+        """When scratch_root is set, TMPDIR/NXF_CONDA_CACHEDIR/CONDA_PKGS_DIRS
+        point under the root and the three subdirs are created."""
+        root = tmp_path / "sroot"
+        utils = _make_utils()
+        utils._scratch_root = str(root)
+
+        env = utils._build_subprocess_env()
+
+        assert env["TMPDIR"] == str(root / "tmp")
+        assert env["NXF_CONDA_CACHEDIR"] == str(root / "conda_cache")
+        assert env["CONDA_PKGS_DIRS"] == str(root / "conda_pkgs")
+        # Subdirs created
+        assert (root / "tmp").is_dir()
+        assert (root / "conda_cache").is_dir()
+        assert (root / "conda_pkgs").is_dir()
+
+    def test_scratch_root_reuses_existing_conda_cache_dirs(self, tmp_path: Path):
+        """Conda cache subdirs are STABLE across runs — pre-existing dirs
+        (with contents) must NOT be wiped when _build_subprocess_env runs."""
+        root = tmp_path / "sroot"
+        (root / "conda_cache").mkdir(parents=True)
+        # Pre-existing cache marker
+        marker = root / "conda_cache" / "existing_env.txt"
+        marker.write_text("previously cached")
+
+        utils = _make_utils()
+        utils._scratch_root = str(root)
+        utils._build_subprocess_env()
+
+        # Marker must still be there — mkdir(exist_ok=True) does not wipe
+        assert marker.exists()
+        assert marker.read_text() == "previously cached"
+
     def test_run_nextflow_passes_env_to_subprocess(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

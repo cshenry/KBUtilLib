@@ -394,6 +394,14 @@ class DRAM2Utils(AnnotatorUtils):
         ``dram2.work_root`` — directory under which ``mkdtemp``-based scratch
             dirs are created (default ``<launch_dir>/scratch``; created if
             absent; never ``/tmp`` unless explicitly set).
+        ``dram2.scratch_root`` — when set, pins the Nextflow subprocess env
+            vars ``TMPDIR``, ``NXF_CONDA_CACHEDIR``, and ``CONDA_PKGS_DIRS``
+            to ``<root>/tmp``, ``<root>/conda_cache``, and
+            ``<root>/conda_pkgs`` respectively (all created if absent).  The
+            conda-cache subdirs are stable across runs (NOT per-run temp
+            dirs) so conda env creation is amortised.  Default empty — env
+            is inherited unchanged (``/tmp`` is the OS default), leaving
+            non-h100 hosts unaffected.
         ``dram2.keep_work`` — when True, preserve the scratch dir after a
             successful run (default False).
 
@@ -437,6 +445,9 @@ class DRAM2Utils(AnnotatorUtils):
         )
         self._work_root: str = self.get_config_value(
             "dram2.work_root", default=""
+        )
+        self._scratch_root: str = self.get_config_value(
+            "dram2.scratch_root", default=""
         )
         self._keep_work: bool = bool(self.get_config_value(
             "dram2.keep_work", default=False
@@ -786,6 +797,10 @@ class DRAM2Utils(AnnotatorUtils):
         Constructs an env dict from ``os.environ`` with:
         - ``NXF_VER`` set to ``self._nxf_ver`` (default ``"24.10.5"``)
         - ``PATH`` prefixed with ``self._env_path`` (if non-empty)
+        - When ``self._scratch_root`` is set, pins ``TMPDIR``,
+          ``NXF_CONDA_CACHEDIR``, and ``CONDA_PKGS_DIRS`` to stable subdirs
+          under that root (created if absent), so the Nextflow subprocess
+          never touches ``/tmp`` and reuses the conda cache across runs.
 
         ``self._env_path`` is a single colon-separated string (NOT a list),
         e.g. ``"/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"``.
@@ -797,6 +812,16 @@ class DRAM2Utils(AnnotatorUtils):
         if self._env_path:
             current_path = os.environ.get("PATH", "")
             env["PATH"] = self._env_path + os.pathsep + current_path
+        if self._scratch_root:
+            root = Path(self._scratch_root)
+            tmp_dir = root / "tmp"
+            conda_cache = root / "conda_cache"
+            conda_pkgs = root / "conda_pkgs"
+            for d in (tmp_dir, conda_cache, conda_pkgs):
+                d.mkdir(parents=True, exist_ok=True)
+            env["TMPDIR"] = str(tmp_dir)
+            env["NXF_CONDA_CACHEDIR"] = str(conda_cache)
+            env["CONDA_PKGS_DIRS"] = str(conda_pkgs)
         return env
 
     def _run_nextflow(

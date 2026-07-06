@@ -1034,6 +1034,28 @@ class TestBuildSubprocessEnv:
         assert marker.exists()
         assert marker.read_text() == "previously cached"
 
+    def test_nxf_home_unset_does_not_inject_key(self):
+        """When nxf_home is empty, NXF_HOME is NOT added by the method.
+
+        Mirrors the scratch_root unset test: the builder may still pass
+        through whatever os.environ already had (via the {**os.environ, ...}
+        spread), but must not INJECT an NXF_HOME of its own.
+        """
+        utils = _make_utils()
+        assert utils._nxf_home == ""
+        baseline_nxf_home = os.environ.get("NXF_HOME")
+
+        env = utils._build_subprocess_env()
+
+        assert env.get("NXF_HOME") == baseline_nxf_home
+
+    def test_nxf_home_set_pins_nxf_home(self):
+        """When nxf_home is set, NXF_HOME equals the configured value."""
+        utils = _make_utils()
+        utils._nxf_home = "/scratch1/dram2/.nextflow"
+        env = utils._build_subprocess_env()
+        assert env["NXF_HOME"] == "/scratch1/dram2/.nextflow"
+
     def test_run_nextflow_passes_env_to_subprocess(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

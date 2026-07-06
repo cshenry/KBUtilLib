@@ -386,6 +386,12 @@ class DRAM2Utils(AnnotatorUtils):
             empty / omit).
         ``dram2.nxf_ver`` — Nextflow engine version to pin via ``NXF_VER``
             in the subprocess environment (default ``"24.10.5"``).
+        ``dram2.nxf_home`` — when set, pins ``NXF_HOME`` in the subprocess
+            environment to this value so the classic Nextflow launcher finds
+            its framework jar (``framework/<ver>/nextflow-<ver>-one.jar``)
+            locally and never attempts a (broken-SSL) download.  Default
+            empty — ``NXF_HOME`` is inherited unchanged (Nextflow's default
+            ``~/.nextflow``), leaving non-h100 hosts unaffected.
         ``dram2.env_path`` — colon-separated list of directories to prepend
             to ``PATH`` in the subprocess environment (e.g.
             ``"/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"``).
@@ -437,6 +443,9 @@ class DRAM2Utils(AnnotatorUtils):
         # Run-hardening config keys
         self._nxf_ver: str = self.get_config_value(
             "dram2.nxf_ver", default=_DEFAULT_NXF_VER
+        )
+        self._nxf_home: str = self.get_config_value(
+            "dram2.nxf_home", default=""
         )
         # dram2.env_path: single colon-separated string, NOT a YAML list.
         # Example: "/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"
@@ -801,6 +810,9 @@ class DRAM2Utils(AnnotatorUtils):
           ``NXF_CONDA_CACHEDIR``, and ``CONDA_PKGS_DIRS`` to stable subdirs
           under that root (created if absent), so the Nextflow subprocess
           never touches ``/tmp`` and reuses the conda cache across runs.
+        - When ``self._nxf_home`` is set, pins ``NXF_HOME`` to that value so
+          the classic Nextflow launcher finds its framework jar locally and
+          never attempts a download.
 
         ``self._env_path`` is a single colon-separated string (NOT a list),
         e.g. ``"/scratch1/.../DRAM2/env/env_nf/bin:/scratch1/.../micromamba/bin"``.
@@ -822,6 +834,8 @@ class DRAM2Utils(AnnotatorUtils):
             env["TMPDIR"] = str(tmp_dir)
             env["NXF_CONDA_CACHEDIR"] = str(conda_cache)
             env["CONDA_PKGS_DIRS"] = str(conda_pkgs)
+        if self._nxf_home:
+            env["NXF_HOME"] = self._nxf_home
         return env
 
     def _run_nextflow(

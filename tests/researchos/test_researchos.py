@@ -1198,27 +1198,8 @@ class TestNewOrchestration:
         """_run_init is called with cwd=<root>/<parent>."""
         captured_cwd = []
 
-        def fake_run(cmd, **kwargs):
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
-            cmd_list = list(cmd)
-            if "init" in cmd_list:
-                captured_cwd.append(kwargs.get("cwd"))
-                # Create project dir structure so new() can continue
-                cwd = kwargs.get("cwd")
-                idx = cmd_list.index("init")
-                proj_name = cmd_list[idx + 1]
-                proj_path = Path(cwd) / proj_name
-                (proj_path / ".os_state").mkdir(parents=True, exist_ok=True)
-            return r
-
         # Create tooling bin
-        bin_dir = tooling_venv / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        (bin_dir / "research-os").write_text("#!/bin/sh\n")
-        (bin_dir / "research-os").chmod(0o755)
+        _seed_tooling_venv(tooling_venv)
 
         from kbutillib.researchos.manager import ResearchOSProject
 
@@ -1227,6 +1208,24 @@ class TestNewOrchestration:
             tooling_venv=tooling_venv,
             aiassistant_root=aiassistant_root,
         )
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            cmd_list = list(cmd)
+            cmd_str = " ".join(str(c) for c in cmd_list)
+            # Match research-os init call (not git init)
+            if "research-os" in cmd_str and "init" in cmd_list:
+                captured_cwd.append(kwargs.get("cwd"))
+                # Create project dir structure so new() can continue
+                cwd = kwargs.get("cwd")
+                idx = cmd_list.index("init")
+                proj_name = cmd_list[idx + 1]
+                proj_path = Path(cwd) / proj_name
+                (proj_path / ".os_state").mkdir(parents=True, exist_ok=True)
+            return r
 
         with patch("subprocess.run", side_effect=fake_run):
             mgr.new("AIALE", "CwdTest")

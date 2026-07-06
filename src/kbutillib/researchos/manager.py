@@ -405,13 +405,10 @@ class ResearchOSProject:
             _git_run(project_path, ["git", "config", "user.name", "kbu"])
         except RuntimeError:
             pass  # best-effort; will use global config if set
-        _git_run(project_path, ["git", "-C", str(project_path), "add", "-A"])
+        _git_run(project_path, ["git", "add", "-A"])
         _git_run(
             project_path,
-            [
-                "git", "-C", str(project_path),
-                "commit", "-m", f"Initialize Research OS project {name}",
-            ],
+            ["git", "commit", "-m", f"Initialize Research OS project {name}"],
         )
 
 

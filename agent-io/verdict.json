@@ -1,24 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "All 86 offline tests pass (1 live h100 test correctly skipped); b0001 round-trip, env builder, keep-on-failure, and all PRD criteria verified; no GAA files touched.",
-  "task_id": "dram2-id-remap-impl",
-  "criteria": {
-    "pytest_passes_with_b0001_roundtrip": "pass",
-    "golden_fixture_parse_tests_adapted_to_identity_maps": "pass",
-    "annotate_signature_only_adds_keep_work": "pass",
-    "parameters_contains_work_dir_and_kept": "pass",
-    "no_gaa_files_modified": "pass",
-    "write_faa_emits_g_n_ids_returns_reverse_map": "pass",
-    "parse_annotations_tsv_translates_emitted_to_caller": "pass",
-    "subprocess_env_has_nxf_ver_and_path_prefix": "pass",
-    "scratch_under_work_root_not_tmp": "pass",
-    "keep_on_failure_preserves_scratch_and_copies_artifacts": "pass",
-    "is_available_warns_not_fails_on_pipeline_outside_launch_dir": "pass"
-  },
-  "tests_run": [
-    {
-      "cmd": "pytest tests/annotators/test_dram2_utils.py -v (from worktree ~/.maestro/worktrees/dram2-id-remap-impl, venv kbutillib-py3.11)",
-      "outcome": "86 passed, 1 skipped (TestDram2LiveIntegration gated by KBU_DRAM2_LIVE=1)"
-    }
-  ]
+  "reason": "Faithful minimal impl of dram2.scratch_root: pins TMPDIR/NXF_CONDA_CACHEDIR/CONDA_PKGS_DIRS to stable subdirs (mkdir exist_ok, caches survive runs), no-op when unset; both docstrings updated; 3 new TestBuildSubprocessEnv tests pass (88 passed, 1 skipped). The lone failing test (TestKeepOnFailure::test_scratch_under_work_root_not_tmp) is pre-existing on main -- the sandbox TMPDIR lives under /tmp -- and is unrelated to this diff. No fix-up commit made.",
+  "stamp": {
+    "task_id": "task-b8a7a409",
+    "branch": "maestro/reviewer/small-single-file-fix-in-kbutill-task-b8a7a409",
+    "commit": null
+  }
 }

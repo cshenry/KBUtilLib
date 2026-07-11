@@ -73,6 +73,9 @@ class KBAnnotationUtils(KBCallbackUtils):
         self.object_alias_hash = {}
         self.term_names = {}
         self.ontologies_present = {}
+        # Parquet-backed mapping-version translation (see load_reaction_mapping_parquet)
+        self.reaction_mapping = {}
+        self.reaction_mapping_by_description = {}
         # Loading filtered reactions
         self.filtered_rxn = {}
         filename = self.annoontology_dir / "data/FilteredReactions.csv"
@@ -238,6 +241,86 @@ class KBAnnotationUtils(KBCallbackUtils):
                 if search not in self.filtered_rxn:
                     new_output.append(item)
             return new_output
+        return output
+
+    def load_reaction_mapping_parquet(self, path):
+        """Load a mapping-version parquet into an in-memory function->reaction lookup.
+
+        This is an additive, parquet-sourced sibling to ``translate_term_to_modelseed``
+        (RAST/SSO/KO/EC/etc.) — it does not touch that path. The parquet carries one row
+        per (function, reaction) with at least the columns ``function_hash``,
+        ``function_description``, ``reaction_id``, ``score``, ``is_in_template``, and
+        ``is_in_core``.
+
+        Builds two lookups, replacing any previously loaded mapping (reload is
+        idempotent — loading the same or a different parquet always yields a lookup
+        built solely from the newly loaded rows, never an accumulation of old + new):
+
+        - ``self.reaction_mapping``: ``{function_hash: [(reaction_id, score,
+          is_in_template, is_in_core), ...]}``
+        - ``self.reaction_mapping_by_description``: the same tuples, keyed by
+          ``function_description`` normalized via ``convert_role_to_searchrole`` so
+          lookups by human-readable description are tolerant of case/whitespace/EC-suffix
+          differences.
+
+        :param path: path to the mapping-version parquet file
+        :return: the loaded ``self.reaction_mapping`` dict
+        """
+        mapping_df = pd.read_parquet(path)
+        reaction_mapping = {}
+        reaction_mapping_by_description = {}
+        for _, row in mapping_df.iterrows():
+            entry = (
+                row["reaction_id"],
+                float(row["score"]),
+                bool(row["is_in_template"]),
+                bool(row["is_in_core"]),
+            )
+            function_hash = row["function_hash"]
+            reaction_mapping.setdefault(function_hash, []).append(entry)
+            description = row.get("function_description")
+            if description:
+                search_description = self.convert_role_to_searchrole(str(description))
+                reaction_mapping_by_description.setdefault(
+                    search_description, []
+                ).append(entry)
+        self.reaction_mapping = reaction_mapping
+        self.reaction_mapping_by_description = reaction_mapping_by_description
+        return self.reaction_mapping
+
+    def translate_function_to_reactions(
+        self, function_hash=None, description=None, with_scores=True
+    ):
+        """Translate a function to ModelSEED reactions via the loaded mapping-version parquet.
+
+        Additive sibling path to ``translate_term_to_modelseed``; sourced entirely from
+        the parquet loaded by ``load_reaction_mapping_parquet`` (never from the bundled
+        EC/KO/SSO ontology files). Looks up by ``function_hash`` first if provided,
+        otherwise by ``description`` (normalized via ``convert_role_to_searchrole``).
+        Honors ``self.msrxn_filter`` against ``self.filtered_rxn`` (``FilteredReactions.csv``)
+        exactly like ``translate_term_to_modelseed`` does. Returns an empty list if no
+        mapping has been loaded or the key is not found.
+
+        :param function_hash: opaque function_hash key supplied by the mapping parquet
+        :param description: human-readable function description to resolve via the
+            normalized-description index
+        :param with_scores: if True (default), return ``(reaction_id, score)`` tuples;
+            if False, return bare ``reaction_id`` strings
+        :return: list of reactions (or reaction/score tuples), possibly empty
+        """
+        entries = None
+        if function_hash is not None:
+            entries = self.reaction_mapping.get(function_hash)
+        elif description is not None:
+            search_description = self.convert_role_to_searchrole(str(description))
+            entries = self.reaction_mapping_by_description.get(search_description)
+        if not entries:
+            return []
+        output = []
+        for reaction_id, score, is_in_template, is_in_core in entries:
+            if self.msrxn_filter and reaction_id in self.filtered_rxn:
+                continue
+            output.append((reaction_id, score) if with_scores else reaction_id)
         return output
 
     def get_annotation_ontology_events(self, params):

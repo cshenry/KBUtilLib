@@ -76,6 +76,12 @@ notebook = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The KING self-install app bundle (kbu king install) -- package data so a
+# `pip install` (not just an editable install) still ships bundle.json +
+# skill.md alongside the kbutillib package.
+kbutillib = ["king_app/*.json", "king_app/*.md"]
+
 [tool.uv]
 package = true
 
@@ -104,6 +110,7 @@ markers = [
     "integration: mark test as integration test",
     "kbase: mark test as requiring a live KBase token (skipped unless KBASE_LIVE_TESTS=1)",
     "kbu_model: mark test as requiring the kbu modeling stack (cobra/modelseedpy); skipped when unavailable",
+    "king_install: mark test as covering the `kbu king` KING self-install verb group",
 ]
 
 [tool.mypy]

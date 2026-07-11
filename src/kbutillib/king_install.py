@@ -392,13 +392,32 @@ def _context_has_header(apps_dir: Path, title: str, app_id: str) -> bool:
 
 
 def _king_context_env_resolves(apps_dir: Path) -> bool:
+    """Static check of AC #18's "``KING_CONTEXT`` resolves to it".
+
+    Checked primarily against the generated ``serve-king.sh`` wrapper, not
+    the calling process's own environment: ``king status`` is normally run
+    from an ordinary shell (e.g. right after ``king install``, per Module
+    E's orchestrator skill), not from inside a KING launch, so the
+    process's live ``KING_CONTEXT`` is almost never set even when
+    everything is correctly wired. A ``KING_CONTEXT`` already set correctly
+    in the current process env also counts. (Mirrors
+    ``assistant.king_install._serve_script_wires_context`` so both
+    installers' ``status`` verbs agree on what "wired" means.)
+    """
+    context_path = _context_md_path(apps_dir)
+    expected = f'export KING_CONTEXT="{context_path}"'
+    script_path = _serve_script_path(apps_dir)
+    try:
+        if expected in script_path.read_text(encoding="utf-8"):
+            return True
+    except OSError:
+        pass
+
     king_context = os.environ.get("KING_CONTEXT")
     if not king_context:
         return False
     try:
-        return Path(king_context).expanduser().resolve() == _context_md_path(
-            apps_dir
-        ).resolve()
+        return Path(king_context).expanduser().resolve() == context_path.resolve()
     except OSError:
         return False
 

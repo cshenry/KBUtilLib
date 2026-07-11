@@ -218,7 +218,11 @@ class TestStatus:
         apps_dir = tmp_path / "king-apps"
         _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
 
-        monkeypatch.setenv("KING_CONTEXT", str(apps_dir / "CONTEXT.md"))
+        # No KING_CONTEXT set in the calling shell -- `king status` is
+        # normally run right after `king install`, from an ordinary shell,
+        # not from inside a KING launch. "Wired" must be judged from the
+        # generated serve-king.sh wrapper, not the caller's live env.
+        monkeypatch.delenv("KING_CONTEXT", raising=False)
         r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
         data = json.loads(r.output)
@@ -228,6 +232,23 @@ class TestStatus:
         assert data["context_has_header"] is True
         assert data["king_context_wired"] is True
         assert set(data["versions"]) == {"kbutillib", "cobra", "modelseedpy"}
+
+    def test_status_green_via_live_king_context_env_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A KING_CONTEXT already correctly set in the current process env
+        also counts (e.g. when status is checked from inside a KING-launched
+        shell), even if the serve-king.sh wrapper were somehow unreadable."""
+        _fake_kbu_on_path(tmp_path, monkeypatch)
+        apps_dir = tmp_path / "king-apps"
+        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+
+        monkeypatch.setenv("KING_CONTEXT", str(apps_dir / "CONTEXT.md"))
+        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 0, r.output
+        data = json.loads(r.output)
+        assert data["color"] == "green"
+        assert data["king_context_wired"] is True
 
     def test_status_amber_when_cli_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -251,6 +272,13 @@ class TestStatus:
         apps_dir = tmp_path / "king-apps"
         _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
 
+        # Actually break the wiring: corrupt the generated serve-king.sh so
+        # it no longer exports KING_CONTEXT, and make sure the calling
+        # shell doesn't have it set either. (Merely unsetting the calling
+        # shell's env is NOT broken wiring -- serve-king.sh is what wires
+        # KING_CONTEXT for the real launch; status must judge "wired" from
+        # that generated script, not the caller's own env.)
+        (apps_dir / "serve-king.sh").write_text("#!/usr/bin/env bash\necho stub\n")
         monkeypatch.delenv("KING_CONTEXT", raising=False)
         r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 2

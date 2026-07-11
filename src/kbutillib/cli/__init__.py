@@ -14,6 +14,7 @@ from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
 from .jobs import jobs_cmd
 from .migrate import migrate_cmd
+from .model import model_cmd
 from .new_project import new_project_command
 from .notebook import notebook_cmd
 from .notebook_init import notebook_init_cmd
@@ -40,6 +41,7 @@ main.add_command(init_notebook_cmd, name="init-notebook")
 main.add_command(jobs_cmd, name="jobs")
 main.add_command(jobdaemon_cmd, name="jobdaemon")
 main.add_command(migrate_cmd, name="migrate")
+main.add_command(model_cmd, name="model")
 main.add_command(new_project_command, name="new-project")
 main.add_command(notebook_cmd, name="notebook")
 main.add_command(notebook_init_cmd, name="notebook-init")

@@ -103,6 +103,7 @@ markers = [
     "slow: mark test as slow running",
     "integration: mark test as integration test",
     "kbase: mark test as requiring a live KBase token (skipped unless KBASE_LIVE_TESTS=1)",
+    "kbu_model: mark test as requiring the kbu modeling stack (cobra/modelseedpy); skipped when unavailable",
 ]
 
 [tool.mypy]

@@ -2,11 +2,27 @@
 
 Signature::
 
-    kbu notebook-init <repo> [--project <topic>] [--update]
+    kbu notebook-init <repo> [--project <topic>] [--group <group>] [--update]
 
 Where ``<repo>`` is either:
-- A bare name  → resolved to ``~/Dropbox/Projects/<name>``
+- A bare name  → resolved as described below
 - A full path  → used verbatim
+
+Repo resolution for bare names (no path separator in ``<repo>``)
+----------------------------------------------------------------
+1. If ``~/Dropbox/Projects/<name>`` exists → use that path (legacy repos are
+   never moved).
+2. Else glob ``~/Dropbox/Projects/NotebookWorkspaces/*/<name>`` and if
+   exactly one match is found → use it.  If more than one match exists →
+   raise an error naming the conflicting paths and asking the caller to
+   pass a full path.
+3. Else (new repo) → create at
+   ``~/Dropbox/Projects/NotebookWorkspaces/<group>/<name>``.  If
+   ``--group`` is not supplied → raise an error: creating a new
+   work-notebook repo requires ``--group <project-group>``.
+
+A path containing a separator is used verbatim via
+``Path(repo).expanduser().resolve()`` (``--group`` is ignored).
 
 Behavior branches on detected state:
   1. **Repo missing** → full bootstrap: ``git init``, ``.code-workspace``,
@@ -27,6 +43,9 @@ Design decisions
 ----------------
 - Topic normalization: lowercase ASCII, non-``[a-z0-9]`` → ``_``, collapse
   runs, strip edges (same rule as notebook titles per advisory #1).
+- Group: used verbatim as the subdirectory name under NotebookWorkspaces/
+  (case preserved).  Only rejected if empty/whitespace-only or if it
+  contains a path separator.
 - Bundle deployment: direct-copy from ClaudeCommands ``agent-io/skills/``
   (``claude-skills sync-repos`` cannot target an arbitrary path without a
   project_registry.yaml entry; direct-copy is the correct fallback path
@@ -96,6 +115,9 @@ _CLAUDECOMMANDS_ROOT_DEFAULT: Path = Path(
 #: Default Dropbox projects root.
 _DROPBOX_PROJECTS: Path = Path("~/Dropbox/Projects").expanduser()
 
+#: New work-notebook repos are created under this directory, grouped by project.
+_NOTEBOOK_WORKSPACES: Path = _DROPBOX_PROJECTS / "NotebookWorkspaces"
+
 
 def _claudecommands_root() -> Path:
     """Return the ClaudeCommands root, honoring the env var override."""
@@ -132,15 +154,47 @@ def normalize_topic(topic: str) -> str:
     return collapsed.strip("_")
 
 
-def _resolve_repo(repo: str) -> Path:
+def _resolve_repo(repo: str, group: Optional[str] = None) -> Path:
     """Resolve a repo argument to an absolute path.
 
-    A bare name (no path separators) expands to
-    ``~/Dropbox/Projects/<name>``.  A path with separators is used
-    verbatim (expanded via ``Path.expanduser()``).
+    For a bare name (no path separator):
+
+    1. If ``~/Dropbox/Projects/<name>`` exists → return it (legacy repos
+       are never relocated).
+    2. Else glob ``~/Dropbox/Projects/NotebookWorkspaces/*/<name>``; if
+       exactly one match → return it; if more than one → raise
+       :class:`click.ClickException` naming the conflicting paths.
+    3. Else (new repo) → return
+       ``~/Dropbox/Projects/NotebookWorkspaces/<group>/<name>``.  If
+       *group* is ``None`` or empty → raise :class:`click.UsageError`.
+
+    A path containing a separator is used verbatim via
+    ``Path(repo).expanduser().resolve()``; *group* is ignored.
     """
     if "/" not in repo and "\\" not in repo:
-        return _DROPBOX_PROJECTS / repo
+        # 1. Legacy path check.
+        legacy = _DROPBOX_PROJECTS / repo
+        if legacy.exists():
+            return legacy
+
+        # 2. Search existing NotebookWorkspaces subdirs.
+        matches = sorted(_NOTEBOOK_WORKSPACES.glob(f"*/{repo}"))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            paths_str = ", ".join(str(p) for p in matches)
+            raise click.ClickException(
+                f"Bare name {repo!r} matches multiple repos: {paths_str}. "
+                "Pass a full path to disambiguate."
+            )
+
+        # 3. New repo — group is required.
+        if not group or not group.strip():
+            raise click.UsageError(
+                f"Creating a new work-notebook repo requires --group <project-group>."
+            )
+        return _NOTEBOOK_WORKSPACES / group / repo
+
     return Path(repo).expanduser().resolve()
 
 
@@ -503,13 +557,35 @@ def _update_bundle(repo_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _validate_group(group: Optional[str]) -> None:
+    """Validate the *group* value if provided.
+
+    Raises :class:`click.UsageError` when *group* is non-None but either
+    empty/whitespace-only or contains a path separator (``/`` or ``\\``).
+    A ``None`` value is accepted here (the new-repo case raises separately
+    inside :func:`_resolve_repo`).
+    """
+    if group is None:
+        return
+    if not group.strip():
+        raise click.UsageError(
+            "--group must not be empty or whitespace-only."
+        )
+    if "/" in group or "\\" in group:
+        raise click.UsageError(
+            f"--group {group!r} must not contain a path separator."
+        )
+
+
 def notebook_init(
     repo: str,
     topic: Optional[str],
     update: bool,
+    group: Optional[str] = None,
 ) -> None:
     """Core logic, separated for testability."""
-    repo_root = _resolve_repo(repo)
+    _validate_group(group)
+    repo_root = _resolve_repo(repo, group=group)
     repo_basename = repo_root.name
 
     # --update path: repo must exist; no topic required.
@@ -563,11 +639,28 @@ def notebook_init(
     default=False,
     help="Re-deploy the work-notebook bundle into .claude/; do not scaffold.",
 )
-def notebook_init_cmd(repo: str, topic: Optional[str], update: bool) -> None:
+@click.option(
+    "--group",
+    default=None,
+    help=(
+        "Project group (parent dir under NotebookWorkspaces/) for a new repo; "
+        "ignored for existing repos."
+    ),
+)
+def notebook_init_cmd(
+    repo: str, topic: Optional[str], update: bool, group: Optional[str]
+) -> None:
     """Scaffold or extend a work-notebook repo.
 
-    REPO is either a bare name (resolved to ~/Dropbox/Projects/<name>)
-    or an absolute/relative path used verbatim.
+    REPO is either a bare name or an absolute/relative path used verbatim.
+
+    Bare-name resolution (no path separator in REPO):
+
+    \b
+    1. ~/Dropbox/Projects/<name> exists  → use that path (legacy, never moved)
+    2. NotebookWorkspaces/*/<name> glob  → use the unique match (error if >1)
+    3. New repo                          → ~/Dropbox/Projects/NotebookWorkspaces/
+                                           <group>/<name>  (--group required)
 
     Branches on detected state:
 
@@ -588,4 +681,4 @@ def notebook_init_cmd(repo: str, topic: Optional[str], update: bool) -> None:
     Work-notebook bundle deployed: jupyter-dev, kbu-run, synthesize.
     No BERIL skill is ever deployed here.
     """
-    notebook_init(repo=repo, topic=topic, update=update)
+    notebook_init(repo=repo, topic=topic, update=update, group=group)

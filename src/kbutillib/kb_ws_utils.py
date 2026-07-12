@@ -315,9 +315,14 @@ class KBWSUtils(SharedEnvUtils):
             if start_after:
                 input["startafter"] = start_after
             output = ws_client.list_objects(input)
-            start_after = wsid_or_ref + "/" + str(output[-1][0])
-            for item in output:
-                full_output[item[1]] = item
+            # An empty page means the workspace has zero (matching)
+            # objects -- nothing to paginate from, so skip the start_after
+            # bookkeeping (latent bug: `output[-1]` used to IndexError on
+            # a bare/type-filtered-empty workspace).
+            if output:
+                start_after = wsid_or_ref + "/" + str(output[-1][0])
+                for item in output:
+                    full_output[item[1]] = item
             if len(output) < 5000:
                 done = True
         return full_output
@@ -723,6 +728,9 @@ class KBWSUtilsImpl:
         self.service = "Unknown"
         self.version = "Unknown"
         self.working_dir: Optional[str] = None
+        # Narrative-provenance (PRD Piece B) -- lazily-constructed dynamic
+        # NarrativeService client; None until first needed.
+        self._narrative_service = None
 
     # -- Env / logger delegation ------------------------------------------
 
@@ -960,6 +968,186 @@ class KBWSUtilsImpl:
             }
         ]
 
+    # -- Narrative provenance (PRD Piece B) --------------------------------
+    #
+    # Ports narrative-connector's render-from-ledger pattern (read-only
+    # reference: ~/king-stack/narrative-connector/src/narrative_connector/
+    # narrative_append.py + clients/narrative_service.py) onto KBUtilLib's
+    # own SQLite job ledger. Opt-in, driven from AppRunner.run_app /
+    # AppRunner.audit_callback -- nothing here fires unless a caller
+    # explicitly resolves or renders a Narrative.
+
+    def _narrative_service_client(self):
+        """Lazily-constructed :class:`NarrativeService` client.
+
+        Resolves the NarrativeService URL DYNAMICALLY via ServiceWizard
+        (``kbase_endpoints.service_url("service_wizard", ...)`` +
+        ``BaseClient(lookup_url=True)``) -- no new static endpoint is
+        added to ``kbase_endpoints.py``.
+        """
+        if self._narrative_service is None:
+            from .installed_clients.NarrativeServiceClient import NarrativeService
+
+            wizard_url = service_url("service_wizard", self.kb_version)
+            self._narrative_service = NarrativeService(
+                url=wizard_url, token=self.get_token(namespace="kbase"),
+            )
+        return self._narrative_service
+
+    def find_narrative_in_workspace(self, workspace_id: int) -> Optional[str]:
+        """Discover an existing Narrative in *workspace_id* (PRD Piece B
+        resolution step 2): the workspace's ``narrative`` metadata pointer,
+        else a ``KBaseNarrative.Narrative`` object located by a type scan.
+        Returns a ``wsid/objid`` ref, or ``None`` if the workspace is bare.
+        """
+        try:
+            info = self._ws_client.get_workspace_info({"id": workspace_id})
+        except Exception:
+            logger.warning(
+                "find_narrative_in_workspace: get_workspace_info(%s) failed",
+                workspace_id,
+            )
+            return None
+        meta = info[8] if isinstance(info, (list, tuple)) and len(info) > 8 else {}
+        if isinstance(meta, dict):
+            narrative_objid = meta.get("narrative")
+            if narrative_objid:
+                try:
+                    return f"{workspace_id}/{int(narrative_objid)}"
+                except (TypeError, ValueError):
+                    pass
+        objects = self.list_ws_objects(workspace_id, type="KBaseNarrative.Narrative")
+        if objects:
+            obj_info = next(iter(objects.values()))
+            # object_info tuple: (objid, name, type, date, ver, owner, wsid, ...)
+            return f"{obj_info[6]}/{obj_info[0]}/{obj_info[4]}"
+        return None
+
+    def create_narrative(self, title: str = "KBUtilLib run") -> str:
+        """Auto-create a Narrative via ``NarrativeService.create_new_narrative``
+        (PRD Piece B resolution step 3, used only when no Narrative was
+        found by :meth:`find_narrative_in_workspace`).
+
+        NOTE: the real NarrativeService wire API has no workspace-targeting
+        parameter -- ``create_new_narrative`` always mints a FRESH Workspace
+        alongside the new Narrative (verified against the live
+        ``NarrativeService.spec``; see ``NarrativeServiceClient``'s
+        docstring). KBUtilLib cannot attach the created Narrative to a
+        pre-existing workspace through this call; this mirrors nc's own
+        one-per-session auto-create behavior.
+        """
+        params = {"markdown": "", "title": title, "includeIntroCell": 1}
+        result = self._narrative_service_client().create_new_narrative(params)
+        narrative_info = result.get("narrativeInfo") or []
+        if len(narrative_info) < 5:
+            raise RuntimeError(
+                f"create_new_narrative returned an unexpected narrativeInfo "
+                f"shape: {narrative_info!r}"
+            )
+        ws_info = result.get("workspaceInfo") or []
+        if ws_info:
+            wsid = ws_info[0]
+        elif len(narrative_info) > 6:
+            wsid = narrative_info[6]
+        else:
+            raise RuntimeError(
+                "create_new_narrative response carries neither workspaceInfo "
+                "nor a wsid-bearing narrativeInfo"
+            )
+        return f"{wsid}/{narrative_info[0]}"
+
+    def resolve_narrative(
+        self, workspace_id: int, narrative_ref: Optional[str] = None
+    ) -> str:
+        """Resolve the target Narrative for *workspace_id* per the PRD
+        precedence: explicit ``narrative_ref`` > discover-existing >
+        auto-create. Called at EE2 submit time by ``AppRunner.run_app``
+        when ``record_narrative_provenance=True``."""
+        if narrative_ref:
+            return narrative_ref
+        existing = self.find_narrative_in_workspace(workspace_id)
+        if existing:
+            return existing
+        return self.create_narrative()
+
+    def append_app_run_audit(
+        self, narrative_ref: str, workspace_id: int, *, job_store: Any = None
+    ) -> str:
+        """Render the COMPLETE app-run audit block for *workspace_id* into
+        the Narrative at *narrative_ref*, idempotently.
+
+        Ported from nc's ``_read_modify_write_once``: fetch the LATEST
+        Narrative version, preserve ``cells[0]`` (the intro), strip every
+        cell whose ``metadata.kbase.audit`` is truthy, re-render the
+        complete audit block from the SQLite ``jobs`` table filtered by
+        *workspace_id*, reassemble ``intro + audit + other`` cells, and
+        ``save_objects`` with recomputed Navigator metadata. Because every
+        call renders the COMPLETE block from the ledger, concurrent /
+        last-writer-wins saves converge instead of duplicating cells.
+
+        Args:
+            narrative_ref: ``wsid/objid`` or ``wsid/objid/ver`` UPA of the
+                target Narrative. Any version suffix is stripped -- the
+                LATEST version is always fetched.
+            workspace_id: The EE2 jobs' workspace id; the local SQLite
+                ledger is filtered by this to build the audit block.
+            job_store: Optional :class:`~kbutillib.kb_job_utils.store.JobStore`
+                override (tests inject an in-memory/temp-file store here).
+                Defaults to the standard ``~/.kbjobs/kbjobs.db`` store.
+
+        Returns:
+            The new Narrative UPA (``wsid/objid/version``) after the save.
+        """
+        from .kb_job_utils.store import JobStore
+        from .kb_narrative_audit import (
+            compute_narrative_meta,
+            data_dependencies_from_records,
+            is_audit_cell,
+            render_audit_cells,
+            to_latest_ref,
+        )
+
+        store = job_store if job_store is not None else JobStore()
+        records = store.list_by_workspace(workspace_id)
+
+        latest_ref = to_latest_ref(narrative_ref)
+        res = self.ws_get_objects({"objects": [{"ref": latest_ref}]})
+        narrative = res["data"][0]
+        narrative_info = narrative["info"]
+        narrative_name = narrative_info[1]
+        narrative_type = narrative_info[2]
+        narrative_data = narrative["data"]
+
+        existing_cells = list(narrative_data.get("cells", []))
+        intro = existing_cells[0:1]
+        others = [c for c in existing_cells[1:] if not is_audit_cell(c)]
+
+        rendered_cells = render_audit_cells(records)
+        new_cells = intro + rendered_cells + others
+
+        new_data = dict(narrative_data)
+        new_data["cells"] = new_cells
+
+        data_deps = data_dependencies_from_records(records)
+        obj_meta = compute_narrative_meta(new_cells, data_deps)
+
+        save_result = self.ws_client().save_objects(
+            {
+                "id": int(latest_ref.split("/")[0]),
+                "objects": [
+                    {
+                        "type": narrative_type,
+                        "name": narrative_name,
+                        "data": new_data,
+                        "meta": obj_meta,
+                    }
+                ],
+            }
+        )
+        info = save_result[0]
+        # object_info tuple: [0]=objid, [4]=version
+        return f"{latest_ref.split('/')[0]}/{info[0]}/{info[4]}"
+
     def list_ws_objects(self, wsid_or_ref, type=None, include_metadata=True):
         ws_client = self.ws_client()
         done = False
@@ -978,9 +1166,14 @@ class KBWSUtilsImpl:
             if start_after:
                 input["startafter"] = start_after
             output = ws_client.list_objects(input)
-            start_after = wsid_or_ref + "/" + str(output[-1][0])
-            for item in output:
-                full_output[item[1]] = item
+            # An empty page means the workspace has zero (matching)
+            # objects -- nothing to paginate from, so skip the start_after
+            # bookkeeping (latent bug: `output[-1]` used to IndexError on
+            # a bare/type-filtered-empty workspace).
+            if output:
+                start_after = wsid_or_ref + "/" + str(output[-1][0])
+                for item in output:
+                    full_output[item[1]] = item
             if len(output) < 5000:
                 done = True
         return full_output

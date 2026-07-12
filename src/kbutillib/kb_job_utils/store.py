@@ -251,6 +251,19 @@ class JobStore:
         )
         return [self._row_to_record(r) for r in cur.fetchall()]
 
+    def list_by_workspace(self, workspace_id: int) -> List[JobRecord]:
+        """Return all records associated with *workspace_id*, newest first.
+
+        Used by the narrative-provenance audit render
+        (:meth:`~kbutillib.kb_ws_utils.KBWSUtilsImpl.append_app_run_audit`)
+        to scope the audit block to a single workspace's jobs.
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM jobs WHERE workspace_id = ? ORDER BY updated_at DESC",
+            (workspace_id,),
+        )
+        return [self._row_to_record(r) for r in cur.fetchall()]
+
     def list_all(self) -> List[JobRecord]:
         """Return every stored job record, newest first."""
         cur = self._conn.execute("SELECT * FROM jobs ORDER BY updated_at DESC")

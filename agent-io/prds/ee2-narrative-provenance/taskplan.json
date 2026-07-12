@@ -1,0 +1,38 @@
+{
+  "prd_name": "ee2-narrative-provenance",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Piece A — object-level provenance",
+      "parallel_group": [
+        {
+          "task_id": "piece-a-object-provenance",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Piece A of agent-io/prds/ee2-narrative-provenance/fullprompt.md in KBUtilLib. Wire the existing get_provenance() into save_ws_object so saved outputs carry real KBase prov_actions WHEN a provenance context is present, else keep empty. (1) In BOTH save_ws_object definitions — KBWSUtils and its composition twin KBWSUtilsImpl in src/kbutillib/kb_ws_utils.py — replace the hard-coded \"provenance\": [] with self.get_provenance() guarded by a context check: emit get_provenance() only when self.method is a real value (self.method not in (None, '', 'Unknown')), otherwise emit []. This preserves current behavior for callers who never call set_provenance()/initialize_call(). (2) Fix the latent bug in get_provenance(): the prov-action 'service' field currently emits self.name and ignores self.service; change it to emit self.service when set to a real value (not in (None, '', 'Unknown')), falling back to self.name otherwise. Leave service_ver sourced from self.version and do NOT rename any prov-action keys (they match the KBase Workspace ProvenanceAction shape). Do NOT touch the unrelated \"provenance\": [] in kb_annotation_utils.py. Add unit tests using a fake ws_client that captures save_objects params: (a) non-empty prov_actions with correct service/method/method_params/input_ws_objects when a context is set, for BOTH KBWSUtils and KBWSUtilsImpl; (b) empty [] when no context is set; (c) get_provenance() emits the service passed to set_provenance(), and falls back to self.name when unset. Mirror existing kb_job_utils/kb_ws_utils test patterns. Run the test suite and keep it green.",
+          "success_criteria": "Objects saved via save_ws_object (on BOTH KBWSUtils and KBWSUtilsImpl) carry a non-empty prov_actions array with correct service/method/method_params/input_ws_objects when a provenance context is set (self.method != 'Unknown'), and remain [] otherwise (default behavior unchanged). get_provenance() emits the service value set via set_provenance(). New unit tests cover all three branches and the full suite passes.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Piece B — narrative audit-cell trace",
+      "parallel_group": [
+        {
+          "task_id": "piece-b-narrative-audit",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement Piece B of agent-io/prds/ee2-narrative-provenance/fullprompt.md in KBUtilLib. Port narrative-connector's render-from-ledger pattern (read-only reference: ~/king-stack/narrative-connector/src/narrative_connector/narrative_append.py and clients/narrative_service.py — do NOT import from or depend on nc). Deliver, opt-in and default-off: (1) Add record_narrative_provenance: bool = False and narrative_ref: str | None = None to AppRunner.run_app; forward them through run_app_if_missing and run_apps_parallel (add both fields to AppCall). run_app stays SUBMIT-ONLY. (2) When record_narrative_provenance=True, resolve the target Narrative AT SUBMIT TIME with precedence: explicit narrative_ref > discover an existing Narrative in the target workspace (workspace 'narrative' metadata pointer / a KBaseNarrative.Narrative object) > auto-create via a new minimal NarrativeService client. Scope is one Narrative per workspace. Stamp JobRecord.narrative_id (the reserved column) with the resolved narrative object id, and stash record_narrative_provenance + narrative_ref + narrative_id on JobHandle.meta. (3) New NarrativeService client that resolves the NarrativeService URL DYNAMICALLY via ServiceWizard (kbase_endpoints.py already has a service_wizard suffix — add NO new static endpoint) and calls create_new_narrative (wire param includeIntroCell). (4) New capability method KBWSUtilsImpl.append_app_run_audit(narrative_ref, workspace_id): a single read-modify-write ported from nc _read_modify_write_once — get_objects2 the LATEST narrative version, preserve cell[0] intro, STRIP every cell whose metadata.kbase.audit is truthy, re-render the COMPLETE audit block from the SQLite jobs table filtered by workspace_id (one markdown cell per run, each tagged metadata.kbase.audit=True and carrying a stable anchor '<!-- kbu:app-run:<job_id> -->'), reassemble cells = intro + audit + other-non-audit, save_objects with recomputed Navigator meta (cell_count, jupyter.markdown, data_object_count, BOUNDED data_dependencies under KBase's 900-byte key+value cap, is_temporary='false'). Do NOT fabricate native kbase.appCell/method.<id> metadata. Idempotent/self-healing under last-writer-wins. Audit cell content per run: app_id, method, service_ver, job_id, terminal state, submit+finish timestamps, compact params summary, output UPA(s) from JobReport.result, workspace. (5) Render seam: AppRunner.audit_callback(narrative_ref=None) -> Callable[[JobReport], None] returning an on_progress fn for JobMonitor.wait_all(on_progress=...); on a TERMINAL report (success and error/terminated) it calls append_app_run_audit(ref_or_handle_meta, report.handle.wsid); non-terminal reports are a no-op. No run_and_wait method. Add tests with fakes (WorkspaceClient, NarrativeService, temp-file/in-memory JobStore): render idempotency (render twice -> identical audit-cell set, no dupes); intro + user non-audit markdown preserved and audit cell resolves by anchor regardless of index; bounded Navigator meta under 900 bytes; narrative resolution precedence (explicit ref bypasses create; existing discovered without create; bare ws triggers exactly one create_new_narrative); callback wiring (terminal success -> append_app_run_audit with correct wsid; non-terminal no-op; record_narrative_provenance=False never resolves/creates/renders). Run the suite and keep it green.",
+          "success_criteria": "AppRunner.run_app accepts record_narrative_provenance (default False) and narrative_ref, leaving default behavior byte-for-byte unchanged (default-off: no narrative resolved/created/rendered). When True against a workspace, a KBaseNarrative.Narrative gains markdown audit cells tagged metadata.kbase.audit=True rendered from the job ledger, idempotent across repeated renders (strip-and-rerender, no duplicate cells), with intro/user cells preserved and cells anchored by job_id. Narrative resolution follows explicit-ref > discover-existing > auto-create (NarrativeService via ServiceWizard, no new static endpoint); JobRecord.narrative_id is stamped at submit; the render hangs off AppRunner.audit_callback passed to JobMonitor.wait_all with run_app staying submit-only. Navigator meta recomputes with data_dependencies bounded under the 900-byte cap. Tests for render idempotency, anchor/preservation, bounded meta, resolution precedence, and callback wiring pass.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["piece-a-object-provenance"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

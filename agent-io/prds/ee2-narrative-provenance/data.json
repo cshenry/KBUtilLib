@@ -1,0 +1,21 @@
+{
+  "prd_name": "ee2-narrative-provenance",
+  "title": "Optional KBase-Narrative Provenance for KBUtilLib's EE2 App Runner",
+  "repos": ["KBUtilLib"],
+  "priority": "normal",
+  "created": "2026-07-11",
+  "confront_rounds": 0,
+  "source_analysis": "agent-io/plans/2026-07-11-ee2-narrative-provenance.md",
+  "reference_impl": "~/king-stack/narrative-connector",
+  "slices": {
+    "A": "object-level prov_actions in save_ws_object (both KBWSUtils and KBWSUtilsImpl) + get_provenance service-field fix; canonical, ships first, opt-in via existing provenance context",
+    "B": "narrative audit-cell trace: record_narrative_provenance flag on run_app, submit-time narrative resolution/creation + narrative_id stamping, KBWSUtilsImpl.append_app_run_audit render-from-ledger, AppRunner.audit_callback seam"
+  },
+  "decisions": {
+    "cell_format": "markdown (nc flavor 2); native re-runnable app cells out of scope",
+    "narrative_scope": "one per workspace; resolve explicit-ref > discover-existing > auto-create",
+    "narrative_service": "dynamic resolution via existing service_wizard endpoint; no new static entry",
+    "render_seam": "AppRunner.audit_callback factory -> on_progress for JobMonitor.wait_all; run_app submit-only",
+    "ordering": "A first; B depends_on A to avoid kb_ws_utils.py merge conflict"
+  }
+}

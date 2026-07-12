@@ -2,7 +2,8 @@
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from kbutillib.kb_ws_utils import KBWSUtils
+from kbutillib.kb_ws_utils import KBWSUtils, KBWSUtilsImpl
+from kbutillib.shared_env_utils import SharedEnvUtils
 
 
 @pytest.fixture
@@ -240,6 +241,131 @@ class TestGetTypeSpecs:
                 "list_all_types",
                 {"include_empty_modules": False}
             )
+
+
+@pytest.fixture
+def fake_ws_client():
+    """Fake workspace client that captures save_objects() calls."""
+    client = MagicMock()
+    client.get_workspace_info.return_value = [
+        12345, "test_workspace", "user", "timestamp", 0, "n", "n", "unlocked", {}
+    ]
+    client.save_objects.return_value = [
+        [1, "myobj", "KBaseGenomes.Genome", "date", 1, "user", 12345, "ws", "chsum", 100, {}]
+    ]
+    return client
+
+
+@pytest.fixture
+def ws_utils_prov(fake_ws_client, temp_dir):
+    """KBWSUtils instance wired to the fake ws client for provenance tests."""
+    with patch('kbutillib.kb_ws_utils.Workspace', return_value=fake_ws_client):
+        with patch('kbutillib.kb_ws_utils.HandleService'):
+            utils = KBWSUtils(
+                kb_version='prod',
+                token_file=f"{temp_dir}/test_tokens",
+                kbase_token_file=f"{temp_dir}/test_kbase_token"
+            )
+            utils._ws_client = fake_ws_client
+            return utils
+
+
+@pytest.fixture
+def ws_utils_impl_prov(fake_ws_client, temp_dir):
+    """KBWSUtilsImpl instance (composition twin) wired to the fake ws client."""
+    with patch('kbutillib.kb_ws_utils.Workspace', return_value=fake_ws_client):
+        with patch('kbutillib.kb_ws_utils.HandleService'):
+            env = SharedEnvUtils(
+                token_file=f"{temp_dir}/test_tokens",
+                kbase_token_file=f"{temp_dir}/test_kbase_token",
+            )
+            impl = KBWSUtilsImpl(env, kb_version='prod')
+            impl._ws_client = fake_ws_client
+            return impl
+
+
+class TestSaveWsObjectProvenance:
+    """Piece A: save_ws_object wires get_provenance() into saved objects.
+
+    Covers both the inheritance-based KBWSUtils and its composition twin
+    KBWSUtilsImpl, per the PRD's "two edit sites, one behavior" decision.
+    """
+
+    @pytest.mark.parametrize("utils_fixture", ["ws_utils_prov", "ws_utils_impl_prov"])
+    def test_save_ws_object_carries_provenance_when_context_set(
+        self, utils_fixture, fake_ws_client, request
+    ):
+        """When a provenance context is set (self.method != 'Unknown'),
+        save_ws_object emits a non-empty prov_actions with correct
+        service/method/method_params/input_ws_objects."""
+        utils = request.getfixturevalue(utils_fixture)
+        utils.set_provenance(
+            method="my_module.my_method",
+            input_objects=["1/2/3"],
+            params={"a": 1},
+            service="my_service",
+            version="1.2.3",
+        )
+
+        utils.save_ws_object("myobj", 12345, {"foo": "bar"}, "KBaseGenomes.Genome")
+
+        params = fake_ws_client.save_objects.call_args[0][0]
+        prov_actions = params["objects"][0]["provenance"]
+        assert prov_actions != []
+        action = prov_actions[0]
+        assert action["service"] == "my_service"
+        assert action["service_ver"] == "1.2.3"
+        assert action["method"] == "my_module.my_method"
+        assert action["method_params"] == [{"a": 1}]
+        assert action["input_ws_objects"] == ["1/2/3"]
+
+    @pytest.mark.parametrize("utils_fixture", ["ws_utils_prov", "ws_utils_impl_prov"])
+    def test_save_ws_object_empty_provenance_when_no_context(
+        self, utils_fixture, fake_ws_client, request
+    ):
+        """When no provenance context has been set, save_ws_object keeps the
+        existing non-breaking behavior of emitting an empty provenance list."""
+        utils = request.getfixturevalue(utils_fixture)
+
+        utils.save_ws_object("myobj", 12345, {"foo": "bar"}, "KBaseGenomes.Genome")
+
+        params = fake_ws_client.save_objects.call_args[0][0]
+        assert params["objects"][0]["provenance"] == []
+
+
+class TestGetProvenanceServiceField:
+    """get_provenance() emits the service set via set_provenance(), falling
+    back to self.name when service is unset (latent-bug fix regression)."""
+
+    def test_get_provenance_uses_configured_service(self, ws_utils_prov):
+        ws_utils_prov.set_provenance(method="do_thing", service="my_service", version="2.0")
+
+        prov = ws_utils_prov.get_provenance()
+
+        assert prov[0]["service"] == "my_service"
+        assert prov[0]["service_ver"] == "2.0"
+
+    def test_get_provenance_falls_back_to_name_when_service_unset(self, ws_utils_prov):
+        ws_utils_prov.name = "KBWSUtilsCustomName"
+
+        prov = ws_utils_prov.get_provenance()
+
+        assert prov[0]["service"] == "KBWSUtilsCustomName"
+
+    def test_get_provenance_impl_uses_configured_service(self, ws_utils_impl_prov):
+        ws_utils_impl_prov.set_provenance(method="do_thing", service="impl_service", version="3.0")
+
+        prov = ws_utils_impl_prov.get_provenance()
+
+        assert prov[0]["service"] == "impl_service"
+        assert prov[0]["service_ver"] == "3.0"
+
+    def test_get_provenance_impl_falls_back_to_name_when_service_unset(self, ws_utils_impl_prov):
+        ws_utils_impl_prov.name = "KBWSUtilsImplCustomName"
+
+        prov = ws_utils_impl_prov.get_provenance()
+
+        assert prov[0]["service"] == "KBWSUtilsImplCustomName"
 
 
 @pytest.mark.integration

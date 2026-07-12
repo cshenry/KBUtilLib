@@ -79,6 +79,7 @@ class KBJobUtils:
         workspace_id: Optional[int] = None,
         service_ver: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
+        narrative_id: Optional[int] = None,
     ) -> JobRecord:
         """Submit a job to EE2 and persist the record locally.
 
@@ -90,6 +91,11 @@ class KBJobUtils:
             workspace_id: Optional workspace to associate.
             service_ver: Optional service version / git hash.
             meta: Arbitrary metadata stored in the local record.
+            narrative_id: Optional resolved Narrative object id (the
+                reserved ``JobRecord.narrative_id`` column), stamped at
+                submit time when a caller (e.g. ``AppRunner.run_app`` with
+                ``record_narrative_provenance=True``) has already resolved
+                a target Narrative for *workspace_id*.
 
         Returns:
             A :class:`JobRecord` with the ``job_id`` populated.
@@ -115,6 +121,7 @@ class KBJobUtils:
             params=run_params,
             state=JobState.QUEUED,
             workspace_id=workspace_id,
+            narrative_id=narrative_id,
             meta=meta or {},
         )
         self._store.upsert(record)

@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .errors import AmbiguousParams, SpecNotFound
-from .monitor import JobHandle
+from .monitor import JobHandle, JobReport
 from .nms import NMSSpecCache
 
 if TYPE_CHECKING:
@@ -50,6 +50,9 @@ class AppCall:
         workspace: Numeric wsid or workspace name.
         pin_version: Optional service version override.
         meta: Caller metadata forwarded to the :class:`JobHandle`.
+        record_narrative_provenance: Forwarded to :meth:`AppRunner.run_app`
+            (opt-in, default-off narrative audit-cell trace).
+        narrative_ref: Forwarded to :meth:`AppRunner.run_app`.
     """
 
     app_id: str
@@ -57,6 +60,8 @@ class AppCall:
     workspace: int | str
     pin_version: str | None = None
     meta: dict = field(default_factory=dict)
+    record_narrative_provenance: bool = False
+    narrative_ref: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +106,8 @@ class AppRunner:
         pin_version: str | None = None,
         tag: str | None = None,
         meta: dict | None = None,
+        record_narrative_provenance: bool = False,
+        narrative_ref: str | None = None,
     ) -> JobHandle:
         """Submit an EE2 job for *app_id*.
 
@@ -126,6 +133,23 @@ class AppRunner:
                 spec lookup.  Required for beta/dev-only apps; ``None`` uses the
                 released spec.
             meta: Arbitrary metadata forwarded to the :class:`JobHandle`.
+            record_narrative_provenance: **Opt-in, default-off.** When
+                ``True``, resolves (or creates) a Narrative for *workspace*
+                at submit time -- see :meth:`~kbutillib.kb_ws_utils.KBWSUtilsImpl.resolve_narrative`
+                -- and stamps the resolved Narrative object id onto
+                ``JobRecord.narrative_id``. The flag, ``narrative_ref``, and
+                the resolved ``narrative_id`` are also stashed on the
+                returned :class:`JobHandle`'s ``meta`` so
+                :meth:`audit_callback` can find them later. ``run_app``
+                itself remains **submit-only** -- it never waits or renders;
+                the actual audit-cell render happens when a terminal
+                :class:`JobReport` reaches the callback returned by
+                :meth:`audit_callback`. When ``False`` (the default), no
+                Narrative is resolved, created, or rendered, and behavior is
+                byte-for-byte unchanged from before this flag existed.
+            narrative_ref: Explicit target Narrative (``wsid/objid`` or
+                ``wsid/objid/ver``). Wins outright over discovery/auto-create
+                when ``record_narrative_provenance=True``; ignored otherwise.
 
         Returns:
             A :class:`JobHandle` wrapping the submitted EE2 job_id.
@@ -144,6 +168,15 @@ class AppRunner:
         # (e.g. workspace -> output_workspace) can be injected during the remap.
         wsid = self._resolve_wsid(workspace)
         ws_name = self._resolve_ws_name(workspace, wsid)
+
+        # Narrative-provenance resolution (PRD Piece B) -- happens at submit
+        # time, strictly opt-in. record_narrative_provenance=False (default)
+        # never touches this branch, so default behavior is unchanged.
+        resolved_narrative_ref: str | None = None
+        resolved_narrative_id: int | None = None
+        if record_narrative_provenance:
+            resolved_narrative_ref = self._ws.resolve_narrative(wsid, narrative_ref)
+            resolved_narrative_id = _narrative_objid_from_ref(resolved_narrative_ref)
 
         params_list = self._build_params_list(
             app_id, params, ui_names, spec,
@@ -167,13 +200,25 @@ class AppRunner:
             workspace_id=wsid,
             service_ver=service_ver,
             meta=meta or {},
+            narrative_id=resolved_narrative_id,
         )
+
+        # record_narrative_provenance=False keeps handle.meta byte-for-byte
+        # identical to the pre-Piece-B behavior (the exact `meta or {}`
+        # object/value that was always returned here).
+        if record_narrative_provenance:
+            handle_meta = dict(meta or {})
+            handle_meta["record_narrative_provenance"] = True
+            handle_meta["narrative_ref"] = resolved_narrative_ref
+            handle_meta["narrative_id"] = resolved_narrative_id
+        else:
+            handle_meta = meta or {}
 
         return JobHandle(
             job_id=record.job_id,
             app_id=app_id,
             wsid=wsid,
-            meta=meta or {},
+            meta=handle_meta,
         )
 
     def run_app_if_missing(
@@ -186,6 +231,8 @@ class AppRunner:
         output_type: str,
         pin_version: str | None = None,
         meta: dict | None = None,
+        record_narrative_provenance: bool = False,
+        narrative_ref: str | None = None,
     ) -> JobHandle | ExistingObject:
         """Idempotency wrapper around :meth:`run_app`.
 
@@ -206,6 +253,10 @@ class AppRunner:
             output_type: Expected KBase type (e.g. ``"KBaseReport.Report"``).
             pin_version: Optional service version override.
             meta: Caller metadata.
+            record_narrative_provenance: Forwarded to :meth:`run_app`
+                (opt-in, default-off; see there for details). Has no effect
+                when the output already exists (no job is submitted).
+            narrative_ref: Forwarded to :meth:`run_app`.
 
         Returns:
             :class:`ExistingObject` if the output already exists, or
@@ -228,6 +279,8 @@ class AppRunner:
             workspace,
             pin_version=pin_version,
             meta=meta,
+            record_narrative_provenance=record_narrative_provenance,
+            narrative_ref=narrative_ref,
         )
 
     def run_apps_parallel(self, calls: list[AppCall]) -> list[JobHandle]:
@@ -245,9 +298,56 @@ class AppRunner:
                 call.workspace,
                 pin_version=call.pin_version,
                 meta=call.meta,
+                record_narrative_provenance=call.record_narrative_provenance,
+                narrative_ref=call.narrative_ref,
             )
             handles.append(handle)
         return handles
+
+    def audit_callback(
+        self, narrative_ref: str | None = None
+    ) -> Callable[[JobReport], None]:
+        """Return an ``on_progress`` callback that renders the app-run
+        audit trail into a Narrative on every TERMINAL :class:`JobReport`.
+
+        Pass the returned function to :meth:`~kbutillib.kb_app_runner.monitor.JobMonitor.wait_all`::
+
+            runner.run_app("mod/app", params, wsid, record_narrative_provenance=True)
+            ...
+            monitor.wait_all(handles, on_progress=runner.audit_callback())
+
+        On a terminal report (``state in {"completed", "error"}`` -- success
+        AND error/terminated, so failures are visible too) this calls
+        :meth:`~kbutillib.kb_ws_utils.KBWSUtilsImpl.append_app_run_audit`
+        with the resolved Narrative ref and the report's ``handle.wsid``.
+        Non-terminal reports are a no-op. This is the ONLY render seam this
+        slice ships -- there is no combined ``run_and_wait``; ``run_app``
+        stays submit-only.
+
+        Args:
+            narrative_ref: Explicit Narrative to render into for every
+                handle this callback processes. If omitted (the common
+                case), each report's own ``handle.meta["narrative_ref"]``
+                -- stashed by :meth:`run_app` at submit time when
+                ``record_narrative_provenance=True`` -- is used instead. A
+                handle with neither (i.e. it was submitted with
+                ``record_narrative_provenance=False``, the default) is a
+                no-op: nothing is resolved, created, or rendered.
+
+        Returns:
+            A function suitable for ``JobMonitor.wait_all(on_progress=...)``.
+        """
+
+        def _on_progress(report: JobReport) -> None:
+            if report.state not in ("completed", "error"):
+                return  # non-terminal report -> no-op
+            handle = report.handle
+            ref = narrative_ref or (handle.meta or {}).get("narrative_ref")
+            if not ref:
+                return  # record_narrative_provenance=False invariant
+            self._ws.append_app_run_audit(ref, handle.wsid)
+
+        return _on_progress
 
     # ── internals ─────────────────────────────────────────────────────────
 
@@ -319,6 +419,30 @@ class AppRunner:
 
         # Branch 4: no UI keys → service-shape dict; wrap in list.
         return [params]
+
+
+# ---------------------------------------------------------------------------
+# Narrative-provenance helpers (PRD Piece B)
+# ---------------------------------------------------------------------------
+
+
+def _narrative_objid_from_ref(ref: str | None) -> int | None:
+    """Extract the Narrative object id from a ``wsid/objid[/ver]`` ref.
+
+    Returns ``None`` for ``None``/malformed input rather than raising --
+    the resolved ``narrative_id`` is best-effort metadata (the ledger's
+    reserved column), not load-bearing for the render itself (which reads
+    ``handle.meta["narrative_ref"]``, the full ref string).
+    """
+    if not ref:
+        return None
+    parts = ref.split("/")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -236,6 +236,11 @@ class KBWSUtils(SharedEnvUtils):
 
     def save_ws_object(self, objid, workspace, obj_json, obj_type):
         self.set_ws(workspace)
+        prov_actions = (
+            self.get_provenance()
+            if self.method not in (None, "", "Unknown")
+            else []
+        )
         params = {
             "id": self.ws_id,
             "objects": [
@@ -244,7 +249,7 @@ class KBWSUtils(SharedEnvUtils):
                     "name": objid,
                     "type": obj_type,
                     "meta": {},
-                    "provenance": []#self.get_provenance(),
+                    "provenance": prov_actions,
                 }
             ],
         }
@@ -277,7 +282,11 @@ class KBWSUtils(SharedEnvUtils):
                 "method": self.method,
                 "script_command_line": "",
                 "method_params": [self.params],
-                "service": self.name,
+                "service": (
+                    self.service
+                    if self.service not in (None, "", "Unknown")
+                    else self.name
+                ),
                 "service_ver": self.version,
             }
         ]
@@ -914,9 +923,14 @@ class KBWSUtilsImpl:
 
     def save_ws_object(self, objid, workspace, obj_json, obj_type):
         self.set_ws(workspace)
+        prov_actions = (
+            self.get_provenance()
+            if self.method not in (None, "", "Unknown")
+            else []
+        )
         params = {
             "id": self.ws_id,
-            "objects": [{"data": obj_json, "name": objid, "type": obj_type, "meta": {}, "provenance": []}],
+            "objects": [{"data": obj_json, "name": objid, "type": obj_type, "meta": {}, "provenance": prov_actions}],
         }
         self.obj_created.append({"ref": self.create_ref(objid, self.ws_name), "description": ""})
         return self.ws_client().save_objects(params)
@@ -937,7 +951,11 @@ class KBWSUtilsImpl:
                 "method": self.method,
                 "script_command_line": "",
                 "method_params": [self.params],
-                "service": self.name,
+                "service": (
+                    self.service
+                    if self.service not in (None, "", "Unknown")
+                    else self.name
+                ),
                 "service_ver": self.version,
             }
         ]

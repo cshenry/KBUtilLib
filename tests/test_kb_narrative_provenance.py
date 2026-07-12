@@ -30,14 +30,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from kbutillib.kb_job_utils.state import JobRecord, JobState
 from kbutillib.kb_job_utils.store import JobStore
 from kbutillib.kb_narrative_audit import app_run_cell_anchor
 from kbutillib.kb_ws_utils import KBWSUtilsImpl
 from kbutillib.shared_env_utils import SharedEnvUtils
-
 
 # ── Fakes ────────────────────────────────────────────────────────────────
 

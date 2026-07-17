@@ -22,10 +22,14 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+
+if TYPE_CHECKING:  # only for the "click.testing.Result" string annotations below
+    import click.testing
 
 from kbutillib.cli.beril import (
     _DIST_NAME,

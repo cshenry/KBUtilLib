@@ -22,9 +22,14 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+if TYPE_CHECKING:  # only for the string annotations below; imported lazily at runtime
+    from kbutillib.kb_app_runner.monitor import JobHandle
+    from kbutillib.kb_job_utils import KBJobUtils
 
 # Fixtures directory path
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "nms"

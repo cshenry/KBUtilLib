@@ -469,9 +469,15 @@ class MSBiochemUtils(SharedEnvUtils):
             objcomp = object_or_id.compartment
             if compartment is None:
                 compartment = objcomp
-                self.log_warning("Comparment is not encoded in the ID but is encoded in the object:",object_or_id.id,objcomp)
+                self.log_warning(
+                    "Compartment is not encoded in the ID but is encoded in the "
+                    f"object: {object_or_id.id} {objcomp}"
+                )
             elif objcomp != compartment:
-                self.log_warning("Compartment mismatch between ID and object:",met_id,objcomp,compartment)
+                self.log_warning(
+                    "Compartment mismatch between ID and object: "
+                    f"{object_or_id.id} {objcomp} {compartment}"
+                )
         return (baseid, compartment, index)
 
     def update_database(self) -> None:

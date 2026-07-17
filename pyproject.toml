@@ -134,7 +134,12 @@ ignore = [
   "E501",  # line too long (let ruff-format handle this)
   "E711",  # comparison to None should use is/is not
   "E722",  # do not use bare except
-  "F821",  # undefined name (common in generated/client code)
+  # F821 (undefined name) is deliberately NOT ignored. It was, on the rationale
+  # that it is "common in generated/client code" -- but installed_clients/ has
+  # zero F821 hits, so the ignore only ever hid real bugs in hand-written code:
+  # an undefined `genome` that made kb_gapfill_metabolic_models raise NameError
+  # on every call, undefined json/os in kb_sdk_utils, and an undefined met_id.
+  # Each was a guaranteed crash on the path that reached it.
   "F841",  # local variable assigned but never used
 ]
 

@@ -1240,7 +1240,7 @@ class MSReconstructionUtils(KBModelUtils):
             if expression_objs and mdlutl in expression_objs:
                 expression_obj = expression_objs[mdlutl]
 
-            reaction_scores = genome.annoont.get_reaction_gene_hash(
+            reaction_scores = genome_objs[mdlutl].annoont.get_reaction_gene_hash(
                 feature_type="gene"
             )
 

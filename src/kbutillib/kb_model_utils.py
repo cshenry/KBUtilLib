@@ -278,6 +278,33 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return output
 
     #################Utility functions#####################
+    def process_genome_list(self, genome_refs, workspace):
+        """Normalize genome IDs/names/refs to workspace references.
+
+        The sibling of ``process_media_list``, so IDs, names and refs are all
+        interchangeable on the way into reconstruction. Returns ref STRINGS (not
+        objects): callers hand each one to ``get_msgenome_from_ontology``, which
+        resolves it itself.
+
+        A bare ID is qualified with ``workspace``; anything already ws/obj[/ver] is
+        passed through; deeper paths are rejected as malformed rather than being
+        sent to the workspace API to fail there.
+        """
+        if not genome_refs:
+            return []
+        genome_ref_list = []
+        for genome_ref in genome_refs:
+            genome_ref = str(genome_ref) if genome_ref is not None else ""
+            if len(genome_ref) == 0:
+                print("Filtering out empty genome reference")
+            elif len(genome_ref.split("/")) == 1:
+                genome_ref_list.append(str(workspace) + "/" + genome_ref)
+            elif len(genome_ref.split("/")) <= 3:
+                genome_ref_list.append(genome_ref)
+            else:
+                print(genome_ref + " looks like an invalid workspace reference")
+        return genome_ref_list
+
     def process_media_list(self, media_list, default_media, workspace):
         if not media_list:
             media_list = []
@@ -328,6 +355,44 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             self.save_ws_object("Carbon-" + item, workspace, copy, "KBaseBiochem.Media")
 
     #################Genome functions#####################
+    @property
+    def ontology_data_dir(self) -> str:
+        """Directory holding the <ONTOLOGY>_dictionary.json files.
+
+        The native (non-callback) ontology path needs these to resolve term names.
+        They ship with the cb_annotation_ontology_api service rather than KBUtilLib
+        -- ~67MB total, too large to vendor into this repo's tracked data/ -- so the
+        location is resolved rather than assumed:
+
+          1. $KBUTILLIB_ONTOLOGY_DATA_DIR
+          2. KBUtilLib/data/ (if the dictionaries were placed there)
+          3. a sibling checkout of cb_annotation_ontology_api / KB-ModelSEEDReconstruction
+
+        Raises with an actionable message instead of a bare FileNotFoundError from
+        deep inside modelseedpy.
+        """
+        import os
+
+        candidates = []
+        env = os.environ.get("KBUTILLIB_ONTOLOGY_DATA_DIR")
+        if env:
+            candidates.append(env)
+        candidates.append(self.module_dir + "/data")
+        parent = os.path.dirname(self.module_dir)
+        candidates += [
+            os.path.join(parent, "cb_annotation_ontology_api", "data"),
+            os.path.join(parent, "KB-ModelSEEDReconstruction", "data"),
+        ]
+        for path in candidates:
+            if os.path.isfile(os.path.join(path, "SSO_dictionary.json")):
+                return path
+        raise FileNotFoundError(
+            "Ontology dictionaries (SSO_dictionary.json et al) not found. The native "
+            "ontology path needs them; they ship with cb_annotation_ontology_api. Set "
+            "KBUTILLIB_ONTOLOGY_DATA_DIR to that repo's data/ directory. Looked in: "
+            + ", ".join(candidates)
+        )
+
     def get_msgenome_from_ontology(
         self, id_or_ref, ws=None, native_python_api=False, output_ws=None
     ):
@@ -337,7 +402,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         annoont = self.AnnotationOntology.from_kbase_data(
             annoapi.get_annotation_ontology_events({"input_ref": gen_ref}),
             gen_ref,
-            self.module_dir + "/data/",
+            self.ontology_data_dir + "/",
         )
         gene_term_hash = annoont.get_gene_term_hash(ontologies=["SSO"])
         if len(gene_term_hash) == 0:
@@ -646,7 +711,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                         "name": objid,
                         "type": "KBaseFBA.FBAModel",
                         "meta": {},
-                        "provenance": self.provenance(),
+                        "provenance": self.get_provenance(),
                     }
                 ],
             }
@@ -665,7 +730,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                     "name": objid,
                     "type": "KBasePhenotypes.PhenotypeSet",
                     "meta": {},
-                    "provenance": self.provenance(),
+                    "provenance": self.get_provenance(),
                 }
             ],
         }
@@ -709,7 +774,7 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                         "name": fbaid,
                         "type": "KBaseFBA.FBA",
                         "meta": {},
-                        "provenance": self.provenance(),
+                        "provenance": self.get_provenance(),
                     }
                 ],
             }

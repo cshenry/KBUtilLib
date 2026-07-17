@@ -236,7 +236,7 @@ class KBGenomeUtils(KBWSUtils):
             "output_workspace": self.ws_id,
             "overwrite_matching": 1,
             "save": 1,
-            "provenance": self.provenance(),
+            "provenance": self.get_provenance(),
             "events": [],
         }
         for ontology in ontology_inputs.keys():

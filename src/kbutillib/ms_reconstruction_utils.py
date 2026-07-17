@@ -30,8 +30,14 @@ class MSReconstructionUtils(KBModelUtils):
             **kwargs: Additional keyword arguments passed to KBModelUtils
         """
         super().__init__(**kwargs)
+        # NOTE: do NOT reset self.FBAModel here. KBModelUtils.__init__ already binds
+        # it to the real cobrakbase FBAModel class; setting it to None afterwards
+        # destroyed that binding, so save_model's
+        #     isinstance(mdlutl.model, self.FBAModel)
+        # raised "arg 2 must be a type". The kb_* SDK wrappers happened to mask this
+        # by lazily calling _kbase_imports(), which rebinds it -- so only callers of
+        # the callback-free core (build_metabolic_model) ever saw the failure.
         self._reconstruction_imports()
-        self.FBAModel = None
         self.version = "0.1.0.msrecon"
         self.native_ontology = False
 

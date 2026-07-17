@@ -147,7 +147,19 @@ class KBCallbackUtils(KBWSUtils):
             )
         return self._callback_clients["RAST_SDK"]
 
-    def anno_client(self):
+    def anno_client(self, native_python_api=False):
+        """Client for the annotation-ontology API.
+
+        Args:
+            native_python_api: return the native in-process implementation instead of
+                the SDK callback client. KBAnnotationUtils implements
+                ``get_annotation_ontology_events`` natively -- the only method callers
+                use this client for -- so ``self`` is a drop-in for the callback proxy.
+                This is what lets reconstruction run OUTSIDE an SDK container, where
+                ``_callback_url`` is None and the callback path can only raise.
+        """
+        if native_python_api:
+            return self
         if self._callback_url is None:
             raise ValueError(
                 "Either set callback URL if you're using an SDK module, or call the initialize callback function."

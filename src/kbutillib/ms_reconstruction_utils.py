@@ -627,7 +627,6 @@ class MSReconstructionUtils(KBModelUtils):
             # Get the GS template from the model (build_metabolic_model may have loaded it)
             model_gs_template = mdlutl.model.template
 
-            mdlutl.save_model("base_model.json")
             genome_objs = {mdlutl: genome}
 
             # Handle expression data

@@ -63,3 +63,17 @@ ai_curation:
 transyt:
   docker_image: "merlin-sysbio/kb_transyt:latest"  # Docker image tag/digest for Transyt
   neo4j_timeout: 120  # Maximum seconds to wait for Neo4j readiness before launching JAR
+
+# Remote LP-Solver service (client + service, see
+# agent-io/prds/remote-lp-solver/fullprompt.md). Every key below is the
+# documented default applied when the key is unset.
+remote_solver:
+  base_url: "http://127.0.0.1:8091"  # client: SSH-tunnel local forward target
+  timeout: 30.0  # client: HTTP request timeout (seconds)
+  poll_interval: 2.0  # client: GET /result poll cadence (+/-10% jitter)
+  api_key: ""  # optional x-api-key; checked only when non-empty
+  max_concurrent_solves: 5  # service: bounded solve pool size
+  max_queue_depth: 50  # service: queued-job backstop (running excluded)
+  threads_per_solve: null  # service: null -> floor(cpu_count / max_concurrent_solves)
+  default_time_limit: 3600  # service: applied when a solve omits time_limit
+  max_time_limit: 7200  # service: ceiling caller time_limit values are clamped to

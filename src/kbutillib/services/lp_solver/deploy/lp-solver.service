@@ -1,0 +1,17 @@
+[Unit]
+Description=KBUtilLib Remote LP-Solver service (localhost only, H100)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=%h/projects/KBUtilLib
+ExecStart=%h/venvs/lp-solver/bin/python -m kbutillib.services.lp_solver.app --host 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:%h/.lp-solver/logs/lp-solver.out.log
+StandardError=append:%h/.lp-solver/logs/lp-solver.err.log
+
+[Install]
+WantedBy=default.target

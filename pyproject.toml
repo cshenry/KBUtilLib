@@ -72,6 +72,14 @@ notebook = [
   "pandas >=1.3.0",
   "tqdm >=4.64.0",
 ]
+lp_solver = [
+  # Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).
+  # Deployed into a dedicated venv (~/venvs/lp-solver) per
+  # agent-io/prds/remote-lp-solver/fullprompt.md "Deployment on H100", not
+  # required for a plain KBUtilLib install.
+  "fastapi >=0.100",
+  "uvicorn >=0.23",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

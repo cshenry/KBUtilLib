@@ -13,6 +13,14 @@ Coverage
   .kbu-run.json carries project_id ``worknb-<basename>``.
 - Gitignore block: marker present; re-running does not duplicate.
 - Degraded mode: AIAssistant absent, ClaudeCommands absent.
+- Group / NotebookWorkspaces resolution:
+  * New repo with --group → NotebookWorkspaces/<group>/<name>.
+  * Legacy repo at Projects/<name> → legacy path (not moved), even when --group passed.
+  * Existing repo under NotebookWorkspaces found by bare name with no group.
+  * New repo with no --group → UsageError, no filesystem writes.
+  * Same bare name in two groups → ambiguity ClickException.
+  * Full path used verbatim (group ignored).
+  * Group with separator or empty → UsageError.
 """
 
 from __future__ import annotations
@@ -29,10 +37,13 @@ from click.testing import CliRunner
 
 from kbutillib.cli import main
 from kbutillib.cli.notebook_init import (
+    _DROPBOX_PROJECTS,
+    _NOTEBOOK_WORKSPACES,
     _WORKNB_BUNDLE,
     _deploy_bundle,
     _register_or_attach,
     _resolve_repo,
+    _validate_group,
     _write_code_workspace,
     normalize_topic,
     notebook_init,
@@ -109,9 +120,55 @@ class TestNormalizeTopic:
 
 
 class TestResolveRepo:
-    def test_bare_name_resolves_to_dropbox(self) -> None:
-        expected = Path("~/Dropbox/Projects/MyRepo").expanduser()
-        assert _resolve_repo("MyRepo") == expected
+    def test_legacy_path_returned_when_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare name resolves to legacy Projects/<name> when that path exists."""
+        import kbutillib.cli.notebook_init as _mod
+
+        fake_projects = tmp_path / "Dropbox" / "Projects"
+        fake_projects.mkdir(parents=True)
+        legacy_repo = fake_projects / "MyRepo"
+        legacy_repo.mkdir()
+
+        monkeypatch.setattr(_mod, "_DROPBOX_PROJECTS", fake_projects)
+        monkeypatch.setattr(_mod, "_NOTEBOOK_WORKSPACES", fake_projects / "NotebookWorkspaces")
+
+        result = _resolve_repo("MyRepo")
+        assert result == legacy_repo
+
+    def test_bare_name_new_repo_with_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare name with group resolves to NotebookWorkspaces/<group>/<name>."""
+        import kbutillib.cli.notebook_init as _mod
+
+        fake_projects = tmp_path / "Dropbox" / "Projects"
+        fake_projects.mkdir(parents=True)
+        fake_nws = fake_projects / "NotebookWorkspaces"
+
+        monkeypatch.setattr(_mod, "_DROPBOX_PROJECTS", fake_projects)
+        monkeypatch.setattr(_mod, "_NOTEBOOK_WORKSPACES", fake_nws)
+
+        result = _resolve_repo("MyRepo", group="MyGroup")
+        assert result == fake_nws / "MyGroup" / "MyRepo"
+
+    def test_bare_name_new_repo_no_group_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare name for a nonexistent repo without group raises UsageError."""
+        import kbutillib.cli.notebook_init as _mod
+        import click
+
+        fake_projects = tmp_path / "Dropbox" / "Projects"
+        fake_projects.mkdir(parents=True)
+        fake_nws = fake_projects / "NotebookWorkspaces"
+
+        monkeypatch.setattr(_mod, "_DROPBOX_PROJECTS", fake_projects)
+        monkeypatch.setattr(_mod, "_NOTEBOOK_WORKSPACES", fake_nws)
+
+        with pytest.raises(click.UsageError, match="--group"):
+            _resolve_repo("MyRepo", group=None)
 
     def test_full_path_verbatim(self, tmp_path: Path) -> None:
         result = _resolve_repo(str(tmp_path))
@@ -892,3 +949,213 @@ class TestCLIIntegration:
         )
         assert result.exit_code == 0
         assert (repo_root / "notebooks" / "PRJ-flux").is_dir()
+
+    def test_group_option_in_help(self) -> None:
+        """--group must appear in help text."""
+        result = _invoke("notebook-init", "--help")
+        assert result.exit_code == 0
+        assert "--group" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Group / NotebookWorkspaces resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def patched_projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Monkeypatch _DROPBOX_PROJECTS and _NOTEBOOK_WORKSPACES to tmp_path subdirs.
+
+    Returns (fake_projects, fake_notebook_workspaces).
+    """
+    import kbutillib.cli.notebook_init as _mod
+
+    fake_projects = tmp_path / "Dropbox" / "Projects"
+    fake_projects.mkdir(parents=True)
+    fake_nws = fake_projects / "NotebookWorkspaces"
+
+    monkeypatch.setattr(_mod, "_DROPBOX_PROJECTS", fake_projects)
+    monkeypatch.setattr(_mod, "_NOTEBOOK_WORKSPACES", fake_nws)
+
+    return fake_projects, fake_nws
+
+
+class TestGroupResolution:
+    """Tests for the NotebookWorkspaces group-based resolution logic."""
+
+    def test_new_repo_with_group_resolves_under_notebook_workspaces(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """New bare name + group bootstraps under NotebookWorkspaces/<group>/<name>."""
+        fake_projects, fake_nws = patched_projects
+        notebook_init(repo="MyNb", topic="analysis", update=False, group="Genomics")
+        expected = fake_nws / "Genomics" / "MyNb"
+        assert expected.is_dir()
+        assert (expected / "notebooks" / "PRJ-analysis").is_dir()
+
+    def test_new_repo_with_group_is_git_repo(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """The bootstrapped repo under NotebookWorkspaces is a git repo."""
+        fake_projects, fake_nws = patched_projects
+        notebook_init(repo="MyNb", topic="analysis", update=False, group="Genomics")
+        repo_root = fake_nws / "Genomics" / "MyNb"
+        assert _git_init_ok(repo_root)
+
+    def test_legacy_repo_resolves_to_legacy_path_even_with_group(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Existing legacy repo at Projects/<name> is used verbatim; group is ignored."""
+        fake_projects, fake_nws = patched_projects
+        # Pre-create the legacy repo (bare dir, no notebooks).
+        legacy = fake_projects / "LegacyRepo"
+        legacy.mkdir()
+
+        notebook_init(
+            repo="LegacyRepo", topic="flux", update=False, group="SomeGroup"
+        )
+
+        # Must have scaffolded IN the legacy path, not under NotebookWorkspaces.
+        assert (legacy / "notebooks" / "PRJ-flux").is_dir()
+        assert not (fake_nws / "SomeGroup" / "LegacyRepo").exists()
+
+    def test_existing_notebook_workspaces_repo_found_by_bare_name(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Bare name with no group resolves to an existing NotebookWorkspaces repo."""
+        fake_projects, fake_nws = patched_projects
+        # Pre-create an existing NWS repo.
+        existing = fake_nws / "Biology" / "NbRepo"
+        existing.mkdir(parents=True)
+
+        # No group needed — already exists.
+        notebook_init(repo="NbRepo", topic="experiment", update=False, group=None)
+
+        assert (existing / "notebooks" / "PRJ-experiment").is_dir()
+
+    def test_new_repo_no_group_raises_usage_error_no_writes(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """New bare-name repo without --group raises UsageError; nothing written."""
+        fake_projects, fake_nws = patched_projects
+        import click
+
+        with pytest.raises(click.UsageError, match="--group"):
+            notebook_init(repo="BrandNew", topic="test", update=False, group=None)
+
+        # No filesystem writes.
+        assert not (fake_projects / "BrandNew").exists()
+        assert not fake_nws.exists() or not list(fake_nws.glob("**/BrandNew"))
+
+    def test_new_repo_no_group_via_cli_exits_nonzero(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Via CLI: bare name with no --group and no existing repo → non-zero exit."""
+        result = _invoke("notebook-init", "BrandNew", "--project", "test")
+        assert result.exit_code != 0
+
+    def test_ambiguous_bare_name_raises_click_exception(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Same bare name under two groups raises ClickException naming both paths."""
+        fake_projects, fake_nws = patched_projects
+        import click
+
+        # Pre-create the same name under two different groups.
+        (fake_nws / "GroupA" / "Shared").mkdir(parents=True)
+        (fake_nws / "GroupB" / "Shared").mkdir(parents=True)
+
+        with pytest.raises(click.ClickException, match="Shared"):
+            notebook_init(repo="Shared", topic="x", update=False, group=None)
+
+    def test_ambiguous_bare_name_via_cli_exits_nonzero(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Via CLI: ambiguous bare name → non-zero exit."""
+        fake_projects, fake_nws = patched_projects
+        (fake_nws / "GroupA" / "Shared").mkdir(parents=True)
+        (fake_nws / "GroupB" / "Shared").mkdir(parents=True)
+
+        result = _invoke("notebook-init", "Shared", "--project", "x")
+        assert result.exit_code != 0
+
+    def test_full_path_used_verbatim_group_ignored(
+        self,
+        tmp_path: Path,
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Full path with a separator is used verbatim; --group is ignored."""
+        repo_root = tmp_path / "SomeDir" / "MyRepo"
+        notebook_init(
+            repo=str(repo_root), topic="data", update=False, group="ShouldBeIgnored"
+        )
+        assert (repo_root / "notebooks" / "PRJ-data").is_dir()
+
+    def test_group_with_slash_raises_usage_error(self) -> None:
+        """Group containing / raises UsageError before any filesystem work."""
+        import click
+
+        with pytest.raises(click.UsageError, match="path separator"):
+            _validate_group("foo/bar")
+
+    def test_group_with_backslash_raises_usage_error(self) -> None:
+        """Group containing \\ raises UsageError before any filesystem work."""
+        import click
+
+        with pytest.raises(click.UsageError, match="path separator"):
+            _validate_group("foo\\bar")
+
+    def test_group_empty_string_raises_usage_error(self) -> None:
+        """Empty group string raises UsageError."""
+        import click
+
+        with pytest.raises(click.UsageError, match="empty"):
+            _validate_group("")
+
+    def test_group_whitespace_only_raises_usage_error(self) -> None:
+        """Whitespace-only group raises UsageError."""
+        import click
+
+        with pytest.raises(click.UsageError, match="empty"):
+            _validate_group("   ")
+
+    def test_group_none_is_accepted_by_validate(self) -> None:
+        """None group passes _validate_group without error."""
+        _validate_group(None)  # Must not raise.
+
+    def test_group_case_preserved(
+        self,
+        patched_projects: tuple[Path, Path],
+        no_assistant,
+        fake_claudecommands: Path,
+    ) -> None:
+        """Group name is used verbatim (case-sensitive subdirectory)."""
+        fake_projects, fake_nws = patched_projects
+        notebook_init(repo="CaseNb", topic="x", update=False, group="MyGroup-A1")
+        expected = fake_nws / "MyGroup-A1" / "CaseNb"
+        assert expected.is_dir()

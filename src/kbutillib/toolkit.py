@@ -253,6 +253,11 @@ class KBUtilLib:
         return self._network_expansion
 
     @property
+    def chem(self) -> "NetworkExpansionUtilsImpl":
+        """Alias for :attr:`network_expansion` (design docs planned ``kbu.chem``)."""
+        return self.network_expansion
+
+    @property
     def mmseqs(self) -> MMSeqsUtilsImpl:
         if self._mmseqs is None:
             from .mmseqs_utils import MMSeqsUtilsImpl

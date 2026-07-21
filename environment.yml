@@ -1,0 +1,73 @@
+# Conda environment for KBUtilLib thermo + cheminformatics backends.
+#
+# Creates a self-contained env that serves ALL backends:
+#   - equilibrator (pip extra, optional)
+#   - dGPredictor  (source checkout; heavy deps: rdkit, openbabel, scikit-learn)
+#   - molGPK/OPAM2 (source checkout; heavy deps: rdkit, torch, torch-geometric)
+#   - pickaxe      (source checkout; heavy deps: rdkit, python-libsbml, lxml, pymongo)
+#
+# Usage:
+#   conda env create -f environment.yml        # first time
+#   conda env update -f environment.yml        # add/update packages
+#   conda activate kbutillib-thermo
+#   pip install -e ".[thermo]"                 # installs equilibrator-api
+#   # Then wire repo paths in config.yaml or via env vars (see INSTALL.md)
+#
+# Pin philosophy:
+#   - rdkit and openbabel are pinned to recent conda-forge releases known to work
+#     with dGPredictor (rdkit>=2022.03, openbabel 3.x).
+#   - torch is pinned to a stable 2.x CPU build; swap for a CUDA build to use GPU
+#     with OPAM2 (torch-geometric follows torch).
+#   - All other pins are lower-bounds (>=) so minor-patch upgrades are allowed.
+#
+# Note: dGPredictor, OPAM2, and MINE-Database are NOT pip deps; they are
+# consumed as source checkouts via KBUtilLib's DependencyManager.  After env
+# creation, clone them (or let DependencyManager clone on first use) and set
+# paths in config.yaml / env vars as documented in docs/thermo-cheminformatics/INSTALL.md.
+
+name: kbutillib-thermo
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # --- Python ---
+  - python >=3.9,<3.12
+
+  # --- RDKit (conda-forge canonical build; needed by dGPredictor, molGPK, pickaxe) ---
+  - rdkit >=2022.03.5
+
+  # --- OpenBabel (needed by dGPredictor's compound cache) ---
+  - openbabel >=3.1.1
+
+  # --- PyTorch (CPU build; needed by OPAM2 / molGPK) ---
+  # For CUDA builds, replace with e.g. pytorch::pytorch=2.1.*=*cuda* and
+  # add nvidia channel.  torch-geometric is installed via pip (see below).
+  - pytorch >=2.0.0,<3.0.0
+  - cpuonly  # omit and add cudatoolkit for GPU
+
+  # --- dGPredictor runtime deps (scikit-learn Bayesian ridge, data I/O) ---
+  - scikit-learn >=1.1.0
+  - scipy >=1.9.0
+  - pandas >=1.5.0
+  - joblib >=1.2.0
+
+  # --- MINE-Database / pickaxe runtime deps ---
+  - lxml >=4.9.0
+  - pymongo >=4.0.0
+
+  # --- General utilities ---
+  - pyyaml >=6.0
+  - requests >=2.28.0
+  - click >=8.0.1
+
+  # --- pip-only packages ---
+  - pip
+  - pip:
+      # torch-geometric (depends on torch; must be installed after pytorch)
+      - torch-geometric >=2.3.0
+      # python-libsbml (pickaxe / MINE-Database)
+      - python-libsbml >=5.19.0
+      # KBUtilLib itself with the thermo extra (pulls in equilibrator-api)
+      - "-e .[thermo]"

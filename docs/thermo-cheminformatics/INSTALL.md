@@ -1,10 +1,15 @@
 # Thermo + cheminformatics backends — install & footprint
 
-This documents how KBUtilLib's predictive-thermodynamics (`kbu.thermo`) and
-cheminformatics network-expansion (`kbu.chem`) backends are installed and wired,
-so the whole thing is reproducible and self-contained the way the rest of
-KBUtilLib's external dependencies are (ModelSEEDpy, ModelSEEDDatabase,
-cobrakbase).
+This documents how KBUtilLib's predictive-thermodynamics (`kbu.predictive_thermo`)
+and cheminformatics network-expansion (`kbu.network_expansion`) backends are
+installed and wired, so the whole thing is reproducible and self-contained the
+way the rest of KBUtilLib's external dependencies are (ModelSEEDpy,
+ModelSEEDDatabase, cobrakbase).
+
+> **API note:** `kbu.thermo` is the *legacy* ModelSEED-lookup ThermoUtils facade
+> (always present, no prediction). The new predictive backends live under
+> `kbu.predictive_thermo`. `kbu.network_expansion` is the cheminformatics
+> expansion facade (replaces the earlier `kbu.chem` name used in design notes).
 
 ## What Henry asked for
 
@@ -76,10 +81,17 @@ pip install "KBUtilLib[thermo]"              # equilibrator-api (optional)
 - **OPAM2**: ships `models/weight_acid_modelseed.pth` + `weight_base_modelseed.pth`
   (real files in the repo — no extra step).
 - **dGPredictor**: needs `model/modelseed_M12_model_BR.pkl`. This is a generated
-  artifact; the upstream Git-LFS object 404s, so rebuild it model-only from the
-  in-repo training matrix with `kbutillib_rebuild_model.py` (R²≈0.9997). The
-  backend reports a precise "model artifact missing" reason if it is absent and
-  never fabricates a value.
+  artifact; the upstream Git-LFS object 404s, so rebuild it from the in-repo
+  training matrix using the script that ships **inside the dGPredictor repo**:
+
+  ```bash
+  cd ../dGPredictor          # the checkout declared in dependencies.yaml
+  python retrain_modelseed.py
+  # Produces model/modelseed_M12_model_BR.pkl (R²≈0.9997, ~several MB)
+  ```
+
+  The backend reports a precise "model artifact missing" reason if it is absent
+  and never fabricates a value.
 
 ## Verifying
 

@@ -34,7 +34,7 @@ starting set of substrates).
 ## Layout (in KBUtilLib)
 
   src/kbutillib/cheminformatics/__init__.py
-  src/kbutillib/cheminformatics/base.py                CheminformaticsUtils umbrella (kbu.chem)
+  src/kbutillib/cheminformatics/base.py                CheminformaticsUtils umbrella (kbu.network_expansion)
   src/kbutillib/cheminformatics/pickaxe_backend.py     network expansion (FIRST)
   src/kbutillib/cheminformatics/retrorules_backend.py  rule-set loader
   src/kbutillib/cheminformatics/tyo_pickaxe_backend.py Tyo branch

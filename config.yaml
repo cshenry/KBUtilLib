@@ -86,7 +86,7 @@ thermo:
     repo_path: ""    # e.g. "/path/to/OPAM2"
     python: ""       # e.g. "/path/to/conda/envs/<env>/bin/python"
 
-# Cheminformatics network expansion (kbu.chem / NetworkExpansionUtils)
+# Cheminformatics network expansion (kbu.network_expansion / NetworkExpansionUtils)
 # Pickaxe = Tyo-NU MINE-Database (github.com/tyo-nu/MINE-Database), the version
 # the Tyo lab confirmed (via Andrew) to use. The PyPI wheel ships code only, so
 # point the backend at a clone's bundled rule TSVs. Can also be set via env var

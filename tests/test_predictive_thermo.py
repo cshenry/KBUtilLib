@@ -593,6 +593,42 @@ def test_molgpk_reaction_dg_not_supported(tmp_path):
         be.reaction_dg_prime("r", {"x": -1})
 
 
+# ── units field on estimate dataclasses ─────────────────────────────────
+
+
+def test_compound_thermo_estimate_has_units_field():
+    """CompoundThermoEstimate.units is machine-readable and defaults to kJ/mol."""
+    from kbutillib.thermo_predictors.base import CompoundThermoEstimate
+
+    est = CompoundThermoEstimate(compound_id="cpd00001", backend="test")
+    assert est.units == "kJ/mol"
+    d = est.to_dict()
+    assert d["units"] == "kJ/mol"
+
+
+def test_reaction_thermo_estimate_has_units_field():
+    """ReactionThermoEstimate.units is machine-readable and defaults to kJ/mol."""
+    from kbutillib.thermo_predictors.base import ReactionThermoEstimate
+
+    est = ReactionThermoEstimate(reaction_id="rxn00001", backend="test")
+    assert est.units == "kJ/mol"
+    d = est.to_dict()
+    assert d["units"] == "kJ/mol"
+
+
+def test_units_field_overridable():
+    """units can be overridden (future-proofing, e.g. kcal/mol inputs)."""
+    from kbutillib.thermo_predictors.base import (
+        CompoundThermoEstimate,
+        ReactionThermoEstimate,
+    )
+
+    c = CompoundThermoEstimate(compound_id="x", backend="b", units="kcal/mol")
+    assert c.units == "kcal/mol"
+    r = ReactionThermoEstimate(reaction_id="r", backend="b", units="kcal/mol")
+    assert r.units == "kcal/mol"
+
+
 # Live end-to-end against a real OPAM2 checkout + opam2 interpreter. Skipped
 # unless both env vars point at a working install (mirrors the cheminformatics
 # live-test gating so CI stays green without torch/torch-geometric).
@@ -700,6 +736,63 @@ def test_molgpk_live_batch_microspecies():
     assert len(ests) == 2
     assert ests[0].major_microspecies == "CC(=O)[O-]"
     assert ests[1].major_microspecies == "[NH3+]CC(=O)[O-]"
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("MOLGPK_REPO") and os.environ.get("MOLGPK_PYTHON")),
+    reason="set MOLGPK_REPO and MOLGPK_PYTHON to run the live OPAM2 integration test",
+)
+def test_molgpk_live_predominant_ion_ph_sweep():
+    """pH sweep: confirm the dominant protonation state changes across the pKa.
+
+    Acetic acid (pKa ≈ 4.76):
+    - pH 2  → protonated form  CC(=O)O   (below pKa, acidic solution)
+    - pH 7  → deprotonated form CC(=O)[O-] (above pKa, physiological)
+
+    Glycine (pKa_COOH ≈ 2.34, pKa_NH3 ≈ 9.60):
+    - pH 7  → zwitterion [NH3+]CC(=O)[O-]
+    - pH 12 → anionic form NCC(=O)[O-]   (NH3+ deprotonated above pKa)
+
+    This test verifies that ``major_microspecies`` actually reflects the
+    requested pH rather than being a static ordering of states.
+    """
+    be = MolGPKBackend(
+        repo_path=os.environ["MOLGPK_REPO"],
+        python_exe=os.environ["MOLGPK_PYTHON"],
+    )
+    assert be.available is True, be.unavailable_reason
+
+    # --- Acetic acid pH sweep (pKa ≈ 4.76) ---
+    est_acid = be.compound_dgf("CC(=O)O", ph=2.0)   # well below pKa → protonated
+    est_base = be.compound_dgf("CC(=O)O", ph=7.0)   # well above pKa → deprotonated
+    assert est_acid.major_microspecies is not None, (
+        "Expected a microspecies at pH 2.0 for acetic acid"
+    )
+    assert est_base.major_microspecies == "CC(=O)[O-]", (
+        f"Expected CC(=O)[O-] at pH 7, got {est_base.major_microspecies}"
+    )
+    # At pH 2 the dominant form should differ from pH 7 (neutral vs. anion)
+    assert est_acid.major_microspecies != est_base.major_microspecies, (
+        "Dominant species should differ across the pKa (pH 2 vs pH 7)"
+    )
+
+    # --- Glycine pH sweep ---
+    est_glc_neutral = be.compound_dgf("NCC(=O)O", ph=7.0)   # zwitterion
+    est_glc_high    = be.compound_dgf("NCC(=O)O", ph=12.0)  # amine deprotonated
+    assert est_glc_neutral.major_microspecies == "[NH3+]CC(=O)[O-]", (
+        f"Expected zwitterion at pH 7.0, got {est_glc_neutral.major_microspecies}"
+    )
+    # At pH 12 (>> pKa_NH3 ≈ 9.6) the NH3+ group should be deprotonated;
+    # the dominant form should differ from the zwitterion.
+    assert est_glc_high.major_microspecies is not None, (
+        "Expected a microspecies at pH 12 for glycine"
+    )
+    assert est_glc_high.major_microspecies != est_glc_neutral.major_microspecies, (
+        "Dominant glycine species should differ between pH 7 and pH 12"
+    )
+
+    # units field sanity
+    assert est_base.units == "kJ/mol"
 
 
 @pytest.mark.skipif(

@@ -56,6 +56,11 @@ class CompoundThermoEstimate:
 
     All energies are in kJ/mol. ``None`` means "not estimated by this backend";
     it is never a stand-in for a real value.
+
+    Attributes:
+        units: Machine-readable energy unit for ``dgf`` / ``dgf_uncertainty``
+            (default ``"kJ/mol"``). ``pka_values`` are dimensionless and not
+            covered by this field.
     """
 
     compound_id: str
@@ -67,6 +72,7 @@ class CompoundThermoEstimate:
     ph: Optional[float] = None
     ionic_strength: Optional[float] = None
     temperature: Optional[float] = None
+    units: str = "kJ/mol"
     warnings: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -77,6 +83,7 @@ class CompoundThermoEstimate:
             "backend": self.backend,
             "dgf": self.dgf,
             "dgf_uncertainty": self.dgf_uncertainty,
+            "units": self.units,
             "pka_values": list(self.pka_values),
             "major_microspecies": self.major_microspecies,
             "ph": self.ph,
@@ -94,6 +101,10 @@ class ReactionThermoEstimate:
     (delta_r G'^0) at the given conditions, in kJ/mol. ``None`` means the
     backend could not estimate it (e.g. a participating compound was
     unidentifiable); it is never a stand-in for a real value.
+
+    Attributes:
+        units: Machine-readable energy unit for ``dg_prime`` /
+            ``dg_prime_uncertainty`` (default ``"kJ/mol"``).
     """
 
     reaction_id: str
@@ -106,6 +117,7 @@ class ReactionThermoEstimate:
     p_mg: Optional[float] = None
     equation: Optional[str] = None
     missing_compounds: List[str] = field(default_factory=list)
+    units: str = "kJ/mol"
     warnings: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -121,6 +133,7 @@ class ReactionThermoEstimate:
             "backend": self.backend,
             "dg_prime": self.dg_prime,
             "dg_prime_uncertainty": self.dg_prime_uncertainty,
+            "units": self.units,
             "ph": self.ph,
             "ionic_strength": self.ionic_strength,
             "temperature": self.temperature,

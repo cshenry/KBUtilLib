@@ -87,7 +87,9 @@ each call result records which backend produced it (provenance, via initialize_c
     pickaxe_backend.py          MINE pickaxe (reaction-rule network expansion) -- FIRST
     retrorules_backend.py       RetroRules reaction-rule sets
     tyo_pickaxe_backend.py      Tyo-lab pickaxe branch
-  Exposed as kbu.chem on the toolkit facade.
+  Exposed as `kbu.network_expansion` on the toolkit facade
+  (design notes originally planned `kbu.chem`; the implemented name is
+  `kbu.network_expansion` to avoid shadowing `kbu.thermo` legacy semantics).
   Depends on thermo for thermodynamic feasibility filtering of generated reactions
   (which is precisely why Henry ordered thermo first).
 

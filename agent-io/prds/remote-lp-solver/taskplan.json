@@ -1,0 +1,65 @@
+{
+  "prd_name": "remote-lp-solver",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Deep modules",
+      "parallel_group": [
+        {
+          "task_id": "solver-backends",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the solver-backend module for the Remote LP-Solver service in KBUtilLib, per agent-io/prds/remote-lp-solver/fullprompt.md (read it in full, especially 'Implementation Decisions', the 'Confront-hardened specifics' block, and Acceptance Criteria 1-9).\n\nCreate kbutillib/services/lp_solver/__init__.py and kbutillib/services/lp_solver/solver_backends.py. Provide a stable interface solve(lp_path, solver, time_limit, threads) -> dict, where the returned dict has exactly the keys status, objective_value, variables, solver, solve_time_s, error (the external result schema; SolveResult is a plain dict, per S1). Two implementations behind one interface: Gurobi (gurobipy) and CPLEX (native cplex package, NOT docplex, per S4).\n\nBehavior: read the LP file; set the solver's native time limit and thread count; run; extract {var_name: value} for EVERY variable via the solver's own name attribute (Gurobi Var.VarName, CPLEX variables.get_names()). Map solver outcomes with an explicit whitelist (OPTIMAL/MIP_optimal->optimal, INFEASIBLE->infeasible, UNBOUNDED->unbounded, TIME_LIMIT->timeout); ANY unrecognized status or exception -> status 'error' with the raw solver code/message in error (never a silent 'optimal'). error is None for all non-error statuses. On Gurobi INF_OR_UNBD (status 4), set DualReductions=0 in-place and re-solve within the ORIGINAL time_limit; solve_time_s includes both runs (S3). On timeout with a feasible incumbent, return all variables with incumbent values and the incumbent objective; if no incumbent, objective_value None and variables {} (S2). solve_time_s is always wall-clock solve time.\n\nWrite unit tests (following existing KBUtilLib test layout/conventions) that feed small LPs with known outcomes and assert: known-optimal -> optimal + correct objective + variable names byte-identical to the submitted LP; known-infeasible -> infeasible; known-unbounded -> unbounded; a near-zero time_limit -> timeout; INF_OR_UNBD disambiguation; a forced/unrecognized failure -> error with populated error. Guard the tests to run only where gurobipy/cplex import and skip-with-note otherwise (S14). Do NOT modify config.yaml, __init__.py, or toolkit.py in this task.",
+          "success_criteria": "kbutillib/services/lp_solver/solver_backends.py exists with a solve(lp_path, solver, time_limit, threads) function returning a dict with exactly keys status/objective_value/variables/solver/solve_time_s/error; supports gurobipy and native cplex; unknown outcomes map to status 'error' with populated error; INF_OR_UNBD re-solves with DualReductions=0; accompanying tests assert per-status behavior and variable-name round-trip and skip cleanly when solvers are unavailable.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "job-store",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the SQLite job store for the Remote LP-Solver service in KBUtilLib, per agent-io/prds/remote-lp-solver/fullprompt.md (read 'Persistence & lifecycle', the 'Confront-hardened specifics' block, and Acceptance Criteria 14-16).\n\nCreate kbutillib/services/lp_solver/job_store.py. It owns all SQLite and per-job LP temp-file handling behind a small interface: create(lp) -> job_id, claim_next(), mark_running(job_id), mark_done(job_id, result), mark_error(job_id, error), get(job_id), sweep_expired(), reap_orphans_on_startup(). Details: DB at ~/.lp-solver/jobs.sqlite; open in WAL mode with a busy-timeout (retry-on-busy) because multiple solve subprocesses plus the API process touch the DB (binding, per promoted free-critique item). job_id is a UUIDv4 string primary key. Columns: job_id, status, solver, submit_ts, start_ts, end_ts, result_json, error. LP payloads are written to ~/.lp-solver/tmp/{job_id}.lp and removed on completion or by the TTL sweep. Job states queued -> running -> done | error. sweep_expired() removes completed results older than 48h. reap_orphans_on_startup() transitions any job left 'running' to 'error' with error == 'service restarted during solve'.\n\nWrite unit tests (existing KBUtilLib test conventions; use a temp DB path, not the real ~/.lp-solver) covering: create->claim->running->done/error transitions; sweep_expired honoring the 48h TTL; reap_orphans_on_startup turning a running row into error with the exact restart message; temp-file creation and cleanup. These tests must run in any environment (no solver dependency). Do NOT modify config.yaml, __init__.py, or toolkit.py in this task.",
+          "success_criteria": "kbutillib/services/lp_solver/job_store.py exists exposing create/claim_next/mark_running/mark_done/mark_error/get/sweep_expired/reap_orphans_on_startup over a WAL-mode SQLite DB with UUIDv4 string job_ids and per-job LP temp files; tests (solver-independent, temp DB) verify state transitions, 48h TTL sweep, and orphan-on-restart -> error with message 'service restarted during solve', and pass locally.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Service assembly",
+      "parallel_group": [
+        {
+          "task_id": "service-assembly",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Assemble the FastAPI LP-solver service in KBUtilLib on top of the completed solver_backends and job_store modules, per agent-io/prds/remote-lp-solver/fullprompt.md (read 'Concurrency, threads, timeouts', 'Wire format & polling', 'Auth & network binding', 'Deployment on H100', the 'Confront-hardened specifics' block, and Acceptance Criteria 8-13, 16, 18-20).\n\nCreate kbutillib/services/lp_solver/worker.py and kbutillib/services/lp_solver/app.py, plus a __main__/CLI entrypoint on the app module so it can start via `python -m kbutillib.services.lp_solver.app --host 127.0.0.1 --port 8091`.\n\nworker.py: a bounded async pool (<= max_concurrent_solves, default 5) that pulls queued jobs from job_store, runs EACH solve in a SEPARATE subprocess invoking solver_backends.solve with threads_per_solve = max(1, floor(os.cpu_count() / max_concurrent_solves)); a watchdog sends SIGTERM at time_limit + 60s then SIGKILL 5s later, marking the job error (S6). time_limit clamped to [0, max_time_limit] (default ceiling 7200s); default_time_limit 3600s when omitted.\n\napp.py (thin): POST /solve accepts a gzip body (Content-Encoding: gzip, Content-Type text/plain; charset=utf-8), inflates it, creates a job, returns {job_id}; returns HTTP 503 when queued jobs (running excluded) exceed max_queue_depth (default 50). GET /result/{job_id} returns 200 + JSON (status carries queued/running/terminal) for known jobs, 404 for unknown. GET /healthz. Optional x-api-key header checked only when remote_solver.api_key is configured. Call job_store.sweep_expired() opportunistically on each POST /solve and GET /result. Call reap_orphans_on_startup() at startup. Bind 127.0.0.1 only.\n\nConfig: read all knobs from ~/.kbutillib/config.yaml under remote_solver.* (max_concurrent_solves, max_queue_depth, threads_per_solve, default_time_limit, max_time_limit, api_key) via SharedEnvUtils.get_config_value, each falling back to its documented default; add these defaults to the repo's root config.yaml. (This task OWNS config.yaml edits.)\n\nDeployment artifacts: under kbutillib/services/lp_solver/deploy/, commit a systemd user-unit template lp-solver.service (ExecStart=%h/venvs/lp-solver/bin/python -m kbutillib.services.lp_solver.app --host 127.0.0.1 --port 8091, WorkingDirectory=%h/projects/KBUtilLib, Type=simple, Restart=on-failure, RestartSec=10s, explicit PATH prepending %h/.local/bin, file logging to %h/.lp-solver/logs/, WantedBy=default.target) and a short enable/deploy script.\n\nWrite one end-to-end test that boots the app in-process (FastAPI TestClient or ephemeral-port uvicorn) with a stub backend, submits a small gzipped LP, and polls to a terminal result -- exercising app.py + worker.py glue. Do NOT modify __init__.py or toolkit.py (client registration is a later task).",
+          "success_criteria": "A runnable FastAPI service (python -m kbutillib.services.lp_solver.app) exposes POST /solve (gzip in, {job_id} out, 503 when queued>max_queue_depth), GET /result/{job_id} (200+JSON for known, 404 unknown), and GET /healthz, binds 127.0.0.1, runs each solve in a subprocess with the thread cap and time_limit+60s watchdog, reads remote_solver.* config with defaults, reaps orphans at startup and sweeps 48h TTL opportunistically; a committed systemd user-unit template + enable script exist under the service package; an end-to-end test with a stub backend submits and polls to a terminal result and passes.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["solver-backends", "job-store"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Client + registration",
+      "parallel_group": [
+        {
+          "task_id": "client-and-registration",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Implement the KBUtilLib client for the Remote LP-Solver service, mirroring ArgoUtils, per agent-io/prds/remote-lp-solver/fullprompt.md (read 'Repo & module layout', 'Wire format & polling', the 'Confront-hardened specifics' block, and Acceptance Criteria 1, 10, 17-19). Study src/kbutillib/argo_utils.py (submit-then-poll, retry/backoff, _poll_for_result, the *Impl delegate) and src/kbutillib/kb_berdl_utils.py (config-driven endpoint + structured-return dict) as prior art before writing.\n\nCreate kbutillib/ms_remote_solver_utils.py: class MSRemoteSolverUtils(SharedEnvUtils) with solve_lp(lp_text_or_path, solver=None, time_limit=None) -> dict. It gzip-compresses the LP (Content-Type text/plain; charset=utf-8, Content-Encoding gzip), POSTs to {base_url}/solve, then polls GET {base_url}/result/{job_id} every poll_interval (default 2.0s) with +/-10% jitter until a terminal status, returning the service's result dict verbatim (keys status/objective_value/variables/solver/solve_time_s/error). Raise a client-side TimeoutError only after min(requested_time_limit, max_time_limit) + 90s. Read remote_solver.base_url (default http://127.0.0.1:8091), remote_solver.timeout, remote_solver.poll_interval, remote_solver.api_key from config via get_config_value; send x-api-key only when api_key is set. Add a companion MSRemoteSolverUtilsImpl (holds env, lazy delegate, token copy) copying the ArgoUtilsImpl pattern.\n\nRegister the client: add a guarded optional import in src/kbutillib/__init__.py and a lazy @property remote_solver on KBUtilLib in src/kbutillib/toolkit.py, instantiating the Impl with self.env, matching the existing argo/berdl registration exactly. (This task OWNS __init__.py and toolkit.py edits; config.yaml remote_solver.* keys already exist from the service task.)\n\nWrite one client integration test against a stubbed HTTP server (existing KBUtilLib test conventions): submit -> poll -> returns the expected dict; assert the request body is gzip-encoded with the right headers; assert the poll-until-terminal loop works; assert a TimeoutError is raised when the stub never terminates. Runs in any environment (no solver dependency).",
+          "success_criteria": "kbu.remote_solver.solve_lp(lp_text_or_path, solver=None, time_limit=None) is reachable via the KBUtilLib facade, gzip-POSTs the LP with correct headers, polls GET /result/{job_id} at 2s+/-10% jitter to a terminal status, returns the exact 6-key result dict, and raises TimeoutError only after min(requested,max)+90s; MSRemoteSolverUtils is registered in __init__.py and toolkit.py mirroring ArgoUtils; a stubbed-server integration test verifies gzip submission, poll-to-terminal, and the timeout path and passes.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["service-assembly"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

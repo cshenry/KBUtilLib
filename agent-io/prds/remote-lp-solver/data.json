@@ -1,0 +1,44 @@
+{
+  "prd_name": "remote-lp-solver",
+  "title": "Remote LP-Solver Service (KBUtilLib)",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "priority": "high",
+  "created": "2026-07-21",
+  "design_sessions": [
+    "ai-design 2026-07-20/21"
+  ],
+  "confront_rounds": 1,
+  "summary": "Async LP-solver service on H100 (Gurobi/CPLEX) + KBUtilLib client over an SSH tunnel; submit gzipped LP, poll for a fixed result schema. HTTP-over-tunnel chosen over SQS.",
+  "key_decisions": {
+    "transport": "HTTP over SSH tunnel (not SQS); v1 callers = interactive primary-laptop only",
+    "repo": "client + FastAPI service both in KBUtilLib",
+    "input": "raw CPLEX-LP-format text from caller; service cobra-agnostic; trust-solver name fidelity",
+    "solver_selection": "default Gurobi; explicit honored; no cross-solver fallback; infra failure -> error",
+    "concurrency": "max_concurrent_solves=5; threads_per_solve=floor(cores/max_concurrent); max_queue_depth=50",
+    "timeouts": "default 3600s, ceiling 7200s, watchdog +60s, incumbent returned on timeout",
+    "persistence": "SQLite job store, LP on disk, 48h result TTL, orphan-on-restart -> error",
+    "status_mapping": "explicit whitelist; unknown -> error with raw code; INF_OR_UNBD re-solve DualReductions=0",
+    "wire": "gzipped LP on POST /solve; client polls every 2s; client wait outlasts server watchdog",
+    "auth_binding": "127.0.0.1:8091, optional bearer token, tunnel = licensing-compliance boundary",
+    "deployment": "user-level systemd unit on H100 (verified), dedicated venv ~/venvs/lp-solver, linger already on"
+  },
+  "modules": [
+    "kbutillib/services/lp_solver/solver_backends.py",
+    "kbutillib/services/lp_solver/job_store.py",
+    "kbutillib/services/lp_solver/worker.py",
+    "kbutillib/services/lp_solver/app.py",
+    "kbutillib/ms_remote_solver_utils.py"
+  ],
+  "test_targets": [
+    "solver_backends",
+    "job_store",
+    "client integration",
+    "end-to-end"
+  ],
+  "evidence": {
+    "h100_supervision": "KBUtilLib:agent-io/research/h100-service-supervision.md (maestro task-1da6c8ff, unmerged branch)"
+  }
+}

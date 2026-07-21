@@ -115,7 +115,7 @@ def precommit(session: nox.Session) -> None:
 @nox.session(python=python_versions)
 def mypy(session: nox.Session) -> None:
     """Type-check using mypy."""
-    args = session.posargs or ["src", "tests", "docs/conf.py"]
+    args = session.posargs
 
     session.run(
         "uv",
@@ -132,27 +132,19 @@ def mypy(session: nox.Session) -> None:
     session.install("pytest")
 
     session.install("-e", ".")
-    session.run("mypy", *args)
-    if not session.posargs:
+    if args:
+        session.run("mypy", *args)
+    else:
+        session.run("mypy", "-p", "kbutillib")
+        session.run("mypy", "tests")
         session.run("mypy", f"--python-executable={sys.executable}", "noxfile.py")
 
 
-@nox.session(python=python_versions)
+@nox.session(venv_backend="none")
 def tests(session: nox.Session) -> None:
     """Run the test suite."""
-    session.run(
-        "uv",
-        "sync",
-        "--group",
-        "dev",
-        "--group",
-        "lint",
-        external=True,
-    )
-
-    session.install("pytest", "coverage")
-    session.install("-e", ".")
-    session.run("pytest", *session.posargs)
+    session.run("uv", "sync", "--group", "dev", external=True)
+    session.run("uv", "run", "pytest", *session.posargs, external=True)
 
 
 @nox.session(python=python_versions[0])

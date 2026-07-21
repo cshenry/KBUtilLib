@@ -249,6 +249,12 @@ except ImportError as e:
     KBBERDLUtils = None
 
 try:
+    from .ms_remote_solver_utils import MSRemoteSolverUtils
+except ImportError as e:
+    _import_error("ms_remote_solver_utils", e)
+    MSRemoteSolverUtils = None
+
+try:
     from .kb_callback_utils import KBCallbackUtils
 except ImportError as e:
     _import_error("kb_callback_utils", e)
@@ -387,6 +393,11 @@ except ImportError:
     KBBERDLUtilsImpl = None
 
 try:
+    from .ms_remote_solver_utils import MSRemoteSolverUtilsImpl
+except ImportError:
+    MSRemoteSolverUtilsImpl = None
+
+try:
     from .patric_ws_utils import PatricWSUtilsImpl
 except ImportError:
     PatricWSUtilsImpl = None
@@ -463,6 +474,7 @@ __all__ = [
     "MSFBAUtils",
     "MSTemplateUtils",
     "MSReconstructionUtils",
+    "MSRemoteSolverUtils",
     "PatricWSUtils",
     "PipelineState",
     "PipelineStatus",
@@ -496,6 +508,7 @@ __all__ = [
     "MSFBAUtilsImpl",
     "MSTemplateUtilsImpl",
     "MSReconstructionUtilsImpl",
+    "MSRemoteSolverUtilsImpl",
     "PatricWSUtilsImpl",
     "RCSBPDBUtilsImpl",
     "SKANIUtilsImpl",

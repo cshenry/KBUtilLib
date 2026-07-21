@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from .mmseqs_utils import MMSeqsUtilsImpl
     from .skani_utils import SKANIUtilsImpl
     from .kb_berdl_utils import KBBERDLUtilsImpl
+    from .ms_remote_solver_utils import MSRemoteSolverUtilsImpl
     from .patric_ws_utils import PatricWSUtilsImpl
     from .kb_uniprot_utils import KBUniProtUtilsImpl
     from .rcsb_pdb_utils import RCSBPDBUtilsImpl
@@ -95,6 +96,7 @@ class KBUtilLib:
         self._mmseqs = None
         self._skani = None
         self._berdl = None
+        self._remote_solver = None
         self._patric = None
         self._uniprot = None
         self._pdb = None
@@ -250,6 +252,13 @@ class KBUtilLib:
             from .kb_berdl_utils import KBBERDLUtilsImpl
             self._berdl = KBBERDLUtilsImpl(self.env)
         return self._berdl
+
+    @property
+    def remote_solver(self) -> MSRemoteSolverUtilsImpl:
+        if self._remote_solver is None:
+            from .ms_remote_solver_utils import MSRemoteSolverUtilsImpl
+            self._remote_solver = MSRemoteSolverUtilsImpl(self.env)
+        return self._remote_solver
 
     @property
     def patric(self) -> PatricWSUtilsImpl:

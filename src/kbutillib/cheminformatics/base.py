@@ -76,6 +76,7 @@ class PredictedReaction:
     reaction_id: str
     backend: str
     operator: Optional[str] = None
+    operators: List[str] = field(default_factory=list)
     reactant_ids: List[str] = field(default_factory=list)
     product_ids: List[str] = field(default_factory=list)
     reaction_smiles: Optional[str] = None
@@ -90,6 +91,7 @@ class PredictedReaction:
             "reaction_id": self.reaction_id,
             "backend": self.backend,
             "operator": self.operator,
+            "operators": list(self.operators),
             "reactant_ids": list(self.reactant_ids),
             "product_ids": list(self.product_ids),
             "reaction_smiles": self.reaction_smiles,

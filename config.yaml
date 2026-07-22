@@ -110,5 +110,6 @@ cheminformatics:
   #     null/unset the caller must pass --outdir explicitly or the command
   #     defaults to the current working directory.
   verab:
-    operator_rule_tsv: null    # e.g. "/path/to/verab_mechanism_rules.tsv"
+    operator_rule_tsv: null    # e.g. "/path/to/coarse-grain-rxns/data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv"
+    operator_coreactant_tsv: null  # e.g. "/path/to/custom_coreactants.tsv"; when null a synthesized fallback is used
     king_outdir: null          # e.g. "./verab_king_output"

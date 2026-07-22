@@ -1,0 +1,10 @@
+{
+  "id": "kbutillib-verab",
+  "title": "KBUtilLib verAB O-Demethylation",
+  "description": "verAB methoxy-aromatic Pickaxe rule discovery + genome screening verbs over kbutillib.cheminformatics.verab, self-installed via `kbu king install`.",
+  "cli": "kbu",
+  "verify": {
+    "cmd": ["kbu", "verab", "--help"],
+    "ok_text": "verAB"
+  }
+}

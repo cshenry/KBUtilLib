@@ -382,6 +382,7 @@ class RetroRulesBackend:
                                 reaction_id=f"RR_R{rxn_hash}",
                                 backend=self.name,
                                 operator=rule_id,
+                                operators=[rule_id],
                                 reactant_ids=[sub_id],
                                 product_ids=product_ids,
                                 generation=gen,

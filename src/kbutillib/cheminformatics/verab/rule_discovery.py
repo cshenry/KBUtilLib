@@ -186,10 +186,18 @@ def match_transformation(
         reactant_ids: List[str] = list(rxn.reactant_ids)
         product_ids: List[str] = list(rxn.product_ids)
 
+        # Prefer the full operators list; fall back to the scalar for backward compat.
+        rxn_operators: List[str] = list(getattr(rxn, "operators", None) or [])
         operator: Optional[str] = rxn.operator
+        if not rxn_operators and operator is not None:
+            rxn_operators = [operator]
+
         # Skip reactions with no operator (can't be attributed to a rule)
-        if operator is None:
+        if not rxn_operators:
             continue
+
+        # Representative scalar for text-fallback and VerabRuleMatch.operator
+        representative: str = rxn_operators[0]
 
         # ---- RDKit structural match --------------------------------------------
         if use_rdkit:
@@ -214,7 +222,7 @@ def match_transformation(
             # ---- text / keyword fallback ---------------------------------------
             is_verab = _is_verab_text(
                 getattr(rxn, "rule_smarts", None),
-                operator,
+                representative,
             )
             method = "smarts_text"
             confidence = 0.5
@@ -222,7 +230,8 @@ def match_transformation(
         if is_verab:
             matches.append(
                 VerabRuleMatch(
-                    operator=operator,
+                    operator=representative,
+                    operators=rxn_operators,
                     reaction_id=rxn.reaction_id,
                     backend=rxn.backend,
                     reactant_ids=reactant_ids,
@@ -246,7 +255,7 @@ def discover_verab_rules(
     expander: Any,
     *,
     generations: int = 1,
-    rule_set: str = "metacyc_generalized",
+    rule_set: str = "mechinformed",
     seeds: Optional[Sequence[Dict[str, Any]]] = None,
     backend: str = "pickaxe",
     ec_hint: str = "1.14.13.82",
@@ -263,8 +272,10 @@ def discover_verab_rules(
     generations:
         Number of expansion generations to run.
     rule_set:
-        Rule set name passed through to *expander* (e.g.
-        ``"metacyc_generalized"`` or ``"metacyc_intermediate"``).
+        Rule set name passed through to *expander*.  Default is
+        ``"mechinformed"`` (Pate 2026 mechanism-informed operators); when the
+        TSV is not locally available the backend degrades automatically to
+        ``"metacyc_intermediate"`` with an honest warning.
     seeds:
         Iterable of seed dicts (each with ``"id"`` and ``"smiles"`` keys).
         Defaults to :data:`~kbutillib.cheminformatics.verab.smarts.SEED_COMPOUNDS`.
@@ -295,23 +306,32 @@ def discover_verab_rules(
         rule_set=rule_set,
     )
 
+    # Determine the rule set actually used (the backend may have degraded from
+    # "mechinformed" to "metacyc_intermediate" when the TSV was absent).
+    actual_rule_set: str = result.raw.get("rule_set") or rule_set
+
     # Classify reactions
     matches = match_transformation(result)
 
-    # Attach ec_hint to every match and de-duplicate operators
+    # Attach ec_hint to every match and de-duplicate operators.
+    # Use the full operators list (multi-op reactions) so no operator is lost.
     unique_operators: List[str] = []
     seen_ops: set = set()
     for m in matches:
         m.ec_hint = ec_hint
-        if m.operator not in seen_ops:
-            seen_ops.add(m.operator)
-            unique_operators.append(m.operator)
+        # Aggregate all firing operator ids from the list; fall back to scalar.
+        op_ids: List[str] = list(m.operators) if m.operators else ([m.operator] if m.operator else [])
+        for op_id in op_ids:
+            if op_id not in seen_ops:
+                seen_ops.add(op_id)
+                unique_operators.append(op_id)
 
-    # Build expansion summary
+    # Build expansion summary; include which rule set was actually used.
     expansion_summary: Dict[str, Any] = {
         "n_compounds": result.n_compounds,
         "n_reactions": result.n_reactions,
         "warnings": list(result.warnings),
+        "rule_set_used": actual_rule_set,
     }
 
     # Aggregate warnings
@@ -323,7 +343,7 @@ def discover_verab_rules(
         )
 
     return VerabDiscoveryResult(
-        rule_set=rule_set,
+        rule_set=actual_rule_set,
         generations=generations,
         seeds=seed_list,
         matches=matches,

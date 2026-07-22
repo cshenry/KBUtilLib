@@ -44,9 +44,10 @@ A custom rule set is supported via ``rule_list``/``coreactant_list`` kwargs
 from __future__ import annotations
 
 import csv
+import os
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import (
     BackendUnavailableError,
@@ -82,6 +83,180 @@ _BUNDLED_RULESETS = {
 
 #: Default rule set if the caller does not specify one.
 _DEFAULT_RULESET = "metacyc_generalized"
+
+#: Subpath within a coarse-grain-rxns clone to the mechinferred operator TSV.
+_MECHINFORMED_RULES_SUBPATH = (
+    "data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv"
+)
+
+#: Honest graceful-degrade message emitted when the mechinformed TSV is unresolved.
+_MECHINFORMED_DEGRADE_MSG = (
+    "[pickaxe] mechanism-informed operators (Pate 2026, stefanpate/coarse-grain-rxns) "
+    "not found. Falling back to bundled 'metacyc_intermediate' (the most "
+    "mechanism-aware built-in set). To use the mechanism-informed operators, clone "
+    "github.com/stefanpate/coarse-grain-rxns and set "
+    "cheminformatics.verab.operator_rule_tsv (or env KBUTILLIB_VERAB_OPERATOR_TSV) "
+    "to data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv. "
+    "NOTE: that repo has no LICENSE, so KBUtilLib does not redistribute the file."
+)
+
+# ---------------------------------------------------------------------------
+# Code-owned coreactant role -> SMILES map for the mechinformed operator set.
+# This table is NOT vendored from coarse-grain-rxns; it is a KBUtilLib-authored
+# best-effort mapping of the role labels embedded in the Pate 2026 rule rows to
+# canonical SMILES.  A curated coreactant TSV can be supplied via
+# cheminformatics.verab.operator_coreactant_tsv (or env
+# KBUTILLIB_VERAB_COREACTANT_TSV) for higher fidelity.
+# ---------------------------------------------------------------------------
+_MECHINFORMED_COREACTANTS: Dict[str, str] = {
+    # Common metabolites
+    "WATER": "O",
+    "OXYGEN": "O=O",
+    "NAD": "O=C(c1ccncc1)[C@@H]1OC([n+]2cccc(C(N)=O)c2)[C@H](O)[C@@H]1O",  # NAD+
+    "NADH": "O=C(c1ccncc1)[C@@H]1OC([nH+]2cccc(C(N)=O)c2)[C@H](O)[C@@H]1O",  # NADH (simplified)
+    "NADP": "NC(=O)c1ccc[n+](C2OC(COP(=O)(O)OP(=O)(O)OCC3OC(n4cnc5c(N)ncnc54)C(OP(=O)(O)O)C3O)C(O)C2O)c1",
+    "NADPH": "NC(=O)C1=CN(C2OC(COP(=O)(O)OP(=O)(O)OCC3OC(n4cnc5c(N)ncnc54)C(OP(=O)(O)O)C3O)C(O)C2O)C=CC1",
+    # SAM / SAH — methyl donor / acceptor (verAB-relevant!)
+    "METHYL_DONOR_CoF": "C[S+](CC[C@@H](N)C(=O)[O-])C[C@@H]1O[C@@H]([n+]2cnc3c(N)ncnc32)[C@H](O)[C@@H]1O",  # SAM
+    "METHYL_ACCEPTOR_CoF": "Nc1ncnc2c1ncn2[C@@H]1O[C@H](CCS(CC[C@@H](N)C(=O)[O-])C)[C@@H](O)[C@H]1O",  # SAH (simplified)
+    # Phosphate donors / acceptors
+    "PHOSPHATE_DONOR_CoF": "Nc1ncnc2c1ncn2[C@@H]1O[C@H](COP(=O)(O)OP(=O)(O)OP(=O)(O)O)[C@@H](O)[C@H]1O",  # ATP
+    "PHOSPHATE_ACCEPTOR_CoF": "Nc1ncnc2c1ncn2[C@@H]1O[C@H](COP(=O)(O)OP(=O)(O)O)[C@@H](O)[C@H]1O",  # ADP
+    # Inorganic phosphate species
+    "PPI": "O=P(O)(O)OP(=O)(O)O",   # pyrophosphate
+    "Pi": "OP(=O)(O)O",              # inorganic phosphate
+    # CoA species
+    "CoA": "CC(C)(COP(=O)(O)OP(=O)(O)OCC1OC(n2cnc3c(N)ncnc32)C(O)C1OP(=O)(O)O)C(O)C(=O)NCCC(=O)NCCS",
+    "ACYL_CoA": "CC(=O)SCCNC(=O)CCNC(=O)C(O)C(C)(C)COP(=O)(O)OP(=O)(O)OCC1OC(n2cnc3c(N)ncnc32)C(O)C1OP(=O)(O)O",
+    # Glutathione
+    "GLUTATHIONE": "N[C@@H](CCC(=O)N[C@@H](CS)C(=O)NCC(=O)O)C(=O)O",
+    "GSSG": "O=C(NCC(=O)O)C(CS)NC(=O)CC[C@@H](N)C(=O)O",
+    # Ferredoxin (placeholder SMILES for iron-sulfur protein cofactor)
+    "FERREDOXIN_OX": "[Fe]",
+    "FERREDOXIN_RED": "[Fe]",
+    # Flavin cofactors
+    "FAD": "Cc1cc2nc3c(=O)[nH]c(=O)nc3n(C[C@H](O)[C@H](O)[C@H](O)COP(=O)(O)OP(=O)(O)OCC3OC(n4cnc5c(N)ncnc54)C(O)C3O)c2cc1C",
+    "FADH2": "Cc1cc2[nH]c3c(=O)[nH]c(=O)nc3n(C[C@H](O)[C@H](O)[C@H](O)COP(=O)(O)OP(=O)(O)OCC3OC(n4cnc5c(N)ncnc54)C(O)C3O)c2cc1C",
+    "FMN": "Cc1cc2nc3c(=O)[nH]c(=O)nc3n(C[C@H](O)[C@H](O)[C@H](O)COP(=O)(O)O)c2cc1C",
+}
+
+# ---------------------------------------------------------------------------
+# Normalized-rule-TSV cache: source_path_str -> (mtime, normalized_temp_path)
+# Prevents re-normalizing the same unchanged file.
+# ---------------------------------------------------------------------------
+_NORMALIZED_RULE_CACHE: Dict[str, Tuple[float, Path]] = {}
+
+
+def _normalize_rule_tsv(source_path: Path) -> Path:
+    """Return a path to a Pickaxe-compatible 5-column rule TSV.
+
+    If *source_path* already has a ``Comments`` column this returns it
+    unchanged.  If it only has the 4 columns ``Name, Reactants, SMARTS,
+    Products`` (the Pate 2026 coarse-grain-rxns format), a normalized copy
+    with an empty ``Comments`` column is written into a temp directory.
+
+    The normalized copy is cached keyed by (path, mtime) so repeated calls
+    are cheap.  The source file is never mutated.
+
+    Args:
+        source_path: Path to the original rule TSV.
+
+    Returns:
+        Path to a Pickaxe-compatible TSV (may be identical to *source_path*
+        when it already has ≥ 5 columns or the first row does not contain
+        ``Comments``).
+    """
+    global _NORMALIZED_RULE_CACHE
+
+    try:
+        mtime = source_path.stat().st_mtime
+    except OSError:
+        return source_path  # can't stat → return as-is
+
+    cache_key = str(source_path)
+    cached = _NORMALIZED_RULE_CACHE.get(cache_key)
+    if cached and cached[0] == mtime:
+        cached_path = cached[1]
+        if cached_path.is_file():
+            return cached_path
+
+    # Inspect header
+    try:
+        with open(source_path, "r", newline="", encoding="utf-8") as fh:
+            reader = csv.reader(fh, delimiter="\t")
+            header = next(reader, None)
+    except Exception:
+        return source_path  # unreadable → pass through
+
+    if header is None:
+        return source_path
+
+    header_lower = [h.strip().lower() for h in header]
+    if "comments" in header_lower:
+        # Already has Comments column — no normalization needed.
+        _NORMALIZED_RULE_CACHE[cache_key] = (mtime, source_path)
+        return source_path
+
+    # Need to add an empty Comments column.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix="_comments.tsv",
+        prefix="kbutillib_mechinformed_",
+        delete=False,
+        newline="",
+        encoding="utf-8",
+    )
+    try:
+        with open(source_path, "r", newline="", encoding="utf-8") as src_fh:
+            reader = csv.reader(src_fh, delimiter="\t")
+            writer = csv.writer(tmp, delimiter="\t", lineterminator="\n")
+            first = True
+            for row in reader:
+                if first:
+                    writer.writerow(list(row) + ["Comments"])
+                    first = False
+                else:
+                    writer.writerow(list(row) + [""])
+        tmp.close()
+        normalized = Path(tmp.name)
+        _NORMALIZED_RULE_CACHE[cache_key] = (mtime, normalized)
+        return normalized
+    except Exception:
+        tmp.close()
+        return source_path  # normalization failed → return original
+
+
+def _synthesize_coreactant_tsv() -> Path:
+    """Write a temporary Pickaxe-compatible coreactant TSV from :data:`_MECHINFORMED_COREACTANTS`.
+
+    This is KBUtilLib's own code-owned role->SMILES table (not vendored from
+    coarse-grain-rxns) and covers the role labels embedded in the Pate 2026
+    operator rows.  It is written to a temp file so Pickaxe can load it via
+    its ``coreactant_list=<path>`` parameter.
+
+    The file is re-created on every call (it is cheap for < 50 rows).
+
+    Returns:
+        Path to the synthesized TSV.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix="_coreactants.tsv",
+        prefix="kbutillib_mechinformed_coact_",
+        delete=False,
+        newline="",
+        encoding="utf-8",
+    )
+    try:
+        writer = csv.writer(tmp, delimiter="\t", lineterminator="\n")
+        writer.writerow(["Name", "SMILES", "Type"])
+        for role, smiles in _MECHINFORMED_COREACTANTS.items():
+            writer.writerow([role, smiles, "Coreactant"])
+        tmp.close()
+        return Path(tmp.name)
+    except Exception:
+        tmp.close()
+        return Path(tmp.name)
 
 
 class PickaxeBackend:
@@ -266,6 +441,85 @@ class PickaxeBackend:
 
     # ── rule resolution ─────────────────────────────────────────────────
 
+    def _resolve_mechinformed(self) -> Optional[Path]:
+        """Locate the Pate 2026 mechinformed rule TSV without auto-cloning.
+
+        Resolution precedence (first valid file wins):
+        1. Config key ``cheminformatics.verab.operator_rule_tsv`` (explicit path).
+        2. Env var ``KBUTILLIB_VERAB_OPERATOR_TSV``.
+        3. DependencyManager: ``get_data_path("coarse-grain-rxns",
+           <_MECHINFORMED_RULES_SUBPATH>)`` — accepted only if the file exists.
+
+        Returns:
+            A :class:`~pathlib.Path` to the TSV if found, else ``None``.
+        """
+        candidates: List[Path] = []
+
+        # 1. Config
+        cfg_tsv = self._config("cheminformatics.verab.operator_rule_tsv", None)
+        if cfg_tsv:
+            candidates.append(Path(str(cfg_tsv)).expanduser())
+
+        # 2. Env var
+        env_tsv = os.environ.get("KBUTILLIB_VERAB_OPERATOR_TSV")
+        if env_tsv:
+            candidates.append(Path(env_tsv).expanduser())
+
+        # 3. DependencyManager (no auto-clone)
+        try:
+            from ..dependency_manager import get_data_path
+
+            dep_tsv = get_data_path("coarse-grain-rxns", _MECHINFORMED_RULES_SUBPATH)
+            if dep_tsv:
+                candidates.append(dep_tsv)
+        except Exception:
+            pass
+
+        for cand in candidates:
+            try:
+                if cand.is_file():
+                    return cand
+            except OSError:
+                continue
+        return None
+
+    def _resolve_mechinformed_coreactants(self) -> Path:
+        """Locate or synthesize a coreactant TSV for the mechinformed rule set.
+
+        Resolution precedence:
+        1. Config key ``cheminformatics.verab.operator_coreactant_tsv``.
+        2. Env var ``KBUTILLIB_VERAB_COREACTANT_TSV``.
+        3. Synthesize a temp TSV from :data:`_MECHINFORMED_COREACTANTS` (our
+           own code-owned role→SMILES map; not vendored from the upstream repo).
+
+        Returns:
+            A :class:`~pathlib.Path` to a valid coreactant TSV.
+        """
+        # 1. Config
+        cfg_coact = self._config(
+            "cheminformatics.verab.operator_coreactant_tsv", None
+        )
+        if cfg_coact:
+            p = Path(str(cfg_coact)).expanduser()
+            if p.is_file():
+                return p
+
+        # 2. Env var
+        env_coact = os.environ.get("KBUTILLIB_VERAB_COREACTANT_TSV")
+        if env_coact:
+            p = Path(env_coact).expanduser()
+            if p.is_file():
+                return p
+
+        # 3. Synthesize from code-owned table
+        self._log_info(
+            "[pickaxe] No coreactant TSV configured for mechinformed rule set; "
+            "synthesizing from built-in role→SMILES table. For higher fidelity "
+            "supply a curated TSV via cheminformatics.verab.operator_coreactant_tsv "
+            "or env KBUTILLIB_VERAB_COREACTANT_TSV."
+        )
+        return _synthesize_coreactant_tsv()
+
     def _resolve_ruleset(
         self,
         rule_set: Optional[str],
@@ -275,7 +529,10 @@ class PickaxeBackend:
         """Return ``(label, rule_path, coreactant_path)``.
 
         Explicit ``rule_list`` + ``coreactant_list`` win. Otherwise resolve a
-        named bundled rule set (config default ``metacyc_generalized``).
+        named rule set.  The special name ``"mechinformed"`` triggers runtime
+        resolution of the Pate 2026 TSV; if unresolved it degrades gracefully
+        to ``"metacyc_intermediate"`` with an honest warning.  All other names
+        are looked up in :data:`_BUNDLED_RULESETS`.
         """
         if rule_list and coreactant_list:
             rp, cp = Path(rule_list), Path(coreactant_list)
@@ -291,11 +548,25 @@ class PickaxeBackend:
             or _DEFAULT_RULESET
         )
         name = str(name).lower()
+
+        # ── mechinformed: runtime-resolve, never bundled ──────────────────
+        if name == "mechinformed":
+            rp = self._resolve_mechinformed()
+            if rp is None:
+                # Honest graceful degrade
+                self._log_warning(_MECHINFORMED_DEGRADE_MSG)
+                name = "metacyc_intermediate"
+                # Fall through to bundled resolution below
+            else:
+                cp = self._resolve_mechinformed_coreactants()
+                rp_norm = _normalize_rule_tsv(rp)
+                return ("mechinformed", str(rp_norm), str(cp))
+
         if name not in _BUNDLED_RULESETS:
             raise BackendUnavailableError(
                 f"Unknown bundled rule set '{name}'. "
-                f"Available: {sorted(_BUNDLED_RULESETS)}, or pass explicit "
-                f"rule_list + coreactant_list."
+                f"Available: {sorted(_BUNDLED_RULESETS)} + 'mechinformed', "
+                f"or pass explicit rule_list + coreactant_list."
             )
         assert self._data_dir is not None
         rel_rule, rel_core = _BUNDLED_RULESETS[name]
@@ -413,11 +684,14 @@ class PickaxeBackend:
             )
 
         for rid, rd in pk.reactions.items():
-            operators = rd.get("Operators")
-            op_label = None
-            if operators:
-                # Operators is a set; sort for a stable representative label.
-                op_label = ";".join(sorted(str(o) for o in operators))
+            raw_operators = rd.get("Operators")
+            op_list: List[str] = []
+            op_label: Optional[str] = None
+            if raw_operators:
+                # Operators is a set; sort for stability. Preserve the FULL list.
+                op_list = sorted(str(o) for o in raw_operators)
+                # Scalar display field: join all operator ids (backward compat).
+                op_label = ";".join(op_list)
             reactant_ids = [str(c) for _, c in rd.get("Reactants", [])]
             product_ids = [str(c) for _, c in rd.get("Products", [])]
             result.reactions.append(
@@ -425,6 +699,7 @@ class PickaxeBackend:
                     reaction_id=str(rd.get("_id", rid)),
                     backend=self.name,
                     operator=op_label,
+                    operators=op_list,
                     reactant_ids=reactant_ids,
                     product_ids=product_ids,
                     reaction_smiles=rd.get("SMILES_rxn"),

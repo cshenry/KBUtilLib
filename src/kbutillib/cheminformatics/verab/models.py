@@ -59,12 +59,14 @@ class VerabRuleMatch:
     method: str = "rdkit_transform"
     confidence: float = 1.0
     ec_hint: Optional[str] = None
+    operators: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a plain JSON-serialisable dict."""
         return {
             "operator": self.operator,
+            "operators": list(self.operators),
             "reaction_id": self.reaction_id,
             "backend": self.backend,
             "reactant_ids": list(self.reactant_ids),
@@ -174,6 +176,9 @@ class ScreeningRecord:
     has_downstream_pathway: bool = False
     downstream_reactions: List[str] = field(default_factory=list)
     in_models: Dict[str, bool] = field(default_factory=dict)
+    operators: List[str] = field(default_factory=list)
+    lookup_ok: bool = True
+    lookup_errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a plain JSON-serialisable dict."""
@@ -181,6 +186,7 @@ class ScreeningRecord:
             "source_msid": self.source_msid,
             "source_smiles": self.source_smiles,
             "operator": self.operator,
+            "operators": list(self.operators),
             "product_smiles": self.product_smiles,
             "product_inchikey": self.product_inchikey,
             "reaction_in_db": self.reaction_in_db,
@@ -188,6 +194,8 @@ class ScreeningRecord:
             "has_downstream_pathway": self.has_downstream_pathway,
             "downstream_reactions": list(self.downstream_reactions),
             "in_models": dict(self.in_models),
+            "lookup_ok": self.lookup_ok,
+            "lookup_errors": list(self.lookup_errors),
         }
 
 

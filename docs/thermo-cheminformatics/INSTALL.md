@@ -184,21 +184,89 @@ get_dependency_manager().initialize_dependencies(checkout_if_missing=True)
 If the checkout or bundled rule TSVs are missing, `kbu.verab.status()` reports
 `pickaxe: unavailable` with an actionable reason; no crash occurs.
 
+### Mechanism-informed operators (Pate 2026 — `stefanpate/coarse-grain-rxns`)
+
+The default rule set for verAB rule discovery is **`"mechinformed"`** — the
+mechanism-informed operator set from Pate et al. 2026
+(`github.com/stefanpate/coarse-grain-rxns`). These operators are derived from
+M-CSA / Rhea and are more mechanism-aware than the bundled MetaCyc rule sets.
+
+**KBUtilLib does NOT ship or redistribute the operator TSV** because the
+`coarse-grain-rxns` repository has no LICENSE file. The file is resolved at
+runtime from a local clone.
+
+#### Obtaining the operators
+
+1. Clone the repo (one-time):
+   ```bash
+   git clone https://github.com/stefanpate/coarse-grain-rxns.git ../coarse-grain-rxns
+   ```
+   The DependencyManager will find it automatically at `../coarse-grain-rxns`
+   (declared in `dependencies.yaml`). No further config is needed.
+
+2. *Or* point the config/env at any other copy:
+   ```yaml
+   # config.yaml
+   cheminformatics:
+     verab:
+       operator_rule_tsv: "/absolute/path/to/coarse-grain-rxns/data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv"
+   ```
+   ```bash
+   export KBUTILLIB_VERAB_OPERATOR_TSV=/path/to/.../mechinferred_dt_019_rules_w_coreactants.tsv
+   ```
+
+#### Fallback when operators are absent
+
+If the TSV cannot be resolved (no clone, no config, no env var), KBUtilLib
+**degrades gracefully** to the bundled `"metacyc_intermediate"` rule set (the
+most mechanism-aware built-in Pickaxe option) and emits an honest warning:
+
+```
+[pickaxe] mechanism-informed operators (Pate 2026, stefanpate/coarse-grain-rxns)
+not found. Falling back to bundled 'metacyc_intermediate' ...
+```
+
+The result's `rule_set` field reports which rule set was **actually used**, so
+downstream analysis is never misled about the operator source.
+
+#### Coreactant table
+
+The Pate 2026 TSV embeds role labels (`WATER`, `METHYL_DONOR_CoF`,
+`METHYL_ACCEPTOR_CoF`, `PHOSPHATE_DONOR_CoF`, `Pi`, `PPI`, …) but has no
+standalone coreactant file. KBUtilLib supplies a **code-owned** role→SMILES
+table covering those roles (a dict literal in our source — not vendored from
+the upstream repo). For higher fidelity, supply a curated coreactant TSV:
+
+```yaml
+cheminformatics:
+  verab:
+    operator_coreactant_tsv: "/path/to/custom_coreactants.tsv"
+```
+```bash
+export KBUTILLIB_VERAB_COREACTANT_TSV=/path/to/custom_coreactants.tsv
+```
+
 ### Optional config keys (`config.yaml`)
 
 ```yaml
 cheminformatics:
   verab:
-    # Path to a mechanism-informed rule TSV (e.g. Pate-2026 verAB-specific
-    # operators). When null, the bundled metacyc_generalized rule set is used.
-    operator_rule_tsv: null        # e.g. "/path/to/verab_mechanism_rules.tsv"
+    # Path to a mechanism-informed rule TSV (Pate 2026 coarse-grain-rxns).
+    # When null, KBUtilLib resolves via DependencyManager or env var; if still
+    # unresolved, falls back to the bundled metacyc_intermediate rule set.
+    operator_rule_tsv: null        # e.g. "/path/to/.../mechinferred_dt_019_rules_w_coreactants.tsv"
+    # Path to a custom coreactant TSV for the mechinformed rule set.
+    # When null, a synthesized fallback from KBUtilLib's built-in role->SMILES
+    # table is used (best-effort; covers WATER, SAM/SAH, ATP/ADP, Pi, PPI, ...).
+    operator_coreactant_tsv: null  # e.g. "/path/to/custom_coreactants.tsv"
     # Default output directory for `kbu verab emit-king`. When null the caller
     # must pass --outdir or the command defaults to the current directory.
     king_outdir: null              # e.g. "./verab_king_output"
 ```
 
-Both keys are fully optional. The verAB feature runs with no config changes
-beyond what Pickaxe already requires (`cheminformatics.pickaxe.data_dir`).
+All keys are fully optional. The verAB feature runs with no config changes
+beyond what Pickaxe already requires (`cheminformatics.pickaxe.data_dir`),
+degrading gracefully to `metacyc_intermediate` when the Pate TSV is absent.
 
 ### Live integration test
 

@@ -289,3 +289,286 @@ def test_pickaxe_live_expansion():
     assert res.n_compounds >= 1
     for c in res.product_compounds():
         assert c.smiles
+
+
+# ---------------------------------------------------------------------------
+# FIX2: operators list on PredictedReaction (additive; scalar field preserved)
+# ---------------------------------------------------------------------------
+
+
+def test_fix2_predicted_reaction_has_operators_field():
+    """PredictedReaction must have an `operators` list field (default empty)."""
+    rxn = PredictedReaction(
+        reaction_id="rxn_fix2_001",
+        backend="pickaxe",
+        operator="op1",
+    )
+    assert hasattr(rxn, "operators"), "PredictedReaction missing `operators` field"
+    assert isinstance(rxn.operators, list)
+    assert rxn.operators == []  # default is empty
+
+
+def test_fix2_predicted_reaction_scalar_operator_preserved():
+    """Adding `operators` list must NOT remove the scalar `operator` field."""
+    rxn = PredictedReaction(
+        reaction_id="rxn_fix2_002",
+        backend="pickaxe",
+        operator="op1",
+    )
+    assert rxn.operator == "op1", "Scalar `operator` field must be preserved"
+
+
+def test_fix2_predicted_reaction_multi_operator_list():
+    """A Pickaxe-style reaction with multiple operators stores the full list."""
+    rxn = PredictedReaction(
+        reaction_id="rxn_fix2_003",
+        backend="pickaxe",
+        operator="opA;opB",   # joined display string (backward compat)
+        operators=["opA", "opB"],
+    )
+    assert len(rxn.operators) == 2, "operators list must hold all firing operators"
+    assert "opA" in rxn.operators
+    assert "opB" in rxn.operators
+    # Scalar still usable for display
+    assert rxn.operator == "opA;opB"
+
+
+def test_fix2_predicted_reaction_to_dict_includes_operators():
+    """to_dict() must emit both 'operator' (scalar) and 'operators' (list)."""
+    rxn = PredictedReaction(
+        reaction_id="rxn_fix2_004",
+        backend="pickaxe",
+        operator="opA;opB",
+        operators=["opA", "opB"],
+    )
+    d = rxn.to_dict()
+    assert "operator" in d, "Scalar 'operator' key must remain in to_dict()"
+    assert "operators" in d, "'operators' list key must be added by FIX2"
+    assert d["operator"] == "opA;opB"
+    assert d["operators"] == ["opA", "opB"]
+
+
+def test_fix2_fake_backend_single_operator_list():
+    """Fake backend reaction with operator='op1' produces operators=['op1'] on the field."""
+    class _MultiOpBackend(_FakeBackend):
+        """Like _FakeBackend but produces a reaction with a multi-operator list."""
+        def expand(self, seed_smiles, generations=1, **kwargs):
+            res = ExpansionResult(backend=self.name, generations=generations)
+            for cid, smi in seed_smiles.items():
+                res.compounds[cid] = PredictedCompound(
+                    compound_id=cid, smiles=smi, generation=0, is_seed=True
+                )
+            # Simulate Pickaxe-style multi-operator reaction
+            res.reactions.append(
+                PredictedReaction(
+                    reaction_id="R_multi",
+                    backend=self.name,
+                    operator="opX;opY;opZ",
+                    operators=["opX", "opY", "opZ"],
+                    reactant_ids=list(seed_smiles.keys()),
+                    product_ids=[],
+                    generation=1,
+                )
+            )
+            return res
+
+    backend = _MultiOpBackend()
+    result = backend.expand({"cpd1": "CC"}, generations=1)
+    assert len(result.reactions) == 1
+    rxn = result.reactions[0]
+    # Must not be collapsed — the list must have 3 elements
+    assert len(rxn.operators) == 3, (
+        f"operators list collapsed: expected 3, got {len(rxn.operators)}"
+    )
+    assert rxn.operators == ["opX", "opY", "opZ"]
+    # Scalar backward compat
+    assert rxn.operator == "opX;opY;opZ"
+
+
+# ---------------------------------------------------------------------------
+# FIX1: mechinformed rule-set resolution, _normalize_rule_tsv, coreactant TSV
+# ---------------------------------------------------------------------------
+
+import csv
+import tempfile
+
+
+def _write_tiny_rule_tsv(path, with_comments=False):
+    """Write a minimal 4- or 5-column rule TSV to *path* for test fixtures."""
+    header = ["Name", "Reactants", "SMARTS", "Products"]
+    if with_comments:
+        header.append("Comments")
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(header)
+        row = ["rule_001", "SUBSTRATE", "[C:1]>>[C:1]O", "PRODUCT"]
+        if with_comments:
+            row.append("some note")
+        writer.writerow(row)
+
+
+def test_fix1_normalize_rule_tsv_adds_comments_column(tmp_path):
+    """_normalize_rule_tsv must add an empty Comments column to 4-col TSV
+    without mutating the source file."""
+    from kbutillib.cheminformatics.pickaxe_backend import _normalize_rule_tsv
+
+    src = tmp_path / "rules_no_comments.tsv"
+    _write_tiny_rule_tsv(src, with_comments=False)
+    src_mtime = src.stat().st_mtime
+
+    normalized = _normalize_rule_tsv(src)
+
+    # Source file must NOT be mutated
+    assert src.stat().st_mtime == src_mtime, "Source file mtime changed — mutated!"
+
+    # Normalized path must be different (a temp copy) since source lacks Comments
+    assert normalized != src, "Normalized path must differ from source for 4-col TSV"
+    assert normalized.is_file()
+
+    # Normalized TSV must have 5 columns with 'Comments' in header
+    with open(normalized, newline="") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        header = next(reader)
+    header_lower = [h.strip().lower() for h in header]
+    assert "comments" in header_lower, f"Comments column missing; header={header}"
+    assert len(header) == 5
+
+
+def test_fix1_normalize_rule_tsv_passthrough_when_comments_present(tmp_path):
+    """_normalize_rule_tsv must return the original path when Comments already exists."""
+    from kbutillib.cheminformatics.pickaxe_backend import _normalize_rule_tsv
+
+    src = tmp_path / "rules_with_comments.tsv"
+    _write_tiny_rule_tsv(src, with_comments=True)
+
+    normalized = _normalize_rule_tsv(src)
+
+    # When Comments column is already present, return source unchanged
+    assert normalized == src, "Should return source path unmodified when Comments already present"
+
+
+def test_fix1_normalize_rule_tsv_cache(tmp_path):
+    """_normalize_rule_tsv must return the same cached temp path on repeated calls."""
+    from kbutillib.cheminformatics.pickaxe_backend import _normalize_rule_tsv
+
+    src = tmp_path / "rules_cache.tsv"
+    _write_tiny_rule_tsv(src, with_comments=False)
+
+    first = _normalize_rule_tsv(src)
+    second = _normalize_rule_tsv(src)
+    assert first == second, "Repeated calls must return the same cached normalized path"
+
+
+def test_fix1_synthesized_coreactant_tsv_contains_required_roles():
+    """_synthesize_coreactant_tsv must include the verAB-relevant role rows."""
+    from kbutillib.cheminformatics.pickaxe_backend import _synthesize_coreactant_tsv
+
+    tsv_path = _synthesize_coreactant_tsv()
+    assert tsv_path.is_file(), "Synthesized coreactant TSV must exist"
+
+    with open(tsv_path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        roles = {row["Name"] for row in reader}
+
+    # Must cover the key roles embedded in the mechinferred operator rows
+    required_roles = {"WATER", "METHYL_DONOR_CoF", "METHYL_ACCEPTOR_CoF",
+                      "PHOSPHATE_DONOR_CoF", "PPI", "Pi"}
+    missing = required_roles - roles
+    assert not missing, f"Synthesized coreactant TSV missing roles: {missing}"
+
+
+def test_fix1_resolve_mechinformed_config_wins(tmp_path, monkeypatch):
+    """Config path wins over env var and DependencyManager for mechinformed TSV."""
+    from kbutillib.cheminformatics.pickaxe_backend import PickaxeBackend
+
+    # Create a fake rule TSV (just needs to exist as a file)
+    cfg_tsv = tmp_path / "cfg_rules.tsv"
+    _write_tiny_rule_tsv(cfg_tsv, with_comments=True)
+
+    env_tsv = tmp_path / "env_rules.tsv"
+    _write_tiny_rule_tsv(env_tsv, with_comments=True)
+
+    monkeypatch.setenv("KBUTILLIB_VERAB_OPERATOR_TSV", str(env_tsv))
+
+    def _cfg(key, default=None):
+        if key == "cheminformatics.verab.operator_rule_tsv":
+            return str(cfg_tsv)
+        return default
+
+    backend = PickaxeBackend(config_resolver=_cfg)
+    resolved = backend._resolve_mechinformed()
+
+    assert resolved == cfg_tsv, (
+        f"Config path must win; expected {cfg_tsv}, got {resolved}"
+    )
+
+
+def test_fix1_resolve_mechinformed_env_wins_over_dep(tmp_path, monkeypatch):
+    """Env var wins over DependencyManager when config is absent."""
+    from kbutillib.cheminformatics.pickaxe_backend import PickaxeBackend
+
+    env_tsv = tmp_path / "env_rules.tsv"
+    _write_tiny_rule_tsv(env_tsv, with_comments=True)
+
+    monkeypatch.setenv("KBUTILLIB_VERAB_OPERATOR_TSV", str(env_tsv))
+
+    backend = PickaxeBackend(config_resolver=lambda key, default=None: None)
+    resolved = backend._resolve_mechinformed()
+
+    assert resolved == env_tsv, (
+        f"Env var path must win over dep; expected {env_tsv}, got {resolved}"
+    )
+
+
+def test_fix1_resolve_mechinformed_returns_none_when_absent(tmp_path, monkeypatch):
+    """_resolve_mechinformed must return None when no TSV is found."""
+    from kbutillib.cheminformatics.pickaxe_backend import PickaxeBackend
+
+    # Remove env var and ensure config returns None
+    monkeypatch.delenv("KBUTILLIB_VERAB_OPERATOR_TSV", raising=False)
+
+    backend = PickaxeBackend(config_resolver=lambda key, default=None: None)
+    resolved = backend._resolve_mechinformed()
+
+    # Only None is acceptable when the TSV genuinely doesn't exist
+    assert resolved is None or not resolved.is_file(), (
+        "Expected None or non-existent path when mechinformed TSV is absent"
+    )
+
+
+def test_fix1_resolve_coreactant_config_wins(tmp_path, monkeypatch):
+    """Config coreactant path wins over env var and synthesized fallback."""
+    from kbutillib.cheminformatics.pickaxe_backend import PickaxeBackend
+
+    cfg_coact = tmp_path / "cfg_coreactants.tsv"
+    with open(cfg_coact, "w") as fh:
+        fh.write("Name\tSMILES\n")
+
+    def _cfg(key, default=None):
+        if key == "cheminformatics.verab.operator_coreactant_tsv":
+            return str(cfg_coact)
+        return default
+
+    backend = PickaxeBackend(config_resolver=_cfg)
+    resolved = backend._resolve_mechinformed_coreactants()
+
+    assert resolved == cfg_coact, (
+        f"Config coreactant path must win; expected {cfg_coact}, got {resolved}"
+    )
+
+
+def test_fix1_resolve_coreactant_synthesizes_when_absent(monkeypatch):
+    """_resolve_mechinformed_coreactants must synthesize a temp TSV when unresolved."""
+    from kbutillib.cheminformatics.pickaxe_backend import PickaxeBackend
+
+    monkeypatch.delenv("KBUTILLIB_VERAB_COREACTANT_TSV", raising=False)
+
+    backend = PickaxeBackend(config_resolver=lambda key, default=None: None)
+    resolved = backend._resolve_mechinformed_coreactants()
+
+    assert resolved.is_file(), "Synthesized coreactant TSV must exist"
+    # Should contain at least the key roles
+    with open(resolved, newline="") as fh:
+        content = fh.read()
+    assert "WATER" in content
+    assert "METHYL_DONOR_CoF" in content

@@ -1,6 +1,6 @@
 """S9 tests — verAB KING app bundle validation.
 
-Verifies that the ``king_app_verab`` bundle directory passes
+Verifies that the ``king_app/verab`` bundle directory passes
 ``king_install.load_bundle`` schema validation without raising
 ``BundleError``, and that the probe/verify schema is correct.
 
@@ -19,7 +19,7 @@ from kbutillib.king_install import BundleError, load_bundle
 # Fixture: resolve bundle dir from the installed package
 # ---------------------------------------------------------------------------
 
-BUNDLE_DIR: Path = Path(kbutillib.__file__).parent / "king_app_verab"
+BUNDLE_DIR: Path = Path(kbutillib.__file__).parent / "king_app" / "verab"
 
 
 # ---------------------------------------------------------------------------

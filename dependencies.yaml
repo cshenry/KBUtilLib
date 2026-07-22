@@ -61,3 +61,13 @@ dependencies:
   MINE-Database:
     path: "../MINE-Database"
     git: "https://github.com/tyo-nu/MINE-Database.git"
+
+  # coarse-grain-rxns — Pate et al. 2026 mechanism-informed (mechinferred) reaction
+  # operators (github.com/stefanpate/coarse-grain-rxns, branch: master). NO LICENSE in
+  # the repo => KBUtilLib never vendors the TSV; it is resolved at runtime from a local
+  # clone. Rule file: data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv
+  # (4 cols: Name, Reactants, SMARTS, Products; ~14,458 rows; no Comments col; no
+  # standalone coreactant TSV — role labels embedded).
+  coarse-grain-rxns:
+    path: "../coarse-grain-rxns"
+    git: "https://github.com/stefanpate/coarse-grain-rxns.git"

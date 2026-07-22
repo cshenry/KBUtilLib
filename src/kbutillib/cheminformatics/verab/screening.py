@@ -91,8 +91,8 @@ def _search_reactions_safe(
     *,
     query_identifiers: Optional[List[str]] = None,
     cpd_hits: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Call ``biochem.search_reactions`` with graceful fallback to empty dict.
+) -> tuple:
+    """Call ``biochem.search_reactions``, distinguishing not-found from failure.
 
     Signature (from ms_biochem_utils.py:567-573):
         search_reactions(
@@ -109,6 +109,16 @@ def _search_reactions_safe(
     cpd_hits:
         Dict mapping compound id -> existing match dict, used to find
         reactions consuming that compound (pass ``{mscpd_id: {}}``).
+
+    Returns
+    -------
+    (result_dict, error_or_None) : tuple
+        - On success (query ran, may be empty): ``(result_dict, None)``
+        - On exception (query failed):  ``({}, "search_reactions failed: <type>: <msg>")``
+
+    This makes a failed DB query distinguishable from a legitimate empty result
+    (genuine "not found"), so callers can annotate ScreeningRecord.lookup_ok=False
+    rather than silently treating an error as a confirmed absence.
     """
     try:
         kwargs: Dict[str, Any] = {}
@@ -118,11 +128,12 @@ def _search_reactions_safe(
             kwargs["cpd_hits"] = cpd_hits
         result = biochem.search_reactions(**kwargs)
         if result is None:
-            return {}
-        return result
+            return {}, None
+        return result, None
     except Exception as exc:
-        logger.debug("biochem.search_reactions failed: %s", exc)
-        return {}
+        msg = f"search_reactions failed: {type(exc).__name__}: {exc}"
+        logger.warning("biochem.%s", msg)
+        return {}, msg
 
 
 def _search_compounds_safe(
@@ -130,13 +141,19 @@ def _search_compounds_safe(
     *,
     query_structures: Optional[List[str]] = None,
     query_identifiers: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """Call ``biochem.search_compounds`` with graceful fallback to empty dict.
+) -> tuple:
+    """Call ``biochem.search_compounds``, distinguishing not-found from failure.
 
     Signature (from ms_biochem_utils.py:510-514):
         search_compounds(
             query_identifiers=[], query_structures=[], query_formula=None
         ) -> dict
+
+    Returns
+    -------
+    (result_dict, error_or_None) : tuple
+        - On success (query ran, may be empty): ``(result_dict, None)``
+        - On exception (query failed):  ``({}, "search_compounds failed: <type>: <msg>")``
     """
     try:
         kwargs: Dict[str, Any] = {}
@@ -146,11 +163,12 @@ def _search_compounds_safe(
             kwargs["query_identifiers"] = query_identifiers
         result = biochem.search_compounds(**kwargs)
         if result is None:
-            return {}
-        return result
+            return {}, None
+        return result, None
     except Exception as exc:
-        logger.debug("biochem.search_compounds failed: %s", exc)
-        return {}
+        msg = f"search_compounds failed: {type(exc).__name__}: {exc}"
+        logger.warning("biochem.%s", msg)
+        return {}, msg
 
 
 def _best_hit(matches: Dict[str, Any]) -> Optional[str]:
@@ -191,7 +209,7 @@ def _check_reaction_in_db(
     reactant_ids: Sequence[str],
     product_ids: Sequence[str],
     warnings: List[str],
-) -> Optional[str]:
+) -> tuple:
     """Answer question (a): is the predicted reaction already in the DB?
 
     Strategy:
@@ -199,22 +217,34 @@ def _check_reaction_in_db(
     2. If no hit, also try the compound ids from reactants/products as
        stoichiometry evidence (lightweight: uses ``cpd_hits`` dict).
 
-    Returns the best-matching MSRXN id, or ``None``.
+    Returns
+    -------
+    (msrxn_id_or_None, lookup_errors) : tuple
+        *msrxn_id_or_None* is ``None`` whether genuinely absent OR a lookup failed.
+        *lookup_errors* is a (possibly empty) list of error message strings.
+        Callers must inspect ``lookup_errors`` to distinguish genuine absence from
+        query failure — a non-empty list signals failure (false-negative risk).
     """
+    lookup_errors: List[str] = []
+
     # 1. Direct id look-up
-    hits = _search_reactions_safe(biochem, query_identifiers=[reaction_id])
-    if hits:
-        return _best_hit(hits)
+    hits, err = _search_reactions_safe(biochem, query_identifiers=[reaction_id])
+    if err is not None:
+        lookup_errors.append(err)
+    elif hits:
+        return _best_hit(hits), lookup_errors
 
     # 2. Compound-set stoichiometry probe: pass reactant and product ids as
     #    cpd_hits stubs so the stoichiometry index can find a match.
     cpd_stubs: Dict[str, Any] = {cid: {} for cid in list(reactant_ids) + list(product_ids)}
     if cpd_stubs:
-        hits = _search_reactions_safe(biochem, cpd_hits=cpd_stubs)
-        if hits:
-            return _best_hit(hits)
+        hits2, err2 = _search_reactions_safe(biochem, cpd_hits=cpd_stubs)
+        if err2 is not None:
+            lookup_errors.append(err2)
+        elif hits2:
+            return _best_hit(hits2), lookup_errors
 
-    return None
+    return None, lookup_errors
 
 
 # ---------------------------------------------------------------------------
@@ -227,12 +257,19 @@ def _check_product_in_db(
     product_smiles: str,
     product_inchikey: Optional[str],
     warnings: List[str],
-) -> Optional[str]:
+) -> tuple:
     """Answer question (b): is the product compound already in the DB?
 
     Tries SMILES first, then the InChIKey first block as an identifier look-up.
-    Returns the best-matching MSCPD id, or ``None``.
+
+    Returns
+    -------
+    (mscpd_id_or_None, lookup_errors) : tuple
+        *mscpd_id_or_None* is ``None`` whether genuinely absent OR lookup failed.
+        *lookup_errors* is a (possibly empty) list of error message strings.
     """
+    lookup_errors: List[str] = []
+
     structures: List[str] = []
     if product_smiles:
         structures.append(product_smiles)
@@ -240,18 +277,22 @@ def _check_product_in_db(
         structures.append(product_inchikey)
 
     if structures:
-        hits = _search_compounds_safe(biochem, query_structures=structures)
-        if hits:
-            return _best_hit(hits)
+        hits, err = _search_compounds_safe(biochem, query_structures=structures)
+        if err is not None:
+            lookup_errors.append(err)
+        elif hits:
+            return _best_hit(hits), lookup_errors
 
     # InChIKey first-block as an identifier (e.g. "AAAA-BBBB-C" → "AAAA")
     if product_inchikey and "-" in product_inchikey:
         first_block = product_inchikey.split("-")[0]
-        hits = _search_compounds_safe(biochem, query_identifiers=[first_block])
-        if hits:
-            return _best_hit(hits)
+        hits2, err2 = _search_compounds_safe(biochem, query_identifiers=[first_block])
+        if err2 is not None:
+            lookup_errors.append(err2)
+        elif hits2:
+            return _best_hit(hits2), lookup_errors
 
-    return None
+    return None, lookup_errors
 
 
 # ---------------------------------------------------------------------------
@@ -263,20 +304,30 @@ def _check_downstream_pathway(
     biochem: Any,
     product_in_db: Optional[str],
     warnings: List[str],
-) -> tuple[bool, List[str]]:
+) -> tuple:
     """Answer question (c): are there DB reactions consuming the product?
 
     Uses ``search_reactions(cpd_hits={mscpd: {}})`` to look up reactions where
-    the product appears as a reactant.  Returns ``(has_pathway, [rxn_ids])``.
+    the product appears as a reactant.
+
+    Returns
+    -------
+    (has_pathway, rxn_ids, lookup_errors) : tuple
+        *has_pathway* is ``True`` iff at least one downstream reaction was found.
+        *rxn_ids* is the list of MSRXN ids found.
+        *lookup_errors* is a (possibly empty) list of error message strings;
+        non-empty means the query raised an exception (false-negative risk).
     """
     if product_in_db is None:
-        return False, []
+        return False, [], []
 
     # Pass the product MSCPD as a cpd_hit stub; search_reactions will use its
     # stoichiometry index to find reactions consuming it.
-    hits = _search_reactions_safe(biochem, cpd_hits={product_in_db: {}})
+    hits, err = _search_reactions_safe(biochem, cpd_hits={product_in_db: {}})
+    if err is not None:
+        return False, [], [err]
     rxn_ids = list(hits.keys())
-    return len(rxn_ids) > 0, rxn_ids
+    return len(rxn_ids) > 0, rxn_ids, []
 
 
 # ---------------------------------------------------------------------------
@@ -430,9 +481,14 @@ def screen_products(
             continue
 
         for rxn in expansion.reactions:
-            # Filter to only reactions attributed to discovered operators
+            # Filter to only reactions attributed to discovered operators.
+            # Use the full operators list when available (multi-op reactions);
+            # fall back to the scalar operator for backward compatibility.
             rxn_operator: Optional[str] = getattr(rxn, "operator", None)
-            if operators_set and rxn_operator not in operators_set:
+            rxn_operators_list: list = list(getattr(rxn, "operators", None) or [])
+            if not rxn_operators_list and rxn_operator is not None:
+                rxn_operators_list = [rxn_operator]
+            if operators_set and not (operators_set & set(rxn_operators_list)):
                 continue
 
             for prod_id in rxn.product_ids:
@@ -443,29 +499,37 @@ def screen_products(
                 product_smiles: str = prod_cpd.smiles or ""
                 product_inchikey: Optional[str] = _inchikey_from_smiles(product_smiles)
 
+                # Accumulate lookup errors for this specific product record.
+                # A non-empty list signals a query failure (false-negative risk)
+                # rather than a confirmed absence.
+                rec_lookup_errors: List[str] = []
+
                 # (a) reaction in DB?
-                reaction_in_db = _check_reaction_in_db(
+                reaction_in_db, errs_a = _check_reaction_in_db(
                     biochem,
                     rxn.reaction_id,
                     rxn.reactant_ids,
                     rxn.product_ids,
                     warnings,
                 )
+                rec_lookup_errors.extend(errs_a)
 
                 # (b) product in DB?
-                product_in_db = _check_product_in_db(
+                product_in_db, errs_b = _check_product_in_db(
                     biochem,
                     product_smiles,
                     product_inchikey,
                     warnings,
                 )
+                rec_lookup_errors.extend(errs_b)
 
                 # (c) downstream pathway?
-                has_downstream, downstream_rxns = _check_downstream_pathway(
+                has_downstream, downstream_rxns, errs_c = _check_downstream_pathway(
                     biochem,
                     product_in_db,
                     warnings,
                 )
+                rec_lookup_errors.extend(errs_c)
 
                 # (d) in models?
                 in_models = _check_in_models(
@@ -474,11 +538,24 @@ def screen_products(
                     warnings,
                 )
 
+                # Determine overall lookup health for this record.
+                # Any error from (a)-(c) means a query failed; this is surfaced
+                # via lookup_ok=False so downstream analysis is not silently
+                # misled into treating a query failure as a confirmed "not in DB".
+                rec_lookup_ok = len(rec_lookup_errors) == 0
+                if not rec_lookup_ok:
+                    for err_msg in rec_lookup_errors:
+                        warnings.append(
+                            f"[screening] lookup failure for product "
+                            f"'{product_smiles[:40]}' of '{src_id}': {err_msg}"
+                        )
+
                 records.append(
                     ScreeningRecord(
                         source_msid=src_id,
                         source_smiles=src_smiles,
                         operator=rxn_operator or "",
+                        operators=list(rxn_operators_list),
                         product_smiles=product_smiles,
                         product_inchikey=product_inchikey,
                         reaction_in_db=reaction_in_db,
@@ -486,6 +563,8 @@ def screen_products(
                         has_downstream_pathway=has_downstream,
                         downstream_reactions=downstream_rxns,
                         in_models=in_models,
+                        lookup_ok=rec_lookup_ok,
+                        lookup_errors=rec_lookup_errors,
                     )
                 )
 
@@ -505,38 +584,55 @@ def screen_products(
 def predict_genome_degradation(
     *,
     operators: Sequence[str],
-    ec_hint: str = "1.14.13.82",
+    ec_hints: Sequence[str] = ("1.14.13.82",),
+    ec_hint: Optional[str] = None,
+    operator_ec_map: Optional[Dict[str, List[str]]] = None,
     genomes: Sequence[Any],
     annotation: Any,
 ) -> Dict[str, Any]:
     """Predict which genomes carry the enzymatic capacity to degrade methoxy-aromatics.
 
     For each genome, tests whether the genome's feature/ontology annotations
-    include the EC number associated with the verAB O-demethylation operator
-    (default EC 1.14.13.82 — vanillate monooxygenase).
+    include EC numbers associated with the verAB O-demethylation operators.
+    Supports multiple EC terms (``ec_hints``) so that predictions are not
+    limited to a single hard-coded EC.  For each matched feature the result
+    records WHICH EC term (or MSRXN id) was the evidence, making the
+    prediction fully explainable.
 
     Workflow
     --------
-    1. Resolve the EC term to ModelSEED reaction id(s) via
-       ``annotation.translate_term_to_modelseed("EC:" + ec_hint)``.
+    1. Build the effective EC list from ``ec_hints``, the legacy ``ec_hint``
+       kwarg (if provided), and optional ``operator_ec_map`` (operator id →
+       list of associated EC numbers derived from rule metadata).
+    2. Resolve EACH EC term to ModelSEED reaction id(s) via
+       ``annotation.translate_term_to_modelseed("EC:" + ec)``.
        Signature (kb_annotation_utils.py:223-244):
            translate_term_to_modelseed(term: str) -> list[str]
-    2. For each genome, call
+    3. For each genome, call
        ``annotation.process_object({"object": genome, "type": genome_type})``
        (kb_annotation_utils.py:568-658) to populate
        ``annotation.ftrhash`` (feature id → feature dict) where each feature
        carries an ``"ontology_terms"`` dict keyed by ontology namespace.
-    3. Scan ``annotation.ftrhash.values()`` for any feature that carries the
-       EC term or a matching MSRXN id in its ``"ontology_terms"``.
+    4. Scan ``annotation.ftrhash.values()`` for any feature that carries ANY
+       of the EC terms or a matching MSRXN id.  Record per-feature evidence
+       (which EC/MSRXN matched).
 
     Parameters
     ----------
     operators:
-        Discovered verAB operator ids (informational; used for provenance only).
+        Discovered verAB operator ids (informational; used for provenance).
+    ec_hints:
+        Sequence of EC numbers to check (do NOT include the ``"EC:"`` prefix).
+        Default ``("1.14.13.82",)`` — vanillate monooxygenase.  Additional
+        ECs derived from ``operator_ec_map`` are merged into this set.
     ec_hint:
-        EC number for the verAB enzyme (default ``"1.14.13.82"``). Do NOT
-        include the ``"EC:"`` prefix — it is added internally when calling
-        ``translate_term_to_modelseed``.
+        Legacy single-EC kwarg.  If provided it is prepended to ``ec_hints``
+        (back-compat: callers supplying only ``ec_hint`` still work).
+    operator_ec_map:
+        Optional dict mapping operator id → list of associated EC numbers.
+        When provided, ECs for any operator in *operators* are merged into the
+        effective EC list.  This lets rule-discovery metadata drive the EC
+        evidence without hard-coding.
     genomes:
         Sequence of genome objects or dicts.  Each entry may be:
 
@@ -558,23 +654,56 @@ def predict_genome_degradation(
 
     Returns
     -------
-    dict[genome_ref, {"can_degrade": bool, "ec_hits": list[str], "msrxn_ids": list[str]}]
+    dict[genome_ref, explainable_entry]
         *genome_ref* is a string key derived from each genome entry.
-        *can_degrade* is ``True`` iff at least one genome feature carries the
-        EC term.
-        *ec_hits* lists the feature ids where the EC term was found.
-        *msrxn_ids* lists the ModelSEED reaction ids resolved from the EC term.
+
+        Each *explainable_entry* is a dict with keys:
+
+        ``can_degrade`` (bool)
+            True iff at least one genome feature matched any EC term or MSRXN.
+        ``ec_hits`` (list[str])
+            Feature ids where ANY EC term or MSRXN matched (union across all
+            terms; backward-compatible with the old single-EC shape).
+        ``matched_terms`` (dict[str, list[str]])
+            Per-feature evidence: maps feature id → list of matched EC terms
+            (prefixed ``"EC:…"``) or MSRXN ids that were found in that feature.
+        ``ec_hints`` (list[str])
+            The effective EC numbers that were checked (bare, without prefix).
+        ``msrxn_ids`` (list[str])
+            Union of all ModelSEED reaction ids resolved from all EC terms.
 
     Graceful degradation
     --------------------
     - If *annotation* is ``None`` or does not expose the required methods,
       every genome is returned with ``{"can_degrade": False, "ec_hits": [],
-      "msrxn_ids": [], "warning": "annotation layer unavailable"}``.
+      "matched_terms": {}, "ec_hints": [...], "msrxn_ids": [],
+      "warning": "annotation layer unavailable"}``.
     - Exceptions raised by ``process_object`` for an individual genome are
       caught; that genome entry records the exception message and is marked
-      ``can_degrade=False``.
+      ``can_degrade=False`` with the explainable fields populated as far as
+      possible (msrxn_ids and ec_hints are still reported).
     """
-    ec_term = "EC:" + ec_hint
+    # ------------------------------------------------------------------
+    # Step 0: Build the effective EC list
+    # ------------------------------------------------------------------
+    # Start from the sequence param (may be empty tuple if caller overrides)
+    _effective_ec_bare: List[str] = list(ec_hints)
+
+    # Legacy back-compat: single ec_hint kwarg → prepend if not already present
+    if ec_hint is not None and ec_hint not in _effective_ec_bare:
+        _effective_ec_bare.insert(0, ec_hint)
+
+    # Operator-derived ECs via operator_ec_map
+    if operator_ec_map:
+        for op in operators:
+            for derived_ec in operator_ec_map.get(op, []):
+                if derived_ec not in _effective_ec_bare:
+                    _effective_ec_bare.append(derived_ec)
+
+    # Ensure the fallback hint is always present so the function stays
+    # meaningful even when called with an empty ec_hints sequence.
+    if not _effective_ec_bare:
+        _effective_ec_bare = ["1.14.13.82"]
 
     # ------------------------------------------------------------------
     # Graceful degradation: annotation layer unavailable
@@ -593,19 +722,41 @@ def predict_genome_degradation(
             result[genome_ref] = {
                 "can_degrade": False,
                 "ec_hits": [],
+                "matched_terms": {},
+                "ec_hints": list(_effective_ec_bare),
                 "msrxn_ids": [],
                 "warning": "annotation layer unavailable",
             }
         return result
 
     # ------------------------------------------------------------------
-    # Step 1: EC → ModelSEED reaction ids
+    # Step 1: Resolve ALL EC terms → ModelSEED reaction ids
+    #
+    # Build two structures:
+    #   all_msrxn_ids   : union of all MSRXNs across all ECs (for back-compat)
+    #   ec_term_to_msrxn: "EC:X.Y.Z.W" → [msrxn, ...] (for per-hit attribution)
     # ------------------------------------------------------------------
-    msrxn_ids: List[str] = []
-    try:
-        msrxn_ids = annotation.translate_term_to_modelseed(ec_term) or []
-    except Exception as exc:
-        logger.debug("translate_term_to_modelseed(%r) failed: %s", ec_term, exc)
+    all_msrxn_ids: List[str] = []
+    ec_term_to_msrxn: Dict[str, List[str]] = {}
+
+    for bare_ec in _effective_ec_bare:
+        ec_term = "EC:" + bare_ec
+        try:
+            ids = annotation.translate_term_to_modelseed(ec_term) or []
+        except Exception as exc:
+            logger.debug("translate_term_to_modelseed(%r) failed: %s", ec_term, exc)
+            ids = []
+        ec_term_to_msrxn[ec_term] = list(ids)
+        for msrxn in ids:
+            if msrxn not in all_msrxn_ids:
+                all_msrxn_ids.append(msrxn)
+
+    # Also build a reverse map: msrxn_id → list of EC terms that produced it
+    # (used for per-feature attribution of MSRXN hits)
+    msrxn_to_ec_terms: Dict[str, List[str]] = {}
+    for ec_term, ids in ec_term_to_msrxn.items():
+        for msrxn in ids:
+            msrxn_to_ec_terms.setdefault(msrxn, []).append(ec_term)
 
     # ------------------------------------------------------------------
     # Step 2 & 3: per-genome feature scan
@@ -623,38 +774,50 @@ def predict_genome_degradation(
             result[genome_ref] = {
                 "can_degrade": False,
                 "ec_hits": [],
-                "msrxn_ids": list(msrxn_ids),
+                "matched_terms": {},
+                "ec_hints": list(_effective_ec_bare),
+                "msrxn_ids": list(all_msrxn_ids),
                 "warning": str(exc),
             }
             continue
 
-        # Scan features for the EC term in ontology_terms
+        # Scan features; accumulate matched feature ids and per-feature evidence
         ec_hits: List[str] = []
+        matched_terms: Dict[str, List[str]] = {}  # ftr_id → [matched EC/MSRXN terms]
+
         ftrhash: Dict[str, Any] = getattr(annotation, "ftrhash", {}) or {}
         for ftr_id, ftr in ftrhash.items():
             onto_terms: Dict[str, Any] = ftr.get("ontology_terms", {})
             # ontology_terms is keyed by ontology namespace (e.g. "EC", "MSRXN", ...)
-            # Check the "EC" namespace for the exact EC term
             ec_namespace = onto_terms.get("EC", {})
-            if ec_term in ec_namespace:
+            msrxn_namespace = onto_terms.get("MSRXN", {})
+
+            ftr_matched: List[str] = []
+
+            # Check EACH effective EC term (full "EC:X.Y.Z.W" and bare form)
+            for bare_ec in _effective_ec_bare:
+                ec_term = "EC:" + bare_ec
+                if ec_term in ec_namespace or bare_ec in ec_namespace:
+                    ftr_matched.append(ec_term)
+
+            # Check MSRXN namespace for any resolved ModelSEED reaction ids
+            for msrxn in all_msrxn_ids:
+                if msrxn in msrxn_namespace:
+                    # Attribute this hit to the EC terms that produced the MSRXN
+                    for src_ec in msrxn_to_ec_terms.get(msrxn, [msrxn]):
+                        if src_ec not in ftr_matched:
+                            ftr_matched.append(src_ec)
+
+            if ftr_matched:
                 ec_hits.append(ftr_id)
-                continue
-            # Also accept the bare number form (e.g. "1.14.13.82") in the EC namespace
-            if ec_hint in ec_namespace:
-                ec_hits.append(ftr_id)
-                continue
-            # Check MSRXN namespace for any of the resolved ModelSEED reaction ids
-            if msrxn_ids:
-                msrxn_namespace = onto_terms.get("MSRXN", {})
-                for msrxn in msrxn_ids:
-                    if msrxn in msrxn_namespace:
-                        ec_hits.append(ftr_id)
-                        break
+                matched_terms[ftr_id] = ftr_matched
 
         result[genome_ref] = {
             "can_degrade": len(ec_hits) > 0,
             "ec_hits": ec_hits,
-            "msrxn_ids": list(msrxn_ids),
+            "matched_terms": matched_terms,
+            "ec_hints": list(_effective_ec_bare),
+            "msrxn_ids": list(all_msrxn_ids),
         }
 
     return result

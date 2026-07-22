@@ -1286,3 +1286,190 @@ def test_s7_existing_toolkit_properties_unaffected():
     assert kbu2._verab is None  # not yet constructed
     _ = kbu2.verab              # trigger construction
     assert kbu2._verab is not None  # now set
+
+
+# ---------------------------------------------------------------------------
+# FIX2: multi-operator list preservation in match_transformation /
+#        discover_verab_rules
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_fix2_match_transformation_populates_operators_list():
+    """match_transformation must populate VerabRuleMatch.operators from rxn.operators."""
+    from kbutillib.cheminformatics.verab.rule_discovery import match_transformation
+
+    result = _build_synthetic_expansion_result()
+    # Inject a multi-operator list on the verab reaction (simulating Pickaxe multi-op)
+    for rxn in result.reactions:
+        if rxn.reaction_id == "rxn_verab_001":
+            rxn.operators = ["ruleXXXX", "ruleEXTRA"]
+            break
+
+    matches = match_transformation(result)
+    assert len(matches) == 1
+    m = matches[0]
+    # Scalar operator preserved (first element)
+    assert m.operator == "ruleXXXX"
+    # operators list carries full list
+    assert "ruleXXXX" in m.operators
+    assert "ruleEXTRA" in m.operators
+    assert len(m.operators) == 2
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_fix2_discover_aggregates_all_operators_from_list():
+    """discover_verab_rules de-dup must use the operators LIST, not just scalar.
+
+    When a single reaction fires with operators=['ruleXXXX', 'ruleEXTRA'],
+    both ids must appear in VerabDiscoveryResult.operators.
+    """
+    from kbutillib.cheminformatics.verab.rule_discovery import discover_verab_rules
+
+    synthetic_result = _build_synthetic_expansion_result()
+    # Inject multi-op list on the verab reaction
+    for rxn in synthetic_result.reactions:
+        if rxn.reaction_id == "rxn_verab_001":
+            rxn.operators = ["ruleXXXX", "ruleEXTRA"]
+            break
+
+    class _FakeExpander:
+        def expand(self, seed_smiles, generations=1, backend="pickaxe",
+                   rule_set="metacyc_generalized", **kwargs):
+            return synthetic_result
+
+    discovery = discover_verab_rules(_FakeExpander(), generations=1)
+
+    # Both operators must be in the de-duped list
+    assert "ruleXXXX" in discovery.operators, (
+        "ruleXXXX missing from discovery.operators"
+    )
+    assert "ruleEXTRA" in discovery.operators, (
+        "ruleEXTRA not aggregated into discovery.operators from the list"
+    )
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_fix2_verab_rule_match_to_dict_has_operators_key():
+    """VerabRuleMatch.to_dict() must include both 'operator' and 'operators' keys."""
+    from kbutillib.cheminformatics.verab.models import VerabRuleMatch
+
+    m = VerabRuleMatch(
+        operator="ruleXXXX",
+        operators=["ruleXXXX", "ruleSECOND"],
+        reaction_id="rxn_fix2",
+        backend="pickaxe",
+    )
+    d = m.to_dict()
+    assert "operator" in d, "Scalar 'operator' key must remain in to_dict()"
+    assert "operators" in d, "'operators' list key must be added by FIX2"
+    assert d["operator"] == "ruleXXXX"
+    assert d["operators"] == ["ruleXXXX", "ruleSECOND"]
+
+
+def test_fix2_verab_rule_match_operators_default_empty():
+    """VerabRuleMatch.operators defaults to an empty list (backward compat)."""
+    from kbutillib.cheminformatics.verab.models import VerabRuleMatch
+
+    m = VerabRuleMatch(operator="ruleA", reaction_id="rxn_bc", backend="pickaxe")
+    assert hasattr(m, "operators")
+    assert m.operators == []
+
+
+# ---------------------------------------------------------------------------
+# FIX1: mechinformed default rule_set + graceful degrade + rule_set_used
+# ---------------------------------------------------------------------------
+
+
+def test_fix1_discover_verab_rules_default_ruleset_is_mechinformed():
+    """discover_verab_rules must default to rule_set='mechinformed'."""
+    import inspect
+    from kbutillib.cheminformatics.verab.rule_discovery import discover_verab_rules
+
+    sig = inspect.signature(discover_verab_rules)
+    default = sig.parameters["rule_set"].default
+    assert default == "mechinformed", (
+        f"discover_verab_rules default rule_set is '{default}', expected 'mechinformed'"
+    )
+
+
+def test_fix1_verab_utils_discover_rules_default_ruleset_is_mechinformed():
+    """VerabUtils.discover_rules must default to rule_set='mechinformed'."""
+    import inspect
+    from kbutillib.verab_utils import VerabUtils
+
+    sig = inspect.signature(VerabUtils.discover_rules)
+    default = sig.parameters["rule_set"].default
+    assert default == "mechinformed", (
+        f"VerabUtils.discover_rules default rule_set is '{default}', expected 'mechinformed'"
+    )
+
+
+def test_fix1_discover_verab_rules_fallback_to_metacyc_intermediate_with_warning():
+    """When mechinformed TSV is absent the expander is called with
+    metacyc_intermediate and the warning contains the honest degrade message."""
+    import warnings as _warnings_std
+    from kbutillib.cheminformatics.verab.rule_discovery import discover_verab_rules
+    from kbutillib.cheminformatics.base import ExpansionResult
+
+    called_rule_sets = []
+    warning_messages = []
+
+    class _FakeExpander:
+        def expand(self, seed_smiles, generations=1, backend="pickaxe",
+                   rule_set="mechinformed", **kwargs):
+            called_rule_sets.append(rule_set)
+            # Simulate what the backend returns after mechinformed -> metacyc_intermediate degrade.
+            # The backend sets result.raw["rule_set"] to the actual rule set used.
+            res = ExpansionResult(backend="pickaxe", generations=generations)
+            res.raw["rule_set"] = "metacyc_intermediate"
+            res.warnings.append(
+                "[pickaxe] mechanism-informed operators (Pate 2026, "
+                "stefanpate/coarse-grain-rxns) not found. Falling back to "
+                "bundled 'metacyc_intermediate'"
+            )
+            return res
+
+    # discover_verab_rules should propagate rule_set="mechinformed" to expander;
+    # the expander (fake) simulates the backend's graceful degrade.
+    result = discover_verab_rules(_FakeExpander(), generations=1)
+
+    # The expander was called with mechinformed
+    assert called_rule_sets == ["mechinformed"], (
+        f"Expander must be called with 'mechinformed'; got {called_rule_sets}"
+    )
+
+    # The VerabDiscoveryResult.rule_set must reflect the ACTUAL rule set used
+    # (propagated from result.raw["rule_set"] = "metacyc_intermediate")
+    assert result.rule_set == "metacyc_intermediate", (
+        f"result.rule_set must be 'metacyc_intermediate' after degrade; "
+        f"got '{result.rule_set}'"
+    )
+
+    # rule_set_used must be recorded in expansion_summary
+    assert result.expansion_summary.get("rule_set_used") == "metacyc_intermediate", (
+        "expansion_summary['rule_set_used'] must be 'metacyc_intermediate'"
+    )
+
+    # The honest degrade message must appear in warnings
+    combined = " ".join(result.warnings)
+    assert "metacyc_intermediate" in combined, (
+        "Honest degrade warning must mention 'metacyc_intermediate'"
+    )
+
+
+def test_fix1_discover_verab_rules_records_actual_rule_set_used():
+    """When mechinformed succeeds, result.rule_set is 'mechinformed'."""
+    from kbutillib.cheminformatics.verab.rule_discovery import discover_verab_rules
+    from kbutillib.cheminformatics.base import ExpansionResult
+
+    class _FakeExpander:
+        def expand(self, seed_smiles, generations=1, backend="pickaxe",
+                   rule_set="mechinformed", **kwargs):
+            res = ExpansionResult(backend="pickaxe", generations=generations)
+            res.raw["rule_set"] = "mechinformed"  # backend confirmed mechinformed
+            return res
+
+    result = discover_verab_rules(_FakeExpander(), generations=1)
+    assert result.rule_set == "mechinformed"
+    assert result.expansion_summary.get("rule_set_used") == "mechinformed"

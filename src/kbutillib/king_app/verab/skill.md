@@ -1,4 +1,4 @@
-# KBUtilLib verAB Methoxy-Aromatic Pickaxe (kbu verab)
+# KBUtilLib verAB O-Demethylation (kbu verab)
 
 You have a `kbu` CLI on PATH.  Its `kbu verab` verb group gives you the full
 five-step verAB pipeline: seed discovery → O-demethylation rule identification
@@ -44,17 +44,21 @@ catalyse aromatic O-demethylation (EC 1.14.13.82).
   (substructure-confirmed transform).  Absent RDKit is reported as a warning,
   not a crash.
 - `--generations` (default 1): number of Pickaxe expansion generations.
-- `--rule-set` (default `metacyc_generalized`): Pickaxe rule-set identifier.
+- `--rule-set` (default `mechinformed`): Pickaxe rule-set identifier.
+  The `mechinformed` set uses Pate et al. 2026 mechanism-informed operators
+  (stefanpate/coarse-grain-rxns).  If the TSV is not found locally, it
+  automatically falls back to the bundled `metacyc_intermediate` set and
+  logs a clear warning explaining how to obtain the Pate TSV.
 - Exit 0 if ≥1 operator was found; exit 1 if no verAB match was identified.
 
 ```
-kbu verab discover --generations 1 --rule-set metacyc_generalized --json
+kbu verab discover --generations 1 --rule-set mechinformed --json
 ```
 
 `--json` emits:
 ```json
 {
-  "rule_set": "metacyc_generalized",
+  "rule_set": "mechinformed",
   "generations": 1,
   "operators": ["ruleXXXX", ...],
   "matches": [...],
@@ -114,7 +118,8 @@ kbu verab screen --operators ruleXXXX --json
 ### `emit-king` — write a reproducible KING coscientist workflow directory
 
 Writes a self-contained set of artifacts that a KING coscientist session can
-consume to reproduce or extend the verAB rule-discovery workflow:
+consume to reproduce or extend the verAB rule-discovery workflow.  These are
+**reproducible-run inputs + a ready-to-run prompt** — not a KING bundle themselves.
 
 | File | Contents |
 |------|----------|
@@ -122,8 +127,8 @@ consume to reproduce or extend the verAB rule-discovery workflow:
 | `seeds.csv`  | Same in CSV format |
 | `discovered_rules.tsv` | `operator\tec_hint\tconfidence\tmethod\treaction_id` rows |
 | `target_transformation.txt` | VERAB_ODEMETHYLATION_SMARTS + EC reference |
-| `prompt.md` | Orientation prose for a KING session (references `kbu verab discover`) |
-| `manifest.json` | Tool provenance: version, rule_set, generations, seeds, operators, git_sha |
+| `prompt.md` | Reproducible-run inputs + ready-to-run prompt for a KING session |
+| `manifest.json` | Tool provenance: version, rule_set, rule_set_used, generations, seeds, operators, git_sha |
 
 No prior `discover` run is required; `emit-king` runs the built-in seed list and
 reports discovery details inside the artifacts.
@@ -160,7 +165,9 @@ isovanillate, guaiacol, 4-methoxybenzoate, veratrate) in aromatic catabolism
 pathways.  The verAB Pickaxe workflow:
 
 1. Expands the 5 canonical methoxy-aromatic seed compounds via Pickaxe
-   (minedatabase) using generalized MetaCyc reaction rules.
+   (minedatabase) using mechanism-informed reaction operators (Pate 2026,
+   stefanpate/coarse-grain-rxns) by default, falling back to the bundled
+   MetaCyc intermediate set when the Pate TSV is not locally available.
 2. Identifies operators whose predicted transformations remove a methoxy
    group from an aromatic ring and produce a phenol product + formaldehyde.
 3. Cross-references predicted products with ModelSEED biochemistry and
@@ -182,7 +189,7 @@ To register this verAB bundle with a local KING session, run:
 
 ```
 kbu king install --bundle-dir "$(python -c "import kbutillib, pathlib; \
-  print(pathlib.Path(kbutillib.__file__).parent / 'king_app_verab')")"
+  print(pathlib.Path(kbutillib.__file__).parent / 'king_app' / 'verab')")"
 ```
 
 Or, from Python:
@@ -192,7 +199,7 @@ from pathlib import Path
 import kbutillib
 from kbutillib import king_install
 
-bundle_dir = Path(kbutillib.__file__).parent / "king_app_verab"
+bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
 king_install.install(bundle_dir)
 ```
 
@@ -236,3 +243,7 @@ PY
   something you should not casually paste into that route.
 - RDKit and minedatabase are **not** hard requirements; missing either degrades
   gracefully with a warning rather than crashing.
+- The Pate 2026 mechanism-informed TSV (stefanpate/coarse-grain-rxns) carries
+  no license and is **not redistributed** by KBUtilLib; it is resolved at
+  runtime from a local clone.  When absent, `discover` falls back to the
+  bundled `metacyc_intermediate` set automatically.

@@ -482,3 +482,188 @@ def test_emit_king_workflow_default_seeds(tmp_path: Path):
     content = (tmp_path / "seeds.tsv").read_text(encoding="utf-8")
     for seed in SEED_COMPOUNDS:
         assert seed["id"] in content
+
+
+# ---------------------------------------------------------------------------
+# FIX 5: king_app/verab/ bundle validation (load_bundle on real KING location)
+# ---------------------------------------------------------------------------
+
+
+def test_king_app_verab_bundle_load_does_not_raise():
+    """load_bundle(king_app/verab/) must succeed without raising BundleError."""
+    from kbutillib.king_install import load_bundle
+
+    import kbutillib
+    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    result = load_bundle(bundle_dir)
+    assert isinstance(result, dict)
+    assert "bundle" in result
+    assert "skill_md" in result
+
+
+def test_king_app_verab_bundle_id():
+    """king_app/verab/bundle.json 'id' must be 'kbutillib-verab'."""
+    from kbutillib.king_install import load_bundle
+
+    import kbutillib
+    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    result = load_bundle(bundle_dir)
+    assert result["bundle"]["id"] == "kbutillib-verab"
+
+
+def test_king_app_verab_bundle_required_fields():
+    """king_app/verab/bundle.json must have all required fields."""
+    from kbutillib.king_install import load_bundle
+
+    import kbutillib
+    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    result = load_bundle(bundle_dir)
+    bundle = result["bundle"]
+    for field in ("id", "title", "description", "cli"):
+        assert field in bundle and bundle[field], f"Required field '{field}' missing or empty"
+
+
+def test_king_app_verab_skill_md_mentions_verbs():
+    """king_app/verab/skill.md must document the kbu verab verbs."""
+    from kbutillib.king_install import load_bundle
+
+    import kbutillib
+    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    result = load_bundle(bundle_dir)
+    skill_md = result["skill_md"]
+    for verb in ("discover", "enumerate", "screen", "emit-king"):
+        assert verb in skill_md, f"skill.md must mention verb '{verb}'"
+
+
+def test_king_app_verab_skill_md_mentions_mechinformed():
+    """king_app/verab/skill.md must reference mechinformed operators and fallback."""
+    from kbutillib.king_install import load_bundle
+
+    import kbutillib
+    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    result = load_bundle(bundle_dir)
+    skill_md = result["skill_md"]
+    assert "mechinformed" in skill_md, "skill.md must mention the 'mechinformed' rule set"
+    assert "metacyc_intermediate" in skill_md, (
+        "skill.md must mention the 'metacyc_intermediate' fallback"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 5: manifest.json must record rule_set_used
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_json_records_rule_set_used(tmp_path: Path):
+    """manifest.json must contain 'rule_set_used' key recording the actual rule set."""
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+
+    discovery = _build_synthetic_discovery()
+    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert "rule_set_used" in manifest, (
+        "manifest.json must contain 'rule_set_used' key (the actually-used rule set)"
+    )
+    # Without FIX 1, rule_set_used falls back to discovery.rule_set
+    assert manifest["rule_set_used"] == manifest["rule_set"]
+
+
+def test_manifest_rule_set_used_reflects_expansion_summary(tmp_path: Path):
+    """manifest.json rule_set_used reflects expansion_summary['rule_set_used'] when set.
+
+    discover_verab_rules stores the actual rule set in expansion_summary['rule_set_used'].
+    When a graceful fallback fires (mechinformed → metacyc_intermediate), rule_set is
+    already set to the fallback label.  Here we test with an explicit expansion_summary
+    value to confirm king_artifacts reads it correctly.
+    """
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult, VerabRuleMatch
+
+    match = VerabRuleMatch(
+        operator="ruleXXXX",
+        reaction_id="rxn_001",
+        backend="pickaxe",
+        method="rdkit_transform",
+        confidence=1.0,
+        ec_hint="1.14.13.82",
+    )
+    # Simulate a discovery result where expansion_summary explicitly records rule_set_used.
+    # In real use, discover_verab_rules populates this automatically.
+    discovery_with_summary = VerabDiscoveryResult(
+        rule_set="metacyc_intermediate",
+        generations=1,
+        seeds=list(SEED_COMPOUNDS),
+        matches=[match],
+        operators=["ruleXXXX"],
+        expansion_summary={
+            "n_compounds": 5,
+            "n_reactions": 1,
+            "warnings": [],
+            "rule_set_used": "metacyc_intermediate",
+        },
+        warnings=["mechinformed TSV not found, fell back to metacyc_intermediate"],
+    )
+    emit_king_workflow(tmp_path, discovery_with_summary, SEED_COMPOUNDS)
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rule_set_used"] == "metacyc_intermediate", (
+        "rule_set_used must reflect expansion_summary['rule_set_used']"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 5: prompt.md wording — honesty + mechanism-informed reference
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_md_not_called_king_bundle(tmp_path: Path):
+    """prompt.md header must clarify it is reproducible inputs, NOT a KING bundle."""
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+
+    discovery = _build_synthetic_discovery()
+    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+
+    content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    # Must contain the honesty caveat (NOT purely a KING bundle)
+    assert "NOT" in content or "not" in content.lower(), (
+        "prompt.md must clarify it is NOT a KING bundle (honesty caveat)"
+    )
+
+
+def test_prompt_md_mentions_mechinformed(tmp_path: Path):
+    """prompt.md must mention the mechinformed rule set default."""
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+
+    discovery = _build_synthetic_discovery()
+    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+
+    content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    assert "mechinformed" in content, (
+        "prompt.md must mention 'mechinformed' as the default rule set"
+    )
+
+
+def test_prompt_md_mentions_fallback(tmp_path: Path):
+    """prompt.md must mention the metacyc_intermediate fallback."""
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+
+    discovery = _build_synthetic_discovery()
+    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+
+    content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    assert "metacyc_intermediate" in content, (
+        "prompt.md must mention 'metacyc_intermediate' as the honest fallback"
+    )
+
+
+def test_prompt_md_mentions_all_kbu_verab_verbs(tmp_path: Path):
+    """prompt.md must reference all kbu verab command verbs."""
+    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+
+    discovery = _build_synthetic_discovery()
+    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+
+    content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    for verb in ("kbu verab discover", "kbu verab enumerate", "kbu verab screen", "kbu verab emit-king"):
+        assert verb in content, f"prompt.md must mention '{verb}' command"

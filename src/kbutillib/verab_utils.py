@@ -194,7 +194,7 @@ class VerabUtils:
         self,
         *,
         generations: int = 1,
-        rule_set: str = "metacyc_generalized",
+        rule_set: str = "mechinformed",
         seeds: Optional[Sequence[Dict[str, Any]]] = None,
         backend: str = "pickaxe",
     ) -> VerabDiscoveryResult:
@@ -362,11 +362,14 @@ class VerabUtils:
             generations=generations,
         )
 
-        # Optionally attach genome predictions
+        # Optionally attach genome predictions.
+        # Derive additional EC hints from operator metadata when available.
+        # The default ec_hints tuple ("1.14.13.82") is preserved as the
+        # fallback; operator_ec_map lets callers pass rule-metadata-derived
+        # EC associations without hard-coding them here.
         if genomes:
             genome_preds = screening.predict_genome_degradation(
                 operators=ops,
-                ec_hint="1.14.13.82",
                 genomes=genomes,
                 annotation=self._get_annotation(),
             )

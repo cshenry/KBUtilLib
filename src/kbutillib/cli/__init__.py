@@ -23,6 +23,7 @@ from .session import session_cmd
 from .set_cmd import set_cmd
 from .subproject import subproject_cmd
 from .update import update_command
+from .verab import verab_cmd
 
 
 @click.group()
@@ -51,3 +52,4 @@ main.add_command(session_cmd, name="session")
 main.add_command(set_cmd, name="set")
 main.add_command(subproject_cmd, name="subproject")
 main.add_command(update_command, name="update")
+main.add_command(verab_cmd, name="verab")

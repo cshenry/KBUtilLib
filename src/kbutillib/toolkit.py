@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from .argo_utils import ArgoUtilsImpl
     from .ai_curation_utils import AICurationUtilsImpl
     from .thermo_utils import ThermoUtilsImpl
+    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
     from .mmseqs_utils import MMSeqsUtilsImpl
     from .skani_utils import SKANIUtilsImpl
     from .kb_berdl_utils import KBBERDLUtilsImpl
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
     from .kbase_catalog_client import CatalogClient
     from .kb_job_utils import KBJobUtils
     from .ontomap_utils import OntomapUtilsImpl
+    from .verab_utils import VerabUtilsImpl
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,8 @@ class KBUtilLib:
         self._argo = None
         self._curation = None
         self._thermo = None
+        self._predictive_thermo = None
+        self._network_expansion = None
         self._mmseqs = None
         self._skani = None
         self._berdl = None
@@ -101,6 +106,7 @@ class KBUtilLib:
         self._catalog = None
         self._jobs = None
         self._ontomap = None
+        self._verab = None
 
     # ── sub-utility lazy properties ──────────────────────────────────
 
@@ -231,6 +237,29 @@ class KBUtilLib:
         return self._thermo
 
     @property
+    def predictive_thermo(self) -> "PredictiveThermoUtilsImpl":
+        """Predictive thermodynamics facade (equilibrator / dGPredictor /
+        molGPK / ModelSEED backends with graceful degradation)."""
+        if self._predictive_thermo is None:
+            from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+            self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.thermo)
+        return self._predictive_thermo
+
+    @property
+    def network_expansion(self) -> "NetworkExpansionUtilsImpl":
+        """Cheminformatics network-expansion facade (pickaxe / retrorules
+        backends with graceful degradation)."""
+        if self._network_expansion is None:
+            from .network_expansion_utils import NetworkExpansionUtilsImpl
+            self._network_expansion = NetworkExpansionUtilsImpl(self.env)
+        return self._network_expansion
+
+    @property
+    def chem(self) -> "NetworkExpansionUtilsImpl":
+        """Alias for :attr:`network_expansion` (design docs planned ``kbu.chem``)."""
+        return self.network_expansion
+
+    @property
     def mmseqs(self) -> MMSeqsUtilsImpl:
         if self._mmseqs is None:
             from .mmseqs_utils import MMSeqsUtilsImpl
@@ -293,3 +322,26 @@ class KBUtilLib:
             from .ontomap_utils import OntomapUtilsImpl
             self._ontomap = OntomapUtilsImpl(self.env)
         return self._ontomap
+
+    @property
+    def verab(self) -> "VerabUtilsImpl":
+        """verAB methoxy-aromatic Pickaxe rule-discovery and genome-screening
+        facade (composes network_expansion + biochem + model + genome +
+        annotation with graceful RDKit/minedatabase degradation).
+
+        Dependencies are resolved lazily — the sub-facades are only constructed
+        when a method that requires them is first called, avoiding eager
+        failures when optional modules (modelseedpy, etc.) are absent."""
+        if self._verab is None:
+            from .verab_utils import VerabUtilsImpl
+            # Pass getter lambdas so each sub-facade is constructed only on
+            # first use (avoids eager ModuleNotFoundError for optional deps).
+            self._verab = VerabUtilsImpl(
+                self.env,
+                network_expansion=lambda: self.network_expansion,
+                biochem=lambda: self.biochem,
+                model=lambda: self.model,
+                genome=lambda: self.genome,
+                annotation=lambda: self.annotation,
+            )
+        return self._verab

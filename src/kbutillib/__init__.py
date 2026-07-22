@@ -169,6 +169,18 @@ except ImportError as e:
     ThermoUtils = None
 
 try:
+    from .predictive_thermo_utils import PredictiveThermoUtils
+except ImportError as e:
+    _import_error("predictive_thermo_utils", e)
+    PredictiveThermoUtils = None
+
+try:
+    from .network_expansion_utils import NetworkExpansionUtils
+except ImportError as e:
+    _import_error("network_expansion_utils", e)
+    NetworkExpansionUtils = None
+
+try:
     from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError as e:
     _import_error("kb_reads_utils", e)
@@ -372,6 +384,16 @@ except ImportError:
     ThermoUtilsImpl = None
 
 try:
+    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+except ImportError:
+    PredictiveThermoUtilsImpl = None
+
+try:
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
+except ImportError:
+    NetworkExpansionUtilsImpl = None
+
+try:
     from .mmseqs_utils import MMSeqsUtilsImpl
 except ImportError:
     MMSeqsUtilsImpl = None
@@ -475,6 +497,8 @@ __all__ = [
     "ToolUnavailableError",
     "TransytUtils",
     "OntomapUtils",
+    "PredictiveThermoUtils",
+    "NetworkExpansionUtils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",
@@ -501,6 +525,8 @@ __all__ = [
     "SKANIUtilsImpl",
     "ThermoUtilsImpl",
     "OntomapUtilsImpl",
+    "PredictiveThermoUtilsImpl",
+    "NetworkExpansionUtilsImpl",
     # Endpoints
     "base_url",
     "env_from_url",

@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from .argo_utils import ArgoUtilsImpl
     from .ai_curation_utils import AICurationUtilsImpl
     from .thermo_utils import ThermoUtilsImpl
+    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
     from .mmseqs_utils import MMSeqsUtilsImpl
     from .skani_utils import SKANIUtilsImpl
     from .kb_berdl_utils import KBBERDLUtilsImpl
@@ -92,6 +94,8 @@ class KBUtilLib:
         self._argo = None
         self._curation = None
         self._thermo = None
+        self._predictive_thermo = None
+        self._network_expansion = None
         self._mmseqs = None
         self._skani = None
         self._berdl = None
@@ -229,6 +233,29 @@ class KBUtilLib:
             from .thermo_utils import ThermoUtilsImpl
             self._thermo = ThermoUtilsImpl(self.env, self.biochem)
         return self._thermo
+
+    @property
+    def predictive_thermo(self) -> "PredictiveThermoUtilsImpl":
+        """Predictive thermodynamics facade (equilibrator / dGPredictor /
+        molGPK / ModelSEED backends with graceful degradation)."""
+        if self._predictive_thermo is None:
+            from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+            self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.thermo)
+        return self._predictive_thermo
+
+    @property
+    def network_expansion(self) -> "NetworkExpansionUtilsImpl":
+        """Cheminformatics network-expansion facade (pickaxe / retrorules
+        backends with graceful degradation)."""
+        if self._network_expansion is None:
+            from .network_expansion_utils import NetworkExpansionUtilsImpl
+            self._network_expansion = NetworkExpansionUtilsImpl(self.env)
+        return self._network_expansion
+
+    @property
+    def chem(self) -> "NetworkExpansionUtilsImpl":
+        """Alias for :attr:`network_expansion` (design docs planned ``kbu.chem``)."""
+        return self.network_expansion
 
     @property
     def mmseqs(self) -> MMSeqsUtilsImpl:

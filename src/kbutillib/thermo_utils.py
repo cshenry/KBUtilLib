@@ -249,7 +249,7 @@ class ThermoUtils(SharedEnvUtils):
 
             if hasattr(reaction_obj, 'delta_g') and reaction_obj.delta_g is not None:
                 if abs(reaction_obj.delta_g) < 10000000:
-                    result['deltag'] = float(reaction_obj.deltag)
+                    result['deltag'] = float(reaction_obj.delta_g)
                 else:
                     result['warnings'].append("Reaction deltaG value is unknown (10000000)")
             else:

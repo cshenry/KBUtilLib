@@ -30,3 +30,34 @@ dependencies:
   cb_annotation_ontology_api:
     path: "../cb_annotation_ontology_api"
     git: "https://github.com/kbaseapps/cb_annotation_ontology_api.git"
+
+  # --- Predictive-thermodynamics + cheminformatics backends (Andrew Freiburger /
+  # Tyo lab research repos). These are NOT pip-installable cleanly, so KBUtilLib
+  # consumes them as source checkouts via this same DependencyManager pattern.
+  # On initialize_dependencies(checkout_if_missing=True) they are cloned and put
+  # on sys.path; the thermo/cheminformatics backends also resolve their repo
+  # paths from here automatically when not set explicitly in config.
+
+  # dGPredictor — Andrew's ModelSEED fork (reaction dG'°). Needs the trained
+  # model model/modelseed_M12_model_BR.pkl present (rebuild with
+  # retrain_modelseed.py if absent). Interpreter needs rdkit + openbabel +
+  # scikit-learn + scipy + pandas + joblib.
+  dGPredictor:
+    path: "../dGPredictor"
+    git: "https://github.com/freiburgermsu/dGPredictor.git"
+
+  # OPAM2 — Andrew's MolGpKa fork fine-tuned on the MSDB (pKa / microspecies).
+  # Ships models/weight_acid_modelseed.pth + weight_base_modelseed.pth.
+  # Interpreter needs rdkit + torch + torch-geometric.
+  OPAM2:
+    path: "../OPAM2"
+    git: "https://github.com/freiburgermsu/OPAM2.git"
+
+  # MINE-Database — the Tyo-lab Pickaxe (network expansion). Andrew/Tyo confirmed
+  # this is the version to use. Provides the minedatabase package + bundled rule
+  # TSVs. Interpreter needs rdkit + python-libsbml + lxml + pymongo. The repo
+  # pins python_requires <3.10 but runs on 3.11; this DependencyManager adds it
+  # to sys.path directly, so no pip install (and no .pth shim) is needed.
+  MINE-Database:
+    path: "../MINE-Database"
+    git: "https://github.com/tyo-nu/MINE-Database.git"

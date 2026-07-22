@@ -63,3 +63,40 @@ ai_curation:
 transyt:
   docker_image: "merlin-sysbio/kb_transyt:latest"  # Docker image tag/digest for Transyt
   neo4j_timeout: 120  # Maximum seconds to wait for Neo4j readiness before launching JAR
+
+# Predictive Thermodynamics Backends (kbu.predictive_thermo / PredictiveThermoUtils)
+# The equilibrator, modelseed_db and modelseed backends need no config here.
+# The dgpredictor and molgpk backends are subprocess-isolated wrappers around
+# Andrew Freiburger's research repos; point them at a local clone + an
+# interpreter that has their heavy deps. Each can also be set via environment
+# variables (DGPREDICTOR_REPO / DGPREDICTOR_PYTHON, MOLGPK_REPO|OPAM2_REPO /
+# MOLGPK_PYTHON). When unset, the backend reports unavailable (never fabricates).
+thermo:
+  dgpredictor:
+    # Andrew's ModelSEED fork: github.com/freiburgermsu/dGPredictor (master).
+    # Needs model/modelseed_M12_model_BR.pkl present (rebuild with the repo's
+    # retrain pipeline if absent). Interpreter needs rdkit + openbabel +
+    # scikit-learn + scipy + pandas + joblib.
+    repo_path: ""    # e.g. "/path/to/dGPredictor"
+    python: ""       # e.g. "/path/to/conda/envs/<env>/bin/python"
+  molgpk:
+    # Andrew's OPAM2: github.com/freiburgermsu/OPAM2 (MolGpKa fine-tuned on MSDB).
+    # Ships models/weight_acid_modelseed.pth + weight_base_modelseed.pth.
+    # Interpreter needs rdkit + torch + torch-geometric.
+    repo_path: ""    # e.g. "/path/to/OPAM2"
+    python: ""       # e.g. "/path/to/conda/envs/<env>/bin/python"
+
+# Cheminformatics network expansion (kbu.network_expansion / NetworkExpansionUtils)
+# Pickaxe = Tyo-NU MINE-Database (github.com/tyo-nu/MINE-Database), the version
+# the Tyo lab confirmed (via Andrew) to use. The PyPI wheel ships code only, so
+# point the backend at a clone's bundled rule TSVs. Can also be set via env var
+# KBUTILLIB_PICKAXE_DATA_DIR. The minedatabase package must be importable in the
+# active interpreter (rdkit + python-libsbml + lxml + pymongo); the repo pins
+# python_requires <3.10 but runs on 3.11 — expose it via a site-packages .pth if
+# `pip install -e` is rejected by that pin.
+cheminformatics:
+  pickaxe:
+    data_dir: ""     # e.g. "/path/to/MINE-Database/minedatabase/data"
+    rule_set: "metacyc_generalized"  # or metacyc_intermediate / bnice / enzymatic / chemical_damage
+  retrorules:
+    rules_tsv: ""    # optional: path to retrorules_rr02_flat_all.tsv

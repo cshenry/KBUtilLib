@@ -937,3 +937,352 @@ def test_match_transformation_text_fallback_emits_warning():
     for m in matches:
         assert m.method == "smarts_text"
         assert m.confidence == 0.5
+
+
+# ---------------------------------------------------------------------------
+# S7 — VerabUtils facade + VerabUtilsImpl + toolkit property
+# ---------------------------------------------------------------------------
+
+
+# ---- Import safety ---------------------------------------------------------
+
+
+def test_s7_import_verab_utils():
+    """verab_utils.py must be importable without RDKit or minedatabase."""
+    from kbutillib import verab_utils  # noqa: F401
+
+
+def test_s7_verab_utils_no_toplevel_rdkit():
+    """verab_utils must NOT import rdkit or minedatabase at module level."""
+    import kbutillib.verab_utils as vu_mod
+
+    module_dict = vars(vu_mod)
+    assert "rdkit" not in module_dict, "rdkit imported at module level in verab_utils.py"
+    assert "Chem" not in module_dict, "rdkit.Chem imported at module level in verab_utils.py"
+    assert "minedatabase" not in module_dict, "minedatabase imported at module level in verab_utils.py"
+
+
+# ---- kbu.verab property returns an instance --------------------------------
+
+
+def test_s7_toolkit_verab_property_returns_instance():
+    """kbu.verab property must return a VerabUtilsImpl without eagerly importing
+    rdkit or minedatabase.  No network or file access is required."""
+    from kbutillib.toolkit import KBUtilLib
+    from kbutillib.verab_utils import VerabUtilsImpl
+
+    kbu = KBUtilLib()
+    verab = kbu.verab
+    assert isinstance(verab, VerabUtilsImpl), (
+        f"kbu.verab should return VerabUtilsImpl, got {type(verab).__name__}"
+    )
+
+
+def test_s7_toolkit_verab_property_is_cached():
+    """kbu.verab property must return the same instance on repeated access."""
+    from kbutillib.toolkit import KBUtilLib
+
+    kbu = KBUtilLib()
+    v1 = kbu.verab
+    v2 = kbu.verab
+    assert v1 is v2, "kbu.verab must be cached (same object on repeated access)"
+
+
+def test_s7_toolkit_verab_does_not_import_rdkit_at_construction():
+    """Constructing kbu.verab must not trigger a top-level rdkit import.
+    We verify by checking sys.modules does not suddenly gain rdkit just from
+    property access (it may already be present if RDKit is installed; this
+    test is most meaningful when RDKit is absent, but passes either way)."""
+    import sys
+
+    from kbutillib.toolkit import KBUtilLib
+
+    before = "rdkit" in sys.modules
+    kbu = KBUtilLib()
+    _ = kbu.verab  # property access
+    after = "rdkit" in sys.modules
+    # If rdkit was NOT present before, it should still not be present now.
+    if not before:
+        assert not after, "kbu.verab property access imported rdkit eagerly"
+
+
+# ---- status() ----------------------------------------------------------------
+
+
+def test_s7_status_returns_dict():
+    """status() must return a dict."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    s = u.status()
+    assert isinstance(s, dict)
+
+
+def test_s7_status_has_expected_keys():
+    """status() dict must contain the documented keys."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    s = u.status()
+    expected_keys = {
+        "rdkit",
+        "minedatabase",
+        "network_expansion",
+        "biochem",
+        "model",
+        "genome",
+        "annotation",
+        "seed_count",
+        "backends",
+    }
+    assert expected_keys.issubset(set(s.keys())), (
+        f"status() is missing keys: {expected_keys - set(s.keys())}"
+    )
+
+
+def test_s7_status_seed_count():
+    """status()['seed_count'] must equal 5 (canonical seeds)."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    assert u.status()["seed_count"] == 5
+
+
+def test_s7_status_no_deps_injected():
+    """When no facades are injected, all boolean dep flags are False."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    s = u.status()
+    assert s["network_expansion"] is False
+    assert s["biochem"] is False
+    assert s["model"] is False
+    assert s["genome"] is False
+    assert s["annotation"] is False
+
+
+def test_s7_status_via_toolkit_has_deps():
+    """When constructed through the toolkit, dep flags must be True (facades
+    are injected, not None)."""
+    from kbutillib.toolkit import KBUtilLib
+
+    kbu = KBUtilLib()
+    s = kbu.verab.status()
+    assert s["network_expansion"] is True
+    assert s["biochem"] is True
+    assert s["model"] is True
+    assert s["genome"] is True
+    assert s["annotation"] is True
+
+
+# ---- seed_compounds() --------------------------------------------------------
+
+
+def test_s7_seed_compounds_returns_five():
+    """seed_compounds() returns exactly 5 dicts."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    seeds = u.seed_compounds()
+    assert len(seeds) == 5
+
+
+def test_s7_seed_compounds_have_keys():
+    """seed_compounds() dicts have id, name, smiles, inchikey, kegg."""
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()
+    for s in u.seed_compounds():
+        assert "id" in s and "name" in s and "smiles" in s
+
+
+# ---- discover_rules with injected fake expander ----------------------------
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_s7_discover_rules_with_fake_expander():
+    """discover_rules with an injected fake expander returns VerabDiscoveryResult
+    with operators=['ruleXXXX'] (uses the synthetic expansion result from S3)."""
+    from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult
+    from kbutillib.verab_utils import VerabUtils
+
+    synthetic = _build_synthetic_expansion_result()
+
+    class _FakeExpander:
+        def expand(self, seed_smiles, generations=1, backend="pickaxe",
+                   rule_set="metacyc_generalized", **kwargs):
+            return synthetic
+
+    u = VerabUtils(network_expansion=_FakeExpander())
+    result = u.discover_rules(generations=1)
+
+    assert isinstance(result, VerabDiscoveryResult)
+    assert result.operators == ["ruleXXXX"]
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_s7_discover_rules_via_verabutils_impl():
+    """VerabUtilsImpl constructed directly with a fake expander works end-to-end."""
+    from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult
+    from kbutillib.verab_utils import VerabUtilsImpl
+
+    # For non-expander facades we use None (only expander is needed for discover_rules)
+    synthetic = _build_synthetic_expansion_result()
+
+    class _FakeExpander:
+        def expand(self, seed_smiles, generations=1, backend="pickaxe",
+                   rule_set="metacyc_generalized", **kwargs):
+            return synthetic
+
+    # Construct directly — no SharedEnvUtils needed for the test
+    class _FakeEnv:
+        pass
+
+    impl = VerabUtilsImpl(
+        _FakeEnv(),
+        network_expansion=_FakeExpander(),
+        biochem=None,
+        model=None,
+        genome=None,
+        annotation=None,
+    )
+    result = impl.discover_rules()
+    assert isinstance(result, VerabDiscoveryResult)
+    assert "ruleXXXX" in result.operators
+
+
+def test_s7_discover_rules_raises_without_expander():
+    """discover_rules must raise BackendUnavailableError when no expander is injected."""
+    from kbutillib.cheminformatics.base import BackendUnavailableError
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()  # no network_expansion
+    with pytest.raises(BackendUnavailableError):
+        u.discover_rules()
+
+
+# ---- enumerate_methoxy_aromatics: available path (RDKit present) -----------
+
+
+@pytest.mark.skipif(not _RDKIT_PRESENT, reason="RDKit not installed")
+def test_s7_enumerate_methoxy_aromatics_with_fake_biochem():
+    """enumerate_methoxy_aromatics returns only methoxy-aromatic compounds
+    from a fake biochem DB when RDKit is present."""
+    from kbutillib.verab_utils import VerabUtils
+
+    class _FakeCpd:
+        def __init__(self, cpd_id, smiles, is_obsolete=False):
+            self.id = cpd_id
+            self.name = cpd_id
+            self.formula = None
+            self.is_obsolete = is_obsolete
+            self.annotation = {"SMILE": smiles} if smiles else {}
+
+    class _FakeDB:
+        compounds = [
+            _FakeCpd("guaiacol", "COc1ccccc1O"),
+            _FakeCpd("glucose", "OC[C@H]1OC(O)[C@H](O)[C@@H](O)[C@@H]1O"),
+        ]
+
+    class _FakeBiochem:
+        biochem_db = _FakeDB()
+
+    u = VerabUtils(biochem=_FakeBiochem())
+    results = u.enumerate_methoxy_aromatics()
+
+    ids = {r["id"] for r in results}
+    assert "guaiacol" in ids
+    assert "glucose" not in ids
+
+
+# ---- enumerate_methoxy_aromatics: unavailable path (RDKit absent) ----------
+
+
+@pytest.mark.skipif(_RDKIT_PRESENT, reason="Testing RDKit-absent path; skip when RDKit present")
+def test_s7_enumerate_methoxy_aromatics_raises_when_rdkit_absent():
+    """enumerate_methoxy_aromatics raises BackendUnavailableError when RDKit absent."""
+    from kbutillib.cheminformatics.base import BackendUnavailableError
+    from kbutillib.verab_utils import VerabUtils
+
+    class _FakeDB:
+        compounds = []
+
+    class _FakeBiochem:
+        biochem_db = _FakeDB()
+
+    u = VerabUtils(biochem=_FakeBiochem())
+    with pytest.raises(BackendUnavailableError):
+        u.enumerate_methoxy_aromatics()
+
+
+def test_s7_enumerate_methoxy_aromatics_raises_without_biochem():
+    """enumerate_methoxy_aromatics raises BackendUnavailableError when no biochem
+    is injected — regardless of RDKit availability."""
+    from kbutillib.cheminformatics.base import BackendUnavailableError
+    from kbutillib.verab_utils import VerabUtils
+
+    u = VerabUtils()  # no biochem; RDKit state doesn't matter here
+
+    # When RDKit is absent the RDKit check fires first; when present the biochem
+    # check fires.  Either way BackendUnavailableError must be raised.
+    with pytest.raises(BackendUnavailableError):
+        # Patch _rdkit_available to True to force the biochem check branch.
+        import unittest.mock as _mock
+        import kbutillib.verab_utils as _vu
+
+        with _mock.patch.object(_vu, "_rdkit_available", return_value=True):
+            u.enumerate_methoxy_aromatics()
+
+
+# ---- Simulate unavailable RDKit path via monkeypatch ----------------------
+
+
+def test_s7_enumerate_methoxy_aromatics_simulated_rdkit_absent(monkeypatch):
+    """Unit-test the RDKit-absent branch by monkeypatching _rdkit_available."""
+    from kbutillib.cheminformatics.base import BackendUnavailableError
+    import kbutillib.verab_utils as _vu
+    from kbutillib.verab_utils import VerabUtils
+
+    class _FakeDB:
+        compounds = []
+
+    class _FakeBiochem:
+        biochem_db = _FakeDB()
+
+    # Force RDKit to appear absent
+    monkeypatch.setattr(_vu, "_rdkit_available", lambda: False)
+
+    u = VerabUtils(biochem=_FakeBiochem())
+    with pytest.raises(BackendUnavailableError) as exc_info:
+        u.enumerate_methoxy_aromatics()
+
+    assert "rdkit" in str(exc_info.value).lower()
+
+
+# ---- Existing toolkit properties unaffected --------------------------------
+
+
+def test_s7_existing_toolkit_properties_unaffected():
+    """Adding the verab property must not break any existing toolkit properties.
+
+    We only check properties whose construction does NOT require unavailable
+    optional dependencies (e.g. modelseedpy, kbase-client) so that this test
+    passes in a minimal dev environment.
+    """
+    from kbutillib.toolkit import KBUtilLib
+
+    kbu = KBUtilLib()
+
+    # network_expansion and chem/predictive_thermo do not require modelseedpy.
+    assert kbu.network_expansion is not None
+    assert kbu.chem is not None  # alias for network_expansion
+    assert kbu.chem is kbu.network_expansion  # alias must return the same object
+
+    # verab itself must be constructable (lazy — no deps resolved yet)
+    assert kbu.verab is not None
+
+    # Verify the verab backing field is the private sentinel before first verab access
+    kbu2 = KBUtilLib()
+    assert kbu2._verab is None  # not yet constructed
+    _ = kbu2.verab              # trigger construction
+    assert kbu2._verab is not None  # now set

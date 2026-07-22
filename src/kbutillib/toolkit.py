@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from .kbase_catalog_client import CatalogClient
     from .kb_job_utils import KBJobUtils
     from .ontomap_utils import OntomapUtilsImpl
+    from .verab_utils import VerabUtilsImpl
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class KBUtilLib:
         self._catalog = None
         self._jobs = None
         self._ontomap = None
+        self._verab = None
 
     # ── sub-utility lazy properties ──────────────────────────────────
 
@@ -320,3 +322,26 @@ class KBUtilLib:
             from .ontomap_utils import OntomapUtilsImpl
             self._ontomap = OntomapUtilsImpl(self.env)
         return self._ontomap
+
+    @property
+    def verab(self) -> "VerabUtilsImpl":
+        """verAB methoxy-aromatic Pickaxe rule-discovery and genome-screening
+        facade (composes network_expansion + biochem + model + genome +
+        annotation with graceful RDKit/minedatabase degradation).
+
+        Dependencies are resolved lazily — the sub-facades are only constructed
+        when a method that requires them is first called, avoiding eager
+        failures when optional modules (modelseedpy, etc.) are absent."""
+        if self._verab is None:
+            from .verab_utils import VerabUtilsImpl
+            # Pass getter lambdas so each sub-facade is constructed only on
+            # first use (avoids eager ModuleNotFoundError for optional deps).
+            self._verab = VerabUtilsImpl(
+                self.env,
+                network_expansion=lambda: self.network_expansion,
+                biochem=lambda: self.biochem,
+                model=lambda: self.model,
+                genome=lambda: self.genome,
+                annotation=lambda: self.annotation,
+            )
+        return self._verab

@@ -1,0 +1,10 @@
+{
+  "id": "kbutillib-verab",
+  "title": "KBUtilLib verAB Methoxy-Aromatic Pickaxe",
+  "description": "verAB rule-discovery verbs (discover/enumerate/screen/emit-king) for methoxy-aromatic O-demethylation Pickaxe expansion and genome-screening, self-installed into a local KING session via `kbu king install`.",
+  "cli": "kbu",
+  "verify": {
+    "cmd": ["kbu", "verab", "--help"],
+    "ok_text": "verAB"
+  }
+}

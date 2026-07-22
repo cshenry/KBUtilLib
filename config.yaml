@@ -100,3 +100,15 @@ cheminformatics:
     rule_set: "metacyc_generalized"  # or metacyc_intermediate / bnice / enzymatic / chemical_damage
   retrorules:
     rules_tsv: ""    # optional: path to retrorules_rr02_flat_all.tsv
+
+  # verAB methoxy-aromatic pickaxe rule-discovery (kbu.verab / VerabUtils)
+  # All keys here are OPTIONAL — the feature degrades gracefully when absent.
+  #   operator_rule_tsv: path to a mechanism-informed TSV (Pate-2026 style)
+  #     containing a custom rule set for verAB O-demethylation. When null/unset,
+  #     the bundled metacyc_generalized / metacyc_intermediate rule sets are used.
+  #   king_outdir: default output directory for `kbu verab emit-king`. When
+  #     null/unset the caller must pass --outdir explicitly or the command
+  #     defaults to the current working directory.
+  verab:
+    operator_rule_tsv: null    # e.g. "/path/to/verab_mechanism_rules.tsv"
+    king_outdir: null          # e.g. "./verab_king_output"

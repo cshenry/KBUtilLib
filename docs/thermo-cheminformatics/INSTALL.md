@@ -106,3 +106,106 @@ Validated results (acetic acid pKa 2.01 → `CC(=O)[O-]`; glycine zwitterion;
 dGPredictor rxn00001 −15.76 ± 3.63 kJ/mol, ATP hydrolysis −25.46 kJ/mol; pickaxe
 glucose 1-gen → 1696 reactions). Live integration tests: `test_molgpk_live_*`,
 `test_dgpredictor_live_*`, `test_pickaxe_live_expansion`.
+
+---
+
+## verAB methoxy-aromatic Pickaxe rule discovery (`kbu.verab`)
+
+The verAB feature extends the cheminformatics stack with a dedicated workflow for
+discovering and validating methoxy-aromatic O-demethylation rules (EC 1.14.13.82)
+using Pickaxe network expansion and optionally confirming them via RDKit SMARTS.
+
+### Purpose
+
+`kbu.verab` answers the question: *which Pickaxe rule operators reproduce the
+verAB aryl-methyl-ether O-demethylation chemistry on the 5 canonical seed
+compounds (vanillate, isovanillate, guaiacol, 4-methoxybenzoate, veratrate)?*
+The facade also enumerates all methoxy-aromatic compounds in the biochem DB,
+screens predicted products against the ModelSEED database, and optionally
+predicts per-genome degradation capacity.
+
+### CLI (`kbu verab`)
+
+```bash
+kbu verab --help                           # list subcommands
+kbu verab discover --json                  # run Phase-1 rule discovery on 5 seeds
+kbu verab enumerate --json                 # RDKit substructure scan of biochem DB
+kbu verab screen --operators <id> --json   # cross-reference predicted products
+kbu verab emit-king --outdir ./king_out    # write KING coscientist input bundle
+```
+
+### RDKit — optional dependency
+
+RDKit is **optional** for the verAB workflow. Without it:
+- `kbu verab discover` still runs but uses text-matching against rule
+  SMARTS/operator names (confidence 0.5; `method="smarts_text"`).
+- `kbu verab enumerate` raises `BackendUnavailableError` (substructure scan
+  requires RDKit).
+- All other commands function without RDKit.
+
+Install RDKit via conda (recommended) or the pip extra:
+
+```bash
+# conda (recommended — avoids binary wheel issues)
+conda install -c conda-forge rdkit
+
+# pip extra (pure-Python wheel where available)
+pip install "KBUtilLib[cheminformatics]"
+```
+
+### MINE-Database / minedatabase — Python version pin
+
+The MINE-Database repo (Tyo lab, `github.com/tyo-nu/MINE-Database`) carries a
+`python_requires <3.10` in its `setup.py`. **This pin is a pip metadata gate
+only.** KBUtilLib's `DependencyManager` adds the MINE-Database source checkout
+directly to `sys.path` at import time, completely bypassing the pip gate.
+minedatabase imports cleanly on Python 3.11 and 3.12 (confirmed in the active
+dev environment).
+
+There is **no subprocess isolation, no `.pth` shim, and no version pin change
+needed.** The mechanism is the same DependencyManager pattern used for all other
+KBUtilLib source-checkout dependencies (ModelSEEDpy, cobrakbase, etc.).
+
+The MINE-Database dependency is declared in `dependencies.yaml`:
+
+```yaml
+MINE-Database:
+  path: "../MINE-Database"
+  git: "https://github.com/tyo-nu/MINE-Database.git"
+```
+
+Clone and wire it the same way as all other source-checkout backends:
+
+```python
+from kbutillib.dependency_manager import get_dependency_manager
+get_dependency_manager().initialize_dependencies(checkout_if_missing=True)
+```
+
+If the checkout or bundled rule TSVs are missing, `kbu.verab.status()` reports
+`pickaxe: unavailable` with an actionable reason; no crash occurs.
+
+### Optional config keys (`config.yaml`)
+
+```yaml
+cheminformatics:
+  verab:
+    # Path to a mechanism-informed rule TSV (e.g. Pate-2026 verAB-specific
+    # operators). When null, the bundled metacyc_generalized rule set is used.
+    operator_rule_tsv: null        # e.g. "/path/to/verab_mechanism_rules.tsv"
+    # Default output directory for `kbu verab emit-king`. When null the caller
+    # must pass --outdir or the command defaults to the current directory.
+    king_outdir: null              # e.g. "./verab_king_output"
+```
+
+Both keys are fully optional. The verAB feature runs with no config changes
+beyond what Pickaxe already requires (`cheminformatics.pickaxe.data_dir`).
+
+### Live integration test
+
+```bash
+# Requires: MINE-Database checkout + rdkit in PATH
+pytest tests/test_verab_live.py -q
+```
+
+Asserts ≥1 operator matches verAB O-demethylation across 5 seeds and that
+`emit-king` writes a valid manifest.

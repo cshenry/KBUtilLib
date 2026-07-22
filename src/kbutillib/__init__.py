@@ -10,20 +10,20 @@ import sys
 
 # Core utilities - these should always be available
 from .base_utils import BaseUtils
-from .shared_env_utils import SharedEnvUtils
-
-# Facade
-from .toolkit import KBUtilLib
 
 # Flat modules
 from .compartments import compartment_types, normalize_compartment
 from .model_directionality import (
-    direction_conversion,
-    directionality_from_bounds,
     biochem_directionality,
     combine_directionality_signals,
+    direction_conversion,
+    directionality_from_bounds,
 )
-from .model_helpers import _parse_id, _check_and_convert_model
+from .model_helpers import _check_and_convert_model, _parse_id
+from .shared_env_utils import SharedEnvUtils
+
+# Facade
+from .toolkit import KBUtilLib
 
 
 # Collected optional-import failures.  Populated by _import_error(); flushed
@@ -169,7 +169,7 @@ except ImportError as e:
     ThermoUtils = None
 
 try:
-    from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
+    from .kb_reads_utils import Assembly, AssemblySet, KBReadsUtils, Reads, ReadSet
 except ImportError as e:
     _import_error("kb_reads_utils", e)
     KBReadsUtils = None
@@ -249,6 +249,12 @@ except ImportError as e:
     KBBERDLUtils = None
 
 try:
+    from .ms_reaction_similarity_utils import MSReactionSimilarityUtils
+except ImportError as e:
+    _import_error("ms_reaction_similarity_utils", e)
+    MSReactionSimilarityUtils = None
+
+try:
     from .kb_callback_utils import KBCallbackUtils
 except ImportError as e:
     _import_error("kb_callback_utils", e)
@@ -256,8 +262,13 @@ except ImportError as e:
 
 try:
     from .kb_job_utils import (
-        KBJobUtils, JobRecord, JobState, JobStore,
-        PipelineState, PipelineStatus, ChainStep,
+        ChainStep,
+        JobRecord,
+        JobState,
+        JobStore,
+        KBJobUtils,
+        PipelineState,
+        PipelineStatus,
     )
 except ImportError as e:
     _import_error("kb_job_utils", e)
@@ -270,7 +281,7 @@ except ImportError as e:
     ChainStep = None
 
 try:
-    from .kbase_endpoints import base_url, service_url, narrative_url, env_from_url
+    from .kbase_endpoints import base_url, env_from_url, narrative_url, service_url
 except ImportError as e:
     _import_error("kbase_endpoints", e)
     base_url = None
@@ -387,6 +398,11 @@ except ImportError:
     KBBERDLUtilsImpl = None
 
 try:
+    from .ms_reaction_similarity_utils import MSReactionSimilarityUtilsImpl
+except ImportError:
+    MSReactionSimilarityUtilsImpl = None
+
+try:
     from .patric_ws_utils import PatricWSUtilsImpl
 except ImportError:
     PatricWSUtilsImpl = None
@@ -462,6 +478,7 @@ __all__ = [
     "MSBiochemUtils",
     "MSFBAUtils",
     "MSTemplateUtils",
+    "MSReactionSimilarityUtils",
     "MSReconstructionUtils",
     "PatricWSUtils",
     "PipelineState",
@@ -495,6 +512,7 @@ __all__ = [
     "MSBiochemUtilsImpl",
     "MSFBAUtilsImpl",
     "MSTemplateUtilsImpl",
+    "MSReactionSimilarityUtilsImpl",
     "MSReconstructionUtilsImpl",
     "PatricWSUtilsImpl",
     "RCSBPDBUtilsImpl",

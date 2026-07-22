@@ -11,7 +11,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from .shared_env_utils import SharedEnvUtils
 
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .ms_fba_utils import MSFBAUtilsImpl
     from .ms_reconstruction_utils import MSReconstructionUtilsImpl
     from .ms_template_utils import MSTemplateUtilsImpl
+    from .ms_reaction_similarity_utils import MSReactionSimilarityUtilsImpl
     from .escher_utils import EscherUtilsImpl
     from .model_standardization_utils import ModelStandardizationUtilsImpl
     from .kb_genome_utils import KBGenomeUtilsImpl
@@ -95,6 +96,7 @@ class KBUtilLib:
         self._mmseqs = None
         self._skani = None
         self._berdl = None
+        self._rxnsim = None
         self._patric = None
         self._uniprot = None
         self._pdb = None
@@ -250,6 +252,14 @@ class KBUtilLib:
             from .kb_berdl_utils import KBBERDLUtilsImpl
             self._berdl = KBBERDLUtilsImpl(self.env)
         return self._berdl
+
+    @property
+    def rxnsim(self) -> "MSReactionSimilarityUtilsImpl":
+        if self._rxnsim is None:
+            from .ms_reaction_similarity_utils import MSReactionSimilarityUtilsImpl
+            # berdl-backed (remote); biochem is optional and not forced here
+            self._rxnsim = MSReactionSimilarityUtilsImpl(self.env, berdl=self.berdl)
+        return self._rxnsim
 
     @property
     def patric(self) -> PatricWSUtilsImpl:

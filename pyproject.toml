@@ -29,6 +29,21 @@ dependencies = [
 ]
 
 
+[project.optional-dependencies]
+# Reaction-similarity module (kbu.rxnsim). Imported lazily, so the package
+# imports fine without these; install with: pip install KBUtilLib[reaction_similarity]
+reaction_similarity = [
+  "numpy >=1.24",
+  "scipy >=1.10",
+  "scikit-learn >=1.3",
+  "rdkit >=2023.3",
+  "drfp >=0.3.6",
+]
+# Optional clustering backend (HDBSCAN) for kbu.rxnsim.cluster(algorithm="hdbscan").
+reaction_similarity_extra = [
+  "hdbscan >=0.8.33",
+]
+
 [project.urls]
 Homepage = "https://github.com/cshenry/KBUtilLib"
 Repository = "https://github.com/cshenry/KBUtilLib"

@@ -8,6 +8,8 @@
 /docs/_build/
 /src/*.egg-info/
 __pycache__/
+# Local research workspace (not for commit)
+.research/
 
 # Virtual environments
 activate.sh

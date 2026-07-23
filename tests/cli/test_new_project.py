@@ -14,7 +14,7 @@ import tomllib
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.new_project import (
+from kbutillib.interfaces.cli.new_project import (
     _compute_file_hashes,
     _copy_template_tree,
     _kbutillib_root,
@@ -159,9 +159,9 @@ class TestNewProjectCore:
         dest = tmp_path / "myproject"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),  # no venvman
             patch("subprocess.run") as mock_run,
         ):
@@ -212,9 +212,9 @@ class TestNewProjectCore:
         dest = tmp_path / "hashproj"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),
             patch("subprocess.run") as mock_run,
         ):
@@ -258,7 +258,7 @@ class TestNewProjectCore:
         existing.mkdir()
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
             pytest.raises(SystemExit) as exc,
         ):
             new_project(
@@ -277,8 +277,8 @@ class TestNewProjectCore:
         dest = tmp_path / "linuxproj"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=False),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=False),
             patch("subprocess.run") as mock_run,
             pytest.raises(SystemExit) as exc,
         ):
@@ -305,9 +305,9 @@ class TestNewProjectCore:
         dest = tmp_path / "overrideproj"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=False),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=False),
             patch("shutil.which", return_value=None),  # no venvman on non-Darwin
             patch("subprocess.run") as mock_run,
         ):
@@ -343,9 +343,9 @@ class TestNewProjectCore:
         calls_recorded = []
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),
             patch("subprocess.run") as mock_run,
         ):
@@ -389,9 +389,9 @@ class TestNewProjectCore:
         dest = tmp_path / "wstest"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),
             patch("subprocess.run") as mock_run,
         ):
@@ -434,9 +434,9 @@ class TestNewProjectCore:
         dest = tmp_path / "contenttest"
 
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=stub_kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),
             patch("subprocess.run") as mock_run,
         ):
@@ -490,7 +490,7 @@ class TestNewProjectCLI:
         existing.mkdir()
 
         runner = CliRunner()
-        with patch("kbutillib.cli.new_project._kbutillib_root", return_value=tmp_path):
+        with patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=tmp_path):
             result = runner.invoke(
                 main,
                 [
@@ -593,9 +593,9 @@ class TestAC42_43NewProject:
 
     def _run_new_project(self, tmp_path: Path, kbu_root: Path, dest: Path) -> None:
         with (
-            patch("kbutillib.cli.new_project._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.new_project._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.new_project._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.new_project._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.new_project._is_darwin", return_value=True),
             patch("shutil.which", return_value=None),
             patch("subprocess.run") as mock_run,
         ):

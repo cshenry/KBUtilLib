@@ -314,3 +314,74 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "kbase" in item.keywords:
             item.add_marker(skip_kbase)
+
+
+# ---------------------------------------------------------------------------
+# WP9 — registry fixtures (function-scoped; NEVER touch get_registry() global)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fresh_registry():
+    """Yield a brand-new, empty CapabilityRegistry.
+
+    Function-scoped so each test gets its own isolated instance.
+    Does NOT interact with the global get_registry() singleton.
+    """
+    from kbutillib.core.registry import CapabilityRegistry
+
+    yield CapabilityRegistry()
+
+
+@pytest.fixture()
+def populated_registry():
+    """Yield a CapabilityRegistry pre-populated with 3 dummy test capabilities.
+
+    One capability per domain:  'test.foo', 'test.bar', 'test.baz'.
+    Function-scoped; NEVER touches the global singleton.
+    """
+    from kbutillib.core.registry import CapabilityRegistry, CapabilitySpec
+
+    reg = CapabilityRegistry()
+
+    dummy_caps = [
+        CapabilitySpec(
+            name="test.foo",
+            fn=lambda: "foo",
+            domain="test.foo",
+            summary="Dummy foo capability",
+            tags=("test", "foo"),
+            visibility="internal",
+        ),
+        CapabilitySpec(
+            name="test.bar",
+            fn=lambda: "bar",
+            domain="test.bar",
+            summary="Dummy bar capability",
+            tags=("test", "bar"),
+            visibility="internal",
+        ),
+        CapabilitySpec(
+            name="test.baz",
+            fn=lambda: "baz",
+            domain="test.baz",
+            summary="Dummy baz capability",
+            tags=("test", "baz"),
+            visibility="internal",
+        ),
+    ]
+    for spec in dummy_caps:
+        reg.register(spec)
+
+    yield reg
+
+
+@pytest.fixture()
+def kbutillib_app():
+    """Yield a KBUtilLib() instance in no-file-discovery mode.
+
+    Used by parity tests that call register_all(app, registry).
+    """
+    from kbutillib import KBUtilLib
+
+    yield KBUtilLib()

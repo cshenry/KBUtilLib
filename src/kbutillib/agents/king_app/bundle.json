@@ -1,0 +1,10 @@
+{
+  "id": "kbutillib-modeling",
+  "title": "KBUtilLib Metabolic Modeling",
+  "description": "Metabolic-modeling verbs (reconstruct/gapfill/fba/fva) plus an exec escape hatch over KBUtilLib's ms_reconstruction_utils/ms_fba_utils API, self-installed into a local KING session via `kbu king install`.",
+  "cli": "kbu",
+  "verify": {
+    "cmd": ["kbu", "model", "--help"],
+    "ok_text": "Metabolic-modeling verbs"
+  }
+}

@@ -1,6 +1,6 @@
 """kbu CLI entry point."""
 
-from kbutillib.cli import main
+from kbutillib.interfaces.cli import main
 
 if __name__ == "__main__":
     main()

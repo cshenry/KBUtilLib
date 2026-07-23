@@ -29,6 +29,30 @@ dependencies = [
 ]
 
 
+[project.optional-dependencies]
+# Transport adapters (kept optional so `import kbutillib` and the core library
+# never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
+mcp = [
+  "mcp >=1.27,<2",
+]
+api = [
+  "fastapi >=0.110",
+  "uvicorn[standard] >=0.29",
+]
+# Auto-generated API docs from the capability registry + docstrings.
+apidocs = [
+  "mkdocs-material >=9.5",
+  "mkdocstrings[python] >=0.24",
+]
+# Everything needed to run all transports + build docs.
+all = [
+  "mcp >=1.27,<2",
+  "fastapi >=0.110",
+  "uvicorn[standard] >=0.29",
+  "mkdocs-material >=9.5",
+  "mkdocstrings[python] >=0.24",
+]
+
 [project.urls]
 Homepage = "https://github.com/cshenry/KBUtilLib"
 Repository = "https://github.com/cshenry/KBUtilLib"

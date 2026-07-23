@@ -35,7 +35,7 @@ from click.testing import CliRunner
 
 from kbutillib.cli import main
 from kbutillib.cli.manifest import now_utc_iso, sha256_file, write_project_manifest
-from kbutillib.cli.update import (
+from kbutillib.interfaces.cli.update import (
     TemplateDiff,
     _build_diff,
     update,
@@ -184,8 +184,8 @@ class TestFilterAdded_NonEmptyHashes_NoAddUntracked:
             return []
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", side_effect=_spy_build_diff),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", side_effect=_spy_build_diff),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             update(check=True, project_root=project_root)
@@ -210,8 +210,8 @@ class TestFilterAdded_NonEmptyHashes_NoAddUntracked:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update.Path.cwd", return_value=project_root),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root),
         ):
             # Make git pull a no-op; rev-parse returns a commit
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
@@ -280,8 +280,8 @@ class TestFilterAdded_NonEmptyHashes_WithAddUntracked:
             return []
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", side_effect=_spy_build_diff),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", side_effect=_spy_build_diff),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             update(check=True, add_untracked=True, project_root=project_root)
@@ -303,8 +303,8 @@ class TestFilterAdded_NonEmptyHashes_WithAddUntracked:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update.Path.cwd", return_value=project_root),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             result = runner.invoke(
@@ -374,8 +374,8 @@ class TestFilterAdded_EmptyHashes_LegacyBehaviour:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update.Path.cwd", return_value=project_root),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             result = runner.invoke(
@@ -434,7 +434,7 @@ class TestModifiedBehaviourUnchanged:
                 return old_content
             return None
 
-        return patch("kbutillib.cli.update._git_show_file", side_effect=_fake_show)
+        return patch("kbutillib.interfaces.cli.update._git_show_file", side_effect=_fake_show)
 
     def test_modified_emitted_with_non_empty_hashes_no_add_untracked(self, tmp_path: Path) -> None:
         """Modified files are emitted even when file_hashes is non-empty + no add_untracked."""
@@ -447,7 +447,7 @@ class TestModifiedBehaviourUnchanged:
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
             # Also need to patch the git diff --name-status call to return nothing
-            with patch("kbutillib.cli.update._run_git") as mock_git:
+            with patch("kbutillib.interfaces.cli.update._run_git") as mock_git:
                 mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 diffs = _build_diff(
                     source=source,
@@ -470,7 +470,7 @@ class TestModifiedBehaviourUnchanged:
         file_hashes = {".claude/commands/kbu-start.md": _prefixed(sha256_file(start_abs))}
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
-            with patch("kbutillib.cli.update._run_git") as mock_git:
+            with patch("kbutillib.interfaces.cli.update._run_git") as mock_git:
                 mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 diffs = _build_diff(
                     source=source,
@@ -490,7 +490,7 @@ class TestModifiedBehaviourUnchanged:
         start_abs = source / "templates" / "research-project" / ".claude" / "commands" / "kbu-start.md"
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
-            with patch("kbutillib.cli.update._run_git") as mock_git:
+            with patch("kbutillib.interfaces.cli.update._run_git") as mock_git:
                 mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 diffs = _build_diff(
                     source=source,
@@ -512,7 +512,7 @@ class TestModifiedBehaviourUnchanged:
         old_content = b"# kbu-start v1 OLD\n"
 
         with self._patch_old_hash(source, ".claude/commands/kbu-start.md", old_content):
-            with patch("kbutillib.cli.update._run_git") as mock_git:
+            with patch("kbutillib.interfaces.cli.update._run_git") as mock_git:
                 mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 diffs = _build_diff(
                     source=source,
@@ -590,9 +590,9 @@ class TestAddUntrackedUpdatesFileHashes:
             dest.write_bytes((tmpl / ".vscode" / "extensions.json").read_bytes())
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=fake_diff),
-            patch("kbutillib.cli.update._apply_diff", side_effect=_fake_apply),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=fake_diff),
+            patch("kbutillib.interfaces.cli.update._apply_diff", side_effect=_fake_apply),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             update(yes=True, add_untracked=True, project_root=project_root)
@@ -643,8 +643,8 @@ class TestCLISurface:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update.Path.cwd", return_value=project_root),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             result = runner.invoke(
@@ -663,8 +663,8 @@ class TestCLISurface:
         _make_project_toml(project_root, source_path=str(source), file_hashes={})
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=[]),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=[]),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             # Should not raise

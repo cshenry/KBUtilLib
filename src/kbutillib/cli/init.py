@@ -10,18 +10,19 @@ a one-screen message and exit 1 unless ``KBU_PLATFORM_OVERRIDE=force`` is set.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 import click
 
 from .manifest import now_utc_iso, read_project_manifest
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -527,6 +528,114 @@ def _probe_project_origin() -> str:
 
 
 # ---------------------------------------------------------------------------
+# WP7 — runtime-backend + registry probes
+# ---------------------------------------------------------------------------
+
+#: Ordered list of runtime backends to probe.
+#: Each entry: (display_name, pkg_name_to_find_spec)
+_BACKEND_PROBES: list[tuple[str, str]] = [
+    ("rdkit", "rdkit"),
+    ("minedatabase", "minedatabase"),
+    ("equilibrator_api", "equilibrator_api"),
+    ("equilibrator_cache", "equilibrator_cache"),
+    ("modelseedpy", "modelseedpy"),
+    ("cobra", "cobra"),
+    ("mcp", "mcp"),
+    ("fastapi", "fastapi"),
+    ("uvicorn", "uvicorn"),
+]
+
+
+def _probe_python_kbutillib_version() -> tuple[str, str]:
+    """Probe: Python version + kbutillib installed version.
+
+    Uses ``importlib.metadata`` to read the installed package version.
+    Never raises.
+    """
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    try:
+        import importlib.metadata as _meta
+
+        kbu_ver = _meta.version("kbutillib")
+    except Exception:  # noqa: BLE001
+        kbu_ver = "unknown"
+    return "INFO", f"python={py_ver}  kbutillib={kbu_ver}"
+
+
+def _probe_backend(display_name: str, pkg_name: str) -> tuple[str, str]:
+    """Probe a single optional runtime backend via ``importlib.util.find_spec``.
+
+    Never imports the package — only checks whether it is locatable on the
+    current ``sys.path``.  Never raises.
+
+    Args:
+        display_name: Human-readable label shown in doctor output.
+        pkg_name:     Top-level package name passed to ``find_spec``.
+
+    Returns:
+        ``("PASS", "installed")`` or ``("WARN", "not installed")``.
+    """
+    try:
+        found = importlib.util.find_spec(pkg_name) is not None
+    except Exception:  # noqa: BLE001
+        found = False
+    if found:
+        return "PASS", "installed"
+    return "WARN", "not installed"
+
+
+def _probe_all_backends() -> list[tuple[str, str, str]]:
+    """Return per-backend probe results as ``(display_name, status, detail)`` triples."""
+    results: list[tuple[str, str, str]] = []
+    for display_name, pkg_name in _BACKEND_PROBES:
+        status, detail = _probe_backend(display_name, pkg_name)
+        results.append((display_name, status, detail))
+    return results
+
+
+def _probe_registry_summary() -> tuple[str, str]:
+    """Probe: build a registry summary from ``register_all(KBUtilLib())``.
+
+    Reports total capabilities + per-domain counts + available vs unavailable.
+    Degrades gracefully: any exception returns a WARN with the error message.
+    Never raises.
+    """
+    try:
+        from kbutillib.core.capability import register_all  # noqa: PLC0415
+        from kbutillib.core.registry import CapabilityRegistry  # noqa: PLC0415
+        from kbutillib.toolkit import KBUtilLib  # noqa: PLC0415
+
+        local_registry = CapabilityRegistry()
+        kbu = KBUtilLib()
+        specs = register_all(kbu, registry=local_registry)
+
+        total = len(specs)
+        domain_counts: dict[str, int] = defaultdict(int)
+        available_count = 0
+        unavailable_count = 0
+
+        for spec in specs:
+            domain_counts[spec.domain or "unknown"] += 1
+            ok, _ = spec.availability()
+            if ok:
+                available_count += 1
+            else:
+                unavailable_count += 1
+
+        domain_summary = ", ".join(
+            f"{d}:{n}" for d, n in sorted(domain_counts.items())
+        )
+        detail = (
+            f"total={total}  available={available_count}"
+            f"  unavailable={unavailable_count}  domains=[{domain_summary}]"
+        )
+        return "INFO", detail
+    except Exception as exc:  # noqa: BLE001
+        first_line = str(exc).splitlines()[0] if str(exc) else repr(exc)
+        return "WARN", f"registry summary unavailable: {first_line}"
+
+
+# ---------------------------------------------------------------------------
 # Click commands
 # ---------------------------------------------------------------------------
 
@@ -585,8 +694,15 @@ def init_command(mode: Optional[str]) -> None:
 def doctor_command(verbose: bool) -> None:
     """Run environment health checks and print one line per probe.
 
-    Exits 0 if all probes PASS or SKIP; exits 1 if any probe FAILs.
+    Checks include:
+    - Machine-level setup (init marker, cursor, kbu binary, Jupyter kernel)
+    - Python and kbutillib versions
+    - Optional runtime backends (rdkit, modelseedpy, cobra, mcp, fastapi, …)
+    - Capability registry summary (total, per-domain, available vs unavailable)
+
+    Exits 0 if all probes PASS/SKIP/INFO/WARN; exits 1 if any probe FAILs.
     """
+    # ── existing machine-level probes ────────────────────────────────────────
     probes = [
         ("init-done", _probe_init_done),
         ("cursor-on-path", _probe_cursor_on_path),
@@ -605,5 +721,23 @@ def doctor_command(verbose: bool) -> None:
             any_fail = True
 
     click.echo(_probe_project_origin())
+
+    # ── Python + kbutillib version ───────────────────────────────────────────
+    click.echo("")
+    click.echo("── python + kbutillib ──")
+    status, detail = _probe_python_kbutillib_version()
+    click.echo(f"[{status}] versions: {detail}")
+
+    # ── optional runtime backends ────────────────────────────────────────────
+    click.echo("")
+    click.echo("── optional runtime backends ──")
+    for display_name, status, detail in _probe_all_backends():
+        click.echo(f"[{status}] {display_name}: {detail}")
+
+    # ── capability registry summary ──────────────────────────────────────────
+    click.echo("")
+    click.echo("── capability registry ──")
+    reg_status, reg_detail = _probe_registry_summary()
+    click.echo(f"[{reg_status}] registry: {reg_detail}")
 
     sys.exit(1 if any_fail else 0)

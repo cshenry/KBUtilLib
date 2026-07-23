@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "kbutillib": {
+      "command": "kbu-mcp",
+      "args": [],
+      "transport": "stdio"
+    }
+  }
+}

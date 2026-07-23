@@ -11,38 +11,41 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from .shared_env_utils import SharedEnvUtils
 
 if TYPE_CHECKING:
-    from .kb_ws_utils import KBWSUtilsImpl
-    from .kb_callback_utils import KBCallbackUtilsImpl
+    from .ai_curation_utils import AICurationUtilsImpl
+    from .argo_utils import ArgoUtilsImpl
+    from .bvbrc_utils import BVBRCUtilsImpl
+    from .escher_utils import EscherUtilsImpl
     from .kb_annotation_utils import KBAnnotationUtilsImpl
-    from .ms_biochem_utils import MSBiochemUtilsImpl
+    from .kb_berdl_utils import KBBERDLUtilsImpl
+    from .kb_callback_utils import KBCallbackUtilsImpl
+    from .kb_genome_utils import KBGenomeUtilsImpl
+    from .kb_job_utils import KBJobUtils
     from .kb_model_utils import KBModelUtilsImpl
+    from .kb_plm_utils import KBPLMUtilsImpl
+    from .kb_reads_utils import KBReadsUtilsImpl
+    from .kb_sdk_utils import KBSDKUtilsImpl
+    from .kb_uniprot_utils import KBUniProtUtilsImpl
+    from .kb_ws_utils import KBWSUtilsImpl
+    from .kbase_catalog_client import CatalogClient
+    from .mmseqs_utils import MMSeqsUtilsImpl
+    from .model_standardization_utils import ModelStandardizationUtilsImpl
+    from .ms_biochem_utils import MSBiochemUtilsImpl
     from .ms_fba_utils import MSFBAUtilsImpl
     from .ms_reconstruction_utils import MSReconstructionUtilsImpl
     from .ms_template_utils import MSTemplateUtilsImpl
-    from .escher_utils import EscherUtilsImpl
-    from .model_standardization_utils import ModelStandardizationUtilsImpl
-    from .kb_genome_utils import KBGenomeUtilsImpl
-    from .kb_plm_utils import KBPLMUtilsImpl
-    from .bvbrc_utils import BVBRCUtilsImpl
-    from .kb_reads_utils import KBReadsUtilsImpl
-    from .kb_sdk_utils import KBSDKUtilsImpl
-    from .argo_utils import ArgoUtilsImpl
-    from .ai_curation_utils import AICurationUtilsImpl
-    from .thermo_utils import ThermoUtilsImpl
-    from .mmseqs_utils import MMSeqsUtilsImpl
-    from .skani_utils import SKANIUtilsImpl
-    from .kb_berdl_utils import KBBERDLUtilsImpl
-    from .patric_ws_utils import PatricWSUtilsImpl
-    from .kb_uniprot_utils import KBUniProtUtilsImpl
-    from .rcsb_pdb_utils import RCSBPDBUtilsImpl
-    from .kbase_catalog_client import CatalogClient
-    from .kb_job_utils import KBJobUtils
+    from .network_expansion_utils import NetworkExpansionUtilsImpl
     from .ontomap_utils import OntomapUtilsImpl
+    from .patric_ws_utils import PatricWSUtilsImpl
+    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .rcsb_pdb_utils import RCSBPDBUtilsImpl
+    from .skani_utils import SKANIUtilsImpl
+    from .thermo_utils import ThermoUtilsImpl
+    from .verab_utils import VerabUtilsImpl
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,7 @@ class KBUtilLib:
         self._argo = None
         self._curation = None
         self._thermo = None
+        self._predictive_thermo = None
         self._mmseqs = None
         self._skani = None
         self._berdl = None
@@ -101,6 +105,8 @@ class KBUtilLib:
         self._catalog = None
         self._jobs = None
         self._ontomap = None
+        self._network_expansion = None
+        self._verab = None
 
     # ── sub-utility lazy properties ──────────────────────────────────
 
@@ -231,6 +237,13 @@ class KBUtilLib:
         return self._thermo
 
     @property
+    def predictive_thermo(self) -> "PredictiveThermoUtilsImpl":
+        if self._predictive_thermo is None:
+            from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+            self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.biochem)
+        return self._predictive_thermo
+
+    @property
     def mmseqs(self) -> MMSeqsUtilsImpl:
         if self._mmseqs is None:
             from .mmseqs_utils import MMSeqsUtilsImpl
@@ -293,3 +306,40 @@ class KBUtilLib:
             from .ontomap_utils import OntomapUtilsImpl
             self._ontomap = OntomapUtilsImpl(self.env)
         return self._ontomap
+
+    @property
+    def network_expansion(self) -> "NetworkExpansionUtilsImpl":
+        """Cheminformatics network-expansion facade (pickaxe / retrorules
+        backends with graceful degradation)."""
+        if self._network_expansion is None:
+            from .network_expansion_utils import NetworkExpansionUtilsImpl
+            self._network_expansion = NetworkExpansionUtilsImpl(self.env)
+        return self._network_expansion
+
+    @property
+    def chem(self) -> "NetworkExpansionUtilsImpl":
+        """Alias for :attr:`network_expansion`."""
+        return self.network_expansion
+
+    @property
+    def verab(self) -> "VerabUtilsImpl":
+        """verAB methoxy-aromatic Pickaxe rule-discovery and genome-screening
+        facade (composes network_expansion + biochem + model + genome +
+        annotation with graceful RDKit/minedatabase degradation).
+
+        Dependencies are resolved lazily — the sub-facades are only constructed
+        when a method that requires them is first called, avoiding eager
+        failures when optional modules (modelseedpy, etc.) are absent."""
+        if self._verab is None:
+            from .verab_utils import VerabUtilsImpl
+            # Pass getter lambdas so each sub-facade is constructed only on
+            # first use (avoids eager ModuleNotFoundError for optional deps).
+            self._verab = VerabUtilsImpl(
+                self.env,
+                network_expansion=lambda: self.network_expansion,
+                biochem=lambda: self.biochem,
+                model=lambda: self.model,
+                genome=lambda: self.genome,
+                annotation=lambda: self.annotation,
+            )
+        return self._verab

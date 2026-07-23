@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from kbutillib.cli.machine import (
+from kbutillib.interfaces.cli.machine import (
     _deep_merge,
     get_hardware_uuid,
     load_machine_config,
@@ -51,16 +51,16 @@ class TestGetHardwareUuid:
             '  | |   "IOPlatformUUID" = "ABCD-1234-EF56-7890"\n'
             "  | |   other stuff\n"
         )
-        with patch("kbutillib.cli.machine.subprocess.run") as mock_run:
+        with patch("kbutillib.interfaces.cli.machine.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = fake_output
             uuid = get_hardware_uuid()
         assert uuid == "ABCD-1234-EF56-7890"
 
     def test_linux_machine_id(self) -> None:
-        with patch("kbutillib.cli.machine.subprocess.run") as mock_run:
+        with patch("kbutillib.interfaces.cli.machine.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("no ioreg")
-            with patch("kbutillib.cli.machine.Path") as MockPath:
+            with patch("kbutillib.interfaces.cli.machine.Path") as MockPath:
                 mock_path_inst = MockPath.return_value
                 mock_path_inst.exists.return_value = True
                 mock_path_inst.read_text.return_value = "abc123def456\n"
@@ -69,7 +69,7 @@ class TestGetHardwareUuid:
                 pass
 
         # Simpler approach: mock ioreg failure, mock file read
-        with patch("kbutillib.cli.machine.subprocess.run", side_effect=Exception("no ioreg")):
+        with patch("kbutillib.interfaces.cli.machine.subprocess.run", side_effect=Exception("no ioreg")):
             fake_id = "abc123def456"
             with patch.object(Path, "exists", return_value=True):
                 with patch.object(Path, "read_text", return_value=f"{fake_id}\n"):
@@ -77,7 +77,7 @@ class TestGetHardwareUuid:
             assert uuid == fake_id
 
     def test_returns_none_on_failure(self) -> None:
-        with patch("kbutillib.cli.machine.subprocess.run", side_effect=Exception("nope")):
+        with patch("kbutillib.interfaces.cli.machine.subprocess.run", side_effect=Exception("nope")):
             with patch.object(Path, "exists", return_value=False):
                 uuid = get_hardware_uuid()
         assert uuid is None
@@ -98,7 +98,7 @@ class TestLoadMachineConfig:
         (configs / "mybox.yaml").write_text(
             yaml.dump({"hardware_uuids": ["UUID1"], "default_python": "3.13"})
         )
-        with patch("kbutillib.cli.machine.find_machine_configs_dir", return_value=configs):
+        with patch("kbutillib.interfaces.cli.machine.find_machine_configs_dir", return_value=configs):
             cfg = load_machine_config("mybox")
 
         assert cfg["default_python"] == "3.13"  # override wins
@@ -109,7 +109,7 @@ class TestLoadMachineConfig:
         configs = tmp_path / "machine_configs"
         configs.mkdir()
         (configs / "_default.yaml").write_text(yaml.dump({"default_python": "3.12"}))
-        with patch("kbutillib.cli.machine.find_machine_configs_dir", return_value=configs):
+        with patch("kbutillib.interfaces.cli.machine.find_machine_configs_dir", return_value=configs):
             cfg = load_machine_config("nonexistent")
 
         assert cfg["default_python"] == "3.12"
@@ -125,7 +125,7 @@ class TestResolveAlias:
         """When AgentForge config is importable and has machine_alias, use it."""
         mock_config = type("C", (), {"worker": type("W", (), {"machine_alias": "emailmac"})()})()
         with patch.dict("sys.modules", {"agentforge": object(), "agentforge.config": object()}):
-            with patch("kbutillib.cli.machine.resolve_alias.__module__", "kbutillib.cli.machine"):
+            with patch("kbutillib.interfaces.cli.machine.resolve_alias.__module__", "kbutillib.interfaces.cli.machine"):
                 # Patch the actual import inside resolve_alias
                 import importlib
                 import kbutillib.cli.machine as mod
@@ -144,7 +144,7 @@ class TestResolveAlias:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump({"worker": {"machine_alias": "h100"}}))
 
-        with patch("kbutillib.cli.machine.Path") as MockPath:
+        with patch("kbutillib.interfaces.cli.machine.Path") as MockPath:
             # Make agentforge import fail
             import builtins
             real_import = builtins.__import__
@@ -181,13 +181,13 @@ class TestResolveAlias:
         )
 
         with (
-            patch("kbutillib.cli.machine.get_hardware_uuid", return_value="TEST-UUID-123"),
-            patch("kbutillib.cli.machine.find_machine_configs_dir", return_value=configs),
+            patch("kbutillib.interfaces.cli.machine.get_hardware_uuid", return_value="TEST-UUID-123"),
+            patch("kbutillib.interfaces.cli.machine.find_machine_configs_dir", return_value=configs),
         ):
             # Make both agentforge import and YAML parse fail
             agentforge_path = Path(tmp_path / "nonexistent" / "config.yaml")
             with patch(
-                "kbutillib.cli.machine.Path",
+                "kbutillib.interfaces.cli.machine.Path",
                 side_effect=lambda *a, **kw: agentforge_path
                 if a and str(a[0]).endswith("config.yaml")
                 else Path(*a, **kw),
@@ -239,8 +239,8 @@ class TestResolveAlias:
         fake_yaml = tmp_path / "no-config.yaml"  # doesn't exist
 
         with (
-            patch("kbutillib.cli.machine.get_hardware_uuid", return_value="MY-UUID"),
-            patch("kbutillib.cli.machine.find_machine_configs_dir", return_value=configs),
+            patch("kbutillib.interfaces.cli.machine.get_hardware_uuid", return_value="MY-UUID"),
+            patch("kbutillib.interfaces.cli.machine.find_machine_configs_dir", return_value=configs),
         ):
             def fake_expanduser(self: Path) -> Path:
                 if str(self) == "~/.agentforge/config.yaml":
@@ -260,8 +260,8 @@ class TestResolveAlias:
         fake_yaml = tmp_path / "no-config.yaml"
 
         with (
-            patch("kbutillib.cli.machine.get_hardware_uuid", return_value=None),
-            patch("kbutillib.cli.machine.find_machine_configs_dir", return_value=configs),
+            patch("kbutillib.interfaces.cli.machine.get_hardware_uuid", return_value=None),
+            patch("kbutillib.interfaces.cli.machine.find_machine_configs_dir", return_value=configs),
         ):
             def fake_expanduser(self: Path) -> Path:
                 if str(self) == "~/.agentforge/config.yaml":

@@ -1,0 +1,22 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    command: ["kbu-api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - KBU_LOG_LEVEL=INFO
+    restart: unless-stopped
+
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    command: ["kbu-mcp", "--transport", "http", "--port", "8001", "--host", "0.0.0.0"]
+    environment:
+      - KBU_LOG_LEVEL=INFO
+    restart: unless-stopped

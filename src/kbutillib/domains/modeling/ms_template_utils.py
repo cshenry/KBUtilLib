@@ -13,13 +13,11 @@ Functions:
     diff_template_evaluation        — perturbation diff across all report categories
 """
 
-import copy
 import datetime
 import json
 import logging
-import os
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .ms_fba_utils import MSFBAUtils
 
@@ -394,7 +392,6 @@ class MSTemplateUtils(MSFBAUtils):
             dict: Diff report with per-perturbation change records.
         """
         from modelseedpy.core.msmodelutl import MSModelUtil
-        import cobra
 
         if mode not in ("independent", "cumulative"):
             raise ValueError(f"diff_template_evaluation: unknown mode '{mode}'; use 'independent' or 'cumulative'")

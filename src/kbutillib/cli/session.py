@@ -23,7 +23,6 @@ import yaml
 from .manifest import append_session_ref, now_utc_iso
 from .subproject import _find_project_root
 
-
 # ── env-var detection ──────────────────────────────────────────────────────
 
 _DEFAULT_AIA_PATHS = (

@@ -12,13 +12,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
-from .errors import AmbiguousParams, SpecNotFound
+from .errors import AmbiguousParams
 from .monitor import JobHandle, JobReport
 from .nms import NMSSpecCache
 
 if TYPE_CHECKING:
-    from ..kb_job_utils import KBJobUtils
     from ..domains.kbase.kb_ws_utils import KBWSUtils
+    from ..kb_job_utils import KBJobUtils
 
 logger = logging.getLogger(__name__)
 

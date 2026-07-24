@@ -13,8 +13,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import requests
-
 from .kb_ws_utils import KBWSUtils
 
 __all__ = ["Reads", "ReadSet", "Assembly", "AssemblySet", "KBReadsUtils", "KBReadsUtilsImpl"]

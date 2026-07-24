@@ -2,15 +2,15 @@
 
 import os
 import re
-import subprocess
 import string
-import json
-import pandas as pd
-from typing import Any, Optional, Dict
+import subprocess
 from collections import defaultdict
+from typing import Any, Dict, Optional
 
-from ...core.shared_env_utils import SharedEnvUtils
+import pandas as pd
+
 from ...core.capability import capability
+from ...core.shared_env_utils import SharedEnvUtils
 
 compartment_types = {
     "cytosol":"c",
@@ -459,8 +459,8 @@ class MSBiochemUtils(SharedEnvUtils):
             index = bracket_match[3]
             if compartment.lower() not in compartment_types:
                 self.log_warning(f"Compartment type '{compartment}' not recognized in bracket notation.") # Try underscore notation (e.g., "cpd01024_c0")
-        elif re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
-            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
+        elif re.search(r"(.+)_([a-zA-Z]+)(\d*)$", id) != None:
+            m = re.search(r"(.+)_([a-zA-Z]+)(\d*)$", id)
             baseid = m[1]
             compartment = m[2]
             index = m[3]

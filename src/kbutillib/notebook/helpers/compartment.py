@@ -1,7 +1,6 @@
 """Compartment normalization utilities."""
 from __future__ import annotations
 
-
 COMPARTMENT_MAP: dict[str, str] = {
     "c": "cytoplasm",
     "c0": "cytoplasm",

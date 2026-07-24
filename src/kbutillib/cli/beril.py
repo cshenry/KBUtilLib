@@ -247,7 +247,7 @@ def _run_pip_install(interpreter: str) -> tuple[bool, str]:
     ):
         cmd_bsp = cmd + ["--break-system-packages"]
         click.echo(
-            f"   (PEP-668 detected — retrying with --break-system-packages)",
+            "   (PEP-668 detected — retrying with --break-system-packages)",
             err=True,
         )
         try:

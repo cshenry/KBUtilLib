@@ -1,6 +1,7 @@
 """Manifest API — browseable view of all notebooks, objects, and freshness state."""
 
 from __future__ import annotations
+
 __all__ = ['Manifest']
 
 

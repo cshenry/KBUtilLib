@@ -34,7 +34,6 @@ from typing import Optional
 
 import click
 
-
 # ---------------------------------------------------------------------------
 # helpers shared across subcommands
 # ---------------------------------------------------------------------------
@@ -96,7 +95,7 @@ def init_cmd(
     br = Path(beril_root).expanduser().resolve()
     hr = Path(harness_root).expanduser() if harness_root else None
 
-    _echo(f"kbu harness init")
+    _echo("kbu harness init")
     _echo(f"BERIL_ROOT: {br}")
     _echo(f"project-id: {project_id}")
     _echo("")
@@ -111,11 +110,11 @@ def init_cmd(
 
     _echo("")
     if ok:
-        _echo(f"── Summary:")
+        _echo("── Summary:")
         _echo(f"   ✓ Harness created: {detail}")
         sys.exit(0)
     else:
-        _echo(f"── Summary:")
+        _echo("── Summary:")
         _echo(f"   ✗ Init failed: {detail}")
         sys.exit(1)
 
@@ -221,9 +220,10 @@ def run_cmd(
     With no notebooks specified, runs all notebooks/*.ipynb in lexicographic order.
     Stops at the first failure.
     """
-    from kbutillib.harness.runner import RunResult, discover_notebooks, run_notebooks
-    from kbutillib.harness.devlog import append_entry
     import time
+
+    from kbutillib.harness.devlog import append_entry
+    from kbutillib.harness.runner import run_notebooks
 
     harness_dir = _require_harness_dir()
     _echo("── run")
@@ -313,7 +313,7 @@ def doctor_cmd() -> None:
 
     Exits 0 only when all checks pass.
     """
-    from kbutillib.harness.config import find_harness_toml, load_config
+    from kbutillib.harness.config import load_config
 
     harness_dir = _require_harness_dir()
     _echo("── kbu harness doctor")

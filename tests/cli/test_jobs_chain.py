@@ -19,7 +19,7 @@ from kbutillib.kb_job_utils.pipeline import (
 from kbutillib.kb_job_utils.state import JobRecord, JobState
 from kbutillib.kb_job_utils.store import JobStore
 
-_PATCH_ENV = "kbutillib.shared_env_utils.SharedEnvUtils"
+_PATCH_ENV = "kbutillib.core.shared_env_utils.SharedEnvUtils"
 _PATCH_EE2 = "kbutillib.kb_job_utils.utils.execution_engine2"
 
 

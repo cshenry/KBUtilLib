@@ -1,17 +1,13 @@
 """KBase model utilities for constraint-based metabolic modeling."""
 
-import pickle
-from typing import Any, Dict, Optional
-import re
 import json
 import subprocess
-import os
+from typing import Any, Optional
 
 # Optional imports - only needed for FBA analysis, not for AI curation
 try:
     import pandas as pd
-    from cobra.flux_analysis import flux_variability_analysis
-    from cobra.flux_analysis import pfba
+    from cobra.flux_analysis import flux_variability_analysis, pfba
     HAS_COBRA = True
 except ImportError:
     HAS_COBRA = False
@@ -174,7 +170,7 @@ class AICurationUtils(ArgoUtils):
         """Load cached curation data"""
         cache = self.load_util_data("AICurationCache"+cache_name,default={})
         return cache
-    
+
     def _save_cached_curation(self,cache_name,cache) -> None:
         """Save cached curation data"""
         self.save_util_data("AICurationCache"+cache_name,cache)
@@ -224,7 +220,7 @@ class AICurationUtils(ArgoUtils):
         else:
             print("ReactionDirectionality-cached")
         return cache[rxn_output["base_id"]]
-        
+
     def evaluate_reaction_equivalence(self, rxn1,rxn2,comparison_evidence) -> dict[str, Any]:
         """Use AI to analyze reaction directionality for an input reaction"""
         system = """
@@ -290,7 +286,7 @@ class AICurationUtils(ArgoUtils):
         cache[rxn1.id][rxn2.id] = json.loads(ai_output)
         self._save_cached_curation("ReactionEquivalence",cache)
         return cache[rxn1.id][rxn2.id]
-    
+
     def evaluate_reaction_gene_association(self, rxn,genedata) -> dict[str, Any]:
         """Use AI to analyze reaction directionality for an input reaction"""
         system = """
@@ -802,7 +798,7 @@ Compound batch:
                 # Debug: log raw response
                 self.log_debug(f"Raw AI response length: {len(ai_output) if ai_output else 0}")
                 if not ai_output or not ai_output.strip():
-                    self.log_warning(f"Empty AI response for batch")
+                    self.log_warning("Empty AI response for batch")
                     raise json.JSONDecodeError("Empty response", "", 0)
 
                 # Clean up the response - remove markdown code blocks

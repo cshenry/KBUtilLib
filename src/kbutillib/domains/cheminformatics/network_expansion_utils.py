@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from kbutillib.core.capability import capability
 from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 from . import (
@@ -97,6 +98,12 @@ class NetworkExpansionUtils(SharedEnvUtils):
                 f"Available: {sorted(self.backends)}"
             )
 
+    @capability(
+        domain="cheminformatics",
+        summary="Report availability of each cheminformatics backend.",
+        tags=("cheminformatics", "status", "readonly"),
+        visibility="public",
+    )
     def backend_status(self) -> Dict[str, Dict[str, Any]]:
         """Return availability + capabilities for every backend.
 
@@ -124,6 +131,12 @@ class NetworkExpansionUtils(SharedEnvUtils):
 
     # ── expansion ───────────────────────────────────────────────────────
 
+    @capability(
+        domain="cheminformatics",
+        summary="Expand a metabolic network via pickaxe/retrorules reaction rules.",
+        tags=("cheminformatics", "expansion"),
+        visibility="public",
+    )
     def expand(
         self,
         seed_smiles: Mapping[str, str],
@@ -217,6 +230,25 @@ class NetworkExpansionUtilsImpl:
     @property
     def env(self) -> Any:
         return self._env
+
+    @property
+    def available(self) -> bool:
+        """True — network expansion is always constructable; backends probe lazily."""
+        return True
+
+    @property
+    def unavailable_reason(self) -> Optional[str]:
+        """None — backends are probed per-call; construction never fails."""
+        return None
+
+    def __dir__(self) -> list:
+        base = list(super().__dir__())
+        try:
+            delegate_attrs = [a for a in dir(self._delegate) if not a.startswith("__")]
+            base.extend(a for a in delegate_attrs if a not in base)
+        except Exception:
+            pass
+        return base
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)

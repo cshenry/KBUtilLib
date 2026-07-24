@@ -20,9 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from ..installed_clients.execution_engine2Client import execution_engine2
-from ..domains.kbase.kbase_endpoints import service_url
 from ..core.shared_env_utils import SharedEnvUtils
+from ..domains.kbase.kbase_endpoints import service_url
+from ..installed_clients.execution_engine2Client import execution_engine2
 from .pipeline import ChainStep, PipelineState, PipelineStatus
 from .state import JobRecord, JobState
 from .store import JobStore

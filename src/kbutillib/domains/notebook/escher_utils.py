@@ -1,21 +1,16 @@
 """Utilities for managing and visualizing models on escher maps."""
 
-import math
-import pickle
-from typing import Any, Dict, List, Optional, Union, Literal, Tuple
-import pandas as pd
-import re
 import json
+import math
 import os
-import cobra
 from pathlib import Path
-import statistics
+from typing import Any, Dict, List, Optional, Union
 
-from cobra.flux_analysis import flux_variability_analysis
-from cobra.flux_analysis import pfba
+import cobra
+import pandas as pd
 
-from ..modeling.kb_model_utils import KBModelUtils
 from ..biochem.ms_biochem_utils import MSBiochemUtils
+from ..modeling.kb_model_utils import KBModelUtils
 
 __all__ = ["EscherUtils", "EscherUtilsImpl"]
 
@@ -1454,7 +1449,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         #Translating model to modelutl
         if not isinstance(model, self.MSModelUtil):
             model = self.MSModelUtil(model)
-        
+
         #Loading map from file
         map_data = self._load_map(map)
         if use_short_rxn_names:

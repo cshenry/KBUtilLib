@@ -21,7 +21,6 @@ from typing import Optional
 
 from .manifest import sha256_file
 
-
 # ---------------------------------------------------------------------------
 # Template copy with substitution
 # ---------------------------------------------------------------------------

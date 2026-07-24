@@ -155,12 +155,12 @@ class ResearchOSProject:
             ide=ide,
             force=force,
         )
-        print(f"   ✓ research-os init completed")
+        print("   ✓ research-os init completed")
 
         # Step 5: Rewrite MCP commands
         print("── Rewriting MCP command fields")
         self._rewrite_mcp_commands(project_path, research_os_bin)
-        print(f"   ✓ MCP commands rewritten to absolute path")
+        print("   ✓ MCP commands rewritten to absolute path")
 
         # Step 6: Write workspace file
         print("── Writing .code-workspace")
@@ -171,7 +171,7 @@ class ResearchOSProject:
         print("── Initializing git repository")
         try:
             self._git_init_and_commit(project_path, name)
-            print(f"   ✓ git repository initialized with initial commit")
+            print("   ✓ git repository initialized with initial commit")
         except Exception as exc:  # noqa: BLE001
             warnings.warn(
                 f"git initialization failed (scaffold is still usable): {exc}",
@@ -190,7 +190,7 @@ class ResearchOSProject:
         if reg_result.status == "ok":
             print(f"   ✓ registered {parent}/{name}")
         elif reg_result.status == "skipped":
-            print(f"   ↷ skipped (already registered)")
+            print("   ↷ skipped (already registered)")
         else:
             print(
                 f"   ⚠ registry unavailable — register manually with /ai-registry"

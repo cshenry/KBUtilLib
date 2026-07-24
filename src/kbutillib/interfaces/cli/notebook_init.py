@@ -90,13 +90,11 @@ from typing import Optional
 import click
 
 from ...layout import (
-    WORKNB_GITIGNORE_MARKER_START,
     WORKNB_PRJ_SUBDIRS,
     WORKNB_SHARED_ROOTS,
     apply_worknb_gitignore_block,
 )
-from .worknb_util import render_worknb_util_template, smart_merge_worknb_util
-
+from .worknb_util import render_worknb_util_template
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -191,7 +189,7 @@ def _resolve_repo(repo: str, group: Optional[str] = None) -> Path:
         # 3. New repo — group is required.
         if not group or not group.strip():
             raise click.UsageError(
-                f"Creating a new work-notebook repo requires --group <project-group>."
+                "Creating a new work-notebook repo requires --group <project-group>."
             )
         return _NOTEBOOK_WORKSPACES / group / repo
 

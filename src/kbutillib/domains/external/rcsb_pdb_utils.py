@@ -1,12 +1,13 @@
 """RCSB PDB utility class for querying protein structures from the RCSB database."""
 
+import asyncio
 import json
 import logging
-import asyncio
+from typing import Any, Dict, List, Optional
+
 import aiohttp
 import requests
 from requests.exceptions import ConnectionError, HTTPError, RequestException
-from typing import Any, Dict, List, Optional
 
 from ...core.base_utils import BaseUtils
 

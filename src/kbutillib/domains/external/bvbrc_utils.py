@@ -7,17 +7,15 @@ This module provides utilities for:
 - Creating synthetic genomes from multiple source genomes
 """
 
-import os
-import json
 import hashlib
-import requests
+from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict, Counter
-from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from ..genome.kb_genome_utils import KBGenomeUtils
+import requests
+
 from ..genome.kb_annotation_utils import KBAnnotationUtils
+from ..genome.kb_genome_utils import KBGenomeUtils
 
 __all__ = ["BVBRCUtils", "BVBRCUtilsImpl"]
 

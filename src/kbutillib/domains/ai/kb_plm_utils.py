@@ -9,8 +9,7 @@ import os
 import subprocess
 import tempfile
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -559,7 +558,7 @@ class KBPLMUtils(KBGenomeUtils):
 
                     hits_by_query[query_title] = hits
 
-            self.log_info(f"BLASTP completed successfully")
+            self.log_info("BLASTP completed successfully")
             return hits_by_query
 
         finally:

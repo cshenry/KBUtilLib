@@ -125,8 +125,8 @@ def _construct_offline(cls: type, **extra_kwargs: Any) -> Any:
     """
     from unittest.mock import patch
 
-    from ..domains.modeling.kb_model_utils import KBModelUtils
     from ..domains.biochem.ms_biochem_utils import MSBiochemUtils
+    from ..domains.modeling.kb_model_utils import KBModelUtils
 
     db_path = _resolve_modelseed_db_path()
 

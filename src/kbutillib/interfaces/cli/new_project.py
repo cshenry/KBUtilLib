@@ -19,19 +19,23 @@ from typing import Optional
 
 import click
 
+from ...layout import DEFAULT_SHARED_DIRS
+from ._template_ops import (
+    compute_file_hashes as _compute_file_hashes,
+)
+from ._template_ops import (
+    copy_template_tree as _copy_template_tree,
+)
+from ._template_ops import (
+    create_plain_venv as _create_plain_venv,
+)
+from ._template_ops import (
+    run_venvman_project as _run_venvman_project,
+)
 from .manifest import (
     now_utc_iso,
     write_project_manifest,
 )
-from ._template_ops import (
-    copy_template_tree as _copy_template_tree,
-    compute_file_hashes as _compute_file_hashes,
-    run_venvman_project as _run_venvman_project,
-    create_plain_venv as _create_plain_venv,
-    parse_virtual_env_from_activate as _parse_virtual_env_from_activate,
-)
-from ...layout import DEFAULT_SHARED_DIRS
-
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -8,9 +8,8 @@ import functools
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 from .detect import get_cell_index, get_cell_source_hash

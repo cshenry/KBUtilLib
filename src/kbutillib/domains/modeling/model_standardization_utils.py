@@ -7,9 +7,8 @@ This module provides utilities for:
 - Standardizing model structure and compartments
 """
 
-from email.policy import default
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -118,7 +117,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
         if mapping_output == None:
             mapping_output = self.model_standardization(mdlutl, msmodel=msmodel,model_comparison=False)
         msmodel = self._check_and_convert_model(msmodel)
-        
+
         #Initializing output
         output = {
             "cpd_counts": [0,0,0],
@@ -129,7 +128,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             "genes": {},
             "reactions": {}
         }
-        
+
         #Setting compound and transport counts
         for cpd in msmodel.model.metabolites:
             if cpd.compartment.lower()[0:1] == "e":
@@ -149,7 +148,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
                     if hit+"_c0" in msmodel.model.metabolites:
                         output["cpd_counts"][2] += 1
                         break
-        
+
         #Setting all reaction output
         matchmsrxn = {}
         ms_to_mod = {}
@@ -223,7 +222,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
                         msdbrxn = self.biochem_db.reactions.get_by_id(hit)
                         rxn_string = msdbrxn.build_reaction_string(use_metabolite_names=True)+":"+f"{hit}:Score:{mapping_output['rxn_matches'][rxn.id][hit]['score']} EC:{mapping_output['rxn_matches'][rxn.id][hit]['ec_hits']} ID:{mapping_output['rxn_matches'][rxn.id][hit]['identifier_hits']} Transport:{mapping_output['rxn_matches'][rxn.id][hit]['transport_scores']} Equation:{mapping_output['rxn_matches'][rxn.id][hit]['equation_scores']} Protons:{mapping_output['rxn_matches'][rxn.id][hit]['proton_matches']}"
                         record["Other matches"].append(rxn_string)
-                #Setting the mod to ms and ms to mod hashes                
+                #Setting the mod to ms and ms to mod hashes
                 ms_to_mod[record["MSID"]+"_c0"] = rxn.id
                 if mapping_output["rxn_matches"][rxn.id][record["MSID"]]["template"]:
                     record["In template"] = "InTemplate"
@@ -334,7 +333,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             for gene in rxn.genes:
                 if gene.id[0:4] != "mRNA":
                     record["MS only genes"].append(gene.id)
-        
+
        #Setting gene output
         for gene in mdlutl.model.genes:
             output["gene_counts"][0] += 1
@@ -365,7 +364,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
                 rxnstring += rxn.build_reaction_string(use_metabolite_names=True)
                 record["Reactions"].append(rxnstring)
             output["genes"][gene.id] = record
-        
+
         for gene in msmodel.model.genes:
             if gene.id[0:4] == "mRNA":
                 continue
@@ -391,7 +390,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
                             break
                     if not found:
                         record["Reactions"].append(rxnstring)
-        
+
         if check_pairings_with_ai:
             for rxn in mdlutl.model.reactions:
                 if rxn.id not in output["reactions"]:
@@ -410,7 +409,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
 
     def match_model_compounds_to_db(
         self, model_or_mdlutl, template="gp", create_dataframe=True, filter_based_on_template=True, annotate_model=False
-    ):  
+    ):
         """Searching all compounds in a model against the ModelSEEDDatabase and a template"""
         #Getting template
         if isinstance(template, str):
@@ -484,7 +483,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             # Sort by model compound ID and then by score (descending)
             if not results["df"].empty:
                 results["df"] = results["df"].sort_values(
-                    ["model_compound_id", "score"], 
+                    ["model_compound_id", "score"],
                     ascending=[True, False]
                 ).reset_index(drop=True)
         if annotate_model:
@@ -497,7 +496,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
 
     def match_model_reactions_to_db(
         self, model_or_mdlutl, template="gp", create_dataframe=True,msmodel=None,filter_based_on_template=True,cpd_match_hits=None
-    ):  
+    ):
         """Searching all reactions in a model against the ModelSEEDDatabase and a template"""
         EC_PATTERN = re.compile(r'^(?:EC\s*)?(?:[1-7])\.(?:\d+|-)\.(?:\d+|-)\.(?:\d+|-)$', re.I)
         #Getting template
@@ -600,7 +599,7 @@ class ModelStandardizationUtils(MSBiochemUtils):
             # Sort by model reaction ID and then by score (descending)
             if not results["rxndf"].empty:
                 results["rxndf"] = results["rxndf"].sort_values(
-                    ["model_id", "score"], 
+                    ["model_id", "score"],
                     ascending=[True, False]
                 ).reset_index(drop=True)
         return results
@@ -736,8 +735,8 @@ class ModelStandardizationUtils(MSBiochemUtils):
             elif has_formula_match:
                 formula_only_matches.append(ms_cpd_id)
         return strong_matches, formula_only_matches
-    
-    
+
+
     def translate_model_to_ms_namespace(
         self,
         model_or_mdlutl,

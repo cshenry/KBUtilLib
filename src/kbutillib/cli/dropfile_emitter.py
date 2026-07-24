@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-
 # Fields required in every drop-file (ingester rejects if any are absent).
 _REQUIRED_FIELDS = {"session_id", "project_id", "command", "summary", "started_at"}
 

@@ -7,7 +7,6 @@ registry with a "create new" path, persisting the binding into kbu-project.toml.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +17,6 @@ from .binding import resolve_binding, set_binding
 from .registry_reader import rank_candidates
 from .session import _detect_aiassistant
 from .subproject import _find_project_root
-
 
 # ── slug helpers ────────────────────────────────────────────────────────────────
 

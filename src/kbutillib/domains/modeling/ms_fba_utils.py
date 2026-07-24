@@ -37,16 +37,16 @@ are the stable public surfaces used as of modelseedpy 0.4.x.
         The zero symbolic constant used when constructing LP objectives.
 """
 
+import json
 import logging
-import pickle
+import re
 import time
 from typing import Any, Dict
-import pandas as pd
-import re
-import json
 
-from cobra.flux_analysis import flux_variability_analysis
+import pandas as pd
 from cobra.flux_analysis import pfba
+
+from kbutillib.core.capability import capability
 
 from .kb_model_utils import KBModelUtils
 
@@ -293,7 +293,6 @@ def add_probe_reaction_standalone(mdlutl, probe, compartment="c0"):
         ``{"reaction": cobra.Reaction, "direction": ">", "new": bool}``
         new=False when an existing reaction was reused.
     """
-    from modelseedpy.core.msmodelutl import MSModelUtil
 
     name = probe["name"]
     raw_stoich = probe["stoichiometry"]
@@ -392,6 +391,7 @@ def minimize_active_reactions_standalone(
         Each reaction entry: {id, direction, flux, reliability_score, is_core}.
     """
     import time as _time
+
     from optlang.symbolics import Zero
 
     t0 = _time.time()
@@ -768,7 +768,6 @@ def find_flux_loops_standalone(
         reliability_score, is_core, alternatives, coupled, essential.
     """
     import cobra as _cobra
-    from optlang.symbolics import Zero
 
     if log_fn is None:
         log_fn = logger.info
@@ -1132,6 +1131,12 @@ class MSFBAUtils(KBModelUtils):
         mdlutl = self._check_and_convert_model(model)
         return add_probe_reaction_standalone(mdlutl, probe, compartment=compartment)
 
+    @capability(
+        domain="modeling",
+        summary="Minimize the number of active reactions carrying flux in a model.",
+        tags=("modeling", "fba"),
+        visibility="public",
+    )
     def minimize_active_reactions(
         self,
         model,
@@ -1164,6 +1169,12 @@ class MSFBAUtils(KBModelUtils):
             zero_tol=zero_tol,
         )
 
+    @capability(
+        domain="modeling",
+        summary="Enumerate alternative minimal reaction sets achieving the objective.",
+        tags=("modeling", "fba"),
+        visibility="public",
+    )
     def enumerate_alternative_reaction_sets(
         self,
         model,
@@ -1188,6 +1199,12 @@ class MSFBAUtils(KBModelUtils):
             mdlutl, solution, tol=tol, zero_tol=zero_tol
         )
 
+    @capability(
+        domain="modeling",
+        summary="Detect thermodynamically infeasible flux loops in a model.",
+        tags=("modeling", "fba", "analysis"),
+        visibility="public",
+    )
     def find_flux_loops(
         self,
         template,
@@ -1262,14 +1279,14 @@ class MSFBAUtils(KBModelUtils):
             media = self.MSMediaUtil(media)
         model.pkgmgr.getpkg("KBaseMediaPkg").build_package(media)
         return media
-    
+
     def set_objective_from_string(self, model, objective: str):
         """Sets the objective for the model from a string"""
         if objective is None:
             return
         model = self._check_and_convert_model(model)
         model.pkgmgr.getpkg("ObjectivePkg").build_package(objective)
-    
+
     def constrain_objective(self, model, objective=None, lower_bound=None, upper_bound=None):
         """Constrains the current objective to set upper/lower bounds"""
         self.set_objective_from_string(model,objective)
@@ -1310,7 +1327,7 @@ class MSFBAUtils(KBModelUtils):
             pfb_solution.objective_value = solution.objective_value
             return pfb_solution
         return solution
-    
+
     def run_fva(self,model,media=None,objective=None,fraction_of_optimum=0.9):
         model = self.configure_fba_formulation(model,media=media,objective=objective,fraction_of_optimum=fraction_of_optimum)
         original_objective = model.model.objective
@@ -1332,7 +1349,7 @@ class MSFBAUtils(KBModelUtils):
         output = {}
         zero_flux_rxns = []
         active_rxns = []
-        
+
         for rxn_id, flux in solution.fluxes.items():
             if rxn_id not in [r.id for r in model.model.reactions]:
                 continue
@@ -1340,13 +1357,13 @@ class MSFBAUtils(KBModelUtils):
                 zero_flux_rxns.append(rxn_id)
             else:
                 active_rxns.append((rxn_id, flux))
-        
+
         self.log_info(f"Zero-flux reactions: {len(zero_flux_rxns)}")
         self.log_info(f"Active reactions: {len(active_rxns)}")
-        
+
         #Building this outside of with model statement because model is failing to clear the additional constraints consistently
         if biomass_objective_coupling:
-            self.log_info(f"Building flexible biomass package")
+            self.log_info("Building flexible biomass package")
             model.pkgmgr.getpkg("FlexibleBiomassPkg").build_package({"bio_rxn_id":biomass_id,"set_min_flex_biomass_objective":False})
             for rxn in model.model.reactions:
                 if rxn.id.startswith("FLEX_"):
@@ -1367,21 +1384,21 @@ class MSFBAUtils(KBModelUtils):
                 rxn = model.model.reactions.get_by_id(rxn_id)
                 rxn.lower_bound = 0
                 rxn.upper_bound = 0
-            
+
             #Consider setting max flux to current flux of every reaction as an optional procedure
-            
+
             for rxn_id, original_flux in active_rxns:
                 output["reaction_objective_coupling"][rxn_id] = {"original_flux":original_flux}
                 rxn = model.model.reactions.get_by_id(rxn_id)
-                
+
                 # Save original bounds
                 orig_lb = rxn.lower_bound
                 orig_ub = rxn.upper_bound
-                
+
                 # Knock out the reaction
                 rxn.lower_bound = 0
                 rxn.upper_bound = 0
-                
+
                 # Optimize
                 ko_solution = model.model.optimize()
                 if ko_solution.status == 'optimal':
@@ -1390,7 +1407,7 @@ class MSFBAUtils(KBModelUtils):
                 else:
                     output["reaction_objective_coupling"][rxn_id]["objective_ratio"] = 0
                     output["reaction_objective_coupling"][rxn_id]["ko_objective_value"] = None
-                
+
                 # Categorize impact
                 if output["reaction_objective_coupling"][rxn_id]["objective_ratio"] < 0.01:
                     output["reaction_objective_coupling"][rxn_id]["impact"] = "essential"
@@ -1400,10 +1417,10 @@ class MSFBAUtils(KBModelUtils):
                     output["reduced_count"] += 1
                 else:
                     output["reaction_objective_coupling"][rxn_id]["impact"] = "dispensable"
-                
+
                 if biomass_objective_coupling and output["reaction_objective_coupling"][rxn_id]["impact"] in ["essential","reduced"] and rxn_id != biomass_id:
                     output["reaction_objective_coupling"][rxn_id]["biomass_coupling"] = self.determine_biomass_objective_coupling(model,biomass_id,output["baseline_objective_value"],media=media,objective=objective,fraction_of_optimum=fraction_of_optimum)
-                
+
                 # Restore original bounds
                 rxn.upper_bound = orig_ub
                 rxn.lower_bound = orig_lb
@@ -1418,15 +1435,15 @@ class MSFBAUtils(KBModelUtils):
         with model.model:
             for rxn_id, original_flux in active_rxns:
                 rxn = model.model.reactions.get_by_id(rxn_id)
-                
+
                 # Save original bounds
                 orig_lb = rxn.lower_bound
                 orig_ub = rxn.upper_bound
-                
+
                 # Knock out the reaction
                 rxn.lower_bound = 0
                 rxn.upper_bound = 0
-                
+
                 # Optimize
                 ko_solution = model.model.optimize()
                 if ko_solution.status == 'optimal':
@@ -1435,7 +1452,7 @@ class MSFBAUtils(KBModelUtils):
                 else:
                     output["reaction_objective_coupling"][rxn_id]["unconstrained_objective_ratio"] = 0
                     output["reaction_objective_coupling"][rxn_id]["unconstrained_ko_objective_value"] = None
-                
+
                 # Categorize impact
                 if output["reaction_objective_coupling"][rxn_id]["unconstrained_objective_ratio"] < 0.01:
                     output["reaction_objective_coupling"][rxn_id]["unconstrained_impact"] = "essential"
@@ -1445,10 +1462,10 @@ class MSFBAUtils(KBModelUtils):
                     output["unconstrained_reduced_count"] += 1
                 else:
                     output["reaction_objective_coupling"][rxn_id]["unconstrained_impact"] = "dispensable"
-                
+
                 if biomass_objective_coupling and output["reaction_objective_coupling"][rxn_id]["unconstrained_impact"] in ["essential","reduced"] and rxn_id != biomass_id:
                     output["reaction_objective_coupling"][rxn_id]["unconstrained_biomass_coupling"] = self.determine_biomass_objective_coupling(model,biomass_id,output["unconstrained_baseline_objective_value"],media=media,objective=objective,fraction_of_optimum=fraction_of_optimum)
-                
+
                 # Restore original bounds
                 rxn.upper_bound = orig_ub
                 rxn.lower_bound = orig_lb
@@ -1456,7 +1473,7 @@ class MSFBAUtils(KBModelUtils):
 
     def determine_biomass_objective_coupling(self,model,biomass_id,biomass_flux,media=None,objective=None,fraction_of_optimum=None):
         model = self.configure_fba_formulation(model,media=media,objective=objective,fraction_of_optimum=fraction_of_optimum)
-        
+
         #Checking if flexible biomass package is already built
         original_objective = model.model.objective
         flex_found = False
@@ -1703,7 +1720,6 @@ class MSFBAUtils(KBModelUtils):
                     ...
                 }
         """
-        import cobra.io
         from modelseedpy import MSExpression, MSMedia
         from modelseedpy.core.msmodelutl import MSModelUtil
 
@@ -2112,6 +2128,7 @@ class MSFBAUtils(KBModelUtils):
             FileNotFoundError: If the stash file has not been committed yet.
         """
         import importlib.resources as pkg_resources
+
         from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
 
         valid_elements = {"C", "N", "S", "P"}
@@ -2154,7 +2171,10 @@ class MSFBAUtils(KBModelUtils):
         Returns:
             dict mapping element letter to count of phenotypes built.
         """
-        from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes, MSGrowthPhenotype
+        from modelseedpy.core.msgrowthphenotypes import (
+            MSGrowthPhenotype,
+            MSGrowthPhenotypes,
+        )
         from modelseedpy.core.msmedia import MSMedia
 
         ELEMENT_PREFIXES = {
@@ -2641,6 +2661,27 @@ class MSFBAUtilsImpl:
     @property
     def model(self):
         return self._model
+
+    @property
+    def available(self) -> bool:
+        """True if cobra/modelseedpy are present and the delegate was initialized."""
+        return self._delegate is not None
+
+    @property
+    def unavailable_reason(self):
+        if self._delegate is not None:
+            return None
+        return "Optional dependencies cobra and/or modelseedpy are not installed"
+
+    def __dir__(self) -> list:
+        base = list(super().__dir__())
+        if self._delegate is not None:
+            try:
+                delegate_attrs = [a for a in dir(self._delegate) if not a.startswith("__")]
+                base.extend(a for a in delegate_attrs if a not in base)
+            except Exception:
+                pass
+        return base
 
     def __getattr__(self, name):
         if self._delegate is None:

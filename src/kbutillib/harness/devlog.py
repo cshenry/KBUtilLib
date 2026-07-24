@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-
 _MAX_TRACEBACK_BYTES = 10_000
 
 
@@ -72,7 +71,7 @@ def append_entry(
     if traceback:
         tb = traceback[:_MAX_TRACEBACK_BYTES]
         indented = "\n".join("  " + line for line in tb.splitlines())
-        lines.append(f"traceback: |")
+        lines.append("traceback: |")
         lines.append(indented)
     lines.append("```")
     lines.append("")

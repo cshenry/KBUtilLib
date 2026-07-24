@@ -1,11 +1,14 @@
-"""KBUtilLib facade — lazy-loading access to all sub-utilities.
+"""KBUtilLib — transport-agnostic facade for metabolic modeling utilities.
 
-Usage::
+``KBUtilLib()`` is the single entry point.  Every property lazily constructs
+the corresponding domain implementation:
 
-    kbu = KBUtilLib()
-    kbu.fba.run_fba(model)
-    kbu.biochem.search_compounds("glucose")
-    kbu.ws.get_object("12345/6/7")
+    from kbutillib import KBUtilLib
+    k = KBUtilLib()
+    results = k.biochem.search_compounds("glucose")
+
+Domain implementations live in ``kbutillib.domains.*``; transport adapters
+(CLI, MCP, HTTP API) live in ``kbutillib.interfaces.*``.
 """
 
 from __future__ import annotations
@@ -18,34 +21,38 @@ from .core.shared_env_utils import SharedEnvUtils
 if TYPE_CHECKING:
     from .domains.ai.ai_curation_utils import AICurationUtilsImpl
     from .domains.ai.argo_utils import ArgoUtilsImpl
+    from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
+    from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.cheminformatics.network_expansion_utils import (
+        NetworkExpansionUtilsImpl,
+    )
+    from .domains.cheminformatics.verab.facade import VerabUtilsImpl
     from .domains.external.bvbrc_utils import BVBRCUtilsImpl
-    from .domains.notebook.escher_utils import EscherUtilsImpl
+    from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
+    from .domains.external.patric_ws_utils import PatricWSUtilsImpl
+    from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
     from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
+    from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
+    from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
+    from .domains.genome.ontomap_utils import OntomapUtilsImpl
+    from .domains.genome.skani_utils import SKANIUtilsImpl
     from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
     from .domains.kbase.kb_callback_utils import KBCallbackUtilsImpl
-    from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
-    from .kb_job_utils import KBJobUtils
-    from .domains.modeling.kb_model_utils import KBModelUtilsImpl
-    from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
     from .domains.kbase.kb_reads_utils import KBReadsUtilsImpl
     from .domains.kbase.kb_sdk_utils import KBSDKUtilsImpl
-    from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
     from .domains.kbase.kb_ws_utils import KBWSUtilsImpl
     from .domains.kbase.kbase_catalog_client import CatalogClient
-    from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
-    from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
-    from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.modeling.kb_model_utils import KBModelUtilsImpl
+    from .domains.modeling.model_standardization_utils import (
+        ModelStandardizationUtilsImpl,
+    )
     from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
     from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
     from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
-    from .domains.cheminformatics.network_expansion_utils import NetworkExpansionUtilsImpl
-    from .domains.genome.ontomap_utils import OntomapUtilsImpl
-    from .domains.external.patric_ws_utils import PatricWSUtilsImpl
+    from .domains.notebook.escher_utils import EscherUtilsImpl
     from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
-    from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
-    from .domains.genome.skani_utils import SKANIUtilsImpl
     from .domains.thermo.thermo_utils import ThermoUtilsImpl
-    from .domains.cheminformatics.verab.facade import VerabUtilsImpl
+    from .kb_job_utils import KBJobUtils
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +162,9 @@ class KBUtilLib:
     @property
     def recon(self) -> MSReconstructionUtilsImpl:
         if self._recon is None:
-            from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
+            from .domains.modeling.ms_reconstruction_utils import (
+                MSReconstructionUtilsImpl,
+            )
             self._recon = MSReconstructionUtilsImpl(self.env, self.model)
         return self._recon
 
@@ -176,7 +185,9 @@ class KBUtilLib:
     @property
     def standardize(self) -> ModelStandardizationUtilsImpl:
         if self._standardize is None:
-            from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
+            from .domains.modeling.model_standardization_utils import (
+                ModelStandardizationUtilsImpl,
+            )
             self._standardize = ModelStandardizationUtilsImpl(self.env, self.biochem)
         return self._standardize
 
@@ -239,7 +250,9 @@ class KBUtilLib:
     @property
     def predictive_thermo(self) -> "PredictiveThermoUtilsImpl":
         if self._predictive_thermo is None:
-            from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
+            from .domains.thermo.predictive_thermo_utils import (
+                PredictiveThermoUtilsImpl,
+            )
             self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.biochem)
         return self._predictive_thermo
 
@@ -312,7 +325,9 @@ class KBUtilLib:
         """Cheminformatics network-expansion facade (pickaxe / retrorules
         backends with graceful degradation)."""
         if self._network_expansion is None:
-            from .domains.cheminformatics.network_expansion_utils import NetworkExpansionUtilsImpl
+            from .domains.cheminformatics.network_expansion_utils import (
+                NetworkExpansionUtilsImpl,
+            )
             self._network_expansion = NetworkExpansionUtilsImpl(self.env)
         return self._network_expansion
 

@@ -8,23 +8,22 @@ The KBUtilLib facade provides lazy-property access to all sub-utilities.
 import os
 import sys
 
+# Flat modules (real infrastructure files — not shims)
+from .compartments import compartment_types, normalize_compartment
+
 # Core utilities - these should always be available
 from .core.base_utils import BaseUtils
 from .core.shared_env_utils import SharedEnvUtils
+from .domains.modeling.model_directionality import (
+    biochem_directionality,
+    combine_directionality_signals,
+    direction_conversion,
+    directionality_from_bounds,
+)
+from .domains.modeling.model_helpers import _check_and_convert_model, _parse_id
 
 # Facade
 from .toolkit import KBUtilLib
-
-# Flat modules (real infrastructure files — not shims)
-from .compartments import compartment_types, normalize_compartment
-from .domains.modeling.model_directionality import (
-    direction_conversion,
-    directionality_from_bounds,
-    biochem_directionality,
-    combine_directionality_signals,
-)
-from .domains.modeling.model_helpers import _parse_id, _check_and_convert_model
-
 
 # Collected optional-import failures.  Populated by _import_error(); flushed
 # to stderr by _flush_import_errors() at module-load time.
@@ -175,7 +174,13 @@ except ImportError as e:
     PredictiveThermoUtils = None
 
 try:
-    from .domains.kbase.kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
+    from .domains.kbase.kb_reads_utils import (
+        Assembly,
+        AssemblySet,
+        KBReadsUtils,
+        Reads,
+        ReadSet,
+    )
 except ImportError as e:
     _import_error("kb_reads_utils", e)
     KBReadsUtils = None
@@ -262,8 +267,13 @@ except ImportError as e:
 
 try:
     from .kb_job_utils import (
-        KBJobUtils, JobRecord, JobState, JobStore,
-        PipelineState, PipelineStatus, ChainStep,
+        ChainStep,
+        JobRecord,
+        JobState,
+        JobStore,
+        KBJobUtils,
+        PipelineState,
+        PipelineStatus,
     )
 except ImportError as e:
     _import_error("kb_job_utils", e)
@@ -276,7 +286,12 @@ except ImportError as e:
     ChainStep = None
 
 try:
-    from .domains.kbase.kbase_endpoints import base_url, service_url, narrative_url, env_from_url
+    from .domains.kbase.kbase_endpoints import (
+        base_url,
+        env_from_url,
+        narrative_url,
+        service_url,
+    )
 except ImportError as e:
     _import_error("kbase_endpoints", e)
     base_url = None
@@ -333,7 +348,9 @@ except ImportError:
     EscherUtilsImpl = None
 
 try:
-    from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
+    from .domains.modeling.model_standardization_utils import (
+        ModelStandardizationUtilsImpl,
+    )
 except ImportError:
     ModelStandardizationUtilsImpl = None
 

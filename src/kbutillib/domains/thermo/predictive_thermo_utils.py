@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from kbutillib.core.capability import capability
 from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 from .thermo_predictors import (
@@ -139,6 +140,12 @@ class PredictiveThermoUtils(SharedEnvUtils):
                 f"Available: {sorted(self.backends)}"
             )
 
+    @capability(
+        domain="thermo",
+        summary="Report availability of each thermodynamics backend.",
+        tags=("thermo", "status", "readonly"),
+        visibility="public",
+    )
     def backend_status(self) -> Dict[str, Dict[str, Any]]:
         """Return availability + capabilities for every backend.
 
@@ -166,6 +173,12 @@ class PredictiveThermoUtils(SharedEnvUtils):
 
     # ── reaction ────────────────────────────────────────────────────────
 
+    @capability(
+        domain="thermo",
+        summary="Predict standard transformed Gibbs free energy (ΔG'°) of a reaction.",
+        tags=("thermo", "predict", "readonly"),
+        visibility="public",
+    )
     def reaction_dg_prime(
         self,
         reaction_id: str,
@@ -252,6 +265,12 @@ class PredictiveThermoUtils(SharedEnvUtils):
 
     # ── compound ────────────────────────────────────────────────────────
 
+    @capability(
+        domain="thermo",
+        summary="Predict standard Gibbs formation energy of a compound.",
+        tags=("thermo", "predict", "readonly"),
+        visibility="public",
+    )
     def compound_dgf(
         self,
         compound_id: str,
@@ -436,6 +455,25 @@ class PredictiveThermoUtilsImpl:
     @property
     def thermo(self) -> Any:
         return self._thermo
+
+    @property
+    def available(self) -> bool:
+        """True — predictive thermo is always constructable; backends probe lazily."""
+        return True
+
+    @property
+    def unavailable_reason(self) -> Optional[str]:
+        """None — at least the modelseed backend is always available."""
+        return None
+
+    def __dir__(self) -> list:
+        base = list(super().__dir__())
+        try:
+            delegate_attrs = [a for a in dir(self._delegate) if not a.startswith("__")]
+            base.extend(a for a in delegate_attrs if a not in base)
+        except Exception:
+            pass
+        return base
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)

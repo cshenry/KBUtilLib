@@ -1,15 +1,15 @@
 """KBase model utilities for constraint-based metabolic modeling."""
 
-import pickle
-from typing import Any, Dict
-from unittest import result
-import pandas as pd
-import re
 import json
 import os
+import pickle
+import re
+from typing import Any, Dict
 
-from ..genome.kb_annotation_utils import KBAnnotationUtils
+import pandas as pd
+
 from ..biochem.ms_biochem_utils import MSBiochemUtils
+from ..genome.kb_annotation_utils import KBAnnotationUtils
 from .model_standardization_utils import compartment_types, direction_conversion
 
 __all__ = [
@@ -115,8 +115,8 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             from modelseedpy.core.msfba import MSFBA
             from modelseedpy.core.msgenomeclassifier import MSGenomeClassifier
             from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
-            from modelseedpy.core.msmodelutl import MSModelUtil
             from modelseedpy.core.msmedia import MSMedia
+            from modelseedpy.core.msmodelutl import MSModelUtil
 
             # Store modules as instance attributes for later use
             self.cobrakbase = cobrakbase
@@ -183,8 +183,8 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             return (baseid, compartment, index)
 
         # Try underscore notation (e.g., "cpd01024_c0")
-        if re.search("(.+)_([a-zA-Z]+)(\d*)$", id) != None:
-            m = re.search("(.+)_([a-zA-Z]+)(\d*)$", id)
+        if re.search(r"(.+)_([a-zA-Z]+)(\d*)$", id) != None:
+            m = re.search(r"(.+)_([a-zA-Z]+)(\d*)$", id)
             baseid = m[1]
             compartment = m[2]
             index = m[3]

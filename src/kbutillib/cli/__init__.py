@@ -11,12 +11,10 @@ from __future__ import annotations
 # Re-export the entire public surface of the new location.
 from kbutillib.interfaces.cli import *  # noqa: F401, F403
 from kbutillib.interfaces.cli import (  # noqa: F401
-    cap_cmd,
-    main,
-    new_capability_cmd,
     beril_cmd,
     bootstrap_command,
     buildplan_cmd,
+    cap_cmd,
     doctor_command,
     harness_cmd,
     init_command,
@@ -24,8 +22,10 @@ from kbutillib.interfaces.cli import (  # noqa: F401
     jobdaemon_cmd,
     jobs_cmd,
     king_cmd,
+    main,
     migrate_cmd,
     model_cmd,
+    new_capability_cmd,
     new_project_command,
     notebook_cmd,
     notebook_init_cmd,

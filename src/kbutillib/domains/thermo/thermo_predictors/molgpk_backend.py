@@ -69,6 +69,8 @@ from .base import (
     BackendUnavailableError,
     CompoundThermoEstimate,
     ReactionThermoEstimate,
+)
+from .base import (
     dependency_repo_path as _dependency_repo_path,
 )
 

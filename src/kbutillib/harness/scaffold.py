@@ -21,7 +21,6 @@ Workflow
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -33,13 +32,10 @@ import kbutillib as _kbu_pkg
 from .config import (
     HarnessConfig,
     _get_kbutillib_version,
-    find_harness_toml,
-    load_config,
     sanitize_project_id,
     save_config,
 )
 from .sync import pull as _pull
-
 
 # ---------------------------------------------------------------------------
 # Paths into the installed package

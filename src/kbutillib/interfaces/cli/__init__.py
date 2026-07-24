@@ -15,14 +15,13 @@ from __future__ import annotations
 
 import click
 
-# WP6: capability registry introspection + scaffolder
-from .capabilities import cap_cmd
-from .scaffold import new_capability_cmd
-
 # Original CLI commands (moved from kbutillib.cli by WP17)
 from .beril import beril_cmd
 from .bootstrap import bootstrap_command
 from .buildplan import buildplan_cmd
+
+# WP6: capability registry introspection + scaffolder
+from .capabilities import cap_cmd
 from .harness import harness_cmd
 from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
@@ -35,6 +34,7 @@ from .new_project import new_project_command
 from .notebook import notebook_cmd
 from .notebook_init import notebook_init_cmd
 from .researchos import researchos_cmd
+from .scaffold import new_capability_cmd
 from .session import session_cmd
 from .set_cmd import set_cmd
 from .subproject import subproject_cmd

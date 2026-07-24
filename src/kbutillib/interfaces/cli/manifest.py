@@ -7,11 +7,11 @@ import from this module.  Never duplicate TOML I/O logic elsewhere.
 from __future__ import annotations
 
 import hashlib
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import tomllib
 
 # ── timestamp ──────────────────────────────────────────────────────────────
 

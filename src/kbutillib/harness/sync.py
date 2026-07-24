@@ -19,14 +19,12 @@ push never touches preferences.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from .config import HarnessConfig, find_harness_toml, load_config
-
+from .config import load_config
 
 # ---------------------------------------------------------------------------
 # rsync availability probe
@@ -202,7 +200,7 @@ def pull(
         if dirty:
             return (
                 False,
-                f"✗ Harness has uncommitted changes (git status --porcelain is non-empty). "
+                "✗ Harness has uncommitted changes (git status --porcelain is non-empty). "
                 "Run `git commit` or use --force to override.",
             )
 

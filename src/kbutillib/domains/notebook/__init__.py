@@ -9,10 +9,10 @@ Public API::
     obj = session.cache.load("name")
 """
 
-from .session import NotebookSession
 from .cache import Cache, CacheEntry
-from .vector_store import VectorStore
 from .experiment_store import ExperimentStore, StrainStore
+from .session import NotebookSession
+from .vector_store import VectorStore
 
 __all__ = [
     "NotebookSession",

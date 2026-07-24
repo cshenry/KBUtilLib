@@ -47,8 +47,9 @@ apply_worknb_gitignore_block(gitignore_path)
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 # ---------------------------------------------------------------------------
 # BERIL constants

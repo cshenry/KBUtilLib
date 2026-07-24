@@ -60,15 +60,15 @@ def list_serializers() -> list[str]:
 # Auto-import built-in serializers so they register themselves on first use.
 def _boot() -> None:
     from . import (  # noqa: F401
-        serialize_json,
-        serialize_dict,
+        serialize_cobra_model,
         serialize_dataframe,
-        serialize_text,
+        serialize_dict,
+        serialize_json,
+        serialize_msexpression,
         serialize_msgenome,
         serialize_msmedia,
-        serialize_cobra_model,
         serialize_msmodelutil,
-        serialize_msexpression,
+        serialize_text,
     )
 
 

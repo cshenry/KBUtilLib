@@ -18,14 +18,13 @@ import click
 from jinja2 import Template
 
 from kbutillib import layout as _layout
-from .adopt._inventory import write_adoption_notes
 
+from .adopt._inventory import write_adoption_notes
 from .manifest import (
     now_utc_iso,
     read_subproject_manifest,
     write_subproject_manifest,
 )
-
 
 # ── state machine ──────────────────────────────────────────────────────────
 

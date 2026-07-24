@@ -56,5 +56,8 @@ data/ms_classifier/
 !templates/research-project/.vscode/**
 !templates/research-project/**/*.code-workspace
 
+# Research scratch directory (gitignored, local only)
+.research/
+
 # opencode session continuation files
 .omo/

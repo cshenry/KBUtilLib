@@ -11,10 +11,9 @@ from typing import List, Optional
 
 import click
 
-from ..kb_job_utils.pipeline import PipelineState, PipelineStatus
+from ..kb_job_utils.pipeline import PipelineStatus
 from ..kb_job_utils.state import JobRecord, JobState
 from ..kb_job_utils.store import JobStore
-
 
 # ── formatting helpers ──────────────────────────────────────────────────────
 
@@ -97,8 +96,8 @@ def _get_kbu(ctx: click.Context):
 
     Only needed for commands that hit EE2 (refresh, cancel, logs).
     """
-    from ..kb_job_utils.utils import KBJobUtils
     from ..core.shared_env_utils import SharedEnvUtils
+    from ..kb_job_utils.utils import KBJobUtils
 
     obj = ctx.obj
     if "kbu" not in obj:

@@ -25,7 +25,6 @@ from pathlib import Path
 
 import click
 
-
 # ── exception ─────────────────────────────────────────────────────────────────
 
 

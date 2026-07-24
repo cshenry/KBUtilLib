@@ -6,7 +6,6 @@ import logging
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -346,5 +345,5 @@ def init_notebook_cmd(
     click.echo("")
     click.echo("Next steps:")
     click.echo(f"  1. cd {cwd}")
-    click.echo(f"  2. source activate.sh")
-    click.echo(f"  3. jupyter lab")
+    click.echo("  2. source activate.sh")
+    click.echo("  3. jupyter lab")

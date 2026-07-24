@@ -7,17 +7,15 @@ __all__ = [
 ]
 
 import hashlib
+import json
 import logging
 import time
-import warnings
 from collections import Counter, defaultdict
 from datetime import datetime
+from os.path import exists
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from os.path import exists
-import json
 
-from ...core.base_utils import BaseUtils
 from ..kbase.kb_ws_utils import KBWSUtils
 
 logger = logging.getLogger(__name__)
@@ -1370,7 +1368,6 @@ class KBGenomeUtils(KBWSUtils):
         the local ``fasta_path``, and reconciliation stats — but performs no
         workspace writes.
         """
-        import os
         import sqlite3
 
         accession_map = dict(accession_map or {})

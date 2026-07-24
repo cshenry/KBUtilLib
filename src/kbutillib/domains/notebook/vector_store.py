@@ -1,6 +1,7 @@
 """VectorStore — typed numerical data backed by .kbcache/vectors/ + catalog.vectors."""
 
 from __future__ import annotations
+
 __all__ = ['VectorStore']
 
 

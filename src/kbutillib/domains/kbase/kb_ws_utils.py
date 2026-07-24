@@ -8,16 +8,16 @@ import os
 import re
 import sys
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
+from ...core.shared_env_utils import SharedEnvUtils
 from ...installed_clients.AbstractHandleClient import AbstractHandle as HandleService
 from ...installed_clients.WorkspaceClient import Workspace
 from .kbase_endpoints import base_url as _base_url
 from .kbase_endpoints import env_from_url, service_url
-from ...core.shared_env_utils import SharedEnvUtils
 
 __all__ = ["KBWSUtils", "KBWSUtilsImpl"]
 

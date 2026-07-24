@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 
 class AppRunnerError(Exception):
     """Base exception for kb_app_runner errors."""

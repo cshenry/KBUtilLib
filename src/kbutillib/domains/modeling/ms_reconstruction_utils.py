@@ -7,8 +7,9 @@ into a KBUtilLib-compatible format with standard named arguments.
 
 import logging
 import os
-import pandas as pd
 from typing import Any, Dict, List, Optional, Union
+
+import pandas as pd
 
 from .kb_model_utils import KBModelUtils
 
@@ -70,9 +71,9 @@ class MSReconstructionUtils(KBModelUtils):
         """Import additional modules needed for reconstruction."""
         try:
             from modelseedpy import (
+                MSATPCorrection,
                 MSBuilder,
                 MSGapfill,
-                MSATPCorrection,
                 MSModelReport,
             )
             from modelseedpy.helpers import get_template
@@ -1328,7 +1329,7 @@ class MSReconstructionUtils(KBModelUtils):
             html = env.get_template("ReportTemplate.html").render(context)
         except jinja2.TemplateNotFound:
             # Fallback if template not found
-            html = f"<html><body><h1>Model Reconstruction Report</h1></body></html>"
+            html = "<html><body><h1>Model Reconstruction Report</h1></body></html>"
 
         os.makedirs(self.working_dir + "/html", exist_ok=True)
 

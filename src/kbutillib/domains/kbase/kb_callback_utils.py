@@ -481,7 +481,9 @@ class KBCallbackUtilsImpl:
         if self._callback_url is None:
             raise ValueError("Either set callback URL or call initialize_callback.")
         if "cb_annotation_ontology_api" not in self._callback_clients:
-            from installed_clients.cb_annotation_ontology_apiClient import cb_annotation_ontology_api
+            from installed_clients.cb_annotation_ontology_apiClient import (
+                cb_annotation_ontology_api,
+            )
             self._callback_clients["cb_annotation_ontology_api"] = cb_annotation_ontology_api(
                 self._callback_url, token=self.get_token(namespace="kbase")
             )
@@ -491,7 +493,9 @@ class KBCallbackUtilsImpl:
         if self._callback_url is None:
             raise ValueError("Either set callback URL or call initialize_callback.")
         if "KBDevUtils" not in self._callback_clients:
-            from installed_clients.chenry_utility_moduleClient import chenry_utility_module
+            from installed_clients.chenry_utility_moduleClient import (
+                chenry_utility_module,
+            )
             self._callback_clients["KBDevUtils"] = chenry_utility_module(
                 self._callback_url, token=self.get_token(namespace="kbase")
             )

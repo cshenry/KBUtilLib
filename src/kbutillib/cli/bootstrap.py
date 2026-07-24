@@ -27,18 +27,21 @@ from typing import Optional
 
 import click
 
+from ..layout import DEFAULT_SHARED_DIRS
+from ._template_ops import (
+    create_plain_venv as _create_plain_venv,
+)
+from ._template_ops import (
+    parse_virtual_env_from_activate as _parse_virtual_env_from_activate,
+)
+from ._template_ops import (
+    run_venvman_project as _run_venvman_project,
+)
 from .manifest import (
     now_utc_iso,
     sha256_file,
     write_project_manifest,
 )
-from ._template_ops import (
-    parse_virtual_env_from_activate as _parse_virtual_env_from_activate,
-    run_venvman_project as _run_venvman_project,
-    create_plain_venv as _create_plain_venv,
-)
-from ..layout import DEFAULT_SHARED_DIRS
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -882,7 +885,7 @@ def _print_check_venv_plan(project_root: Path, name: str, force_venv: bool) -> N
         if use_venvman:
             click.echo(f"\nvenv: no venv detected — would run venvman create --project {name} --dir <cwd> --python 3.11")
         else:
-            click.echo(f"\nvenv: no venv detected — would run python -m venv .venv")
+            click.echo("\nvenv: no venv detected — would run python -m venv .venv")
 
     click.echo(f"pip: would run <venv_python> -m pip install -e {_kbutillib_root()}")
     click.echo(f"kernel: would register jupyter kernel `{name}`")

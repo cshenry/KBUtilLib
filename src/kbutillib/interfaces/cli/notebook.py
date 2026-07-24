@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
-import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -27,7 +25,6 @@ from .manifest import (
     read_subproject_manifest,
 )
 from .subproject import _find_project_root
-
 
 # ── constants ──────────────────────────────────────────────────────────────
 
@@ -412,7 +409,10 @@ def exec_cmd(ctx: click.Context, path: Path, allow_errors: bool) -> None:
     Creates a backup, runs all cells, writes results back, and records
     last_run_at in the subproject manifest on success.
     """
-    from nbclient.exceptions import CellExecutionError, CellTimeoutError  # noqa: PLC0415
+    from nbclient.exceptions import (  # noqa: PLC0415
+        CellExecutionError,
+        CellTimeoutError,
+    )
 
     nb_path = path.resolve()
     try:

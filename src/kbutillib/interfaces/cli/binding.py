@@ -12,7 +12,6 @@ from typing import Optional
 
 from .manifest import read_project_manifest, write_project_manifest
 
-
 # ── read ───────────────────────────────────────────────────────────────────────
 
 

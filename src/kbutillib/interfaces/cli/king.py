@@ -22,7 +22,7 @@ from typing import Optional
 
 import click
 
-from ... import king_install
+from ...agents import king_install
 
 
 def _bundle_dir() -> Path:

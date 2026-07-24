@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kbutillib.ontomap_utils import OntomapUtils
+from kbutillib.domains.genome.ontomap_utils import OntomapUtils
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +361,7 @@ def test_module_imports_without_ontomap():
     saved = sys.modules.pop("ontomap", None)
     sys.modules["ontomap"] = None  # type: ignore[assignment]
     try:
-        import kbutillib.ontomap_utils as m
+        import kbutillib.domains.genome.ontomap_utils as m
         importlib.reload(m)  # re-execute with blocked import
         assert hasattr(m, "OntomapUtils")
         assert hasattr(m, "OntomapUtilsImpl")

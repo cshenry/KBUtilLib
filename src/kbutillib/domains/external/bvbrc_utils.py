@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
 from pathlib import Path
 
-from ...kb_genome_utils import KBGenomeUtils
-from ...kb_annotation_utils import KBAnnotationUtils
+from ..genome.kb_genome_utils import KBGenomeUtils
+from ..genome.kb_annotation_utils import KBAnnotationUtils
 
 __all__ = ["BVBRCUtils", "BVBRCUtilsImpl"]
 

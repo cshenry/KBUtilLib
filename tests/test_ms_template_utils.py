@@ -44,9 +44,9 @@ def _make_template_utils():
     """Build a minimal MSTemplateUtils that bypasses KBase/biochem initialization."""
     _require_cobra()
     _require_modelseedpy()
-    from kbutillib.ms_template_utils import MSTemplateUtils
-    from kbutillib.ms_biochem_utils import MSBiochemUtils
-    from kbutillib.kb_model_utils import KBModelUtils
+    from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtils
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+    from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
     with (
         patch.object(MSBiochemUtils, "_ensure_database_available", return_value=None),
@@ -597,7 +597,7 @@ class TestRenderTemplateReport:
 
     def test_pure_function_standalone(self):
         """_render_markdown module function must work on a minimal report dict."""
-        from kbutillib.ms_template_utils import _render_markdown
+        from kbutillib.domains.modeling.ms_template_utils import _render_markdown
         minimal_report = {
             "template_metadata": {"id": "t1", "biomass_ids": ["bio1"],
                                    "rich_media": "Complete", "minimal_media": "Glucose",
@@ -653,8 +653,8 @@ class TestKBUtilLibWiring:
         _require_cobra()
         _require_modelseedpy()
         from kbutillib.toolkit import KBUtilLib
-        from kbutillib.ms_template_utils import MSTemplateUtilsImpl
-        from kbutillib.ms_biochem_utils import MSBiochemUtils, MSBiochemUtilsImpl
+        from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtilsImpl
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils, MSBiochemUtilsImpl
 
         with (
             patch.object(MSBiochemUtils, "_ensure_database_available", return_value=None),

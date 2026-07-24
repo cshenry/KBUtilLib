@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from kbutillib.kb_plm_utils import KBPLMUtils
+from kbutillib.domains.ai.kb_plm_utils import KBPLMUtils
 
 
 @pytest.fixture

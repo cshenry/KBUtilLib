@@ -2,8 +2,8 @@
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from kbutillib.kb_ws_utils import KBWSUtils, KBWSUtilsImpl
-from kbutillib.shared_env_utils import SharedEnvUtils
+from kbutillib.domains.kbase.kb_ws_utils import KBWSUtils, KBWSUtilsImpl
+from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 
 @pytest.fixture

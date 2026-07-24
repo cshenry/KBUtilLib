@@ -55,3 +55,6 @@ data/ms_classifier/
 !templates/research-project/.vscode/
 !templates/research-project/.vscode/**
 !templates/research-project/**/*.code-workspace
+
+# opencode session continuation files
+.omo/

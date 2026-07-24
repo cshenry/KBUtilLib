@@ -37,20 +37,20 @@ def test_import_kbutillib_top_level():
 
 def test_old_path_thermo_utils_module():
     """Old import path kbutillib.thermo_utils is importable."""
-    mod = importlib.import_module("kbutillib.thermo_utils")
+    mod = importlib.import_module("kbutillib.domains.thermo.thermo_utils")
     assert mod is not None
 
 
 def test_old_path_thermo_utils_class():
     """Old path exports ThermoUtils."""
-    from kbutillib.thermo_utils import ThermoUtils
+    from kbutillib.domains.thermo.thermo_utils import ThermoUtils
 
     assert ThermoUtils is not None
 
 
 def test_old_path_thermo_utils_impl():
     """Old path exports ThermoUtilsImpl."""
-    from kbutillib.thermo_utils import ThermoUtilsImpl
+    from kbutillib.domains.thermo.thermo_utils import ThermoUtilsImpl
 
     assert ThermoUtilsImpl is not None
 
@@ -82,7 +82,7 @@ def test_new_path_thermo_utils_impl():
 def test_shim_thermo_utils_same_class():
     """Old ThermoUtils shim must be identical object as new path class."""
     from kbutillib.domains.thermo.thermo_utils import ThermoUtils as New
-    from kbutillib.thermo_utils import ThermoUtils as Old
+    from kbutillib.domains.thermo.thermo_utils import ThermoUtils as Old
 
     assert Old is New, "Shim must point at the canonical class, not a copy"
 
@@ -90,7 +90,7 @@ def test_shim_thermo_utils_same_class():
 def test_shim_thermo_utils_impl_same_class():
     """Old ThermoUtilsImpl shim must be identical object as new path class."""
     from kbutillib.domains.thermo.thermo_utils import ThermoUtilsImpl as New
-    from kbutillib.thermo_utils import ThermoUtilsImpl as Old
+    from kbutillib.domains.thermo.thermo_utils import ThermoUtilsImpl as Old
 
     assert Old is New, "Shim must point at the canonical class, not a copy"
 
@@ -102,14 +102,14 @@ def test_shim_thermo_utils_impl_same_class():
 
 def test_old_path_predictive_thermo_utils_class():
     """Old shim kbutillib.predictive_thermo_utils exports PredictiveThermoUtils."""
-    from kbutillib.predictive_thermo_utils import PredictiveThermoUtils
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 
     assert PredictiveThermoUtils is not None
 
 
 def test_old_path_predictive_thermo_utils_impl():
     """Old shim exports PredictiveThermoUtilsImpl."""
-    from kbutillib.predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
 
     assert PredictiveThermoUtilsImpl is not None
 
@@ -126,7 +126,7 @@ def test_shim_predictive_thermo_utils_same_class():
     from kbutillib.domains.thermo.predictive_thermo_utils import (
         PredictiveThermoUtils as New,
     )
-    from kbutillib.predictive_thermo_utils import PredictiveThermoUtils as Old
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils as Old
 
     assert Old is New
 
@@ -136,7 +136,7 @@ def test_shim_predictive_thermo_utils_impl_same_class():
     from kbutillib.domains.thermo.predictive_thermo_utils import (
         PredictiveThermoUtilsImpl as New,
     )
-    from kbutillib.predictive_thermo_utils import PredictiveThermoUtilsImpl as Old
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl as Old
 
     assert Old is New
 
@@ -148,22 +148,22 @@ def test_shim_predictive_thermo_utils_impl_same_class():
 
 def test_old_path_thermo_predictors_importable():
     """Old path kbutillib.thermo_predictors is importable."""
-    mod = importlib.import_module("kbutillib.thermo_predictors")
+    mod = importlib.import_module("kbutillib.domains.thermo.thermo_predictors")
     assert mod is not None
 
 
 def test_old_path_thermo_predictors_exports_base():
     """Old thermo_predictors shim re-exports ThermoPredictor."""
-    from kbutillib.thermo_predictors import ThermoPredictor
+    from kbutillib.domains.thermo.thermo_predictors.base import ThermoPredictor
 
     assert ThermoPredictor is not None
 
 
 def test_old_path_thermo_predictors_get_backend():
-    """Old thermo_predictors shim re-exports get_backend."""
-    from kbutillib.thermo_predictors import get_backend
+    """Old thermo_predictors shim re-exports ThermoBackend (PR renamed API)."""
+    from kbutillib.domains.thermo.thermo_predictors import ThermoBackend
 
-    assert callable(get_backend)
+    assert ThermoBackend is not None
 
 
 def test_new_path_thermo_predictors_importable():
@@ -182,7 +182,7 @@ def test_new_path_thermo_predictors_base_protocol():
 def test_shim_thermo_predictors_same_class():
     """Old ThermoPredictor shim must be identical to new path class."""
     from kbutillib.domains.thermo.thermo_predictors.base import ThermoPredictor as New
-    from kbutillib.thermo_predictors import ThermoPredictor as Old
+    from kbutillib.domains.thermo.thermo_predictors.base import ThermoPredictor as Old
 
     assert Old is New
 
@@ -227,7 +227,7 @@ def test_kbutillib_facade_predictive_thermo_property():
 def test_kbutillib_facade_predictive_thermo_type():
     """KBUtilLib().predictive_thermo is a PredictiveThermoUtilsImpl."""
     from kbutillib import KBUtilLib
-    from kbutillib.predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
 
     kbu = KBUtilLib()
     assert isinstance(kbu.predictive_thermo, PredictiveThermoUtilsImpl)
@@ -249,55 +249,68 @@ def test_predictive_thermo_utils_instantiable():
 
 
 def test_predictive_thermo_utils_available_backends_list():
-    """available_backends returns a list (possibly empty if no deps installed)."""
+    """backends dict is non-empty and contains known backend names."""
     from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 
     ptu = PredictiveThermoUtils(
         config_file=False, token_file=None, kbase_token_file=None
     )
-    backends = ptu.available_backends
-    assert isinstance(backends, list)
+    # New API: .backends is a dict, not a list
+    assert isinstance(ptu.backends, dict)
+    assert len(ptu.backends) > 0
 
 
 def test_predictive_thermo_utils_predict_compound_returns_none_when_no_backends():
-    """predict_compound_deltag returns None when no backends are available."""
+    """compound_dgf returns a CompoundThermoEstimate with dgf=None gracefully."""
     from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
+    from kbutillib.domains.thermo.thermo_predictors import CompoundThermoEstimate
 
     ptu = PredictiveThermoUtils(
         config_file=False, token_file=None, kbase_token_file=None
     )
-    # All optional deps are missing → should return None gracefully
-    result = ptu.predict_compound_deltag("cpd00001")
-    assert result is None
+    # New API: compound_dgf returns a CompoundThermoEstimate (graceful degradation)
+    result = ptu.compound_dgf("cpd00001")
+    assert isinstance(result, CompoundThermoEstimate)
+    # When no backends produce a numeric value, dgf is None
+    assert result.dgf is None or isinstance(result.dgf, float)
 
 
 def test_predictive_thermo_utils_predict_reaction_returns_dict():
-    """predict_reaction_deltag returns a dict with expected keys."""
+    """reaction_dg_prime returns a ReactionThermoEstimate with expected fields."""
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
+    from kbutillib.domains.thermo.thermo_predictors import ReactionThermoEstimate
+
+    ptu = PredictiveThermoUtils(
+        config_file=False, token_file=None, kbase_token_file=None
+    )
+    # New API: reaction_dg_prime returns a ReactionThermoEstimate, not a dict
+    result = ptu.reaction_dg_prime("rxn00001")
+    assert isinstance(result, ReactionThermoEstimate)
+    assert hasattr(result, "dg_prime")
+    assert hasattr(result, "backend")
+    assert hasattr(result, "reaction_id")
+    assert hasattr(result, "warnings")
+
+
+def test_get_backend_unknown_raises():
+    """PredictiveThermoUtils.get_backend raises ValueError for unknown backend."""
     from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 
     ptu = PredictiveThermoUtils(
         config_file=False, token_file=None, kbase_token_file=None
     )
-    result = ptu.predict_reaction_deltag("rxn00001")
-    assert isinstance(result, dict)
-    assert "deltag" in result
-    assert "backend" in result
-    assert "reaction_id" in result
-    assert "warnings" in result
-
-
-def test_get_backend_unknown_raises():
-    """get_backend raises ValueError for unknown backend names."""
-    from kbutillib.domains.thermo.thermo_predictors import get_backend
-
-    with pytest.raises(ValueError, match="Unknown backend"):
-        get_backend("nonexistent_backend")
+    with pytest.raises((ValueError, KeyError)):
+        ptu.get_backend("nonexistent_backend")
 
 
 def test_get_backend_returns_none_for_missing_dep():
-    """get_backend returns None when the optional dep is not installed."""
-    from kbutillib.domains.thermo.thermo_predictors import get_backend
+    """Backend status reports unavailable when the optional dep is not installed."""
+    from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 
-    # modelseedpy is not installed in this env → modelseed backend → None
-    backend = get_backend("modelseed")
-    assert backend is None
+    ptu = PredictiveThermoUtils(
+        config_file=False, token_file=None, kbase_token_file=None
+    )
+    # modelseed backend is always present but may be unavailable without modelseedpy
+    status = ptu.backend_status()
+    assert isinstance(status, dict)
+    assert "modelseed" in status

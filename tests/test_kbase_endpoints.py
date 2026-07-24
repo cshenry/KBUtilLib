@@ -2,7 +2,7 @@
 
 import pytest
 
-from kbutillib.kbase_endpoints import (
+from kbutillib.domains.kbase.kbase_endpoints import (
     base_url,
     env_from_url,
     narrative_url,

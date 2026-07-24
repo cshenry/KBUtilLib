@@ -37,7 +37,7 @@ def recon():
     far too slow to repeat per test.  Tests MUST NOT mutate this instance; use
     ``patch.object`` so changes are undone.
     """
-    from kbutillib.ms_reconstruction_utils import MSReconstructionUtils
+    from kbutillib.domains.modeling.ms_reconstruction_utils import MSReconstructionUtils
 
     return MSReconstructionUtils(
         config_file=False,
@@ -50,7 +50,7 @@ def recon():
 @pytest.fixture(scope="session")
 def model_utils():
     """A real KBModelUtils instance, constructed offline."""
-    from kbutillib.kb_model_utils import KBModelUtils
+    from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
     return KBModelUtils(
         config_file=False,
@@ -505,7 +505,7 @@ class TestProvenanceOnSavePaths:
         still-open bug; this test isolates the provenance payload, which is what
         the fix actually changed.
         """
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         g = KBGenomeUtils(
             config_file=False,
@@ -553,7 +553,7 @@ class TestKBGenomeUtilsAnnoClientGap:
     def test_anno_client_is_missing_on_kb_genome_utils(self):
         """Documents the gap as it stands today.  If this starts failing, the
         composition changed and the xfail below should flip -- delete both."""
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         assert not hasattr(KBGenomeUtils, "anno_client")
 
@@ -569,7 +569,7 @@ class TestKBGenomeUtilsAnnoClientGap:
         Only the workspace side is mocked -- anno_client is NOT patched in, which
         is the whole point.
         """
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         g = KBGenomeUtils(
             config_file=False,

@@ -24,13 +24,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kbutillib.annotator_utils import (
+from kbutillib.domains.genome.annotation.annotator_utils import (
     AnnotationRecord,
     AnnotationResult,
     Term,
     ToolUnavailableError,
 )
-from kbutillib.prokka_utils import (
+from kbutillib.domains.genome.annotation.prokka_utils import (
     ProkkaUtils,
     _parse_gff_locus_map,
     _parse_tsv,
@@ -897,7 +897,7 @@ class TestProkkaExports:
 
     def test_prokka_utils_is_correct_class(self):
         import kbutillib
-        from kbutillib.prokka_utils import ProkkaUtils as PU
+        from kbutillib.domains.genome.annotation.prokka_utils import ProkkaUtils as PU
         assert kbutillib.ProkkaUtils is PU
 
 

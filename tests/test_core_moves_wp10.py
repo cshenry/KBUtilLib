@@ -19,28 +19,28 @@ import pytest
 
 def test_old_base_utils_import():
     """kbutillib.base_utils.BaseUtils is importable from the old path."""
-    from kbutillib.base_utils import BaseUtils  # noqa: F401
+    from kbutillib.core.base_utils import BaseUtils  # noqa: F401
 
     assert BaseUtils is not None
 
 
 def test_old_shared_env_utils_import():
     """kbutillib.shared_env_utils.SharedEnvUtils is importable from the old path."""
-    from kbutillib.shared_env_utils import SharedEnvUtils  # noqa: F401
+    from kbutillib.core.shared_env_utils import SharedEnvUtils  # noqa: F401
 
     assert SharedEnvUtils is not None
 
 
 def test_old_dependency_manager_import():
     """kbutillib.dependency_manager.DependencyManager is importable from the old path."""
-    from kbutillib.dependency_manager import DependencyManager  # noqa: F401
+    from kbutillib.core.dependency_manager import DependencyManager  # noqa: F401
 
     assert DependencyManager is not None
 
 
 def test_old_dependency_manager_module_functions():
     """Module-level helper functions are still accessible at the old shim path."""
-    from kbutillib.dependency_manager import (  # noqa: F401
+    from kbutillib.core.dependency_manager import (  # noqa: F401
         get_data_path,
         get_dependency_manager,
         get_dependency_path,
@@ -84,7 +84,7 @@ def test_new_dependency_manager_import():
 
 def test_base_utils_same_object():
     """Old and new BaseUtils paths must resolve to the identical class object."""
-    from kbutillib.base_utils import BaseUtils as OldBaseUtils
+    from kbutillib.core.base_utils import BaseUtils as OldBaseUtils
     from kbutillib.core.base_utils import BaseUtils as NewBaseUtils
 
     assert OldBaseUtils is NewBaseUtils, (
@@ -95,7 +95,7 @@ def test_base_utils_same_object():
 def test_shared_env_utils_same_object():
     """Old and new SharedEnvUtils paths must resolve to the identical class object."""
     from kbutillib.core.shared_env_utils import SharedEnvUtils as NewSharedEnvUtils
-    from kbutillib.shared_env_utils import SharedEnvUtils as OldSharedEnvUtils
+    from kbutillib.core.shared_env_utils import SharedEnvUtils as OldSharedEnvUtils
 
     assert OldSharedEnvUtils is NewSharedEnvUtils, (
         "SharedEnvUtils from old path is not the same object as from new core path"
@@ -105,7 +105,7 @@ def test_shared_env_utils_same_object():
 def test_dependency_manager_same_object():
     """Old and new DependencyManager paths must resolve to the identical class object."""
     from kbutillib.core.dependency_manager import DependencyManager as NewDM
-    from kbutillib.dependency_manager import DependencyManager as OldDM
+    from kbutillib.core.dependency_manager import DependencyManager as OldDM
 
     assert OldDM is NewDM, (
         "DependencyManager from old path is not the same object as from new core path"
@@ -170,7 +170,7 @@ def test_kbutillib_constructs():
 
 def test_base_utils_instantiation():
     """BaseUtils imported from old shim path can be instantiated."""
-    from kbutillib.base_utils import BaseUtils
+    from kbutillib.core.base_utils import BaseUtils
 
     obj = BaseUtils()
     assert isinstance(obj, BaseUtils)
@@ -179,7 +179,7 @@ def test_base_utils_instantiation():
 
 def test_dependency_manager_instantiation():
     """DependencyManager imported from old shim path can be instantiated."""
-    from kbutillib.dependency_manager import DependencyManager
+    from kbutillib.core.dependency_manager import DependencyManager
 
     dm = DependencyManager(auto_init=False)
     assert isinstance(dm, DependencyManager)
@@ -188,7 +188,7 @@ def test_dependency_manager_instantiation():
 
 def test_shared_env_utils_is_base_utils_subclass():
     """SharedEnvUtils (from either path) is a subclass of BaseUtils."""
-    from kbutillib.base_utils import BaseUtils
-    from kbutillib.shared_env_utils import SharedEnvUtils
+    from kbutillib.core.base_utils import BaseUtils
+    from kbutillib.core.shared_env_utils import SharedEnvUtils
 
     assert issubclass(SharedEnvUtils, BaseUtils)

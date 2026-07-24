@@ -98,7 +98,7 @@ def _get_kbu(ctx: click.Context):
     Only needed for commands that hit EE2 (refresh, cancel, logs).
     """
     from ..kb_job_utils.utils import KBJobUtils
-    from ..shared_env_utils import SharedEnvUtils
+    from ..core.shared_env_utils import SharedEnvUtils
 
     obj = ctx.obj
     if "kbu" not in obj:

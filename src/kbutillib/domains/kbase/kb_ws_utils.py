@@ -15,9 +15,9 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 from ...installed_clients.AbstractHandleClient import AbstractHandle as HandleService
 from ...installed_clients.WorkspaceClient import Workspace
-from ...kbase_endpoints import base_url as _base_url
-from ...kbase_endpoints import env_from_url, service_url
-from ...shared_env_utils import SharedEnvUtils
+from .kbase_endpoints import base_url as _base_url
+from .kbase_endpoints import env_from_url, service_url
+from ...core.shared_env_utils import SharedEnvUtils
 
 __all__ = ["KBWSUtils", "KBWSUtilsImpl"]
 

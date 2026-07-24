@@ -28,7 +28,7 @@ def shared_env():
 
     Suitable for tests that don't need a KBase token.
     """
-    from kbutillib.shared_env_utils import SharedEnvUtils
+    from kbutillib.core.shared_env_utils import SharedEnvUtils
 
     return SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None)
 
@@ -39,7 +39,7 @@ def shared_env_with_token():
 
     For tests that exercise token-passing without hitting a real service.
     """
-    from kbutillib.shared_env_utils import SharedEnvUtils
+    from kbutillib.core.shared_env_utils import SharedEnvUtils
 
     return SharedEnvUtils(
         config_file=False,

@@ -48,7 +48,7 @@ import json
 from cobra.flux_analysis import flux_variability_analysis
 from cobra.flux_analysis import pfba
 
-from ...kb_model_utils import KBModelUtils
+from .kb_model_utils import KBModelUtils
 
 __all__ = [
     "MSFBAUtils",

@@ -18,7 +18,7 @@ from .nms import NMSSpecCache
 
 if TYPE_CHECKING:
     from ..kb_job_utils import KBJobUtils
-    from ..kb_ws_utils import KBWSUtils
+    from ..domains.kbase.kb_ws_utils import KBWSUtils
 
 logger = logging.getLogger(__name__)
 

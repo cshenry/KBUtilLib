@@ -15,18 +15,18 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def test_old_path_model_directionality_direction_conversion():
-    from kbutillib.model_directionality import direction_conversion
+    from kbutillib.domains.modeling.model_directionality import direction_conversion
     assert isinstance(direction_conversion, dict)
     assert direction_conversion["forward"] == ">"
 
 
 def test_old_path_model_directionality_directionality_from_bounds():
-    from kbutillib.model_directionality import directionality_from_bounds
+    from kbutillib.domains.modeling.model_directionality import directionality_from_bounds
     assert callable(directionality_from_bounds)
 
 
 def test_old_path_model_directionality_combine():
-    from kbutillib.model_directionality import combine_directionality_signals
+    from kbutillib.domains.modeling.model_directionality import combine_directionality_signals
     assert callable(combine_directionality_signals)
 
 
@@ -50,13 +50,13 @@ def test_new_path_modeling_model_directionality_from_bounds():
 # ---------------------------------------------------------------------------
 
 def test_identity_model_directionality_direction_conversion():
-    from kbutillib.model_directionality import direction_conversion as old
+    from kbutillib.domains.modeling.model_directionality import direction_conversion as old
     from kbutillib.domains.modeling.model_directionality import direction_conversion as new
     assert old is new
 
 
 def test_identity_model_directionality_from_bounds():
-    from kbutillib.model_directionality import directionality_from_bounds as old
+    from kbutillib.domains.modeling.model_directionality import directionality_from_bounds as old
     from kbutillib.domains.modeling.model_directionality import directionality_from_bounds as new
     assert old is new
 
@@ -66,7 +66,7 @@ def test_identity_model_directionality_from_bounds():
 # ---------------------------------------------------------------------------
 
 def test_old_path_model_helpers_parse_id():
-    from kbutillib.model_helpers import _parse_id
+    from kbutillib.domains.modeling.model_helpers import _parse_id
     assert callable(_parse_id)
     base, comp, idx = _parse_id("cpd00001[c]")
     assert base == "cpd00001"
@@ -74,7 +74,7 @@ def test_old_path_model_helpers_parse_id():
 
 
 def test_old_path_model_helpers_check_convert():
-    from kbutillib.model_helpers import _check_and_convert_model
+    from kbutillib.domains.modeling.model_helpers import _check_and_convert_model
     assert callable(_check_and_convert_model)
 
 
@@ -91,7 +91,7 @@ def test_new_path_modeling_model_helpers_parse_id():
 
 
 def test_identity_model_helpers_parse_id():
-    from kbutillib.model_helpers import _parse_id as old
+    from kbutillib.domains.modeling.model_helpers import _parse_id as old
     from kbutillib.domains.modeling.model_helpers import _parse_id as new
     assert old is new
 
@@ -101,18 +101,18 @@ def test_identity_model_helpers_parse_id():
 # ---------------------------------------------------------------------------
 
 def test_old_path_model_standardization_utils_class():
-    from kbutillib.model_standardization_utils import ModelStandardizationUtils
+    from kbutillib.domains.modeling.model_standardization_utils import ModelStandardizationUtils
     assert ModelStandardizationUtils is not None
 
 
 def test_old_path_model_standardization_utils_direction():
-    from kbutillib.model_standardization_utils import direction_conversion
+    from kbutillib.domains.modeling.model_standardization_utils import direction_conversion
     assert isinstance(direction_conversion, dict)
     assert direction_conversion["reversible"] == "="
 
 
 def test_old_path_model_standardization_utils_compartment_types():
-    from kbutillib.model_standardization_utils import compartment_types
+    from kbutillib.domains.modeling.model_standardization_utils import compartment_types
     assert isinstance(compartment_types, dict)
     assert "cytosol" in compartment_types
 
@@ -127,7 +127,7 @@ def test_new_path_modeling_model_standardization_utils():
 
 
 def test_identity_model_standardization_utils_class():
-    from kbutillib.model_standardization_utils import ModelStandardizationUtils as old
+    from kbutillib.domains.modeling.model_standardization_utils import ModelStandardizationUtils as old
     from kbutillib.domains.modeling.model_standardization_utils import ModelStandardizationUtils as new
     assert old is new
 
@@ -142,7 +142,7 @@ def test_old_path_kb_model_utils_module_importable():
     # We can't *instantiate* KBModelUtils without cobra/modelseedpy,
     # but we can verify the shim module itself imports cleanly.
     try:
-        mod = importlib.import_module("kbutillib.kb_model_utils")
+        mod = importlib.import_module("kbutillib.domains.modeling.kb_model_utils")
         # If the shim loaded, KBModelUtils attr should exist
         assert hasattr(mod, "KBModelUtils")
     except ImportError as exc:
@@ -153,7 +153,7 @@ def test_old_path_kb_model_utils_module_importable():
 def test_old_path_kb_model_utils_impl_importable():
     import importlib
     try:
-        mod = importlib.import_module("kbutillib.kb_model_utils")
+        mod = importlib.import_module("kbutillib.domains.modeling.kb_model_utils")
         assert hasattr(mod, "KBModelUtilsImpl")
     except ImportError as exc:
         pytest.skip(f"Optional dep missing: {exc}")
@@ -166,7 +166,7 @@ def test_old_path_kb_model_utils_impl_importable():
 def test_old_path_ms_fba_utils_importable():
     import importlib
     try:
-        mod = importlib.import_module("kbutillib.ms_fba_utils")
+        mod = importlib.import_module("kbutillib.domains.modeling.ms_fba_utils")
         assert hasattr(mod, "MSFBAUtils")
         assert hasattr(mod, "MSFBAUtilsImpl")
     except ImportError as exc:
@@ -180,7 +180,7 @@ def test_old_path_ms_fba_utils_importable():
 def test_old_path_ms_template_utils_importable():
     import importlib
     try:
-        mod = importlib.import_module("kbutillib.ms_template_utils")
+        mod = importlib.import_module("kbutillib.domains.modeling.ms_template_utils")
         assert hasattr(mod, "MSTemplateUtils")
         assert hasattr(mod, "MSTemplateUtilsImpl")
     except ImportError as exc:
@@ -194,7 +194,7 @@ def test_old_path_ms_template_utils_importable():
 def test_old_path_ms_reconstruction_utils_importable():
     import importlib
     try:
-        mod = importlib.import_module("kbutillib.ms_reconstruction_utils")
+        mod = importlib.import_module("kbutillib.domains.modeling.ms_reconstruction_utils")
         assert hasattr(mod, "MSReconstructionUtils")
         assert hasattr(mod, "MSReconstructionUtilsImpl")
     except ImportError as exc:

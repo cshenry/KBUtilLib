@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from ...shared_env_utils import SharedEnvUtils
+from ...core.shared_env_utils import SharedEnvUtils
 
 
 class SKANIUtils(SharedEnvUtils):

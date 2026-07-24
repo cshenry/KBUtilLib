@@ -29,7 +29,7 @@ def _make_kbws_utils(shock_url: str = "https://kbase.us/services/shock-api") -> 
     We construct the object without going through __init__ so that we don't need
     a real config file, token file, or installed KBase clients.
     """
-    from kbutillib.kb_ws_utils import KBWSUtils
+    from kbutillib.domains.kbase.kb_ws_utils import KBWSUtils
 
     obj = object.__new__(KBWSUtils)
     # Minimal attributes required by upload_blob_file

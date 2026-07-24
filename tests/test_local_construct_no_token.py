@@ -44,7 +44,7 @@ class TestNoTokenConstruction:
     def test_kb_model_utils_no_token_no_error(self):
         """KBModelUtils(config_file=False, token_file=None, kbase_token_file=None)
         succeeds with no KB_AUTH_TOKEN and no KBASE_AUTH_TOKEN set."""
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             obj = KBModelUtils(config_file=False, token_file=None, kbase_token_file=None)
@@ -54,7 +54,7 @@ class TestNoTokenConstruction:
     def test_ms_fba_utils_no_token_no_error(self):
         """MSFBAUtils(config_file=False, token_file=None, kbase_token_file=None)
         succeeds with no KB_AUTH_TOKEN and no KBASE_AUTH_TOKEN set."""
-        from kbutillib.ms_fba_utils import MSFBAUtils
+        from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             obj = MSFBAUtils(config_file=False, token_file=None, kbase_token_file=None)
@@ -63,7 +63,7 @@ class TestNoTokenConstruction:
 
     def test_no_token_does_not_set_kb_auth_token_env(self):
         """When no token is available, KB_AUTH_TOKEN must not be set in the environment."""
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             KBModelUtils(config_file=False, token_file=None, kbase_token_file=None)
@@ -81,7 +81,7 @@ class TestKbaseAuthTokenBridge:
 
     def test_kbase_auth_token_recognized_by_shared_env(self):
         """SharedEnvUtils with only KBASE_AUTH_TOKEN set returns that value via get_token('kbase')."""
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         token = "bridge-test-token-kbase-auth"
         with patch.dict(os.environ, _clean_env({"KBASE_AUTH_TOKEN": token}), clear=True):
@@ -94,7 +94,7 @@ class TestKbaseAuthTokenBridge:
 
     def test_kb_auth_token_still_recognized(self):
         """KB_AUTH_TOKEN (the primary name) is still recognized after the bridge change."""
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         token = "primary-kb-auth-token"
         with patch.dict(os.environ, _clean_env({"KB_AUTH_TOKEN": token}), clear=True):
@@ -107,7 +107,7 @@ class TestKbaseAuthTokenBridge:
 
     def test_kb_auth_token_wins_over_kbase_auth_token(self):
         """When both vars are set, KB_AUTH_TOKEN takes precedence over KBASE_AUTH_TOKEN."""
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         kb_token = "kb-auth-wins"
         kbase_token = "kbase-auth-loses"
@@ -123,7 +123,7 @@ class TestKbaseAuthTokenBridge:
 
     def test_no_token_vars_returns_none(self):
         """When neither KB_AUTH_TOKEN nor KBASE_AUTH_TOKEN is set, get_token returns None."""
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             env = SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None)
@@ -147,7 +147,7 @@ class TestLazyKbaseApi:
 
     def test_kbase_api_raises_runtime_error_without_token(self):
         """Accessing kbase_api with no token raises RuntimeError with clear message."""
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             obj = KBModelUtils(config_file=False, token_file=None, kbase_token_file=None)
@@ -156,7 +156,7 @@ class TestLazyKbaseApi:
 
     def test_kbase_api_not_raised_on_construction(self):
         """No RuntimeError is raised during __init__ even when no token is set."""
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         with patch.dict(os.environ, _clean_env(), clear=True):
             # Must not raise
@@ -167,7 +167,7 @@ class TestLazyKbaseApi:
     def test_kbase_api_constructs_when_token_present(self):
         """kbase_api property succeeds and returns a non-None object when a token is set."""
         pytest.importorskip("cobrakbase", reason="cobrakbase required")
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         token = "fake-kbase-token-lazy-test"
         with patch.dict(os.environ, _clean_env(), clear=True):
@@ -188,7 +188,7 @@ class TestLazyKbaseApi:
     def test_kbase_api_lazy_via_kbase_auth_token(self):
         """kbase_api construction succeeds when token comes from KBASE_AUTH_TOKEN bridge."""
         pytest.importorskip("cobrakbase", reason="cobrakbase required")
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         token = "bridge-lazy-token"
         with patch.dict(os.environ, _clean_env({"KBASE_AUTH_TOKEN": token}), clear=True):

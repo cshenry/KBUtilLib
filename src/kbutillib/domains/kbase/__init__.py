@@ -38,6 +38,16 @@ __all__ = [
     "data_dependencies_from_records",
     "compute_narrative_meta",
     "to_latest_ref",
+    # new in Phase B
+    "KBBERDLUtils",
+    "KBBERDLUtilsImpl",
+    "CatalogClient",
+    "CatalogError",
+    "register_module",
+    "base_url",
+    "service_url",
+    "narrative_url",
+    "env_from_url",
 ]
 
 _MODULE_MAP: dict[str, str] = {
@@ -62,6 +72,18 @@ _MODULE_MAP: dict[str, str] = {
     "data_dependencies_from_records": "kb_narrative_audit",
     "compute_narrative_meta": "kb_narrative_audit",
     "to_latest_ref": "kb_narrative_audit",
+    # kb_berdl_utils
+    "KBBERDLUtils": "kb_berdl_utils",
+    "KBBERDLUtilsImpl": "kb_berdl_utils",
+    # kbase_catalog_client
+    "CatalogClient": "kbase_catalog_client",
+    "CatalogError": "kbase_catalog_client",
+    "register_module": "kbase_catalog_client",
+    # kbase_endpoints
+    "base_url": "kbase_endpoints",
+    "service_url": "kbase_endpoints",
+    "narrative_url": "kbase_endpoints",
+    "env_from_url": "kbase_endpoints",
 }
 
 

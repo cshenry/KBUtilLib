@@ -45,9 +45,9 @@ def _make_fba_utils():
     """Build a minimal MSFBAUtils that bypasses KBase/biochem initialization."""
     _require_cobra()
     _require_modelseedpy()
-    from kbutillib.ms_fba_utils import MSFBAUtils
-    from kbutillib.ms_biochem_utils import MSBiochemUtils
-    from kbutillib.kb_model_utils import KBModelUtils
+    from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+    from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
     with (
         patch.object(MSBiochemUtils, "_ensure_database_available", return_value=None),

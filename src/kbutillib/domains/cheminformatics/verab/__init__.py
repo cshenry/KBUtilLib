@@ -39,6 +39,7 @@ Later slices (S4-S8) will add:
 
 from __future__ import annotations
 
+from .facade import VerabUtils, VerabUtilsImpl  # noqa: F401
 from .king_artifacts import emit_king_workflow
 from .models import (
     ScreeningRecord,
@@ -69,4 +70,7 @@ __all__ = [
     "MethoxyAromaticFilter",
     # KING artifact emission (S6)
     "emit_king_workflow",
+    # facade
+    "VerabUtils",
+    "VerabUtilsImpl",
 ]

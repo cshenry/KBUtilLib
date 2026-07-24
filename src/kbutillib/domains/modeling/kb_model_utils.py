@@ -8,9 +8,9 @@ import re
 import json
 import os
 
-from ...kb_annotation_utils import KBAnnotationUtils
-from ...ms_biochem_utils import MSBiochemUtils
-from ...model_standardization_utils import compartment_types, direction_conversion
+from ..genome.kb_annotation_utils import KBAnnotationUtils
+from ..biochem.ms_biochem_utils import MSBiochemUtils
+from .model_standardization_utils import compartment_types, direction_conversion
 
 __all__ = [
     "KBModelUtils",

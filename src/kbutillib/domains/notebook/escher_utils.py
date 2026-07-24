@@ -14,8 +14,8 @@ import statistics
 from cobra.flux_analysis import flux_variability_analysis
 from cobra.flux_analysis import pfba
 
-from ...kb_model_utils import KBModelUtils
-from ...ms_biochem_utils import MSBiochemUtils
+from ..modeling.kb_model_utils import KBModelUtils
+from ..biochem.ms_biochem_utils import MSBiochemUtils
 
 __all__ = ["EscherUtils", "EscherUtilsImpl"]
 

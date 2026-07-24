@@ -2,7 +2,7 @@
 
 Tests
 -----
-1.  Old path import: ``from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl`` works.
+1.  Old path import: ``from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl`` works.
 2.  New path import: ``from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl`` works.
 3.  Both paths resolve to the same class object (identity check).
 4.  Old path: ``MSBiochemUtils`` importable.
@@ -27,7 +27,7 @@ import pytest
 
 def test_old_path_impl_importable():
     """Old path import of MSBiochemUtilsImpl must not raise."""
-    from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl  # noqa: F401
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ def test_new_path_impl_importable():
 
 def test_impl_same_object():
     """Old and new paths must resolve to the identical class."""
-    from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl as OLD
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl as OLD
     from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl as NEW
     assert OLD is NEW, "MSBiochemUtilsImpl should be the same object via both import paths"
 
@@ -56,7 +56,7 @@ def test_impl_same_object():
 
 def test_old_path_base_importable():
     """Old path import of legacy MSBiochemUtils must not raise."""
-    from kbutillib.ms_biochem_utils import MSBiochemUtils  # noqa: F401
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ def test_old_path_base_importable():
 
 def test_base_same_object():
     """MSBiochemUtils must be the same class via old and new paths."""
-    from kbutillib.ms_biochem_utils import MSBiochemUtils as OLD
+    from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils as OLD
     from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils as NEW
     assert OLD is NEW
 
@@ -75,7 +75,7 @@ def test_base_same_object():
 # ---------------------------------------------------------------------------
 
 def test_old_path_compartment_types():
-    from kbutillib.ms_biochem_utils import compartment_types
+    from kbutillib.domains.biochem.ms_biochem_utils import compartment_types
     assert isinstance(compartment_types, dict)
     assert "cytosol" in compartment_types
 
@@ -85,7 +85,7 @@ def test_old_path_compartment_types():
 # ---------------------------------------------------------------------------
 
 def test_new_path_compartment_types_same():
-    from kbutillib.ms_biochem_utils import compartment_types as OLD
+    from kbutillib.domains.biochem.ms_biochem_utils import compartment_types as OLD
     from kbutillib.domains.biochem.ms_biochem_utils import compartment_types as NEW
     assert OLD is NEW
 
@@ -143,8 +143,8 @@ def test_kbutillib_biochem_attr():
 # ---------------------------------------------------------------------------
 
 def test_shim_all_contents():
-    import kbutillib.ms_biochem_utils as shim
-    assert hasattr(shim, "__all__"), "Shim must define __all__"
-    assert "MSBiochemUtils" in shim.__all__
-    assert "MSBiochemUtilsImpl" in shim.__all__
-    assert "compartment_types" in shim.__all__
+    """After Phase C shim deletion, verify canonical module exports key names."""
+    import kbutillib.domains.biochem.ms_biochem_utils as mod
+    assert hasattr(mod, "MSBiochemUtils"), "canonical ms_biochem_utils must export MSBiochemUtils"
+    assert hasattr(mod, "MSBiochemUtilsImpl"), "canonical ms_biochem_utils must export MSBiochemUtilsImpl"
+    assert hasattr(mod, "compartment_types"), "canonical ms_biochem_utils must export compartment_types"

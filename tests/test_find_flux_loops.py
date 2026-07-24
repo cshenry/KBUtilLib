@@ -245,7 +245,7 @@ class TestFindFluxLoopsEndToEnd:
     def test_atp_cycle_detected(self, atp_cycle_model):
         """find_flux_loops reports exactly the planted ATP cycle."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone, EGC_PROBE_CATALOG
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone, EGC_PROBE_CATALOG
         from modelseedpy.core.msmodelutl import MSModelUtil
 
         mdlutl = _make_msutil(atp_cycle_model)
@@ -288,7 +288,7 @@ class TestFindFluxLoopsEndToEnd:
     def test_clean_model_no_loops(self, atp_cycle_model_fixed):
         """find_flux_loops returns empty list for a correctly-directed model."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         mdlutl = _make_msutil(atp_cycle_model_fixed)
         results = find_flux_loops_standalone(
@@ -312,7 +312,7 @@ class TestMinimizeActiveReactions:
     def test_returns_short_path(self, parallel_paths_model):
         """minimize_active_reactions returns the 1-reaction short path, not 2-reaction long."""
         _require_deps()
-        from kbutillib.ms_fba_utils import minimize_active_reactions_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import minimize_active_reactions_standalone
 
         mdlutl = _make_msutil(parallel_paths_model)
 
@@ -326,7 +326,7 @@ class TestMinimizeActiveReactions:
             mdlutl,
             objective="MAX{R_probe}",
         )
-        from kbutillib.ms_fba_utils import _strip_reaction_use_pkg
+        from kbutillib.domains.modeling.ms_fba_utils import _strip_reaction_use_pkg
         _strip_reaction_use_pkg(parallel_paths_model, mdlutl.pkgmgr)
 
         # Restore
@@ -341,7 +341,7 @@ class TestMinimizeActiveReactions:
     def test_count_minimal_not_flux_minimal(self, parallel_paths_model):
         """With both paths available, minimize_active_reactions picks count-minimal (1 rxn)."""
         _require_deps()
-        from kbutillib.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
+        from kbutillib.domains.modeling.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
 
         mdlutl = _make_msutil(parallel_paths_model)
 
@@ -372,7 +372,7 @@ class TestMinimizeActiveReactions:
     def test_result_schema(self, parallel_paths_model):
         """minimize_active_reactions result has correct schema."""
         _require_deps()
-        from kbutillib.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
+        from kbutillib.domains.modeling.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
 
         mdlutl = _make_msutil(parallel_paths_model)
         result = minimize_active_reactions_standalone(
@@ -413,7 +413,7 @@ class TestEnumerateAlternativeReactionSets:
         # for both MILP and subsequent enumerate calls).
         alternatives_model.reactions.get_by_id("R_essential").lower_bound = 1
 
-        from kbutillib.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
+        from kbutillib.domains.modeling.ms_fba_utils import minimize_active_reactions_standalone, _strip_reaction_use_pkg
         result = minimize_active_reactions_standalone(
             mdlutl,
             objective="MAX{R_essential}",
@@ -426,7 +426,7 @@ class TestEnumerateAlternativeReactionSets:
         _require_deps()
         mdlutl, min_result = self._get_minimal_result(alternatives_model)
         # R_essential is still pinned at lb=1 from _get_minimal_result
-        from kbutillib.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
 
         if not min_result["reactions"]:
             alternatives_model.reactions.get_by_id("R_essential").lower_bound = 0
@@ -456,7 +456,7 @@ class TestEnumerateAlternativeReactionSets:
         _require_deps()
         mdlutl, min_result = self._get_minimal_result(alternatives_model)
         # R_essential is pinned at lb=1 — knocking it out (ub=0) makes min-dev infeasible
-        from kbutillib.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
 
         if not min_result["reactions"]:
             alternatives_model.reactions.get_by_id("R_essential").lower_bound = 0
@@ -476,7 +476,7 @@ class TestEnumerateAlternativeReactionSets:
         """enumerate_alternative_reaction_sets returns correct schema per reaction."""
         _require_deps()
         mdlutl, min_result = self._get_minimal_result(alternatives_model)
-        from kbutillib.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import enumerate_alternative_reaction_sets_standalone
 
         if not min_result["reactions"]:
             alternatives_model.reactions.get_by_id("R_essential").lower_bound = 0
@@ -508,7 +508,7 @@ class TestAddProbeReaction:
     def test_atp_probe_added(self, probe_model):
         """ATP probe adds correct stoichiometry and seed.reaction annotation."""
         _require_deps()
-        from kbutillib.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
 
         # Use a fresh model without any pre-existing ATP hydrolysis reaction
         import cobra
@@ -550,7 +550,7 @@ class TestAddProbeReaction:
         _require_deps()
         import cobra
         from modelseedpy.core.msmodelutl import MSModelUtil
-        from kbutillib.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
 
         m = cobra.Model("reuse_test")
 
@@ -586,7 +586,7 @@ class TestAddProbeReaction:
     def test_no_duplicate_on_second_call(self, probe_model):
         """Calling add_probe_reaction twice does not add a duplicate."""
         _require_deps()
-        from kbutillib.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import EGC_PROBE_CATALOG, add_probe_reaction_standalone
         import cobra
         from modelseedpy.core.msmodelutl import MSModelUtil
 
@@ -621,7 +621,7 @@ class TestModelUnmodifiedAfterFindFluxLoops:
     def test_no_probe_reactions_remain(self, atp_cycle_model):
         """No PROBE_ reactions remain in the model after find_flux_loops."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         mdlutl = _make_msutil(atp_cycle_model)
         rxn_ids_before = {r.id for r in atp_cycle_model.reactions}
@@ -635,7 +635,7 @@ class TestModelUnmodifiedAfterFindFluxLoops:
     def test_no_binary_vars_remain(self, atp_cycle_model):
         """No fu_/ru_ variables or constraints remain after find_flux_loops."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         mdlutl = _make_msutil(atp_cycle_model)
         find_flux_loops_standalone(mdlutl, objective="atp", compartment="c0")
@@ -654,7 +654,7 @@ class TestModelUnmodifiedAfterFindFluxLoops:
     def test_bounds_restored(self, atp_cycle_model):
         """All reaction bounds are restored to their pre-call values."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         mdlutl = _make_msutil(atp_cycle_model)
         bounds_before = {r.id: (r.lower_bound, r.upper_bound) for r in atp_cycle_model.reactions}
@@ -674,7 +674,7 @@ class TestModelUnmodifiedAfterFindFluxLoops:
     def test_rxn_count_unchanged(self, atp_cycle_model):
         """The number of reactions is the same before and after find_flux_loops."""
         _require_deps()
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         mdlutl = _make_msutil(atp_cycle_model)
         n_before = len(atp_cycle_model.reactions)
@@ -697,7 +697,7 @@ class TestSpecificityATPProbe:
         """A model with only X->Y->X cycle gives empty ATP probe result."""
         _require_deps()
         import cobra
-        from kbutillib.ms_fba_utils import find_flux_loops_standalone
+        from kbutillib.domains.modeling.ms_fba_utils import find_flux_loops_standalone
 
         m = cobra.Model("neutral_cycle")
 

@@ -24,7 +24,7 @@ class TestMSBiochemUtils:
 
     @pytest.fixture
     def biochem(self):
-        from kbutillib.ms_biochem_utils import MSBiochemUtils
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
 
         return MSBiochemUtils(
             config_file=False, token_file=None, kbase_token_file=None
@@ -69,7 +69,7 @@ class TestMSFBAUtils:
 
     @pytest.fixture
     def fba(self):
-        from kbutillib.ms_fba_utils import MSFBAUtils
+        from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils
 
         return MSFBAUtils(
             config_file=False,
@@ -117,7 +117,7 @@ class TestKBModelUtils:
 
     @pytest.fixture
     def model_utils(self):
-        from kbutillib.kb_model_utils import KBModelUtils
+        from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 
         return KBModelUtils(
             config_file=False,
@@ -148,7 +148,7 @@ class TestModelStandardizationUtils:
 
     @pytest.fixture
     def std_utils(self):
-        from kbutillib.model_standardization_utils import ModelStandardizationUtils
+        from kbutillib.domains.modeling.model_standardization_utils import ModelStandardizationUtils
 
         return ModelStandardizationUtils(
             config_file=False, token_file=None, kbase_token_file=None
@@ -180,7 +180,7 @@ class TestThermoUtils:
 
     @pytest.fixture
     def thermo(self):
-        from kbutillib.thermo_utils import ThermoUtils
+        from kbutillib.domains.thermo.thermo_utils import ThermoUtils
 
         return ThermoUtils(
             config_file=False, token_file=None, kbase_token_file=None
@@ -207,7 +207,7 @@ class TestEscherUtils:
 
     @pytest.fixture
     def escher(self):
-        from kbutillib.escher_utils import EscherUtils
+        from kbutillib.domains.notebook.escher_utils import EscherUtils
 
         return EscherUtils(
             config_file=False,
@@ -232,7 +232,7 @@ class TestKBWSUtils:
     @pytest.mark.kbase
     def test_ws_client_constructs_with_valid_token(self):
         """ws_client constructs without error given a valid token."""
-        from kbutillib.kb_ws_utils import KBWSUtils
+        from kbutillib.domains.kbase.kb_ws_utils import KBWSUtils
 
         ws = KBWSUtils(
             config_file=False,
@@ -245,7 +245,7 @@ class TestKBWSUtils:
 
     def test_is_ref_valid_and_invalid(self):
         """is_ref('12345/6/7') returns True, is_ref('foo') returns False."""
-        from kbutillib.kb_ws_utils import KBWSUtils
+        from kbutillib.domains.kbase.kb_ws_utils import KBWSUtils
 
         ws = KBWSUtils(
             config_file=False,
@@ -265,7 +265,7 @@ class TestKBGenomeUtils:
 
     @pytest.fixture
     def genome(self):
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         return KBGenomeUtils(
             config_file=False,
@@ -294,7 +294,7 @@ class TestKBAnnotationUtils:
 
     @pytest.fixture
     def annotation(self):
-        from kbutillib.kb_annotation_utils import KBAnnotationUtils
+        from kbutillib.domains.genome.kb_annotation_utils import KBAnnotationUtils
 
         # The constructor reads data files from cb_annotation_ontology_api;
         # skip if the sibling repo isn't cloned alongside KBUtilLib.
@@ -342,7 +342,7 @@ class TestMMSeqsUtils:
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             pytest.skip("mmseqs2 binary not available")
 
-        from kbutillib.mmseqs_utils import MMSeqsUtils
+        from kbutillib.domains.genome.mmseqs_utils import MMSeqsUtils
 
         utils = MMSeqsUtils(
             config_file=False, token_file=None, kbase_token_file=None
@@ -368,7 +368,7 @@ class TestSKANIUtils:
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             pytest.skip("skani binary not available")
 
-        from kbutillib.skani_utils import SKANIUtils
+        from kbutillib.domains.genome.skani_utils import SKANIUtils
 
         utils = SKANIUtils(
             config_file=False, token_file=None, kbase_token_file=None
@@ -387,7 +387,7 @@ class TestKBUtilLibFacade:
         pytest.importorskip("modelseedpy", reason="modelseedpy required")
         pytest.importorskip("cobrakbase", reason="cobrakbase required")
         from kbutillib import KBUtilLib
-        from kbutillib.ms_fba_utils import MSFBAUtilsImpl
+        from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtilsImpl
 
         kbu = KBUtilLib()
         assert isinstance(kbu.fba, MSFBAUtilsImpl)
@@ -420,7 +420,7 @@ class TestCleanRoomConstruction:
     def test_facade_env_shared(self):
         """KBUtilLib constructed with explicit SharedEnvUtils shares it."""
         from kbutillib import KBUtilLib
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         env = SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None)
         kbu = KBUtilLib(env=env)
@@ -429,7 +429,7 @@ class TestCleanRoomConstruction:
     def test_facade_argo_deferred(self):
         """kbu.argo property constructs without network access (lazy delegate)."""
         from kbutillib import KBUtilLib
-        from kbutillib.argo_utils import ArgoUtilsImpl
+        from kbutillib.domains.ai.argo_utils import ArgoUtilsImpl
 
         kbu = KBUtilLib()
         argo = kbu.argo

@@ -32,9 +32,9 @@ from unittest.mock import MagicMock, patch
 
 from kbutillib.kb_job_utils.state import JobRecord, JobState
 from kbutillib.kb_job_utils.store import JobStore
-from kbutillib.kb_narrative_audit import app_run_cell_anchor
-from kbutillib.kb_ws_utils import KBWSUtilsImpl
-from kbutillib.shared_env_utils import SharedEnvUtils
+from kbutillib.domains.kbase.kb_narrative_audit import app_run_cell_anchor
+from kbutillib.domains.kbase.kb_ws_utils import KBWSUtilsImpl
+from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 # ── Fakes ────────────────────────────────────────────────────────────────
 
@@ -400,7 +400,7 @@ def _make_job_utils(ee2_mock) -> "object":
     import tempfile as _tempfile
 
     from kbutillib.kb_job_utils.utils import KBJobUtils
-    from kbutillib.shared_env_utils import SharedEnvUtils as _SEU
+    from kbutillib.core.shared_env_utils import SharedEnvUtils as _SEU
 
     env = _SEU(config_file=False, token_file=None, kbase_token_file=None, token="fake-token")
     db_path = Path(_tempfile.mktemp(suffix=".db"))

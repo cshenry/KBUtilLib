@@ -32,4 +32,25 @@ __all__ = [
     "PredictedReaction",
     "PickaxeBackend",
     "RetroRulesBackend",
+    "NetworkExpansionUtils",
+    "NetworkExpansionUtilsImpl",
+    "VerabUtils",
+    "VerabUtilsImpl",
 ]
+
+
+def __getattr__(name: str):  # noqa: ANN001
+    """Lazy loader for heavier sub-modules."""
+    import importlib
+
+    _lazy = {
+        "NetworkExpansionUtils": ("network_expansion_utils", "NetworkExpansionUtils"),
+        "NetworkExpansionUtilsImpl": ("network_expansion_utils", "NetworkExpansionUtilsImpl"),
+        "VerabUtils": ("verab.facade", "VerabUtils"),
+        "VerabUtilsImpl": ("verab.facade", "VerabUtilsImpl"),
+    }
+    if name in _lazy:
+        mod_path, attr = _lazy[name]
+        module = importlib.import_module(f"kbutillib.domains.cheminformatics.{mod_path}")
+        return getattr(module, attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -34,13 +34,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kbutillib.annotator_utils import (
+from kbutillib.domains.genome.annotation.annotator_utils import (
     AnnotationRecord,
     AnnotationResult,
     Term,
     ToolUnavailableError,
 )
-from kbutillib.dram2_utils import (
+from kbutillib.domains.genome.annotation.dram2_utils import (
     DRAM2Utils,
     _DEFAULT_DATABASES,
     _DEFAULT_NXF_VER,
@@ -460,7 +460,7 @@ class TestIsAvailable:
         utils._pipeline = str(pipeline)
         utils._launch_dir = str(subdir_b)
         import logging
-        with caplog.at_level(logging.WARNING, logger="kbutillib.dram2_utils"):
+        with caplog.at_level(logging.WARNING, logger="kbutillib.domains.genome.annotation.dram2_utils"):
             result = utils.is_available()
         # Must still return True (warning, not failure)
         assert result is True
@@ -479,7 +479,7 @@ class TestIsAvailable:
         utils._pipeline = str(pipeline)
         utils._launch_dir = str(tmp_path)
         import logging
-        with caplog.at_level(logging.WARNING, logger="kbutillib.dram2_utils"):
+        with caplog.at_level(logging.WARNING, logger="kbutillib.domains.genome.annotation.dram2_utils"):
             result = utils.is_available()
         assert result is True
         assert not any("does not resolve under" in m for m in caplog.messages)
@@ -974,7 +974,7 @@ class TestBuildSubprocessEnv:
             mock_r.stderr = ""
             return mock_r
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             proteins = {"b0001": "MKTAYIAKQRQ" * 5}
             utils.annotate(proteins)
 
@@ -1081,7 +1081,7 @@ class TestBuildSubprocessEnv:
             mr.stderr = ""
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             utils._run_nextflow(
                 genes_dir=genes, outdir=out, workdir=work,
                 databases=("kofam",), threads=1,
@@ -1130,7 +1130,7 @@ class TestKeepOnFailure:
             mr.stderr = "boom"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
 
@@ -1152,7 +1152,7 @@ class TestKeepOnFailure:
             mr.stderr = "pipeline failed"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
 
@@ -1179,7 +1179,7 @@ class TestKeepOnFailure:
             mr.stderr = "fail"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
 
@@ -1204,7 +1204,7 @@ class TestKeepOnFailure:
             mr.stderr = "fail"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
 
@@ -1226,7 +1226,7 @@ class TestKeepOnFailure:
             return mr
 
         # No pipeline_info/ staged; must not raise beyond CalledProcessError
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
         # failed-* dir still created
@@ -1247,7 +1247,7 @@ class TestKeepOnFailure:
             mr.stderr = "fail"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
         # No nextflow.log in failed dir
@@ -1267,7 +1267,7 @@ class TestKeepOnFailure:
             mr.stderr = "fail"
             return mr
 
-        with patch("kbutillib.dram2_utils.subprocess.run", side_effect=mock_run):
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run", side_effect=mock_run):
             with pytest.raises(subprocess.CalledProcessError):
                 utils.annotate(proteins)
 
@@ -1402,7 +1402,7 @@ class TestRunNextflow:
         raw_dir.mkdir()
         (raw_dir / "raw-annotations.tsv").write_text("query_id\nfoo\n")
 
-        with patch("kbutillib.dram2_utils.subprocess.run") as mock_run:
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout="N E X T F L O W  ~  version 24.10.5\n",
@@ -1423,7 +1423,7 @@ class TestRunNextflow:
         work = tmp_path / "work"
         genes.mkdir(); out.mkdir(); work.mkdir()
 
-        with patch("kbutillib.dram2_utils.subprocess.run") as mock_run:
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             tsv, ver, _ = utils._run_nextflow(
                 genes_dir=genes, outdir=out, workdir=work,
@@ -1439,7 +1439,7 @@ class TestRunNextflow:
         work = tmp_path / "work"
         genes.mkdir(); out.mkdir(); work.mkdir()
 
-        with patch("kbutillib.dram2_utils.subprocess.run") as mock_run:
+        with patch("kbutillib.domains.genome.annotation.dram2_utils.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="boom"
             )
@@ -1463,7 +1463,7 @@ class TestDram2Exports:
 
     def test_dram2_utils_is_correct_class(self):
         import kbutillib
-        from kbutillib.dram2_utils import DRAM2Utils as DU
+        from kbutillib.domains.genome.annotation.dram2_utils import DRAM2Utils as DU
         assert kbutillib.DRAM2Utils is DU
 
 

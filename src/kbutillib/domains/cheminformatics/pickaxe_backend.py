@@ -320,7 +320,7 @@ class PickaxeBackend:
         try:
             import sys
 
-            from ...dependency_manager import get_dependency_path
+            from ...core.dependency_manager import get_dependency_path
 
             dep = get_dependency_path("MINE-Database")
             if dep:
@@ -407,7 +407,7 @@ class PickaxeBackend:
         candidates.append(pkg_dir.parent / "MINE-Database" / "minedatabase" / "data")
         # A MINE-Database checkout declared in KBUtilLib's dependencies.yaml.
         try:
-            from ...dependency_manager import get_dependency_path
+            from ...core.dependency_manager import get_dependency_path
 
             dep = get_dependency_path("MINE-Database")
             if dep:
@@ -467,7 +467,7 @@ class PickaxeBackend:
 
         # 3. DependencyManager (no auto-clone)
         try:
-            from ...dependency_manager import get_data_path
+            from ...core.dependency_manager import get_data_path
 
             dep_tsv = get_data_path("coarse-grain-rxns", _MECHINFORMED_RULES_SUBPATH)
             if dep_tsv:

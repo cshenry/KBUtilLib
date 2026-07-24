@@ -15,8 +15,8 @@ from typing import Any
 
 import pandas as pd
 
-from ...kb_ws_utils import KBWSUtils
-from ...kb_callback_utils import KBCallbackUtils
+from ..kbase.kb_ws_utils import KBWSUtils
+from ..kbase.kb_callback_utils import KBCallbackUtils
 
 source_hash = {"MetaCyc": "META", "KEGG": "RO", "BiGG": "BIGG", "Rhea": "RHEA"}
 

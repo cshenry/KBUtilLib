@@ -3,7 +3,7 @@
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from kbutillib.shared_env_utils import SharedEnvUtils
+from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 
 class ThermoUtils(SharedEnvUtils):
@@ -27,7 +27,7 @@ class ThermoUtils(SharedEnvUtils):
     def biochem_utils(self):
         """Lazy-load MSBiochemUtils for compound/reaction lookups."""
         if self._biochem_utils is None:
-            from kbutillib.ms_biochem_utils import MSBiochemUtils
+            from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
             self._biochem_utils = MSBiochemUtils(**self._init_kwargs)
         return self._biochem_utils
 

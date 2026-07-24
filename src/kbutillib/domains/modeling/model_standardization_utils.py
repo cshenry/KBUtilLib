@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from ...ms_biochem_utils import MSBiochemUtils, compartment_types
+from ..biochem.ms_biochem_utils import MSBiochemUtils, compartment_types
 
 # Module-level constants
 # `compartment_types` is canonically defined in `ms_biochem_utils` and re-exported

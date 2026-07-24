@@ -15,7 +15,7 @@ import tempfile
 import os
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
-from kbutillib.escher_utils import EscherUtils, DEFAULT_ARROW_WIDTH_RANGE, DEFAULT_FLUX_COLOR_SCHEMES
+from kbutillib.domains.notebook.escher_utils import EscherUtils, DEFAULT_ARROW_WIDTH_RANGE, DEFAULT_FLUX_COLOR_SCHEMES
 
 
 # Fixtures

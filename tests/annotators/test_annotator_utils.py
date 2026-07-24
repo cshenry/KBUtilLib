@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from kbutillib.annotator_utils import (
+from kbutillib.domains.genome.annotation.annotator_utils import (
     AnnotationRecord,
     AnnotationResult,
     AnnotatorUtils,
@@ -396,7 +396,7 @@ class TestExports:
     def test_exported_names_are_correct_types(self):
         import kbutillib
         # These should be the actual classes, not None
-        from kbutillib.annotator_utils import (
+        from kbutillib.domains.genome.annotation.annotator_utils import (
             AnnotationRecord as AR,
             AnnotationResult as ARes,
             AnnotatorUtils as AU,

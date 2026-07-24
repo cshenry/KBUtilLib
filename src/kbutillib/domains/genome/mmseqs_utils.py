@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ...shared_env_utils import SharedEnvUtils
+from ...core.shared_env_utils import SharedEnvUtils
 
 
 class MMSeqsUtils(SharedEnvUtils):

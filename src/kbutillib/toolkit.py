@@ -13,39 +13,39 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from .shared_env_utils import SharedEnvUtils
+from .core.shared_env_utils import SharedEnvUtils
 
 if TYPE_CHECKING:
-    from .ai_curation_utils import AICurationUtilsImpl
-    from .argo_utils import ArgoUtilsImpl
-    from .bvbrc_utils import BVBRCUtilsImpl
-    from .escher_utils import EscherUtilsImpl
-    from .kb_annotation_utils import KBAnnotationUtilsImpl
-    from .kb_berdl_utils import KBBERDLUtilsImpl
-    from .kb_callback_utils import KBCallbackUtilsImpl
-    from .kb_genome_utils import KBGenomeUtilsImpl
+    from .domains.ai.ai_curation_utils import AICurationUtilsImpl
+    from .domains.ai.argo_utils import ArgoUtilsImpl
+    from .domains.external.bvbrc_utils import BVBRCUtilsImpl
+    from .domains.notebook.escher_utils import EscherUtilsImpl
+    from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
+    from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
+    from .domains.kbase.kb_callback_utils import KBCallbackUtilsImpl
+    from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
     from .kb_job_utils import KBJobUtils
-    from .kb_model_utils import KBModelUtilsImpl
-    from .kb_plm_utils import KBPLMUtilsImpl
-    from .kb_reads_utils import KBReadsUtilsImpl
-    from .kb_sdk_utils import KBSDKUtilsImpl
-    from .kb_uniprot_utils import KBUniProtUtilsImpl
-    from .kb_ws_utils import KBWSUtilsImpl
-    from .kbase_catalog_client import CatalogClient
-    from .mmseqs_utils import MMSeqsUtilsImpl
-    from .model_standardization_utils import ModelStandardizationUtilsImpl
-    from .ms_biochem_utils import MSBiochemUtilsImpl
-    from .ms_fba_utils import MSFBAUtilsImpl
-    from .ms_reconstruction_utils import MSReconstructionUtilsImpl
-    from .ms_template_utils import MSTemplateUtilsImpl
-    from .network_expansion_utils import NetworkExpansionUtilsImpl
-    from .ontomap_utils import OntomapUtilsImpl
-    from .patric_ws_utils import PatricWSUtilsImpl
-    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
-    from .rcsb_pdb_utils import RCSBPDBUtilsImpl
-    from .skani_utils import SKANIUtilsImpl
-    from .thermo_utils import ThermoUtilsImpl
-    from .verab_utils import VerabUtilsImpl
+    from .domains.modeling.kb_model_utils import KBModelUtilsImpl
+    from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
+    from .domains.kbase.kb_reads_utils import KBReadsUtilsImpl
+    from .domains.kbase.kb_sdk_utils import KBSDKUtilsImpl
+    from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
+    from .domains.kbase.kb_ws_utils import KBWSUtilsImpl
+    from .domains.kbase.kbase_catalog_client import CatalogClient
+    from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
+    from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
+    from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
+    from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
+    from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
+    from .domains.cheminformatics.network_expansion_utils import NetworkExpansionUtilsImpl
+    from .domains.genome.ontomap_utils import OntomapUtilsImpl
+    from .domains.external.patric_ws_utils import PatricWSUtilsImpl
+    from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
+    from .domains.genome.skani_utils import SKANIUtilsImpl
+    from .domains.thermo.thermo_utils import ThermoUtilsImpl
+    from .domains.cheminformatics.verab.facade import VerabUtilsImpl
 
 logger = logging.getLogger(__name__)
 
@@ -113,183 +113,183 @@ class KBUtilLib:
     @property
     def ws(self) -> KBWSUtilsImpl:
         if self._ws is None:
-            from .kb_ws_utils import KBWSUtilsImpl
+            from .domains.kbase.kb_ws_utils import KBWSUtilsImpl
             self._ws = KBWSUtilsImpl(self.env)
         return self._ws
 
     @property
     def callback(self) -> KBCallbackUtilsImpl:
         if self._callback is None:
-            from .kb_callback_utils import KBCallbackUtilsImpl
+            from .domains.kbase.kb_callback_utils import KBCallbackUtilsImpl
             self._callback = KBCallbackUtilsImpl(self.env, self.ws)
         return self._callback
 
     @property
     def annotation(self) -> KBAnnotationUtilsImpl:
         if self._annotation is None:
-            from .kb_annotation_utils import KBAnnotationUtilsImpl
+            from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
             self._annotation = KBAnnotationUtilsImpl(self.env, self.ws, self.callback)
         return self._annotation
 
     @property
     def biochem(self) -> MSBiochemUtilsImpl:
         if self._biochem is None:
-            from .ms_biochem_utils import MSBiochemUtilsImpl
+            from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
             self._biochem = MSBiochemUtilsImpl(self.env)
         return self._biochem
 
     @property
     def model(self) -> KBModelUtilsImpl:
         if self._model is None:
-            from .kb_model_utils import KBModelUtilsImpl
+            from .domains.modeling.kb_model_utils import KBModelUtilsImpl
             self._model = KBModelUtilsImpl(self.env, self.ws, self.annotation, self.biochem)
         return self._model
 
     @property
     def fba(self) -> MSFBAUtilsImpl:
         if self._fba is None:
-            from .ms_fba_utils import MSFBAUtilsImpl
+            from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
             self._fba = MSFBAUtilsImpl(self.env, self.model)
         return self._fba
 
     @property
     def recon(self) -> MSReconstructionUtilsImpl:
         if self._recon is None:
-            from .ms_reconstruction_utils import MSReconstructionUtilsImpl
+            from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
             self._recon = MSReconstructionUtilsImpl(self.env, self.model)
         return self._recon
 
     @property
     def template(self) -> MSTemplateUtilsImpl:
         if self._template is None:
-            from .ms_template_utils import MSTemplateUtilsImpl
+            from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
             self._template = MSTemplateUtilsImpl(self.env, self.model)
         return self._template
 
     @property
     def escher(self) -> EscherUtilsImpl:
         if self._escher is None:
-            from .escher_utils import EscherUtilsImpl
+            from .domains.notebook.escher_utils import EscherUtilsImpl
             self._escher = EscherUtilsImpl(self.env, self.model, self.biochem)
         return self._escher
 
     @property
     def standardize(self) -> ModelStandardizationUtilsImpl:
         if self._standardize is None:
-            from .model_standardization_utils import ModelStandardizationUtilsImpl
+            from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
             self._standardize = ModelStandardizationUtilsImpl(self.env, self.biochem)
         return self._standardize
 
     @property
     def genome(self) -> KBGenomeUtilsImpl:
         if self._genome is None:
-            from .kb_genome_utils import KBGenomeUtilsImpl
+            from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
             self._genome = KBGenomeUtilsImpl(self.env, self.ws, self.jobs)
         return self._genome
 
     @property
     def plm(self) -> KBPLMUtilsImpl:
         if self._plm is None:
-            from .kb_plm_utils import KBPLMUtilsImpl
+            from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
             self._plm = KBPLMUtilsImpl(self.env, self.genome)
         return self._plm
 
     @property
     def bvbrc(self) -> BVBRCUtilsImpl:
         if self._bvbrc is None:
-            from .bvbrc_utils import BVBRCUtilsImpl
+            from .domains.external.bvbrc_utils import BVBRCUtilsImpl
             self._bvbrc = BVBRCUtilsImpl(self.env, self.genome, self.annotation)
         return self._bvbrc
 
     @property
     def reads(self) -> KBReadsUtilsImpl:
         if self._reads is None:
-            from .kb_reads_utils import KBReadsUtilsImpl
+            from .domains.kbase.kb_reads_utils import KBReadsUtilsImpl
             self._reads = KBReadsUtilsImpl(self.env, self.ws)
         return self._reads
 
     @property
     def sdk(self) -> KBSDKUtilsImpl:
         if self._sdk is None:
-            from .kb_sdk_utils import KBSDKUtilsImpl
+            from .domains.kbase.kb_sdk_utils import KBSDKUtilsImpl
             self._sdk = KBSDKUtilsImpl(self.env, self.ws)
         return self._sdk
 
     @property
     def argo(self) -> ArgoUtilsImpl:
         if self._argo is None:
-            from .argo_utils import ArgoUtilsImpl
+            from .domains.ai.argo_utils import ArgoUtilsImpl
             self._argo = ArgoUtilsImpl(self.env)
         return self._argo
 
     @property
     def curation(self) -> AICurationUtilsImpl:
         if self._curation is None:
-            from .ai_curation_utils import AICurationUtilsImpl
+            from .domains.ai.ai_curation_utils import AICurationUtilsImpl
             self._curation = AICurationUtilsImpl(self.env, self.argo)
         return self._curation
 
     @property
     def thermo(self) -> ThermoUtilsImpl:
         if self._thermo is None:
-            from .thermo_utils import ThermoUtilsImpl
+            from .domains.thermo.thermo_utils import ThermoUtilsImpl
             self._thermo = ThermoUtilsImpl(self.env, self.biochem)
         return self._thermo
 
     @property
     def predictive_thermo(self) -> "PredictiveThermoUtilsImpl":
         if self._predictive_thermo is None:
-            from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+            from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
             self._predictive_thermo = PredictiveThermoUtilsImpl(self.env, self.biochem)
         return self._predictive_thermo
 
     @property
     def mmseqs(self) -> MMSeqsUtilsImpl:
         if self._mmseqs is None:
-            from .mmseqs_utils import MMSeqsUtilsImpl
+            from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
             self._mmseqs = MMSeqsUtilsImpl(self.env)
         return self._mmseqs
 
     @property
     def skani(self) -> SKANIUtilsImpl:
         if self._skani is None:
-            from .skani_utils import SKANIUtilsImpl
+            from .domains.genome.skani_utils import SKANIUtilsImpl
             self._skani = SKANIUtilsImpl(self.env)
         return self._skani
 
     @property
     def berdl(self) -> KBBERDLUtilsImpl:
         if self._berdl is None:
-            from .kb_berdl_utils import KBBERDLUtilsImpl
+            from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
             self._berdl = KBBERDLUtilsImpl(self.env)
         return self._berdl
 
     @property
     def patric(self) -> PatricWSUtilsImpl:
         if self._patric is None:
-            from .patric_ws_utils import PatricWSUtilsImpl
+            from .domains.external.patric_ws_utils import PatricWSUtilsImpl
             self._patric = PatricWSUtilsImpl(self.env)
         return self._patric
 
     @property
     def uniprot(self) -> KBUniProtUtilsImpl:
         if self._uniprot is None:
-            from .kb_uniprot_utils import KBUniProtUtilsImpl
+            from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
             self._uniprot = KBUniProtUtilsImpl(self.env)
         return self._uniprot
 
     @property
     def pdb(self) -> RCSBPDBUtilsImpl:
         if self._pdb is None:
-            from .rcsb_pdb_utils import RCSBPDBUtilsImpl
+            from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
             self._pdb = RCSBPDBUtilsImpl(self.env)
         return self._pdb
 
     @property
     def catalog(self) -> CatalogClient:
         if self._catalog is None:
-            from .kbase_catalog_client import CatalogClient
-            from .kbase_endpoints import service_url
+            from .domains.kbase.kbase_catalog_client import CatalogClient
+            from .domains.kbase.kbase_endpoints import service_url
             self._catalog = CatalogClient(url=service_url("catalog"))
         return self._catalog
 
@@ -303,7 +303,7 @@ class KBUtilLib:
     @property
     def ontomap(self) -> "OntomapUtilsImpl":
         if self._ontomap is None:
-            from .ontomap_utils import OntomapUtilsImpl
+            from .domains.genome.ontomap_utils import OntomapUtilsImpl
             self._ontomap = OntomapUtilsImpl(self.env)
         return self._ontomap
 
@@ -312,7 +312,7 @@ class KBUtilLib:
         """Cheminformatics network-expansion facade (pickaxe / retrorules
         backends with graceful degradation)."""
         if self._network_expansion is None:
-            from .network_expansion_utils import NetworkExpansionUtilsImpl
+            from .domains.cheminformatics.network_expansion_utils import NetworkExpansionUtilsImpl
             self._network_expansion = NetworkExpansionUtilsImpl(self.env)
         return self._network_expansion
 
@@ -331,7 +331,7 @@ class KBUtilLib:
         when a method that requires them is first called, avoiding eager
         failures when optional modules (modelseedpy, etc.) are absent."""
         if self._verab is None:
-            from .verab_utils import VerabUtilsImpl
+            from .domains.cheminformatics.verab.facade import VerabUtilsImpl
             # Pass getter lambdas so each sub-facade is constructed only on
             # first use (avoids eager ModuleNotFoundError for optional deps).
             self._verab = VerabUtilsImpl(

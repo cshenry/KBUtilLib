@@ -949,12 +949,12 @@ def test_match_transformation_text_fallback_emits_warning():
 
 def test_s7_import_verab_utils():
     """verab_utils.py must be importable without RDKit or minedatabase."""
-    from kbutillib import verab_utils  # noqa: F401
+    from kbutillib.domains.cheminformatics.verab import facade  # noqa: F401
 
 
 def test_s7_verab_utils_no_toplevel_rdkit():
     """verab_utils must NOT import rdkit or minedatabase at module level."""
-    import kbutillib.verab_utils as vu_mod
+    import kbutillib.domains.cheminformatics.verab.facade as vu_mod
 
     module_dict = vars(vu_mod)
     assert "rdkit" not in module_dict, "rdkit imported at module level in verab_utils.py"
@@ -969,7 +969,7 @@ def test_s7_toolkit_verab_property_returns_instance():
     """kbu.verab property must return a VerabUtilsImpl without eagerly importing
     rdkit or minedatabase.  No network or file access is required."""
     from kbutillib.toolkit import KBUtilLib
-    from kbutillib.verab_utils import VerabUtilsImpl
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtilsImpl
 
     kbu = KBUtilLib()
     verab = kbu.verab
@@ -1011,7 +1011,7 @@ def test_s7_toolkit_verab_does_not_import_rdkit_at_construction():
 
 def test_s7_status_returns_dict():
     """status() must return a dict."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     s = u.status()
@@ -1020,7 +1020,7 @@ def test_s7_status_returns_dict():
 
 def test_s7_status_has_expected_keys():
     """status() dict must contain the documented keys."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     s = u.status()
@@ -1042,7 +1042,7 @@ def test_s7_status_has_expected_keys():
 
 def test_s7_status_seed_count():
     """status()['seed_count'] must equal 5 (canonical seeds)."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     assert u.status()["seed_count"] == 5
@@ -1050,7 +1050,7 @@ def test_s7_status_seed_count():
 
 def test_s7_status_no_deps_injected():
     """When no facades are injected, all boolean dep flags are False."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     s = u.status()
@@ -1080,7 +1080,7 @@ def test_s7_status_via_toolkit_has_deps():
 
 def test_s7_seed_compounds_returns_five():
     """seed_compounds() returns exactly 5 dicts."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     seeds = u.seed_compounds()
@@ -1089,7 +1089,7 @@ def test_s7_seed_compounds_returns_five():
 
 def test_s7_seed_compounds_have_keys():
     """seed_compounds() dicts have id, name, smiles, inchikey, kegg."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()
     for s in u.seed_compounds():
@@ -1104,7 +1104,7 @@ def test_s7_discover_rules_with_fake_expander():
     """discover_rules with an injected fake expander returns VerabDiscoveryResult
     with operators=['ruleXXXX'] (uses the synthetic expansion result from S3)."""
     from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     synthetic = _build_synthetic_expansion_result()
 
@@ -1124,7 +1124,7 @@ def test_s7_discover_rules_with_fake_expander():
 def test_s7_discover_rules_via_verabutils_impl():
     """VerabUtilsImpl constructed directly with a fake expander works end-to-end."""
     from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult
-    from kbutillib.verab_utils import VerabUtilsImpl
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtilsImpl
 
     # For non-expander facades we use None (only expander is needed for discover_rules)
     synthetic = _build_synthetic_expansion_result()
@@ -1154,7 +1154,7 @@ def test_s7_discover_rules_via_verabutils_impl():
 def test_s7_discover_rules_raises_without_expander():
     """discover_rules must raise BackendUnavailableError when no expander is injected."""
     from kbutillib.cheminformatics.base import BackendUnavailableError
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()  # no network_expansion
     with pytest.raises(BackendUnavailableError):
@@ -1168,7 +1168,7 @@ def test_s7_discover_rules_raises_without_expander():
 def test_s7_enumerate_methoxy_aromatics_with_fake_biochem():
     """enumerate_methoxy_aromatics returns only methoxy-aromatic compounds
     from a fake biochem DB when RDKit is present."""
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     class _FakeCpd:
         def __init__(self, cpd_id, smiles, is_obsolete=False):
@@ -1202,7 +1202,7 @@ def test_s7_enumerate_methoxy_aromatics_with_fake_biochem():
 def test_s7_enumerate_methoxy_aromatics_raises_when_rdkit_absent():
     """enumerate_methoxy_aromatics raises BackendUnavailableError when RDKit absent."""
     from kbutillib.cheminformatics.base import BackendUnavailableError
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     class _FakeDB:
         compounds = []
@@ -1219,7 +1219,7 @@ def test_s7_enumerate_methoxy_aromatics_raises_without_biochem():
     """enumerate_methoxy_aromatics raises BackendUnavailableError when no biochem
     is injected — regardless of RDKit availability."""
     from kbutillib.cheminformatics.base import BackendUnavailableError
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     u = VerabUtils()  # no biochem; RDKit state doesn't matter here
 
@@ -1228,7 +1228,7 @@ def test_s7_enumerate_methoxy_aromatics_raises_without_biochem():
     with pytest.raises(BackendUnavailableError):
         # Patch _rdkit_available to True to force the biochem check branch.
         import unittest.mock as _mock
-        import kbutillib.verab_utils as _vu
+        import kbutillib.domains.cheminformatics.verab.facade as _vu
 
         with _mock.patch.object(_vu, "_rdkit_available", return_value=True):
             u.enumerate_methoxy_aromatics()
@@ -1240,8 +1240,8 @@ def test_s7_enumerate_methoxy_aromatics_raises_without_biochem():
 def test_s7_enumerate_methoxy_aromatics_simulated_rdkit_absent(monkeypatch):
     """Unit-test the RDKit-absent branch by monkeypatching _rdkit_available."""
     from kbutillib.cheminformatics.base import BackendUnavailableError
-    import kbutillib.verab_utils as _vu
-    from kbutillib.verab_utils import VerabUtils
+    import kbutillib.domains.cheminformatics.verab.facade as _vu
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     class _FakeDB:
         compounds = []
@@ -1396,7 +1396,7 @@ def test_fix1_discover_verab_rules_default_ruleset_is_mechinformed():
 def test_fix1_verab_utils_discover_rules_default_ruleset_is_mechinformed():
     """VerabUtils.discover_rules must default to rule_set='mechinformed'."""
     import inspect
-    from kbutillib.verab_utils import VerabUtils
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtils
 
     sig = inspect.signature(VerabUtils.discover_rules)
     default = sig.parameters["rule_set"].default

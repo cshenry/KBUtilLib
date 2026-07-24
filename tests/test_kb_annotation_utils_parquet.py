@@ -18,7 +18,7 @@ def annotation():
     Skips (rather than fails) if the sibling data repo isn't available locally,
     matching the existing convention in tests/test_composition_smoke.py.
     """
-    from kbutillib.kb_annotation_utils import KBAnnotationUtils
+    from kbutillib.domains.genome.kb_annotation_utils import KBAnnotationUtils
 
     try:
         return KBAnnotationUtils(

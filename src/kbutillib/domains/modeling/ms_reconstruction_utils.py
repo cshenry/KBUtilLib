@@ -10,7 +10,7 @@ import os
 import pandas as pd
 from typing import Any, Dict, List, Optional, Union
 
-from ...kb_model_utils import KBModelUtils
+from .kb_model_utils import KBModelUtils
 
 __all__ = [
     "MSReconstructionUtils",

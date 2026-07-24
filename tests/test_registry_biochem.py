@@ -167,7 +167,7 @@ class TestDecoratorInertness:
 
     def test_decorated_method_is_callable(self):
         """The decorated methods remain plain callables on the class."""
-        from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
 
         assert callable(MSBiochemUtilsImpl.search_compounds)
         assert callable(MSBiochemUtilsImpl.get_compound_by_id)
@@ -175,7 +175,7 @@ class TestDecoratorInertness:
 
     def test_no_functools_wrapper(self):
         """The decorator returns the exact original function (no wrapping)."""
-        from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
 
         for method_name in ("search_compounds", "get_compound_by_id", "get_reaction_by_id"):
             fn = getattr(MSBiochemUtilsImpl, method_name)
@@ -188,7 +188,7 @@ class TestDecoratorInertness:
     def test_capability_attribute_attached(self):
         """The __kbu_capability__ attribute is present after decoration."""
         from kbutillib.core.capability import _CAPABILITY_ATTR
-        from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
 
         for method_name in ("search_compounds", "get_compound_by_id", "get_reaction_by_id"):
             fn = getattr(MSBiochemUtilsImpl, method_name)
@@ -200,8 +200,8 @@ class TestDecoratorInertness:
         """Without a ModelSEED DB, the util constructs (gracefully) but calling
         a method that needs the DB still raises the same exception as before
         decoration.  The decorator does NOT intercept or change call semantics."""
-        from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         env = SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None)
 
@@ -224,7 +224,7 @@ class TestDecoratorInertness:
         from kbutillib.core.capability import collect_capabilities
 
         # Create a minimal fake util object with a decorated method
-        from kbutillib.ms_biochem_utils import MSBiochemUtilsImpl
+        from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
 
         # Build a mock that looks like MSBiochemUtilsImpl but doesn't need a DB
         mock_util = MagicMock(spec=MSBiochemUtilsImpl)

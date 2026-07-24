@@ -28,7 +28,7 @@ def jobdaemon_cmd(
 ) -> None:
     """Run the KBJobUtils watcher in the foreground until SIGINT/SIGTERM."""
     from ..kb_job_utils.utils import KBJobUtils
-    from ..shared_env_utils import SharedEnvUtils
+    from ..core.shared_env_utils import SharedEnvUtils
 
     logging.basicConfig(
         level=getattr(logging, log_level),

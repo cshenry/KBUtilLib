@@ -33,7 +33,7 @@ from kbutillib.cheminformatics import (
     RetroRulesBackend,
 )
 from kbutillib.cheminformatics.base import BackendUnavailableError, ExpansionBackend
-from kbutillib.network_expansion_utils import (
+from kbutillib.domains.cheminformatics.network_expansion_utils import (
     DEFAULT_EXPANSION_ORDER,
     NetworkExpansionUtils,
     NetworkExpansionUtilsImpl,
@@ -101,7 +101,7 @@ def _make_utils(**backends):
 def test_import_does_not_require_optional_deps():
     import importlib
 
-    mod = importlib.import_module("kbutillib.cheminformatics")
+    mod = importlib.import_module("kbutillib.domains.cheminformatics")
     assert hasattr(mod, "PickaxeBackend")
     assert hasattr(mod, "RetroRulesBackend")
 
@@ -178,7 +178,7 @@ def test_dispatch_walks_priority_order():
         b=_FakeBackend(name="b", available=True),
     )
     assert u._resolve_order(None, ["a", "b"]) == ["a", "b"]
-    import kbutillib.network_expansion_utils as nx
+    import kbutillib.domains.cheminformatics.network_expansion_utils as nx
 
     original = nx.DEFAULT_EXPANSION_ORDER
     try:
@@ -208,7 +208,7 @@ def test_dispatch_empty_expansion_falls_through():
     )
     u_order = ["empty", "good"]
     # Use the internal loop by forcing default order through a subclass-free shim
-    import kbutillib.network_expansion_utils as nx
+    import kbutillib.domains.cheminformatics.network_expansion_utils as nx
 
     original = nx.DEFAULT_EXPANSION_ORDER
     try:

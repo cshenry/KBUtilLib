@@ -5,6 +5,8 @@ Sub-modules:
     kb_annotation_utils — KBAnnotationUtils, KBAnnotationUtilsImpl
     mmseqs_utils        — MMSeqsUtils, MMSeqsUtilsImpl
     skani_utils         — SKANIUtils, SKANIUtilsImpl
+    ontomap_utils       — OntomapUtils, OntomapUtilsImpl
+    annotation/         — AnnotatorUtils, DRAM2Utils, ProkkaUtils, TransytUtils
 
 Imports here are lazy to avoid pulling in optional heavy dependencies
 (httpx, requests_toolbelt) at package-init time.
@@ -17,6 +19,18 @@ def __getattr__(name: str):  # noqa: ANN001
 
     # Mapping: public name -> (submodule, attribute_in_submodule)
     _lazy_map = {
+        # ontomap_utils
+        "OntomapUtils": ("ontomap_utils", "OntomapUtils"),
+        "OntomapUtilsImpl": ("ontomap_utils", "OntomapUtilsImpl"),
+        # annotation subpackage
+        "AnnotatorUtils": ("annotation", "AnnotatorUtils"),
+        "AnnotationRecord": ("annotation", "AnnotationRecord"),
+        "AnnotationResult": ("annotation", "AnnotationResult"),
+        "Term": ("annotation", "Term"),
+        "ToolUnavailableError": ("annotation", "ToolUnavailableError"),
+        "DRAM2Utils": ("annotation", "DRAM2Utils"),
+        "ProkkaUtils": ("annotation", "ProkkaUtils"),
+        "TransytUtils": ("annotation", "TransytUtils"),
         # kb_genome_utils
         "KBGenomeUtils": ("kb_genome_utils", "KBGenomeUtils"),
         "KBGenomeUtilsImpl": ("kb_genome_utils", "KBGenomeUtilsImpl"),
@@ -43,6 +57,18 @@ def __getattr__(name: str):  # noqa: ANN001
 
 
 __all__ = [
+    # ontomap_utils
+    "OntomapUtils",
+    "OntomapUtilsImpl",
+    # annotation subpackage
+    "AnnotatorUtils",
+    "AnnotationRecord",
+    "AnnotationResult",
+    "Term",
+    "ToolUnavailableError",
+    "DRAM2Utils",
+    "ProkkaUtils",
+    "TransytUtils",
     # kb_genome_utils
     "KBGenomeUtils",
     "KBGenomeUtilsImpl",

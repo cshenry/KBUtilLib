@@ -74,7 +74,7 @@ class TestOldShimPaths:
     def test_old_kb_genome_utils_shim(self):
         """kbutillib.kb_genome_utils still importable (shim)."""
         try:
-            mod = importlib.import_module("kbutillib.kb_genome_utils")
+            mod = importlib.import_module("kbutillib.domains.genome.kb_genome_utils")
             assert hasattr(mod, "KBGenomeUtils")
         except ImportError as e:
             if "requests_toolbelt" in str(e):
@@ -84,7 +84,7 @@ class TestOldShimPaths:
     def test_old_kb_annotation_utils_shim(self):
         """kbutillib.kb_annotation_utils still importable (shim)."""
         try:
-            mod = importlib.import_module("kbutillib.kb_annotation_utils")
+            mod = importlib.import_module("kbutillib.domains.genome.kb_annotation_utils")
             assert hasattr(mod, "KBAnnotationUtils")
         except ImportError as e:
             if "requests_toolbelt" in str(e):
@@ -93,13 +93,13 @@ class TestOldShimPaths:
 
     def test_old_mmseqs_utils_shim(self):
         """kbutillib.mmseqs_utils still importable (shim)."""
-        mod = importlib.import_module("kbutillib.mmseqs_utils")
+        mod = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         assert hasattr(mod, "MMSeqsUtils")
         assert hasattr(mod, "MMSeqsUtilsImpl")
 
     def test_old_skani_utils_shim(self):
         """kbutillib.skani_utils still importable (shim)."""
-        mod = importlib.import_module("kbutillib.skani_utils")
+        mod = importlib.import_module("kbutillib.domains.genome.skani_utils")
         assert hasattr(mod, "SKANIUtils")
         assert hasattr(mod, "SKANIUtilsImpl")
 
@@ -133,13 +133,13 @@ class TestIdentityChecks:
 
     def test_mmseqs_identity(self):
         """kbutillib.mmseqs_utils.MMSeqsUtils is kbutillib.domains.genome.mmseqs_utils.MMSeqsUtils."""
-        old = importlib.import_module("kbutillib.mmseqs_utils")
+        old = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         new = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         assert old.MMSeqsUtils is new.MMSeqsUtils
 
     def test_skani_identity(self):
         """kbutillib.skani_utils.SKANIUtils is kbutillib.domains.genome.skani_utils.SKANIUtils."""
-        old = importlib.import_module("kbutillib.skani_utils")
+        old = importlib.import_module("kbutillib.domains.genome.skani_utils")
         new = importlib.import_module("kbutillib.domains.genome.skani_utils")
         assert old.SKANIUtils is new.SKANIUtils
 
@@ -205,7 +205,7 @@ class TestImplClasses:
 
     def test_mmseqs_impl_old_path(self):
         """MMSeqsUtilsImpl accessible via old shim path."""
-        mod = importlib.import_module("kbutillib.mmseqs_utils")
+        mod = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         assert hasattr(mod, "MMSeqsUtilsImpl")
         assert mod.MMSeqsUtilsImpl.__name__ == "MMSeqsUtilsImpl"
 
@@ -217,12 +217,12 @@ class TestImplClasses:
 
     def test_mmseqs_impl_identity(self):
         """MMSeqsUtilsImpl old and new paths are identical."""
-        old = importlib.import_module("kbutillib.mmseqs_utils")
+        old = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         new = importlib.import_module("kbutillib.domains.genome.mmseqs_utils")
         assert old.MMSeqsUtilsImpl is new.MMSeqsUtilsImpl
 
     def test_skani_impl_identity(self):
         """SKANIUtilsImpl old and new paths are identical."""
-        old = importlib.import_module("kbutillib.skani_utils")
+        old = importlib.import_module("kbutillib.domains.genome.skani_utils")
         new = importlib.import_module("kbutillib.domains.genome.skani_utils")
         assert old.SKANIUtilsImpl is new.SKANIUtilsImpl

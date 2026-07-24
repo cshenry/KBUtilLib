@@ -9,7 +9,7 @@ import pandas as pd
 from typing import Any, Optional, Dict
 from collections import defaultdict
 
-from ...shared_env_utils import SharedEnvUtils
+from ...core.shared_env_utils import SharedEnvUtils
 from ...core.capability import capability
 
 compartment_types = {

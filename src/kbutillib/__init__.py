@@ -9,21 +9,21 @@ import os
 import sys
 
 # Core utilities - these should always be available
-from .base_utils import BaseUtils
-from .shared_env_utils import SharedEnvUtils
+from .core.base_utils import BaseUtils
+from .core.shared_env_utils import SharedEnvUtils
 
 # Facade
 from .toolkit import KBUtilLib
 
-# Flat modules
+# Flat modules (real infrastructure files — not shims)
 from .compartments import compartment_types, normalize_compartment
-from .model_directionality import (
+from .domains.modeling.model_directionality import (
     direction_conversion,
     directionality_from_bounds,
     biochem_directionality,
     combine_directionality_signals,
 )
-from .model_helpers import _parse_id, _check_and_convert_model
+from .domains.modeling.model_helpers import _parse_id, _check_and_convert_model
 
 
 # Collected optional-import failures.  Populated by _import_error(); flushed
@@ -67,115 +67,115 @@ def _flush_import_errors() -> None:
 # ── Legacy classes (inheritance-based, kept for backward compat) ────────
 
 try:
-    from .kb_ws_utils import KBWSUtils
+    from .domains.kbase.kb_ws_utils import KBWSUtils
 except ImportError as e:
     _import_error("kb_ws_utils", e)
     KBWSUtils = None
 
 try:
-    from .kb_genome_utils import KBGenomeUtils
+    from .domains.genome.kb_genome_utils import KBGenomeUtils
 except ImportError as e:
     _import_error("kb_genome_utils", e)
     KBGenomeUtils = None
 
 try:
-    from .ms_biochem_utils import MSBiochemUtils
+    from .domains.biochem.ms_biochem_utils import MSBiochemUtils
 except ImportError as e:
     _import_error("ms_biochem_utils", e)
     MSBiochemUtils = None
 
 try:
-    from .model_standardization_utils import ModelStandardizationUtils
+    from .domains.modeling.model_standardization_utils import ModelStandardizationUtils
 except ImportError as e:
     _import_error("model_standardization_utils", e)
     ModelStandardizationUtils = None
 
 try:
-    from .kb_model_utils import KBModelUtils
+    from .domains.modeling.kb_model_utils import KBModelUtils
 except ImportError as e:
     _import_error("kb_model_utils", e)
     KBModelUtils = None
 
 try:
-    from .ms_reconstruction_utils import MSReconstructionUtils
+    from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtils
 except ImportError as e:
     _import_error("ms_reconstruction_utils", e)
     MSReconstructionUtils = None
 
 try:
-    from .ms_fba_utils import MSFBAUtils
+    from .domains.modeling.ms_fba_utils import MSFBAUtils
 except ImportError as e:
     _import_error("ms_fba_utils", e)
     MSFBAUtils = None
 
 try:
-    from .ms_template_utils import MSTemplateUtils
+    from .domains.modeling.ms_template_utils import MSTemplateUtils
 except ImportError as e:
     _import_error("ms_template_utils", e)
     MSTemplateUtils = None
 
 try:
-    from .kb_sdk_utils import KBSDKUtils
+    from .domains.kbase.kb_sdk_utils import KBSDKUtils
 except ImportError as e:
     _import_error("kb_sdk_utils", e)
     KBSDKUtils = None
 
 try:
-    from .argo_utils import ArgoUtils
+    from .domains.ai.argo_utils import ArgoUtils
 except ImportError as e:
     _import_error("argo_utils", e)
     ArgoUtils = None
 
 try:
-    from .ai_curation_utils import AICurationUtils
+    from .domains.ai.ai_curation_utils import AICurationUtils
 except ImportError as e:
     _import_error("ai_curation_utils", e)
     AICurationUtils = None
 
 try:
-    from .escher_utils import EscherUtils
+    from .domains.notebook.escher_utils import EscherUtils
 except ImportError as e:
     _import_error("escher_utils", e)
     EscherUtils = None
 
 try:
-    from .kb_annotation_utils import KBAnnotationUtils
+    from .domains.genome.kb_annotation_utils import KBAnnotationUtils
 except ImportError as e:
     _import_error("kb_annotation_utils", e)
     KBAnnotationUtils = None
 
 try:
-    from .kb_plm_utils import KBPLMUtils
+    from .domains.ai.kb_plm_utils import KBPLMUtils
 except ImportError as e:
     _import_error("kb_plm_utils", e)
     KBPLMUtils = None
 
 try:
-    from .kb_uniprot_utils import KBUniProtUtils
+    from .domains.external.kb_uniprot_utils import KBUniProtUtils
 except ImportError as e:
     _import_error("kb_uniprot_utils", e)
     KBUniProtUtils = None
 
 try:
-    from .skani_utils import SKANIUtils
+    from .domains.genome.skani_utils import SKANIUtils
 except ImportError as e:
     _import_error("skani_utils", e)
     SKANIUtils = None
 
 try:
-    from .thermo_utils import ThermoUtils
+    from .domains.thermo.thermo_utils import ThermoUtils
 except ImportError as e:
     _import_error("thermo_utils", e)
     ThermoUtils = None
 
 try:
-    from .predictive_thermo_utils import PredictiveThermoUtils
+    from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 except ImportError as e:
     _import_error("predictive_thermo_utils", e)
     PredictiveThermoUtils = None
 
 try:
-    from .kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
+    from .domains.kbase.kb_reads_utils import KBReadsUtils, Assembly, AssemblySet, Reads, ReadSet
 except ImportError as e:
     _import_error("kb_reads_utils", e)
     KBReadsUtils = None
@@ -185,31 +185,31 @@ except ImportError as e:
     ReadSet = None
 
 try:
-    from .bvbrc_utils import BVBRCUtils
+    from .domains.external.bvbrc_utils import BVBRCUtils
 except ImportError as e:
     _import_error("bvbrc_utils", e)
     BVBRCUtils = None
 
 try:
-    from .patric_ws_utils import PatricWSUtils
+    from .domains.external.patric_ws_utils import PatricWSUtils
 except ImportError as e:
     _import_error("patric_ws_utils", e)
     PatricWSUtils = None
 
 try:
-    from .rcsb_pdb_utils import RCSBPDBUtils
+    from .domains.external.rcsb_pdb_utils import RCSBPDBUtils
 except ImportError as e:
     _import_error("rcsb_pdb_utils", e)
     RCSBPDBUtils = None
 
 try:
-    from .mmseqs_utils import MMSeqsUtils
+    from .domains.genome.mmseqs_utils import MMSeqsUtils
 except ImportError as e:
     _import_error("mmseqs_utils", e)
     MMSeqsUtils = None
 
 try:
-    from .annotator_utils import (
+    from .domains.genome.annotation.annotator_utils import (
         AnnotationRecord,
         AnnotationResult,
         AnnotatorUtils,
@@ -225,37 +225,37 @@ except ImportError as e:
     ToolUnavailableError = None
 
 try:
-    from .prokka_utils import ProkkaUtils
+    from .domains.genome.annotation.prokka_utils import ProkkaUtils
 except ImportError as e:
     _import_error("prokka_utils", e)
     ProkkaUtils = None
 
 try:
-    from .dram2_utils import DRAM2Utils
+    from .domains.genome.annotation.dram2_utils import DRAM2Utils
 except ImportError as e:
     _import_error("dram2_utils", e)
     DRAM2Utils = None
 
 try:
-    from .transyt_utils import TransytUtils
+    from .domains.genome.annotation.transyt_utils import TransytUtils
 except ImportError as e:
     _import_error("transyt_utils", e)
     TransytUtils = None
 
 try:
-    from .ontomap_utils import OntomapUtils
+    from .domains.genome.ontomap_utils import OntomapUtils
 except ImportError as e:
     _import_error("ontomap_utils", e)
     OntomapUtils = None
 
 try:
-    from .kb_berdl_utils import KBBERDLUtils
+    from .domains.kbase.kb_berdl_utils import KBBERDLUtils
 except ImportError as e:
     _import_error("kb_berdl_utils", e)
     KBBERDLUtils = None
 
 try:
-    from .kb_callback_utils import KBCallbackUtils
+    from .domains.kbase.kb_callback_utils import KBCallbackUtils
 except ImportError as e:
     _import_error("kb_callback_utils", e)
     KBCallbackUtils = None
@@ -276,7 +276,7 @@ except ImportError as e:
     ChainStep = None
 
 try:
-    from .kbase_endpoints import base_url, service_url, narrative_url, env_from_url
+    from .domains.kbase.kbase_endpoints import base_url, service_url, narrative_url, env_from_url
 except ImportError as e:
     _import_error("kbase_endpoints", e)
     base_url = None
@@ -288,132 +288,132 @@ except ImportError as e:
 # ── Composition-based *Impl classes ────────────────────────────────────
 
 try:
-    from .kb_ws_utils import KBWSUtilsImpl
+    from .domains.kbase.kb_ws_utils import KBWSUtilsImpl
 except ImportError:
     KBWSUtilsImpl = None
 
 try:
-    from .kb_callback_utils import KBCallbackUtilsImpl
+    from .domains.kbase.kb_callback_utils import KBCallbackUtilsImpl
 except ImportError:
     KBCallbackUtilsImpl = None
 
 try:
-    from .kb_annotation_utils import KBAnnotationUtilsImpl
+    from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
 except ImportError:
     KBAnnotationUtilsImpl = None
 
 try:
-    from .ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
 except ImportError:
     MSBiochemUtilsImpl = None
 
 try:
-    from .kb_model_utils import KBModelUtilsImpl
+    from .domains.modeling.kb_model_utils import KBModelUtilsImpl
 except ImportError:
     KBModelUtilsImpl = None
 
 try:
-    from .ms_fba_utils import MSFBAUtilsImpl
+    from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
 except ImportError:
     MSFBAUtilsImpl = None
 
 try:
-    from .ms_template_utils import MSTemplateUtilsImpl
+    from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
 except ImportError:
     MSTemplateUtilsImpl = None
 
 try:
-    from .ms_reconstruction_utils import MSReconstructionUtilsImpl
+    from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
 except ImportError:
     MSReconstructionUtilsImpl = None
 
 try:
-    from .escher_utils import EscherUtilsImpl
+    from .domains.notebook.escher_utils import EscherUtilsImpl
 except ImportError:
     EscherUtilsImpl = None
 
 try:
-    from .model_standardization_utils import ModelStandardizationUtilsImpl
+    from .domains.modeling.model_standardization_utils import ModelStandardizationUtilsImpl
 except ImportError:
     ModelStandardizationUtilsImpl = None
 
 try:
-    from .kb_genome_utils import KBGenomeUtilsImpl
+    from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
 except ImportError:
     KBGenomeUtilsImpl = None
 
 try:
-    from .kb_plm_utils import KBPLMUtilsImpl
+    from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
 except ImportError:
     KBPLMUtilsImpl = None
 
 try:
-    from .bvbrc_utils import BVBRCUtilsImpl
+    from .domains.external.bvbrc_utils import BVBRCUtilsImpl
 except ImportError:
     BVBRCUtilsImpl = None
 
 try:
-    from .kb_reads_utils import KBReadsUtilsImpl
+    from .domains.kbase.kb_reads_utils import KBReadsUtilsImpl
 except ImportError:
     KBReadsUtilsImpl = None
 
 try:
-    from .kb_sdk_utils import KBSDKUtilsImpl
+    from .domains.kbase.kb_sdk_utils import KBSDKUtilsImpl
 except ImportError:
     KBSDKUtilsImpl = None
 
 try:
-    from .argo_utils import ArgoUtilsImpl
+    from .domains.ai.argo_utils import ArgoUtilsImpl
 except ImportError:
     ArgoUtilsImpl = None
 
 try:
-    from .ai_curation_utils import AICurationUtilsImpl
+    from .domains.ai.ai_curation_utils import AICurationUtilsImpl
 except ImportError:
     AICurationUtilsImpl = None
 
 try:
-    from .thermo_utils import ThermoUtilsImpl
+    from .domains.thermo.thermo_utils import ThermoUtilsImpl
 except ImportError:
     ThermoUtilsImpl = None
 
 try:
-    from .predictive_thermo_utils import PredictiveThermoUtilsImpl
+    from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
 except ImportError:
     PredictiveThermoUtilsImpl = None
 
 try:
-    from .mmseqs_utils import MMSeqsUtilsImpl
+    from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
 except ImportError:
     MMSeqsUtilsImpl = None
 
 try:
-    from .skani_utils import SKANIUtilsImpl
+    from .domains.genome.skani_utils import SKANIUtilsImpl
 except ImportError:
     SKANIUtilsImpl = None
 
 try:
-    from .kb_berdl_utils import KBBERDLUtilsImpl
+    from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
 except ImportError:
     KBBERDLUtilsImpl = None
 
 try:
-    from .patric_ws_utils import PatricWSUtilsImpl
+    from .domains.external.patric_ws_utils import PatricWSUtilsImpl
 except ImportError:
     PatricWSUtilsImpl = None
 
 try:
-    from .kb_uniprot_utils import KBUniProtUtilsImpl
+    from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
 except ImportError:
     KBUniProtUtilsImpl = None
 
 try:
-    from .rcsb_pdb_utils import RCSBPDBUtilsImpl
+    from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
 except ImportError:
     RCSBPDBUtilsImpl = None
 
 try:
-    from .ontomap_utils import OntomapUtilsImpl
+    from .domains.genome.ontomap_utils import OntomapUtilsImpl
 except ImportError:
     OntomapUtilsImpl = None
 

@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ...shared_env_utils import SharedEnvUtils
+from ...core.shared_env_utils import SharedEnvUtils
 
 SYSTEM_MSG = (
     "You are an expert curator of gene functional annotations (SwissProt or RAST style). "

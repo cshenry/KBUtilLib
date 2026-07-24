@@ -8,7 +8,7 @@ when the database fallback is (and is not) consulted.
 """
 from __future__ import annotations
 
-from kbutillib.ms_reconstruction_utils import MSReconstructionUtils
+from kbutillib.domains.modeling.ms_reconstruction_utils import MSReconstructionUtils
 
 
 # --- fakes -----------------------------------------------------------------

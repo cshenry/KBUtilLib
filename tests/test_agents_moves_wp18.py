@@ -32,15 +32,15 @@ _AGENTS_KING_APP_DIR = (
 
 
 def test_old_king_install_load_bundle_importable():
-    """from kbutillib.king_install import load_bundle should work (old path)."""
-    from kbutillib.king_install import load_bundle  # noqa: PLC0415
+    """from kbutillib.agents.king_install import load_bundle should work (old path)."""
+    from kbutillib.agents.king_install import load_bundle  # noqa: PLC0415
 
     assert callable(load_bundle)
 
 
 def test_old_king_install_module_has_all():
     """kbutillib.king_install.__all__ is exposed by the shim."""
-    import kbutillib.king_install as ki  # noqa: PLC0415
+    import kbutillib.agents.king_install as ki  # noqa: PLC0415
 
     assert hasattr(ki, "__all__")
     assert "load_bundle" in ki.__all__
@@ -49,7 +49,7 @@ def test_old_king_install_module_has_all():
 
 def test_old_king_install_full_public_api():
     """All main symbols from the old path are accessible."""
-    from kbutillib.king_install import (  # noqa: PLC0415
+    from kbutillib.agents.king_install import (  # noqa: PLC0415
         BundleError,
         compose_context,
         detect_llm_route,
@@ -107,7 +107,7 @@ def test_new_agents_module_importable():
 
 def test_king_install_identity_old_is_new():
     """load_bundle from old path IS the same object as from new path."""
-    from kbutillib.king_install import load_bundle as lb_old  # noqa: PLC0415
+    from kbutillib.agents.king_install import load_bundle as lb_old  # noqa: PLC0415
     from kbutillib.agents.king_install import load_bundle as lb_new  # noqa: PLC0415
 
     assert lb_old is lb_new, "Old and new load_bundle must be the same object"
@@ -227,9 +227,10 @@ def test_researchos_tooling_shim():
 
 
 def test_old_king_install_is_shim():
-    """kbutillib.king_install module is a shim (small file, no original code)."""
-    import kbutillib.king_install as ki  # noqa: PLC0415
+    """kbutillib.agents.king_install is the canonical module (shims deleted in Phase C)."""
+    import kbutillib.agents.king_install as ki  # noqa: PLC0415
 
-    # The shim simply re-exports; the module file should be small
-    src = Path(ki.__file__).read_text(encoding="utf-8")
-    assert "kbutillib.agents.king_install" in src, "king_install.py should be a shim"
+    # The canonical module should define load_bundle and __all__
+    assert callable(ki.load_bundle), "canonical king_install.load_bundle must be callable"
+    assert hasattr(ki, "__all__"), "canonical king_install must define __all__"
+    assert "load_bundle" in ki.__all__

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from ...kb_genome_utils import KBGenomeUtils
+from ..genome.kb_genome_utils import KBGenomeUtils
 
 __all__ = ["KBPLMUtils", "KBPLMUtilsImpl"]
 

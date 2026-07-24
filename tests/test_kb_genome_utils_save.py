@@ -54,7 +54,7 @@ def _minimal_genome(**overrides) -> dict:
 
 def _genome_utils():
     """Bare KBGenomeUtils instance (no tokens required for pure-logic methods)."""
-    from kbutillib.kb_genome_utils import KBGenomeUtils
+    from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
     return KBGenomeUtils(
         config_file=False,
@@ -339,7 +339,7 @@ class TestBuildGenomeWithGff:
 class TestSaveAssemblyFromFastaLegacyRaises:
     def test_bare_legacy_class_raises_runtime_error(self):
         """save_assembly_from_fasta on bare KBGenomeUtils raises RuntimeError."""
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         g = KBGenomeUtils(
             config_file=False,
@@ -360,7 +360,7 @@ class TestSaveAssemblyFromFastaLegacyRaises:
 class TestSaveGenomeObject:
     def test_returns_ref_format(self):
         """save_genome_object returns 'ws_id/obj_id/version' format."""
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         g = KBGenomeUtils(
             config_file=False,
@@ -383,7 +383,7 @@ class TestSaveGenomeObject:
 
     def test_ref_parts_are_integers(self):
         """Each part of the returned ref is numeric."""
-        from kbutillib.kb_genome_utils import KBGenomeUtils
+        from kbutillib.domains.genome.kb_genome_utils import KBGenomeUtils
 
         g = KBGenomeUtils(
             config_file=False,

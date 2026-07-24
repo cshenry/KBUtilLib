@@ -8,7 +8,7 @@ import requests
 from requests.exceptions import ConnectionError, HTTPError, RequestException
 from typing import Any, Dict, List, Optional
 
-from ...base_utils import BaseUtils
+from ...core.base_utils import BaseUtils
 
 __all__ = ["RCSBPDBUtils", "RCSBPDBUtilsImpl"]
 

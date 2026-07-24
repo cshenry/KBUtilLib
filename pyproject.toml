@@ -111,6 +111,8 @@ package = true
 
 [project.scripts]
 kbu = "kbutillib.__main__:main"
+kbu-mcp = "kbutillib.interfaces.mcp.server:main"
+kbu-api = "kbutillib.interfaces.api.app:main"
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]

@@ -8,28 +8,30 @@ All public names are re-exported here so existing code continues to work
 without any modifications.
 """
 
-from kbutillib.domains.thermo.thermo_predictors import get_backend  # noqa: F401
-from kbutillib.domains.thermo.thermo_predictors.base import (
-    ThermoPredictor,  # noqa: F401
-)
-from kbutillib.domains.thermo.thermo_predictors.dgpredictor_backend import (  # noqa: F401
+from kbutillib.domains.thermo.thermo_predictors import (  # noqa: F401
+    BackendUnavailableError,
+    CompoundThermoEstimate,
     DGPredictorBackend,
-)
-from kbutillib.domains.thermo.thermo_predictors.equilibrator_backend import (  # noqa: F401
     EquilibratorBackend,
-)
-from kbutillib.domains.thermo.thermo_predictors.modelseed_backend import (  # noqa: F401
-    ModelseedBackend,
-)
-from kbutillib.domains.thermo.thermo_predictors.molgpka_backend import (  # noqa: F401
-    MolgpkaBackend,
+    ModelSEEDBackend,
+    ModelSEEDDBBackend,
+    MolGPKBackend,
+    ReactionThermoEstimate,
+    ThermoBackend,
 )
 
+# Legacy alias — ThermoPredictor was the old Protocol name before the PR rename.
+ThermoPredictor = ThermoBackend  # noqa: F401
+
 __all__ = [
+    "ThermoBackend",
     "ThermoPredictor",
-    "get_backend",
-    "ModelseedBackend",
+    "BackendUnavailableError",
+    "CompoundThermoEstimate",
+    "ReactionThermoEstimate",
+    "ModelSEEDBackend",
+    "ModelSEEDDBBackend",
     "EquilibratorBackend",
     "DGPredictorBackend",
-    "MolgpkaBackend",
+    "MolGPKBackend",
 ]

@@ -21,7 +21,7 @@ import os
 import pathlib
 from typing import Any, Dict, List, Optional
 
-from ...ms_fba_utils import MSFBAUtils
+from .ms_fba_utils import MSFBAUtils
 
 __all__ = [
     "MSTemplateUtils",

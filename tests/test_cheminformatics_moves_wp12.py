@@ -15,7 +15,7 @@ Tests
 11. New path: ``kbutillib.domains.cheminformatics.verab`` importable.
 12. verAB smarts constants importable via old path.
 13. verAB smarts constants same object via new path.
-14. ``from kbutillib.verab_utils import VerabUtilsImpl`` works (old top-level path).
+14. ``from kbutillib.domains.cheminformatics.verab.facade import VerabUtilsImpl`` works (old top-level path).
 15. ``from kbutillib.domains.cheminformatics.verab_utils import VerabUtilsImpl`` works.
 16. VerabUtilsImpl same class via old and new paths.
 17. ``import kbutillib`` clean (no ImportError).
@@ -195,7 +195,7 @@ def test_verab_smarts_same_object():
 
 def test_old_top_level_verab_utils_impl():
     """Old top-level kbutillib.verab_utils.VerabUtilsImpl must work."""
-    from kbutillib.verab_utils import VerabUtilsImpl  # noqa: F401
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtilsImpl  # noqa: F401
     assert VerabUtilsImpl is not None
 
 
@@ -218,7 +218,7 @@ def test_new_verab_utils_impl():
 
 def test_verab_utils_impl_same_object():
     from kbutillib.domains.cheminformatics.verab_utils import VerabUtilsImpl as NEW
-    from kbutillib.verab_utils import VerabUtilsImpl as OLD
+    from kbutillib.domains.cheminformatics.verab.facade import VerabUtilsImpl as OLD
     assert OLD is NEW, "VerabUtilsImpl must be identical via both import paths"
 
 
@@ -273,7 +273,7 @@ def test_shim_all_contents():
 
 
 def test_verab_utils_shim_all():
-    import kbutillib.verab_utils as shim
+    import kbutillib.domains.cheminformatics.verab.facade as shim
     assert hasattr(shim, "__all__"), "verab_utils shim must define __all__"
     assert "VerabUtils" in shim.__all__
     assert "VerabUtilsImpl" in shim.__all__

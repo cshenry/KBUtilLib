@@ -153,7 +153,7 @@ class NotebookSession:
         """Lazy-loaded KBUtilLib facade sharing this session's environment."""
         if self._kbu is None:
             from ..toolkit import KBUtilLib
-            from ..shared_env_utils import SharedEnvUtils
+            from kbutillib.core.shared_env_utils import SharedEnvUtils
 
             if self._env is None:
                 self._env = SharedEnvUtils()

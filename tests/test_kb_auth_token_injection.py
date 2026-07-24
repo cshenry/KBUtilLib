@@ -32,7 +32,7 @@ class TestKBAuthTokenInjection:
         We pass a non-existent path for token_file to avoid the pre-existing
         Path(None) crash in read_token_file when token_file=None but kbase_token_file exists.
         """
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         # Use a dummy path that doesn't exist so read_token_file skips the standard
         # token file but still reads the kbase token file correctly.

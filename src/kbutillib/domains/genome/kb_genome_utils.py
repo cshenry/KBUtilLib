@@ -17,8 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from os.path import exists
 import json
 
-from ...base_utils import BaseUtils
-from ...kb_ws_utils import KBWSUtils
+from ...core.base_utils import BaseUtils
+from ..kbase.kb_ws_utils import KBWSUtils
 
 logger = logging.getLogger(__name__)
 

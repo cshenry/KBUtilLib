@@ -1,14 +1,7 @@
 # KBUtilLib
 
-[![PyPI](https://img.shields.io/pypi/v/KBUtilLib.svg)][pypi status]
-[![Status](https://img.shields.io/pypi/status/KBUtilLib.svg)][pypi status]
-[![Python Version](https://img.shields.io/pypi/pyversions/KBUtilLib)][pypi status]
-[![License](https://img.shields.io/pypi/l/KBUtilLib)][license]
-
-[![Tests](https://github.com/cshenry/KBUtilLib/workflows/Tests/badge.svg)][tests]
-[![Codecov](https://codecov.io/gh/cshenry/KBUtilLib/branch/main/graph/badge.svg)][codecov]
-
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
+[![Tests](https://github.com/cshenry/KBUtilLib/actions/workflows/ci.yml/badge.svg?branch=feature%2Freorg-api-mcp-explore)][ci]
+[![License](https://img.shields.io/github/license/cshenry/KBUtilLib)][license]
 [![Ruff codestyle][ruff badge]][ruff project]
 
 KBUtilLib is a domain-organized utility library for KBase bioinformatics: biochemistry search,
@@ -368,16 +361,9 @@ Distributed under the terms of the [MIT license][license].
 
 Developed at **Argonne National Laboratory** by Christopher Henry.
 
-[@cjolowicz]: https://github.com/cjolowicz
-[pypi status]: https://pypi.org/project/KBUtilLib/
-[tests]: https://github.com/cshenry/KBUtilLib/actions?workflow=Tests
-[codecov]: https://app.codecov.io/gh/cshenry/KBUtilLib
-[pre-commit]: https://github.com/pre-commit/pre-commit
+[ci]: https://github.com/cshenry/KBUtilLib/actions/workflows/ci.yml
+[license]: https://github.com/cshenry/KBUtilLib/blob/main/LICENSE
 [ruff badge]: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json
 [ruff project]: https://github.com/charliermarsh/ruff
 [file an issue]: https://github.com/cshenry/KBUtilLib/issues
-
-<!-- github-only -->
-
-[license]: https://github.com/cshenry/KBUtilLib/blob/main/LICENSE
 [contributor guide]: https://github.com/cshenry/KBUtilLib/blob/main/CONTRIBUTING.md

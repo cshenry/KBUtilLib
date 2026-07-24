@@ -28,7 +28,7 @@ import yaml
 # Helpers
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SRC_ROOT = _REPO_ROOT / "src"
 
 

@@ -24,7 +24,7 @@ import yaml
 # Paths
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SKILLS_ROOT = _REPO_ROOT / "src" / "kbutillib" / "beril" / "skills"
 
 _KBU_DIR = _SKILLS_ROOT / "kbu"

@@ -590,7 +590,7 @@ class TestBiologStash:
     def _stash_path(self):
         """Return path to the committed biolog_phenotypes.json."""
         return (
-            pathlib.Path(__file__).parent.parent
+            pathlib.Path(__file__).parent.parent.parent
             / "src" / "kbutillib" / "data" / "biolog_phenotypes.json"
         )
 

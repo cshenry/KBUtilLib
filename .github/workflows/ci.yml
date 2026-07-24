@@ -40,13 +40,13 @@ jobs:
         run: |
           python -m pytest \
             --ignore=tests/notebook/helpers \
-            --ignore=tests/test_comprehensive_gapfill_wrapper.py \
-            --ignore=tests/test_escher_utils.py \
-            --ignore=tests/test_kb_narrative_provenance.py \
-            --ignore=tests/test_kb_plm_utils.py \
-            --ignore=tests/test_kb_ws_utils.py \
-            --ignore=tests/test_ms_reconstruction_utils.py \
-            --ignore=tests/test_upload_blob_file_streaming.py \
+            --ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py \
+            --ignore=tests/biochem/test_escher_utils.py \
+            --ignore=tests/kbase/test_kb_narrative_provenance.py \
+            --ignore=tests/kbase/test_kb_plm_utils.py \
+            --ignore=tests/kbase/test_kb_ws_utils.py \
+            --ignore=tests/modeling/test_ms_reconstruction_utils.py \
+            --ignore=tests/kbase/test_upload_blob_file_streaming.py \
             --cov=src/kbutillib \
             --cov-report=xml \
             --cov-report=term-missing \

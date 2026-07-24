@@ -1,10 +1,27 @@
 # kbutillib.domains.external — External Data Services
 
-Clients for public biological databases: BVBRC/PATRIC, RCSB PDB, UniProt via KBase, and the TransyT transport system database.
+Clients for public biological databases: BVBRC/PATRIC, RCSB PDB, UniProt via KBase, and PATRIC
+workspace access.
+
+---
 
 ## What lives here
 
-Four utility classes provide programmatic access to external databases without requiring direct API credentials beyond what each service offers publicly. All clients follow the same lazy-import pattern: they construct cleanly and report availability before making any network calls.
+Four utility classes provide programmatic access to external biological databases without
+requiring direct API credentials beyond what each service offers publicly. All clients follow the
+lazy-import pattern: they construct cleanly and report availability before making any network
+calls.
+
+## Canonical imports
+
+```python
+from kbutillib.domains.external.bvbrc_utils import BvbrcUtils
+from kbutillib.domains.external.rcsb_pdb_utils import RcsbPdbUtils
+from kbutillib.domains.external.kb_uniprot_utils import KbUniprotUtils
+from kbutillib.domains.external.patric_ws_utils import PatricWsUtils
+```
+
+---
 
 ## Modules
 
@@ -15,32 +32,62 @@ Four utility classes provide programmatic access to external databases without r
 | `rcsb_pdb_utils.py` | `RcsbPdbUtils`, `RcsbPdbUtilsImpl` | RCSB PDB structure search, metadata retrieval, mmCIF download |
 | `kb_uniprot_utils.py` | `KbUniprotUtils`, `KbUniprotUtilsImpl` | UniProt lookup via KBase integration layer |
 
-## Facade access
-
-```python
-from kbutillib.toolkit import KBUtilLib
-
-kbu = KBUtilLib()
-
-# BVBRC genome search
-genomes = kbu.bvbrc.search_genomes(taxon_id=573)
-
-# RCSB PDB structure
-pdb_meta = kbu.rcsb_pdb.get_entry("1ABC")
-kbu.rcsb_pdb.download_mmcif("1ABC", outdir="/tmp")
-
-# UniProt
-uniprot_record = kbu.uniprot.get_protein("P00533")
-```
+---
 
 ## Optional dependencies
 
-| Package | Enables | Note |
-|---------|---------|------|
-| `requests` | All HTTP clients | included in core |
-| `biopython` | PDB mmCIF parsing in `rcsb_pdb_utils` | `pip install biopython` |
+| Package | Enables | Install |
+|---------|---------|---------|
+| `requests` | All HTTP clients | included in core dependencies |
+| `biopython` | PDB mmCIF parsing in `RcsbPdbUtils` | `pip install biopython` |
 
-No optional packages are needed for availability checks or metadata queries. Structure downloads and parsing require `biopython`.
+No optional packages are needed for availability checks or metadata queries. Structure downloads
+and parsing require `biopython`.
+
+---
+
+## Usage example
+
+```python
+from kbutillib.domains.external.bvbrc_utils import BvbrcUtils
+from kbutillib.domains.external.rcsb_pdb_utils import RcsbPdbUtils
+from kbutillib.domains.external.kb_uniprot_utils import KbUniprotUtils
+
+# BVBRC genome search
+bvbrc = BvbrcUtils()
+genomes = bvbrc.search_genomes(taxon_id=573)
+
+# RCSB PDB
+pdb = RcsbPdbUtils()
+meta = pdb.get_entry("1ABC")
+pdb.download_mmcif("1ABC", outdir="/tmp")  # requires biopython
+
+# UniProt via KBase
+uniprot = KbUniprotUtils()
+record = uniprot.get_protein("P00533")
+```
+
+Via the facade:
+
+```python
+from kbutillib import KBUtilLib
+
+kbu = KBUtilLib()
+genomes = kbu.bvbrc.search_genomes(taxon_id=573)
+pdb_meta = kbu.rcsb_pdb.get_entry("1ABC")
+```
+
+---
+
+## Available capabilities
+
+Capabilities are registered on each `*Impl` class where they are present. Run:
+
+```bash
+kbu cap list --domain external
+```
+
+---
 
 ## Adding a capability here
 

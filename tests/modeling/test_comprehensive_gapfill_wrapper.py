@@ -164,7 +164,7 @@ class _StubReconUtils:
     # Bind the real implementation as an instance method
     run_comprehensive_gapfill_on_model = (
         __import__(
-            "kbutillib.ms_reconstruction_utils",
+            "kbutillib.domains.modeling.ms_reconstruction_utils",
             fromlist=["MSReconstructionUtils"],
         ).MSReconstructionUtils.run_comprehensive_gapfill_on_model
     )

@@ -34,4 +34,5 @@ from kbutillib.interfaces.cli import (  # noqa: F401
     set_cmd,
     subproject_cmd,
     update_command,
+    verab_cmd,
 )

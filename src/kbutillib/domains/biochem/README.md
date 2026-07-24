@@ -2,38 +2,83 @@
 
 ModelSEED compound and reaction lookup, biochemistry search, and chemical identifier resolution.
 
+---
+
 ## What lives here
 
-`MSBiochemUtils` wraps the ModelSEED biochemistry database to search compounds by name, formula, or InChI; retrieve reactions by identifier; and resolve cross-database identifiers (KEGG, ChEBI, BiGG). This is the only domain with `@capability`-decorated methods registered out of the box, making biochem the canonical reference implementation of the capability pattern.
+`MSBiochemUtils` wraps the ModelSEED biochemistry database to search compounds by name, formula,
+or InChI; retrieve reactions by identifier; and resolve cross-database identifiers (KEGG, ChEBI,
+BiGG). Biochem is the canonical reference implementation of the `@capability` pattern — its three
+registered capabilities demonstrate the full decorator and schema workflow.
 
-## Modules
-
-| File | Class(es) | Purpose |
-|------|-----------|---------|
-| `ms_biochem_utils.py` | `MSBiochemUtils`, `MSBiochemUtilsImpl` | Compound/reaction search, ID lookup, cross-reference resolution |
-| `schemas.py` | `CompoundResult`, `ReactionResult` | Pydantic v2 I/O models for `@capability` typed transports |
-
-## Facade access
+## Canonical import
 
 ```python
-from kbutillib.toolkit import KBUtilLib
+from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+```
 
-kbu = KBUtilLib()
-biochem = kbu.biochem
+Or via the top-level re-export (stable across releases):
+
+```python
+from kbutillib import MSBiochemUtils
+```
+
+---
+
+## Key classes and methods
+
+| Class | Method | Description |
+|-------|--------|-------------|
+| `MSBiochemUtils` / `MSBiochemUtilsImpl` | `search_compounds(query, limit)` | Search by name, formula, or InChI |
+| | `get_compound_by_id(compound_id)` | Retrieve a compound record by ModelSEED ID |
+| | `get_reaction_by_id(reaction_id)` | Retrieve a reaction record by ModelSEED ID |
+
+`schemas.py` provides pydantic v2 `CompoundResult` and `ReactionResult` models used by the
+capability's typed transports.
+
+---
+
+## Optional dependencies
+
+None. The core ModelSEED data is bundled with the package. Network-dependent features (live
+KEGG/ChEBI sync) need outbound HTTP but degrade gracefully when offline.
+
+---
+
+## Usage example
+
+```python
+from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+
+biochem = MSBiochemUtils()
 
 # Search by name or partial string
 hits = biochem.search_compounds("adenosine triphosphate")
+print(hits[0])  # {'id': 'cpd00002', 'name': 'ATP', 'formula': 'C10H12N5O13P3', ...}
 
 # Look up a specific compound
 atp = biochem.get_compound_by_id("cpd00002")
+print(atp["formula"])  # C10H12N5O13P3
 
 # Look up a reaction
 rxn = biochem.get_reaction_by_id("rxn00001")
+print(rxn["equation"])
 ```
 
-## Capabilities
+Via the facade:
 
-All three methods are `@capability`-decorated — they appear in `kbu cap list` and are available to MCP and API transports without additional wiring.
+```python
+from kbutillib import KBUtilLib
+
+kbu = KBUtilLib()
+hits = kbu.biochem.search_compounds("glucose")
+```
+
+---
+
+## Available capabilities
+
+All three methods are `@capability`-decorated and appear in every transport automatically.
 
 | Capability name | Summary |
 |-----------------|---------|
@@ -41,26 +86,24 @@ All three methods are `@capability`-decorated — they appear in `kbu cap list` 
 | `biochem.get_compound_by_id` | Retrieve a compound record by ModelSEED ID |
 | `biochem.get_reaction_by_id` | Retrieve a reaction record by ModelSEED ID |
 
-```console
+```bash
 kbu cap list --domain biochem
 kbu cap info biochem.search_compounds
 kbu cap run biochem.search_compounds --query atp --limit 5
 ```
 
-## Optional dependencies
-
-The core ModelSEED data is bundled. No optional packages required for basic search. Network-dependent features (live KEGG/ChEBI sync) need outbound HTTP.
+---
 
 ## Adding a capability here
 
-See root `CONTRIBUTING.md` → "Add a domain capability". Biochem is the reference pattern:
+Biochem is the reference pattern. See root `CONTRIBUTING.md` for the full guide.
 
 ```python
 from ...core.capability import capability
 
 @capability(
     domain="biochem",
-    summary="Get all aliases for a compound.",
+    summary="Return all database aliases for a ModelSEED compound ID.",
     tags=("biochem", "lookup", "readonly"),
     visibility="public",
 )
@@ -69,4 +112,4 @@ def get_compound_aliases(self, compound_id: str) -> list[str]:
     ...
 ```
 
-After decorating, run `kbu cap list --domain biochem` to confirm. Add a schema to `schemas.py` if the return type is complex.
+After adding, run `kbu cap list --domain biochem` to confirm registration.

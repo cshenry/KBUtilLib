@@ -24,6 +24,7 @@ from .model_directionality import (
     combine_directionality_signals,
 )
 from .model_helpers import _parse_id, _check_and_convert_model
+from .ms_remote_solve_utils import RemoteSolveResult, remote_solve
 
 
 # Collected optional-import failures.  Populated by _import_error(); flushed
@@ -441,6 +442,8 @@ __all__ = [
     "combine_directionality_signals",
     "_parse_id",
     "_check_and_convert_model",
+    "RemoteSolveResult",
+    "remote_solve",
     # Legacy class names (inheritance-based)
     "AICurationUtils",
     "ArgoUtils",

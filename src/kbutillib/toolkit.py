@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .skani_utils import SKANIUtilsImpl
     from .kb_berdl_utils import KBBERDLUtilsImpl
     from .ms_remote_solver_utils import MSRemoteSolverUtilsImpl
+    from .ms_remote_solve_utils import RemoteSolveResult
     from .patric_ws_utils import PatricWSUtilsImpl
     from .kb_uniprot_utils import KBUniProtUtilsImpl
     from .rcsb_pdb_utils import RCSBPDBUtilsImpl
@@ -259,6 +260,37 @@ class KBUtilLib:
             from .ms_remote_solver_utils import MSRemoteSolverUtilsImpl
             self._remote_solver = MSRemoteSolverUtilsImpl(self.env)
         return self._remote_solver
+
+    def remote_solve(
+        self,
+        model: Any,
+        solver: Optional[str] = None,
+        time_limit: Optional[float] = None,
+    ) -> "RemoteSolveResult":
+        """Serialize a built cobra/optlang ``model`` and solve it remotely.
+
+        Thin wrapper around :func:`kbutillib.ms_remote_solve_utils.remote_solve`,
+        using this facade's ``.remote_solver`` client. See that module for
+        the guard/serialize/solve/wrap details (a quadratic objective
+        requires a gurobi/cplex backend; a purely linear model may use any
+        LP-writing backend, including GLPK). ``.primal`` on ``model``'s own
+        optlang variables is NOT populated -- read fitted values via
+        ``result.value(...)``.
+
+        Args:
+            model: A cobra/optlang model whose problem has already been
+                built (``model.solver.problem``).
+            solver: ``"gurobi"`` / ``"cplex"`` / ``None`` (service default).
+            time_limit: Solver time limit in seconds.
+
+        Returns:
+            A ``RemoteSolveResult`` wrapping the remote service's response.
+        """
+        from .ms_remote_solve_utils import remote_solve as _remote_solve
+
+        return _remote_solve(
+            self.remote_solver, model, solver=solver, time_limit=time_limit
+        )
 
     @property
     def patric(self) -> PatricWSUtilsImpl:

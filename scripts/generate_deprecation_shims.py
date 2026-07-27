@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Generate the flat-submodule deprecation shims under ``src/kbutillib/``.
+
+Background
+----------
+The ``domains/`` reorg (WP0-WP20, adopted from Vibhav's
+``feature/reorg-api-mcp-explore`` branch) deleted the flat
+``kbutillib.<x>_utils`` import surface in favor of
+``kbutillib.domains.<domain>.<x>_utils`` (see
+``agent-io/prds/kbutillib-reorg-integration/fullprompt.md``, "Old -> new module
+mapping" table). Every consumer that still does
+``from kbutillib.ms_fba_utils import MSFBAUtils`` would otherwise get a hard
+``ModuleNotFoundError``.
+
+This script is the single source of truth (``LEGACY_MODULE_MAP``) for the
+old -> new mapping, and it (re)writes one thin, real ``.py`` module per legacy
+path directly under ``src/kbutillib/``. Each generated module:
+
+1. Emits a ``DeprecationWarning`` (once per process, since Python only
+   executes a module body on first import) pointing at the new canonical
+   import path.
+2. Re-exports everything from the new module via ``from <new> import *``, so
+   ``from kbutillib.ms_fba_utils import MSFBAUtils`` returns the *same*
+   object as ``from kbutillib.domains.modeling.ms_fba_utils import
+   MSFBAUtils`` (star-import binds the existing object, it does not copy it).
+
+Deliberately NOT a package ``__getattr__`` or an ``importlib`` meta-path
+finder: those intercept ``kbutillib.<x>`` attribute access but do not create
+a real module object, and `import kbutillib.ms_fba_utils` /
+`help(kbutillib.ms_fba_utils)` / ``__file__`` all need a genuine submodule to
+work as extension authors expect.
+
+Usage
+-----
+    python3 scripts/generate_deprecation_shims.py
+
+Regenerate whenever ``LEGACY_MODULE_MAP`` changes (e.g. a new domain module is
+carved out of a further-future reorg). The generated files are checked into
+git like any other source file; this script is a maintenance tool, not a
+build step.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+# ---------------------------------------------------------------------------
+# The one table: legacy flat module name -> new dotted module path (relative
+# to ``kbutillib``). Mirrors the "Old -> new module mapping" table in
+# agent-io/prds/kbutillib-reorg-integration/fullprompt.md.
+# ---------------------------------------------------------------------------
+LEGACY_MODULE_MAP: dict[str, str] = {
+    # core.<same>
+    "base_utils": "core.base_utils",
+    "shared_env_utils": "core.shared_env_utils",
+    "dependency_manager": "core.dependency_manager",
+    # domains.ai.<same>
+    "argo_utils": "domains.ai.argo_utils",
+    "ai_curation_utils": "domains.ai.ai_curation_utils",
+    "kb_plm_utils": "domains.ai.kb_plm_utils",
+    # domains.biochem.ms_biochem_utils
+    "ms_biochem_utils": "domains.biochem.ms_biochem_utils",
+    # domains.external.<same>
+    "bvbrc_utils": "domains.external.bvbrc_utils",
+    "kb_uniprot_utils": "domains.external.kb_uniprot_utils",
+    "patric_ws_utils": "domains.external.patric_ws_utils",
+    "rcsb_pdb_utils": "domains.external.rcsb_pdb_utils",
+    # domains.genome.<same>
+    "annotator_utils": "domains.genome.annotator_utils",
+    "kb_annotation_utils": "domains.genome.kb_annotation_utils",
+    "kb_genome_utils": "domains.genome.kb_genome_utils",
+    "mmseqs_utils": "domains.genome.mmseqs_utils",
+    "skani_utils": "domains.genome.skani_utils",
+    "ontomap_utils": "domains.genome.ontomap_utils",
+    # domains.genome.annotation.<same>
+    "dram2_utils": "domains.genome.annotation.dram2_utils",
+    "prokka_utils": "domains.genome.annotation.prokka_utils",
+    "transyt_utils": "domains.genome.annotation.transyt_utils",
+    # domains.kbase.<same>
+    "kb_berdl_utils": "domains.kbase.kb_berdl_utils",
+    "kb_callback_utils": "domains.kbase.kb_callback_utils",
+    "kb_narrative_audit": "domains.kbase.kb_narrative_audit",
+    "kb_reads_utils": "domains.kbase.kb_reads_utils",
+    "kb_sdk_utils": "domains.kbase.kb_sdk_utils",
+    "kb_ws_utils": "domains.kbase.kb_ws_utils",
+    "kbase_catalog_client": "domains.kbase.kbase_catalog_client",
+    "kbase_endpoints": "domains.kbase.kbase_endpoints",
+    # domains.modeling.<same>
+    "kb_model_utils": "domains.modeling.kb_model_utils",
+    "model_directionality": "domains.modeling.model_directionality",
+    "model_helpers": "domains.modeling.model_helpers",
+    "model_standardization_utils": "domains.modeling.model_standardization_utils",
+    "ms_fba_utils": "domains.modeling.ms_fba_utils",
+    "ms_reconstruction_utils": "domains.modeling.ms_reconstruction_utils",
+    "ms_template_utils": "domains.modeling.ms_template_utils",
+    # domains.notebook.escher_utils
+    "escher_utils": "domains.notebook.escher_utils",
+    # domains.thermo.thermo_utils
+    "thermo_utils": "domains.thermo.thermo_utils",
+    # agents.king_install
+    "king_install": "agents.king_install",
+}
+
+_TEMPLATE = '''"""Deprecated flat-module shim for ``kbutillib.{old}``.
+
+AUTO-GENERATED by ``scripts/generate_deprecation_shims.py`` from
+``LEGACY_MODULE_MAP`` in that script — do not hand-edit, regenerate instead.
+
+The ``domains/`` reorg moved this module to ``kbutillib.{new}``. This shim
+exists only so that old ``from kbutillib.{old} import ...`` call sites keep
+working (with a warning) instead of hard-failing with
+``ModuleNotFoundError``. It re-exports the target module's public names via
+a star-import, so the objects you get here are identical (``is``) to the
+ones at the new location. Update your import to::
+
+    from kbutillib.{new} import ...
+
+This shim is migration debt and is expected to be removed in a future
+release.
+"""
+
+from __future__ import annotations
+
+import warnings as _warnings
+
+_warnings.warn(
+    "kbutillib.{old} is deprecated; import from kbutillib.{new} instead. "
+    "This flat shim will be removed in a future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from kbutillib.{new} import *  # noqa: E402,F401,F403
+'''
+
+_GENERATED_HEADER_MARKER = "AUTO-GENERATED by ``scripts/generate_deprecation_shims.py``"
+
+
+def generate() -> list[pathlib.Path]:
+    """(Re)write every shim module. Returns the list of written paths."""
+    src_root = pathlib.Path(__file__).resolve().parent.parent / "src" / "kbutillib"
+    written = []
+    for old, new in sorted(LEGACY_MODULE_MAP.items()):
+        out_path = src_root / f"{old}.py"
+        out_path.write_text(_TEMPLATE.format(old=old, new=new), encoding="utf-8")
+        written.append(out_path)
+    return written
+
+
+def main() -> None:
+    written = generate()
+    for path in written:
+        print(f"wrote {path}")
+    print(f"\n{len(written)} deprecation shim module(s) generated.")
+
+
+if __name__ == "__main__":
+    main()

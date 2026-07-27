@@ -172,8 +172,8 @@ Before writing a `kbu model exec` script, read:
   docstring and each verb's implementation; every verb is a thin facade,
   so reading it shows you exactly which `MSReconstructionUtils`/
   `MSFBAUtils` methods to call yourself.
-- `~/Dropbox/Projects/KBUtilLib/src/kbutillib/ms_reconstruction_utils.py`
-  and `~/Dropbox/Projects/KBUtilLib/src/kbutillib/ms_fba_utils.py` — the
+- `~/Dropbox/Projects/KBUtilLib/src/kbutillib/domains/modeling/ms_reconstruction_utils.py`
+  and `~/Dropbox/Projects/KBUtilLib/src/kbutillib/domains/modeling/ms_fba_utils.py` — the
   underlying methods (`build_metabolic_model`, `gapfill_metabolic_model`,
   `run_fba`, `run_fva`) with their full signatures and docstrings.
 

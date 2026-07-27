@@ -75,7 +75,7 @@ def _make_job_utils(ee2_mock: MagicMock | None = None, db_path: Path | None = No
 
     from kbutillib.kb_job_utils.store import JobStore
     from kbutillib.kb_job_utils.utils import KBJobUtils
-    from kbutillib.shared_env_utils import SharedEnvUtils
+    from kbutillib.core.shared_env_utils import SharedEnvUtils
 
     if ee2_mock is None:
         ee2_mock = _make_ee2_mock()
@@ -743,7 +743,7 @@ class TestCheckJobsListShape:
 
         from kbutillib.kb_job_utils.store import JobStore
         from kbutillib.kb_job_utils.utils import KBJobUtils
-        from kbutillib.shared_env_utils import SharedEnvUtils
+        from kbutillib.core.shared_env_utils import SharedEnvUtils
 
         env = SharedEnvUtils(config_file=False, token_file=None, kbase_token_file=None,
                              token="fake-token")

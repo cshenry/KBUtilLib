@@ -26,7 +26,6 @@ from .manifest import (
     write_subproject_manifest,
 )
 
-
 # ── state machine ──────────────────────────────────────────────────────────
 
 #: Ordered list of all valid states.

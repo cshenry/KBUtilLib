@@ -18,7 +18,7 @@ import tomllib
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.bootstrap import (
+from kbutillib.interfaces.cli.bootstrap import (
     _BOOTSTRAP_MACOS_ONLY_MESSAGE,
     _CLAUDE_AGENT_FILES,
     _CLAUDE_COMMAND_FILES,
@@ -55,7 +55,7 @@ def _make_git_repo(path: Path) -> None:
 
 def _make_stub_template(kbu_root: Path, project_name: str = "PROJECT") -> None:
     """Create a minimal stub templates/research-project/ in *kbu_root*."""
-    from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
+    from kbutillib.interfaces.cli.bootstrap import _CLAUDE_AGENT_FILES
     tmpl = kbu_root / "templates" / "research-project"
     (tmpl / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
     (tmpl / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
@@ -168,11 +168,11 @@ def _invoke_bootstrap(
 
     runner = CliRunner()
     with (
-        patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-        patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-        patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-        patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=subprocess_side_effect),
-        patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+        patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+        patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+        patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+        patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=subprocess_side_effect),
+        patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
     ):
         os.chdir(tmp_path)
         result = runner.invoke(
@@ -219,7 +219,7 @@ class TestAC2NotGitRepo:
         """Exit 1 with 'must run inside a git repository' when .git absent."""
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
         ):
             os.chdir(tmp_path)
             result = runner.invoke(
@@ -234,7 +234,7 @@ class TestAC2NotGitRepo:
         """No files are written when precondition fails."""
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
         ):
             os.chdir(tmp_path)
             runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
@@ -247,7 +247,7 @@ class TestAC2NotGitRepo:
         (tmp_path / "kbu-project.toml").write_text("")  # trigger the SECOND precondition
 
         runner = CliRunner()
-        with patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True):
+        with patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True):
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
         # Should fail on kbu-project.toml, NOT on "must run inside a git repo"
@@ -267,7 +267,7 @@ class TestAC3ManifestExists:
         (tmp_path / "kbu-project.toml").write_text("[project]\nname = 'x'\n")
 
         runner = CliRunner()
-        with patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True):
+        with patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True):
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
         assert result.exit_code == 1
@@ -280,7 +280,7 @@ class TestAC3ManifestExists:
         (tmp_path / "kbu-project.toml").write_text(orig)
 
         runner = CliRunner()
-        with patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True):
+        with patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True):
             os.chdir(tmp_path)
             runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
         # Manifest unchanged
@@ -299,7 +299,7 @@ class TestAC4MacOSGate:
         _make_git_repo(tmp_path)
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=False),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=False),
         ):
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap"], catch_exceptions=False)
@@ -311,7 +311,7 @@ class TestAC4MacOSGate:
         """The exact macOS-only message is printed verbatim."""
         _make_git_repo(tmp_path)
         runner = CliRunner()
-        with patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=False):
+        with patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=False):
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap"], catch_exceptions=False)
         assert _BOOTSTRAP_MACOS_ONLY_MESSAGE in result.output
@@ -326,10 +326,10 @@ class TestAC4MacOSGate:
         runner = CliRunner()
         se = _make_subprocess_side_effect()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=False),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=False),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -395,10 +395,10 @@ class TestAC6NameDefault:
         runner = CliRunner()
         se = _make_subprocess_side_effect()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(repo)
@@ -439,10 +439,10 @@ class TestAC7AuthorTriple:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -467,10 +467,10 @@ class TestAC7AuthorTriple:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -506,10 +506,10 @@ class TestAC8Check:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_make_subprocess_side_effect()),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_make_subprocess_side_effect()),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -547,10 +547,10 @@ class TestAC8Check:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -586,10 +586,10 @@ class TestAC8Check:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -612,7 +612,7 @@ class TestAC8Check:
 class TestAC9TemplateSet:
     def test_bootstrap_handles_expected_entries(self, tmp_path: Path) -> None:
         """Bootstrap handles 16 template entries: 7 commands + 4 agents + 5 other."""
-        from kbutillib.cli.bootstrap import _TEMPLATE_ENTRIES
+        from kbutillib.interfaces.cli.bootstrap import _TEMPLATE_ENTRIES
         assert len(_TEMPLATE_ENTRIES) == 16
         assert "README.md" in _TEMPLATE_ENTRIES
 
@@ -622,7 +622,7 @@ class TestAC9TemplateSet:
 
     def test_claude_agents_count(self) -> None:
         """There are exactly 4 .claude/agents/ subagent files."""
-        from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
+        from kbutillib.interfaces.cli.bootstrap import _CLAUDE_AGENT_FILES
         assert len(_CLAUDE_AGENT_FILES) == 4
 
     def test_expected_command_files(self) -> None:
@@ -640,7 +640,7 @@ class TestAC9TemplateSet:
 
     def test_expected_agent_files(self) -> None:
         """Agent files are the 3 converted subagents plus the net-new kbu-sub-build."""
-        from kbutillib.cli.bootstrap import _CLAUDE_AGENT_FILES
+        from kbutillib.interfaces.cli.bootstrap import _CLAUDE_AGENT_FILES
         expected = {
             ".claude/agents/kbu-sub-literature-review.md",
             ".claude/agents/kbu-sub-review.md",
@@ -684,10 +684,10 @@ class TestAC10CommandFileConflict:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -715,10 +715,10 @@ class TestAC10CommandFileConflict:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -746,10 +746,10 @@ class TestAC10CommandFileConflict:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -786,10 +786,10 @@ class TestAC10CommandFileConflict:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -821,10 +821,10 @@ class TestAC11VSCodeExtensions:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -852,10 +852,10 @@ class TestAC11VSCodeExtensions:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -885,10 +885,10 @@ class TestAC11VSCodeExtensions:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -919,10 +919,10 @@ class TestAC12SubprojectsGitkeep:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -949,10 +949,10 @@ class TestAC12SubprojectsGitkeep:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -984,10 +984,10 @@ class TestAC13CodeWorkspace:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1013,10 +1013,10 @@ class TestAC13CodeWorkspace:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1050,14 +1050,14 @@ class TestReadmeHandling:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
                 patch(
-                    "kbutillib.cli.bootstrap.subprocess.run",
+                    "kbutillib.interfaces.cli.bootstrap.subprocess.run",
                     side_effect=_make_subprocess_side_effect(),
                 ),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 return runner.invoke(
@@ -1118,14 +1118,14 @@ class TestReadmeHandling:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
             patch(
-                "kbutillib.cli.bootstrap.subprocess.run",
+                "kbutillib.interfaces.cli.bootstrap.subprocess.run",
                 side_effect=_make_subprocess_side_effect(),
             ),
-            patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
             result = runner.invoke(
@@ -1230,10 +1230,10 @@ class TestAC16BakFormat:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1362,11 +1362,11 @@ class TestAC18VenvCompat:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1408,11 +1408,11 @@ class TestAC18VenvCompat:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1467,14 +1467,14 @@ class TestAC19VenvFallback:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value="/usr/local/bin/venvman"),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value="/usr/local/bin/venvman"),
                 # Mock _run_venvman_project so it doesn't need real venvman
                 patch(
-                    "kbutillib.cli.bootstrap._run_venvman_project",
+                    "kbutillib.interfaces.cli.bootstrap._run_venvman_project",
                     return_value=(venvman_python, ""),
                 ),
             ):
@@ -1524,11 +1524,11 @@ class TestAC19VenvFallback:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1568,10 +1568,10 @@ class TestAC20NoVenv:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1600,10 +1600,10 @@ class TestAC20NoVenv:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1651,11 +1651,11 @@ class TestAC21NoKernel:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1712,11 +1712,11 @@ class TestAC22PipCommand:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1773,11 +1773,11 @@ class TestAC23KernelCommand:
         try:
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-                patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-                patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-                patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
-                patch("kbutillib.cli.bootstrap.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+                patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+                patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
+                patch("kbutillib.interfaces.cli.bootstrap.shutil.which", return_value=None),
             ):
                 os.chdir(tmp_path)
                 result = runner.invoke(
@@ -1816,10 +1816,10 @@ class TestAC24To28Manifest:
         se = _make_subprocess_side_effect(git_commit="deadbeef123")
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1906,10 +1906,10 @@ class TestAC25SourceCommit:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1947,10 +1947,10 @@ class TestAC25SourceCommit:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -1984,10 +1984,10 @@ class TestAC26FileHashesMembership:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2011,10 +2011,10 @@ class TestAC26FileHashesMembership:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2039,10 +2039,10 @@ class TestAC26FileHashesMembership:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2074,10 +2074,10 @@ class TestAC27HashHelper:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2112,10 +2112,10 @@ class TestAC28Timestamps:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2159,10 +2159,10 @@ class TestAC29NoGitCommit:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2201,10 +2201,10 @@ class TestAC30NoInitMarker:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
             patch.dict(os.environ, {"XDG_CONFIG_HOME": str(fake_config_dir)}),
         ):
@@ -2235,10 +2235,10 @@ class TestAC31SuccessSummary:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2289,7 +2289,7 @@ class TestAC34DoctorOrigin:
 
     def test_bootstrapped_manifest_probe(self, tmp_path: Path) -> None:
         """_probe_project_origin returns 'bootstrap' for bootstrapped manifest."""
-        from kbutillib.cli.init import _probe_project_origin
+        from kbutillib.interfaces.cli.init import _probe_project_origin
         ts = "2026-06-07T12:00:00Z"
         # Write a real manifest so read_project_manifest finds it from cwd
         write_project_manifest(tmp_path, {
@@ -2312,11 +2312,11 @@ class TestAC34DoctorOrigin:
 
 class TestAC35ModuleExports:
     def test_bootstrap_command_exported(self) -> None:
-        from kbutillib.cli.bootstrap import bootstrap_command
+        from kbutillib.interfaces.cli.bootstrap import bootstrap_command
         assert callable(bootstrap_command)
 
     def test_bootstrap_function_exported(self) -> None:
-        from kbutillib.cli.bootstrap import bootstrap
+        from kbutillib.interfaces.cli.bootstrap import bootstrap
         assert callable(bootstrap)
 
     def test_bootstrap_function_callable_from_tests(self, tmp_path: Path) -> None:
@@ -2328,10 +2328,10 @@ class TestAC35ModuleExports:
 
         se = _make_subprocess_side_effect()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             bootstrap(
@@ -2358,7 +2358,7 @@ class TestAC35ModuleExports:
 class TestAC36TemplateOpsModule:
     def test_template_ops_exports(self) -> None:
         """_template_ops exports the required public API."""
-        from kbutillib.cli._template_ops import (
+        from kbutillib.interfaces.cli._template_ops import (
             copy_template_tree,
             compute_file_hashes,
             run_venvman_project,
@@ -2373,9 +2373,9 @@ class TestAC36TemplateOpsModule:
 
     def test_new_project_imports_from_template_ops(self) -> None:
         """new_project.py uses helpers from _template_ops (not local defs)."""
-        import kbutillib.cli.new_project as np_mod
+        import kbutillib.interfaces.cli.new_project as np_mod  # WP17: real module moved
         # These should be the same objects (not separate definitions)
-        from kbutillib.cli._template_ops import copy_template_tree
+        from kbutillib.interfaces.cli._template_ops import copy_template_tree
         assert np_mod._copy_template_tree is copy_template_tree
 
     def test_parse_virtual_env_supports_venv_subdir_format(
@@ -2387,7 +2387,7 @@ class TestAC36TemplateOpsModule:
         venvman now writes ``VENV_SUBDIR="..."`` and composes the path at
         activate time from ``${VIRTUAL_ENVIRONMENT_DIRECTORY}/${VENV_SUBDIR}``.
         """
-        from kbutillib.cli._template_ops import parse_virtual_env_from_activate
+        from kbutillib.interfaces.cli._template_ops import parse_virtual_env_from_activate
 
         venv_root = tmp_path / "envroot"
         venv_root.mkdir()
@@ -2425,10 +2425,10 @@ class TestAC37FirstSubproject:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2464,10 +2464,10 @@ class TestAC37FirstSubproject:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2506,10 +2506,10 @@ class TestAC38CheckFirstSubproject:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=_se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=_se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)
@@ -2554,10 +2554,10 @@ class TestAC42_47SharedDirsAndAgents:
         se = _make_subprocess_side_effect()
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.bootstrap._kbutillib_root", return_value=kbu_root),
-            patch("kbutillib.cli.bootstrap._is_macos_or_override", return_value=True),
-            patch("kbutillib.cli.bootstrap._is_darwin", return_value=True),
-            patch("kbutillib.cli.bootstrap.subprocess.run", side_effect=se),
+            patch("kbutillib.interfaces.cli.bootstrap._kbutillib_root", return_value=kbu_root),
+            patch("kbutillib.interfaces.cli.bootstrap._is_macos_or_override", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap._is_darwin", return_value=True),
+            patch("kbutillib.interfaces.cli.bootstrap.subprocess.run", side_effect=se),
             patch("shutil.which", return_value=None),
         ):
             os.chdir(tmp_path)

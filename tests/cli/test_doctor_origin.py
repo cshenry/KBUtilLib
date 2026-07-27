@@ -16,7 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.init import _probe_project_origin
+from kbutillib.interfaces.cli.init import _probe_project_origin
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ class TestProbeProjectOriginViaManifestPatch:
                 "bootstrapped_at": ts,
             }
         }
-        with patch("kbutillib.cli.init.read_project_manifest", return_value=manifest):
+        with patch("kbutillib.interfaces.cli.init.read_project_manifest", return_value=manifest):
             result = _probe_project_origin()
         assert result == f"project origin: bootstrap ({ts})"
 
@@ -54,7 +54,7 @@ class TestProbeProjectOriginViaManifestPatch:
                 "created_at": ts,
             }
         }
-        with patch("kbutillib.cli.init.read_project_manifest", return_value=manifest):
+        with patch("kbutillib.interfaces.cli.init.read_project_manifest", return_value=manifest):
             result = _probe_project_origin()
         assert result == f"project origin: new-project ({ts})"
 
@@ -67,13 +67,13 @@ class TestProbeProjectOriginViaManifestPatch:
                 "bootstrapped": False,
             }
         }
-        with patch("kbutillib.cli.init.read_project_manifest", return_value=manifest):
+        with patch("kbutillib.interfaces.cli.init.read_project_manifest", return_value=manifest):
             result = _probe_project_origin()
         assert result == f"project origin: new-project ({ts})"
 
     def test_no_manifest_file_not_found(self) -> None:
         with patch(
-            "kbutillib.cli.init.read_project_manifest",
+            "kbutillib.interfaces.cli.init.read_project_manifest",
             side_effect=FileNotFoundError("no manifest"),
         ):
             result = _probe_project_origin()
@@ -105,20 +105,20 @@ class TestDoctorOriginLine:
             return r
 
         patches: list = [
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ]
         if manifest_return_value is None:
             patches.append(
                 patch(
-                    "kbutillib.cli.init.read_project_manifest",
+                    "kbutillib.interfaces.cli.init.read_project_manifest",
                     side_effect=FileNotFoundError("no manifest"),
                 )
             )
         else:
             patches.append(
                 patch(
-                    "kbutillib.cli.init.read_project_manifest",
+                    "kbutillib.interfaces.cli.init.read_project_manifest",
                     return_value=manifest_return_value,
                 )
             )
@@ -157,11 +157,16 @@ class TestDoctorOriginLine:
         assert "project origin: (no kbu-project.toml in cwd)" in output
 
     def test_doctor_origin_line_is_last_non_empty_line(self) -> None:
-        """The origin line appears after all [STATUS] probe lines."""
+        """The origin line appears after the machine-level [STATUS] probe lines.
+
+        WP7 note: additional sections (backend availability, registry summary)
+        are appended after the origin line, so we verify the origin line is
+        present in the output rather than being the absolute last line.
+        """
         output = self._run_doctor_with_manifest(None)
         lines = [ln for ln in output.strip().splitlines() if ln.strip()]
-        assert lines[-1].startswith("project origin:"), (
-            f"Expected last line to be project origin, got: {lines[-1]!r}"
+        assert any(ln.startswith("project origin:") for ln in lines), (
+            f"project origin line missing from doctor output; got lines: {lines}"
         )
 
     def test_doctor_origin_does_not_affect_exit_code(self) -> None:
@@ -188,18 +193,18 @@ class TestDoctorOriginLine:
 
             runner = CliRunner()
             with (
-                patch("kbutillib.cli.init.shutil.which", return_value=None),
-                patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+                patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+                patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
                 patch(
-                    "kbutillib.cli.init.read_project_manifest",
+                    "kbutillib.interfaces.cli.init.read_project_manifest",
                     side_effect=FileNotFoundError("no manifest"),
                 ),
                 patch(
-                    "kbutillib.cli.init.init_status",
+                    "kbutillib.interfaces.cli.init.init_status",
                     return_value=0,  # init probe passes
                 ),
                 patch(
-                    "kbutillib.cli.init._probe_init_done",
+                    "kbutillib.interfaces.cli.init._probe_init_done",
                     return_value=("PASS", "init marker present"),
                 ),
             ):

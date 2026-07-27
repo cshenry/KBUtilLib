@@ -35,11 +35,11 @@ Data relocation options for ``data/`` and ``user_data/``
 from __future__ import annotations
 
 import shutil
-import tomllib
 from pathlib import Path
 from typing import Optional
 
 import click
+import tomllib
 
 from kbutillib import layout as _layout
 from kbutillib.cli.subproject import (
@@ -47,7 +47,6 @@ from kbutillib.cli.subproject import (
     _find_project_root,
     _list_subproject_names,
 )
-
 
 # ---------------------------------------------------------------------------
 # TOML helpers
@@ -209,10 +208,10 @@ def _prompt_references(sp_dir: Path, sp_name: str) -> None:
         index_path = lit_dir / "index.md"
         index_path.write_text(ref_path.read_text(encoding="utf-8"), encoding="utf-8")
         ref_path.unlink()
-        click.echo(f"  Converted references.md -> literature/index.md")
+        click.echo("  Converted references.md -> literature/index.md")
     elif choice == "3":
         ref_path.unlink()
-        click.echo(f"  Deleted references.md.")
+        click.echo("  Deleted references.md.")
     else:
         click.echo("  Kept references.md as-is.")
 

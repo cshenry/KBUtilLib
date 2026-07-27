@@ -14,7 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.init import (
+from kbutillib.interfaces.cli.init import (
     _marker_path,
     _parse_virtual_env_from_activate,
     _read_marker,
@@ -225,9 +225,9 @@ class TestNonDarwinPlatform:
             return result
 
         with (
-            patch("kbutillib.cli.init._create_plain_venv", return_value=fake_python),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
-            patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
+            patch("kbutillib.interfaces.cli.init._create_plain_venv", return_value=fake_python),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init._kbutillib_commit", return_value="a" * 40),
         ):
             result = _invoke("init")
 
@@ -244,7 +244,7 @@ class TestNonDarwinPlatform:
 class TestVenvmanDetection:
     def test_venvman_subprocess_uses_correct_args(self, tmp_path: Path) -> None:
         """_run_venvman calls subprocess.run with the exact right args."""
-        from kbutillib.cli.init import _run_venvman
+        from kbutillib.interfaces.cli.init import _run_venvman
 
         activate_sh = tmp_path / "activate.sh"
         activate_sh.write_text(
@@ -266,7 +266,7 @@ class TestVenvmanDetection:
             result.stderr = ""
             return result
 
-        with patch("kbutillib.cli.init.subprocess.run", side_effect=_mock):
+        with patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock):
             returned_path, returned_err = _run_venvman(tmp_path)
 
         assert len(captured) == 1
@@ -312,10 +312,10 @@ class TestVenvmanDetection:
             return result
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value="/usr/local/bin/venvman"),
-            patch("kbutillib.cli.init._run_venvman", side_effect=_mock_run_venvman),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
-            patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value="/usr/local/bin/venvman"),
+            patch("kbutillib.interfaces.cli.init._run_venvman", side_effect=_mock_run_venvman),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init._kbutillib_commit", return_value="a" * 40),
         ):
             result = _invoke("init")
 
@@ -361,14 +361,14 @@ class TestVenvmanFailureFallback:
         venvman_error_detail = "venvman: python 3.11 toolchain missing"
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value="/usr/local/bin/venvman"),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value="/usr/local/bin/venvman"),
             patch(
-                "kbutillib.cli.init._run_venvman",
+                "kbutillib.interfaces.cli.init._run_venvman",
                 return_value=(None, venvman_error_detail),
             ),
-            patch("kbutillib.cli.init._create_plain_venv", return_value=fake_python),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
-            patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
+            patch("kbutillib.interfaces.cli.init._create_plain_venv", return_value=fake_python),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init._kbutillib_commit", return_value="a" * 40),
         ):
             result = _invoke("init")
 
@@ -402,10 +402,10 @@ class TestVenvmanFailureFallback:
             return result
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init._create_plain_venv", return_value=fake_python),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
-            patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init._create_plain_venv", return_value=fake_python),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init._kbutillib_commit", return_value="a" * 40),
         ):
             result = _invoke("init")
 
@@ -443,10 +443,10 @@ class TestMarkerAfterInit:
             return result
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init._create_plain_venv", return_value=fake_python),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
-            patch("kbutillib.cli.init._kbutillib_commit", return_value="a" * 40),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init._create_plain_venv", return_value=fake_python),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init._kbutillib_commit", return_value="a" * 40),
         ):
             result = _invoke("init")
 
@@ -543,23 +543,30 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
         lines = [ln for ln in result.output.strip().splitlines() if ln.strip()]
-        # 5 status-probe lines + 1 project-origin info line
-        assert len(lines) == 6, f"Expected 6 output lines, got {len(lines)}: {lines}"
-        probe_lines = lines[:5]
+        # WP7: doctor now emits additional sections (python+kbutillib versions,
+        # optional runtime backends, capability registry summary) after the
+        # original 7 probe lines + project-origin line.  Verify that the first
+        # 7 status-probe lines are present and that the project-origin line
+        # appears in the output (not necessarily last any more).
+        assert len(lines) >= 8, (
+            f"Expected at least 8 output lines after WP7 additions, got {len(lines)}: {lines}"
+        )
+        probe_lines = lines[:7]
         for line in probe_lines:
             assert (
                 line.startswith("[PASS]")
                 or line.startswith("[FAIL]")
                 or line.startswith("[SKIP]")
+                or line.startswith("[WARN]")
             ), f"Line does not start with status token: {line!r}"
-        assert lines[5].startswith("project origin:"), (
-            f"Last line should be project origin info: {lines[5]!r}"
+        assert any(ln.startswith("project origin:") for ln in lines), (
+            "project origin line missing from doctor output"
         )
 
     def test_doctor_exits_0_when_all_pass_or_skip(
@@ -607,8 +614,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", side_effect=_mock_which),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", side_effect=_mock_which),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -631,8 +638,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -654,8 +661,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -681,8 +688,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -716,8 +723,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", side_effect=_which),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", side_effect=_which),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -751,8 +758,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", side_effect=_which),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", side_effect=_which),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -786,8 +793,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", side_effect=_which),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", side_effect=_which),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -818,8 +825,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -850,8 +857,8 @@ class TestDoctorCommand:
             return r
 
         with (
-            patch("kbutillib.cli.init.shutil.which", return_value=None),
-            patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc),
+            patch("kbutillib.interfaces.cli.init.shutil.which", return_value=None),
+            patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc),
         ):
             result = _invoke("doctor")
 
@@ -902,7 +909,7 @@ class TestInitUpdate:
             r.stderr = ""
             return r
 
-        with patch("kbutillib.cli.init.subprocess.run", side_effect=_mock_subproc):
+        with patch("kbutillib.interfaces.cli.init.subprocess.run", side_effect=_mock_subproc):
             result = _invoke("init", "--update")
 
         assert result.exit_code == 0

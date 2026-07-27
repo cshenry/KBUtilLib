@@ -1,5 +1,7 @@
 # MSBiochemUtils Module
 
+> **New path**: `from kbutillib.domains.biochem import MSBiochemUtils`
+
 The `MSBiochemUtils` class provides utilities for working with ModelSEED biochemistry databases and metabolic compound/reaction data.
 
 ## Overview
@@ -123,7 +125,7 @@ def __init__(self, **kwargs: Any) -> None:
 ## Usage Examples
 
 ```python
-from kbutillib.ms_biochem_utils import MSBiochemUtils
+from kbutillib.domains.biochem import MSBiochemUtils
 
 # Initialize biochemistry utilities
 biochem = MSBiochemUtils()

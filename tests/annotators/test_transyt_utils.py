@@ -19,11 +19,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kbutillib.annotator_utils import (
+from kbutillib.domains.genome.annotation.annotator_utils import (
     AnnotationResult,
     ToolUnavailableError,
 )
-from kbutillib.transyt_utils import (
+from kbutillib.domains.genome.annotation.transyt_utils import (
     TransytUtils,
     _build_annotation_records,
     _parse_reactions,
@@ -660,7 +660,7 @@ class TestAnnotateCleanupFailure:
         with patch.object(tu, "is_available", return_value=True), \
              patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
              patch.object(tu, "_get_image_digest", return_value="sha256:abc"), \
-             patch("kbutillib.transyt_utils.shutil.rmtree",
+             patch("kbutillib.domains.genome.annotation.transyt_utils.shutil.rmtree",
                    side_effect=raising_rmtree):
             # The call MUST NOT raise PermissionError.
             result = tu.annotate(
@@ -685,7 +685,7 @@ class TestAnnotateCleanupFailure:
         with patch.object(tu, "is_available", return_value=True), \
              patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
              patch.object(tu, "_get_image_digest", return_value=""), \
-             patch("kbutillib.transyt_utils.shutil.rmtree") as rmtree_mock:
+             patch("kbutillib.domains.genome.annotation.transyt_utils.shutil.rmtree") as rmtree_mock:
             tu.annotate(proteins={"prot1": "MKTAY"}, tax_id="562")
 
         assert rmtree_mock.called, "rmtree must be called to clean up tmpdir"

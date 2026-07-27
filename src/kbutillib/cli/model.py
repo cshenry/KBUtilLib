@@ -125,8 +125,8 @@ def _construct_offline(cls: type, **extra_kwargs: Any) -> Any:
     """
     from unittest.mock import patch
 
-    from ..kb_model_utils import KBModelUtils
-    from ..ms_biochem_utils import MSBiochemUtils
+    from ..domains.biochem.ms_biochem_utils import MSBiochemUtils
+    from ..domains.modeling.kb_model_utils import KBModelUtils
 
     db_path = _resolve_modelseed_db_path()
 
@@ -170,7 +170,7 @@ def _fba_utils() -> Any:
     """Return an offline-constructed ``MSFBAUtils`` instance."""
     from modelseedpy.core.msmodelutl import MSModelUtil
 
-    from ..ms_fba_utils import MSFBAUtils
+    from ..domains.modeling.ms_fba_utils import MSFBAUtils
 
     utils = _construct_offline(MSFBAUtils)
     utils.MSModelUtil = MSModelUtil

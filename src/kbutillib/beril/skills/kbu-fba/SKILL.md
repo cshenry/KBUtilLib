@@ -58,12 +58,12 @@ genome-table databases from KBase workspace.  **There is no
 constructed from a local file or fetched via the genome-table path.
 
 ```python
-from kbutillib.kb_berdl_utils import KBBERDLUtils
+from kbutillib import KBBERDLUtils
 
 berdl = KBBERDLUtils(token=session.kbu.env.kbase_token)
 
 # Download genome-table SQLite databases from a KBase workspace object.
-# Endpoint: get_genometables_from_kbase (kb_berdl_utils.py:705)
+# Endpoint: get_genometables_from_kbase (domains/kbase/kb_berdl_utils.py:705)
 result = berdl.get_genometables_from_kbase(
     ref="76990/TestDB",         # workspace ref to a GenomeDataLakeTables object
     output_path="data/dbs",
@@ -97,7 +97,7 @@ instead of re-running.
 
 ## Stage 2: Reconstruction (Build)
 
-**Signature** (confirmed at `ms_reconstruction_utils.py:176`):
+**Signature** (confirmed at `domains/modeling/ms_reconstruction_utils.py:188`):
 
 ```python
 def build_metabolic_model(
@@ -134,7 +134,7 @@ Default: 1 genome per sample run.
 
 ## Stage 3: Gapfilling
 
-**Signature** (confirmed at `ms_reconstruction_utils.py:685`):
+**Signature** (confirmed at `domains/modeling/ms_reconstruction_utils.py:696`):
 
 ```python
 def gapfill_metabolic_model(
@@ -201,7 +201,7 @@ result = session.kbu.recon.run_comprehensive_gapfill_on_model(
 
 ## Stage 4: FBA (pFBA)
 
-**Signature** (confirmed at `ms_fba_utils.py:75`):
+**Signature** (confirmed at `domains/modeling/ms_fba_utils.py:1320`):
 
 ```python
 def run_fba(self, model: MSModelUtil, media=None, objective=None,
@@ -261,7 +261,7 @@ session.kbu.fba.set_objective_from_string(mdlutl, "MAX{rxn00001}")
 **Never call `cobra.flux_variability_analysis` directly — it is broken
 in this environment and will produce incorrect or no results.**
 
-**Signature** (confirmed at `ms_fba_utils.py:86`):
+**Signature** (confirmed at `domains/modeling/ms_fba_utils.py:1331`):
 
 ```python
 def run_fva(self, model: MSModelUtil, media=None, objective=None,

@@ -1,5 +1,7 @@
 # BaseUtils Module
 
+> **New path**: `from kbutillib.core import BaseUtils`
+
 The `BaseUtils` class provides the foundational functionality for all utility modules in the KBUtilLib framework. It serves as the base class that all other utility classes inherit from.
 
 ## Overview
@@ -63,7 +65,7 @@ def __init__(self, name="Unknown", log_level: str = "INFO", **kwargs: Any) -> No
 ## Usage Example
 
 ```python
-from kbutillib.base_utils import BaseUtils
+from kbutillib.core import BaseUtils
 
 # Direct usage (typically not recommended - use specialized subclasses)
 utils = BaseUtils(name="MyUtility", log_level="DEBUG")

@@ -24,8 +24,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 COPY pyproject.toml ./
 
-# Install dependencies
-RUN uv pip install -e .
+# Install dependencies (including all optional extras: mcp, api, apidocs)
+RUN uv pip install -e '.[all]'
 
 # Production stage
 FROM python:3.12-slim

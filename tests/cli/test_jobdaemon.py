@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from kbutillib.cli import main
 
 # Patch targets -- these are the modules where the names are looked up
-_PATCH_ENV = "kbutillib.shared_env_utils.SharedEnvUtils"
+_PATCH_ENV = "kbutillib.core.shared_env_utils.SharedEnvUtils"
 _PATCH_KBU = "kbutillib.kb_job_utils.utils.KBJobUtils"
 
 

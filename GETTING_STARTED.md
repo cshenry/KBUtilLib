@@ -1,164 +1,242 @@
 # Getting Started with KBUtilLib
 
-This guide walks a first-time user from a clean machine to "Claude is running inside a kbu project, and we can take it from there."
-
-It's intentionally short. KBUtilLib's superpower is that once Claude is running in a kbu project, the AI agent can pick up the rest — pulling in deeper docs, scaffolding subprojects, running notebooks, etc. Your job here is just to get Claude into the room.
-
----
-
-## What you'll end up with
-
-```
-your-project/
-├── .claude/commands/   ← /kbu-start, /kbu-plan, /kbu-run, /kbu-review, ...
-├── subprojects/         ← scientific work organized as kbu subprojects
-├── kbu-project.toml     ← manifest tracked by `kbu` CLI
-└── your-project.code-workspace
-```
-
-Plus a Python virtual environment with KBUtilLib installed editable, registered as a Jupyter kernel, and `claude` running in the project root with access to project-aware slash commands.
+KBUtilLib is not on PyPI. You install it from a clone, then use it through one of three
+transports: the `kbu` CLI, the `kbu-mcp` stdio MCP server, or the `kbu-api` FastAPI server.
+This guide walks you from a fresh machine to a running environment.
 
 ---
 
 ## Prerequisites
 
-You'll need:
-
-1. **git** — `git --version` should work.
-2. **Python 3.11 or newer** — `python3 --version`. If you have 3.10 or older, install 3.11+ first. We recommend [`pyenv`](https://github.com/pyenv/pyenv) on macOS/Linux:
-   ```bash
-   curl -fsSL https://pyenv.run | bash
-   pyenv install 3.11.14
-   pyenv global 3.11.14
-   ```
-3. **Claude Code CLI** — `claude --version` should work. Install from [claude.com/claude-code](https://claude.com/claude-code) and sign in once before continuing.
-4. **(Optional, recommended on macOS)** [Cursor](https://cursor.sh) — IDE with built-in Claude Code integration. After installing the .app, you also need the `cursor` shell command on `$PATH` so `kbu doctor` can see it:
-   - Inside Cursor: open the command palette (`Cmd+Shift+P`) → run **Shell Command: Install 'cursor' command in PATH** (prompts for sudo).
-   - Or manually:
-     ```bash
-     ln -s /Applications/Cursor.app/Contents/Resources/app/bin/cursor ~/bin/cursor   # if ~/bin is on PATH
-     # or, into /usr/local/bin (needs sudo):
-     sudo ln -s /Applications/Cursor.app/Contents/Resources/app/bin/cursor /usr/local/bin/cursor
-     ```
-   Verify with `which cursor`.
-5. **(Optional)** [`venvman`](https://github.com/cshenry/venvman) for per-project virtual environments. If absent, `kbu` falls back to a plain `.venv`.
+- **Python 3.11 or newer** — check with `python --version`
+- **Git** — to clone the repo
+- **conda** (recommended) or a virtual environment of your choice
 
 ---
 
-## Step 1 — Install KBUtilLib
+## Step 1 — Clone the repository
 
 ```bash
 git clone https://github.com/cshenry/KBUtilLib.git
 cd KBUtilLib
-pip install -e .
 ```
 
-Sanity-check:
+---
+
+## Step 2 — Create and activate a conda environment
+
+A ready-made environment file is included:
+
+```bash
+conda env create -f environment-reorg.yml
+conda activate kbutillib-reorg
+```
+
+If you prefer a plain virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate    # Linux / macOS
+# .venv\Scripts\activate     # Windows
+```
+
+---
+
+## Step 3 — Install in editable mode
+
+Install with all extras so every transport and the docs generator are available:
+
+```bash
+pip install -e ".[all]"
+```
+
+If you only need specific transports:
+
+```bash
+pip install -e .              # core library + CLI only
+pip install -e ".[mcp]"       # adds kbu-mcp (MCP stdio server)
+pip install -e ".[api]"       # adds kbu-api (FastAPI HTTP server)
+pip install -e ".[apidocs]"   # adds mkdocs capability catalog
+```
+
+---
+
+## Step 4 — Verify the install
 
 ```bash
 kbu --help
+```
+
+You should see the top-level command list with `cap`, `doctor`, and `new-capability` groups.
+
+```bash
+python -c "from kbutillib import KBUtilLib; print('ok')"
+```
+
+Both commands completing without errors means the install is healthy.
+
+---
+
+## Step 5 — Explore registered capabilities
+
+```bash
+kbu cap list
+```
+
+This prints a table of every `@capability`-decorated function in the library. Biochem ships
+three out of the box:
+
+```
+NAME                              DOMAIN       TAGS
+biochem.search_compounds          biochem      biochem, search
+biochem.get_compound_by_id        biochem      biochem, lookup
+biochem.get_reaction_by_id        biochem      biochem, lookup
+...
+```
+
+Filter by domain:
+
+```bash
+kbu cap list --domain thermo
+kbu cap info biochem.search_compounds   # full signature and docstring
+```
+
+---
+
+## Step 6 — First Python usage
+
+Open a Python shell or notebook:
+
+```python
+from kbutillib import KBUtilLib
+
+kbu = KBUtilLib()
+
+# Biochemistry — no optional dependencies required
+hits = kbu.biochem.search_compounds("atp")
+print(hits[0])  # {'id': 'cpd00002', 'name': 'ATP', ...}
+
+# Specific compound by ModelSEED ID
+atp = kbu.biochem.get_compound_by_id("cpd00002")
+print(atp["formula"])  # C10H12N5O13P3
+
+# ModelSEED thermodynamics (bundled data — always available)
+dg = kbu.thermo.get_compound_deltag("cpd00002")
+print(dg)  # ΔGf in kJ/mol
+```
+
+The `KBUtilLib()` facade gives you access to every domain through lazy properties — nothing
+is imported until you access it for the first time.
+
+---
+
+## Step 7 — Run the HTTP API
+
+```bash
+pip install -e ".[api]"    # skip if you used [all]
+kbu-api
+```
+
+The server starts at `http://0.0.0.0:8000`. In another terminal:
+
+```bash
+# Health check
+curl http://localhost:8000/health
+# → {"status": "ok"}
+
+# List all capabilities
+curl http://localhost:8000/v1/capabilities
+
+# Invoke a capability
+curl -X POST http://localhost:8000/v1/tools/biochem.search_compounds \
+  -H "Content-Type: application/json" \
+  -d '{"query": "glucose", "limit": 3}'
+```
+
+The Swagger UI is at `http://localhost:8000/docs`.
+
+Override the default host and port:
+
+```bash
+KBU_API_HOST=127.0.0.1 KBU_API_PORT=9000 kbu-api
+```
+
+Enable bearer-token authentication:
+
+```bash
+KBU_API_TOKEN=mysecrettoken kbu-api
+# then pass: -H "Authorization: Bearer mysecrettoken"
+```
+
+Stop the server with `Ctrl-C`.
+
+---
+
+## Step 8 — Run the MCP server
+
+The MCP server exposes every registered capability as an MCP tool over stdio. It requires
+no port — the client launches the process directly.
+
+```bash
+pip install -e ".[mcp]"    # skip if you used [all]
+kbu-mcp                    # starts stdio MCP server (blocks; Ctrl-C to stop)
+```
+
+### Connect Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "kbutillib": {
+      "command": "kbu-mcp"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The KBUtilLib tools appear in the MCP tool list.
+
+If `kbu-mcp` is not on `PATH` in Claude's environment, use the full path:
+
+```json
+{
+  "mcpServers": {
+    "kbutillib": {
+      "command": "/path/to/your/venv/bin/kbu-mcp"
+    }
+  }
+}
+```
+
+### Connect Cursor
+
+Go to **Settings → MCP → Add server**, set the command to `kbu-mcp` (or the full path),
+and save. See `src/kbutillib/interfaces/mcp/README.md` for more client examples.
+
+---
+
+## Step 9 — Check backend availability
+
+```bash
 kbu doctor
 ```
 
-`kbu --help` should list `bootstrap`, `new-project`, `init`, `notebook`, `subproject`, and friends. `kbu doctor` prints one line per environment probe — if any line ends in `❌`, follow its suggestion before continuing.
+This probes every registered backend (rdkit, cobra, equilibrator, KBase token, external
+binaries) and prints which are ready and which are missing. Missing backends are expected
+for optional dependencies — the library degrades gracefully.
 
 ---
 
-## Step 2 — Get into a kbu project
+## Next steps
 
-Pick the path that matches your situation.
-
-### Path A: Brand new project
-
-If you're starting from scratch:
-
-```bash
-cd ~/where/you/keep/projects
-kbu new-project my-project --name "my project"
-cd my-project
-git init && git add . && git commit -m "kbu new-project scaffold"
-```
-
-`kbu new-project` will prompt for author/affiliation/ORCID if not supplied, scaffold the directory layout above, create a venv, register a Jupyter kernel, and write `kbu-project.toml`.
-
-### Path B: Existing git repository
-
-If you already have a repo and want to retrofit it as kbu-aware:
-
-```bash
-cd your-existing-repo
-kbu bootstrap --check     # dry-run: shows everything that would happen
-kbu bootstrap             # apply
-```
-
-`kbu bootstrap` copies the `.claude/commands/`, `.vscode/`, `subprojects/`, and workspace files into your existing tree, prompting before overwriting anything (use `--force-overwrite` to skip prompts; conflicting files are saved as `*.bak.<UTC>`). It detects an existing venv if you have one, falls back to creating a `.venv` if you don't, installs KBUtilLib editable, registers a Jupyter kernel, and writes `kbu-project.toml` with `bootstrapped = true`.
-
-Bootstrap does **not** auto-commit. Review the changes and commit them yourself:
-
-```bash
-git add .
-git commit -m "kbu bootstrap"
-```
-
----
-
-## Step 3 — Open Claude in your project
-
-```bash
-cd my-project   # or your existing repo
-claude
-```
-
-That's it. The `.claude/commands/` files added by `kbu new-project` or `kbu bootstrap` register project-aware slash commands inside Claude:
-
-| Slash command | What it does |
-|---|---|
-| `/kbu-start` | Onboard Claude to the project and start a session |
-| `/kbu-plan` | Plan a scientific or coding task before executing |
-| `/kbu-run` | Execute a planned task |
-| `/kbu-build` | Build/scaffold new functionality |
-| `/kbu-review` | Review work before committing |
-| `/kbu-diagnose` | Diagnose a failing test or broken workflow |
-| `/kbu-literature-review` | Run a literature search and synthesis |
-| `/kbu-synthesize` | Synthesize results across runs or sources |
-| `/kbu-update` | Pull the latest template/`.claude/commands` updates from KBUtilLib |
-
-From here, just say what you're trying to accomplish — Claude will pick the right slash command, ask clarifying questions, and drive the workflow.
-
----
-
-## Common follow-ups
-
-**Keep templates up to date.** When KBUtilLib publishes new slash commands or template improvements, pull them into your project:
-
-```bash
-cd my-project
-kbu update --check        # see what would change
-kbu update                # apply
-```
-
-By default `kbu update` only refreshes files your project already tracks — files you deliberately skipped at bootstrap stay skipped. Pass `--add-untracked` if you want to add newly available template files too.
-
-**Add a subproject.** Most scientific work lives in subprojects (`subprojects/<name>/`):
-
-```bash
-kbu subproject create <name>
-```
-
-Or just ask Claude inside the project: *"create a subproject for my isotope-labeling experiment"* — `/kbu-start` knows how.
-
-**Check project health.** From inside the project:
-
-```bash
-kbu doctor
-```
-
-The last line tells you whether the project was created via `new-project` or `bootstrap`, plus when.
-
----
-
-## If you get stuck
-
-- `kbu doctor` is the first stop — it diagnoses venv / kernel / Python / manifest problems.
-- The deeper module-by-module API is in [`README.md`](README.md) and [`docs/`](docs/).
-- Open an issue at https://github.com/cshenry/KBUtilLib/issues.
+| What | Where |
+|------|-------|
+| Domain-specific capabilities | `src/kbutillib/domains/<domain>/README.md` |
+| Transport details (auth, env vars, config) | `src/kbutillib/interfaces/<cli\|mcp\|api>/README.md` |
+| Add a new capability | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| core registry and decorator | `src/kbutillib/core/README.md` |
+| MkDocs capability catalog | `pip install -e ".[apidocs]"` then `mkdocs serve` |
+| Run tests | `python -m pytest tests/ -q` |

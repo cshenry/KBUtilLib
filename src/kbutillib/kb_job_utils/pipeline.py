@@ -9,7 +9,6 @@ one after another.
 from __future__ import annotations
 
 import enum
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional

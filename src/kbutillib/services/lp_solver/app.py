@@ -14,7 +14,7 @@ Run directly::
     python -m kbutillib.services.lp_solver.app --host 127.0.0.1 --port 8091
 
 Configuration is read from ``~/.kbutillib/config.yaml`` under
-``remote_solver.*`` via :class:`~kbutillib.shared_env_utils.SharedEnvUtils`
+``remote_solver.*`` via :class:`~kbutillib.core.shared_env_utils.SharedEnvUtils`
 (S15); every key falls back to its documented default when unset.
 """
 
@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional, Union
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from kbutillib.shared_env_utils import SharedEnvUtils
+from kbutillib.core.shared_env_utils import SharedEnvUtils
 
 from . import worker
 from .job_store import LPJobStore

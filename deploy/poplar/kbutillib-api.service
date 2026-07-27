@@ -1,0 +1,17 @@
+[Unit]
+Description=KBUtilLib API Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+WorkingDirectory=<REPO_PATH>
+ExecStart=<CONDA_OR_VENV_PYTHON> -m uvicorn kbutillib.interfaces.api.app:build_app --factory --host 127.0.0.1 --port 8000 --workers 2
+Restart=on-failure
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+Environment=KBU_LOG_LEVEL=INFO
+
+[Install]
+WantedBy=multi-user.target

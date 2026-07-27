@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     )
     from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
     from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
+    from .domains.modeling.ms_remote_solve_utils import RemoteSolveResult
+    from .domains.modeling.ms_remote_solver_utils import MSRemoteSolverUtilsImpl
     from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
     from .domains.notebook.escher_utils import EscherUtilsImpl
     from .domains.thermo.predictive_thermo_utils import PredictiveThermoUtilsImpl
@@ -106,6 +108,7 @@ class KBUtilLib:
         self._mmseqs = None
         self._skani = None
         self._berdl = None
+        self._remote_solver = None
         self._patric = None
         self._uniprot = None
         self._pdb = None
@@ -276,6 +279,49 @@ class KBUtilLib:
             from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
             self._berdl = KBBERDLUtilsImpl(self.env)
         return self._berdl
+
+    @property
+    def remote_solver(self) -> MSRemoteSolverUtilsImpl:
+        if self._remote_solver is None:
+            from .domains.modeling.ms_remote_solver_utils import (
+                MSRemoteSolverUtilsImpl,
+            )
+            self._remote_solver = MSRemoteSolverUtilsImpl(self.env)
+        return self._remote_solver
+
+    def remote_solve(
+        self,
+        model: Any,
+        solver: str | None = None,
+        time_limit: float | None = None,
+    ) -> "RemoteSolveResult":
+        """Serialize a built cobra/optlang ``model`` and solve it remotely.
+
+        Thin wrapper around
+        :func:`kbutillib.domains.modeling.ms_remote_solve_utils.remote_solve`,
+        using this facade's ``.remote_solver`` client. See that module for
+        the guard/serialize/solve/wrap details (a quadratic objective
+        requires a gurobi/cplex backend; a purely linear model may use any
+        LP-writing backend, including GLPK). ``.primal`` on ``model``'s own
+        optlang variables is NOT populated -- read fitted values via
+        ``result.value(...)``.
+
+        Args:
+            model: A cobra/optlang model whose problem has already been
+                built (``model.solver.problem``).
+            solver: ``"gurobi"`` / ``"cplex"`` / ``None`` (service default).
+            time_limit: Solver time limit in seconds.
+
+        Returns:
+            A ``RemoteSolveResult`` wrapping the remote service's response.
+        """
+        from .domains.modeling.ms_remote_solve_utils import (
+            remote_solve as _remote_solve,
+        )
+
+        return _remote_solve(
+            self.remote_solver, model, solver=solver, time_limit=time_limit
+        )
 
     @property
     def patric(self) -> PatricWSUtilsImpl:

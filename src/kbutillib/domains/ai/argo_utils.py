@@ -125,19 +125,20 @@ class ArgoUtils(SharedEnvUtils):
             f"timeout={self.timeout:.1f}s url={self.url}"
         )
 
-        # Instantiate HTTP client using socks5 proxy if needed
-        proxies = None
+        # Instantiate HTTP client, routing through the local SOCKS5 proxy when
+        # a proxy_port is set. httpx 0.28 removed the per-scheme
+        # ``proxies={...}`` mapping in favour of a single ``proxy=`` argument;
+        # passing the old kwarg raises TypeError on import of any ArgoUtils.
+        # SOCKS5 support comes from the optional ``socksio`` package (pulled in
+        # by the ``httpx[socks]`` extra declared in pyproject).
         if proxy_port:
-            proxies = {
-                "http://": f"socks5://127.0.0.1:{proxy_port}",
-                "https://": f"socks5://127.0.0.1:{proxy_port}",
-            }
-        if proxies is None:
-            self.cli = httpx.Client(timeout=self.timeout, follow_redirects=True)
-        else:
             self.cli = httpx.Client(
-                proxies=proxies, timeout=self.timeout, follow_redirects=True
+                proxy=f"socks5://127.0.0.1:{proxy_port}",
+                timeout=self.timeout,
+                follow_redirects=True,
             )
+        else:
+            self.cli = httpx.Client(timeout=self.timeout, follow_redirects=True)
 
         # headers (api key optional)
         self.headers = {"Content-Type": "application/json"}

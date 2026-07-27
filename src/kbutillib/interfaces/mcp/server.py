@@ -19,7 +19,7 @@ Public API
 ``run_stdio()``
     Run the MCP server over stdio transport (blocking).
 
-``run_http(host="0.0.0.0", port=8000)``
+``run_http(host="127.0.0.1", port=8000)``
     Run the MCP server over Streamable HTTP transport (blocking).
 
 ``main()``
@@ -288,7 +288,7 @@ def run_stdio(registry: CapabilityRegistry | None = None, app: Any = None) -> No
 
 
 def run_http(
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8000,
     registry: CapabilityRegistry | None = None,
     app: Any = None,
@@ -298,7 +298,8 @@ def run_http(
     Parameters
     ----------
     host:
-        Bind host address.  Defaults to ``"0.0.0.0"``.
+        Bind host address.  Defaults to ``"127.0.0.1"`` (loopback-only);
+        pass ``"0.0.0.0"`` to deliberately widen the bind.
     port:
         Bind port.  Defaults to ``8000``.
     registry:
@@ -352,8 +353,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0912
 
         kbu-mcp --list            # print tool names + availability, no server
         kbu-mcp --stdio           # run stdio transport (default)
-        kbu-mcp --http            # run Streamable HTTP transport
-        kbu-mcp --http --host 0.0.0.0 --port 8000
+        kbu-mcp --http            # run Streamable HTTP transport (loopback)
+        kbu-mcp --http --host 0.0.0.0 --port 8000  # deliberately widen the bind
 
     Parameters
     ----------
@@ -384,8 +385,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0912
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Bind host for HTTP transport (default: 0.0.0.0).",
+        default="127.0.0.1",
+        help="Bind host for HTTP transport (default: 127.0.0.1, loopback-only; "
+        "pass 0.0.0.0 to deliberately widen the bind).",
     )
     parser.add_argument(
         "--port",

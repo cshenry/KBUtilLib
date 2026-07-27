@@ -32,7 +32,8 @@ Public API
 
 ``main()``
     Console-script entry point for ``kbu-api``.
-    Supports ``--host`` (default 0.0.0.0) and ``--port`` (default 8000).
+    Supports ``--host`` (default 127.0.0.1, loopback-only) and ``--port``
+    (default 8000). Pass ``--host 0.0.0.0`` to deliberately widen the bind.
 """
 
 from __future__ import annotations
@@ -392,8 +393,8 @@ def main(argv: list[str] | None = None) -> None:
     -----
     ::
 
-        kbu-api                        # bind 0.0.0.0:8000
-        kbu-api --host 127.0.0.1       # bind loopback
+        kbu-api                        # bind 127.0.0.1:8000 (loopback)
+        kbu-api --host 0.0.0.0         # deliberately widen the bind
         kbu-api --port 9000            # alternate port
         kbu-api --log-requests         # enable per-request logging
 
@@ -411,8 +412,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Bind host address (default: 0.0.0.0).",
+        default="127.0.0.1",
+        help="Bind host address (default: 127.0.0.1, loopback-only; pass "
+        "0.0.0.0 to deliberately widen the bind).",
     )
     parser.add_argument(
         "--port",

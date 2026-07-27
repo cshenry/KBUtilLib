@@ -21,6 +21,7 @@ from .domains.modeling.model_directionality import (
     directionality_from_bounds,
 )
 from .domains.modeling.model_helpers import _check_and_convert_model, _parse_id
+from .domains.modeling.ms_remote_solve_utils import RemoteSolveResult, remote_solve
 
 # Facade
 from .toolkit import KBUtilLib
@@ -260,6 +261,12 @@ except ImportError as e:
     KBBERDLUtils = None
 
 try:
+    from .domains.modeling.ms_remote_solver_utils import MSRemoteSolverUtils
+except ImportError as e:
+    _import_error("ms_remote_solver_utils", e)
+    MSRemoteSolverUtils = None
+
+try:
     from .domains.kbase.kb_callback_utils import KBCallbackUtils
 except ImportError as e:
     _import_error("kb_callback_utils", e)
@@ -415,6 +422,11 @@ except ImportError:
     KBBERDLUtilsImpl = None
 
 try:
+    from .domains.modeling.ms_remote_solver_utils import MSRemoteSolverUtilsImpl
+except ImportError:
+    MSRemoteSolverUtilsImpl = None
+
+try:
     from .domains.external.patric_ws_utils import PatricWSUtilsImpl
 except ImportError:
     PatricWSUtilsImpl = None
@@ -458,6 +470,8 @@ __all__ = [
     "combine_directionality_signals",
     "_parse_id",
     "_check_and_convert_model",
+    "RemoteSolveResult",
+    "remote_solve",
     # Legacy class names (inheritance-based)
     "AICurationUtils",
     "ArgoUtils",
@@ -491,6 +505,7 @@ __all__ = [
     "MSFBAUtils",
     "MSTemplateUtils",
     "MSReconstructionUtils",
+    "MSRemoteSolverUtils",
     "PatricWSUtils",
     "PipelineState",
     "PipelineStatus",
@@ -525,6 +540,7 @@ __all__ = [
     "MSFBAUtilsImpl",
     "MSTemplateUtilsImpl",
     "MSReconstructionUtilsImpl",
+    "MSRemoteSolverUtilsImpl",
     "PatricWSUtilsImpl",
     "RCSBPDBUtilsImpl",
     "SKANIUtilsImpl",

@@ -1,0 +1,31 @@
+{
+  "prd_name": "kbutillib-reorg-integration",
+  "title": "KBUtilLib Reorg Integration (feature/reorg-api-mcp-explore)",
+  "repos": ["KBUtilLib"],
+  "priority": "high",
+  "confront_rounds": 1,
+  "confront_task_id": "task-62d8c425",
+  "source_branch": "vibhav/feature/reorg-api-mcp-explore",
+  "source_fork": "https://github.com/VibhavSetlur/KBUtilLib",
+  "merge_base": "aa98d89",
+  "main_tip_at_design": "d1bcbcb",
+  "decisions": {
+    "scope": "whole-branch-as-is",
+    "servers": "accept-as-is; default-bind loopback 127.0.0.1; auth deferred",
+    "migration": "fix-known-breaks + flat-submodule deprecation shim + grep sweep + report"
+  },
+  "conflict_hotspots": [
+    "domains/ai/argo_utils.py (rename-hidden, highest risk)",
+    "src/kbutillib/__init__.py",
+    "src/kbutillib/toolkit.py",
+    "pyproject.toml"
+  ],
+  "reorg_lacks": [
+    "services/lp_solver/app.py",
+    "services/lp_solver/worker.py",
+    "services/lp_solver/deploy/",
+    "ms_remote_solver_utils (client)",
+    "ms_remote_solve_utils (client)",
+    "argo httpx-0.28 fix (ece70da, wip-only)"
+  ]
+}

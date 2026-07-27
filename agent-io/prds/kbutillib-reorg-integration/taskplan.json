@@ -1,0 +1,97 @@
+{
+  "prd_name": "kbutillib-reorg-integration",
+  "default_max_retries": 0,
+  "phases": [
+    {
+      "name": "Integration base",
+      "parallel_group": [
+        {
+          "task_id": "integrate-reorg-base",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Adopt the KBUtilLib reorg branch as the integration base and re-land our delta. STEP 0 (do not skip): in ~/Dropbox/Projects/KBUtilLib, fetch remote `vibhav` (https://github.com/VibhavSetlur/KBUtilLib) branch `feature/reorg-api-mcp-explore`; create an integration branch off its tip (e.g. `integrate-reorg`); assert `src/kbutillib/domains/` exists on it before proceeding. Then re-land the wip/main delta that the reorg lacks: (1) re-add the LP-solver service layer `src/kbutillib/services/lp_solver/app.py`, `worker.py`, and `deploy/` (enable_lp_solver.sh, lp-solver.service) from main; (2) place the LP-solver client `ms_remote_solver_utils.py` and `ms_remote_solve_utils.py` under `src/kbutillib/domains/modeling/` with imports repointed to new core/domain paths; (3) re-apply the `remote_solve`/`remote_solver` lazy-property facade wiring into the reorg's `toolkit.py`; (4) re-add exports `RemoteSolveResult`, `remote_solve`, `MSRemoteSolverUtils`/`Impl` into the reorg's `__init__.py`; (5) apply the ARGO httpx-0.28 `proxies=`->`proxy=` fix to `src/kbutillib/domains/ai/argo_utils.py`. Reconcile the four conflict hotspots (domains/ai/argo_utils.py, __init__.py, toolkit.py, pyproject.toml). Declare `httpx[socks]>=0.28` behind an `ai` extra (not core) unless a non-lazy core path imports httpx. Keep cheminformatics (rdkit/pickaxe/retrorules) and server (fastapi/uvicorn/mcp) deps behind extras. Set default server bind host to 127.0.0.1 in `interfaces/api/app.py` and `interfaces/mcp/server.py`. Do NOT touch downstream consumers, skills, or the deprecation shim (later phases). Commit on the integration branch. Follow the PRD Implementation Decisions + Acceptance Criteria in agent-io/prds/kbutillib-reorg-integration/fullprompt.md.",
+          "success_criteria": "On the integration branch: `src/kbutillib/domains/` exists; `src/kbutillib/services/lp_solver/app.py` and `worker.py` exist; `src/kbutillib/domains/modeling/ms_remote_solver_utils.py` exists; `src/kbutillib/domains/ai/argo_utils.py` contains `proxy=` and no `proxies=` kwarg; `PYTHONPATH=src python3 -c 'import kbutillib; kbutillib.KBUtilLib'` exits 0; `PYTHONPATH=src python3 -m kbutillib model --help` and `PYTHONPATH=src python3 -m kbutillib cap list` exit 0; a core install with no extras imports kbutillib and runs `kbu model --help` without rdkit/fastapi/mcp installed.",
+          "repos": ["KBUtilLib"],
+          "depends_on": [],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Back-compat and consumer netting",
+      "parallel_group": [
+        {
+          "task_id": "backcompat-shim-guard",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "On the integration branch, add the flat-submodule deprecation shim and the silent-None guard. Implement the shim as GENERATED THIN MODULES: one real `.py` per legacy `*_utils` path that the reorg deleted (full old->new mapping is in the PRD Implementation Decisions table), each doing `warnings.warn(..., DeprecationWarning, stacklevel=2)` once per import then `from kbutillib.<new> import *`. Do NOT use a package `__getattr__` or a meta-path finder. Cover at minimum: ms_fba_utils, kb_model_utils, kb_ws_utils, kb_genome_utils, kb_berdl_utils, ms_biochem_utils, annotator_utils, kb_annotation_utils, shared_env_utils, argo_utils, thermo_utils, and generate for the full mapping so no legacy path 404s. Add a silent-None guard test: iterate the class entries of `src/kbutillib/__init__.py`'s `__all__` and assert each imports non-None. Put shim tests under tests/core/ and the guard under tests/guard/. Commit on the integration branch.",
+          "success_criteria": "`PYTHONPATH=src python3 -W error::DeprecationWarning -c 'from kbutillib.ms_fba_utils import MSFBAUtils'` exits non-zero (shim warns); without -W error, `from kbutillib.ms_fba_utils import MSFBAUtils` returns the SAME object (`is`) as `kbutillib.domains.modeling.ms_fba_utils.MSFBAUtils`; the __all__-driven guard test passes; `pytest tests/core tests/guard` is green.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["integrate-reorg-base"],
+          "machine": null,
+          "max_retries": 0
+        },
+        {
+          "task_id": "skill-netting-and-sweep",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "On the integration branch, net the shipped skills and produce the consumer sweep. (1) Repoint every flat-submodule import in shipped skill bodies to the TOP-LEVEL FACADE form `from kbutillib import <Class>` (no domain paths): fix `src/kbutillib/beril/skills/kbu-fba/SKILL.md` line ~62 (`from kbutillib.kb_berdl_utils import KBBERDLUtils` -> `from kbutillib import KBBERDLUtils`) and sweep `src/kbutillib/beril/skills/{kbu,kbu-fba,kbu-notebook}`, `src/kbutillib/harness/skills/kbu-run`, and `src/kbutillib/king_app/skill.md` for any `from kbutillib.<x>_utils import` and stale flat file-path prose (e.g. ms_fba_utils.py:75/86, ms_reconstruction_utils.py:176/685, kb_berdl_utils.py:705, cli/model.py citations) and correct them to the new domain paths. (2) grep `~/Dropbox/Projects` for `from kbutillib.<flat>` reach-ins and write `agent-io/reports/consumer-migration.md` enumerating every external hit (path:line:import); if `~/Dropbox/Projects` is absent, write the report marked 'skipped'. Do not modify the external consumer files themselves. Commit on the integration branch.",
+          "success_criteria": "`grep -rEn 'from kbutillib\\.[a-z_]+_utils import' src/kbutillib/beril/skills src/kbutillib/harness/skills src/kbutillib/king_app` returns no matches; `agent-io/reports/consumer-migration.md` exists and either lists external flat-import hits with path:line or is explicitly marked 'skipped'.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["integrate-reorg-base"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Land to main",
+      "parallel_group": [
+        {
+          "task_id": "land-to-main",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Land the integration branch onto main in ~/Dropbox/Projects/KBUtilLib. First confirm the in_context minimum landing bar passes on the integration branch: the silent-None guard, the deprecation-shim tests, an LP-solver client smoke (construct MSRemoteSolverUtils / call remote_solve via the facade), and an ArgoUtils construct test. Then MERGE-COMMIT the integration branch into `main` (NO rebase). Do NOT merge into wip yet (that is the finalize phase, after h100 full-suite verification). Do NOT push to origin. Commit on main via the branch symbolic-ref; never `git checkout main` on the parking working tree in a way that leaves it off wip afterwards -- perform the main merge without disturbing the wip working tree (e.g. via a temporary worktree or a non-checkout merge), consistent with the parking-branch model.",
+          "success_criteria": "`git -C ~/Dropbox/Projects/KBUtilLib show main:src/kbutillib/domains/ai/argo_utils.py` succeeds and contains `proxy=`; `git -C ~/Dropbox/Projects/KBUtilLib show main:src/kbutillib/services/lp_solver/app.py` succeeds; main's tip is a merge commit; `git -C ~/Dropbox/Projects/KBUtilLib merge-base --is-ancestor origin/main main` (local main is ahead of origin -- not pushed); the working tree is still on wip and clean.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["backcompat-shim-guard", "skill-netting-and-sweep"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Full-suite verification",
+      "parallel_group": [
+        {
+          "task_id": "full-suite-h100",
+          "lane": "maestro",
+          "role": "developer",
+          "prompt": "Run the full KBUtilLib test suite off `main` (which now carries the adopted reorg + re-landed delta) and fix regressions introduced by the re-landed LP-solver delta and the deprecation shim. Relocate the re-landed LP-solver tests into the new tests/ subdir layout (tests/modeling/) if not already. Install the extras needed for the full suite (including cheminformatics/server extras) on h100. Run `pytest`; for each failure, determine whether it is (a) a regression from the re-land/shim -> fix it and commit, or (b) a pre-existing failure on the reorg branch -> mark/document as xfail. Write `agent-io/reports/full-suite-verification.md` with pass/fail counts, the list of fixed regressions, and the documented xfails. Commit fixes + report on the task branch.",
+          "success_criteria": "`agent-io/reports/full-suite-verification.md` exists on the task branch with pytest pass/fail counts; every failure is either fixed (committed) or listed as a documented pre-existing xfail; no regression attributable to the re-landed LP-solver delta or the deprecation shim remains unaddressed.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["land-to-main"],
+          "machine": "h100",
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Finalize wip",
+      "parallel_group": [
+        {
+          "task_id": "finalize-wip",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Finalize the landing after h100 full-suite verification. Merge the h100 full-suite-h100 task branch's fixes into `main` (standard maestro merge / ff), then merge `main` into `wip` (fast-forward if possible) on the ~/Dropbox/Projects/KBUtilLib parking repo so the reorg + delta is LIVE on the local wip working tree. Verify by content, not status. Do NOT push to origin. Leave the working tree clean on wip.",
+          "success_criteria": "`git -C ~/Dropbox/Projects/KBUtilLib show wip:src/kbutillib/domains/ai/argo_utils.py` succeeds and contains `proxy=`; `git -C ~/Dropbox/Projects/KBUtilLib show wip:src/kbutillib/services/lp_solver/app.py` succeeds; `git -C ~/Dropbox/Projects/KBUtilLib rev-parse --abbrev-ref HEAD` is `wip` and `git status --porcelain` is clean; `PYTHONPATH=src python3 -m kbutillib model --help` exits 0 in the wip tree.",
+          "repos": ["KBUtilLib"],
+          "depends_on": ["full-suite-h100"],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    }
+  ]
+}

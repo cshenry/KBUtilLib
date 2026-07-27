@@ -1,275 +1,369 @@
 # KBUtilLib
 
-[![PyPI](https://img.shields.io/pypi/v/KBUtilLib.svg)][pypi status]
-[![Status](https://img.shields.io/pypi/status/KBUtilLib.svg)][pypi status]
-[![Python Version](https://img.shields.io/pypi/pyversions/KBUtilLib)][pypi status]
-[![License](https://img.shields.io/pypi/l/KBUtilLib)][license]
-
-[![Tests](https://github.com/cshenry/KBUtilLib/workflows/Tests/badge.svg)][tests]
-[![Codecov](https://codecov.io/gh/cshenry/KBUtilLib/branch/main/graph/badge.svg)][codecov]
-
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
+[![Tests](https://github.com/cshenry/KBUtilLib/actions/workflows/ci.yml/badge.svg?branch=feature%2Freorg-api-mcp-explore)][ci]
+[![License](https://img.shields.io/github/license/cshenry/KBUtilLib)][license]
 [![Ruff codestyle][ruff badge]][ruff project]
 
-> **A modular utility framework for scientific computing and bioinformatics**
->
-> KBUtilLib provides a flexible, composable set of utilities for working with KBase data, genomics, biochemistry databases, metabolic modeling, and interactive notebook environments.
+KBUtilLib is a domain-organized utility library for KBase bioinformatics: biochemistry search,
+metabolic modeling, thermodynamics, genome analysis, cheminformatics, and AI/LLM workflows —
+all exposed through a single capability registry and your choice of transport: CLI, MCP stdio
+server, or HTTP API.
 
-**New here?** See **[GETTING_STARTED.md](GETTING_STARTED.md)** for the first-time-user onboarding guide — it walks you from a clean machine to "Claude is running in your kbu project, take it from there."
+> **Not on PyPI yet.** Install from source with `pip install -e .` — see [Installation](#installation) below.
 
-## Features
+**New here?** → **[GETTING_STARTED.md](GETTING_STARTED.md)** walks you from a fresh clone to a
+running `kbu` command in under ten minutes.
 
-- **Modular Architecture**: Inherit from only the utility modules you need
-- **Composable Design**: Create custom utility combinations via multiple inheritance
-- **Shared Environment**: Centralized configuration and secret management
-- **KBase Integration**: Workspace access, SDK utilities, and data manipulation tools
-- **Genomics Utilities**: Sequence analysis, ORF finding, translation, and genome annotation
-- **Biochemistry Database**: ModelSEED biochemistry search and analysis utilities
-- **Metabolic Modeling**: Model analysis, FBA preparation, and pathway utilities
-- **Annotation Tools**: Gene and protein annotation workflows and utilities
-- **Notebook Support**: Enhanced display and interactive features for Jupyter
-
-## Quick Start
-
-### Basic Usage
-
-```python
-from kbutillib import KBGenomeUtils, SharedEnvUtils
-
-# Use individual utilities
-genome_utils = KBGenomeUtils()
-dna_sequence = "ATGAAAGCCTAG"
-protein = genome_utils.translate_sequence(dna_sequence)
-print(f"Translated: {dna_sequence} -> {protein}")
-
-# Use with shared configuration
-env = SharedEnvUtils(config_file="config.yaml")
-token = env.get_token("kbase")
-```
-
-### Composable Design
-
-```python
-from kbutillib import KBWSUtils, KBGenomeUtils, SharedEnvUtils
-
-# Create custom utility combinations
-class MyWorkflow(KBWSUtils, KBGenomeUtils, SharedEnvUtils):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def analyze_genome(self, genome_ref, workspace_id):
-        # Get genome data via KBase workspace
-        genome_data = self.get_object(workspace_id, genome_ref)
-
-        # Analyze with genome utilities
-        genome_info = self.parse_genome_object(genome_data)
-        features = self.extract_features_by_type(genome_data, 'CDS')
-
-        return genome_info, features
-
-# Use your custom workflow
-workflow = MyWorkflow(config_file="config.yaml")
-```
-
-### Pre-built Combinations
-
-```python
-from kbutillib.examples import KBaseWorkbench, NotebookAnalysis
-
-# Complete KBase analysis environment
-workbench = KBaseWorkbench(config_file="config.yaml")
-
-# Notebook-optimized analysis tools
-notebook_env = NotebookAnalysis()
-notebook_env.display_dataframe(my_dataframe)
-```
+---
 
 ## Architecture
 
-### Core Modules
+Every capability is registered once — via the `@capability` decorator — and all three transports
+read from the same registry. Adding a capability to a domain makes it immediately available to
+the CLI, the MCP server, and the HTTP API without any additional wiring.
 
-- **`BaseUtils`**: Foundation class with logging, configuration, and dependency management
-- **`SharedEnvUtils`**: Configuration file loading and authentication token management
-- **`NotebookUtils`**: Jupyter notebook integration and enhanced display utilities
-- **`KBWSUtils`**: KBase workspace service API access and object management
-- **`KBGenomeUtils`**: Genomic sequence analysis, translation, and feature extraction
-- **`MSBiochemUtils`**: ModelSEED biochemistry database search and compound analysis
-- **`KBModelUtils`**: Metabolic model analysis, FBA preparation, and pathway utilities
-- **`KBSDKUtils`**: KBase SDK development tools and utility functions
-- **`KBAnnotationUtils`**: Gene and protein annotation workflows and utilities
-- **`KBCallbackUtils`**: Callback handling for KBase SDK applications
-- **`ArgoUtils`**: Language model integration and inference utilities
-
-### Design Philosophy
-
-The framework follows a composable design where you can inherit from any combination of utility modules to create exactly the functionality you need:
-
-```python
-# Minimal combination
-class SimpleTools(KBWSUtils, SharedEnvUtils):
-    pass
-
-# Complete analysis suite
-class FullWorkbench(KBWSUtils, KBGenomeUtils, MSBiochemUtils, KBModelUtils, NotebookUtils, SharedEnvUtils):
-    pass
-
-# Domain-specific combination
-class BiochemistryTools(MSBiochemUtils, KBModelUtils, NotebookUtils):
-    pass
+```
+┌─────────────────────────────────────────────────────────┐
+│                    @capability registry                  │
+│              (core/registry.py — CapabilitySpec)         │
+└───────────────────────┬─────────────────────────────────┘
+                        │  populated at import time
+          ┌─────────────┼──────────────┐
+          ▼             ▼              ▼
+    domains/         domains/       domains/
+    biochem/         modeling/      thermo/  …
+    (MSBiochemUtils) (MSFBAUtils)   (ThermoUtils)
+          │             │              │
+          └─────────────┼──────────────┘
+                        │  read at startup
+          ┌─────────────┼──────────────┐
+          ▼             ▼              ▼
+    kbu (CLI)     kbu-mcp (MCP)  kbu-api (HTTP)
+    Click          stdio JSON-RPC   FastAPI/uvicorn
 ```
 
-## Module Documentation
+The `KBUtilLib` facade in `toolkit.py` composes all domain implementations as lazy properties.
+Use it for scripted or interactive work when you want one object with access to everything.
+For production imports, use the canonical `kbutillib.domains.*` paths.
 
-Comprehensive documentation is available for each utility module:
-
-### Core Foundation Modules
-
-- **[BaseUtils](docs/modules/base_utils.md)** - Base class with logging, error handling, and dependency management
-- **[SharedEnvUtils](docs/modules/shared_env_utils.md)** - Configuration and authentication token management
-
-### Data Access and Workspace Modules
-
-- **[KBWSUtils](docs/modules/kb_ws_utils.md)** - KBase workspace operations and object management
-- **[MSBiochemUtils](docs/modules/ms_biochem_utils.md)** - ModelSEED biochemistry database access and search
-
-### Analysis and Processing Modules
-
-- **[KBGenomeUtils](docs/modules/kb_genome_utils.md)** - Genome analysis, feature extraction, and sequence operations
-- **[KBAnnotationUtils](docs/modules/kb_annotation_utils.md)** - Gene and protein annotation workflows
-- **[KBModelUtils](docs/modules/kb_model_utils.md)** - Metabolic modeling and flux balance analysis
-
-### Development and Integration Modules
-
-- **[KBSDKUtils](docs/modules/kb_sdk_utils.md)** - KBase SDK development tools and workflows
-- **[KBCallbackUtils](docs/modules/kb_callback_utils.md)** - Callback service management for SDK applications
-- **[ArgoUtils](docs/modules/argo_utils.md)** - Language model integration and inference utilities
-
-### Interactive and Visualization Modules
-
-- **[NotebookUtils](docs/modules/notebook_utils.md)** - Jupyter notebook enhancements and interactive displays
-
-Each module documentation includes:
-
-- **Overview and Key Features** - What the module does and its main capabilities
-- **Class Definition and Constructor** - How to initialize and configure the module
-- **Core Methods** - Essential methods and their usage
-- **Advanced Features** - Specialized functionality and integration options
-- **Usage Examples** - Practical code examples and common patterns
-- **Configuration Options** - Customization and setup parameters
-- **Error Handling** - Common issues and troubleshooting guidance
-- **Dependencies** - Required packages and integration requirements
-
-- **Modern Python Development**: Built with `uv` for fast dependency management and packaging
-- **Code Quality**: Comprehensive linting with `ruff`, type checking with `mypy`, and testing with `pytest`
-- **Scientific Workflows**: Ready for data analysis, computational research, and scientific computing
-
-  - **Containerization**: Docker support for reproducible deployment and environment isolation
-
-- **Documentation**: Automated documentation with Sphinx and Read the Docs
-- **CI/CD**: GitHub Actions for automated testing, linting, and deployment
-
-## Requirements
-
-- Python 3.9+
-- `uv` package manager (recommended) or `pip`
+---
 
 ## Installation
 
-### Using uv (Recommended)
+KBUtilLib is not on PyPI. Clone the repo, then install from source:
 
-```console
-$ uv add KBUtilLib
+```bash
+git clone https://github.com/cshenry/KBUtilLib.git
+cd KBUtilLib
+
+# Core library — no transport dependencies
+pip install -e .
+
+# With MCP server support (adds mcp SDK)
+pip install -e ".[mcp]"
+
+# With FastAPI HTTP server (adds fastapi + uvicorn)
+pip install -e ".[api]"
+
+# With auto-generated MkDocs capability catalog
+pip install -e ".[apidocs]"
+
+# Everything
+pip install -e ".[all]"
 ```
 
-### Using pip
+**Python 3.11+** is required. A conda environment file ships with the repo:
 
-You can install _KBUtilLib_ via [pip] from [PyPI]:
-
-```console
-$ pip install KBUtilLib
+```bash
+conda env create -f environment-reorg.yml   # creates the kbutillib-reorg env
+conda activate kbutillib-reorg
+pip install -e ".[all]"
 ```
 
-### Notebook Support
+---
 
-For enhanced Jupyter notebook features (interactive tables with pagination and search):
+## Quick Start
 
-```console
-$ pip install "KBUtilLib[notebook]"
-# or with uv:
-$ uv add "KBUtilLib[notebook]"
+### Python API
+
+```python
+from kbutillib import KBUtilLib
+
+kbu = KBUtilLib()
+
+# Biochemistry — ModelSEED compound search (no optional deps required)
+hits = kbu.biochem.search_compounds("atp")
+
+# Thermodynamics — legacy ModelSEED ΔG lookup
+dg = kbu.thermo.get_compound_deltag("cpd00002")
+
+# Thermodynamics — predictive ΔG via best available backend
+result = kbu.predictive_thermo.compound_dgf("cpd00002")
+
+# Cheminformatics — metabolic network expansion
+expanded = kbu.network_expansion.expand(seed_compounds=["cpd00001", "cpd00002"], generations=2)
+
+# KBase workspace
+obj = kbu.ws.get_object(workspace="my_ws", ref="my_ws/my_genome/1")
 ```
 
-This installs optional dependencies for interactive DataFrame display:
-- `itables` - Modern interactive tables with pagination and search
-- `ipywidgets` - Interactive widgets
-- `pandas` - DataFrame support  
-- `tqdm` - Progress bars
+For production scripts, prefer direct domain imports:
 
-### Development Installation
-
-For development, clone the repository and install with development dependencies:
-
-```console
-$ git clone https://github.com/cshenry/KBUtilLib.git
-$ cd KBUtilLib
-$ uv sync --all-groups
+```python
+from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils
+from kbutillib.domains.thermo.predictive_thermo_utils import PredictiveThermoUtils
 ```
 
-## Usage
+### CLI (`kbu`)
 
-### Command Line Interface
+The `kbu` command is available after any install — no extras required.
 
-```console
-$ KBUtilLib --help
+```bash
+kbu --help
+kbu doctor                                   # check backend availability
+kbu cap list                                 # all registered capabilities
+kbu cap list --domain biochem                # filter by domain
+kbu cap info biochem.search_compounds        # signature + docstring
+kbu cap run biochem.search_compounds --query atp --limit 5
+kbu new-capability                           # scaffold a new @capability stub
 ```
 
-### Docker
+### HTTP API (`kbu-api`)
 
-Build and run with Docker:
+```bash
+pip install -e ".[api]"
+kbu-api                                      # starts on http://0.0.0.0:8000
 
-```console
-$ docker build -t KBUtilLib .
-$ docker run KBUtilLib
+# Health check
+curl http://localhost:8000/health
+
+# List capabilities
+curl http://localhost:8000/v1/capabilities
+
+# Invoke a capability
+curl -X POST http://localhost:8000/v1/tools/biochem.search_compounds \
+  -H "Content-Type: application/json" \
+  -d '{"query": "atp", "limit": 5}'
 ```
 
-For detailed usage instructions, please see the [Command-line Reference].
+Swagger UI is at `http://localhost:8000/docs`. Override host/port with `KBU_API_HOST` and
+`KBU_API_PORT` environment variables. Bearer-token auth is enabled via `KBU_API_TOKEN`.
 
-## Contributing
+---
 
-Contributions are very welcome.
-To learn more, see the [Contributor Guide].
+## Domain Modules
+
+| Domain | Import path | What it provides |
+|--------|-------------|-----------------|
+| **biochem** | `kbutillib.domains.biochem` | ModelSEED compound and reaction search, ID lookup, cross-reference resolution (`MSBiochemUtils`) |
+| **thermo** | `kbutillib.domains.thermo` | ModelSEED ΔG lookup (`ThermoUtils`); multi-backend predictive ΔG (`PredictiveThermoUtils`) with equilibrator, modelseed, modelseed_db, dgpredictor, and molgpk backends |
+| **cheminformatics** | `kbutillib.domains.cheminformatics` | Metabolic network expansion via Pickaxe/RetroRules (`NetworkExpansionUtils`); SMARTS-based rule screening (`VerabUtils`) |
+| **modeling** | `kbutillib.domains.modeling` | Flux balance analysis (`MSFBAUtils`), draft model reconstruction (`MSReconstructionUtils`), reaction templates (`MSTemplateUtils`), KBase model I/O (`KBModelUtils`) |
+| **genome** | `kbutillib.domains.genome` | KBase genome objects (`KBGenomeUtils`), sequence alignment (`MMSeqsUtils`, `SkaniUtils`), ontology mapping (`OntomapUtils`), annotation pipeline (`annotation/`) |
+| **kbase** | `kbutillib.domains.kbase` | Workspace API (`KBWSUtils`), SDK client (`KBSDKUtils`), narrative audit, catalog client, endpoint resolver |
+| **ai** | `kbutillib.domains.ai` | Argo LLM gateway client (`ArgoUtils`), AI curation pipelines (`AiCurationUtils`), protein language models (`KBPLMUtils`) |
+| **external** | `kbutillib.domains.external` | BVBRC/PATRIC genome queries (`BvbrcUtils`), RCSB PDB structure retrieval (`RcsbPdbUtils`), UniProt via KBase (`KbUniprotUtils`) |
+| **notebook** | `kbutillib.domains.notebook` | Provenanced notebook cache (`NotebookSession`, `Cache`), typed vector store (`VectorStore`), Escher map rendering (`EscherUtils`) |
+
+---
+
+## Transports
+
+### CLI — `kbu`
+
+Available after `pip install -e .` with no extras.
+
+```bash
+kbu cap list                    # tabular listing with tags and backend requirements
+kbu cap info <name>             # full signature, docstring, and availability
+kbu cap run <name> [--arg val]  # invoke from the shell
+kbu doctor                      # check all backends; exits 0 if all pass
+kbu new-capability              # interactive scaffold for a new capability
+```
+
+### MCP server — `kbu-mcp`
+
+Exposes every registered capability as an MCP tool over stdio. Works with Claude Desktop,
+Cursor, and any MCP-compatible client.
+
+```bash
+pip install -e ".[mcp]"
+kbu-mcp                         # stdio server — no port, no HTTP
+```
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "kbutillib": {
+      "command": "kbu-mcp"
+    }
+  }
+}
+```
+
+**Cursor**: Settings → MCP → Add server → command `kbu-mcp`.
+
+See `src/kbutillib/interfaces/mcp/README.md` for full configuration details.
+
+### HTTP API — `kbu-api`
+
+FastAPI application with bearer-token authentication and auto-generated OpenAPI docs.
+
+```bash
+pip install -e ".[api]"
+kbu-api
+```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness check |
+| `GET` | `/version` | Package version |
+| `GET` | `/v1/capabilities` | List all capabilities with metadata |
+| `POST` | `/v1/tools/{name}` | Invoke a capability by dotted name |
+
+See `src/kbutillib/interfaces/api/README.md` for auth configuration and deployment options.
+
+---
+
+## Capability Registry
+
+Every public method decorated with `@capability` is registered automatically at import time.
+The decorator is completely inert to normal calls — it attaches metadata and registers the
+function, then returns the original callable unchanged. No wrappers, no overhead.
+
+```python
+from kbutillib.core.capability import capability
+
+@capability(
+    domain="biochem",
+    summary="Search ModelSEED biochemistry for compounds matching a query string.",
+    tags=("biochem", "search"),
+    visibility="public",
+)
+def search_compounds(self, query: str, limit: int = 20) -> list[dict]:
+    """Return up to *limit* compound records matching *query*."""
+    ...
+```
+
+Query the registry:
+
+```bash
+kbu cap list                              # all capabilities, tabular
+kbu cap info biochem.search_compounds     # detail for one capability
+```
+
+```python
+from kbutillib.core.registry import get_registry
+
+reg = get_registry()
+caps = reg.list_capabilities()                    # all CapabilitySpec objects
+spec = reg.get("biochem.search_compounds")        # single spec by name
+available, reason = spec.availability()           # check backend readiness
+```
+
+---
+
+## Package Structure
+
+```
+src/kbutillib/
+├── __init__.py              # public API — re-exports all domain classes
+├── toolkit.py               # KBUtilLib lazy facade
+├── core/                    # registry, @capability, errors, config, BaseUtils
+├── domains/
+│   ├── biochem/             # MSBiochemUtils (reference @capability implementation)
+│   ├── thermo/              # ThermoUtils, PredictiveThermoUtils + thermo_predictors/
+│   ├── cheminformatics/     # NetworkExpansionUtils, VerabUtils + verab/
+│   ├── modeling/            # MSFBAUtils, MSReconstructionUtils, KBModelUtils, ...
+│   ├── genome/              # KBGenomeUtils, MMSeqsUtils, SkaniUtils + annotation/
+│   ├── kbase/               # KBWSUtils, KBSDKUtils, narrative audit, endpoints
+│   ├── ai/                  # ArgoUtils, AiCurationUtils, KBPLMUtils
+│   ├── external/            # BvbrcUtils, RcsbPdbUtils, KbUniprotUtils
+│   └── notebook/            # NotebookSession, Cache, VectorStore, EscherUtils
+├── interfaces/
+│   ├── cli/                 # kbu (Click) — cap list/info/run, new-capability, doctor
+│   ├── mcp/                 # kbu-mcp (stdio MCP server)
+│   ├── api/                 # kbu-api (FastAPI/uvicorn)
+│   └── docs/                # mkdocs catalog generator
+├── agents/                  # KING self-install bundles, researchos config
+└── deploy/
+    ├── poplar/              # systemd + nginx service definitions
+    └── docker/              # docker-compose and Dockerfile
+```
+
+---
+
+## Migration Note
+
+The flat module layout (`kbutillib.ms_biochem_utils`, etc.) is no longer the primary import
+surface. The top-level re-exports remain stable:
+
+```python
+# Preferred — stable across releases
+from kbutillib import MSBiochemUtils, KBWSUtils, ThermoUtils
+
+# Canonical domain path
+from kbutillib.domains.biochem.ms_biochem_utils import MSBiochemUtils
+```
+
+---
+
+## Development
+
+```bash
+# Scaffold a new capability
+kbu new-capability
+# → prompts for domain, name, summary, tags, then writes the decorated stub
+
+# Run tests
+python -m pytest tests/ -q
+
+# Lint and format
+ruff check src/kbutillib
+ruff format src/kbutillib
+mypy src/kbutillib
+
+# Generate MkDocs capability catalog
+python -m kbutillib.interfaces.docs.gen_capabilities
+mkdocs serve
+```
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full contribution guide, test conventions,
+and the step-by-step process for adding a new domain or capability.
+
+---
+
+## Deploy
+
+```bash
+# Poplar — systemd service + nginx reverse proxy
+sudo cp deploy/poplar/kbu-api.service /etc/systemd/system/
+sudo systemctl enable --now kbu-api
+
+# Docker
+docker compose -f deploy/docker/docker-compose.yml up
+```
+
+---
 
 ## License
 
-Distributed under the terms of the [MIT license][license],
-_KBUtilLib_ is free and open source software.
+Distributed under the terms of the [MIT license][license].
 
 ## Issues
 
-If you encounter any problems,
-please [file an issue] along with a detailed description.
+[File an issue][file an issue] with a description and the output of `kbu doctor`.
 
 ## Credits
 
-This project was generated from Christopher Henry's [cookiecutter-henry-hypermodern-python] template,
-which is based on [@cjolowicz]'s [uv hypermodern python cookiecutter] template.
+Developed at **Argonne National Laboratory** by Christopher Henry.
 
-**Developed at Argonne National Laboratory**
-
-[@cjolowicz]: https://github.com/cjolowicz
-[pypi]: https://pypi.org/
-[pypi status]: https://pypi.org/project/KBUtilLib/
-[tests]: https://github.com/cshenry/KBUtilLib/actions?workflow=Tests
-[codecov]: https://app.codecov.io/gh/cshenry/KBUtilLib
-[pre-commit]: https://github.com/pre-commit/pre-commit
+[ci]: https://github.com/cshenry/KBUtilLib/actions/workflows/ci.yml
+[license]: https://github.com/cshenry/KBUtilLib/blob/main/LICENSE
 [ruff badge]: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json
 [ruff project]: https://github.com/charliermarsh/ruff
-[cookiecutter-henry-hypermodern-python]: https://github.com/chenry/cookiecutter-henry-hypermodern-python
-[uv hypermodern python cookiecutter]: https://github.com/bosd/cookiecutter-uv-hypermodern-python
 [file an issue]: https://github.com/cshenry/KBUtilLib/issues
-[pip]: https://pip.pypa.io/
-
-<!-- github-only -->
-
-[license]: https://github.com/cshenry/KBUtilLib/blob/main/LICENSE
 [contributor guide]: https://github.com/cshenry/KBUtilLib/blob/main/CONTRIBUTING.md

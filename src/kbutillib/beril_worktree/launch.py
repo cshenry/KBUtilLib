@@ -21,7 +21,6 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # Import helpers (deferred so beril_cli is optional at collection time)
 # ---------------------------------------------------------------------------

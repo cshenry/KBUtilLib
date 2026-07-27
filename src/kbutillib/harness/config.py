@@ -19,14 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-
 try:
     import tomllib  # py 3.11+
 except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 import tomli_w
-
 
 # ---------------------------------------------------------------------------
 # Config dataclass

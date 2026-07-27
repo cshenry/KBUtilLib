@@ -12,7 +12,7 @@ import yaml
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.init_notebook import (
+from kbutillib.interfaces.cli.init_notebook import (
     _MARKER,
     _render_util_template,
     _slugify,
@@ -157,15 +157,15 @@ class TestInitNotebookCommand:
 
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value=alias,
             ),
             patch(
-                "kbutillib.cli.init_notebook.subprocess.run",
+                "kbutillib.interfaces.cli.init_notebook.subprocess.run",
                 side_effect=_mock_subprocess_run,
             ),
             patch("shutil.which", return_value="/usr/local/bin/venvman"),
@@ -253,15 +253,15 @@ class TestInitNotebookCommand:
         os.chdir(project_dir)
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value="testbox",
             ),
             patch(
-                "kbutillib.cli.init_notebook.subprocess.run",
+                "kbutillib.interfaces.cli.init_notebook.subprocess.run",
                 side_effect=_mock_subprocess_run,
             ) as mock_subproc,
         ):
@@ -289,15 +289,15 @@ class TestInitNotebookCommand:
         os.chdir(project_dir)
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value="testbox",
             ),
             patch(
-                "kbutillib.cli.init_notebook.subprocess.run",
+                "kbutillib.interfaces.cli.init_notebook.subprocess.run",
                 side_effect=_mock_subprocess_run,
             ) as mock_subproc,
             patch("shutil.which", return_value="/usr/local/bin/venvman"),
@@ -324,11 +324,11 @@ class TestInitNotebookCommand:
         try:
             with (
                 patch(
-                    "kbutillib.cli.init_notebook.load_machine_config",
+                    "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                     return_value=_DEFAULT_CONFIG.copy(),
                 ),
                 patch(
-                    "kbutillib.cli.init_notebook.resolve_alias",
+                    "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                     return_value="testbox",
                 ),
                 patch("shutil.which", return_value="/usr/local/bin/venvman"),
@@ -351,11 +351,11 @@ class TestInitNotebookCommand:
         os.chdir(project_dir)
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value="testbox",
             ),
             patch("shutil.which", return_value=None),
@@ -401,15 +401,15 @@ class TestInitNotebookCommand:
 
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value="testbox",
             ),
             patch(
-                "kbutillib.cli.init_notebook.subprocess.run",
+                "kbutillib.interfaces.cli.init_notebook.subprocess.run",
                 side_effect=_mock_subprocess_run,
             ),
             patch("shutil.which", return_value="/usr/local/bin/venvman"),
@@ -458,15 +458,15 @@ class TestInitNotebookCommand:
 
         with (
             patch(
-                "kbutillib.cli.init_notebook.load_machine_config",
+                "kbutillib.interfaces.cli.init_notebook.load_machine_config",
                 return_value=_DEFAULT_CONFIG.copy(),
             ),
             patch(
-                "kbutillib.cli.init_notebook.resolve_alias",
+                "kbutillib.interfaces.cli.init_notebook.resolve_alias",
                 return_value="testbox",
             ),
             patch(
-                "kbutillib.cli.init_notebook.subprocess.run",
+                "kbutillib.interfaces.cli.init_notebook.subprocess.run",
                 side_effect=_mock_subprocess_run,
             ),
             patch("shutil.which", return_value="/usr/local/bin/venvman"),

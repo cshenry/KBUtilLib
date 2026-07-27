@@ -1,5 +1,7 @@
 # SharedEnvUtils Module
 
+> **New path**: `from kbutillib.core import SharedEnvUtils`
+
 The `SharedEnvUtils` class manages shared environment configuration, secrets, and runtime settings across the KBUtilLib framework. It provides centralized access to configuration files, environment variables, authentication tokens, and other shared resources.
 
 ## Overview
@@ -146,7 +148,7 @@ def get_environment_variable(self, key: str, default: Any = None) -> Any:
 ### Basic Configuration
 
 ```python
-from kbutillib.shared_env_utils import SharedEnvUtils
+from kbutillib.core import SharedEnvUtils
 
 # Initialize with config file
 env = SharedEnvUtils(config_file="config.yaml")

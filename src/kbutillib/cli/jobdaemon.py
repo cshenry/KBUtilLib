@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import signal
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -27,8 +26,8 @@ def jobdaemon_cmd(
     log_level: str,
 ) -> None:
     """Run the KBJobUtils watcher in the foreground until SIGINT/SIGTERM."""
+    from ..core.shared_env_utils import SharedEnvUtils
     from ..kb_job_utils.utils import KBJobUtils
-    from ..shared_env_utils import SharedEnvUtils
 
     logging.basicConfig(
         level=getattr(logging, log_level),

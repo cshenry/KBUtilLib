@@ -18,7 +18,7 @@ from kbutillib.cli.manifest import (
     sha256_file,
     write_project_manifest,
 )
-from kbutillib.cli.update import (
+from kbutillib.interfaces.cli.update import (
     TemplateDiff,
     _apply_diff,
     _build_diff,
@@ -141,8 +141,8 @@ class TestCheckYesMutuallyExclusive:
 
         # Simulate no diff (already up to date)
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=[]),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=[]),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="abc123\n", stderr="")
             # Should not raise
@@ -156,8 +156,8 @@ class TestCheckYesMutuallyExclusive:
         _make_project_toml(project_root, source_path=str(source))
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=[]),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=[]),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="abc123\n", stderr="")
             # Should not raise
@@ -211,7 +211,7 @@ class TestSetSource:
         new_source = tmp_path / "new_kbutillib"
         new_source.mkdir()
 
-        with patch("kbutillib.cli.update._build_diff") as mock_diff:
+        with patch("kbutillib.interfaces.cli.update._build_diff") as mock_diff:
             update(set_source=new_source, project_root=project_root)
             mock_diff.assert_not_called()
 
@@ -240,7 +240,7 @@ class TestMissingSource:
         _make_project_toml(project_root, source_path="/very/specific/missing/path")
 
         runner = CliRunner()
-        with patch("kbutillib.cli.update.Path.cwd", return_value=project_root):
+        with patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root):
             result = runner.invoke(
                 main,
                 ["update"],
@@ -279,8 +279,8 @@ class TestCheckDryRun:
         ]
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             update(check=True, project_root=project_root)
@@ -301,9 +301,9 @@ class TestCheckDryRun:
 
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
-            patch("kbutillib.cli.update.Path.cwd", return_value=project_root),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update.Path.cwd", return_value=project_root),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             result = runner.invoke(
@@ -411,10 +411,10 @@ class TestClobberWithWarn:
         ]
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
-            patch("kbutillib.cli.update._apply_diff") as mock_apply,
-            patch("kbutillib.cli.update._recompute_file_hashes", return_value={}),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update._apply_diff") as mock_apply,
+            patch("kbutillib.interfaces.cli.update._recompute_file_hashes", return_value={}),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
             # With --yes, no prompt should be raised; apply_diff should be called
@@ -450,10 +450,10 @@ class TestClobberWithWarn:
         prompt_called = []
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
-            patch("kbutillib.cli.update._apply_diff"),
-            patch("kbutillib.cli.update._recompute_file_hashes", return_value={}),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update._apply_diff"),
+            patch("kbutillib.interfaces.cli.update._recompute_file_hashes", return_value={}),
             patch("click.prompt", side_effect=lambda *a, **kw: prompt_called.append(True) or "n") as mock_prompt,
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
@@ -489,10 +489,10 @@ class TestClobberWithWarn:
         toml_before = (project_root / "kbu-project.toml").read_bytes()
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
-            patch("kbutillib.cli.update._apply_diff") as mock_apply,
-            patch("kbutillib.cli.update._recompute_file_hashes", return_value={}),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update._apply_diff") as mock_apply,
+            patch("kbutillib.interfaces.cli.update._recompute_file_hashes", return_value={}),
             patch("click.prompt", return_value="n"),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha\n", stderr="")
@@ -551,9 +551,9 @@ class TestPostApplyHashes:
             )
 
         with (
-            patch("kbutillib.cli.update._run_git") as mock_git,
-            patch("kbutillib.cli.update._build_diff", return_value=diff),
-            patch("kbutillib.cli.update._apply_diff", side_effect=_fake_apply),
+            patch("kbutillib.interfaces.cli.update._run_git") as mock_git,
+            patch("kbutillib.interfaces.cli.update._build_diff", return_value=diff),
+            patch("kbutillib.interfaces.cli.update._apply_diff", side_effect=_fake_apply),
         ):
             mock_git.return_value = MagicMock(returncode=0, stdout="newsha123\n", stderr="")
             update(yes=True, project_root=project_root)

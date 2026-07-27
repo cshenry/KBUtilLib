@@ -29,6 +29,49 @@ dependencies = [
 ]
 
 
+[project.optional-dependencies]
+# Transport adapters (kept optional so `import kbutillib` and the core library
+# never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
+mcp = [
+  "mcp >=1.27,<2",
+]
+api = [
+  "fastapi >=0.110",
+  "uvicorn[standard] >=0.29",
+]
+# httpx client used by ArgoUtils/AICurationUtils (domains.ai.*, SOCKS5-tunnelled
+# ARGO gateway calls) and by the Remote LP-Solver client (domains.modeling.
+# ms_remote_solver_utils, plain HTTP to the lp-solver service). Kept optional
+# so `import kbutillib` and the core modeling/notebook install never require
+# httpx -- both call sites are behind lazy properties / try-except-ImportError
+# re-exports in toolkit.py and __init__.py, so a core install degrades
+# gracefully instead of crashing when httpx is absent.
+ai = [
+  "httpx[socks] >=0.28",
+]
+# Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).
+# Deployed into a dedicated venv (~/venvs/lp-solver) per
+# agent-io/prds/remote-lp-solver/fullprompt.md "Deployment on H100", not
+# required for a plain KBUtilLib install or for the client side (see `ai`).
+lp_solver = [
+  "fastapi >=0.110",
+  "uvicorn[standard] >=0.29",
+]
+# Auto-generated API docs from the capability registry + docstrings.
+apidocs = [
+  "mkdocs-material >=9.5",
+  "mkdocstrings[python] >=0.24",
+]
+# Everything needed to run all transports + build docs.
+all = [
+  "mcp >=1.27,<2",
+  "fastapi >=0.110",
+  "uvicorn[standard] >=0.29",
+  "httpx[socks] >=0.28",
+  "mkdocs-material >=9.5",
+  "mkdocstrings[python] >=0.24",
+]
+
 [project.urls]
 Homepage = "https://github.com/cshenry/KBUtilLib"
 Repository = "https://github.com/cshenry/KBUtilLib"
@@ -95,6 +138,8 @@ package = true
 
 [project.scripts]
 kbu = "kbutillib.__main__:main"
+kbu-mcp = "kbutillib.interfaces.mcp.server:main"
+kbu-api = "kbutillib.interfaces.api.app:main"
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]

@@ -7,7 +7,6 @@ and an in-process cache is sufficient for notebook and pipeline use.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any

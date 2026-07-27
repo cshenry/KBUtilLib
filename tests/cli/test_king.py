@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from kbutillib import king_install
+from kbutillib.agents import king_install
 from kbutillib.cli import main
 
 pytestmark = pytest.mark.king_install

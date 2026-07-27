@@ -24,15 +24,13 @@ No shell=True anywhere.
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 try:
     import nbformat
@@ -40,8 +38,7 @@ try:
 except ImportError:
     _NBFORMAT_AVAILABLE = False
 
-from .config import find_harness_toml, load_config
-
+from .config import load_config
 
 # ---------------------------------------------------------------------------
 # RunResult

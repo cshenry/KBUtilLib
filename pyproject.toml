@@ -13,6 +13,7 @@ classifiers = [
 ]
 
 dependencies = [
+"aiohttp >=3.9",
 "click >=8.0.1",
 "jupyter_client >=7.0",
 "nbclient >=0.7",

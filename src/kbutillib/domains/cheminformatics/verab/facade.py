@@ -224,7 +224,7 @@ class VerabUtils:
                 "facade (e.g. kbu.network_expansion).  None was provided."
             )
 
-        from .cheminformatics.verab.rule_discovery import discover_verab_rules
+        from .rule_discovery import discover_verab_rules
 
         return discover_verab_rules(
             ne,
@@ -253,7 +253,7 @@ class VerabUtils:
         Returns:
             Dict with keys ``outdir``, ``files``, ``n_operators``, ``n_seeds``.
         """
-        from .cheminformatics.verab.king_artifacts import emit_king_workflow
+        from .king_artifacts import emit_king_workflow
 
         if discovery is None:
             discovery = VerabDiscoveryResult(
@@ -301,7 +301,7 @@ class VerabUtils:
                 "facade.  None was provided."
             )
 
-        from .cheminformatics.verab.substructure import MethoxyAromaticFilter
+        from .substructure import MethoxyAromaticFilter
 
         f = MethoxyAromaticFilter()
         result = f.enumerate_from_biochem(biochem, limit=limit)
@@ -347,7 +347,7 @@ class VerabUtils:
                 "None was provided."
             )
 
-        from .cheminformatics.verab import screening
+        from . import screening
 
         cpds = list(compounds) if compounds is not None else list(SEED_COMPOUNDS)
         ops = list(rule_operators) if rule_operators is not None else []

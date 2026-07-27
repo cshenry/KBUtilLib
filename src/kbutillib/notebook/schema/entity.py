@@ -1,25 +1,3 @@
-"""Entity kind and reference types."""
-
-from enum import Enum
-
-from pydantic import BaseModel
-
-
-class EntityKind(str, Enum):
-    """Kinds of biological entities that can appear in vectors."""
-
-    GENE = "gene"
-    REACTION = "reaction"
-    METABOLITE = "metabolite"
-
-
-class EntityRef(BaseModel):
-    """Lazy reference to a biological entity.
-
-    No verification at construction; resolved lazily via
-    ``session.validate_entities()`` (Phase 2).
-    """
-
-    kind: EntityKind
-    id: str
-    namespace: str  # genome_id or model_id this entity belongs to
+"""Backward-compatible shim: re-exports from domains/notebook/schema/entity."""
+# ruff: noqa: F401, F403
+from kbutillib.domains.notebook.schema.entity import *  # noqa: F401, F403

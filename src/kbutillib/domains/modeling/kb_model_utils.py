@@ -635,10 +635,29 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         import os
 
         if classifier_dir is None:
-            # Default: KBUtilLib/data/ms_classifier/ (relative to this source file)
-            src_dir = os.path.dirname(os.path.abspath(__file__))
-            kbutillib_root = os.path.dirname(os.path.dirname(src_dir))
-            classifier_dir = os.path.join(kbutillib_root, "data", "ms_classifier")
+            # Default: the KBUtilLib repo-root data/ms_classifier/ directory.
+            # Locate it by walking up from this source file rather than using a
+            # fixed number of dirname() calls: kb_model_utils.py lives several
+            # packages deep (src/kbutillib/domains/modeling/), and a hard-coded
+            # depth silently breaks whenever the module is relocated (as the
+            # domains/ reorg did).
+            here = os.path.dirname(os.path.abspath(__file__))
+            classifier_dir = None
+            search = here
+            while True:
+                candidate = os.path.join(search, "data", "ms_classifier")
+                if os.path.isdir(candidate):
+                    classifier_dir = candidate
+                    break
+                parent = os.path.dirname(search)
+                if parent == search:  # reached filesystem root
+                    break
+                search = parent
+            if classifier_dir is None:
+                raise FileNotFoundError(
+                    "Could not locate data/ms_classifier/ by walking up from "
+                    f"{here!r}. Pass classifier_dir explicitly to get_classifier()."
+                )
 
         cls_pickle = os.path.join(classifier_dir, "knn_ACNP_RAST_full_01_17_2023.pickle")
         cls_features = os.path.join(classifier_dir, "knn_ACNP_RAST_full_01_17_2023_features.json")

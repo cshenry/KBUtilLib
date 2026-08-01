@@ -49,13 +49,20 @@ class MSReconstructionUtils(KBModelUtils):
 
     @property
     def module_dir(self) -> str:
-        """Get the KBUtilLib root directory path.
+        """Get the KBUtilLib repo-root directory (contains pyproject.toml / data/).
 
-        Returns:
-            Path to KBUtilLib root directory (parent of src/kbutillib)
+        Located by walking up from this source file rather than a fixed dirname
+        depth: this module lives several packages deep (src/kbutillib/domains/
+        modeling/), so the old dirname(dirname(src_dir)) resolved to src/kbutillib
+        after the domains/ reorg and broke every module_dir consumer (the jinja
+        report loader and ontology_data_dir's SSO-dictionary resolver).
         """
-        src_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.dirname(os.path.dirname(src_dir))
+        from pathlib import Path
+        here = Path(__file__).resolve()
+        for anc in here.parents:
+            if (anc / "pyproject.toml").is_file():
+                return str(anc)
+        return str(here.parents[3])
 
     @property
     def modelseedpy_data_dir(self) -> str:

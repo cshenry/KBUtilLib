@@ -65,10 +65,22 @@ class MSBiochemUtils(SharedEnvUtils):
                 if db_path:
                     modelseed_db_path = str(db_path)
                 else:
-                    # Fallback: look in sibling directory
+                    # Fallback: locate a local ModelSEEDDatabase checkout by walking
+                    # up from this source file, not a fixed dirname depth. This module
+                    # lives several packages deep (src/kbutillib/domains/biochem/), so a
+                    # hard-coded depth silently broke when the domains/ reorg moved it
+                    # (-> src/ModelSEEDDatabase). Fall back to a sibling of the repo root
+                    # (identified by pyproject.toml) so the auto-clone still has a target.
                     from pathlib import Path
-                    repo_root = Path(__file__).parent.parent.parent
-                    modelseed_db_path = str((repo_root / ".." / "ModelSEEDDatabase").resolve())
+                    here = Path(__file__).resolve()
+                    _hit = next((a / "ModelSEEDDatabase" for a in here.parents
+                                 if (a / "ModelSEEDDatabase" / "Biochemistry").is_dir()), None)
+                    if _hit is not None:
+                        modelseed_db_path = str(_hit)
+                    else:
+                        _root = next((a for a in here.parents
+                                      if (a / "pyproject.toml").is_file()), here.parents[3])
+                        modelseed_db_path = str(_root.parent / "ModelSEEDDatabase")
 
         self.modelseed_db_path = modelseed_db_path
         self.auto_download = auto_download
@@ -1043,9 +1055,19 @@ class MSBiochemUtilsImpl:
                 if db_path:
                     modelseed_db_path = str(db_path)
                 else:
+                    # Walk up to a local ModelSEEDDatabase checkout rather than a fixed
+                    # dirname depth (broken by the domains/ reorg — see the sibling
+                    # resolver in __init__ above). Fall back to a repo-root sibling.
                     from pathlib import Path
-                    repo_root = Path(__file__).parent.parent.parent
-                    modelseed_db_path = str((repo_root / ".." / "ModelSEEDDatabase").resolve())
+                    here = Path(__file__).resolve()
+                    _hit = next((a / "ModelSEEDDatabase" for a in here.parents
+                                 if (a / "ModelSEEDDatabase" / "Biochemistry").is_dir()), None)
+                    if _hit is not None:
+                        modelseed_db_path = str(_hit)
+                    else:
+                        _root = next((a for a in here.parents
+                                      if (a / "pyproject.toml").is_file()), here.parents[3])
+                        modelseed_db_path = str(_root.parent / "ModelSEEDDatabase")
 
         self.modelseed_db_path = modelseed_db_path
         self.auto_download = auto_download

@@ -62,10 +62,23 @@ class KBAnnotationUtils(KBCallbackUtils):
         if ontology_path:
             self.annoontology_dir = ontology_path
         else:
-            # Fallback: look in sibling directory
+            # Fallback: locate a sibling cb_annotation_ontology_api checkout by walking
+            # up from this source file, not a fixed dirname depth. This module lives
+            # several packages deep (src/kbutillib/domains/genome/), so a hard-coded
+            # depth resolved to src/cb_annotation_ontology_api after the domains/ reorg.
             from pathlib import Path
-            repo_root = Path(__file__).parent.parent.parent
-            self.annoontology_dir = repo_root / ".." / "cb_annotation_ontology_api"
+            here = Path(__file__).resolve()
+            _hit = next(
+                (a / "cb_annotation_ontology_api" for a in here.parents
+                 if (a / "cb_annotation_ontology_api" / "data" / "FilteredReactions.csv").is_file()),
+                None,
+            )
+            if _hit is not None:
+                self.annoontology_dir = _hit
+            else:
+                _root = next((a for a in here.parents if (a / "pyproject.toml").is_file()),
+                             here.parents[3])
+                self.annoontology_dir = _root.parent / "cb_annotation_ontology_api"
 
         self.object = None
         self.objectinfo = None

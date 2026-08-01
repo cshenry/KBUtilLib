@@ -280,10 +280,15 @@ every time:
    trap that applies to `get_databases`/`get_tables`/`get_table_schema`
    applies here too; do not iterate the result without checking its type
    first, or you will iterate characters of a string instead of table names.
-2. **`DROP TABLE ... PURGE` each table individually.**
-   `remove_table(spark, table_name, namespace=...)` (wrapped on
-   `InPodTransport`) or the equivalent `spark.sql("DROP TABLE
-   <catalog>.<namespace>.<table> PURGE")` — the `PURGE` is not optional.
+2. **`DROP TABLE ... PURGE` each table individually**, e.g.
+   `spark.sql("DROP TABLE <catalog>.<namespace>.<table> PURGE")` — the
+   `PURGE` is not optional. `InPodTransport.remove_table(spark, table_name,
+   namespace=...)` wraps `berdl_notebook_utils.remove_table`, but that
+   helper's harvested signature (`api-reference.md`) takes no `purge`
+   argument and its purge behavior has not been verified against the live
+   platform — **do not assume it purges**. Use the explicit `spark.sql(...
+   PURGE)` form for teardown, where `PURGE` is guaranteed rather than
+   assumed.
    **Omitting `PURGE` silently orphans the table's S3 data files**: the
    catalog entry is gone, but the underlying Parquet/Avro/manifest files in
    MinIO/S3 are left behind, unreferenced and un-billed-for-by-name, with no

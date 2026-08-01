@@ -1,0 +1,74 @@
+{
+  "command_type": "create-prd",
+  "status": "complete",
+  "session_id": "session_01N5RPck9WzvD5TbGhB1jW2U",
+  "parent_session_id": null,
+  "session_summary": "Reviewed all ten BERDL user guides, verified their claims empirically in-pod on kbhub, and rendered a PRD for four locus-aware BERDL lakehouse skills backed by a deep BerdlCapability module in KBUtilLib. Design grill resolved all five open questions plus four scope decisions; two documentation errors and one KBUtilLib token-resolution gap were found and recorded.",
+  "confront_rounds": 0,
+
+  "tasks": [
+    {"task_id": "1.0", "description": "Review the ten berdl_docs user guides", "status": "completed", "parent_task_id": null, "notes": "All ten downloaded and read in full."},
+    {"task_id": "1.1", "description": "Identify prior BERDL art in Chris's repos", "status": "completed", "parent_task_id": "1.0", "notes": "Found GAA BerdlAdapter/berdl_backend and KBUtilLib KBBERDLUtils."},
+    {"task_id": "2.0", "description": "Resolve the five open design questions", "status": "completed", "parent_task_id": null, "notes": "Locus=both; repo=KBUtilLib; sync verified; REST Iceberg-awareness answered empirically; targets=aiale+kbaseincubator."},
+    {"task_id": "2.1", "description": "Verify kbhub deployment channel rather than assuming", "status": "completed", "parent_task_id": "2.0", "notes": "systems.yaml registers kbhub with domains ['*']; 48/70 skills already deployed; last_seen 2026-07-31."},
+    {"task_id": "2.2", "description": "Determine whether /apis/mcp/delta is Iceberg-aware", "status": "completed", "parent_task_id": "2.0", "notes": "HTTP 200, 143 databases: 97 dotted Iceberg + 46 underscored legacy Delta. Personal catalog absent."},
+    {"task_id": "3.0", "description": "Verify the documented helper API against the installed package", "status": "completed", "parent_task_id": null, "notes": "Auto-import claim holds only in a notebook kernel; produced the authoritative import map."},
+    {"task_id": "3.1", "description": "Check tenant read-write standing on both targets", "status": "completed", "parent_task_id": "3.0", "notes": "Read-write on both aiale and kbaseincubator; load path unblocked."},
+    {"task_id": "3.2", "description": "Determine whether ingest() writes Iceberg or Delta", "status": "completed", "parent_task_id": "3.0", "notes": "Iceberg via writeTo; package docstring is stale. Earlier Delta hypothesis disproved."},
+    {"task_id": "3.3", "description": "Resolve the DataFrame-vs-bronze write fork", "status": "completed", "parent_task_id": "3.0", "notes": "Resolved from code, no user input needed: both are first-class, selected by input type."},
+    {"task_id": "4.0", "description": "Grill scope decisions with Chris", "status": "completed", "parent_task_id": null, "notes": "Module breakdown, cluster deferral, ACL gating, and test scope all resolved."},
+    {"task_id": "5.0", "description": "Render the PRD", "status": "completed", "parent_task_id": null, "notes": "humanprompt.md, fullprompt.md, data.json written."},
+    {"task_id": "6.0", "description": "Run cross-family confront against the PRD", "status": "pending", "parent_task_id": null, "notes": "Offered to Chris at end of session; not yet run."},
+    {"task_id": "7.0", "description": "Decompose into taskplan.json and register the PRD", "status": "pending", "parent_task_id": null, "notes": "Blocked on the confront decision."}
+  ],
+
+  "files": {
+    "created": [
+      {"path": "agent-io/prds/berdl-lakehouse-skills/humanprompt.md", "purpose": "Original request and the answers given during the design grill", "type": "markdown"},
+      {"path": "agent-io/prds/berdl-lakehouse-skills/fullprompt.md", "purpose": "Full PRD for the four locus-aware BERDL skills and the KBUtilLib capability layer", "type": "markdown"},
+      {"path": "agent-io/prds/berdl-lakehouse-skills/data.json", "purpose": "Tracking file for tasks, queries, findings, and errors", "type": "config"}
+    ],
+    "modified": [],
+    "deleted": []
+  },
+
+  "artifacts": {
+    "prd_filename": "agent-io/prds/berdl-lakehouse-skills/fullprompt.md"
+  },
+
+  "queries_for_user": [
+    {"query_number": 1, "query": "Execution locus: in-pod, off-pod, or both?", "type": "text", "response": "Both — we operate in both places."},
+    {"query_number": 2, "query": "Which repo owns the skills and capability layer?", "type": "text", "response": "KBUtilLib."},
+    {"query_number": 3, "query": "Does ClaudeCommands sync reach the pod today?", "type": "boolean", "response": "Yes — verified in-session; kbhub registered with domains ['*'] and 48/70 skills already deployed."},
+    {"query_number": 4, "query": "Is the off-pod REST surface Iceberg-aware?", "type": "boolean", "response": "Unknown to Chris; checked empirically in-session. Yes — but it returns both Iceberg and legacy Delta names for the same datasets."},
+    {"query_number": 5, "query": "Which tenants are the initial targets?", "type": "text", "response": "AI-ALE and KBase Incubator."},
+    {"query_number": 6, "query": "One locus-aware skill set, or two parallel families?", "type": "multiple_choice", "choices": [{"id": "one", "value": "One locus-aware set"}, {"id": "two", "value": "Two parallel sets"}], "response": "One locus-aware set"},
+    {"query_number": 7, "query": "What should an off-pod write request do?", "type": "multiple_choice", "choices": [{"id": "fail", "value": "Hard-fail with guidance"}, {"id": "artifact", "value": "Generate an in-pod artifact"}, {"id": "dispatch", "value": "Dispatch via Maestro"}], "response": "Hard-fail with guidance"},
+    {"query_number": 8, "query": "Does the proposed module breakdown match expectations?", "type": "multiple_choice", "choices": [{"id": "sketch", "value": "As sketched"}, {"id": "flat", "value": "Extend KBBERDLUtils in place"}], "response": "As sketched"},
+    {"query_number": 9, "query": "Should berdl-load own Spark cluster provisioning?", "type": "multiple_choice", "choices": [{"id": "defer", "value": "Defer to a later version"}, {"id": "include", "value": "Include in v1"}], "response": "Defer to a later version"},
+    {"query_number": 10, "query": "How should namespace ACLs and stewardship be handled?", "type": "multiple_choice", "choices": [{"id": "confirm", "value": "Read now, mutate behind confirmation"}, {"id": "full", "value": "Full surface, no gating"}, {"id": "ro", "value": "Read-only in v1"}], "response": "Read now, mutate behind confirmation"},
+    {"query_number": 11, "query": "Which parts get tests?", "type": "multiple_choice", "choices": [{"id": "pure", "value": "Pure-logic modules only"}, {"id": "mocked", "value": "Pure logic + mocked transports"}, {"id": "live", "value": "Add one live smoke test"}], "response": "Pure-logic modules only"}
+  ],
+
+  "comments": [
+    "Every empirical claim in the PRD was verified in-pod on kbhub (hostname jupyter-chenry) on 2026-07-31/2026-08-01 against the live platform and installed packages.",
+    "HIGHEST-VALUE FINDING: the guides' 'auto-imported, no imports needed' claim holds only inside a notebook kernel. A skill in a terminal gets ImportError. The verified import map in the PRD is the single most important thing the skills encode.",
+    "DOC ERROR 1: data_lakehouse_ingest docstrings claim it writes Silver Delta tables. It writes Iceberg via writeTo; there is no Delta write path in the package.",
+    "DOC ERROR 2: the installed package exposes namespace ACLs, stewardship, tenancy v2, cluster management, and an MCP client family that appear in none of the ten guides.",
+    "KBUTILLIB GAP: KBBERDLUtils does not read KBASE_AUTH_TOKEN and raises 'No KBase token available' even in-pod where that variable is set and works. Token precedence must be env -> file -> config.",
+    "SAFETY: the credential escalation ladder must try the non-rotating fix first. refresh_spark_environment() rotates credentials and breaks other live kernels, scripts, and remote connections.",
+    "SAFETY: AccessDenied on cross-tenant prefixes is expected isolation, not breakage. Misreading it leads directly to the damaging rotating fix.",
+    "TRAP CONFIRMED RELEVANT: 'aws s3 ls .../kbase' also matches 'kbaseincubator' because prefix matching has no implicit trailing slash. This affects both initial target tenants.",
+    "Both target tenants are read-write for chenry, so no Slack access request is needed to begin.",
+    "Off-pod is not yet proven end to end: the REST route authenticates and needs no SSH tunnel, but token resolution off-pod is unfixed and the personal catalog did not appear in REST results.",
+    "Skill registration must be run from primary-laptop; a Linux register writes a non-portable home path and breaks macOS sync."
+  ],
+
+  "context": "PRD rendered but NOT yet confronted, decomposed, or registered. Next steps: optional cross-family confront, then taskplan.json synthesis, validation via load_taskplan, and registration. Note the path rule: this PRD lives in KBUtilLib, not AIAssistant, so registration must use ABSOLUTE paths or /ai-conductor will not find the taskplan.",
+
+  "metrics": {
+    "files_analyzed": 10
+  },
+
+  "errors": []
+}

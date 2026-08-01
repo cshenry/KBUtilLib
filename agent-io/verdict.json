@@ -1,22 +1,17 @@
 {
   "verdict": "pass",
-  "reason": "berdl/{naming,membership,tokens}.py + 39 unit tests exist, cover every required case (dotted/underscored pairing+dedup+legacy marking, bidirectional my/{username} alias translation, ro-suffix decode with a genuine 'cairo' negative case, env->file->config token precedence with no-leak assertions on stdout/stderr/logging/error message), are network-free, and introduce zero new test failures relative to the pre-existing baseline (50 failed/28 errors, all in unrelated modeling/biochem/cli/researchos suites, same class of failure the task brief flagged as pre-existing in worktree envs). NOTE: this verdict.json previously held a stale committed verdict from an unrelated PRD (ee2-piece-b-narrative-audit); it has been overwritten below.",
+  "reason": "berdl-query.md satisfies all success criteria (routing, alias trap via naming.py, dual-name rule, discovery, cross-catalog joins, time-travel-as-recovery, honest off-pod caveats) and matches naming.py/capability.py ground truth; diff touches only agent-io/, no Python modified.",
   "criteria": [
-    {"criterion": "berdl subpackage with naming.py, membership.py, tokens.py + one test module each", "status": "pass"},
-    {"criterion": "dotted/underscored pairing and dedup preferring dotted form", "status": "pass", "note": "normalize_databases groups by underscored key, dotted form wins as .name"},
-    {"criterion": "legacy marking (not hidden)", "status": "pass", "note": "underscored counterpart retained as legacy_alias"},
-    {"criterion": "my/{username} alias translation both directions", "status": "pass", "note": "to_trino_alias/to_spark_alias, bare + qualified forms, round-trip tests"},
-    {"criterion": "ro-suffix decoding with negative case for a tenant name legitimately ending in 'ro'", "status": "pass", "note": "decode_memberships strips 'ro' only when stem is in available_groups; 'cairo' fixture in AVAILABLE_GROUPS decodes rw, not ro-on-'cai'; explicit naive-endswith comparison test included"},
-    {"criterion": "token precedence env->file->config, no token value emitted", "status": "pass", "note": "resolve_token/require_token; TestTokenNeverEmitted checks capsys stdout/stderr, caplog records, and NoTokenAvailableError message"},
-    {"criterion": "no network calls during test run", "status": "pass", "note": "no requests/socket/berdl_notebook_utils imports in the three modules; tests inject env/token_file"},
-    {"criterion": "full test suite passes (regression-judged)", "status": "pass", "note": "39/39 new tests/berdl pass; full suite 2806 passed/50 failed/28 errors/259 skipped/1 xfailed, diff is purely additive (no existing file modified, no conftest added) so the 50 failures+28 errors are the same pre-existing worktree-path-resolution class of failure (modeling/biochem/escher/cli/researchos) called out in the task brief, none touching berdl"},
-    {"criterion": "membership.py does not rely on naive endswith('ro') alone", "status": "pass"},
-    {"criterion": "transports.py and capability.py correctly not created", "status": "pass"}
+    {"criterion": "Frontmatter conforms to existing skills", "status": "pass"},
+    {"criterion": "Trino/Spark routing, Trino read-only rejects writes", "status": "pass"},
+    {"criterion": "my/{username} alias trap routed through naming.py (to_trino_alias/to_spark_alias)", "status": "pass", "note": "verified against src/kbutillib/domains/kbase/berdl/naming.py, including the qualified my.dataset1 form"},
+    {"criterion": "Dual dotted/underscored rule: prefer dotted, mark underscored legacy, never present as unrelated", "status": "pass", "note": "verified against normalize_databases/NormalizedDatabase"},
+    {"criterion": "Discovery commands for both engines", "status": "pass"},
+    {"criterion": "Cross-catalog joins", "status": "pass"},
+    {"criterion": "Time travel identified as post-overwrite recovery path", "status": "pass"},
+    {"criterion": "Off-pod honesty: tenant catalogs only AND not yet proven end to end", "status": "pass"},
+    {"criterion": "Directs to BerdlCapability instead of reimplementing", "status": "pass"},
+    {"criterion": "No Python module modified", "status": "pass", "note": "git diff --name-only main...HEAD shows only agent-io/skills/berdl-query.md and agent-io/work-records/skill-berdl-query.md"}
   ],
-  "tests_run": [
-    {"cmd": "python3 -m pytest tests/berdl/ -q", "outcome": "39 passed"},
-    {"cmd": "python3 -m pytest -q (full suite)", "outcome": "2806 passed, 50 failed, 28 errors, 259 skipped, 1 xfailed -- all failures/errors pre-existing/unrelated (modeling gapfill/flux-loops, biochem escher, cli venv_doctor/model, researchos slug), none in tests/berdl"},
-    {"cmd": "python3 -m ruff check src/kbutillib/domains/kbase/berdl/ tests/berdl/", "outcome": "All checks passed"}
-  ],
-  "notes": "The work-record documents that the implementing sub-agent terminated before its commit step and the conductor session committed the existing worktree contents verbatim on Chris's explicit decision; this is a process anomaly worth knowing about but does not affect code correctness, which was independently verified above."
+  "tests_run": []
 }

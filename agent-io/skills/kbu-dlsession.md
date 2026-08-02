@@ -1,16 +1,16 @@
 ---
-name: BERDL Session
+name: KBU Lakehouse Session
 description: Foundation skill for BERDL lakehouse sessions — locus detection, the verified import map, the credential escalation ladder, and the access-denial taxonomy
 scope: domain
 ---
 
-# BERDL Session
+# KBU Lakehouse Session
 
 You are an expert on establishing and diagnosing a working session against the
 BER Data Lakehouse (BERDL) platform — inside the BERDL JupyterHub pod (`kbhub`
 / `jupyter-chenry`) and from other platform machines (primary-laptop, h100,
-email-mac). This is the **foundation skill**: `berdl-load`, `berdl-query`, and
-`berdl-tenant` all assume the facts here and do not re-derive them.
+email-mac). This is the **foundation skill**: `kbu-dlload`, `kbu-dlquery`, and
+`kbu-dltenant` all assume the facts here and do not re-derive them.
 
 Everything here is empirically verified against the installed package on
 `kbhub`, not transcribed from `berdl_docs`. The guides are known to be stale
@@ -55,7 +55,7 @@ in-pod. Treat it as authoritative over the guides:
 | Import path | Contents |
 |---|---|
 | `berdl_notebook_utils` (top level) | `get_spark_session`, `create_namespace_if_not_exists`, `get_databases`, `get_tables`, `get_table_schema`, `get_db_structure`, `get_trino_connection`, `refresh_spark_environment`, `table_exists`, `remove_table`, `list_namespaces`, `list_tables`, `read_csv`, `spark_to_pandas`, `display_df`, the `mcp_*` family, `get_minio_client`, `get_s3_client`, `get_governance_client`, tenancy v2 (`list_tenants`, `get_tenant_detail`, `get_tenant_members`, `add_tenant_member`, `remove_tenant_member`, `update_tenant_metadata`, `show_my_tenants`), stewardship (`assign_steward`, `remove_steward`, `get_my_steward_tenants`), clusters (`create_cluster`, `delete_cluster`, `get_cluster_status`) |
-| `berdl_notebook_utils.governance` | `get_my_groups`, `get_my_workspace`, `get_my_sql_warehouse`, `get_namespace_prefix`, `get_my_policies`, `get_my_accessible_paths`, `check_governance_health`, `get_credentials`, `request_tenant_access`, `list_available_groups`, `get_tenant_stewards`, admin operations (`list_users`, `list_groups`, `add_group_member`, `remove_group_member`, `create_tenant_and_assign_users`), the deprecated sharing functions (see §4 sharing doctrine in `berdl-tenant`), and the **undocumented** namespace ACLs (`grant_namespace_access`, `revoke_namespace_access`, `list_namespace_access`) and Polaris operations (`ensure_polaris_resources`, `get_polaris_catalog_info`, `provision_polaris_user`, `rotate_polaris_credentials`, `rotate_credentials`, `regenerate_policies`) |
+| `berdl_notebook_utils.governance` | `get_my_groups`, `get_my_workspace`, `get_my_sql_warehouse`, `get_namespace_prefix`, `get_my_policies`, `get_my_accessible_paths`, `check_governance_health`, `get_credentials`, `request_tenant_access`, `list_available_groups`, `get_tenant_stewards`, admin operations (`list_users`, `list_groups`, `add_group_member`, `remove_group_member`, `create_tenant_and_assign_users`), the deprecated sharing functions (see §4 sharing doctrine in `kbu-dltenant`), and the **undocumented** namespace ACLs (`grant_namespace_access`, `revoke_namespace_access`, `list_namespace_access`) and Polaris operations (`ensure_polaris_resources`, `get_polaris_catalog_info`, `provision_polaris_user`, `rotate_polaris_credentials`, `rotate_credentials`, `regenerate_policies`) |
 | `berdl_notebook_utils.spark` | `start_spark_connect_server`, `stop_spark_connect_server`, `get_spark_connect_status` |
 | `berdl_notebook_utils.refresh` | `refresh_spark_environment`, `rotate_credentials` |
 | `data_lakehouse_ingest` | `ingest` |
@@ -269,13 +269,13 @@ it is what prevents the hazard from recurring on the next kernel.
 
 ## 6. Related Skills
 
-- `berdl-load` — in-pod only. Preflight, source-mode routing, schema
+- `kbu-dlload` — in-pod only. Preflight, source-mode routing, schema
   enforcement, write, verify. Owns namespace lifecycle including
   purge-ordered teardown and schema evolution. Assumes the locus detection
   and credential ladder from this skill.
-- `berdl-query` — both loci. Discovery, Trino/Spark routing, alias
+- `kbu-dlquery` — both loci. Discovery, Trino/Spark routing, alias
   translation, cross-catalog joins, time travel.
-- `berdl-tenant` — both loci. Membership, access requests, ACLs,
+- `kbu-dltenant` — both loci. Membership, access requests, ACLs,
   stewardship, admin operations, sharing doctrine.
 - `kbutillib-expert` — full KBUtilLib reference (composition architecture,
   all sub-utilities, config, job management).

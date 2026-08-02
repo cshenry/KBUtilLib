@@ -1,10 +1,10 @@
 ---
-name: BERDL Load
+name: KBU Lakehouse Load
 description: In-pod BERDL Lakehouse loading — preflight, DataFrame/bronze source-mode routing, write semantics, postflight verification, and namespace lifecycle (teardown, schema evolution) via BerdlCapability
 scope: domain
 ---
 
-# BERDL Load
+# KBU Lakehouse Load
 
 ## 1. What This Skill Covers
 
@@ -26,9 +26,9 @@ Topics covered:
 - Postflight verification — row count and Iceberg snapshot history
 - Namespace lifecycle — purge-ordered teardown and schema evolution
 
-Companion skills: `/berdl-session` (locus detection, the import map, the
-credential ladder — read this first if you have not already), `/berdl-query`
-(reads, Trino/Spark routing, time travel), `/berdl-tenant` (membership, ACLs,
+Companion skills: `/kbu-dlsession` (locus detection, the import map, the
+credential ladder — read this first if you have not already), `/kbu-dlquery`
+(reads, Trino/Spark routing, time travel), `/kbu-dltenant` (membership, ACLs,
 stewardship). This skill assumes you already know how to detect locus and
 resolve a token; it does not repeat that material.
 
@@ -84,7 +84,7 @@ If you are running this skill off-pod (laptop, h100, any machine other than
 `kbhub`), **stop here**. Do not attempt to stage files, build an `ingest`
 config, or hand the load off to another process — there is no partial
 off-pod write path to fall back to. Re-run the same call inside a `kbhub`
-notebook or terminal instead. Detecting locus itself is `/berdl-session`'s
+notebook or terminal instead. Detecting locus itself is `/kbu-dlsession`'s
 job (`BerdlCapability().locus()` → `'in_pod'` / `'off_pod'`, which tests
 importability of `berdl_notebook_utils`, not environment variables alone).
 
@@ -98,7 +98,7 @@ checks — both must pass, or nothing is written.
 ### 3a. Read-write membership (not read-only)
 
 Read-only and read-write are **different groups** on the target tenant, not
-two levels of one group (see `/berdl-tenant` for the full membership-decode
+two levels of one group (see `/kbu-dltenant` for the full membership-decode
 story). `load()` calls `memberships()` and refuses with `PermissionError` if
 the target tenant is not `'rw'`:
 
@@ -114,7 +114,7 @@ for it. Checking membership *before* staging anything is the entire point:
 an approval cycle measured in hours is a very different failure than a
 five-second retry, and finding out after a bronze read has already staged
 gigabytes to MinIO is strictly worse than finding out before. If membership
-comes back `'ro'` or absent, stop and go through `/berdl-tenant`'s access-
+comes back `'ro'` or absent, stop and go through `/kbu-dltenant`'s access-
 request flow before touching this skill again — do not attempt the load
 "just to see."
 
@@ -211,7 +211,7 @@ third mode, and no upsert/merge mode.
 - **`overwrite` maps to `createOrReplace()`** — a full, destructive replace
   of the table's contents. It is **not** a merge and **not** an upsert.
   Recovery after an unwanted `overwrite` is via Iceberg snapshot time travel
-  only (see `/berdl-query` for reading a prior snapshot) — there is no
+  only (see `/kbu-dlquery` for reading a prior snapshot) — there is no
   separate undo. Treat every `overwrite` call, and every `append` that gets
   silently upgraded to `overwrite` by the first-creation rule above, as
   irreversible in the ordinary sense.
@@ -252,7 +252,7 @@ declaring the load done. Success here is verified, not assumed.
 
 `BerdlCapability` covers the write path but does not wrap namespace
 creation, teardown, or schema evolution — those are handled directly through
-the import map (`/berdl-session` has the authoritative table) and Iceberg
+the import map (`/kbu-dlsession` has the authoritative table) and Iceberg
 Spark SQL, since there is no higher-level wrapper for them yet.
 
 ### 7a. Creating a namespace
@@ -388,11 +388,11 @@ for t in report["tables"]:
 
 ## 9. Related Skills
 
-- `/berdl-session` — locus detection, the import map (why every call in
+- `/kbu-dlsession` — locus detection, the import map (why every call in
   this document is fully qualified rather than bare), the credential
   escalation ladder, and the access-denial taxonomy. Read this first.
-- `/berdl-query` — reads, Trino/Spark routing, `my`/`{username}` alias
+- `/kbu-dlquery` — reads, Trino/Spark routing, `my`/`{username}` alias
   translation, cross-catalog joins, and time-travel reads of a table's
   snapshot history (the recovery path referenced in Section 5).
-- `/berdl-tenant` — membership decoding in full, access requests, namespace
+- `/kbu-dltenant` — membership decoding in full, access requests, namespace
   ACLs, stewardship, and the deprecated sharing-function doctrine.

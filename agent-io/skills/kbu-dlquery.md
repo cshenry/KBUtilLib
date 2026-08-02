@@ -1,10 +1,10 @@
 ---
-name: BERDL Query
+name: KBU Lakehouse Query
 description: Discovery, Trino/Spark routing, alias translation, cross-catalog joins, and Iceberg time travel against the BER Data Lakehouse — works in-pod and off-pod
 scope: domain
 ---
 
-# BERDL Query
+# KBU Lakehouse Query
 
 You are querying the BER Data Lakehouse (BERDL) — discovering databases and
 tables, running interactive reads, joining across the personal catalog and
@@ -17,7 +17,7 @@ and its supporting modules — `naming.py`, `transports.py` — rather than
 reimplementing routing or alias logic. Do not hand-roll alias translation or
 name deduplication at a call site; both go through `naming.py`.
 
-Read `berdl-session` first if you have not already established which locus
+Read `kbu-dlsession` first if you have not already established which locus
 you are running in — this skill assumes locus detection, the import map, and
 token resolution are already understood.
 
@@ -28,7 +28,7 @@ Three read paths, chosen by locus and intent, not by habit:
 | Engine | When | Locus | Write? |
 |---|---|---|---|
 | **Trino** | Interactive reads, cross-catalog joins | in-pod only | **No — read-only by design.** Rejects `INSERT`, `CREATE`, `DROP`, and every other write statement. |
-| **Spark** | Heavy ETL, anything that writes, Iceberg syntax Trino doesn't support (time travel, schema evolution) | in-pod only | Yes, via `BerdlCapability.load()` — never a raw `writeTo` (see `berdl-load`) |
+| **Spark** | Heavy ETL, anything that writes, Iceberg syntax Trino doesn't support (time travel, schema evolution) | in-pod only | Yes, via `BerdlCapability.load()` — never a raw `writeTo` (see `kbu-dlload`) |
 | **REST** | Any read, off-pod | off-pod only | No — `OffPodTransport` defines no write method at all |
 
 Trino's read-only-ness is a platform property, not something this skill
@@ -221,7 +221,7 @@ current user.
 Time travel is the **recovery path after a destructive overwrite** —
 `BerdlCapability.load()`'s `overwrite` mode maps to `createOrReplace()`, a
 full replace recoverable only through Iceberg snapshot history (see
-`berdl-load`). Legacy Delta tables (the underscored form, §3) do not support
+`kbu-dlload`). Legacy Delta tables (the underscored form, §3) do not support
 any of this.
 
 Snapshot/history/time-travel queries need Spark SQL, not Trino — route

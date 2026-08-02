@@ -1,10 +1,10 @@
 ---
-name: BERDL Tenant Governance
+name: KBU Lakehouse Tenant Governance
 description: Tenant membership, access requests, namespace ACLs, stewardship, and admin operations on the BER Data Lakehouse (BERDL) platform
 scope: domain
 ---
 
-# BERDL Tenant Governance
+# KBU Lakehouse Tenant Governance
 
 ## 1. What This Skill Covers
 
@@ -122,7 +122,7 @@ the fix is to load or copy it into the tenant catalog, not to "share" it in
 place.
 
 If asked to "share a table" or "make a table public," treat that as a
-request to either (a) load into the correct tenant catalog (`berdl-load`),
+request to either (a) load into the correct tenant catalog (`kbu-dlload`),
 or (b) grant a specific namespace ACL (§5) — never as a cue to look for a
 `share_*` or `make_table_*` function.
 
@@ -284,7 +284,7 @@ two disagree: `get_tenant_stewards` is a `berdl_notebook_utils.governance`
 call.
 
 **Never call any of the above bare** (as if auto-imported with no module
-qualification) outside a notebook kernel — see `berdl-session` for why that
+qualification) outside a notebook kernel — see `kbu-dlsession` for why that
 raises `ImportError` and the full locus-detection procedure.
 
 **Never emit** `share_table`, `unshare_table`, `make_table_public`, or
@@ -294,11 +294,11 @@ raises `ImportError` and the full locus-detection procedure.
 
 ## 9. Related Skills
 
-- `/berdl-session` — locus detection, the full import map, the credential
+- `/kbu-dlsession` — locus detection, the full import map, the credential
   escalation ladder, and the access-denial taxonomy. Read this first if you
   are not already sure whether you are in-pod or off-pod.
-- `/berdl-load` — in-pod loading: preflight (including the read-write
+- `/kbu-dlload` — in-pod loading: preflight (including the read-write
   membership check this skill's §2 documents), schema enforcement, write,
   verify, and namespace teardown.
-- `/berdl-query` — discovery, Trino/Spark routing, alias translation,
+- `/kbu-dlquery` — discovery, Trino/Spark routing, alias translation,
   cross-catalog joins, and time travel, in both loci.

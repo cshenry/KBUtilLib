@@ -146,6 +146,16 @@ Two execution loci, detected at preflight, never assumed:
 - **off-pod** — anywhere else. `berdl_notebook_utils` is a pod-only package and
   will not exist. Read and governance only, over REST.
 
+> **CORRECTED 2026-08-03 by off-pod smoke verification.** Off-pod is **not a
+> pod-independent fallback.** The REST surface is a thin remote client to the
+> user's *own in-pod Spark Connect server*: all four `OffPodTransport` methods
+> delegate to `/apis/mcp/delta`, which returns HTTP 500 — *"Spark Connect server
+> for user 'chenry' did not respond to a session-create RPC within 15s"* — while
+> the pod's session is unhealthy. The framing "REST/MCP works without Spark" is
+> true only of **local** Spark; a **live pod session is still required**. A
+> zombied pod therefore takes the off-pod read path down with it, and repairing
+> the pod unblocks both loci. See `../berdl-smoke-verification/off-pod-results.md`.
+
 Detection must test **importability of the platform package**, not only
 environment variables, because the variables alone do not guarantee the package
 is present.

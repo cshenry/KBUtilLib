@@ -39,10 +39,15 @@ Two outcomes:
   `start_spark_connect_server(force_restart=True)` — and only escalate to
   `refresh_spark_environment()` if that fails, because the rotating fix
   invalidates credentials in use by other kernels and jobs.
-- **`~/.kbase/token` on kbhub is 32 bytes and appears stale/invalid.**
-  `KBASE_AUTH_TOKEN` in the pod environment works. `tokens.py` resolves env
-  first, which is correct — but the stale file is still there and will be the
-  fallback off-pod.
+- **~~`~/.kbase/token` on kbhub is 32 bytes and appears stale/invalid.~~
+  CORRECTED 2026-08-03 by the off-pod session — do not act on this.**
+  32 characters is *normal* KBase token length, not a staleness signal. The
+  laptop's copy resolves correctly and was proven genuinely valid by
+  discrimination (real token → HTTP 500 pod-condition; bogus token → HTTP 401
+  invalid-token). The original 2026-07-31 observation was a real error from the
+  *old* `KBBERDLUtils` path, since fixed by `tokens.py`; the "32 bytes therefore
+  stale" inference on top of it was unfounded. Re-test kbhub's copy rather than
+  inheriting the assumption.
 
 ## In-pod session — what to exercise
 
@@ -74,9 +79,21 @@ time, each documented in `agent-io/prds/berdl-lakehouse-skills/api-reference.md`
 8. **Purge-ordered teardown**, then confirm via `aws s3 ls` that the data files
    are actually gone, not just the catalog entry.
 
-## Off-pod session — what to answer
+## Off-pod session — DONE 2026-08-03
 
-Run on primary-laptop, where `berdl_notebook_utils` does not exist.
+Results: [`off-pod-results.md`](off-pod-results.md). Items 1, 3, 4 **PASS**.
+Items 2 and 5 are **BLOCKED** on the pod's Spark Connect and need a cheap rerun
+(`offpod_probe2.py`) once the in-pod session repairs it.
+
+**Its headline finding changes the in-pod session's priority:** the off-pod REST
+surface is a thin remote client to the user's *own in-pod Spark Connect server*.
+All four `OffPodTransport` methods delegate to `/apis/mcp/delta`, which returns
+HTTP 500 *"Spark Connect server for user 'chenry' did not respond to a
+session-create RPC within 15s"* while the pod is zombied. Off-pod is therefore
+**not a pod-independent fallback** — repairing kbhub's Spark Connect unblocks
+both loci, which makes it the first thing the in-pod session should do.
+
+The original questions, retained for the rerun:
 
 1. **Does token resolution actually work off-pod?** `tokens.py` falls back to
    `~/.kbase/token`. On kbhub that file is stale; check the laptop's copy and

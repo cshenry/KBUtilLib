@@ -5,12 +5,20 @@ both source modes (DataFrame mode omits 'paths', bronze mode includes it),
 create-vs-append write-mode selection given table existence, and
 ``BerdlCapability.load()`` refusing off-pod with actionable guidance
 (pod requirement, the kbhub machine, and a concrete command). Per the PRD's
-"Testing Decisions", the two transports and locus-detection's positive
-(in-pod) branch require a live BERDL pod and are not exercised here.
+"Testing Decisions", the two transports require a live BERDL pod and are
+not exercised here.
+
+Locus is always forced via the ``force_off_pod`` / ``force_in_pod``
+fixtures rather than inferred from whether ``berdl_notebook_utils``
+happens to be installed on the host. These tests must behave identically
+off-pod and in-pod: relying on ambient absence made them pass on a laptop,
+fail in-pod, and -- because the refusal branch was then never taken --
+open real Spark Connect sessions inside a suite that promises no network.
 """
 
 import pytest
 
+from kbutillib.domains.kbase.berdl import capability as capability_module
 from kbutillib.domains.kbase.berdl.capability import (
     POD_MACHINE,
     BerdlCapability,
@@ -22,41 +30,85 @@ from kbutillib.domains.kbase.berdl.capability import (
 )
 
 
-class TestBerdlNotebookUtilsImportable:
-    def test_returns_false_when_package_is_not_installed(self):
-        """In this dev/CI environment berdl_notebook_utils is not installed.
+@pytest.fixture
+def force_off_pod(monkeypatch):
+    """Make locus detection report off_pod regardless of the host machine.
 
-        This also documents that the check tests real importability rather
-        than being hardcoded -- if the pod package were ever installed
-        here, this assertion would need updating.
+    The off-pod tests must not depend on whether ``berdl_notebook_utils``
+    happens to be installed where the suite runs. Relying on its ambient
+    absence passes on a dev laptop but fails in-pod, and worse, lets the
+    in-pod branch run for real -- which is how these tests previously
+    attempted live Spark Connect sessions during a "pure logic, no
+    network" suite.
+    """
+    monkeypatch.setattr(
+        capability_module, "berdl_notebook_utils_importable", lambda: False
+    )
+
+
+@pytest.fixture
+def force_in_pod(monkeypatch):
+    """Make locus detection report in_pod regardless of the host machine."""
+    monkeypatch.setattr(
+        capability_module, "berdl_notebook_utils_importable", lambda: True
+    )
+
+
+class TestBerdlNotebookUtilsImportable:
+    def test_agrees_with_find_spec(self):
+        """The check must reflect real importability on whichever machine runs it.
+
+        Asserted against ``find_spec`` rather than a hardcoded expectation,
+        so this passes both off-pod (package absent) and in-pod (package
+        present) without needing to be edited per locus.
         """
+        import importlib.util
+
+        expected = importlib.util.find_spec("berdl_notebook_utils") is not None
+        assert berdl_notebook_utils_importable() is expected
+
+    def test_returns_false_when_the_package_cannot_be_found(self, monkeypatch):
+        """A missing package reports False."""
+        monkeypatch.setattr(
+            capability_module.importlib.util, "find_spec", lambda name: None
+        )
         assert berdl_notebook_utils_importable() is False
 
-    def test_locus_reports_off_pod_when_package_not_importable(self):
+    def test_returns_false_when_find_spec_raises(self, monkeypatch):
+        """A malformed parent package is not importable either."""
+
+        def _boom(name):
+            raise ValueError("malformed parent package")
+
+        monkeypatch.setattr(
+            capability_module.importlib.util, "find_spec", _boom
+        )
+        assert berdl_notebook_utils_importable() is False
+
+    def test_locus_reports_off_pod_when_package_not_importable(
+        self, force_off_pod
+    ):
         """locus() must test importability, not environment variables alone.
 
-        Setting all three pod environment variables without the package
-        being installed must still report off_pod -- the variables alone
+        Setting all three pod environment variables while the package is
+        not importable must still report off_pod -- the variables alone
         are not sufficient evidence of being in-pod.
         """
-        import os
-
-        cap = BerdlCapability()
-        env_backup = {}
-        pod_env_vars = ["KBASE_AUTH_TOKEN", "SPARK_CONNECT_URL", "S3_ACCESS_KEY"]
+        monkey = pytest.MonkeyPatch()
         try:
-            for var in pod_env_vars:
-                env_backup[var] = os.environ.get(var)
-                os.environ[var] = "fake-value-for-test"
-
-            assert berdl_notebook_utils_importable() is False
-            assert cap.locus() == "off_pod"
+            for var in ("KBASE_AUTH_TOKEN", "SPARK_CONNECT_URL", "S3_ACCESS_KEY"):
+                monkey.setenv(var, "fake-value-for-test")
+            assert BerdlCapability().locus() == "off_pod"
         finally:
-            for var, value in env_backup.items():
-                if value is None:
-                    os.environ.pop(var, None)
-                else:
-                    os.environ[var] = value
+            monkey.undo()
+
+    def test_locus_reports_in_pod_when_package_importable(self, force_in_pod):
+        """The positive branch, exercised deterministically on either locus.
+
+        Previously untested because it was assumed to need a live pod; it
+        only needs the importability check to report True.
+        """
+        assert BerdlCapability().locus() == "in_pod"
 
 
 class TestBuildIngestConfig:
@@ -184,8 +236,14 @@ class TestSelectWriteMode:
             select_write_mode("upsert", table_exists=True)
 
 
+@pytest.mark.usefixtures("force_off_pod")
 class TestLoadOffPod:
-    """BerdlCapability.load() must refuse off-pod with actionable guidance."""
+    """BerdlCapability.load() must refuse off-pod with actionable guidance.
+
+    Locus is forced via ``force_off_pod`` so these run identically on a dev
+    laptop and in-pod. Without it, in-pod the refusal branch is never taken
+    and ``load()`` proceeds to open a real Spark Connect session.
+    """
 
     def test_raises_berdl_load_refused_error(self):
         cap = BerdlCapability()
@@ -239,6 +297,7 @@ class TestLoadOffPod:
             )
 
 
+@pytest.mark.usefixtures("force_off_pod")
 class TestMembershipsOffPod:
     """memberships() has no governance surface off-pod."""
 

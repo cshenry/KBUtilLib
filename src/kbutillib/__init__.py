@@ -209,6 +209,12 @@ except ImportError as e:
     RCSBPDBUtils = None
 
 try:
+    from .domains.external.kbdl_service_utils import KBDLServiceUtils
+except ImportError as e:
+    _import_error("kbdl_service_utils", e)
+    KBDLServiceUtils = None
+
+try:
     from .domains.genome.mmseqs_utils import MMSeqsUtils
 except ImportError as e:
     _import_error("mmseqs_utils", e)
@@ -442,6 +448,11 @@ except ImportError:
     RCSBPDBUtilsImpl = None
 
 try:
+    from .domains.external.kbdl_service_utils import KBDLServiceUtilsImpl
+except ImportError:
+    KBDLServiceUtilsImpl = None
+
+try:
     from .domains.genome.ontomap_utils import OntomapUtilsImpl
 except ImportError:
     OntomapUtilsImpl = None
@@ -486,6 +497,7 @@ __all__ = [
     "KBAnnotationUtils",
     "KBBERDLUtils",
     "KBCallbackUtils",
+    "KBDLServiceUtils",
     "KBGenomeUtils",
     "KBJobUtils",
     "KBModelUtils",
@@ -527,6 +539,7 @@ __all__ = [
     "KBAnnotationUtilsImpl",
     "KBBERDLUtilsImpl",
     "KBCallbackUtilsImpl",
+    "KBDLServiceUtilsImpl",
     "KBGenomeUtilsImpl",
     "KBModelUtilsImpl",
     "KBPLMUtilsImpl",

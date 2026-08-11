@@ -24,6 +24,8 @@ __all__ = [
     "KBUniProtUtilsImpl",
     "PatricWSUtils",
     "PatricWSUtilsImpl",
+    "KBDLServiceUtils",
+    "KBDLServiceUtilsImpl",
 ]
 
 _MODULE_MAP: dict[str, str] = {
@@ -35,6 +37,8 @@ _MODULE_MAP: dict[str, str] = {
     "KBUniProtUtilsImpl": "kb_uniprot_utils",
     "PatricWSUtils": "patric_ws_utils",
     "PatricWSUtilsImpl": "patric_ws_utils",
+    "KBDLServiceUtils": "kbdl_service_utils",
+    "KBDLServiceUtilsImpl": "kbdl_service_utils",
 }
 
 

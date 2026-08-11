@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .domains.cheminformatics.verab.facade import VerabUtilsImpl
     from .domains.external.bvbrc_utils import BVBRCUtilsImpl
     from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
+    from .domains.external.kbdl_service_utils import KBDLServiceUtilsImpl
     from .domains.external.patric_ws_utils import PatricWSUtilsImpl
     from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
     from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
@@ -114,6 +115,7 @@ class KBUtilLib:
         self._pdb = None
         self._catalog = None
         self._jobs = None
+        self._kbdl_service = None
         self._ontomap = None
         self._network_expansion = None
         self._verab = None
@@ -343,6 +345,13 @@ class KBUtilLib:
             from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
             self._pdb = RCSBPDBUtilsImpl(self.env)
         return self._pdb
+
+    @property
+    def kbdl_service(self) -> KBDLServiceUtilsImpl:
+        if self._kbdl_service is None:
+            from .domains.external.kbdl_service_utils import KBDLServiceUtilsImpl
+            self._kbdl_service = KBDLServiceUtilsImpl(self.env)
+        return self._kbdl_service
 
     @property
     def catalog(self) -> CatalogClient:

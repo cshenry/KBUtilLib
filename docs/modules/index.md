@@ -64,6 +64,15 @@ These modules provide access to KBase services and external databases:
 - Cross-reference integration
 - Biochemical data analysis
 
+### [MSReactionSimilarityUtils](ms_reaction_similarity_utils.md)
+
+**Reaction similarity lookup and clustering backed by the BERDL data lake**
+
+- Stored and recomputed (DRFP) reaction similarity lookup
+- Neighbour expansion for annotation-refinement pipelines
+- Pairwise distance matrix construction
+- Clustering by chemical distinctness with transport-reaction segregation
+
 ## Analysis and Processing Modules
 
 These modules provide specialized analysis capabilities:

@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from .domains.ai.argo_utils import ArgoUtilsImpl
     from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
     from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.biochem.ms_reaction_similarity_utils import (
+        MSReactionSimilarityUtilsImpl,
+    )
     from .domains.cheminformatics.network_expansion_utils import (
         NetworkExpansionUtilsImpl,
     )
@@ -108,6 +111,7 @@ class KBUtilLib:
         self._mmseqs = None
         self._skani = None
         self._berdl = None
+        self._rxnsim = None
         self._remote_solver = None
         self._patric = None
         self._uniprot = None
@@ -279,6 +283,15 @@ class KBUtilLib:
             from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
             self._berdl = KBBERDLUtilsImpl(self.env)
         return self._berdl
+
+    @property
+    def rxnsim(self) -> MSReactionSimilarityUtilsImpl:
+        if self._rxnsim is None:
+            from .domains.biochem.ms_reaction_similarity_utils import (
+                MSReactionSimilarityUtilsImpl,
+            )
+            self._rxnsim = MSReactionSimilarityUtilsImpl(self.env, berdl=self.berdl)
+        return self._rxnsim
 
     @property
     def remote_solver(self) -> MSRemoteSolverUtilsImpl:

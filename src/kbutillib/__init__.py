@@ -85,6 +85,14 @@ except ImportError as e:
     MSBiochemUtils = None
 
 try:
+    from .domains.biochem.ms_reaction_similarity_utils import (
+        MSReactionSimilarityUtils,
+    )
+except ImportError as e:
+    _import_error("ms_reaction_similarity_utils", e)
+    MSReactionSimilarityUtils = None
+
+try:
     from .domains.modeling.model_standardization_utils import ModelStandardizationUtils
 except ImportError as e:
     _import_error("model_standardization_utils", e)
@@ -330,6 +338,13 @@ except ImportError:
     MSBiochemUtilsImpl = None
 
 try:
+    from .domains.biochem.ms_reaction_similarity_utils import (
+        MSReactionSimilarityUtilsImpl,
+    )
+except ImportError:
+    MSReactionSimilarityUtilsImpl = None
+
+try:
     from .domains.modeling.kb_model_utils import KBModelUtilsImpl
 except ImportError:
     KBModelUtilsImpl = None
@@ -502,6 +517,7 @@ __all__ = [
     "ProkkaUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
+    "MSReactionSimilarityUtils",
     "MSFBAUtils",
     "MSTemplateUtils",
     "MSReconstructionUtils",
@@ -537,6 +553,7 @@ __all__ = [
     "MMSeqsUtilsImpl",
     "ModelStandardizationUtilsImpl",
     "MSBiochemUtilsImpl",
+    "MSReactionSimilarityUtilsImpl",
     "MSFBAUtilsImpl",
     "MSTemplateUtilsImpl",
     "MSReconstructionUtilsImpl",

@@ -22,6 +22,10 @@ from .ms_biochem_utils import (
     MSBiochemUtilsImpl,
     compartment_types,
 )
+from .ms_reaction_similarity_utils import (
+    MSReactionSimilarityUtils,
+    MSReactionSimilarityUtilsImpl,
+)
 from .schemas import (
     GetCompoundByIdInput,
     GetCompoundByIdOutput,
@@ -43,4 +47,6 @@ __all__ = [
     "MSBiochemUtils",
     "MSBiochemUtilsImpl",
     "compartment_types",
+    "MSReactionSimilarityUtils",
+    "MSReactionSimilarityUtilsImpl",
 ]

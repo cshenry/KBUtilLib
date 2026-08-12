@@ -417,7 +417,7 @@ class MSReconstructionUtils(KBModelUtils):
             gene_term_hash = anno_ont.get_gene_term_hash(
                 ontology_events, None, merge_annotations, False
             )
-            self.print_json_debug_file("gene_term_hash", gene_term_hash)
+            # print_json_debug_file dropped: dead reference (no active definition).
 
             for gene in gene_term_hash:
                 for term in gene_term_hash[gene]:

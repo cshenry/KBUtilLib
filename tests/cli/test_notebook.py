@@ -452,7 +452,7 @@ class TestExecNotebook:
     def test_kernel_fallback_to_python3(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """When project kernel is not found, _select_kernel is called and a valid kernel is used."""
         from jupyter_client.kernelspec import find_kernel_specs
-        from kbutillib.cli import notebook as nb_mod
+        from kbutillib.interfaces.cli import notebook as nb_mod
 
         available = find_kernel_specs()
         if not available:

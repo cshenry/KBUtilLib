@@ -235,6 +235,7 @@ def test_distance_matrix_bad_source(rs):
 
 @needs_numpy
 def test_cluster_segregates_transport(rs):
+    pytest.importorskip("sklearn", reason="scikit-learn required for reaction clustering")
     ids = ["seed.reaction:rxn1", "seed.reaction:rxn2", "seed.reaction:rxn3", "seed.reaction:rxn4"]
     res = rs.cluster(ids, source="berdl", algorithm="agglomerative", distance_threshold=0.3)
     assert "seed.reaction:rxn4" in res["transport"]

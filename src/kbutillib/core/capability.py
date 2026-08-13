@@ -416,8 +416,18 @@ def register_all(
         # Retrieve the util object — lazy properties are accessed here
         try:
             util_obj = getattr(app, attr_name)
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
+            # Expected: an optional dependency for this domain is not installed.
             logger.debug("register_all: skipping %r — getattr raised: %s", attr_name, exc)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # Unexpected: a real failure that would otherwise vanish silently.
+            logger.warning(
+                "register_all: skipping %r — unexpected %s during attribute access: %s",
+                attr_name,
+                type(exc).__name__,
+                exc,
+            )
             continue
 
         if not hasattr(util_obj, "__dict__") and not inspect.ismodule(util_obj):

@@ -7,8 +7,12 @@ docstring.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib  # py 3.11+
+except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import pytest
 

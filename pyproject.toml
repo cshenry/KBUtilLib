@@ -32,10 +32,19 @@ dependencies = [
 
 
 [project.optional-dependencies]
+# Test toolchain installed by CI via `pip install -e ".[dev]"` (.github/workflows/ci.yml).
+# PEP 735 [dependency-groups] cannot be installed through an extra, so the test
+# deps are mirrored here; pytest-cov is required by the --cov flags in that
+# workflow step.
+dev = [
+  "pytest >=6.2.5",
+  "pytest-cov >=4.0",
+  "coverage[toml] >=6.2",
+]
 # Transport adapters (kept optional so `import kbutillib` and the core library
 # never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
 mcp = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
 ]
 api = [
   "fastapi >=0.110",
@@ -79,7 +88,7 @@ reaction_similarity_extra = [
 ]
 # Everything needed to run all transports + build docs.
 all = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
   "fastapi >=0.110",
   "uvicorn[standard] >=0.29",
   "httpx[socks] >=0.28",
@@ -99,6 +108,7 @@ dev = [
   "pre-commit >=2.16.0",
   "pre-commit-hooks >=4.6.0",
   "pytest >=6.2.5",
+  "pytest-cov >=4.0",
   "pygments >=2.10.0",
 
 ]

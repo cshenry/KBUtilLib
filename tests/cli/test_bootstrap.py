@@ -45,6 +45,20 @@ from kbutillib.cli.manifest import now_utc_iso, sha256_file, write_project_manif
 # ---------------------------------------------------------------------------
 
 
+def _combined_output(result: Any) -> str:
+    """Concatenate stdout+stderr from a CliRunner Result.
+
+    Click <8.2's CliRunner mixes stdout/stderr into a single stream and
+    raises ``ValueError: stderr not separately captured`` when ``.stderr``
+    is accessed; treat that case as an empty stderr contribution.
+    """
+    try:
+        stderr = result.stderr or ""
+    except ValueError:
+        stderr = ""
+    return result.output + stderr
+
+
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -233,7 +247,7 @@ class TestAC2NotGitRepo:
                 catch_exceptions=False,
             )
         assert result.exit_code == 1
-        assert "must run inside a git repository" in (result.output + (result.stderr or ""))
+        assert "must run inside a git repository" in _combined_output(result)
 
     def test_no_filesystem_writes_when_no_git(self, tmp_path: Path) -> None:
         """No files are written when precondition fails."""
@@ -256,8 +270,8 @@ class TestAC2NotGitRepo:
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
         # Should fail on kbu-project.toml, NOT on "must run inside a git repo"
-        assert "kbu-project.toml" in (result.output + (result.stderr or ""))
-        assert "must run inside a git repository" not in (result.output + (result.stderr or ""))
+        assert "kbu-project.toml" in _combined_output(result)
+        assert "must run inside a git repository" not in _combined_output(result)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +290,7 @@ class TestAC3ManifestExists:
             os.chdir(tmp_path)
             result = runner.invoke(main, ["bootstrap", "--no-venv"], catch_exceptions=False)
         assert result.exit_code == 1
-        assert "kbu-project.toml" in (result.output + (result.stderr or ""))
+        assert "kbu-project.toml" in _combined_output(result)
 
     def test_no_writes_when_manifest_exists(self, tmp_path: Path) -> None:
         """Zero filesystem writes when kbu-project.toml is present."""
@@ -1384,7 +1398,7 @@ class TestAC18VenvCompat:
                 os.environ["VIRTUAL_ENV"] = env_backup
 
         assert result.exit_code == 1
-        combined = result.output + (result.stderr or "")
+        combined = _combined_output(result)
         assert "3.10" in combined
         assert "--force-venv" in combined or "--no-venv" in combined
 

@@ -87,7 +87,7 @@ def _fake_model(*, backend_module: str, expression, problem=None):
 
 
 def test_remote_solve_guard_rejects_quadratic_on_non_qp_backend():
-    import sympy
+    sympy = pytest.importorskip("sympy", reason="sympy required to build a quadratic objective")
 
     x = sympy.Symbol("x")
     quadratic_expression = x**2 + 1
@@ -107,7 +107,7 @@ def test_remote_solve_guard_rejects_quadratic_on_non_qp_backend():
 
 @pytest.mark.parametrize("qp_module", QP_CAPABLE_MODULE_PREFIXES)
 def test_remote_solve_accepts_quadratic_on_qp_capable_backend(qp_module):
-    import sympy
+    sympy = pytest.importorskip("sympy", reason="sympy required to build a quadratic objective")
 
     x = sympy.Symbol("x")
     quadratic_expression = x**2 + 1
@@ -141,7 +141,7 @@ def test_remote_solve_accepts_quadratic_on_qp_capable_backend(qp_module):
 
 def test_remote_solve_linear_objective_ok_on_non_qp_backend():
     """A purely linear objective may use any backend (incl. GLPK) -- AC 11."""
-    import sympy
+    sympy = pytest.importorskip("sympy", reason="sympy required to build a quadratic objective")
 
     x = sympy.Symbol("x")
     linear_expression = 2 * x + 1
@@ -172,7 +172,7 @@ def test_remote_solve_linear_objective_ok_on_non_qp_backend():
 
 
 def test_remote_solve_removes_temp_lp_file_after_read():
-    import sympy
+    sympy = pytest.importorskip("sympy", reason="sympy required to build a quadratic objective")
 
     written_paths = []
 

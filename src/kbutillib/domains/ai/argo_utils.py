@@ -1,5 +1,6 @@
 """KBase SDK utilities for working with KBase SDK environments and services."""
 
+import getpass
 import logging
 import os
 import random
@@ -99,7 +100,15 @@ class ArgoUtils(SharedEnvUtils):
         # ------------------------------------------------------------------
         # 2. Auth & identity
         # ------------------------------------------------------------------
-        self.user = user or os.getenv("ARGO_USER") or os.getlogin()
+        # os.getlogin() reads the controlling terminal via ctermid() and raises
+        # OSError [Errno 25] "Inappropriate ioctl for device" in CI, daemons and
+        # containers; getpass.getuser() consults LOGNAME/USER/LNAME/USERNAME then
+        # the pwd database and is the standard portable replacement.
+        try:
+            fallback_user = getpass.getuser()
+        except Exception:
+            fallback_user = "unknown"
+        self.user = user or os.getenv("ARGO_USER") or fallback_user
         self.retries = retries
 
         # optional kwargs (e.g. temperature for vote mode)

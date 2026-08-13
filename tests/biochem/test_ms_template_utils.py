@@ -597,6 +597,7 @@ class TestRenderTemplateReport:
 
     def test_pure_function_standalone(self):
         """_render_markdown module function must work on a minimal report dict."""
+        _require_cobra()
         from kbutillib.domains.modeling.ms_template_utils import _render_markdown
         minimal_report = {
             "template_metadata": {"id": "t1", "biomass_ids": ["bio1"],

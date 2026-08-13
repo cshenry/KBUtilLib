@@ -11,8 +11,14 @@ server, or HTTP API.
 
 > **Not on PyPI yet.** Install from source with `pip install -e .` — see [Installation](#installation) below.
 
-**New here?** → **[GETTING_STARTED.md](GETTING_STARTED.md)** walks you from a fresh clone to a
-running `kbu` command in under ten minutes.
+### Start here
+
+| You are… | Read |
+|----------|------|
+| new to the project | **[GETTING_STARTED.md](GETTING_STARTED.md)** — fresh clone to a running `kbu` in ten minutes |
+| an AI coding agent or a developer who needs the map fast | **[AGENTS.md](AGENTS.md)** — repository map, entry points, probe commands |
+| about to change code | **[CONTRIBUTING.md](CONTRIBUTING.md)** — layout rules, adding a capability or domain, tests, style |
+| looking for reference docs | **[docs/](docs/)** (`mkdocs serve`) — usage, capability catalog, API reference, migration guide |
 
 ---
 
@@ -288,11 +294,21 @@ src/kbutillib/
 │   ├── mcp/                 # kbu-mcp (stdio MCP server)
 │   ├── api/                 # kbu-api (FastAPI/uvicorn)
 │   └── docs/                # mkdocs catalog generator
-├── agents/                  # KING self-install bundles, researchos config
-└── deploy/
-    ├── poplar/              # systemd + nginx service definitions
-    └── docker/              # docker-compose and Dockerfile
+└── agents/                  # KING self-install bundles, researchos config
 ```
+
+Deployment assets live at the **repository root**, not inside the package:
+
+```
+deploy/
+├── poplar/                  # systemd + nginx service definitions
+└── docker/                  # compose.yaml and Dockerfile
+```
+
+The ~40 flat `*.py` modules still sitting directly in `src/kbutillib/` (and the
+`cheminformatics/`, `cli/`, `researchos/`, `thermo_predictors/` sub-packages) are
+deprecated auto-generated re-export shims kept for backward compatibility — import
+from `kbutillib.domains.*` / `kbutillib.interfaces.*` instead.
 
 ---
 
@@ -344,7 +360,7 @@ sudo cp deploy/poplar/kbu-api.service /etc/systemd/system/
 sudo systemctl enable --now kbu-api
 
 # Docker
-docker compose -f deploy/docker/docker-compose.yml up
+docker compose -f deploy/docker/compose.yaml up
 ```
 
 ---

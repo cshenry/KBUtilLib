@@ -26,6 +26,8 @@ Tests
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -342,3 +344,186 @@ def test_generate_mcp_catalog_empty_registry(empty_registry: Any) -> None:
     assert "# MCP Tool Catalog" in result
     # Should mention 0 tools or say no capabilities
     assert "0" in result or "No capabilities" in result or "no capabilities" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# V: generate_mcp_catalog length-mismatch guard (mcp_catalog.py:160-163)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateMcpCatalogLengthMismatchGuard:
+    """Targets mcp_catalog.py:160-163 (the mcp_specs_sorted/tool_specs length guard).
+
+    ``tool_specs`` is built as a 1:1 list comprehension over ``mcp_specs_sorted``
+    (``[capability_to_tool_spec(spec) for spec in mcp_specs_sorted]``). By Python's
+    list-comprehension semantics, ``len(tool_specs) == len(mcp_specs_sorted)`` always
+    holds for any return value of ``capability_to_tool_spec`` (mocked or real) -- a
+    per-element map cannot change the element count it produces. There is no
+    reachable path to the guard's True branch without patching list-comprehension
+    execution itself, which is not a legitimate test technique. Reported as
+    unreachable defensive/dead code (see packet P25 `defects`); this target is
+    skipped rather than fabricating a non-representative reach.
+    """
+
+    def test_length_guard_is_unreachable_dead_code(self) -> None:
+        """mcp_catalog.py:160-163 cannot be reached; see class docstring for proof."""
+        pytest.skip(
+            "mcp_catalog.py:160-163 is unreachable dead code: tool_specs is a 1:1 "
+            "list comprehension over mcp_specs_sorted, so their lengths can never "
+            "diverge through any legitimate mock of capability_to_tool_spec. "
+            "Reported as a defect (see packet P25); not covered."
+        )
+
+
+# ---------------------------------------------------------------------------
+# W: generate_mcp_catalog_file creates missing parent dirs (mcp_catalog.py:203-205)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateMcpCatalogFileCreatesParentDirs:
+    """Targets mcp_catalog.py:203-205 in generate_mcp_catalog_file (def :181)."""
+
+    def test_creates_nested_parent_dirs_and_writes_content(
+        self, small_registry: Any, tmp_path: Path
+    ) -> None:
+        """Writing to a nested, non-existent path creates parents; content matches generate_mcp_catalog."""
+        from kbutillib.interfaces.docs.mcp_catalog import (
+            generate_mcp_catalog,
+            generate_mcp_catalog_file,
+        )
+
+        dest = tmp_path / "a" / "b" / "mcp-catalog.md"
+        assert not dest.parent.exists()
+
+        expected = generate_mcp_catalog(small_registry)
+        result = generate_mcp_catalog_file(small_registry, output_path=dest)
+
+        assert result == expected
+        assert dest.exists()
+        assert dest.read_text(encoding="utf-8") == expected
+
+
+# ---------------------------------------------------------------------------
+# X: _main CLI entry point (mcp_catalog.py:215-256)
+# ---------------------------------------------------------------------------
+
+
+class TestMainCli:
+    """Targets mcp_catalog.py:215-256, the entire ``_main`` CLI entry point.
+
+    Every test monkeypatches ``kbutillib.core.registry.get_registry`` to return
+    a fresh, isolated ``CapabilityRegistry`` so ``_main`` never touches (or
+    pollutes) the real process-global registry singleton.
+    """
+
+    def test_without_output_prints_catalog_to_stdout(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """X1: no --output -> catalog content is printed to stdout."""
+        import kbutillib.core.registry as registry_mod
+        from kbutillib.core.registry import CapabilityRegistry
+        from kbutillib.interfaces.docs.mcp_catalog import _main
+
+        fresh = CapabilityRegistry()
+        monkeypatch.setattr(registry_mod, "get_registry", lambda: fresh)
+        monkeypatch.setattr(sys, "argv", ["mcp_catalog"])
+
+        result = _main()
+
+        assert result is None
+        captured = capsys.readouterr()
+        assert "# MCP Tool Catalog" in captured.out
+
+    def test_with_output_writes_file_and_prints_confirmation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """X2: --output <path> -> file is written and a confirmation naming the path is printed."""
+        import kbutillib.core.registry as registry_mod
+        from kbutillib.core.registry import CapabilityRegistry
+        from kbutillib.interfaces.docs.mcp_catalog import _main
+
+        fresh = CapabilityRegistry()
+        monkeypatch.setattr(registry_mod, "get_registry", lambda: fresh)
+        dest = tmp_path / "mcp-catalog.md"
+        monkeypatch.setattr(sys, "argv", ["mcp_catalog", "--output", str(dest)])
+
+        result = _main()
+
+        assert result is None
+        assert dest.exists()
+        assert "# MCP Tool Catalog" in dest.read_text(encoding="utf-8")
+        captured = capsys.readouterr()
+        assert str(dest) in captured.out
+        assert "Wrote" in captured.out
+
+    def test_register_all_failure_warns_and_completes(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """X3: register_all raising is warned about and _main still completes normally."""
+        import importlib
+
+        import kbutillib.core.registry as registry_mod
+        from kbutillib.core.registry import CapabilityRegistry
+        from kbutillib.interfaces.docs.mcp_catalog import _main
+
+        # NOTE: `import kbutillib.core.capability as m` (or `from kbutillib.core
+        # import capability`) resolves to the `capability` package's re-exported
+        # decorator FUNCTION of the same name, not the submodule -- the `import
+        # ... as` form does attribute traversal on the parent package, and
+        # kbutillib/core/__init__.py shadows the submodule attribute with the
+        # decorator. importlib.import_module goes through sys.modules by fully
+        # qualified name and reaches the real submodule.
+        capability_mod = importlib.import_module("kbutillib.core.capability")
+
+        def _boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("boom")
+
+        fresh = CapabilityRegistry()
+        monkeypatch.setattr(registry_mod, "get_registry", lambda: fresh)
+        monkeypatch.setattr(capability_mod, "register_all", _boom)
+        monkeypatch.setattr(sys, "argv", ["mcp_catalog"])
+
+        result = _main()
+
+        assert result is None
+        captured = capsys.readouterr()
+        assert "[warn]" in captured.out
+        assert "boom" in captured.out
+        assert "# MCP Tool Catalog" in captured.out
+
+    def test_no_register_skips_registration(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """X4: --no-register -> register_all is never called, catalog still emitted.
+
+        (The default/--register path calling register_all is already proven by
+        test_register_all_failure_warns_and_completes above, which monkeypatches
+        register_all and observes it being invoked.)
+        """
+        import importlib
+
+        import kbutillib.core.registry as registry_mod
+        from kbutillib.core.registry import CapabilityRegistry
+        from kbutillib.interfaces.docs.mcp_catalog import _main
+
+        capability_mod = importlib.import_module("kbutillib.core.capability")
+
+        calls: list[Any] = []
+
+        def _record(*args: Any, **kwargs: Any) -> None:
+            calls.append((args, kwargs))
+
+        fresh = CapabilityRegistry()
+        monkeypatch.setattr(registry_mod, "get_registry", lambda: fresh)
+        monkeypatch.setattr(capability_mod, "register_all", _record)
+        monkeypatch.setattr(sys, "argv", ["mcp_catalog", "--no-register"])
+
+        result = _main()
+
+        assert result is None
+        assert calls == []
+        captured = capsys.readouterr()
+        assert "# MCP Tool Catalog" in captured.out

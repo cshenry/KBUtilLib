@@ -232,6 +232,12 @@ def _main() -> None:
         default=True,
         help="Call register_all() to populate the registry (default: True).",
     )
+    parser.add_argument(
+        "--no-register",
+        action="store_false",
+        dest="register",
+        help="Do not call register_all(); emit the catalog for an empty registry.",
+    )
     args = parser.parse_args()
 
     registry = CapabilityRegistry()

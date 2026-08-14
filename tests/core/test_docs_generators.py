@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from kbutillib.core.registry import CapabilityRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures — isolated registry with dummy capabilities (no real backends)
@@ -68,7 +71,7 @@ def _make_spec(
 
 
 @pytest.fixture()
-def small_registry():
+def small_registry() -> CapabilityRegistry:
     """A fresh CapabilityRegistry with 3 dummy capabilities across 2 domains."""
     from kbutillib.core.registry import CapabilityRegistry
 
@@ -88,7 +91,7 @@ def small_registry():
 
 
 @pytest.fixture()
-def empty_registry():
+def empty_registry() -> CapabilityRegistry:
     """A fresh, empty CapabilityRegistry."""
     from kbutillib.core.registry import CapabilityRegistry
 

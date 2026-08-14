@@ -45,7 +45,10 @@ import builtins
 import importlib
 import re
 import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import ModuleType
+from typing import Any, cast
 
 import pytest
 
@@ -55,7 +58,7 @@ _INIT_PATH = Path(kbutillib.__file__)
 _TREE = ast.parse(_INIT_PATH.read_text(encoding="utf-8"), filename=str(_INIT_PATH))
 
 
-def _collect_guarded_blocks() -> list[dict]:
+def _collect_guarded_blocks() -> list[dict[str, Any]]:
     """Parse every ``try: from .domains.<x> import <Name> / except ImportError``
     block at module top level.
 
@@ -66,7 +69,7 @@ def _collect_guarded_blocks() -> list[dict]:
     the handler), and ``records_as`` (the module-name string argument passed
     to ``_import_error(...)`` if the handler calls it, else ``None``).
     """
-    blocks: list[dict] = []
+    blocks: list[dict[str, Any]] = []
     for node in _TREE.body:
         if not isinstance(node, ast.Try):
             continue
@@ -134,11 +137,19 @@ _BLOCKED_MODULES = frozenset(b["resolved_module"] for b in _GUARDED_BLOCKS)
 _BASELINE = {name: getattr(kbutillib, name, "<MISSING>") for name in _ALL_NAMES}
 
 
-def _fake_import(real_import):
+def _fake_import(real_import: Callable[..., Any]) -> Callable[..., Any]:
     """Build an ``__import__`` replacement that raises ``ImportError`` for
     exactly the guarded submodules and delegates everything else untouched."""
 
-    def fake(name, globals=None, locals=None, fromlist=(), level=0, /, **kw):  # noqa: A002
+    def fake(  # noqa: A002
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+        /,
+        **kw: Any,
+    ) -> Any:
         resolved = name
         if level == 1 and globals is not None:
             package = globals.get("__package__")
@@ -152,7 +163,7 @@ def _fake_import(real_import):
 
 
 @pytest.fixture(scope="module")
-def sabotaged():
+def sabotaged() -> Iterator[tuple[ModuleType, str]]:
     """Reload ``kbutillib`` with every guarded import forced to fail.
 
     Snapshots ``sys.modules`` entries for the package before mutating
@@ -187,7 +198,7 @@ def sabotaged():
     finally:
         builtins.__import__ = real_import
         if had_verbose:
-            os.environ["KBUTILLIB_VERBOSE_IMPORTS"] = old_verbose
+            os.environ["KBUTILLIB_VERBOSE_IMPORTS"] = cast(str, old_verbose)
         else:
             os.environ.pop("KBUTILLIB_VERBOSE_IMPORTS", None)
         # Drop anything imported/partially-initialized under sabotage, restore
@@ -214,7 +225,9 @@ def test_ast_derivation_is_non_trivial() -> None:
     assert len(_RECORDING_MODULES) > 10
 
 
-def test_reload_under_forced_failure_does_not_raise(sabotaged) -> None:
+def test_reload_under_forced_failure_does_not_raise(
+    sabotaged: tuple[ModuleType, str],
+) -> None:
     """TARGET Y (part 1): the fixture itself proves this - if reload had
     raised, fixture setup would have failed and every test would error."""
     reloaded, _ = sabotaged
@@ -222,13 +235,17 @@ def test_reload_under_forced_failure_does_not_raise(sabotaged) -> None:
 
 
 @pytest.mark.parametrize("name", _ALL_NAMES)
-def test_guarded_name_is_none_under_forced_failure(sabotaged, name) -> None:
+def test_guarded_name_is_none_under_forced_failure(
+    sabotaged: tuple[ModuleType, str], name: str
+) -> None:
     """TARGET Y (part 2): every guarded public name degrades to None."""
     reloaded, _ = sabotaged
     assert getattr(reloaded, name) is None
 
 
-def test_forced_failures_are_recorded_for_every_recording_module(sabotaged) -> None:
+def test_forced_failures_are_recorded_for_every_recording_module(
+    sabotaged: tuple[ModuleType, str],
+) -> None:
     """TARGET Z: one detail line per module that calls ``_import_error``,
     each referencing the underlying ImportError."""
     _, captured_err = sabotaged

@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 try:
     import tomllib  # py 3.11+
@@ -44,7 +45,7 @@ def _make_project(
     """Create a minimal ``kbu-project.toml`` in *tmp_path* and return the root."""
     root = tmp_path / name
     root.mkdir(exist_ok=True)
-    data: dict = {
+    data: dict[str, Any] = {
         "project": {"name": name, "title": name, "created_at": now_utc_iso()},
         "kbutillib": {"source_path": "/fake", "source_commit": "abc"},
         "update": {"last_pulled_at": now_utc_iso(), "last_pulled_commit": "abc"},

@@ -8,6 +8,8 @@ use function-local imports), so no optional/heavy dependency is required.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from kbutillib import KBUtilLib
@@ -20,7 +22,7 @@ class _CountingFake:
 
     instantiations = 0
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         type(self).instantiations += 1
         self.args = args
         self.kwargs = kwargs
@@ -91,7 +93,9 @@ class TestRemoteSolveDelegation:
         calls = []
         sentinel = object()
 
-        def fake_remote_solve(remote_solver, model, solver=None, time_limit=None):
+        def fake_remote_solve(
+            remote_solver: Any, model: Any, solver: Any = None, time_limit: Any = None
+        ) -> Any:
             calls.append((remote_solver, model, solver, time_limit))
             return sentinel
 

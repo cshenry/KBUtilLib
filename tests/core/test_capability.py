@@ -5,6 +5,8 @@ All tests are offline — no network, no optional backends.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from kbutillib.core import (
@@ -147,7 +149,7 @@ class TestDecoratorInertness:
 class TestMetadataAttachment:
     """Ensure the decorator attaches a CapabilityDraft with correct fields."""
 
-    def _get_draft(self, fn) -> CapabilityDraft:
+    def _get_draft(self, fn: Any) -> CapabilityDraft:
         return getattr(fn, _CAPABILITY_ATTR)
 
     def test_alpha_has_capability_attr(self) -> None:
@@ -381,7 +383,9 @@ class TestRegisterAll:
         spec = registry.get("fake.alpha")
         assert isinstance(spec, CapabilitySpec)
 
-    def test_duplicate_name_skipped_with_warning(self, caplog) -> None:
+    def test_duplicate_name_skipped_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Registering the same name twice logs a warning and skips."""
         import logging
 
@@ -501,7 +505,7 @@ class TestSpecFromDraftTransports:
 class _RaisingClassDescriptor:
     """A descriptor that raises on __get__ regardless of instance vs class access."""
 
-    def __get__(self, obj, objtype=None):
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
         raise RuntimeError("class-level getattr blew up")
 
 
@@ -529,7 +533,7 @@ class _InstanceRaisingDescriptor:
     name) invokes __get__ and raises.
     """
 
-    def __get__(self, obj, objtype=None):
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
         if obj is None:
             # Accessed via the class itself: return something callable and
             # falsy-safe so `getattr(type(obj), name, None) or getattr(obj, name)`
@@ -565,10 +569,10 @@ class _RaisingBoundDescriptor:
     callable at capability.py:322-325 (`bound = getattr(obj, attr_name)`).
     """
 
-    def __init__(self, func) -> None:
+    def __init__(self, func: Any) -> None:
         self.func = func
 
-    def __get__(self, obj, objtype=None):
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
         if obj is None:
             return self.func
         raise RuntimeError("bound instance getattr blew up")
@@ -621,10 +625,10 @@ class _CallableWithFunc:
     """A plain callable object exposing a __func__ attribute (not a function,
     method, staticmethod, or classmethod)."""
 
-    def __init__(self, func) -> None:
+    def __init__(self, func: Any) -> None:
         self.__func__ = func
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.__func__(*args, **kwargs)
 
 
@@ -632,7 +636,7 @@ class _CallableWithCapabilityAttr:
     """A plain callable object with no __func__, but with the capability
     sentinel attribute attached directly."""
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> str:
         return "called"
 
 
@@ -647,7 +651,7 @@ class TestUnwrap:
         assert result is raw
 
     def test_unwraps_classmethod(self) -> None:
-        def raw(cls) -> str:
+        def raw(cls: type) -> str:
             return "ok"
 
         result = _unwrap(classmethod(raw))
@@ -724,7 +728,7 @@ class _RaisingAttrApp:
         self.good = self._GoodUtil()
 
     @property
-    def broken(self):
+    def broken(self) -> Any:
         raise RuntimeError("facade attribute access exploded")
 
 

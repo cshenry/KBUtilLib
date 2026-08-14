@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -69,7 +70,7 @@ class TestSha256File:
 
 
 class TestProjectManifestRoundTrip:
-    def _sample_data(self) -> dict:
+    def _sample_data(self) -> dict[str, Any]:
         now = now_utc_iso()
         return {
             "project": {
@@ -128,7 +129,7 @@ class TestProjectManifestRoundTrip:
 
 
 class TestSubprojectManifestRoundTrip:
-    def _sample_data(self, name: str = "test_sp") -> dict:
+    def _sample_data(self, name: str = "test_sp") -> dict[str, Any]:
         now = now_utc_iso()
         return {
             "subproject": {

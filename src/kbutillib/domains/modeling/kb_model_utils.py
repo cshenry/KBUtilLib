@@ -526,7 +526,11 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         gene_term_hash = anno_ont.get_gene_term_hash(
             prioritized_event_list, ontologies, merge_all, False
         )
-        self.print_json_debug_file("gene_term_hash", gene_term_hash)
+        # Dropped: self.print_json_debug_file("gene_term_hash", gene_term_hash)
+        # -- debug hook with no definition in the package (survives only in
+        # kb_model_utils.py.bak), so this raised AttributeError unconditionally
+        # and made the bulk-reconstruct path uncallable. Diagnosed by jplfaria
+        # in PR #46. Pure debug output, so removal is the whole fix.
         residual_reaction_gene_hash = {}
         for gene in gene_term_hash:
             for term in gene_term_hash[gene]:
@@ -718,9 +722,20 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             mdlutl.model = self.CobraModelConverter(mdlutl.model).build()
         mdlutl.save_attributes()
         data = mdlutl.model.get_data()
-        # If the workspace is None, then saving data to file
+        # No workspace: hand back the KBase-formatted model object rather than
+        # saving it. This is the in-memory path used by callers that want the
+        # object without a workspace round-trip (e.g. the modelseed-api bulk
+        # -reconstruct endpoint, which has no KBase token).
+        #
+        # This branch previously called self.print_json_debug_file(), a debug
+        # hook that has no definition anywhere in the package -- it lived only
+        # in kb_model_utils.py.bak -- so every workspace-less save raised
+        # AttributeError. Diagnosed by jplfaria in PR #46. Returning the data
+        # was Chris's call (2026-08-20); the alternative fix on the table was
+        # to drop the call entirely, which would have made a workspace-less
+        # save a silent no-op that returned as though the model were saved.
         if not workspace:
-            self.print_json_debug_file(mdlutl.wsid + ".json", data)
+            return data
         else:
             # Setting the workspace
             if workspace:

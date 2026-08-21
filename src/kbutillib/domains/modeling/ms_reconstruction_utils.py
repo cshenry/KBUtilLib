@@ -417,7 +417,11 @@ class MSReconstructionUtils(KBModelUtils):
             gene_term_hash = anno_ont.get_gene_term_hash(
                 ontology_events, None, merge_annotations, False
             )
-            self.print_json_debug_file("gene_term_hash", gene_term_hash)
+            # Dropped: self.print_json_debug_file("gene_term_hash", gene_term_hash)
+            # -- debug hook with no definition in the package (survives only in
+            # kb_model_utils.py.bak), so this raised AttributeError unconditionally
+            # and made the bulk-reconstruct path uncallable. Diagnosed by jplfaria
+            # in PR #46. Pure debug output, so removal is the whole fix.
 
             for gene in gene_term_hash:
                 for term in gene_term_hash[gene]:

@@ -77,3 +77,8 @@ remote_solver:
   threads_per_solve: null  # service: null -> floor(cpu_count / max_concurrent_solves)
   default_time_limit: 3600  # service: applied when a solve omits time_limit
   max_time_limit: 7200  # service: ceiling caller time_limit values are clamped to
+
+# Highest-priority MINE-Database reaction-rule TSV location; empty falls back to $KBUTILLIB_PICKAXE_DATA_DIR, installed minedatabase data, or the MINE-Database checkout in dependencies.yaml.
+cheminformatics:
+  pickaxe:
+    data_dir: ""

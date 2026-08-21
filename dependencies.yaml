@@ -30,3 +30,7 @@ dependencies:
   cb_annotation_ontology_api:
     path: "../cb_annotation_ontology_api"
     git: "https://github.com/kbaseapps/cb_annotation_ontology_api.git"
+
+  MINE-Database:
+    path: "../MINE-Database"
+    git: "https://github.com/tyo-nu/MINE-Database.git"

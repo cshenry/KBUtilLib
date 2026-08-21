@@ -172,12 +172,19 @@ source = ["kbutillib", "tests"]
 
 [tool.coverage.report]
 show_missing = true
-# Coverage is REPORTED by the pytest jobs but GATED separately -- ci.yml passes
-# --cov-fail-under=0 so a coverage shortfall never fails a test run. This value
-# is the target the dedicated coverage job enforces, not a per-PR merge gate.
-# It was previously enforced inline at 100 against ~41% real coverage, so every
-# PR was red regardless of its content (Chris's call, 2026-08-20).
-fail_under = 100
+# Coverage is REPORTED by the pytest jobs but GATED here, in the dedicated
+# coverage job. ci.yml passes --cov-fail-under=0 so a shortfall never fails a
+# test run (Chris's call, 2026-08-20).
+#
+# This is a NO-REGRESSION RATCHET, not an aspiration. Measured total on
+# 2026-08-21 was 40% (30065 statements, 16651 missed); 39 leaves a point of
+# slack so an unrelated PR does not go red over rounding. Raise it deliberately
+# as coverage improves -- that is the whole point of a ratchet.
+#
+# It was previously 100 against ~40% real coverage, enforced inline in the test
+# run, so every PR was red regardless of its content. That is a large part of
+# why this repo's CI had never been green in 73 recorded runs.
+fail_under = 39
 exclude_lines = [
   "pragma: no cover",
   "if TYPE_CHECKING:",

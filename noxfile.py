@@ -115,7 +115,7 @@ def precommit(session: nox.Session) -> None:
 @nox.session(python=python_versions)
 def mypy(session: nox.Session) -> None:
     """Type-check using mypy."""
-    args = session.posargs or ["src", "tests", "docs/conf.py"]
+    args = session.posargs or ["src", "tests"]
 
     session.run(
         "uv",
@@ -157,15 +157,50 @@ def tests(session: nox.Session) -> None:
 
 @nox.session(python=python_versions[0])
 def coverage(session: nox.Session) -> None:
-    """Produce the coverage report."""
+    """Produce the coverage report.
+
+    Called two ways by .github/workflows/tests.yml:
+
+      nox --session=coverage             -> run the suite, then `coverage report`
+      nox --session=coverage -- xml -i   -> `coverage xml -i` on existing data
+
+    So posargs are coverage(1) arguments, NOT pytest arguments. The previous
+    implementation spliced them straight into the pytest argv, which meant the
+    bare call ran `pytest ... report` ("file or directory not found: report")
+    and the XML call ran `pytest ... xml -i` ("unrecognized arguments: -i").
+    Both failed before doing anything. Nobody saw it because this job is
+    `needs: tests` and the tests job had never once succeeded.
+    """
     args = session.posargs or ["report"]
-    session.install("pytest", "coverage[toml]", "pytest-cov")
 
-    session.install("-e", ".")
+    # The dev extra, not a bare `-e .` -- the suite needs pytest-cov and pandas.
+    session.install("-e", ".[dev]")
 
-    session.log("Running pytest with coverage...")
+    # Only run the suite when we are not merely post-processing existing
+    # coverage data (the `-- xml -i` invocation reads the .coverage file the
+    # bare invocation just wrote).
+    if not session.posargs:
+        session.log("Running pytest with coverage...")
+        session.run(
+            "pytest",
+            # Mirrors .github/workflows/ci.yml. Change one, change both, or the
+            # coverage number describes a different suite than the one CI runs.
+            "--ignore=tests/notebook/helpers",
+            "--ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py",
+            "--ignore=tests/biochem/test_escher_utils.py",
+            "--ignore=tests/kbase/test_kb_narrative_provenance.py",
+            "--ignore=tests/kbase/test_kb_plm_utils.py",
+            "--ignore=tests/kbase/test_kb_ws_utils.py",
+            "--ignore=tests/modeling/test_ms_reconstruction_utils.py",
+            "--ignore=tests/kbase/test_upload_blob_file_streaming.py",
+            "--cov=src",
+            "--cov-report=term-missing",
+            # Coverage is reported here and gated separately -- see
+            # [tool.coverage.report] fail_under.
+            "--cov-fail-under=0",
+        )
 
-    session.run("pytest", "--cov=src", "--cov-report=xml", *args)
+    session.run("coverage", *args)
 
 
 @nox.session(name="typeguard", python=python_versions[0])

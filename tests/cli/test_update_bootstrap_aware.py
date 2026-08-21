@@ -30,7 +30,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import tomllib
+
+try:
+    import tomllib  # py 3.11+
+except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from click.testing import CliRunner
 
 from kbutillib.cli import main

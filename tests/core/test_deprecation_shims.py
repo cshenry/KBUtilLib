@@ -103,12 +103,27 @@ def _clear_shim_modules_from_cache():
         sys.modules.pop(f"kbutillib.{old}", None)
 
 
+def _import_or_skip(module_path: str):
+    """Import a module, skipping if an OPTIONAL third-party dep is absent.
+
+    A missing ``kbutillib`` module is a real failure; a missing
+    third-party package (cobra, modelseedpy, ...) just means the
+    optional extra is not installed in this environment.
+    """
+    try:
+        return importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:  # pragma: no cover - env dependent
+        if exc.name and not exc.name.startswith("kbutillib"):
+            pytest.skip(f"optional dependency {exc.name!r} is not installed")
+        raise
+
+
 @pytest.mark.parametrize("old,new", sorted(LEGACY_MODULE_MAP.items()))
 def test_legacy_import_succeeds_and_warns(old: str, new: str) -> None:
     """``from kbutillib.<old> import ...`` succeeds and emits a DeprecationWarning."""
     sys.modules.pop(f"kbutillib.{old}", None)
     with pytest.warns(DeprecationWarning, match=old):
-        importlib.import_module(f"kbutillib.{old}")
+        _import_or_skip(f"kbutillib.{old}")
 
 
 @pytest.mark.parametrize("old,new", sorted(LEGACY_MODULE_MAP.items()))
@@ -116,8 +131,8 @@ def test_legacy_reexports_are_identical_objects(old: str, new: str) -> None:
     """Every public name re-exported by the shim is the SAME object (``is``) as the new module's."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        old_mod = importlib.import_module(f"kbutillib.{old}")
-    new_mod = importlib.import_module(f"kbutillib.{new}")
+        old_mod = _import_or_skip(f"kbutillib.{old}")
+    new_mod = _import_or_skip(f"kbutillib.{new}")
 
     public_names = getattr(new_mod, "__all__", None)
     if public_names is None:
@@ -140,8 +155,10 @@ def test_ms_fba_utils_class_identity_representative_sample() -> None:
     """Representative sample (explicitly required): MSFBAUtils identity across old/new paths."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        from kbutillib.ms_fba_utils import MSFBAUtils as OldMSFBAUtils
-    from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils as NewMSFBAUtils
+        old_mod = _import_or_skip("kbutillib.ms_fba_utils")
+    new_mod = _import_or_skip("kbutillib.domains.modeling.ms_fba_utils")
+    OldMSFBAUtils = old_mod.MSFBAUtils
+    NewMSFBAUtils = new_mod.MSFBAUtils
 
     assert OldMSFBAUtils is NewMSFBAUtils
 

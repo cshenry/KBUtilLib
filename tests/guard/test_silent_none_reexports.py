@@ -24,6 +24,10 @@ offending name(s) in the assertion message, instead of degrading silently.
 
 from __future__ import annotations
 
+import ast
+import importlib
+from pathlib import Path
+
 import kbutillib
 
 
@@ -76,15 +80,60 @@ def test_function_and_constant_entries_are_excluded() -> None:
     assert not leaked, f"Non-class entries incorrectly classified as classes: {leaked}"
 
 
+def _name_to_module_path() -> dict[str, str]:
+    """Map each class-shaped ``kbutillib.__all__`` name to its backing dotted module.
+
+    Parsed directly (via ``ast``) from ``kbutillib/__init__.py``'s ``try: from
+    .domains.<x> import <Name> / except ImportError: <Name> = None`` pattern —
+    the same pattern this guard is protecting — so the mapping cannot drift
+    from the real re-export table.
+    """
+    init_path = Path(kbutillib.__file__)
+    tree = ast.parse(init_path.read_text(encoding="utf-8"))
+    mapping: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for stmt in node.body:
+                if isinstance(stmt, ast.ImportFrom) and stmt.module:
+                    full_module = f"kbutillib.{stmt.module}"
+                    for alias in stmt.names:
+                        mapping[alias.asname or alias.name] = full_module
+    return mapping
+
+
 def test_all_class_entries_import_non_none() -> None:
     """Every class-shaped ``kbutillib.__all__`` entry must resolve to a non-None object.
 
     A ``None`` here means the corresponding ``try/except ImportError -> X =
     None`` block in ``kbutillib/__init__.py`` swallowed a real import error
-    (e.g. a renamed or deleted domain module) instead of surfacing it.
+    (e.g. a renamed or deleted domain module) instead of surfacing it — UNLESS
+    that ``None`` is fully explained by a missing OPTIONAL third-party
+    dependency (e.g. no ``cobra``/``aiohttp`` installed in this environment),
+    in which case the name is excluded from ``failures`` and recorded in
+    ``skipped_optional`` instead.
     """
-    failures = [name for name in _class_entries() if getattr(kbutillib, name) is None]
+    name_to_module = _name_to_module_path()
+    failures: list[str] = []
+    skipped_optional: list[str] = []
+    for name in _class_entries():
+        if getattr(kbutillib, name) is not None:
+            continue
+        module_path = name_to_module.get(name)
+        if module_path is None:
+            failures.append(name)
+            continue
+        try:
+            importlib.import_module(module_path)
+        except ModuleNotFoundError as exc:
+            if exc.name and not exc.name.startswith("kbutillib"):
+                skipped_optional.append(name)
+                continue
+        except ImportError:
+            pass
+        failures.append(name)
     assert not failures, (
         "The following kbutillib.__all__ class entries resolved to None "
-        f"(a re-export in kbutillib/__init__.py is silently broken): {failures}"
+        f"(a re-export in kbutillib/__init__.py is silently broken): {failures}\n"
+        f"(entries excluded because an optional third-party dependency is "
+        f"not installed: {skipped_optional})"
     )

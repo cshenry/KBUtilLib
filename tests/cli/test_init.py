@@ -572,6 +572,14 @@ class TestDoctorCommand:
     def test_doctor_exits_0_when_all_pass_or_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        pytest.importorskip(
+            "cobra",
+            reason="kbu doctor reports FAIL, not SKIP, when optional modeling deps are absent",
+        )
+        pytest.importorskip(
+            "modelseedpy",
+            reason="kbu doctor reports FAIL, not SKIP, when optional modeling deps are absent",
+        )
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
 
         fake_python = tmp_path / "venv_bin" / "python"

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,7 +19,7 @@ from kbutillib.cli.manifest import (
     write_project_manifest,
     write_subproject_manifest,
 )
-
+from kbutillib.interfaces.cli import manifest as icli_manifest
 
 # ── now_utc_iso ─────────────────────────────────────────────────────────────
 
@@ -31,11 +33,13 @@ class TestNowUtcIso:
         ts = now_utc_iso()
         # Must be parseable as ISO-8601 (strip Z, replace with +00:00)
         from datetime import datetime
+
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         assert dt.tzinfo is not None
 
     def test_format_matches_pattern(self) -> None:
         import re
+
         ts = now_utc_iso()
         assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts)
 
@@ -66,7 +70,7 @@ class TestSha256File:
 
 
 class TestProjectManifestRoundTrip:
-    def _sample_data(self) -> dict:
+    def _sample_data(self) -> dict[str, Any]:
         now = now_utc_iso()
         return {
             "project": {
@@ -125,7 +129,7 @@ class TestProjectManifestRoundTrip:
 
 
 class TestSubprojectManifestRoundTrip:
-    def _sample_data(self, name: str = "test_sp") -> dict:
+    def _sample_data(self, name: str = "test_sp") -> dict[str, Any]:
         now = now_utc_iso()
         return {
             "subproject": {
@@ -210,14 +214,21 @@ class TestAppendSessionRef:
                 "report": False,
                 "reviews": {"plan": [], "build": [], "synthesis": []},
             },
-            "notebooks": [{"slug": "01", "last_run_at": now, "modified_since_run": False}],
+            "notebooks": [
+                {"slug": "01", "last_run_at": now, "modified_since_run": False}
+            ],
             "session_refs": [],
         }
         write_subproject_manifest(tmp_path, name, data)
 
     def test_appends_ref(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
-        ref = {"id": "abc12345", "skill": "kbu-plan", "at": now_utc_iso(), "summary": "Done"}
+        ref = {
+            "id": "abc12345",
+            "skill": "kbu-plan",
+            "at": now_utc_iso(),
+            "summary": "Done",
+        }
         append_session_ref(tmp_path, "sp1", ref)
         data = read_subproject_manifest(tmp_path, "sp1")
         assert len(data["session_refs"]) == 1
@@ -246,7 +257,12 @@ class TestAppendSessionRef:
     def test_multiple_appends(self, tmp_path: Path) -> None:
         self._create_base(tmp_path)
         for i in range(3):
-            ref = {"id": f"ref{i}", "skill": "kbu-plan", "at": now_utc_iso(), "summary": f"s{i}"}
+            ref = {
+                "id": f"ref{i}",
+                "skill": "kbu-plan",
+                "at": now_utc_iso(),
+                "summary": f"s{i}",
+            }
             append_session_ref(tmp_path, "sp1", ref)
         data = read_subproject_manifest(tmp_path, "sp1")
         assert len(data["session_refs"]) == 3
@@ -278,7 +294,9 @@ class TestAppendNotebookEntryOrUpdate:
                     "modified_since_run": True,
                 }
             ],
-            "session_refs": [{"id": "existingref", "skill": "kbu-plan", "at": now, "summary": "x"}],
+            "session_refs": [
+                {"id": "existingref", "skill": "kbu-plan", "at": now, "summary": "x"}
+            ],
         }
         write_subproject_manifest(tmp_path, name, data)
 
@@ -324,3 +342,86 @@ class TestAppendNotebookEntryOrUpdate:
         count = sum(1 for nb in data["notebooks"] if nb["slug"] == "01_explore")
         assert count == 1
         assert data["notebooks"][0]["last_run_at"] == ts2
+
+
+# ── interfaces.cli.manifest: missing tomli-w dependency ─────────────────────
+# The following classes exercise kbutillib.interfaces.cli.manifest (the live
+# tree) directly, since the classes above import the kbutillib.cli shim copy.
+
+
+class TestWriteProjectManifestMissingWriter:
+    """Covers interfaces/cli/manifest.py:75-76 -- write_project_manifest raises
+    an actionable ImportError naming tomli-w when the writer is unavailable."""
+
+    def test_raises_importerror_naming_tomli_w(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "tomli_w", None)
+        with pytest.raises(ImportError, match="tomli-w"):
+            icli_manifest.write_project_manifest(tmp_path, {"project": {"name": "p"}})
+
+
+class TestWriteSubprojectManifestMissingWriter:
+    """Covers interfaces/cli/manifest.py:124-125 -- write_subproject_manifest
+    raises the same actionable ImportError naming tomli-w."""
+
+    def test_raises_importerror_naming_tomli_w(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "tomli_w", None)
+        with pytest.raises(ImportError, match="tomli-w"):
+            icli_manifest.write_subproject_manifest(
+                tmp_path, "sp1", {"subproject": {"name": "sp1"}}
+            )
+
+
+class TestAppendSessionRefInitializesMissingList:
+    """Covers interfaces/cli/manifest.py:151 -- session_refs is initialized to
+    an empty list when the manifest does not already have one."""
+
+    def test_initializes_list_and_appends_single_ref(self, tmp_path: Path) -> None:
+        now = icli_manifest.now_utc_iso()
+        data = {
+            "subproject": {
+                "name": "sp1",
+                "title": "t",
+                "status": "plan",
+                "created_at": now,
+                "last_session_at": now,
+            },
+        }
+        icli_manifest.write_subproject_manifest(tmp_path, "sp1", data)
+        ref = {"id": "r1", "skill": "kbu-plan", "at": now, "summary": "s"}
+        icli_manifest.append_session_ref(tmp_path, "sp1", ref)
+        result = icli_manifest.read_subproject_manifest(tmp_path, "sp1")
+        assert result["session_refs"] == [ref]
+
+
+class TestAppendNotebookEntryOrUpdateMatchingSlug:
+    """Covers interfaces/cli/manifest.py:181-185 -- a matching-slug entry is
+    updated in place (not duplicated), and the loop stops at the first match."""
+
+    def test_update_in_place_reflects_new_values(self, tmp_path: Path) -> None:
+        data = {
+            "subproject": {
+                "name": "sp1",
+                "title": "t",
+                "status": "run",
+                "created_at": "2020-01-01T00:00:00Z",
+                "last_session_at": "2020-01-01T00:00:00Z",
+            },
+            "notebooks": [
+                {
+                    "slug": "01",
+                    "last_run_at": "2020-01-01T00:00:00Z",
+                    "modified_since_run": True,
+                }
+            ],
+        }
+        icli_manifest.write_subproject_manifest(tmp_path, "sp1", data)
+        new_ts = icli_manifest.now_utc_iso()
+        icli_manifest.append_notebook_entry_or_update(tmp_path, "sp1", "01", new_ts)
+        result = icli_manifest.read_subproject_manifest(tmp_path, "sp1")
+        assert len(result["notebooks"]) == 1
+        assert result["notebooks"][0]["last_run_at"] == new_ts
+        assert result["notebooks"][0]["modified_since_run"] is False

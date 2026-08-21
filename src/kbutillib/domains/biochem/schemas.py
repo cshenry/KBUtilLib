@@ -17,7 +17,7 @@ GetReactionByIdInput / GetReactionByIdOutput
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -63,7 +63,7 @@ class SearchCompoundsInput(BaseModel):
             "SMILES).  The hash type is auto-detected."
         ),
     )
-    query_formula: str | None = Field(
+    query_formula: Optional[str] = Field(
         default=None,
         description=(
             "Molecular formula string (e.g. 'C6H12O6').  When provided, "

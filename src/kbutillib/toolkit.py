@@ -13,6 +13,7 @@ Domain implementations live in ``kbutillib.domains.*``; transport adapters
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
     from .domains.ai.argo_utils import ArgoUtilsImpl
     from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
     from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
+    from .domains.biochem.ms_reaction_similarity_utils import (
+        MSReactionSimilarityUtilsImpl,
+    )
     from .domains.cheminformatics.network_expansion_utils import (
         NetworkExpansionUtilsImpl,
     )
@@ -108,6 +112,7 @@ class KBUtilLib:
         self._mmseqs = None
         self._skani = None
         self._berdl = None
+        self._rxnsim = None
         self._remote_solver = None
         self._patric = None
         self._uniprot = None
@@ -281,6 +286,15 @@ class KBUtilLib:
         return self._berdl
 
     @property
+    def rxnsim(self) -> MSReactionSimilarityUtilsImpl:
+        if self._rxnsim is None:
+            from .domains.biochem.ms_reaction_similarity_utils import (
+                MSReactionSimilarityUtilsImpl,
+            )
+            self._rxnsim = MSReactionSimilarityUtilsImpl(self.env, berdl=self.berdl)
+        return self._rxnsim
+
+    @property
     def remote_solver(self) -> MSRemoteSolverUtilsImpl:
         if self._remote_solver is None:
             from .domains.modeling.ms_remote_solver_utils import (
@@ -404,3 +418,82 @@ class KBUtilLib:
                 annotation=lambda: self.annotation,
             )
         return self._verab
+
+
+# ---------------------------------------------------------------------------
+# Optional-dependency ergonomics
+# ---------------------------------------------------------------------------
+# Every property above imports its implementation lazily, so a missing optional
+# dependency surfaces as a bare ``ModuleNotFoundError`` ("No module named
+# 'aiohttp'") with no indication of which toolkit attribute triggered it or how
+# to fix it.  Rather than repeat error handling in 30+ property bodies, the
+# accessors are wrapped once, here, after the class body.
+
+#: Top-level import name -> pip extra, derived from ``[project.optional-
+#: dependencies]`` in pyproject.toml.  Only unambiguous mappings are listed;
+#: anything else falls back to a generic hint.
+_EXTRA_FOR_MODULE: dict[str, str] = {
+    "mcp": "mcp",
+    "fastapi": "api",
+    "uvicorn": "api",
+    "httpx": "ai",
+    "mkdocs_material": "apidocs",
+    "mkdocstrings": "apidocs",
+    "numpy": "reaction_similarity",
+    "scipy": "reaction_similarity",
+    "sklearn": "reaction_similarity",
+    "rdkit": "reaction_similarity",
+    "drfp": "reaction_similarity",
+    "hdbscan": "reaction_similarity_extra",
+}
+
+
+def _missing_dependency_error(prop: str, exc: ModuleNotFoundError) -> ImportError:
+    """Build an actionable ImportError for a lazy property whose import failed."""
+    module = (exc.name or "").split(".")[0]
+    extra = _EXTRA_FOR_MODULE.get(module)
+    if extra:
+        hint = f"pip install 'KBUtilLib[{extra}]'"
+    elif module:
+        hint = f"pip install {module}"
+    else:
+        hint = "pip install 'KBUtilLib[all]'"
+    return ImportError(
+        f"KBUtilLib.{prop} requires the optional dependency "
+        f"{module or 'that could not be imported'!s}, which is not installed. "
+        f"Install it with: {hint}  (original error: {exc})"
+    )
+
+
+def _wrap_lazy_property(name: str, fget: Any) -> Any:
+    """Wrap a lazy property getter so import failures name the attribute."""
+
+    @functools.wraps(fget)
+    def getter(self: KBUtilLib) -> Any:
+        try:
+            return fget(self)
+        except ModuleNotFoundError as exc:
+            raise _missing_dependency_error(name, exc) from exc
+
+    getter.__kbu_wrapped__ = True
+    return getter
+
+
+for _name, _attr in list(vars(KBUtilLib).items()):
+    if (
+        not _name.startswith("_")
+        and isinstance(_attr, property)
+        and _attr.fget is not None
+        and not getattr(_attr.fget, "__kbu_wrapped__", False)
+    ):
+        setattr(
+            KBUtilLib,
+            _name,
+            property(
+                _wrap_lazy_property(_name, _attr.fget),
+                _attr.fset,
+                _attr.fdel,
+                _attr.__doc__,
+            ),
+        )
+del _name, _attr

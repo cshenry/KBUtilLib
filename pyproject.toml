@@ -26,16 +26,28 @@ dependencies = [
 "requests_toolbelt >=0.10.0",
 "jinja2 >=3.0",
 "tomli-w >=1.0",
+"tomli >=2.0 ; python_version < '3.11'",
 "httpx[socks] >=0.28",
 
 ]
 
 
 [project.optional-dependencies]
+# Test toolchain installed by CI via `pip install -e ".[dev]"` (.github/workflows/ci.yml).
+# PEP 735 [dependency-groups] cannot be installed through an extra, so the test
+# deps are mirrored here; pytest-cov is required by the --cov flags in that
+# workflow step.
+dev = [
+  "pytest >=6.2.5",
+  "pytest-cov >=4.0",
+  "coverage[toml] >=6.2",
+  "pandas >=1.3.0",
+  "ipykernel >=6.0",  # provides the python3 kernelspec that tests/cli/test_notebook.py needs
+]
 # Transport adapters (kept optional so `import kbutillib` and the core library
 # never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
 mcp = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
 ]
 api = [
   "fastapi >=0.110",
@@ -64,9 +76,22 @@ apidocs = [
   "mkdocs-material >=9.5",
   "mkdocstrings[python] >=0.24",
 ]
+# Reaction-similarity module (kbu.rxnsim). Imported lazily, so the package
+# imports fine without these; install with: pip install KBUtilLib[reaction_similarity]
+reaction_similarity = [
+  "numpy >=1.24",
+  "scipy >=1.10",
+  "scikit-learn >=1.3",
+  "rdkit >=2023.3",
+  "drfp >=0.3.6",
+]
+# Optional clustering backend (HDBSCAN) for kbu.rxnsim.cluster(algorithm="hdbscan").
+reaction_similarity_extra = [
+  "hdbscan >=0.8.33",
+]
 # Everything needed to run all transports + build docs.
 all = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
   "fastapi >=0.110",
   "uvicorn[standard] >=0.29",
   "httpx[socks] >=0.28",
@@ -86,7 +111,10 @@ dev = [
   "pre-commit >=2.16.0",
   "pre-commit-hooks >=4.6.0",
   "pytest >=6.2.5",
+  "pytest-cov >=4.0",
   "pygments >=2.10.0",
+  "pandas >=1.3.0",
+  "ipykernel >=6.0",
 
 ]
 lint = [

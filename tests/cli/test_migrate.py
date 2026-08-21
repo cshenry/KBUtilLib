@@ -13,26 +13,39 @@ AC #41: ``kbu migrate`` creates root shared dirs with ``.gitkeep`` when
 from __future__ import annotations
 
 import os
-import tomllib
+import sys
 from pathlib import Path
+from typing import Any
 
+try:
+    import tomllib  # py 3.11+
+except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
+import click
 import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import now_utc_iso, write_project_manifest, write_subproject_manifest
-
+from kbutillib.cli.manifest import (
+    now_utc_iso,
+    write_project_manifest,
+    write_subproject_manifest,
+)
+from kbutillib.interfaces.cli import migrate as icli_migrate
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_project(tmp_path: Path, name: str = "myproj", with_layout: bool = False) -> Path:
+def _make_project(
+    tmp_path: Path, name: str = "myproj", with_layout: bool = False
+) -> Path:
     """Create a minimal ``kbu-project.toml`` in *tmp_path* and return the root."""
     root = tmp_path / name
     root.mkdir(exist_ok=True)
-    data: dict = {
+    data: dict[str, Any] = {
         "project": {"name": name, "title": name, "created_at": now_utc_iso()},
         "kbutillib": {"source_path": "/fake", "source_commit": "abc"},
         "update": {"last_pulled_at": now_utc_iso(), "last_pulled_commit": "abc"},
@@ -50,22 +63,26 @@ def _create_subproject(root: Path, sp_name: str, status: str = "migrate") -> Pat
     sp_dir.mkdir(parents=True, exist_ok=True)
     (sp_dir / "notebooks").mkdir(exist_ok=True)
     (sp_dir / "sessions").mkdir(exist_ok=True)
-    write_subproject_manifest(root, sp_name, {
-        "subproject": {
-            "name": sp_name,
-            "title": sp_name,
-            "status": status,
-            "created_at": now,
-            "last_session_at": now,
+    write_subproject_manifest(
+        root,
+        sp_name,
+        {
+            "subproject": {
+                "name": sp_name,
+                "title": sp_name,
+                "status": status,
+                "created_at": now,
+                "last_session_at": now,
+            },
+            "artifacts": {
+                "research_plan": False,
+                "report": False,
+                "reviews": {"plan": [], "build": [], "synthesis": []},
+            },
+            "notebooks": [],
+            "session_refs": [],
         },
-        "artifacts": {
-            "research_plan": False,
-            "report": False,
-            "reviews": {"plan": [], "build": [], "synthesis": []},
-        },
-        "notebooks": [],
-        "session_refs": [],
-    })
+    )
     return sp_dir
 
 
@@ -99,7 +116,9 @@ class TestAC39Prompts:
         empty.mkdir()
         result = _invoke_migrate(empty)
         assert result.exit_code == 1
-        assert "kbu-bootstrapped" in result.output or "kbu-project.toml" in result.output
+        assert (
+            "kbu-bootstrapped" in result.output or "kbu-project.toml" in result.output
+        )
 
     def test_data_dir_prompts_before_move(self, tmp_path: Path) -> None:
         """Prompt text is shown when a data/ directory exists in a subproject."""
@@ -189,6 +208,7 @@ class TestAC40LayoutSharedDirs:
         root = _make_project(tmp_path, with_layout=True)
         # Modify the existing list to a custom value to verify it's untouched
         import tomli_w
+
         with (root / "kbu-project.toml").open("rb") as fh:
             existing = tomllib.load(fh)
         existing["layout"]["shared_dirs"] = ["data", "custom_dir"]
@@ -373,3 +393,122 @@ class TestGitignoreBlock:
         gi_text = (root / ".gitignore").read_text(encoding="utf-8")
         # The marker appears in both open and close lines; count the open marker only.
         assert gi_text.count("# >>> kbu-subproject:sp_idem >>>") == 1
+
+
+# ---------------------------------------------------------------------------
+# interfaces.cli.migrate: internal helpers exercised directly (the classes
+# above drive interfaces/cli/migrate.py transitively via `kbutillib.cli.main`,
+# which re-exports migrate_cmd from the live interfaces tree).
+# ---------------------------------------------------------------------------
+
+
+class TestAddLayoutSharedDirsNoManifest:
+    """Covers interfaces/cli/migrate.py:69 -- returns False when kbu-project.toml
+    is not present in project_root."""
+
+    def test_no_manifest_returns_false(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert icli_migrate._add_layout_shared_dirs(empty) is False
+
+
+class TestAddLayoutSharedDirsMissingWriter:
+    """Covers interfaces/cli/migrate.py:83-84 -- raises the same actionable
+    ImportError naming tomli-w when the writer dependency is unavailable."""
+
+    def test_raises_importerror_naming_tomli_w(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tomli_w
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        with (proj / "kbu-project.toml").open("wb") as fh:
+            tomli_w.dump({"project": {"name": "p"}}, fh)
+
+        monkeypatch.setitem(sys.modules, "tomli_w", None)
+
+        with pytest.raises(ImportError, match="tomli-w"):
+            icli_migrate._add_layout_shared_dirs(proj)
+
+
+class TestMergeFlat:
+    """Covers interfaces/cli/migrate.py:114-122 -- _merge_flat creates the
+    destination root when absent, rejects name collisions, moves items on a
+    clean merge, and removes the emptied source directory."""
+
+    def test_collision_returns_message_and_does_not_move(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "shared.txt").write_text("from-src\n", encoding="utf-8")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "shared.txt").write_text("from-dest\n", encoding="utf-8")
+
+        result = icli_migrate._merge_flat(src, dest)
+
+        assert result is not None
+        assert "Collision" in result
+        assert (src / "shared.txt").read_text() == "from-src\n"
+        assert (dest / "shared.txt").read_text() == "from-dest\n"
+
+    def test_clean_move_creates_dest_and_removes_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("a\n", encoding="utf-8")
+        (src / "b.txt").write_text("b\n", encoding="utf-8")
+        dest = tmp_path / "dest"  # does not exist yet
+
+        result = icli_migrate._merge_flat(src, dest)
+
+        assert result is None
+        assert dest.is_dir()
+        assert (dest / "a.txt").read_text() == "a\n"
+        assert (dest / "b.txt").read_text() == "b\n"
+        assert not src.exists()
+
+
+class TestPromptDataRelocationMerge:
+    """Covers interfaces/cli/migrate.py:175-179 -- choice '2' merges flat data
+    and reports success, or reports a warning when a collision is found."""
+
+    @staticmethod
+    def _wrapper(sp_dir: Path, project_root: Path) -> click.BaseCommand:
+        @click.command()
+        def _cmd() -> None:
+            icli_migrate._prompt_data_relocation("data", sp_dir, "spx", project_root)
+
+        return _cmd
+
+    def test_merge_choice_reports_success(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "proj"
+        sp_dir = project_root / "subprojects" / "spx"
+        sp_dir.mkdir(parents=True)
+        (sp_dir / "data").mkdir()
+        (sp_dir / "data" / "f.csv").write_text("x\n", encoding="utf-8")
+
+        result = CliRunner().invoke(
+            self._wrapper(sp_dir, project_root), [], input="2\n"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Merged data/ -> data/" in result.output
+        assert (project_root / "data" / "f.csv").exists()
+
+    def test_merge_choice_reports_collision_warning(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "proj"
+        sp_dir = project_root / "subprojects" / "spx"
+        sp_dir.mkdir(parents=True)
+        (sp_dir / "data").mkdir()
+        (sp_dir / "data" / "f.csv").write_text("new\n", encoding="utf-8")
+        (project_root / "data").mkdir(parents=True)
+        (project_root / "data" / "f.csv").write_text("old\n", encoding="utf-8")
+
+        result = CliRunner().invoke(
+            self._wrapper(sp_dir, project_root), [], input="2\n"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Warning" in result.output
+        assert "Collision" in result.output
+        assert (project_root / "data" / "f.csv").read_text() == "old\n"

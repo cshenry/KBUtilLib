@@ -7,8 +7,12 @@ docstring.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib  # py 3.11+
+except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import pytest
 
@@ -25,7 +29,6 @@ from kbutillib.layout import (
     subproject_subdirs,
     worknb_gitignore_lines,
 )
-
 
 # ---------------------------------------------------------------------------
 # AC #1 — DEFAULT_SHARED_DIRS constant
@@ -82,8 +85,13 @@ class TestSubprojectSubdirsAdopted:
 
     def test_exact_list(self) -> None:
         expected = [
-            "notebooks", "figures", "nboutput", ".cache",
-            "literature", "sessions", "archive",
+            "notebooks",
+            "figures",
+            "nboutput",
+            ".cache",
+            "literature",
+            "sessions",
+            "archive",
         ]
         assert subproject_subdirs(adopted=True) == expected
 
@@ -135,9 +143,15 @@ class TestRootGitignoreLines:
 
     STANDARD_DIRS = ["data", "models", "genomes"]
     EXPECTED_9 = [
-        "data/**/*.h5", "data/**/*.pkl", "data/**/*.parquet",
-        "models/**/*.h5", "models/**/*.pkl", "models/**/*.parquet",
-        "genomes/**/*.h5", "genomes/**/*.pkl", "genomes/**/*.parquet",
+        "data/**/*.h5",
+        "data/**/*.pkl",
+        "data/**/*.parquet",
+        "models/**/*.h5",
+        "models/**/*.pkl",
+        "models/**/*.parquet",
+        "genomes/**/*.h5",
+        "genomes/**/*.pkl",
+        "genomes/**/*.parquet",
     ]
 
     def test_exact_list_standard_dirs(self) -> None:
@@ -156,7 +170,9 @@ class TestRootGitignoreLines:
     def test_custom_single_dir(self) -> None:
         result = root_gitignore_lines(["proteomes"])
         assert result == [
-            "proteomes/**/*.h5", "proteomes/**/*.pkl", "proteomes/**/*.parquet"
+            "proteomes/**/*.h5",
+            "proteomes/**/*.pkl",
+            "proteomes/**/*.parquet",
         ]
 
     def test_empty_list(self) -> None:
@@ -165,7 +181,11 @@ class TestRootGitignoreLines:
     def test_order_follows_input(self) -> None:
         """Input order is preserved in output."""
         result = root_gitignore_lines(["genomes", "data"])
-        assert result[:3] == ["genomes/**/*.h5", "genomes/**/*.pkl", "genomes/**/*.parquet"]
+        assert result[:3] == [
+            "genomes/**/*.h5",
+            "genomes/**/*.pkl",
+            "genomes/**/*.parquet",
+        ]
         assert result[3:] == ["data/**/*.h5", "data/**/*.pkl", "data/**/*.parquet"]
 
     def test_no_extra_patterns(self) -> None:
@@ -246,7 +266,7 @@ class TestReadSharedDirsUserList:
     def test_empty_shared_dirs_list(self, tmp_path: Path) -> None:
         """User can explicitly opt out of shared dirs with []."""
         toml = tmp_path / "kbu-project.toml"
-        toml.write_text('[layout]\nshared_dirs = []\n', encoding="utf-8")
+        toml.write_text("[layout]\nshared_dirs = []\n", encoding="utf-8")
         assert read_shared_dirs(tmp_path) == []
 
     def test_order_preserved(self, tmp_path: Path) -> None:
@@ -287,8 +307,10 @@ class TestReadSharedDirsTomllib:
 
     def test_implementation_uses_tomllib(self) -> None:
         """Verify the module imports tomllib (not tomli or another 3rd-party lib)."""
-        import kbutillib.layout as layout_mod
         import inspect
+
+        import kbutillib.layout as layout_mod
+
         src = inspect.getsource(layout_mod)
         assert "import tomllib" in src
 
@@ -436,6 +458,22 @@ class TestApplyWorknbGitignoreBlockAppend:
         assert "*.pyc" in content
         assert WORKNB_GITIGNORE_MARKER_START in content
 
+    def test_no_trailing_newline_gets_separator_before_block(
+        self, tmp_path: Path
+    ) -> None:
+        """When existing content has no trailing newline, apply_worknb_gitignore_block
+        must insert a newline so the last pre-existing line is not concatenated
+        onto the block's first line (AC: layout.py:285)."""
+        gi = tmp_path / ".gitignore"
+        last_line = "*.pyc"
+        gi.write_text(last_line, encoding="utf-8")
+        apply_worknb_gitignore_block(gi)
+        content = gi.read_text(encoding="utf-8")
+        assert content.startswith(last_line + "\n")
+        # The pre-existing final line must not be glued to the marker line.
+        assert last_line + WORKNB_GITIGNORE_MARKER_START not in content
+        assert WORKNB_GITIGNORE_MARKER_START in content
+
     def test_existing_content_not_modified(self, tmp_path: Path) -> None:
         gi = tmp_path / ".gitignore"
         pre_existing = "*.pyc\n__pycache__/\n"
@@ -505,8 +543,7 @@ class TestApplyWorknbGitignoreBlockReplace:
         gi = tmp_path / ".gitignore"
         stale = (
             WORKNB_GITIGNORE_MARKER_START + "\n"
-            "notebooks/PRJ-*/OldCache/\n"
-            + WORKNB_GITIGNORE_MARKER_END + "\n"
+            "notebooks/PRJ-*/OldCache/\n" + WORKNB_GITIGNORE_MARKER_END + "\n"
         )
         gi.write_text(stale, encoding="utf-8")
         apply_worknb_gitignore_block(gi)
@@ -519,8 +556,7 @@ class TestApplyWorknbGitignoreBlockReplace:
         before = "*.pyc\n"
         stale_block = (
             WORKNB_GITIGNORE_MARKER_START + "\n"
-            "old_line/\n"
-            + WORKNB_GITIGNORE_MARKER_END + "\n"
+            "old_line/\n" + WORKNB_GITIGNORE_MARKER_END + "\n"
         )
         gi.write_text(before + stale_block, encoding="utf-8")
         apply_worknb_gitignore_block(gi)
@@ -532,8 +568,7 @@ class TestApplyWorknbGitignoreBlockReplace:
         gi = tmp_path / ".gitignore"
         stale_block = (
             WORKNB_GITIGNORE_MARKER_START + "\n"
-            "old_line/\n"
-            + WORKNB_GITIGNORE_MARKER_END + "\n"
+            "old_line/\n" + WORKNB_GITIGNORE_MARKER_END + "\n"
         )
         after = "node_modules/\n"
         gi.write_text(stale_block + after, encoding="utf-8")
@@ -553,7 +588,12 @@ class TestBerilFunctionsUnchanged:
 
     def test_subproject_subdirs_non_adopted(self) -> None:
         assert subproject_subdirs(adopted=False) == [
-            "notebooks", "figures", "nboutput", ".cache", "literature", "sessions"
+            "notebooks",
+            "figures",
+            "nboutput",
+            ".cache",
+            "literature",
+            "sessions",
         ]
 
     def test_subproject_subdirs_adopted(self) -> None:
@@ -563,7 +603,9 @@ class TestBerilFunctionsUnchanged:
 
     def test_subproject_gitignore_lines(self) -> None:
         assert subproject_gitignore_lines() == [
-            ".cache/", "nboutput/", ".adoption-notes.md"
+            ".cache/",
+            "nboutput/",
+            ".adoption-notes.md",
         ]
 
     def test_default_shared_dirs_unchanged(self) -> None:

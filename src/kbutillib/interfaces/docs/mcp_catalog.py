@@ -156,7 +156,12 @@ def generate_mcp_catalog(registry: CapabilityRegistry) -> str:
     lines.append("| Tool | Description | Status |")
     lines.append("|------|-------------|--------|")
 
-    for spec, ts in zip(mcp_specs_sorted, tool_specs, strict=True):
+    if len(mcp_specs_sorted) != len(tool_specs):
+        raise ValueError(
+            "mcp_specs_sorted and tool_specs length mismatch: "
+            f"{len(mcp_specs_sorted)} != {len(tool_specs)}"
+        )
+    for spec, ts in zip(mcp_specs_sorted, tool_specs):
         available, _ = spec.availability()
         status = "✅" if available else "⚠️"
         desc_first_line = ts.get("description", "").splitlines()[0] if ts.get("description") else "—"
@@ -226,6 +231,12 @@ def _main() -> None:
         action="store_true",
         default=True,
         help="Call register_all() to populate the registry (default: True).",
+    )
+    parser.add_argument(
+        "--no-register",
+        action="store_false",
+        dest="register",
+        help="Do not call register_all(); emit the catalog for an empty registry.",
     )
     args = parser.parse_args()
 

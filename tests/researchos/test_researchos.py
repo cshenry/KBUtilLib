@@ -634,32 +634,32 @@ class TestEnsureResearchOSBinary:
 
 class TestSlug:
     def test_slug_lowercases(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("AIALE") == "aiale"
 
     def test_slug_replaces_non_alphanumeric_with_hyphen(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("My Study 2024!") == "my-study-2024"
 
     def test_slug_strips_leading_trailing_hyphens(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("!hello!") == "hello"
 
     def test_slug_compresses_runs(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("a---b") == "a-b"
 
     def test_slug_alphanumeric_unchanged(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("abc123") == "abc123"
 
     def test_slug_real_example(self) -> None:
-        from kbutillib.researchos.registry import _slug
+        from kbutillib.agents.researchos.registry import _slug
 
         assert _slug("RoboticLabManuscript") == "roboticlabmanuscript"
 
@@ -1629,7 +1629,7 @@ class TestCLISetRoot:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kbutillib.researchos.config._DEFAULT_CONFIG_FILE",
+            "kbutillib.agents.researchos.config._DEFAULT_CONFIG_FILE",
             fake_home / ".kbutillib" / "config.yaml",
         )
 

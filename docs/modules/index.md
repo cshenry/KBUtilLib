@@ -64,6 +64,24 @@ These modules provide access to KBase services and external databases:
 - Cross-reference integration
 - Biochemical data analysis
 
+### [MSReactionSimilarityUtils](ms_reaction_similarity_utils.md)
+
+**Reaction similarity lookup and clustering backed by the BERDL data lake**
+
+- Stored and recomputed (DRFP) reaction similarity lookup
+- Neighbour expansion for annotation-refinement pipelines
+- Pairwise distance matrix construction
+- Clustering by chemical distinctness with transport-reaction segregation
+
+### [KBBERDLUtils](kb_berdl_utils.md)
+
+**BERDL (Biological and Environmental Research Data Lake) API access for genomic, ontology, and other scientific data, reached as `kbu.berdl`**
+
+- SQL-based query execution against BERDL Delta Lake tables
+- Database introspection
+- Pagination support
+- Genomic, ontology, and other KBase scientific data access
+
 ## Analysis and Processing Modules
 
 These modules provide specialized analysis capabilities:
@@ -166,16 +184,16 @@ class GenomicsWorkflow(KBWSUtils, KBGenomeUtils, SharedEnvUtils):
         return features
 ```
 
-### Pre-built combinations
+### Unified toolkit entry point
 
 ```python
-from kbutillib.examples import KBaseWorkbench, NotebookAnalysis
+from kbutillib import KBUtilLib
 
-# Complete analysis environment
-workbench = KBaseWorkbench(config_file="config.yaml")
+kbu = KBUtilLib()
 
-# Notebook-optimized tools
-notebook_tools = NotebookAnalysis()
+# Lazily-constructed facade accessors
+genome_utils = kbu.genome
+biochem_utils = kbu.biochem
 ```
 
 ## Module Integration

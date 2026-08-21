@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1138,7 +1139,10 @@ class TestKeepOnFailure:
         scratch_dirs = list(work_root.glob("dram2_*"))
         assert len(scratch_dirs) >= 1
         for d in scratch_dirs:
-            assert not str(d).startswith("/tmp"), f"scratch under /tmp: {d}"
+            assert d.parent == work_root, f"scratch not directly under work_root: {d}"
+            assert d.parent != Path(tempfile.gettempdir()), (
+                f"scratch placed directly in the system temp dir: {d}"
+            )
 
     def test_failed_dir_created_on_nonzero_exit(self, tmp_path: Path):
         """failed-<run_id>/ is created under work_root on non-zero Nextflow exit."""

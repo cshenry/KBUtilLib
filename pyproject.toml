@@ -32,10 +32,23 @@ dependencies = [
 
 
 [project.optional-dependencies]
+# Test/dev dependencies, duplicated from [dependency-groups].dev below.
+# BOTH are required and neither is redundant: PEP 735 dependency-groups are
+# reachable by `uv sync --group dev` but NOT by pip extras, and .github/
+# workflows/ci.yml installs with `pip install -e ".[dev]"`. Declaring `dev`
+# only as a group made pip warn "does not provide the extra 'dev'", install
+# nothing, and fail one second later with `No module named pytest` -- which
+# is why CI had never been green. If you edit one list, edit the other.
+dev = [
+  "pytest >=6.2.5",
+  "pytest-cov >=4.0",
+  "coverage[toml] >=6.2",
+  "pandas >=1.3.0",
+]
 # Transport adapters (kept optional so `import kbutillib` and the core library
 # never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
 mcp = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
 ]
 api = [
   "fastapi >=0.110",
@@ -66,7 +79,7 @@ apidocs = [
 ]
 # Everything needed to run all transports + build docs.
 all = [
-  "mcp >=1.27,<2",
+  "mcp >=1.27,<2 ; python_version >= '3.10'",
   "fastapi >=0.110",
   "uvicorn[standard] >=0.29",
   "httpx[socks] >=0.28",
@@ -83,6 +96,8 @@ Changelog = "https://github.com/cshenry/KBUtilLib/releases"
 [dependency-groups]
 dev = [
   "coverage[toml] >= 6.2",
+  "pytest-cov >=4.0",
+  "pandas >=1.3.0",
   "pre-commit >=2.16.0",
   "pre-commit-hooks >=4.6.0",
   "pytest >=6.2.5",
@@ -153,6 +168,11 @@ source = ["kbutillib", "tests"]
 
 [tool.coverage.report]
 show_missing = true
+# Coverage is REPORTED by the pytest jobs but GATED separately -- ci.yml passes
+# --cov-fail-under=0 so a coverage shortfall never fails a test run. This value
+# is the target the dedicated coverage job enforces, not a per-PR merge gate.
+# It was previously enforced inline at 100 against ~41% real coverage, so every
+# PR was red regardless of its content (Chris's call, 2026-08-20).
 fail_under = 100
 exclude_lines = [
   "pragma: no cover",

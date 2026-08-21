@@ -157,42 +157,50 @@ def tests(session: nox.Session) -> None:
 
 @nox.session(python=python_versions[0])
 def coverage(session: nox.Session) -> None:
-    """Produce the coverage report."""
-    # `args` previously defaulted to ["report"], a leftover from the
-    # cookiecutter template where the session ran `coverage combine` and
-    # `coverage report` as separate coverage(1) commands. Here it was spliced
-    # into the pytest invocation instead, so pytest received "report" as a test
-    # path and died with `file or directory not found: report` before running
-    # anything. Nobody saw it for a year because this job is `needs: tests` and
-    # the tests job never got far enough to trigger it.
-    args = session.posargs
+    """Produce the coverage report.
 
-    # Install the dev extra, not a bare `-e .` -- the suite needs pytest-cov and
-    # pandas, and a bare install leaves them out.
+    Called two ways by .github/workflows/tests.yml:
+
+      nox --session=coverage             -> run the suite, then `coverage report`
+      nox --session=coverage -- xml -i   -> `coverage xml -i` on existing data
+
+    So posargs are coverage(1) arguments, NOT pytest arguments. The previous
+    implementation spliced them straight into the pytest argv, which meant the
+    bare call ran `pytest ... report` ("file or directory not found: report")
+    and the XML call ran `pytest ... xml -i` ("unrecognized arguments: -i").
+    Both failed before doing anything. Nobody saw it because this job is
+    `needs: tests` and the tests job had never once succeeded.
+    """
+    args = session.posargs or ["report"]
+
+    # The dev extra, not a bare `-e .` -- the suite needs pytest-cov and pandas.
     session.install("-e", ".[dev]")
 
-    session.log("Running pytest with coverage...")
+    # Only run the suite when we are not merely post-processing existing
+    # coverage data (the `-- xml -i` invocation reads the .coverage file the
+    # bare invocation just wrote).
+    if not session.posargs:
+        session.log("Running pytest with coverage...")
+        session.run(
+            "pytest",
+            # Mirrors .github/workflows/ci.yml. Change one, change both, or the
+            # coverage number describes a different suite than the one CI runs.
+            "--ignore=tests/notebook/helpers",
+            "--ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py",
+            "--ignore=tests/biochem/test_escher_utils.py",
+            "--ignore=tests/kbase/test_kb_narrative_provenance.py",
+            "--ignore=tests/kbase/test_kb_plm_utils.py",
+            "--ignore=tests/kbase/test_kb_ws_utils.py",
+            "--ignore=tests/modeling/test_ms_reconstruction_utils.py",
+            "--ignore=tests/kbase/test_upload_blob_file_streaming.py",
+            "--cov=src",
+            "--cov-report=term-missing",
+            # Coverage is reported here and gated separately -- see
+            # [tool.coverage.report] fail_under.
+            "--cov-fail-under=0",
+        )
 
-    # Ignore list mirrors .github/workflows/ci.yml. If you change one, change
-    # both -- a divergence here means the coverage number describes a different
-    # suite than the one the pytest jobs run.
-    session.run(
-        "pytest",
-        "--ignore=tests/notebook/helpers",
-        "--ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py",
-        "--ignore=tests/biochem/test_escher_utils.py",
-        "--ignore=tests/kbase/test_kb_narrative_provenance.py",
-        "--ignore=tests/kbase/test_kb_plm_utils.py",
-        "--ignore=tests/kbase/test_kb_ws_utils.py",
-        "--ignore=tests/modeling/test_ms_reconstruction_utils.py",
-        "--ignore=tests/kbase/test_upload_blob_file_streaming.py",
-        "--cov=src",
-        "--cov-report=xml",
-        "--cov-report=term-missing",
-        # Coverage is reported here, gated elsewhere -- see [tool.coverage.report].
-        "--cov-fail-under=0",
-        *args,
-    )
+    session.run("coverage", *args)
 
 
 @nox.session(name="typeguard", python=python_versions[0])

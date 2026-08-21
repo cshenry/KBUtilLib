@@ -167,7 +167,8 @@ class MSReactionSimilarityUtils(SharedEnvUtils):
             A list of row dicts.
 
         Raises:
-            RuntimeError: If a page query fails after retries.
+            RuntimeError: If a page query fails after retries, or a response has an
+                unusable or contradictory ``has_more`` value.
         """
         page_size = min(page_size, self.MAX_PAGE)
         rows: list[dict[str, Any]] = []
@@ -176,8 +177,22 @@ class MSReactionSimilarityUtils(SharedEnvUtils):
             result = self._query_page(sql, limit=page_size, offset=offset)
             page = result.get("data") or []
             rows.extend(page)
-            if len(rows) >= max_rows or not result.get("has_more") or not page:
+            if len(rows) >= max_rows:
                 break
+            has_more = result.get("has_more")
+            if not isinstance(has_more, bool):
+                raise RuntimeError(
+                    f"BERDL response has unusable has_more after collecting {len(rows)} rows; "
+                    "cannot prove the result set is complete without boolean has_more."
+                    f"\nSQL: {sql}"
+                )
+            if has_more is False:
+                break
+            if not page:
+                raise RuntimeError(
+                    f"BERDL response has_more=True with an empty page after collecting "
+                    f"{len(rows)} rows; cannot continue safely.\nSQL: {sql}"
+                )
             offset += len(page)
         return rows
 

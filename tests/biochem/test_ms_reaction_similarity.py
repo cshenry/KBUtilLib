@@ -324,3 +324,71 @@ def test_live_find_similar_id_and_smarts():
         smarts, candidate_ids=[d["reaction_id"] for d in out], top_k=3
     )
     assert all(d["method"] == "drfp" for d in sm)
+
+
+# ── _fetch_all pagination ────────────────────────────────────────────────
+
+class _PagingBerdl:
+    """Return pre-seeded responses and record page requests."""
+
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+
+    def query(self, sql, limit=None, offset=0, timeout=None):
+        self.calls.append((sql, limit, offset, timeout))
+        return next(self.responses)
+
+
+def _paging_rs(responses):
+    return MSReactionSimilarityUtils(
+        berdl=_PagingBerdl(responses),
+        config_file=False,
+        token_file=None,
+        kbase_token_file=None,
+    )
+
+
+def test_fetch_all_raises_when_has_more_is_absent():
+    rs = _paging_rs([{"success": True, "data": [{"id": "a"}]}])
+
+    with pytest.raises(RuntimeError, match="has_more"):
+        rs._fetch_all("SELECT id FROM table")
+
+
+def test_fetch_all_raises_when_has_more_is_none():
+    rs = _paging_rs([{"success": True, "data": [{"id": "a"}], "has_more": None}])
+
+    with pytest.raises(RuntimeError, match="has_more"):
+        rs._fetch_all("SELECT id FROM table")
+
+
+def test_fetch_all_concatenates_pages_with_boolean_has_more():
+    rs = _paging_rs([
+        {"success": True, "data": [{"id": "a"}], "has_more": True},
+        {"success": True, "data": [{"id": "b"}], "has_more": False},
+    ])
+
+    assert rs._fetch_all("SELECT id FROM table", page_size=1) == [{"id": "a"}, {"id": "b"}]
+    assert [call[2] for call in rs.berdl.calls] == [0, 1]
+
+
+def test_fetch_all_raises_for_empty_page_with_has_more_true():
+    rs = _paging_rs([{"success": True, "data": [], "has_more": True}])
+
+    with pytest.raises(RuntimeError, match="has_more"):
+        rs._fetch_all("SELECT id FROM table")
+
+
+def test_fetch_all_max_rows_short_circuits_unusable_has_more():
+    rs = _paging_rs([{"success": True, "data": [{"id": "a"}, {"id": "b"}]}])
+
+    assert rs._fetch_all("SELECT id FROM table", max_rows=1) == [{"id": "a"}, {"id": "b"}]
+
+
+@pytest.mark.parametrize("has_more", [1, "true"])
+def test_fetch_all_raises_when_has_more_is_truthy_non_boolean(has_more):
+    rs = _paging_rs([{"success": True, "data": [{"id": "a"}], "has_more": has_more}])
+
+    with pytest.raises(RuntimeError, match="has_more"):
+        rs._fetch_all("SELECT id FROM table")

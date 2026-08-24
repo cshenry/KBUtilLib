@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
     from .domains.external.kbdl_service_utils import KBDLServiceUtilsImpl
     from .domains.external.patric_ws_utils import PatricWSUtilsImpl
+    from .domains.external.rast_utils import RastUtilsImpl
     from .domains.external.rcsb_pdb_utils import RCSBPDBUtilsImpl
     from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
     from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
@@ -111,6 +112,7 @@ class KBUtilLib:
         self._berdl = None
         self._remote_solver = None
         self._patric = None
+        self._rast = None
         self._uniprot = None
         self._pdb = None
         self._catalog = None
@@ -331,6 +333,13 @@ class KBUtilLib:
             from .domains.external.patric_ws_utils import PatricWSUtilsImpl
             self._patric = PatricWSUtilsImpl(self.env)
         return self._patric
+
+    @property
+    def rast(self) -> RastUtilsImpl:
+        if self._rast is None:
+            from .domains.external.rast_utils import RastUtilsImpl
+            self._rast = RastUtilsImpl(self.env)
+        return self._rast
 
     @property
     def uniprot(self) -> KBUniProtUtilsImpl:

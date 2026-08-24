@@ -215,6 +215,13 @@ except ImportError as e:
     KBDLServiceUtils = None
 
 try:
+    from .domains.external.rast_utils import RastServiceError, RastUtils
+except ImportError as e:
+    _import_error("rast_utils", e)
+    RastServiceError = None
+    RastUtils = None
+
+try:
     from .domains.genome.mmseqs_utils import MMSeqsUtils
 except ImportError as e:
     _import_error("mmseqs_utils", e)
@@ -453,6 +460,11 @@ except ImportError:
     KBDLServiceUtilsImpl = None
 
 try:
+    from .domains.external.rast_utils import RastUtilsImpl
+except ImportError:
+    RastUtilsImpl = None
+
+try:
     from .domains.genome.ontomap_utils import OntomapUtilsImpl
 except ImportError:
     OntomapUtilsImpl = None
@@ -521,6 +533,8 @@ __all__ = [
     "PatricWSUtils",
     "PipelineState",
     "PipelineStatus",
+    "RastServiceError",
+    "RastUtils",
     "RCSBPDBUtils",
     "Reads",
     "ReadSet",
@@ -555,6 +569,7 @@ __all__ = [
     "MSReconstructionUtilsImpl",
     "MSRemoteSolverUtilsImpl",
     "PatricWSUtilsImpl",
+    "RastUtilsImpl",
     "RCSBPDBUtilsImpl",
     "SKANIUtilsImpl",
     "ThermoUtilsImpl",

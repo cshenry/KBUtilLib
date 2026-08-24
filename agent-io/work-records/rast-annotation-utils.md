@@ -7,7 +7,7 @@ rast-annotation-utils
 feat/rast-annotation-utils
 
 ## commit_shas
-(filled in below after commit — see final message)
+- 893dcdb feat(external): add RAST annotation utility wrapping the token-free RAST JSON-RPC API
 
 ## repo state found / base used
 

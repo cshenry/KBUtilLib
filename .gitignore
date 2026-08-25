@@ -61,3 +61,6 @@ data/ms_classifier/
 
 # opencode session continuation files
 .omo/
+
+# Python build artifacts (setuptools/wheel build tree)
+build/

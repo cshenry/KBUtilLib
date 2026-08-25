@@ -12,6 +12,7 @@ __pycache__/
 # Virtual environments
 activate.sh
 .venv
+.venv-task/
 venv/
 env/
 # OS generated files
@@ -64,3 +65,13 @@ data/ms_classifier/
 
 # Python build artifacts (setuptools/wheel build tree)
 build/
+
+# KEGG-derived generated artifacts (kbdl-local-bakta-kofamscan-v1 D6.1/D6.2).
+# Produced on the compute host by build_ko_function_map.py and
+# build_guard_kofam_profiles.py from bulk KEGG ko/ko_list content; KEGG's
+# redistribution terms for that content are more restrictive than this
+# repo's own licence, so these must never be committed regardless of where
+# they happen to land during local development.
+ko_function_map*.tsv
+/kofam-guard/
+/guard.txt

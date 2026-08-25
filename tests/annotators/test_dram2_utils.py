@@ -916,6 +916,74 @@ class TestB0001RoundTrip:
         assert "K00002" in ko_ids
 
 
+class TestSuffixNoCollideNoDoubleApply:
+    """Round-trip proof for caller ids that already end in ``_<digits>``.
+
+    The synthetic emitted id (``g_<n>``) is unrelated to the caller id's own
+    text, so a caller id that happens to already look prodigal-safe (e.g.
+    ``gene_12``, or ``g_1`` itself — colliding with what would be the FIRST
+    emitted id) must neither collide with an emitted id nor come back out
+    with a second ``_<n>`` suffix stacked onto it. This directly covers the
+    PRD's required regression: "a test covers ids that already end in
+    '_<digits>' to prove the suffix logic does not collide or double-apply."
+    """
+
+    def test_write_faa_ids_already_suffixed_do_not_collide(self, tmp_path: Path):
+        """Caller ids already shaped like emitted ids must not create ambiguity."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        # "g_1" would be byte-identical to the first emitted id if the
+        # synthetic scheme were derived from caller text; "gene_12" and
+        # "gene_1" already end in "_<digits>" per the PRD's required case.
+        proteins = {
+            "g_1": "MKTAYIAKQRQ" * 5,
+            "gene_12": "MAAQAAKLT" * 5,
+            "gene_1": "MPPQRSTLVK" * 5,
+        }
+        emap = utils._write_faa(path, proteins)
+        headers = _read_faa_headers(path)
+
+        # Emitted ids are the synthetic g_1/g_2/g_3 sequence, unrelated to
+        # caller text -- no double-suffixing like "gene_12_2".
+        assert headers == ["g_1", "g_2", "g_3"]
+        for h in headers:
+            last = h.split("_")[-1]
+            assert int(last) >= 1, f"header {h!r} final token not an int"
+
+        # Reverse map recovers each original caller id exactly.
+        assert emap == {"g_1": "g_1", "g_2": "gene_12", "g_3": "gene_1"}
+
+    def test_full_roundtrip_preserves_already_suffixed_ids(self, tmp_path: Path):
+        """AnnotationRecord.gene_id is byte-identical for already-suffixed ids."""
+        utils = _make_utils()
+        path = tmp_path / "input.faa"
+        proteins = {
+            "g_1": "MKTAYIAKQRQ" * 5,
+            "gene_12": "MAAQAAKLT" * 5,
+            "gene_1": "MPPQRSTLVK" * 5,
+        }
+        emap = utils._write_faa(path, proteins)
+        headers = _read_faa_headers(path)
+
+        tsv = (
+            "query_id\tkofam_id\tkofam_description\n"
+            f"{headers[0]}\tK00001\thit one\n"
+            f"{headers[1]}\tK00002\thit two\n"
+            f"{headers[2]}\tK00003\thit three\n"
+        )
+        records = _parse_annotations_tsv(tsv, emap)
+
+        gene_ids = [r.gene_id for r in records]
+        # Every returned gene_id is byte-identical to a caller-supplied id,
+        # with no residual "_<n>" suffix appended (e.g. NOT "gene_12_2").
+        assert gene_ids == ["g_1", "gene_12", "gene_1"]
+        for original in proteins:
+            assert original in gene_ids
+        # No synthetic emitted ids leaked into the output.
+        assert "g_2" not in gene_ids
+        assert "g_3" not in gene_ids
+
+
 # ---------------------------------------------------------------------------
 # Env builder tests (Acceptance Criterion 6-7)
 # ---------------------------------------------------------------------------

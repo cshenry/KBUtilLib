@@ -19,7 +19,7 @@ directly in this module rather than imported.
 
 Endpoint & auth
 ----------------
-Targets the tunnelled loopback endpoint, default ``http://127.0.0.1:8790``,
+Targets the tunnelled loopback endpoint, default ``http://127.0.0.1:8791``,
 overridable via the ``KBDL_SERVICE_URL`` environment variable or the
 ``base_url`` constructor argument. The KBase auth token is taken from the
 environment the same way :class:`~kbutillib.domains.external.patric_ws_utils.PatricWSUtils`
@@ -123,7 +123,7 @@ __all__ = [
 KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 
 #: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
-DEFAULT_BASE_URL = "http://127.0.0.1:8790"
+DEFAULT_BASE_URL = "http://127.0.0.1:8791"
 
 #: The five job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
@@ -234,7 +234,7 @@ class KBDLServiceUtils(SharedEnvUtils):
         Args:
             base_url: Override for the tunnelled loopback endpoint. If
                 None, uses the ``KBDL_SERVICE_URL`` environment variable,
-                falling back to ``http://127.0.0.1:8790``.
+                falling back to ``http://127.0.0.1:8791``.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built ``requests.Session`` (or a
                 stand-in with a compatible ``.request()``), so tests can

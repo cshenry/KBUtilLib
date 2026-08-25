@@ -74,4 +74,5 @@ build/
 # they happen to land during local development.
 ko_function_map*.tsv
 /kofam-guard/
+/guard/
 /guard.txt

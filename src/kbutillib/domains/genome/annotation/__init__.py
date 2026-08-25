@@ -1,4 +1,4 @@
-"""Genome annotation tools (Prokka, DRAM2, TransyT, generic annotator)."""
+"""Genome annotation tools (Prokka, DRAM2, TransyT, Bakta, KofamScan, generic annotator)."""
 from .annotator_utils import (  # noqa: F401
     AnnotationRecord,
     AnnotationResult,
@@ -6,7 +6,9 @@ from .annotator_utils import (  # noqa: F401
     Term,
     ToolUnavailableError,
 )
+from .bakta_utils import BaktaUtils  # noqa: F401
 from .dram2_utils import DRAM2Utils  # noqa: F401
+from .kofamscan_utils import KofamscanUtils  # noqa: F401
 from .prokka_utils import ProkkaUtils  # noqa: F401
 from .transyt_utils import TransytUtils  # noqa: F401
 
@@ -16,7 +18,9 @@ __all__ = [
     "AnnotationResult",
     "Term",
     "ToolUnavailableError",
+    "BaktaUtils",
     "DRAM2Utils",
+    "KofamscanUtils",
     "ProkkaUtils",
     "TransytUtils",
 ]

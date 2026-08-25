@@ -9,11 +9,30 @@
 # see agent-io/research/2026-08-23-filipe-bakta-kofamscan-recon.md in the
 # KBDLJobRunningPrototype repo).
 #
-# NOT A BYTE-FOR-BYTE PORT, AND SAY SO PLAINLY: this file was authored from
-# primary-laptop, which has no network route to poplar or to
-# github.com/Fxe/bioseed_tools. It could not be diffed against the literal
-# upstream Dockerfile. It is reconstructed from the recon's MEASURED,
-# load-bearing facts instead:
+# RECONSTRUCTED-THEN-CORRECTED ON POPLAR (2026-08-25): this file was first
+# authored from primary-laptop with no network route to poplar or to
+# github.com/Fxe/bioseed_tools, so it could not be diffed against the
+# literal upstream Dockerfile. The literal upstream recipe is
+# `FROM python:3.13-slim` + apt ruby/parallel + HMMER 3.4 compiled from a
+# vendored `src/hmmer.tar.gz` + a vendored `src/kofam_scan` Ruby tool copied
+# to `/opt/kofam_scan`, then a Celery worker layer.
+#
+# This reconstruction keeps the conda base instead of vendoring fliu's
+# 19 MB HMMER tarball + kofam_scan source into KBUtilLib. Verified on poplar
+# 2026-08-25 that `conda install kofamscan=1.3.0 hmmer=3.4` DOES build
+# (unlike the bakta conda recipe) and yields the measured pairing:
+# `exec_annotation` (kofamscan 1.3.0-2) + `hmmsearch` reporting
+# "HMMER 3.4 (Aug 2023)", plus ruby 3.4 and GNU parallel, all on
+# /opt/conda/bin.
+#
+# ONE DRIFT CORRECTED: conda installs `exec_annotation` at
+# `/opt/conda/bin/exec_annotation`, but KofamscanUtils's default
+# `kofamscan.executable` is `/opt/kofam_scan/exec_annotation` (the upstream
+# vendored path) and it invokes that path as argv[0] with NO PATH lookup.
+# We add a symlink so the upstream path resolves out-of-box; because the
+# Ruby entry point uses `require_relative 'lib/kofam_scan'`, the symlink
+# resolves to the real file and its sibling `lib/` is found correctly.
+# Load-bearing facts that survive the correction:
 #   - KOfamScan v1.3.0 with HMMER 3.4 is the pinned, measured pairing,
 #     against the `2025-11-03` profile set (7.2 GB) plus its paired
 #     `ko_list`.
@@ -23,8 +42,6 @@
 #     to rows carrying the `*` significance flag -- that is KofamscanUtils's
 #     concern, not this image's, but it is why HMMER's exact version is
 #     pinned rather than left to float.
-# Whoever next has poplar access should diff this file against the literal
-# upstream Dockerfile and correct any drift this reconstruction introduced.
 #
 # STRIPPED FROM UPSTREAM: the Celery worker layer. Upstream's default
 # entrypoint is /worker/run_worker.sh, which subscribes to fliu's Celery
@@ -79,15 +96,34 @@ RUN conda install -n base -y -c conda-forge -c bioconda \
 
 ENV PATH=/opt/conda/bin:$PATH
 
+# Expose exec_annotation at the upstream vendored path
+# (/opt/kofam_scan/exec_annotation) that KofamscanUtils uses by default as
+# argv[0] with no PATH lookup. The Ruby entry point resolves its own lib/
+# via require_relative against the *real* file, so a symlink is sufficient.
+RUN mkdir -p /opt/kofam_scan \
+    && ln -s /opt/conda/bin/exec_annotation /opt/kofam_scan/exec_annotation
+
 # Sanity layer: fail the build early (not at first annotate) if
-# exec_annotation is not runnable in this image. exec_annotation has no
-# dedicated --version flag; -h is the documented smoke check.
-RUN exec_annotation -h >/dev/null
+# exec_annotation is not runnable in this image, via BOTH the PATH name and
+# the adapter's default absolute path. exec_annotation has no dedicated
+# --version flag; -h is the documented smoke check.
+RUN exec_annotation -h >/dev/null \
+    && /opt/kofam_scan/exec_annotation -h >/dev/null
 
 WORKDIR /work
 
+# The condaforge/miniforge3 base sets `ENTRYPOINT ["tini","--"]`. tini is a
+# benign init/reaper and does NOT break the adapter's argv invocation
+# (verified: `docker run <img> /opt/kofam_scan/exec_annotation -h` works),
+# but KofamscanUtils passes its command as plain argv with no
+# `--entrypoint` override, so we reset ENTRYPOINT to nothing to match this
+# image's stated "no ENTRYPOINT" design and keep a bare `docker run`
+# predictable. Containers are short-lived `--rm` runs, so PID-1 reaping is
+# not needed.
+ENTRYPOINT []
+
 # KofamscanUtils always passes an explicit `exec_annotation ...` argv to
-# `docker run`, so this CMD only matters for a bare `docker run
-# kbutillib/kofamscan`. There is deliberately no ENTRYPOINT -- see
-# "STRIPPED FROM UPSTREAM" above.
-CMD ["exec_annotation", "-h"]
+# `docker run` (default `/opt/kofam_scan/exec_annotation`), so this CMD only
+# matters for a bare `docker run kbutillib/kofamscan`. There is deliberately
+# no worker ENTRYPOINT -- see "STRIPPED FROM UPSTREAM" above.
+CMD ["/opt/kofam_scan/exec_annotation", "-h"]

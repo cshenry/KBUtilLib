@@ -361,6 +361,61 @@ class TestRunBaktaCommandShape:
         assert result_payload["version"]["bakta"] == "1.11.4"
         assert result_payload["features"][0]["id"] == "g1"
 
+    def test_native_outdir_not_pre_created_only_parent_exists(self, tmp_path):
+        """bakta_proteins refuses a pre-existing --output dir (native path).
+
+        Assert the *observable state at subprocess-invocation time*: outdir
+        must not exist yet, while its parent must. Asserting only that
+        ``Path.mkdir`` was not called would be a weaker claim than asserting
+        what the tool actually sees when the command runs.
+        """
+        bu = _make_utils(db_path=str(tmp_path))
+        fasta = tmp_path / "input.faa"
+        fasta.write_text(">g1\nMKTAY\n")
+        outdir = tmp_path / "out"
+
+        seen: dict[str, bool] = {}
+
+        def _fake_run(cmd, **kwargs):
+            seen["outdir_exists"] = outdir.exists()
+            seen["parent_exists"] = outdir.parent.exists()
+            return self._fake_completed()
+
+        with patch("subprocess.run", side_effect=_fake_run):
+            bu._run_bakta(
+                fasta_path=fasta, outdir=outdir, resolved_db=str(tmp_path), threads=1
+            )
+
+        assert seen["outdir_exists"] is False
+        assert seen["parent_exists"] is True
+
+    def test_docker_outdir_not_pre_created_only_parent_exists(self, tmp_path):
+        """bakta_proteins refuses a pre-existing --output dir (docker path).
+
+        Same observable-state assertion as the native-path test above,
+        exercised through the docker command-construction branch.
+        """
+        bu = _make_utils(db_path=str(tmp_path))
+        bu._docker_image = "kbutillib/bakta:latest"
+        fasta = tmp_path / "input.faa"
+        fasta.write_text(">g1\nMKTAY\n")
+        outdir = tmp_path / "out"
+
+        seen: dict[str, bool] = {}
+
+        def _fake_run(cmd, **kwargs):
+            seen["outdir_exists"] = outdir.exists()
+            seen["parent_exists"] = outdir.parent.exists()
+            return self._fake_completed()
+
+        with patch("subprocess.run", side_effect=_fake_run):
+            bu._run_bakta(
+                fasta_path=fasta, outdir=outdir, resolved_db=str(tmp_path), threads=1
+            )
+
+        assert seen["outdir_exists"] is False
+        assert seen["parent_exists"] is True
+
 
 # ---------------------------------------------------------------------------
 # annotate() — full path, subprocess + db version mocked

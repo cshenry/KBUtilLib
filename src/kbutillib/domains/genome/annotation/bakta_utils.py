@@ -444,7 +444,10 @@ class BaktaUtils(AnnotatorUtils):
 
         Args:
             fasta_path: Path to the one-line-per-record input FASTA.
-            outdir: Output directory (created if absent).
+            outdir: Output directory. ``bakta_proteins`` refuses an
+                ``--output`` directory that already exists, so this method
+                creates only ``outdir.parent`` and leaves ``outdir`` itself
+                for ``bakta_proteins`` to create.
             resolved_db: Absolute, resolved path to the database directory.
             threads: CPU count.
 
@@ -455,7 +458,10 @@ class BaktaUtils(AnnotatorUtils):
         Raises:
             subprocess.CalledProcessError: If bakta_proteins exits non-zero.
         """
-        outdir.mkdir(parents=True, exist_ok=True)
+        # bakta_proteins refuses an --output directory that already exists,
+        # so only the parent is created here; bakta_proteins creates
+        # ``outdir`` itself.
+        outdir.parent.mkdir(parents=True, exist_ok=True)
 
         if self._docker_image:
             work = fasta_path.parent.resolve()

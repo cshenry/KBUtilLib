@@ -8,6 +8,7 @@ Sub-modules:
     model_helpers           — _parse_id, _check_and_convert_model (canonical helpers)
     model_directionality    — directionality_from_bounds, direction_conversion, etc.
     model_standardization_utils — ModelStandardizationUtils, ModelStandardizationUtilsImpl
+    ec_role_resolver        — EcRoleResolver
 
 Imports here are lazy to avoid pulling in optional heavy dependencies
 (cobra, modelseedpy, requests_toolbelt) at package-init time.
@@ -44,6 +45,8 @@ def __getattr__(name: str):  # noqa: ANN001
         "ModelStandardizationUtils": ("model_standardization_utils", "ModelStandardizationUtils"),
         "ModelStandardizationUtilsImpl": ("model_standardization_utils", "ModelStandardizationUtilsImpl"),
         "compartment_types": ("model_standardization_utils", "compartment_types"),
+        # ec_role_resolver
+        "EcRoleResolver": ("ec_role_resolver", "EcRoleResolver"),
     }
 
     if name in _lazy_map:
@@ -79,4 +82,6 @@ __all__ = [
     "ModelStandardizationUtils",
     "ModelStandardizationUtilsImpl",
     "compartment_types",
+    # ec_role_resolver
+    "EcRoleResolver",
 ]

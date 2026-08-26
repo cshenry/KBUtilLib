@@ -34,6 +34,7 @@ from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtils
 | `model_standardization_utils.py` | `MSModelStandardizationUtils`, `MSModelStandardizationUtilsImpl` | Standardize stoichiometry, compartment labeling, and metabolite IDs |
 | `model_directionality.py` | — | Reaction directionality helpers used by FBA and reconstruction |
 | `model_helpers.py` | — | Shared utilities: formula parsing, compartment resolution, flux bounds |
+| `ec_role_resolver.py` | `EcRoleResolver` | EC number -> ModelSEED role name(s), parsed from a caller-supplied `Annotations/Roles.tsv`; no fuzzy matching, no external dependencies |
 
 ---
 

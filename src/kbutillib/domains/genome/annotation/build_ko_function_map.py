@@ -100,11 +100,21 @@ _FIELD_START_RE = re.compile(r"^([A-Z][A-Z0-9_]*)\s+(.*)$")
 
 @dataclass
 class KoEntry:
-    """One parsed KEGG `ko` flat-file record, fields relevant to the bridge only."""
+    """One parsed KEGG `ko` flat-file record, fields relevant to the bridge only.
+
+    ``definition_field`` is not used by the bridge composition in this
+    module (the bridge's definition always comes from ``ko_list``, never
+    from the flat file) but is captured here -- rather than in a second,
+    parallel parser -- for ``build_ko_description_map.py`` (sibling
+    module), which needs the ``DEFINITION`` field's raw text on 90.1-style
+    (``NAME``-carries-symbol) releases. Defaults to ``None`` so this
+    addition does not change the constructor shape for existing callers.
+    """
 
     ko_id: str
     symbol_field: str | None  # raw SYMBOL field text, if present
     name_field: str | None  # raw NAME field text, if present
+    definition_field: str | None = None  # raw DEFINITION field text, if present
 
 
 def _iter_ko_entries(ko_file: Path) -> Iterator[KoEntry]:
@@ -139,7 +149,17 @@ def _iter_ko_entries(ko_file: Path) -> Iterator[KoEntry]:
             if "NAME" in current_fields
             else None
         )
-        return KoEntry(ko_id=ko_id, symbol_field=symbol_field, name_field=name_field)
+        definition_field = (
+            " ".join(current_fields["DEFINITION"]).strip()
+            if "DEFINITION" in current_fields
+            else None
+        )
+        return KoEntry(
+            ko_id=ko_id,
+            symbol_field=symbol_field,
+            name_field=name_field,
+            definition_field=definition_field,
+        )
 
     with ko_file.open("r", encoding="utf-8", errors="replace", newline=None) as fh:
         for raw_line in fh:

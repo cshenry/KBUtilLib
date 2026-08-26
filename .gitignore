@@ -76,3 +76,18 @@ ko_function_map*.tsv
 /kofam-guard/
 /guard/
 /guard.txt
+
+# OntologyDictionary staged dictionaries (kbdl-ontology-descriptions-v1).
+# Produced on the compute host by build_ko_description_map.py,
+# build_ec_description_map.py, build_go_description_map.py and
+# build_cog_description_map.py from bulk third-party ontology releases
+# (KEGG ko, ExPASy enzyme.dat, Gene Ontology go-basic.obo, NCBI
+# cog-20.def.tab). Each source's redistribution terms are more
+# restrictive than this repo's own licence, so these staged dictionaries
+# must never be committed regardless of where they happen to land during
+# local development -- see the docstring at the top of each generator
+# script for the specific licensing reason.
+ko_description_map*.tsv
+ec_description_map*.tsv
+go_description_map*.tsv
+cog_description_map*.tsv

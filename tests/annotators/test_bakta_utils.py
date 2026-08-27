@@ -28,6 +28,8 @@ from kbutillib.domains.genome.annotation.bakta_utils import (
     _parse_bakta_features,
     _write_one_line_faa,
 )
+from kbutillib.domains.genome.annotation.ontology_dictionary import OntologyDictionary
+from kbutillib.domains.modeling.ec_role_resolver import EcRoleResolver
 
 
 def _make_utils(db_path: str = "/fake/db", **kwargs: Any) -> BaktaUtils:
@@ -189,7 +191,12 @@ class TestParseBaktaFeatures:
         assert term.id is None
         assert term.value == "hypothetical protein"
 
-    def test_ec_kegg_cog_go_never_emitted_as_terms(self):
+    def test_ec_kegg_cog_go_now_emitted_as_additive_namespaced_terms(self):
+        """PRD kbdl-ontology-descriptions-v1 knowingly reverses D4's original
+        "product string only" rule: psc.* accessions are now ADDITIONALLY
+        surfaced as their own namespaced terms, alongside (never instead of)
+        the unchanged FUNCTION term and its evidence dict.
+        """
         features = [
             {
                 "id": "gene1",
@@ -203,17 +210,124 @@ class TestParseBaktaFeatures:
             }
         ]
         records = _parse_bakta_features(features)
-        all_values = [t.value for r in records for t in r.terms]
-        all_namespaces = {t.namespace for r in records for t in r.terms}
-        # Only the product string is emitted.
-        assert all_values == ["alcohol dehydrogenase"]
-        assert all_namespaces == {"FUNCTION"}
-        # But nothing is silently dropped — it lands in evidence.
-        term = records[0].terms[0]
-        assert term.evidence["ec_ids"] == ["1.1.1.1"]
-        assert term.evidence["kegg_orthology_id"] == ["K00001"]
-        assert term.evidence["cog_id"] == "COG1064"
-        assert term.evidence["go_ids"] == ["GO:0004022"]
+        terms = records[0].terms
+
+        function_terms = [t for t in terms if t.namespace == "FUNCTION"]
+        assert len(function_terms) == 1
+        assert function_terms[0].id is None
+        assert function_terms[0].value == "alcohol dehydrogenase"
+        # Nothing is silently dropped — evidence still carries the raw psc
+        # fields exactly as before (D4's original rule, unchanged).
+        assert function_terms[0].evidence["ec_ids"] == ["1.1.1.1"]
+        assert function_terms[0].evidence["kegg_orthology_id"] == ["K00001"]
+        assert function_terms[0].evidence["cog_id"] == "COG1064"
+        assert function_terms[0].evidence["go_ids"] == ["GO:0004022"]
+
+        # Additive namespaced terms, one per psc accession. No
+        # OntologyDictionary was injected, so each degrades to the bare
+        # accession (never raises, never skips).
+        by_namespace = {(t.namespace, t.id): t.value for t in terms if t.namespace != "FUNCTION"}
+        assert by_namespace == {
+            ("EC", "1.1.1.1"): "1.1.1.1",
+            ("KO", "K00001"): "K00001",
+            ("COG", "COG1064"): "COG1064",
+            ("GO", "GO:0004022"): "GO:0004022",
+        }
+
+    def test_psc_accessions_described_when_ontology_dictionary_injected(self):
+        od = OntologyDictionary(
+            ko_path=None,
+            ec_path=None,
+            go_path=None,
+            cog_path=None,
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        )
+        od._tables = {
+            "EC": {"1.1.1.1": "alcohol dehydrogenase"},
+            "KO": {"K00001": "alcohol dehydrogenase"},
+            "COG": {"COG1064": "alcohol dehydrogenase-like protein"},
+            "GO": {"GO:0006260": "DNA replication"},
+        }
+        features = [
+            {
+                "id": "gene1",
+                "product": "alcohol dehydrogenase",
+                "psc": {
+                    "ec_ids": ["1.1.1.1"],
+                    "kegg_orthology_id": ["K00001"],
+                    "cog_id": "COG1064",
+                    "go_ids": ["GO:0006260"],
+                },
+            }
+        ]
+        records = _parse_bakta_features(features, ontology_dictionary=od)
+        by_namespace = {
+            (t.namespace, t.id): t.value for t in records[0].terms if t.namespace != "FUNCTION"
+        }
+        assert by_namespace == {
+            ("EC", "1.1.1.1"): "1.1.1.1: alcohol dehydrogenase",
+            ("KO", "K00001"): "K00001: alcohol dehydrogenase",
+            ("COG", "COG1064"): "COG1064: alcohol dehydrogenase-like protein",
+            # GO round-trips correctly under a first-": " split even though
+            # the accession itself embeds a colon.
+            ("GO", "GO:0006260"): "GO:0006260: DNA replication",
+        }
+        accession, _, description = by_namespace[("GO", "GO:0006260")].partition(": ")
+        assert accession == "GO:0006260"
+        assert description == "DNA replication"
+
+    def test_psc_missing_dictionary_degrades_to_accession_only(self):
+        """A namespace with no staged dictionary file degrades to the bare
+        accession (never raises) and is recorded in degraded_namespaces."""
+        od = OntologyDictionary(
+            config_file=False, token_file=None, kbase_token_file=None
+        )
+        features = [
+            {
+                "id": "gene1",
+                "product": "alcohol dehydrogenase",
+                "psc": {"ec_ids": ["1.1.1.1"]},
+            }
+        ]
+        records = _parse_bakta_features(features, ontology_dictionary=od)
+        ec_term = next(t for t in records[0].terms if t.namespace == "EC")
+        assert ec_term.value == "1.1.1.1"
+        assert "EC" in od.degraded_namespaces
+
+    def test_ec_role_resolver_yields_role_namespace_terms(self):
+        resolver = EcRoleResolver("/unused/roles.tsv")
+        resolver._index = {
+            "1.1.1.1": [
+                "Alcohol dehydrogenase (EC 1.1.1.1)",
+                "Bifunctional dehydrogenase (EC 1.1.1.1)",
+            ]
+        }
+        features = [
+            {
+                "id": "gene1",
+                "product": "alcohol dehydrogenase",
+                "psc": {"ec_ids": ["1.1.1.1"]},
+            }
+        ]
+        records = _parse_bakta_features(features, ec_role_resolver=resolver)
+        role_values = {t.value for t in records[0].terms if t.namespace == "role"}
+        assert role_values == {
+            "Alcohol dehydrogenase (EC 1.1.1.1)",
+            "Bifunctional dehydrogenase (EC 1.1.1.1)",
+        }
+
+    def test_no_ec_role_resolver_yields_no_role_terms(self):
+        features = [
+            {
+                "id": "gene1",
+                "product": "alcohol dehydrogenase",
+                "psc": {"ec_ids": ["1.1.1.1"]},
+            }
+        ]
+        records = _parse_bakta_features(features, ec_role_resolver=None)
+        assert all(t.namespace != "role" for t in records[0].terms)
 
     def test_aa_hexdigest_carried_in_evidence(self):
         features = [
@@ -456,6 +570,119 @@ class TestAnnotateMocked:
         with patch.object(bu, "is_available", return_value=True):
             with pytest.raises(ToolUnavailableError, match="db/version.json"):
                 bu.annotate(proteins={"gene1": "MKTAY"})
+
+    def test_ontology_and_ec_role_degradation_recorded_in_parameters(self, tmp_path):
+        """No ontology_dictionary/ec_role_resolver injected -> parameters
+        records the degradation (never raises), mirroring KofamscanUtils's
+        existing 'ko_function_map: absent' behaviour."""
+        db_payload = {"date": "2026-01-01", "major": 6, "minor": 0, "type": "full"}
+        (tmp_path / "version.json").write_text(json.dumps(db_payload), encoding="utf-8")
+        bu = _make_utils(db_path=str(tmp_path))
+
+        def _fake_run_bakta_with_psc(fasta_path, outdir, resolved_db, threads):
+            payload = {
+                "version": {"bakta": "1.11.4", "db": {"version": "6.0", "type": "full"}},
+                "features": [
+                    {
+                        "id": "gene1",
+                        "product": "alcohol dehydrogenase",
+                        "psc": {"ec_ids": ["1.1.1.1"], "kegg_orthology_id": ["K00001"]},
+                    }
+                ],
+            }
+            return payload, "bakta_proteins --db /fake/db ..."
+
+        with patch.object(bu, "is_available", return_value=True), patch.object(
+            bu, "_run_bakta", side_effect=_fake_run_bakta_with_psc
+        ):
+            result = bu.annotate(proteins={"gene1": "MKTAY"})
+
+        assert result.parameters["ontology_ec"] == "absent"
+        assert result.parameters["ontology_ko"] == "absent"
+        assert result.parameters["ec_role_resolver"] == "absent"
+
+    def test_function_term_byte_identical_to_base_commit_capture(self, tmp_path):
+        """Captured from base commit 222490d (unmodified _parse_bakta_features)
+        via the exact feature dict below, BEFORE this task's changes:
+
+            _parse_bakta_features([{
+                "id": "gene1",
+                "product": "alcohol dehydrogenase, zinc-containing",
+                "gene": "adhA",
+                "aa_hexdigest": "abc123",
+                "psc": {
+                    "ec_ids": ["1.1.1.1"],
+                    "kegg_orthology_id": ["K00001"],
+                    "cog_id": "COG1064",
+                    "go_ids": ["GO:0006260"],
+                },
+            }])[0].terms[0].value
+
+        captured literal: 'alcohol dehydrogenase, zinc-containing'
+
+        This asserts the branch's FUNCTION-destined term is still exactly
+        that literal, unaffected by any ontology-description machinery
+        added by this task -- reactions are reached downstream by joining
+        this exact text against mapping tables keyed on it.
+        """
+        base_commit_captured_value = "alcohol dehydrogenase, zinc-containing"
+
+        db_payload = {"date": "2026-01-01", "major": 6, "minor": 0, "type": "full"}
+        (tmp_path / "version.json").write_text(json.dumps(db_payload), encoding="utf-8")
+
+        # An OntologyDictionary WITH descriptions staged for every accession
+        # this feature carries -- the maximally adversarial case for byte
+        # identity, since if the FUNCTION term were vulnerable to being
+        # folded together with accession data, this is where it would show.
+        od = OntologyDictionary(
+            config_file=False, token_file=None, kbase_token_file=None
+        )
+        od._tables = {
+            "EC": {"1.1.1.1": "alcohol dehydrogenase"},
+            "KO": {"K00001": "alcohol dehydrogenase"},
+            "COG": {"COG1064": "alcohol dehydrogenase-like"},
+            "GO": {"GO:0006260": "DNA replication"},
+        }
+        resolver = EcRoleResolver("/unused/roles.tsv")
+        resolver._index = {"1.1.1.1": ["Alcohol dehydrogenase (EC 1.1.1.1)"]}
+        bu = _make_utils(
+            db_path=str(tmp_path),
+            ontology_dictionary=od,
+            ec_role_resolver=resolver,
+        )
+
+        def _fake_run_bakta_with_psc(fasta_path, outdir, resolved_db, threads):
+            payload = {
+                "version": {"bakta": "1.11.4", "db": {"version": "6.0", "type": "full"}},
+                "features": [
+                    {
+                        "id": "gene1",
+                        "product": "alcohol dehydrogenase, zinc-containing",
+                        "gene": "adhA",
+                        "aa_hexdigest": "abc123",
+                        "psc": {
+                            "ec_ids": ["1.1.1.1"],
+                            "kegg_orthology_id": ["K00001"],
+                            "cog_id": "COG1064",
+                            "go_ids": ["GO:0006260"],
+                        },
+                    }
+                ],
+            }
+            return payload, "bakta_proteins --db /fake/db ..."
+
+        with patch.object(bu, "is_available", return_value=True), patch.object(
+            bu, "_run_bakta", side_effect=_fake_run_bakta_with_psc
+        ):
+            result = bu.annotate(proteins={"gene1": "MKTAY"})
+
+        rec = next(r for r in result.records if r.gene_id == "gene1")
+        function_term = next(t for t in rec.terms if t.namespace == "FUNCTION")
+        assert function_term.value == base_commit_captured_value
+        assert function_term.id is None
+        # And the new namespaced terms are additive, not a replacement.
+        assert any(t.namespace == "EC" for t in rec.terms)
+        assert any(t.namespace == "role" for t in rec.terms)
 
 
 # ---------------------------------------------------------------------------

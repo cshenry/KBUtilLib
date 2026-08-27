@@ -50,18 +50,31 @@ caller's own id (``feature["id"]``) — Bakta's protein entry point writes the
 FASTA header verbatim from the caller's dict, so no id-remapping is needed
 (unlike ``ProkkaUtils`` / ``DRAM2Utils``, which must remap to tool-safe ids).
 
-Per the PRD's resolved spec (D4), only the free-text ``product`` string is
-emitted as a ``Term``:
+Per the PRD's originally resolved spec (D4), only the free-text ``product``
+string was emitted as a ``Term``:
 
     Term(namespace="FUNCTION", id=None, value=<product>, evidence={...})
 
-Bakta's per-gene record also carries ``gene``, and, nested under ``psc``,
-``ec_ids``, ``kegg_orthology_id``, ``cog_id`` and ``go_ids``. None of these
-are emitted as Terms — they would collide under the same ``FUNCTION``
-namespace as the product string on the KBDL side and are recoverable later
-by a deliberate widening. They are carried in ``Term.evidence`` (alongside
-``aa_hexdigest`` when present) so nothing is silently dropped, since
-``evidence`` never reaches the output map.
+That FUNCTION-destined term is still emitted exactly this way, byte-for-byte
+— reactions are reached downstream by joining this text against mapping
+tables keyed on it, so it is never rewritten. D4's confinement of the
+``psc`` ontology accessions to ``Term.evidence`` only has since been
+**deliberately reversed** (see the ``kbdl-ontology-descriptions-v1`` PRD,
+task ``annotator-description-emission``): Bakta's per-gene record also
+carries ``gene``, and, nested under ``psc``, ``ec_ids``,
+``kegg_orthology_id``, ``cog_id`` and ``go_ids``. These are now surfaced
+**additionally** as their own namespaced, described Terms —
+
+    Term(namespace="EC"|"KO"|"COG"|"GO", id=<accession>,
+         value="<accession>: <description>")
+
+— described via an injected ``OntologyDictionary`` (degrading to the bare
+accession when no description is available), alongside a
+``Term(namespace="role", ...)`` per ModelSEED role an EC accession resolves
+to via an injected ``EcRoleResolver``. None of this touches the FUNCTION
+term or its evidence dict: ``ec_ids``, ``kegg_orthology_id``, ``cog_id`` and
+``go_ids`` continue to be carried in ``Term.evidence`` too (alongside
+``aa_hexdigest`` when present), so nothing is silently dropped there either.
 
 The payload's own version stamp, ``version = {"bakta": ..., "db":
 {"version": ..., "type": ...}}``, is the source for
@@ -80,6 +93,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from kbutillib.domains.modeling.ec_role_resolver import EcRoleResolver
+
 from .annotator_utils import (
     AnnotationRecord,
     AnnotationResult,
@@ -87,7 +102,9 @@ from .annotator_utils import (
     Term,
     ToolUnavailableError,
     _guard_protein,
+    describe_or_accession,
 )
+from .ontology_dictionary import OntologyDictionary
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,7 +117,9 @@ _INSTALL_HINT = (
     "Requires a registered Bakta database directory containing version.json."
 )
 
-# psc.* fields carried in evidence but never emitted as Terms (D4).
+# psc.* fields carried in Term.evidence (unconditionally, as before) AND now
+# additionally surfaced as their own namespaced, described Terms (see module
+# docstring) -- the PRD's deliberate reversal of D4's "evidence only" rule.
 _EVIDENCE_ONLY_PSC_FIELDS: tuple[str, ...] = (
     "ec_ids",
     "kegg_orthology_id",
@@ -108,23 +127,103 @@ _EVIDENCE_ONLY_PSC_FIELDS: tuple[str, ...] = (
     "go_ids",
 )
 
+# psc.* field -> the ontology namespace its accessions belong to.
+_PSC_FIELD_NAMESPACE: dict[str, str] = {
+    "ec_ids": "EC",
+    "kegg_orthology_id": "KO",
+    "cog_id": "COG",
+    "go_ids": "GO",
+}
+
 
 # ---------------------------------------------------------------------------
 # Pure parse helpers (offline-unit-testable)
 # ---------------------------------------------------------------------------
 
 
+def _as_accession_list(value: Any) -> list[str]:
+    """Normalize a ``psc.*`` field into a list of non-empty accession strings.
+
+    Bakta's ``psc`` fields are inconsistently shaped across fields (e.g.
+    ``ec_ids``/``kegg_orthology_id``/``go_ids`` are lists, ``cog_id`` is a
+    bare string) — this normalizes either shape to a list so all four fields
+    can be walked identically. ``None``/empty/non-string entries are
+    dropped; anything else falls back to an empty list rather than raising.
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str) and v]
+    return []
+
+
+def _psc_ontology_terms(
+    psc: dict[str, Any],
+    ontology_dictionary: OntologyDictionary | None,
+    ec_role_resolver: EcRoleResolver | None,
+) -> list[Term]:
+    """Build the additive, described Terms for a feature's ``psc`` block.
+
+    One ``Term(namespace=<EC|KO|COG|GO>, id=<accession>, value="<accession>:
+    <description>")`` per accession in ``ec_ids``/``kegg_orthology_id``/
+    ``cog_id``/``go_ids``, degrading to the bare accession (never raising)
+    when *ontology_dictionary* has no description on file. Each EC
+    accession additionally yields a ``Term(namespace="role", ...)`` per
+    ModelSEED role name *ec_role_resolver* resolves it to — this is how EC
+    reaches reactions, through ModelSEED's curated role -> complex ->
+    reaction chain. Never touches the FUNCTION-destined term or its
+    evidence dict (built separately by the caller).
+
+    Args:
+        psc: The feature's ``psc`` dict (already type-checked by the
+            caller).
+        ontology_dictionary: Dictionary used to describe each accession, or
+            ``None`` (every accession degrades to itself).
+        ec_role_resolver: Resolver used to expand EC accessions into
+            ModelSEED role names, or ``None`` (no role Terms are emitted).
+
+    Returns:
+        The list of additive Terms (possibly empty, when *psc* carries no
+        ontology accessions).
+    """
+    terms: list[Term] = []
+    for field_name, namespace in _PSC_FIELD_NAMESPACE.items():
+        for accession in _as_accession_list(psc.get(field_name)):
+            terms.append(
+                Term(
+                    namespace=namespace,
+                    id=accession,
+                    value=describe_or_accession(
+                        namespace, accession, ontology_dictionary
+                    ),
+                )
+            )
+            if namespace == "EC" and ec_role_resolver is not None:
+                for role in ec_role_resolver.roles_for_ec(accession):
+                    terms.append(Term(namespace="role", id=None, value=role))
+    return terms
+
+
 def _parse_bakta_features(
     features: list[dict[str, Any]],
     input_ids: set[str] | None = None,
+    ontology_dictionary: OntologyDictionary | None = None,
+    ec_role_resolver: EcRoleResolver | None = None,
 ) -> list[AnnotationRecord]:
     """Convert Bakta's ``input.json`` ``features`` array into AnnotationRecords.
 
-    Emits exactly one ``Term`` per gene — the free-text ``product`` string
-    under ``namespace="FUNCTION"`` — per D4. ``ec_ids``, ``kegg_orthology_id``,
-    ``cog_id`` and ``go_ids`` (nested under ``feature["psc"]``) are carried in
-    ``Term.evidence`` only, never emitted as Terms. ``aa_hexdigest`` is also
-    carried in evidence when present.
+    Emits, per gene, the free-text ``product`` string under
+    ``namespace="FUNCTION"`` — byte-identical to D4's original behaviour,
+    since reactions are reached downstream by joining this exact text
+    against mapping tables keyed on it. ``ec_ids``, ``kegg_orthology_id``,
+    ``cog_id`` and ``go_ids`` (nested under ``feature["psc"]``) continue to
+    be carried in ``Term.evidence`` (D4's original rule) AND are now
+    additionally emitted as their own namespaced, described Terms (see
+    :func:`_psc_ontology_terms`) — the PRD's deliberate, knowing reversal of
+    D4's "evidence only" confinement. ``aa_hexdigest`` is also carried in
+    evidence when present.
 
     Args:
         features: The parsed ``features`` array from Bakta's ``input.json``.
@@ -133,11 +232,15 @@ def _parse_bakta_features(
         input_ids: When given, only features whose ``id`` is a member of this
             set are retained (defends against stray rows from a shared
             output). ``None`` disables the filter.
+        ontology_dictionary: Dictionary used to describe ``psc`` accessions,
+            or ``None`` (every accession degrades to itself; never raises).
+        ec_role_resolver: Resolver used to expand EC accessions into
+            ModelSEED role names, or ``None`` (no role Terms are emitted).
 
     Returns:
         List of ``AnnotationRecord``. A feature with an empty/missing
-        ``product`` yields no Term and is therefore absent from the result —
-        this is not an error.
+        ``product`` yields no record and is therefore absent from the
+        result — this is not an error.
     """
     records: list[AnnotationRecord] = []
     for feature in features:
@@ -167,8 +270,17 @@ def _parse_bakta_features(
         if aa_hexdigest:
             evidence["aa_hexdigest"] = aa_hexdigest
 
-        term = Term(namespace="FUNCTION", id=None, value=product, evidence=evidence)
-        records.append(AnnotationRecord(gene_id=gene_id, terms=[term]))
+        # FUNCTION-destined term: MUST stay byte-identical to D4's original
+        # output. Never rewrite `product` or fold an accession into it.
+        terms: list[Term] = [
+            Term(namespace="FUNCTION", id=None, value=product, evidence=evidence)
+        ]
+        if isinstance(psc, dict):
+            terms.extend(
+                _psc_ontology_terms(psc, ontology_dictionary, ec_role_resolver)
+            )
+
+        records.append(AnnotationRecord(gene_id=gene_id, terms=terms))
 
     return records
 
@@ -212,6 +324,18 @@ class BaktaUtils(AnnotatorUtils):
         ``bakta.docker_workdir`` — base dir for the per-run bind-mounted
             work dir (default ``~/.kbutillib/bakta_work``).
 
+    Ontology description / EC-role resolution:
+        ``ontology_dictionary`` — an ``OntologyDictionary`` instance used to
+            describe ``psc.ec_ids``/``kegg_orthology_id``/``cog_id``/``go_ids``
+            accessions. When not given, one is constructed from this
+            instance's own config (``ontology_dictionary.{ko,ec,go,cog}_path``
+            — see ``OntologyDictionary``), which degrades gracefully (never
+            raises) when a namespace's staged dictionary is unset/unreadable.
+        ``ec_role_resolver`` — an ``EcRoleResolver`` instance used to expand
+            each EC accession into ModelSEED role names. When not given, no
+            role-namespace Terms are emitted and the degradation is recorded
+            in ``AnnotationResult.parameters["ec_role_resolver"]``.
+
     Example::
 
         bu = BaktaUtils(db_path="/scratch/kbdl/refdata/bakta-db-6.0-full")
@@ -229,7 +353,13 @@ class BaktaUtils(AnnotatorUtils):
     _tool_name = _TOOL
     _install_hint = _INSTALL_HINT
 
-    def __init__(self, db_path: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        ontology_dictionary: OntologyDictionary | None = None,
+        ec_role_resolver: EcRoleResolver | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Initialize BaktaUtils against a specific, already-resolved database.
 
         Args:
@@ -238,6 +368,16 @@ class BaktaUtils(AnnotatorUtils):
                 per-request by the caller — this is a constructor argument,
                 not a config key, so multiple database versions can coexist
                 without touching config.
+            ontology_dictionary: Dictionary used to describe ``psc.*``
+                ontology accessions. When ``None`` (the default), one is
+                constructed from this instance's own config, which degrades
+                gracefully — never raises — for any namespace whose staged
+                dictionary is unset/unreadable.
+            ec_role_resolver: Resolver used to expand EC accessions into
+                ModelSEED role names. When ``None`` (the default), no
+                role-namespace Terms are emitted for this instance's runs;
+                the degradation is recorded in
+                ``AnnotationResult.parameters["ec_role_resolver"]``.
             **kwargs: Forwarded to ``AnnotatorUtils.__init__``.
         """
         super().__init__(**kwargs)
@@ -250,6 +390,17 @@ class BaktaUtils(AnnotatorUtils):
         self._docker_image: str = (
             self.get_config_value("bakta.docker_image", default="") or ""
         )
+        self._ontology_dictionary: OntologyDictionary = (
+            ontology_dictionary
+            if ontology_dictionary is not None
+            else OntologyDictionary(**kwargs)
+        )
+        #: EcRoleResolver instance, or None -- constructor-injected only
+        #: (see module docstring: "the caller supplies the path ... via the
+        #: constructor"). No automatic file discovery is attempted here, so
+        #: an absent resolver can never raise; it simply degrades to no
+        #: role-namespace Terms (recorded in parameters, see annotate()).
+        self._ec_role_resolver: EcRoleResolver | None = ec_role_resolver
 
     # ------------------------------------------------------------------
     # Availability probe
@@ -365,8 +516,21 @@ class BaktaUtils(AnnotatorUtils):
                 threads=threads,
             )
 
+        if self._ec_role_resolver is None:
+            self.log_warning(
+                "No EcRoleResolver was provided to BaktaUtils; EC accessions "
+                "will not yield role-namespace terms until an EcRoleResolver "
+                "(built from ModelSEED's Annotations/Roles.tsv) is injected "
+                "via BaktaUtils(ec_role_resolver=...)."
+            )
+
         features = payload.get("features", []) if isinstance(payload, dict) else []
-        records = _parse_bakta_features(features, set(proteins))
+        records = _parse_bakta_features(
+            features,
+            set(proteins),
+            ontology_dictionary=self._ontology_dictionary,
+            ec_role_resolver=self._ec_role_resolver,
+        )
 
         version_info = payload.get("version", {}) if isinstance(payload, dict) else {}
         tool_version = (
@@ -385,6 +549,14 @@ class BaktaUtils(AnnotatorUtils):
             "docker_image": self._docker_image,
             **params,
         }
+        # Record ontology-dictionary degradation the same way KofamscanUtils
+        # records "ko_function_map: absent" -- only namespaces this run
+        # actually queried (i.e. that had at least one accession) can be
+        # known to be degraded (see OntologyDictionary.degraded_namespaces).
+        for namespace in sorted(self._ontology_dictionary.degraded_namespaces):
+            parameters[f"ontology_{namespace.lower()}"] = "absent"
+        if self._ec_role_resolver is None:
+            parameters["ec_role_resolver"] = "absent"
 
         return AnnotationResult(
             tool=_TOOL,

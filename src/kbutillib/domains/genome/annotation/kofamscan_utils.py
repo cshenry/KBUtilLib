@@ -48,10 +48,20 @@ downstream reaction-mapping table on its own (measured: 0% — the mapping
 table's descriptions follow a ``"symbol; definition"`` convention that a
 bare KO-list definition can never reproduce). ``KofamscanUtils`` therefore
 emits **two** ``Term``s per significant hit, in a stable but semantically
-unordered pair: first the raw KO id, then — when bridgeable — the composed
-``"symbol; definition"`` text that *does* join the mapping table. When no
-bridge is available the pair degrades to its first element (the KO id
-alone); this is never treated as an error.
+unordered pair: the KO-namespace term (``Term(namespace="KO", id=ko_id,
+value=...)``), and — when bridgeable — the composed ``"symbol; definition"``
+text that *does* join the mapping table, emitted with ``namespace=None`` so
+the downstream adapter files it under FUNCTION. This bridged-text term is
+**never rewritten by this task's ontology-description work** — it stays
+byte-identical to what ``_bridge_ko`` returns, since reactions are reached
+downstream by joining this exact text against mapping tables keyed on it.
+When no bridge is available the pair degrades to its KO-namespace element
+alone; this is never treated as an error.
+
+The KO-namespace term's *value*, separately, is described via an injected
+``OntologyDictionary`` — ``"<ko_id>: <description>"``, degrading to the bare
+``ko_id`` (never raising) when no description is on file. This is
+independent of, and never touches, the bridged FUNCTION-destined text.
 
 ``_bridge_ko`` is a **pure lookup function** over an in-memory table — no
 I/O, no string normalisation at runtime. The table itself (a precomputed
@@ -59,16 +69,19 @@ I/O, no string normalisation at runtime. The table itself (a precomputed
 sibling-task build script and loaded from the path named by the config key
 ``kofamscan.ko_function_map``. An absent table (unset config key, or a
 missing file) is **not a failure**: the module logs a warning, degrades
-every pair to its KO id, and records ``bridged_fraction = 0.0`` plus a
-``ko_function_map: absent`` marker in ``AnnotationResult.parameters`` so the
-degraded state is a visible number rather than a silent loss of coverage.
+every pair to its KO-namespace term alone, and records ``bridged_fraction =
+0.0`` plus a ``ko_function_map: absent`` marker in
+``AnnotationResult.parameters`` so the degraded state is a visible number
+rather than a silent loss of coverage.
 
 ``AnnotationResult.parameters`` also records three versions on every run:
 the profile set name, its paired ``ko_list`` version (the profile-set
 directory name itself, per KofamScan's on-disk versioning convention — see
 ``BaktaUtils`` for the analogous ``db/version.json`` case), and the KEGG
-``ko`` release the symbol table was built from (read from the table's own
-header when present).
+``ko`` release the symbol table was built from, read from the table's own
+``# kegg_ko_release: ...`` header line when present (the ``kegg_release``
+parameter key predates, and is aligned to, that header key -- see
+``_parse_ko_function_map_text``).
 """
 
 from __future__ import annotations
@@ -89,7 +102,9 @@ from .annotator_utils import (
     AnnotatorUtils,
     Term,
     _guard_protein,
+    describe_or_accession,
 )
+from .ontology_dictionary import OntologyDictionary
 
 _LOG = logging.getLogger(__name__)
 
@@ -188,25 +203,34 @@ def _build_kofam_records(
     rows: list[dict[str, str]],
     table: dict[str, str] | None,
     input_ids: set[str] | None = None,
+    ontology_dictionary: OntologyDictionary | None = None,
 ) -> tuple[list[AnnotationRecord], float]:
     """Build AnnotationRecords (and the run's bridged fraction) from detail-tsv rows.
 
     Emits, per significant hit, a stable-ordered pair of Terms — first the
-    raw KO id (``Term(namespace="KO", id=ko_id, value=ko_id)``), then, when
-    *table* bridges it, the composed text (``Term(namespace=None, id=None,
-    value=<bridge text>)``). A gene with N significant hits yields terms for
-    all N hits (the explicit multimap regression this module guards
-    against). ``Term.evidence`` on both Terms of a pair carries the hit's
-    ``thrshld``, ``score`` and ``evalue``.
+    KO-namespace term (``Term(namespace="KO", id=ko_id, value="<ko_id>:
+    <description>")``, described via *ontology_dictionary* and degrading to
+    the bare ``ko_id`` when no description is on file), then, when *table*
+    bridges it, the composed text (``Term(namespace=None, id=None,
+    value=<bridge text>)``) -- this second, FUNCTION-destined term is never
+    touched by *ontology_dictionary* and stays byte-identical to what
+    :func:`_bridge_ko` returns, since reactions are reached downstream by
+    joining this exact text against mapping tables keyed on it. A gene with
+    N significant hits yields terms for all N hits (the explicit multimap
+    regression this module guards against). ``Term.evidence`` on both Terms
+    of a pair carries the hit's ``thrshld``, ``score`` and ``evalue``.
 
     Args:
         rows: Significant-only rows as returned by
             :func:`_parse_kofam_detail_tsv`.
         table: The loaded ``{ko_id: composed_string}`` bridge table, or
             ``None`` when the table is absent (every pair degrades to its
-            KO id alone).
+            KO-namespace term alone).
         input_ids: When given, only rows whose ``gene_id`` is a member of
             this set are retained.
+        ontology_dictionary: Dictionary used to describe each KO id's
+            KO-namespace term value, or ``None`` (every KO-namespace term
+            degrades to the bare ``ko_id``; never raises).
 
     Returns:
         Tuple of (list of ``AnnotationRecord``, ``bridged_fraction``).
@@ -233,9 +257,16 @@ def _build_kofam_records(
 
         terms = per_gene.setdefault(gene_id, [])
         terms.append(
-            Term(namespace="KO", id=ko_id, value=ko_id, evidence=dict(evidence))
+            Term(
+                namespace="KO",
+                id=ko_id,
+                value=describe_or_accession("KO", ko_id, ontology_dictionary),
+                evidence=dict(evidence),
+            )
         )
 
+        # FUNCTION-destined bridge term: MUST stay byte-identical to
+        # _bridge_ko's return value. Never touched by ontology description.
         bridged_text = _bridge_ko(ko_id, table) if table is not None else None
         if bridged_text:
             bridged_kos.add(ko_id)
@@ -347,6 +378,13 @@ class KofamscanUtils(AnnotatorUtils):
             ``ko_function_map.tsv`` bridge table. Unset/missing degrades
             gracefully (see module docstring); it is never a hard failure.
 
+    Ontology description:
+        ``ontology_dictionary`` — an ``OntologyDictionary`` instance used to
+            describe each significant hit's KO-namespace term value. When
+            not given, one is constructed from this instance's own config
+            (``ontology_dictionary.ko_path`` — see ``OntologyDictionary``),
+            which degrades gracefully (never raises) when unset/unreadable.
+
     Example::
 
         ku = KofamscanUtils(
@@ -367,7 +405,11 @@ class KofamscanUtils(AnnotatorUtils):
     _install_hint = _INSTALL_HINT
 
     def __init__(
-        self, profiles_path: str, profile_set: str, **kwargs: Any
+        self,
+        profiles_path: str,
+        profile_set: str,
+        ontology_dictionary: OntologyDictionary | None = None,
+        **kwargs: Any,
     ) -> None:
         """Initialize KofamscanUtils against a specific registered profile set.
 
@@ -379,6 +421,11 @@ class KofamscanUtils(AnnotatorUtils):
                 ``"2025-11-03"``), selecting
                 ``<profiles_path>/profiles/<profile_set>`` and its paired
                 ``<profiles_path>/profiles/<profile_set>.txt``.
+            ontology_dictionary: Dictionary used to describe each
+                significant hit's KO-namespace term value. When ``None``
+                (the default), one is constructed from this instance's own
+                config, which degrades gracefully — never raises — when
+                unset/unreadable.
             **kwargs: Forwarded to ``AnnotatorUtils.__init__``.
         """
         super().__init__(**kwargs)
@@ -394,6 +441,11 @@ class KofamscanUtils(AnnotatorUtils):
         )
         self._ko_function_map_path: str = (
             self.get_config_value("kofamscan.ko_function_map", default="") or ""
+        )
+        self._ontology_dictionary: OntologyDictionary = (
+            ontology_dictionary
+            if ontology_dictionary is not None
+            else OntologyDictionary(**kwargs)
         )
 
     # ------------------------------------------------------------------
@@ -525,20 +577,28 @@ class KofamscanUtils(AnnotatorUtils):
             )
 
         rows = _parse_kofam_detail_tsv(tsv_text)
-        records, bridged_fraction = _build_kofam_records(rows, table, set(proteins))
+        records, bridged_fraction = _build_kofam_records(
+            rows, table, set(proteins), ontology_dictionary=self._ontology_dictionary
+        )
 
         parameters: dict[str, Any] = {
             "threads": threads,
             "profiles_path": resolved_profiles,
             "profile_set": self.profile_set,
             "ko_list_version": self.profile_set,
-            "kegg_release": metadata.get("kegg_release") if loaded is not None else None,
+            # ko_function_map.tsv's header writes "# kegg_ko_release: ...",
+            # not "# kegg_release: ..." (see _parse_ko_function_map_text /
+            # build_ko_function_map.py) -- read the same key that is
+            # actually written, or this always lands None.
+            "kegg_release": metadata.get("kegg_ko_release") if loaded is not None else None,
             "bridged_fraction": round(bridged_fraction, 4),
             "docker_image": self._docker_image,
             **params,
         }
         if loaded is None:
             parameters["ko_function_map"] = "absent"
+        if "KO" in self._ontology_dictionary.degraded_namespaces:
+            parameters["ontology_ko"] = "absent"
 
         return AnnotationResult(
             tool=_TOOL,

@@ -31,6 +31,7 @@ from kbutillib.domains.genome.annotation.kofamscan_utils import (
     _parse_ko_function_map_text,
     _parse_kofam_detail_tsv,
 )
+from kbutillib.domains.genome.annotation.ontology_dictionary import OntologyDictionary
 
 
 def _make_utils(
@@ -527,11 +528,14 @@ class TestAnnotateMocked:
         assert result.parameters["ko_function_map"] == "absent"
 
     def test_present_table_bridges_and_records_versions(self, tmp_path):
+        # Header key matches what build_ko_function_map.py / this fixture's
+        # sibling build_ko_description_map.py actually write:
+        # "# kegg_ko_release: ...", not "# kegg_release: ...".
         table_path = tmp_path / "ko_function_map.tsv"
         table_path.write_text(
             "\n".join(
                 [
-                    "# kegg_release: 109.1",
+                    "# kegg_ko_release: 109.1",
                     "K00001\tadh; alcohol dehydrogenase",
                 ]
             ),
@@ -547,12 +551,111 @@ class TestAnnotateMocked:
             result = ku.annotate(proteins={"gene1": "MKTAY"})
 
         assert "ko_function_map" not in result.parameters
+        # The kegg_release telemetry key must be populated from the header
+        # key the generator actually writes (kegg_ko_release) -- this is
+        # the fix this task makes; previously it always landed None because
+        # annotate() read "kegg_release" against a "kegg_ko_release" header.
         assert result.parameters["kegg_release"] == "109.1"
         assert result.parameters["profile_set"] == "2025-11-03"
         assert result.parameters["ko_list_version"] == "2025-11-03"
         rec = next(r for r in result.records if r.gene_id == "gene1")
         values = {t.value for t in rec.terms}
         assert "adh; alcohol dehydrogenase" in values
+
+    def test_kegg_release_header_key_mismatch_regression_guard(self, tmp_path):
+        """Guards the alignment fix: a header using the WRONG key
+        ("kegg_release" instead of the real generator's "kegg_ko_release")
+        must NOT populate parameters["kegg_release"] -- proving the code
+        reads the header key ko_function_map.tsv actually writes, not a
+        key that happens to have the same name as the parameter.
+        """
+        table_path = tmp_path / "ko_function_map.tsv"
+        table_path.write_text(
+            "\n".join(
+                ["# kegg_release: 109.1", "K00001\tadh; alcohol dehydrogenase"]
+            ),
+            encoding="utf-8",
+        )
+        ku = _make_utils(config={"kofamscan": {"ko_function_map": str(table_path)}})
+        with patch.object(ku, "is_available", return_value=True), patch.object(
+            ku, "_run_kofamscan", side_effect=self._fake_run_kofamscan
+        ):
+            result = ku.annotate(proteins={"gene1": "MKTAY"})
+
+        assert result.parameters["kegg_release"] is None
+
+
+# ---------------------------------------------------------------------------
+# Ontology description (KO-namespace term value)
+# ---------------------------------------------------------------------------
+
+
+class TestOntologyDescription:
+    _DETAIL_TSV = "\n".join(
+        [
+            "# gene name\tKO\tthrshld\tscore\tE-value\tKO definition",
+            "*\tgene1\tK00001\t1\t1\t1e-10\tdef1",
+        ]
+    )
+
+    def _fake_run_kofamscan(
+        self, fasta_path, out_path, scan_tmp_dir, resolved_profiles, threads
+    ):
+        return self._DETAIL_TSV, "exec_annotation ..."
+
+    def test_ko_term_described_when_ontology_dictionary_injected(self):
+        od = OntologyDictionary(
+            config_file=False, token_file=None, kbase_token_file=None
+        )
+        od._tables = {"KO": {"K00001": "alcohol dehydrogenase"}}
+        ku = _make_utils(ontology_dictionary=od)
+        with patch.object(ku, "is_available", return_value=True), patch.object(
+            ku, "_run_kofamscan", side_effect=self._fake_run_kofamscan
+        ):
+            result = ku.annotate(proteins={"gene1": "MKTAY"})
+
+        rec = next(r for r in result.records if r.gene_id == "gene1")
+        ko_term = next(t for t in rec.terms if t.namespace == "KO")
+        assert ko_term.value == "K00001: alcohol dehydrogenase"
+
+    def test_ko_term_degrades_to_bare_id_without_ontology_dictionary(self):
+        ku = _make_utils()
+        with patch.object(ku, "is_available", return_value=True), patch.object(
+            ku, "_run_kofamscan", side_effect=self._fake_run_kofamscan
+        ):
+            result = ku.annotate(proteins={"gene1": "MKTAY"})
+
+        rec = next(r for r in result.records if r.gene_id == "gene1")
+        ko_term = next(t for t in rec.terms if t.namespace == "KO")
+        assert ko_term.value == "K00001"
+        assert result.parameters["ontology_ko"] == "absent"
+
+    def test_bridged_function_term_unaffected_by_ontology_dictionary(self):
+        """The bridged (namespace=None, FUNCTION-destined) term must stay
+        untouched even when an OntologyDictionary describes the KO id."""
+        od = OntologyDictionary(
+            config_file=False, token_file=None, kbase_token_file=None
+        )
+        od._tables = {"KO": {"K00001": "alcohol dehydrogenase"}}
+        table_path_table = {"K00001": "adh, e1.1.1.1; alcohol dehydrogenase [EC:1.1.1.1]"}
+        records, _fraction = _build_kofam_records(
+            [
+                {
+                    "gene_id": "gene1",
+                    "ko_id": "K00001",
+                    "thrshld": "1",
+                    "score": "1",
+                    "evalue": "1",
+                    "definition": "d",
+                }
+            ],
+            table_path_table,
+            ontology_dictionary=od,
+        )
+        bridged_term = next(t for t in records[0].terms if t.namespace is None)
+        # Captured from base commit 222490d's unmodified _build_kofam_records
+        # (same rows/table, before this task's ontology-description change).
+        assert bridged_term.value == "adh, e1.1.1.1; alcohol dehydrogenase [EC:1.1.1.1]"
 
 
 # ---------------------------------------------------------------------------

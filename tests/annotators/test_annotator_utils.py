@@ -22,7 +22,9 @@ from kbutillib.domains.genome.annotation.annotator_utils import (
     ToolUnavailableError,
     _guard_dna,
     _guard_protein,
+    describe_or_accession,
 )
+from kbutillib.domains.genome.annotation.ontology_dictionary import OntologyDictionary
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +317,69 @@ class TestGuardProtein:
         with pytest.raises(ValueError) as exc_info:
             _guard_protein({"p1": "ACDEF", "p2": "U" * 100})
         assert "p2" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# describe_or_accession — shared ontology-description formatter
+# ---------------------------------------------------------------------------
+
+
+def _dictionary_with(**tables: dict[str, str]) -> OntologyDictionary:
+    """An OntologyDictionary with an in-memory table injected per-namespace,
+    with no file I/O and no dependency on a generated artifact or a real
+    ontology release."""
+    od = OntologyDictionary(config_file=False, token_file=None, kbase_token_file=None)
+    od._tables = dict(tables)
+    return od
+
+
+class TestDescribeOrAccession:
+    """describe_or_accession: "<accession>: <description>", degrading to
+    the bare accession -- never raising -- when no description is on file.
+    """
+
+    def test_no_dictionary_degrades_to_bare_accession(self):
+        assert describe_or_accession("KO", "K00001", None) == "K00001"
+
+    def test_described_accession_uses_single_colon_space_separator(self):
+        od = _dictionary_with(EC={"1.1.1.1": "alcohol dehydrogenase"})
+        assert (
+            describe_or_accession("EC", "1.1.1.1", od)
+            == "1.1.1.1: alcohol dehydrogenase"
+        )
+
+    def test_missing_description_in_present_dictionary_degrades_to_bare_accession(self):
+        od = _dictionary_with(KO={"K00001": "alcohol dehydrogenase"})
+        assert describe_or_accession("KO", "K99999", od) == "K99999"
+
+    def test_dictionary_with_unset_namespace_degrades_to_bare_accession(self):
+        # No ec_path given at all -- OntologyDictionary's own missing-file
+        # degradation, exercised through describe_or_accession.
+        od = OntologyDictionary(config_file=False, token_file=None, kbase_token_file=None)
+        assert describe_or_accession("EC", "1.1.1.1", od) == "1.1.1.1"
+        assert "EC" in od.degraded_namespaces
+
+    def test_go_accession_round_trips_on_first_colon_space_split(self):
+        """A GO accession embeds a colon itself ("GO:0006260"), which is
+        exactly why consumers must split on the first ": " (colon-space),
+        not the first colon."""
+        od = _dictionary_with(GO={"GO:0006260": "DNA replication"})
+        value = describe_or_accession("GO", "GO:0006260", od)
+        assert value == "GO:0006260: DNA replication"
+        accession, sep, description = value.partition(": ")
+        assert sep == ": "
+        assert accession == "GO:0006260"
+        assert description == "DNA replication"
+
+    def test_description_containing_colon_space_does_not_break_the_split(self):
+        """Descriptions may themselves contain ': '; consumers split on the
+        FIRST occurrence only."""
+        od = _dictionary_with(EC={"1.1.1.1": "note: alcohol dehydrogenase"})
+        value = describe_or_accession("EC", "1.1.1.1", od)
+        assert value == "1.1.1.1: note: alcohol dehydrogenase"
+        accession, _sep, description = value.partition(": ")
+        assert accession == "1.1.1.1"
+        assert description == "note: alcohol dehydrogenase"
 
 
 # ---------------------------------------------------------------------------

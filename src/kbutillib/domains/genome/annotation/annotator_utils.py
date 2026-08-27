@@ -37,6 +37,8 @@ from typing import Any
 
 from kbutillib.core.shared_env_utils import SharedEnvUtils
 
+from .ontology_dictionary import OntologyDictionary
+
 # ---------------------------------------------------------------------------
 # Alphabet definitions
 # ---------------------------------------------------------------------------
@@ -205,6 +207,51 @@ def _guard_protein(sequences: dict[str, str]) -> None:
             alphabet.
     """
     _check_alphabet(sequences, _PROTEIN_CHARS, "protein")
+
+
+# ---------------------------------------------------------------------------
+# Ontology-description formatting (shared by BaktaUtils / KofamscanUtils)
+# ---------------------------------------------------------------------------
+
+
+def describe_or_accession(
+    namespace: str,
+    accession: str,
+    ontology_dictionary: OntologyDictionary | None,
+) -> str:
+    """Return ``"<accession>: <description>"``, degrading to the bare accession.
+
+    Looks up *accession* within *namespace* (one of ``"KO"``, ``"EC"``,
+    ``"GO"``, ``"COG"``) via *ontology_dictionary*. Never raises: degrades
+    to the bare *accession* when *ontology_dictionary* is ``None``, when
+    the namespace's staged dictionary file is itself absent (see
+    ``OntologyDictionary``'s own missing-file degradation), or when
+    *accession* simply has no description on file.
+
+    Uses exactly one ``": "`` separator after the accession. GO accessions
+    (e.g. ``"GO:0006260"``) already embed a colon in the accession itself,
+    which is why consumers must split on the *first* ``": "``
+    (colon-space), not the first colon, to recover the accession.
+
+    Args:
+        namespace: One of the four ``OntologyDictionary.NAMESPACES``.
+        accession: The accession to describe (e.g. ``"K00001"``,
+            ``"1.1.1.1"``, ``"GO:0006260"``, ``"COG0001"``).
+        ontology_dictionary: The dictionary to look up *accession* in, or
+            ``None`` when no dictionary is available for this run.
+
+    Returns:
+        ``"<accession>: <description>"`` when a description is found,
+        otherwise the bare *accession*.
+    """
+    description = (
+        ontology_dictionary.describe(namespace, accession)
+        if ontology_dictionary is not None
+        else None
+    )
+    if description:
+        return f"{accession}: {description}"
+    return accession
 
 
 # ---------------------------------------------------------------------------

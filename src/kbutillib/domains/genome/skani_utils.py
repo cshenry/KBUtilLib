@@ -9,6 +9,8 @@ __all__ = [
     "SKANIUtilsImpl",
 ]
 
+import contextlib
+import fcntl
 import json
 import os
 import subprocess
@@ -59,6 +61,12 @@ class SKANIUtils(SharedEnvUtils):
             cache_file = os.path.expanduser(default_cache)
 
         self.cache_file = Path(cache_file)
+
+        # Sibling lockfile guarding read-modify-write access to the cache.
+        # This must NEVER be the cache file itself: _save_cache() replaces
+        # the cache file's inode via os.replace(), so a lock held on that
+        # inode would protect nothing once the swap happens.
+        self.lock_file = self.cache_file.parent / (self.cache_file.name + ".lock")
 
         # Ensure cache file directory exists
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -112,18 +120,39 @@ class SKANIUtils(SharedEnvUtils):
     def _load_cache(self) -> Dict[str, Dict[str, Any]]:
         """Load the sketch database cache from JSON file.
 
+        An absent cache file is a legitimate, expected state (``__init__``
+        creates it on first use) and yields an empty mapping. A cache file
+        that IS present but fails to parse is a corruption signal, not "no
+        databases registered" -- returning {} in that case would make every
+        downstream lookup silently behave as though a registered database
+        didn't exist. So a present-but-unparseable cache raises instead.
+
         Returns:
             Dictionary mapping database names to their metadata
+
+        Raises:
+            json.JSONDecodeError: If the cache file exists but is not valid JSON.
+            OSError: If the cache file exists but cannot be read.
         """
+        if not self.cache_file.exists():
+            return {}
+
         try:
             with open(self.cache_file, 'r') as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            self.log_error(f"Failed to load cache file: {e}")
-            return {}
+            self.log_error(f"Cache file {self.cache_file} is present but unreadable/corrupt: {e}")
+            raise
 
     def _save_cache(self, cache: Dict[str, Dict[str, Any]]) -> bool:
         """Save the sketch database cache to JSON file.
+
+        Writes to a temporary file in the same directory as the cache file
+        and then ``os.replace()``s it into place. POSIX rename is atomic,
+        so a concurrent reader always observes either the complete old file
+        or the complete new file -- never a truncated/partial one, which is
+        what a plain ``open(self.cache_file, 'w')`` would expose during the
+        write.
 
         Args:
             cache: Dictionary mapping database names to their metadata
@@ -131,13 +160,48 @@ class SKANIUtils(SharedEnvUtils):
         Returns:
             bool: True if successful, False otherwise
         """
+        tmp_path = None
         try:
-            with open(self.cache_file, 'w') as f:
-                json.dump(cache, f, indent=2)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.cache_file.parent),
+                prefix=f".{self.cache_file.name}.",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(cache, f, indent=2)
+                os.replace(tmp_path, self.cache_file)
+                tmp_path = None
+            finally:
+                if tmp_path is not None:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
             return True
         except IOError as e:
             self.log_error(f"Failed to save cache file: {e}")
             return False
+
+    @contextlib.contextmanager
+    def _write_lock(self):
+        """Advisory lock guarding read-modify-write access to the cache.
+
+        Locks a SIBLING lockfile (``self.lock_file``), never the cache file
+        itself: ``_save_cache`` swaps the cache file's inode via
+        ``os.replace()``, so a flock held on that inode would stop
+        protecting anything the instant a writer completes a replace, and
+        two writers could then both believe they hold exclusivity.
+        """
+        lock_fd = os.open(str(self.lock_file), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
     def _get_database_info(self, database_name: str) -> Optional[Dict[str, Any]]:
         """Get information about a database from cache.
@@ -302,9 +366,14 @@ class SKANIUtils(SharedEnvUtils):
                 }
             }
 
-            # Update cache
-            cache[database_name] = db_entry
-            self._save_cache(cache)
+            # Update cache. Re-load under the lock (rather than reusing the
+            # unlocked `cache` read earlier) so a concurrent writer's update
+            # is not clobbered -- guard the read-modify-write, not just the
+            # write.
+            with self._write_lock():
+                cache = self._load_cache()
+                cache[database_name] = db_entry
+                self._save_cache(cache)
 
             return {
                 "success": True,
@@ -361,32 +430,33 @@ class SKANIUtils(SharedEnvUtils):
             ...     description="GTDB bacterial representatives r214"
             ... )
         """
-        cache = self._load_cache()
+        with self._write_lock():
+            cache = self._load_cache()
 
-        if database_name in cache:
-            self.log_warning(
-                f"Database '{database_name}' already exists in cache. "
-                f"Use a different name or remove the existing entry first."
-            )
-            return False
+            if database_name in cache:
+                self.log_warning(
+                    f"Database '{database_name}' already exists in cache. "
+                    f"Use a different name or remove the existing entry first."
+                )
+                return False
 
-        db_path = Path(database_path)
-        if not db_path.exists():
-            self.log_warning(f"Database path does not exist: {database_path}")
+            db_path = Path(database_path)
+            if not db_path.exists():
+                self.log_warning(f"Database path does not exist: {database_path}")
 
-        # Create database entry
-        db_entry = {
-            "path": str(db_path),
-            "description": description,
-            "created": datetime.now().isoformat(),
-            "updated": datetime.now().isoformat(),
-            "genome_count": genome_count or 0,
-            "metadata": metadata or {}
-        }
+            # Create database entry
+            db_entry = {
+                "path": str(db_path),
+                "description": description,
+                "created": datetime.now().isoformat(),
+                "updated": datetime.now().isoformat(),
+                "genome_count": genome_count or 0,
+                "metadata": metadata or {}
+            }
 
-        # Update cache
-        cache[database_name] = db_entry
-        self._save_cache(cache)
+            # Update cache
+            cache[database_name] = db_entry
+            self._save_cache(cache)
 
         self.log_info(f"Added database '{database_name}' to cache at {database_path}")
         return True
@@ -397,7 +467,8 @@ class SKANIUtils(SharedEnvUtils):
         database_name: str = "default",
         min_ani: float = 0.0,
         max_results: Optional[int] = None,
-        threads: int = 1
+        threads: int = 1,
+        timeout: int = 300
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Query genome(s) against a sketch database.
 
@@ -407,6 +478,12 @@ class SKANIUtils(SharedEnvUtils):
             min_ani: Minimum ANI threshold (0.0-1.0)
             max_results: Maximum number of results per query (None = all)
             threads: Number of threads to use
+            timeout: Timeout in seconds for the underlying ``skani search``
+                subprocess (default: 300). A single invocation covers ALL
+                query files passed in ``query_fasta``, so callers batching
+                multiple queries into one call should raise this rather
+                than relying on the default, which was sized for a single
+                query per call.
 
         Returns:
             Dict mapping query IDs to lists of hit dictionaries:
@@ -432,7 +509,8 @@ class SKANIUtils(SharedEnvUtils):
                 "database_name": database_name,
                 "min_ani": min_ani,
                 "max_results": max_results,
-                "threads": threads
+                "threads": threads,
+                "timeout": timeout
             },
             print_params=True
         )
@@ -503,7 +581,7 @@ class SKANIUtils(SharedEnvUtils):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout
+                timeout=timeout
             )
 
             if result.returncode != 0:
@@ -525,7 +603,7 @@ class SKANIUtils(SharedEnvUtils):
             return results_by_query
 
         except subprocess.TimeoutExpired:
-            self.log_error("skani search timed out after 5 minutes")
+            self.log_error(f"skani search timed out after {timeout} seconds")
             raise RuntimeError("skani search timed out")
         finally:
             # Clean up temporary file
@@ -659,29 +737,30 @@ class SKANIUtils(SharedEnvUtils):
         Returns:
             bool: True if successful, False otherwise
         """
-        cache = self._load_cache()
+        with self._write_lock():
+            cache = self._load_cache()
 
-        if database_name not in cache:
-            self.log_warning(f"Database '{database_name}' not found in cache")
-            return False
+            if database_name not in cache:
+                self.log_warning(f"Database '{database_name}' not found in cache")
+                return False
 
-        db_info = cache[database_name]
+            db_info = cache[database_name]
 
-        # Optionally delete files
-        if delete_files:
-            db_path = Path(db_info["path"])
-            if db_path.exists():
-                try:
-                    import shutil
-                    shutil.rmtree(db_path)
-                    self.log_info(f"Deleted database files at {db_path}")
-                except Exception as e:
-                    self.log_error(f"Failed to delete database files: {e}")
-                    return False
+            # Optionally delete files
+            if delete_files:
+                db_path = Path(db_info["path"])
+                if db_path.exists():
+                    try:
+                        import shutil
+                        shutil.rmtree(db_path)
+                        self.log_info(f"Deleted database files at {db_path}")
+                    except Exception as e:
+                        self.log_error(f"Failed to delete database files: {e}")
+                        return False
 
-        # Remove from cache
-        del cache[database_name]
-        self._save_cache(cache)
+            # Remove from cache
+            del cache[database_name]
+            self._save_cache(cache)
         self.log_info(f"Removed database '{database_name}' from cache")
         return True
 

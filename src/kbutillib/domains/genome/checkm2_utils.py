@@ -445,6 +445,23 @@ class CheckM2Utils(SharedEnvUtils):
             "docker", "run", "--rm",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--network", "none",
+            # HOME is load-bearing and must point somewhere WRITABLE. The image's
+            # default user is ``mambauser``; the ``--user`` override above leaves
+            # ``HOME=/``, which the invoking uid cannot write. micromamba then
+            # aborts before CheckM2 ever starts, trying to create its proc cache:
+            #
+            #   critical libmamba filesystem error: directory iterator cannot
+            #   open directory: No such file or directory [/.cache/mamba/proc]
+            #
+            # ``/work`` is the bind-mounted host scratch dir owned by that same
+            # uid, so it is the one reliably writable path in the container.
+            # MEASURED on poplar 2026-09-02: without these two flags KBDLCheckM2
+            # fails 100% of the time and the adapter's batch-then-isolate retries
+            # every genome individually before failing; with them the identical
+            # invocation succeeds. See
+            # KBDLJobRunningPrototype/agent-io/research/checkm2-live-measurement.md
+            "-e", "HOME=/work",
+            "-e", "XDG_CACHE_HOME=/work/.cache",
             "-v", f"{work}:/work",
             "-v", f"{db_dir}:/db:ro",
             "--entrypoint", "micromamba",

@@ -192,6 +192,56 @@ class TestPredictArgvConstruction:
     def _fake_completed(self, returncode=0, stdout="", stderr=""):
         return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
 
+    def test_argv_sets_writable_home_for_micromamba(self, tmp_path):
+        """``--user`` without a writable HOME makes micromamba abort.
+
+        REGRESSION GUARD for a blocker measured on poplar 2026-09-02. The
+        image's default user is ``mambauser``; overriding it with ``--user``
+        leaves ``HOME=/``, which the invoking uid cannot write, so micromamba
+        dies before CheckM2 starts::
+
+            critical libmamba filesystem error: directory iterator cannot open
+            directory: No such file or directory [/.cache/mamba/proc]
+
+        KBDLCheckM2 failed 100% of the time on poplar until ``-e HOME=/work``
+        was added. ``/work`` is the bind-mounted scratch dir owned by that uid.
+        The mocked argv tests could not catch this because none of them runs a
+        real container -- hence this explicit assertion on the argv itself.
+        """
+        cu = _make_utils()
+        cu._docker_image = "kbutillib/checkm2:1.1.0"
+        work = tmp_path / "work"
+        work.mkdir()
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        db_file = db_dir / "uniref100.KO.1.dmnd"
+        db_file.write_text("fake-db")
+
+        with patch("subprocess.run", return_value=self._fake_completed()) as mock_run:
+            cu._run_checkm2_predict(
+                work=work,
+                genome_names=["genome1.fna"],
+                resolved_db=db_file,
+                threads=4,
+                extension=".fna",
+                remove_intermediates=True,
+            )
+
+        argv = mock_run.call_args[0][0]
+        env_vals = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+
+        assert "HOME=/work" in env_vals, (
+            "HOME must be set to the writable bind-mounted /work; without it "
+            "micromamba aborts and every CheckM2 job fails"
+        )
+        assert "XDG_CACHE_HOME=/work/.cache" in env_vals
+
+        # The HOME value must be a path that is actually writable in the
+        # container -- i.e. the /work bind mount, not / or /db (read-only).
+        home_val = next(v for v in env_vals if v.startswith("HOME="))
+        home_path = home_val.split("=", 1)[1]
+        assert home_path.startswith("/work"), home_val
+
     def test_argv_has_user_network_none_and_ro_db_mount(self, tmp_path):
         cu = _make_utils()
         cu._docker_image = "kbutillib/checkm2:1.1.0"

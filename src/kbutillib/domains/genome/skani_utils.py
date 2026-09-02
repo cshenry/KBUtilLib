@@ -399,6 +399,79 @@ class SKANIUtils(SharedEnvUtils):
                 "database_name": database_name
             }
 
+    def build_sketch_database(
+        self,
+        fasta_files: List[str],
+        out_dir: str,
+        threads: int = 1,
+        timeout: int = 600
+    ) -> Dict[str, Any]:
+        """Build a SKANI sketch database from an explicit list of FASTA files.
+
+        Unlike ``sketch_genome_directory``, this method writes NOTHING to
+        the JSON database cache (no ``_load_cache``/``_save_cache``/
+        ``_write_lock``) and returns ``database_path`` exactly as the
+        ``out_dir`` it was given -- the caller's ``out_dir`` is the literal
+        directory skani populates via ``-o <out_dir>``, so a consumer
+        validating the output (e.g. for ``markers.bin``) finds it there
+        without any parent/child path translation.
+
+        Args:
+            fasta_files: List of paths to FASTA files to sketch
+            out_dir: Directory skani should write the sketch database into.
+                     Returned verbatim as ``database_path``.
+            threads: Number of threads to use for sketching. Passed to
+                     skani as ``-t <threads>`` when greater than 1.
+            timeout: Timeout in seconds for the underlying ``skani sketch``
+                     subprocess. Honored exactly as given -- not hardcoded.
+
+        Returns:
+            Dict containing:
+                - success: bool
+                - database_path: str (``out_dir``, verbatim)
+                - genome_count: int
+                - error: str | None (skani's stderr, or the timeout message)
+        """
+        cmd = [self.skani_executable, "sketch"]
+        cmd.extend(str(f) for f in fasta_files)
+        cmd.extend(["-o", out_dir])
+
+        if threads > 1:
+            cmd.extend(["-t", str(threads)])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+
+            if result.returncode != 0:
+                self.log_error(f"skani sketch failed: {result.stderr}")
+                return {
+                    "success": False,
+                    "database_path": out_dir,
+                    "genome_count": 0,
+                    "error": result.stderr
+                }
+
+            return {
+                "success": True,
+                "database_path": out_dir,
+                "genome_count": len(fasta_files),
+                "error": None
+            }
+
+        except subprocess.TimeoutExpired as e:
+            self.log_error(f"skani sketch timed out after {timeout} seconds")
+            return {
+                "success": False,
+                "database_path": out_dir,
+                "genome_count": 0,
+                "error": str(e)
+            }
+
     def add_skani_database(
         self,
         database_name: str,

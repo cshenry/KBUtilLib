@@ -1,12 +1,38 @@
 # `kbu king` CLI reference
 
-`kbu king` self-installs the KBUtilLib-modeling app (App-2 in the
-[king-integration-apps](../prds/) PRD) into a local KING checkout, without
-ever modifying KING's own repository. It is a thin CLI facade over the
-vendored `kbutillib.king_install` module, which reads this repo's OWN
-packaged bundle (`src/kbutillib/king_app/{bundle.json,skill.md}`) — no
-cross-repo dependency; a checkout/install of KBUtilLib alone is enough to
-run `kbu king install`.
+`kbu king` self-installs this repo's KING apps into a local KING checkout,
+without ever modifying KING's own repository. It is a thin CLI facade over
+the vendored `kbutillib.king_install` module, which reads this repo's OWN
+packaged bundles — no cross-repo dependency; a checkout/install of
+KBUtilLib alone is enough to run `kbu king install`.
+
+## The two bundles this repo ships
+
+| `--app` | package dir | app id | `cli` |
+|---|---|---|---|
+| `modeling` | `src/kbutillib/king_app/` | `kbutillib-modeling` | `kbu` |
+| `wake` | `src/kbutillib/king_app_wake/` | `persistentai-wake` | `persistentai` |
+
+`modeling` is App-2 in the [king-integration-apps](../prds/) PRD — the
+metabolic-modeling verbs.
+
+`wake` gives a KING/KOROS session the ability to fire a **triggered wake**
+at one of Chris's persistent agents (`luna` on primary-laptop, `miles` on
+h100) by writing an envelope onto the `persistentai` trigger rail. It is
+deliberately fire-and-forget: 3–15 minute latency, no return value, and no
+reply channel, because an originating envelope cannot request one. The
+skill prose says so in those words, since it is the only thing an isolated
+KOROS session will ever know about the rail.
+
+Its `cli` (`persistentai`) lives in another repo. That is fine and
+expected — `install` never fails on a missing CLI, it reports
+`cli_on_path: false`, and `status` colors the app amber until the CLI
+arrives. **The wake app is only usable on primary-laptop**: a KING session
+on the BERDL pod has neither `persistentai` nor the Dropbox-synced trigger
+inbox.
+
+With no `--app`, every verb acts on **all** of this repo's bundles. A
+per-app default would silently ship a subset.
 
 Built for [king-integration-apps](../prds/) Module C/D: composing this
 app's `skill.md` into KING's injected `KING_CONTEXT` orientation and
@@ -15,12 +41,19 @@ wiring the launch env, per Acceptance Criteria #13-#21.
 ## Verbs
 
 ```
-kbu king install [--apps-dir PATH] [--json]
-kbu king uninstall [--apps-dir PATH] [--json]
-kbu king status [--apps-dir PATH] [--json]
+kbu king install   [--app modeling|wake] [--apps-dir PATH] [--json]
+kbu king uninstall [--app modeling|wake] [--apps-dir PATH] [--json]
+kbu king status    [--app modeling|wake] [--apps-dir PATH] [--json]
 ```
 
 `--apps-dir` overrides `$KING_APPS_DIR` (default `~/king-apps`).
+`--app` narrows to one bundle; omitting it acts on all of them.
+
+**`--json` always emits a LIST** of per-app result objects, one per app
+acted on — a list even when `--app` selects exactly one. It was a bare
+object before this repo shipped a second bundle; an output shape that
+changes with the number of apps is the kind of thing that breaks a caller
+months later.
 
 ### `install`
 

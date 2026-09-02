@@ -149,10 +149,13 @@ lp_solver = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-# The KING self-install app bundle (kbu king install) -- package data so a
-# `pip install` (not just an editable install) still ships bundle.json +
+# The KING self-install app bundles (kbu king install) -- package data so a
+# `pip install` (not just an editable install) still ships each bundle.json +
 # skill.md alongside the kbutillib package.
-kbutillib = ["king_app/*.json", "king_app/*.md"]
+kbutillib = [
+    "king_app/*.json", "king_app/*.md",
+    "king_app_wake/*.json", "king_app_wake/*.md",
+]
 
 [tool.uv]
 package = true

@@ -34,6 +34,20 @@ _BUNDLE_DIR = _SRC_DIR / "kbutillib" / "king_app"
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
+def _json_one(result: Any) -> Any:
+    """Sole element of a ``--json`` payload, which is always a LIST.
+
+    ``kbu king`` grew a second bundle (``persistentai-wake``), so ``--json``
+    emits one object per app acted on -- a list even for a single ``--app``.
+    Asserting the length here also proves the ``--app`` selector really
+    narrowed the run rather than silently acting on everything.
+    """
+    data = json.loads(result.output)
+    assert isinstance(data, list), data
+    assert len(data) == 1, data
+    return data[0]
+
+
 def _invoke(*args: str) -> Any:
     runner = CliRunner()
     return runner.invoke(main, list(args), catch_exceptions=False)
@@ -103,12 +117,14 @@ class TestInstall:
         r = _invoke(
             "king",
             "install",
+            "--app",
+            "modeling",
             "--apps-dir",
             str(apps_dir),
             "--json",
         )
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["id"] == "kbutillib-modeling"
         assert data["cli_on_path"] is True
         assert data["verify_probe_ok"] is True
@@ -141,16 +157,16 @@ class TestInstall:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
 
-        r1 = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        r1 = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r1.exit_code == 0, r1.output
 
         registry_before = (apps_dir / "registry.json").read_text()
         context_before = (apps_dir / "CONTEXT.md").read_text()
         serve_before = (apps_dir / "serve-king.sh").read_text()
 
-        r2 = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        r2 = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r2.exit_code == 0, r2.output
-        data2 = json.loads(r2.output)
+        data2 = _json_one(r2)
         assert data2["changed"] is False
 
         assert (apps_dir / "registry.json").read_text() == registry_before
@@ -167,7 +183,7 @@ class TestInstall:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
 
-        r = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
 
         other_bundle_dir = _write_fixture_bundle(tmp_path, "aiassistant", "AIAssistant")
@@ -197,9 +213,9 @@ class TestInstall:
         _no_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
 
-        r = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["cli_on_path"] is False
         assert data["verify_probe_ok"] is False
         # Composition still happens even though the hand is missing.
@@ -216,16 +232,16 @@ class TestStatus:
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         # No KING_CONTEXT set in the calling shell -- `king status` is
         # normally run right after `king install`, from an ordinary shell,
         # not from inside a KING launch. "Wired" must be judged from the
         # generated serve-king.sh wrapper, not the caller's live env.
         monkeypatch.delenv("KING_CONTEXT", raising=False)
-        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["color"] == "green"
         assert data["cli_on_path"] is True
         assert data["verify_probe_ok"] is True
@@ -241,12 +257,12 @@ class TestStatus:
         shell), even if the serve-king.sh wrapper were somehow unreadable."""
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         monkeypatch.setenv("KING_CONTEXT", str(apps_dir / "CONTEXT.md"))
-        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["color"] == "green"
         assert data["king_context_wired"] is True
 
@@ -255,12 +271,12 @@ class TestStatus:
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         _no_kbu_on_path(tmp_path, monkeypatch)
-        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 1
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["color"] == "amber"
         assert data["cli_on_path"] is False
         assert data["remediation"] is not None
@@ -270,7 +286,7 @@ class TestStatus:
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         # Actually break the wiring: corrupt the generated serve-king.sh so
         # it no longer exports KING_CONTEXT, and make sure the calling
@@ -280,9 +296,9 @@ class TestStatus:
         # that generated script, not the caller's own env.)
         (apps_dir / "serve-king.sh").write_text("#!/usr/bin/env bash\necho stub\n")
         monkeypatch.delenv("KING_CONTEXT", raising=False)
-        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 2
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["color"] == "red"
         assert data["cli_on_path"] is True
         assert data["king_context_wired"] is False
@@ -297,12 +313,12 @@ class TestUninstall:
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert (apps_dir / "kbutillib-modeling").is_dir()
 
-        r = _invoke("king", "uninstall", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "uninstall", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["removed"] is True
 
         assert not (apps_dir / "kbutillib-modeling").is_dir()
@@ -316,12 +332,12 @@ class TestUninstall:
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
-        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         other_bundle_dir = _write_fixture_bundle(tmp_path, "aiassistant", "AIAssistant")
         king_install.install(other_bundle_dir, apps_dir=apps_dir)
 
-        r = _invoke("king", "uninstall", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "uninstall", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
 
         context = (apps_dir / "CONTEXT.md").read_text()
@@ -334,9 +350,9 @@ class TestUninstall:
         _fake_kbu_on_path(tmp_path, monkeypatch)
         apps_dir = tmp_path / "king-apps"
 
-        r = _invoke("king", "uninstall", "--apps-dir", str(apps_dir), "--json")
+        r = _invoke("king", "uninstall", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
-        data = json.loads(r.output)
+        data = _json_one(r)
         assert data["removed"] is False
 
 
@@ -359,3 +375,133 @@ class TestBundleSchema:
         (bad_dir / "skill.md").write_text("# X\n")
         with pytest.raises(king_install.BundleError):
             king_install.load_bundle(bad_dir)
+
+
+# ── the wake bundle (persistentai-wake) ──────────────────────────────────────
+
+
+_WAKE_BUNDLE_DIR = _SRC_DIR / "kbutillib" / "king_app_wake"
+
+
+class TestWakeBundle:
+    """This repo's SECOND KING app: firing a triggered wake at luna/miles.
+
+    Its `cli` is `persistentai`, which lives in another repo and is
+    deliberately absent from the hermetic PATH these tests build. That is
+    the point of the "report state, don't crash" contract -- composition
+    must still happen so the app is installable before its CLI is.
+    """
+
+    def test_bundle_conforms_to_schema(self) -> None:
+        loaded = king_install.load_bundle(_WAKE_BUNDLE_DIR)
+        bundle = loaded["bundle"]
+        assert set(bundle) >= {"id", "title", "description", "cli"}
+        assert bundle["id"] == "persistentai-wake"
+        assert bundle["cli"] == "persistentai"
+        assert bundle["verify"]["cmd"] == ["persistentai", "trigger", "--help"]
+
+    def test_skill_md_states_the_load_bearing_constraints(self) -> None:
+        """The prose IS the deliverable -- it is injected verbatim and is the
+        only thing a KOROS session will ever know about this rail. Each
+        assertion below is a wrong assumption an agent would otherwise make.
+        """
+        skill_md = king_install.load_bundle(_WAKE_BUNDLE_DIR)["skill_md"]
+
+        # Both addressing axes, and the only valid pairings.
+        assert "--to-machine primary-laptop" in skill_md
+        assert "--to miles --to-machine h100" in skill_md
+        # The rail is one-way: no reply, no return value, minutes of latency.
+        assert "one-way" in skill_md
+        assert "3–15 minutes" in skill_md
+        # An envelope is a request, not a grant of scope.
+        assert "Not an authorisation." in skill_md
+        # The payload is a file, never argv.
+        assert "--payload-file" in skill_md
+        # Not available off primary-laptop.
+        assert "only on primary-laptop" in skill_md
+        # PERSISTENTAI_MACHINE is required and unset in a KOROS session --
+        # omitting it makes the very first emit fail with an error whose
+        # cause is not obvious from the message.
+        assert "PERSISTENTAI_MACHINE=primary-laptop persistentai trigger emit" in skill_md
+        assert "required and you must set it yourself" in skill_md
+
+    def test_install_composes_wake_app_even_though_its_cli_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _no_kbu_on_path(tmp_path, monkeypatch)  # neither kbu NOR persistentai
+        apps_dir = tmp_path / "king-apps"
+
+        r = _invoke("king", "install", "--app", "wake", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 0, r.output
+        data = _json_one(r)
+        assert data["id"] == "persistentai-wake"
+        assert data["cli"] == "persistentai"
+        assert data["cli_on_path"] is False
+        assert data["changed"] is True
+
+        registry = json.loads((apps_dir / "registry.json").read_text())
+        assert registry["persistentai-wake"]["cli"] == "persistentai"
+
+        context = (apps_dir / "CONTEXT.md").read_text()
+        assert (
+            "# [KING App] Wake a Persistent Agent (Luna / Miles) "
+            "(id: persistentai-wake)" in context
+        )
+        assert "persistentai trigger emit" in context
+
+    def test_bare_install_ships_every_app_this_repo_offers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No --app means all of them. A per-app default would silently ship
+        a subset, which is exactly how the second app would go unnoticed."""
+        _fake_kbu_on_path(tmp_path, monkeypatch)
+        apps_dir = tmp_path / "king-apps"
+
+        r = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 0, r.output
+        data = json.loads(r.output)
+        assert {entry["id"] for entry in data} == {
+            "kbutillib-modeling",
+            "persistentai-wake",
+        }
+
+        registry = json.loads((apps_dir / "registry.json").read_text())
+        assert set(registry) == {"kbutillib-modeling", "persistentai-wake"}
+
+        context = (apps_dir / "CONTEXT.md").read_text()
+        assert "(id: kbutillib-modeling)" in context
+        assert "(id: persistentai-wake)" in context
+
+    def test_uninstalling_one_app_keeps_the_others_fragment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fake_kbu_on_path(tmp_path, monkeypatch)
+        apps_dir = tmp_path / "king-apps"
+        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+
+        r = _invoke("king", "uninstall", "--app", "wake", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 0, r.output
+        assert _json_one(r)["removed"] is True
+
+        registry = json.loads((apps_dir / "registry.json").read_text())
+        assert set(registry) == {"kbutillib-modeling"}
+        context = (apps_dir / "CONTEXT.md").read_text()
+        assert "(id: persistentai-wake)" not in context
+        assert "(id: kbutillib-modeling)" in context
+
+    def test_status_worst_color_wins_across_apps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A green modeling app must not mask the wake app's missing CLI."""
+        _fake_kbu_on_path(tmp_path, monkeypatch)  # kbu present, persistentai not
+        apps_dir = tmp_path / "king-apps"
+        _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
+        monkeypatch.delenv("KING_CONTEXT", raising=False)
+
+        r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 0  # green on its own
+
+        r = _invoke("king", "status", "--apps-dir", str(apps_dir), "--json")
+        assert r.exit_code == 1, r.output  # amber, because persistentai is absent
+        colors = {e["id"]: e["color"] for e in json.loads(r.output)}
+        assert colors == {"kbutillib-modeling": "green", "persistentai-wake": "amber"}

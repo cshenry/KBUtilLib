@@ -1,0 +1,10 @@
+{
+  "id": "persistentai-wake",
+  "title": "Wake a Persistent Agent (Luna / Miles)",
+  "description": "Fire a triggered wake at one of Chris's persistent agents -- luna on primary-laptop or miles on h100 -- by writing an envelope onto the cross-machine trigger rail with `persistentai trigger emit`. One-way and fire-and-forget: 3-15 minute latency, no return value, no reply channel.",
+  "cli": "persistentai",
+  "verify": {
+    "cmd": ["persistentai", "trigger", "--help"],
+    "ok_text": "Write a new envelope"
+  }
+}

@@ -32,14 +32,15 @@ anywhere in this module: the service derives identity from the token alone
 ignored server-side even if one were accepted here.
 
 Endpoints encoded here (as of the service's ``job_api.py``/``schemas/*``
-at KBDLJobRunningPrototype commit ``e0b2dda``)::
+at KBDLJobRunningPrototype commit ``a024b55``)::
 
     POST   /jobs                    submit a job envelope -> 202 {"job_id"}
     GET    /jobs                    list the caller's jobs
     GET    /jobs/{job_id}           full status record
     GET    /jobs/{job_id}/result    result JSON (409 if not completed)
     DELETE /jobs/{job_id}           clear a finished job -> 204
-    POST   /objects                 multipart upload -> 202 {"job_id"} or
+    POST   /objects                 multipart upload (with an optional
+                                     ``transform``) -> 202 {"job_id"} or
                                      201 {"object_id"} if content already
                                      hashes to a registered object
     GET    /objects                 list the caller's objects
@@ -48,18 +49,35 @@ at KBDLJobRunningPrototype commit ``e0b2dda``)::
                                      object is not an archive type)
     DELETE /objects/{object_id}     delete (owner-only) -> 204
 
-Deliberately NOT implemented: any ACL/grant call. The service exposes no
-grant endpoint (see ``job_api.py``'s module docstring in the service repo)
--- ``ObjectStore.grant()`` is not owner-gated and adding a route for it
-would be a privilege-escalation hole, so this client does not invent one
-either.
+Deliberately NOT implemented:
+
+- Any ACL/grant call. The service exposes no grant endpoint (see
+  ``job_api.py``'s module docstring in the service repo) --
+  ``ObjectStore.grant()`` is not owner-gated and adding a route for it
+  would be a privilege-escalation hole, so this client does not invent
+  one either.
+- Any requeue call. Operator requeue (``kbdl-operator-requeue-v1``)
+  deliberately has no HTTP route -- it is admin-CLI only on the service
+  host, and owner self-service retry was explicitly deferred. This is
+  called out because reading the service's recent commit history could
+  reasonably suggest a client method is missing here; it is not missing,
+  it is out of scope by design.
 
 Job submission envelope is ``{"schema_version": "1", "job_type": <name>,
-"params": {...}}`` for the five job types: ``KBDLGenomeAnnotation``,
+"params": {...}}`` for the six job types: ``KBDLGenomeAnnotation``,
 ``KBDLModelReconstruction``, ``KBDLFitnessModelAnalysis``, ``KBDLSKANI``,
-``KBDLUploadObject`` (the last of which is only ever submitted as a side
-effect of :meth:`KBDLServiceUtils.upload_object`'s multipart call -- there
-is no standalone JSON path to it, since its params alone carry no bytes).
+``KBDLCheckM2``, ``KBDLUploadObject`` (the last of which is only ever
+submitted as a side effect of :meth:`KBDLServiceUtils.upload_object`'s
+multipart call -- there is no standalone JSON path to it, since its
+params alone carry no bytes).
+
+Contract note (``kbdl-atp-safe-at-scale-v1``): the result payloads for
+``KBDLFitnessModelAnalysis`` and ``KBDLModelReconstruction`` jobs gained
+required fields -- a top-level ``model`` and the effective ``solver`` --
+under that PRD. This client returns raw result dicts from
+:meth:`KBDLServiceUtils.get_job_result`/:meth:`KBDLServiceUtils.submit_and_wait`
+either way, so no code here needed to change; only this documented
+contract description was stale.
 
 Errors -- distinguishable, typed, and raised from :meth:`_raise_for_status`:
 
@@ -87,7 +105,7 @@ completion):
   the job's ``state`` is ``"completed"`` or ``"failed"``. ``sleep_fn`` and
   ``time_fn`` are injectable (mirroring ``kbdl_service.identity``'s own
   clock-injection pattern) so tests never really sleep.
-- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the five job
+- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the six job
   types and returns its result, raising :class:`KBDLJobFailedError` if the
   job ends in ``"failed"``.
 """
@@ -125,11 +143,12 @@ KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 #: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
 DEFAULT_BASE_URL = "http://127.0.0.1:8791"
 
-#: The five job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
+#: The six job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
 JOB_TYPE_MODEL_RECONSTRUCTION = "KBDLModelReconstruction"
 JOB_TYPE_FITNESS_MODEL_ANALYSIS = "KBDLFitnessModelAnalysis"
 JOB_TYPE_SKANI = "KBDLSKANI"
+JOB_TYPE_CHECKM2 = "KBDLCheckM2"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
 
 #: The only schema_version this client (and the v0 service) speaks.
@@ -360,6 +379,14 @@ class KBDLServiceUtils(SharedEnvUtils):
         """
         return self._submit(JOB_TYPE_SKANI, params)
 
+    def submit_checkm2(self, **params: Any) -> str:
+        """Submit a ``KBDLCheckM2`` job. Returns the job id.
+
+        See ``kbdl_service.schemas.checkm2.KBDLCheckM2Params`` (``checkm2_db``,
+        exactly one of ``fasta``/``archive``, ``delete_archive_on_completion``).
+        """
+        return self._submit(JOB_TYPE_CHECKM2, params)
+
     # ── job lifecycle ────────────────────────────────────────────────────
 
     def list_jobs(self) -> List[Dict[str, Any]]:
@@ -477,6 +504,7 @@ class KBDLServiceUtils(SharedEnvUtils):
         name: str,
         visibility: str,
         filename: Optional[str] = None,
+        transform: str = "none",
     ) -> Dict[str, Any]:
         """Upload an object via the multipart ``POST /objects`` endpoint.
 
@@ -484,22 +512,55 @@ class KBDLServiceUtils(SharedEnvUtils):
         is no separate JSON-only submission path for it, since its params
         alone carry no bytes.
 
+        Object types fall into two groups, and this method only ever
+        creates the first kind:
+
+        - **Caller-uploadable via this method**: ``"SKANIDB"``,
+          ``"ModelMapping"``, ``"Media"``, ``"GenomeArchive"``.
+        - **Operator-registered on the host, with no HTTP upload route by
+          design**: ``"BaktaDB"``, ``"KofamProfiles"``, ``"CheckM2DB"``.
+          These appear in :meth:`list_objects`/:meth:`get_object_metadata`
+          like any other object, but the service deliberately exposes no
+          way to upload one -- they are large, operator-curated reference
+          databases seeded on the host, not caller content. Calling this
+          method with ``object_type="CheckM2DB"`` (or ``"BaktaDB"``/
+          ``"KofamProfiles"``) is a category error; there is no route that
+          accepts it.
+
         Args:
             file: A path (``str``/``Path``), raw ``bytes``/``bytearray``,
                 or an open binary file-like object to upload.
-            object_type: One of the service's object types (e.g.
-                ``"SKANIDB"``, ``"ModelMapping"``, ``"Media"``,
-                ``"GenomeArchive"``).
+            object_type: One of the caller-uploadable object types listed
+                above.
             name: Display name for the object.
             visibility: ``"public"`` or ``"private"``.
             filename: Optional filename to send in the multipart part;
                 defaults to ``name``.
+            transform: Server-side post-processing to apply to the upload,
+                default ``"none"``. Two surprising, already-implemented
+                server behaviours to know before passing anything else:
+
+                - ``transform != "none"`` is valid ONLY when
+                  ``object_type == "GenomeArchive"``; any other
+                  ``object_type`` combined with a non-``"none"`` transform
+                  is rejected with HTTP 400.
+                - ``transform != "none"`` disables the pre-hash dedup
+                  short-circuit, so such an upload ALWAYS returns
+                  ``{"job_id": ...}`` (202) and never ``{"object_id": ...}``
+                  (201), even if identical content was uploaded before.
+
+                Passing the default ``transform="none"`` leaves the
+                request byte-identical to this method's pre-``transform``
+                behavior, so existing callers are unaffected.
 
         Returns:
-            ``{"job_id": ...}`` for newly-hashed content (HTTP 202), or
-            ``{"object_id": ...}`` if the content already hashes to an
-            object the caller can already see (HTTP 201) -- the upload is
-            discarded server-side in that case and no new job is queued.
+            With ``transform="none"``: ``{"job_id": ...}`` for newly-hashed
+            content (HTTP 202), or ``{"object_id": ...}`` if the content
+            already hashes to an object the caller can already see (HTTP
+            201) -- the upload is discarded server-side in that case and no
+            new job is queued. With ``transform != "none"``: always
+            ``{"job_id": ...}`` (HTTP 202); the 201/dedup path never
+            applies.
         """
         opened: Optional[Any] = None
         if hasattr(file, "read"):
@@ -513,6 +574,8 @@ class KBDLServiceUtils(SharedEnvUtils):
         try:
             files = {"file": (filename or name, fileobj)}
             data = {"object_type": object_type, "name": name, "visibility": visibility}
+            if transform != "none":
+                data["transform"] = transform
             response = self._request("POST", "/objects", files=files, data=data)
             return response.json()
         finally:

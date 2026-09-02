@@ -216,6 +216,11 @@ def test_constructor_accepts_no_username_parameter():
             "KBDLSKANI",
             {"skani_db": {"object_id": "db-1"}, "fasta": "seq"},
         ),
+        (
+            "submit_checkm2",
+            "KBDLCheckM2",
+            {"checkm2_db": {"object_id": "db-1"}, "fasta": "seq"},
+        ),
     ],
 )
 def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
@@ -329,6 +334,51 @@ def test_upload_object_new_content_returns_job_id():
         "object_type": "GenomeArchive",
         "name": "archive1",
         "visibility": "private",
+    }
+
+
+def test_upload_object_default_transform_is_byte_identical_to_pre_transform_behavior():
+    """Regression guard: the default transform="none" must leave the
+    outgoing request completely unchanged from before ``transform``
+    existed, so every existing caller is unaffected. No "transform" key
+    should appear in the form data at all -- not even set to "none"."""
+    session = FakeSession([FakeResponse(202, {"job_id": "up-1"})])
+    client = make_client(session)
+
+    client.upload_object(
+        b"file bytes",
+        object_type="GenomeArchive",
+        name="archive1",
+        visibility="private",
+    )
+
+    call = session.calls[0]
+    assert call["data"] == {
+        "object_type": "GenomeArchive",
+        "name": "archive1",
+        "visibility": "private",
+    }
+    assert "transform" not in call["data"]
+
+
+def test_upload_object_includes_transform_in_form_data_when_passed():
+    session = FakeSession([FakeResponse(202, {"job_id": "up-1"})])
+    client = make_client(session)
+
+    client.upload_object(
+        b"file bytes",
+        object_type="GenomeArchive",
+        name="archive1",
+        visibility="private",
+        transform="some-transform",
+    )
+
+    call = session.calls[0]
+    assert call["data"] == {
+        "object_type": "GenomeArchive",
+        "name": "archive1",
+        "visibility": "private",
+        "transform": "some-transform",
     }
 
 

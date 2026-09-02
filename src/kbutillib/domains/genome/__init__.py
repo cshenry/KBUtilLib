@@ -6,6 +6,7 @@ Sub-modules:
     mmseqs_utils        — MMSeqsUtils, MMSeqsUtilsImpl
     skani_utils         — SKANIUtils, SKANIUtilsImpl
     ontomap_utils       — OntomapUtils, OntomapUtilsImpl
+    checkm2_utils       — CheckM2Utils
     annotation/         — AnnotatorUtils, DRAM2Utils, ProkkaUtils, TransytUtils
 
 Imports here are lazy to avoid pulling in optional heavy dependencies
@@ -46,6 +47,8 @@ def __getattr__(name: str):  # noqa: ANN001
         # skani_utils
         "SKANIUtils": ("skani_utils", "SKANIUtils"),
         "SKANIUtilsImpl": ("skani_utils", "SKANIUtilsImpl"),
+        # checkm2_utils
+        "CheckM2Utils": ("checkm2_utils", "CheckM2Utils"),
     }
 
     if name in _lazy_map:
@@ -84,4 +87,6 @@ __all__ = [
     # skani_utils
     "SKANIUtils",
     "SKANIUtilsImpl",
+    # checkm2_utils
+    "CheckM2Utils",
 ]

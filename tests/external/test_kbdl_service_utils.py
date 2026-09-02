@@ -144,7 +144,7 @@ def test_default_base_url_is_the_tunnelled_loopback_endpoint():
         token_file=None,
         kbase_token_file=None,
     )
-    assert client.base_url == "http://127.0.0.1:8790"
+    assert client.base_url == "http://127.0.0.1:8791"
 
 
 def test_base_url_overridable_by_environment_variable(monkeypatch):
@@ -216,6 +216,11 @@ def test_constructor_accepts_no_username_parameter():
             "KBDLSKANI",
             {"skani_db": {"object_id": "db-1"}, "fasta": "seq"},
         ),
+        (
+            "submit_checkm2",
+            "KBDLCheckM2",
+            {"checkm2_db": {"object_id": "db-1"}, "fasta": "seq"},
+        ),
     ],
 )
 def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
@@ -229,7 +234,7 @@ def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
     assert job_id == "job-xyz"
     call = session.calls[0]
     assert call["method"] == "POST"
-    assert call["url"] == "http://127.0.0.1:8790/jobs"
+    assert call["url"] == "http://127.0.0.1:8791/jobs"
     assert call["json"] == {
         "schema_version": "1",
         "job_type": job_type,
@@ -271,7 +276,7 @@ def test_list_jobs():
         }
     ]
     assert session.calls[0]["method"] == "GET"
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/jobs"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/jobs"
 
 
 def test_check_job():
@@ -281,7 +286,7 @@ def test_check_job():
     status = client.check_job("j1")
 
     assert status == {"job_id": "j1", "state": "running"}
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/jobs/j1"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/jobs/j1"
 
 
 def test_get_job_result():
@@ -291,7 +296,7 @@ def test_get_job_result():
     result = client.get_job_result("j1")
 
     assert result == {"gaa_data": {}}
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/jobs/j1/result"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/jobs/j1/result"
 
 
 def test_clear_job():
@@ -301,7 +306,7 @@ def test_clear_job():
     client.clear_job("j1")
 
     assert session.calls[0]["method"] == "DELETE"
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/jobs/j1"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/jobs/j1"
 
 
 # ---------------------------------------------------------------------------
@@ -323,12 +328,57 @@ def test_upload_object_new_content_returns_job_id():
     assert result == {"job_id": "up-1"}
     call = session.calls[0]
     assert call["method"] == "POST"
-    assert call["url"] == "http://127.0.0.1:8790/objects"
+    assert call["url"] == "http://127.0.0.1:8791/objects"
     assert "files" in call
     assert call["data"] == {
         "object_type": "GenomeArchive",
         "name": "archive1",
         "visibility": "private",
+    }
+
+
+def test_upload_object_default_transform_is_byte_identical_to_pre_transform_behavior():
+    """Regression guard: the default transform="none" must leave the
+    outgoing request completely unchanged from before ``transform``
+    existed, so every existing caller is unaffected. No "transform" key
+    should appear in the form data at all -- not even set to "none"."""
+    session = FakeSession([FakeResponse(202, {"job_id": "up-1"})])
+    client = make_client(session)
+
+    client.upload_object(
+        b"file bytes",
+        object_type="GenomeArchive",
+        name="archive1",
+        visibility="private",
+    )
+
+    call = session.calls[0]
+    assert call["data"] == {
+        "object_type": "GenomeArchive",
+        "name": "archive1",
+        "visibility": "private",
+    }
+    assert "transform" not in call["data"]
+
+
+def test_upload_object_includes_transform_in_form_data_when_passed():
+    session = FakeSession([FakeResponse(202, {"job_id": "up-1"})])
+    client = make_client(session)
+
+    client.upload_object(
+        b"file bytes",
+        object_type="GenomeArchive",
+        name="archive1",
+        visibility="private",
+        transform="some-transform",
+    )
+
+    call = session.calls[0]
+    assert call["data"] == {
+        "object_type": "GenomeArchive",
+        "name": "archive1",
+        "visibility": "private",
+        "transform": "some-transform",
     }
 
 
@@ -355,7 +405,7 @@ def test_list_objects():
     objects = client.list_objects()
 
     assert objects == [{"object_id": "o1"}]
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/objects"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/objects"
 
 
 def test_get_object_metadata():
@@ -367,7 +417,7 @@ def test_get_object_metadata():
     meta = client.get_object_metadata("o1")
 
     assert meta["object_id"] == "o1"
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/objects/o1"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/objects/o1"
 
 
 def test_list_archive_files():
@@ -379,7 +429,7 @@ def test_list_archive_files():
     entries = client.list_archive_files("archive-1")
 
     assert entries == [{"name": "genome1.fna", "size_bytes": 123}]
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/objects/archive-1/files"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/objects/archive-1/files"
 
 
 def test_delete_object():
@@ -389,7 +439,7 @@ def test_delete_object():
     client.delete_object("o1")
 
     assert session.calls[0]["method"] == "DELETE"
-    assert session.calls[0]["url"] == "http://127.0.0.1:8790/objects/o1"
+    assert session.calls[0]["url"] == "http://127.0.0.1:8791/objects/o1"
 
 
 # ---------------------------------------------------------------------------

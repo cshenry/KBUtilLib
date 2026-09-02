@@ -63,8 +63,24 @@ def resolve_apps_dir(explicit: Optional[str] = None) -> Path:
 
 
 def resolve_king_stack_dir(explicit: Optional[str] = None) -> Path:
-    """Resolve the local KING checkout root (env ``KING_STACK_DIR``, else
-    default ``~/king-stack``).
+    """Resolve the local KING checkout root.
+
+    Order: ``explicit`` -> env ``KING_STACK_DIR`` -> DETECTED layout -> the
+    historical ``~/king-stack`` default.
+
+    KING is deployed in two shapes and the parent dir differs between them:
+
+    * laptop  -- the five repos nested under ``~/king-stack/`` (so root is
+      ``~/king-stack`` and KING is ``~/king-stack/king``);
+    * BERDL pod -- the five repos sit FLAT in ``~`` (so root is ``~`` and KING
+      is ``~/king``); ``~/king-stack`` does not exist there at all.
+
+    Returning ``~/king-stack`` unconditionally meant that on a pod, a bare
+    ``kbu king install`` generated a ``serve-king.sh`` whose ``exec`` target did
+    not exist. Nothing failed at install time -- it broke only at the NEXT
+    launch, by which point the cause looked unrelated. Detecting the layout
+    makes the bare invocation correct in both, instead of relying on every
+    caller remembering to set ``KING_STACK_DIR``.
 
     Used ONLY to point the generated ``serve-king.sh`` wrapper at KING's own
     ``scripts/serve.sh`` and (best-effort, read-only) at its persisted
@@ -75,6 +91,11 @@ def resolve_king_stack_dir(explicit: Optional[str] = None) -> Path:
     env = os.environ.get("KING_STACK_DIR")
     if env:
         return Path(env).expanduser()
+    # Detect: a candidate is the KING stack root iff <root>/king/scripts/serve.sh
+    # is present. Nested layout wins if both somehow exist.
+    for candidate in (Path.home() / "king-stack", Path.home()):
+        if (candidate / "king" / "scripts" / "serve.sh").is_file():
+            return candidate
     return Path.home() / "king-stack"
 
 

@@ -195,7 +195,7 @@ def test_constructor_accepts_no_username_parameter():
         (
             "submit_genome_annotation",
             "KBDLGenomeAnnotation",
-            {"fasta": ">contig\nACGT", "tools": ["rast"]},
+            {"genome_ref": {"object_id": "genome-1"}, "tools": ["rast"]},
         ),
         (
             "submit_model_reconstruction",
@@ -221,6 +221,16 @@ def test_constructor_accepts_no_username_parameter():
             "KBDLCheckM2",
             {"checkm2_db": {"object_id": "db-1"}, "fasta": "seq"},
         ),
+        (
+            "submit_build_genome",
+            "KBDLBuildGenome",
+            {"skani_db": {"object_id": "db-1"}, "fasta": "seq"},
+        ),
+        (
+            "submit_build_genome",
+            "KBDLBuildGenome",
+            {"skani_db": {"object_id": "db-1"}, "genbank": "gb-text", "fasta": "seq"},
+        ),
     ],
 )
 def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
@@ -240,6 +250,92 @@ def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
         "job_type": job_type,
         "params": params,
     }
+
+
+# ---------------------------------------------------------------------------
+# submit_build_genome / submit_genome_annotation -- client-side validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # no genome source at all
+        {"skani_db": {"object_id": "db-1"}},
+        # two mutually exclusive sources
+        {"skani_db": {"object_id": "db-1"}, "fasta": "seq", "archive": "arch"},
+        {"skani_db": {"object_id": "db-1"}, "genbank": "gb", "archive": "arch"},
+        {
+            "skani_db": {"object_id": "db-1"},
+            "fasta": "seq",
+            "genbank": "gb",
+            "archive": "arch",
+        },
+        # gff without fasta
+        {"skani_db": {"object_id": "db-1"}, "genbank": "gb", "gff": "annot.gff"},
+    ],
+)
+def test_submit_build_genome_rejects_invalid_source_combination_without_a_request(
+    kwargs,
+):
+    session = FakeSession([])
+    client = make_client(session)
+
+    with pytest.raises(ValueError):
+        client.submit_build_genome(**kwargs)
+
+    assert session.calls == []
+
+
+def test_submit_build_genome_rejects_missing_skani_db_without_a_request():
+    session = FakeSession([])
+    client = make_client(session)
+
+    with pytest.raises(ValueError):
+        client.submit_build_genome(skani_db=None, fasta="seq")
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"tools": ["rast"]},
+        {
+            "tools": ["rast"],
+            "genome": {"features": []},
+            "genome_ref": {"object_id": "genome-1"},
+        },
+    ],
+)
+def test_submit_genome_annotation_rejects_invalid_genome_source_without_a_request(
+    kwargs,
+):
+    session = FakeSession([])
+    client = make_client(session)
+
+    with pytest.raises(ValueError):
+        client.submit_genome_annotation(**kwargs)
+
+    assert session.calls == []
+
+
+def test_submit_genome_annotation_no_longer_accepts_legacy_parameters():
+    """The narrowed contract removed fasta/gff/genbank/features/
+    kbase_genome_id -- passing any of them must be a TypeError (unknown
+    keyword), not a silently-forwarded param."""
+    sig = inspect.signature(KBDLServiceUtils.submit_genome_annotation)
+    for legacy_name in ("fasta", "gff", "genbank", "features", "kbase_genome_id"):
+        assert legacy_name not in sig.parameters
+
+    session = FakeSession([])
+    client = make_client(session)
+    for legacy_name in ("fasta", "gff", "genbank", "features", "kbase_genome_id"):
+        with pytest.raises(TypeError):
+            client.submit_genome_annotation(
+                tools=["rast"], genome_ref={"object_id": "g1"}, **{legacy_name: "x"}
+            )
+    assert session.calls == []
 
 
 # ---------------------------------------------------------------------------

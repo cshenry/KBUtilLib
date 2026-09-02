@@ -64,12 +64,12 @@ Deliberately NOT implemented:
   it is out of scope by design.
 
 Job submission envelope is ``{"schema_version": "1", "job_type": <name>,
-"params": {...}}`` for the six job types: ``KBDLGenomeAnnotation``,
+"params": {...}}`` for the seven job types: ``KBDLGenomeAnnotation``,
 ``KBDLModelReconstruction``, ``KBDLFitnessModelAnalysis``, ``KBDLSKANI``,
-``KBDLCheckM2``, ``KBDLUploadObject`` (the last of which is only ever
-submitted as a side effect of :meth:`KBDLServiceUtils.upload_object`'s
-multipart call -- there is no standalone JSON path to it, since its
-params alone carry no bytes).
+``KBDLCheckM2``, ``KBDLBuildGenome``, ``KBDLUploadObject`` (the last of
+which is only ever submitted as a side effect of
+:meth:`KBDLServiceUtils.upload_object`'s multipart call -- there is no
+standalone JSON path to it, since its params alone carry no bytes).
 
 Contract note (``kbdl-atp-safe-at-scale-v1``): the result payloads for
 ``KBDLFitnessModelAnalysis`` and ``KBDLModelReconstruction`` jobs gained
@@ -105,9 +105,18 @@ completion):
   the job's ``state`` is ``"completed"`` or ``"failed"``. ``sleep_fn`` and
   ``time_fn`` are injectable (mirroring ``kbdl_service.identity``'s own
   clock-injection pattern) so tests never really sleep.
-- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the six job
-  types and returns its result, raising :class:`KBDLJobFailedError` if the
-  job ends in ``"failed"``.
+- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the seven
+  job types and returns its result, raising :class:`KBDLJobFailedError` if
+  the job ends in ``"failed"``.
+
+Contract note: ``KBDLGenomeAnnotationParams`` was narrowed to take exactly
+one of ``genome`` (a built-genome JSON) or ``genome_ref`` (an object ref),
+plus ``tools``. The previous ``fasta``/``gff``/``genbank``/``features``/
+``kbase_genome_id`` parameters are gone -- the service now rejects any
+request naming them -- so :meth:`KBDLServiceUtils.submit_genome_annotation`
+no longer accepts them either. Genome assembly now happens as its own
+``KBDLBuildGenome`` job (:meth:`KBDLServiceUtils.submit_build_genome`),
+whose result feeds ``genome``/``genome_ref`` into annotation.
 """
 
 from __future__ import annotations
@@ -143,12 +152,13 @@ KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 #: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
 DEFAULT_BASE_URL = "http://127.0.0.1:8791"
 
-#: The six job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
+#: The seven job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
 JOB_TYPE_MODEL_RECONSTRUCTION = "KBDLModelReconstruction"
 JOB_TYPE_FITNESS_MODEL_ANALYSIS = "KBDLFitnessModelAnalysis"
 JOB_TYPE_SKANI = "KBDLSKANI"
 JOB_TYPE_CHECKM2 = "KBDLCheckM2"
+JOB_TYPE_BUILD_GENOME = "KBDLBuildGenome"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
 
 #: The only schema_version this client (and the v0 service) speaks.
@@ -344,15 +354,103 @@ class KBDLServiceUtils(SharedEnvUtils):
 
     # ── job submission (one method per job type) ────────────────────────
 
-    def submit_genome_annotation(self, **params: Any) -> str:
+    def submit_genome_annotation(
+        self,
+        tools: Any,
+        genome: Optional[Any] = None,
+        genome_ref: Optional[Any] = None,
+        tax_id: Optional[Any] = None,
+    ) -> str:
         """Submit a ``KBDLGenomeAnnotation`` job. Returns the job id.
 
         See ``kbdl_service.schemas.genome_annotation.KBDLGenomeAnnotationParams``
-        in the service repo for the accepted ``params`` shape (exactly one
-        of ``kbase_genome_id``/``fasta``/``genbank``, plus ``tools``,
-        ``save_to_kbase``, ``workspace``).
+        in the service repo for the accepted params shape: exactly one of
+        ``genome`` (a built-genome JSON, typically the result of a
+        ``KBDLBuildGenome`` job) or ``genome_ref`` (an object ref), plus
+        ``tools``, with ``tax_id`` as an optional override.
+
+        Deliberately has no catch-all ``**params``: the service narrowed
+        this contract to drop ``fasta``/``gff``/``genbank``/``features``/
+        ``kbase_genome_id`` entirely, and a request naming any of them is
+        now rejected server-side, so this method removed them rather than
+        continuing to pass them through. Passing any of those old names is
+        a ``TypeError`` (unexpected keyword argument), not a silently
+        forwarded param. Build the genome first with
+        :meth:`submit_build_genome` if you only have raw sequence/
+        annotation files.
+
+        Raises:
+            ValueError: If zero or both of ``genome``/``genome_ref`` are
+                given. Raised before any request is sent.
         """
-        return self._submit(JOB_TYPE_GENOME_ANNOTATION, params)
+        provided = [
+            name
+            for name, val in (("genome", genome), ("genome_ref", genome_ref))
+            if val is not None
+        ]
+        if len(provided) != 1:
+            raise ValueError(
+                "submit_genome_annotation requires exactly one of genome/genome_ref, "
+                f"got: {provided or 'neither'}"
+            )
+        payload: Dict[str, Any] = {"tools": tools}
+        if genome is not None:
+            payload["genome"] = genome
+        if genome_ref is not None:
+            payload["genome_ref"] = genome_ref
+        if tax_id is not None:
+            payload["tax_id"] = tax_id
+        return self._submit(JOB_TYPE_GENOME_ANNOTATION, payload)
+
+    def submit_build_genome(
+        self,
+        skani_db: Any,
+        fasta: Optional[Any] = None,
+        genbank: Optional[Any] = None,
+        archive: Optional[Any] = None,
+        gff: Optional[Any] = None,
+        **params: Any,
+    ) -> str:
+        """Submit a ``KBDLBuildGenome`` job. Returns the job id.
+
+        See ``kbdl_service.schemas.build_genome.KBDLBuildGenomeParams`` in
+        the service repo for the accepted ``params`` shape: exactly one of
+        ``fasta``/``genbank``/``archive`` as the genome source, an optional
+        ``gff`` alongside ``fasta``, an optional ``fasta`` alongside
+        ``genbank``, and a required ``skani_db``.
+
+        Raises:
+            ValueError: If ``skani_db`` is missing, if the genome source is
+                ambiguous (zero, or two sources other than the documented
+                ``genbank``+``fasta`` pairing), or if ``gff`` is given
+                without ``fasta``. Raised before any request is sent.
+        """
+        if skani_db is None:
+            raise ValueError("submit_build_genome requires skani_db")
+
+        sources = {"fasta": fasta, "genbank": genbank, "archive": archive}
+        provided = {name for name, val in sources.items() if val is not None}
+        valid_combinations = ({"fasta"}, {"genbank"}, {"archive"}, {"genbank", "fasta"})
+        if provided not in valid_combinations:
+            raise ValueError(
+                "submit_build_genome requires exactly one of fasta/genbank/archive "
+                "(an optional fasta may accompany genbank), got: "
+                f"{sorted(provided) or 'none'}"
+            )
+        if gff is not None and fasta is None:
+            raise ValueError("submit_build_genome's gff is only valid alongside fasta")
+
+        payload = dict(params)
+        payload["skani_db"] = skani_db
+        if fasta is not None:
+            payload["fasta"] = fasta
+        if genbank is not None:
+            payload["genbank"] = genbank
+        if archive is not None:
+            payload["archive"] = archive
+        if gff is not None:
+            payload["gff"] = gff
+        return self._submit(JOB_TYPE_BUILD_GENOME, payload)
 
     def submit_model_reconstruction(self, **params: Any) -> str:
         """Submit a ``KBDLModelReconstruction`` job. Returns the job id.

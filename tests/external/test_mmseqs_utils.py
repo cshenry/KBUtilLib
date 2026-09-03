@@ -417,3 +417,415 @@ class TestMMSeqsIntegration:
         assert result["num_proteins"] == 3
         # With 90% identity, identical1 and identical2 should cluster
         assert result["num_clusters"] == 2
+
+
+class TestBuildSearchDb:
+    """Test suite for build_search_db method."""
+
+    @pytest.fixture
+    def mock_utils(self, temp_dir):
+        """Create MMSeqsUtils instance with mocked availability."""
+        with patch.object(MMSeqsUtils, '_check_mmseqs_availability'):
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+            utils.mmseqs_available = True
+            return utils
+
+    @pytest.fixture
+    def sample_proteins(self):
+        """Create sample protein data for testing."""
+        return [
+            {"id": "rep1", "protein_translation": "MKTAYIAKQRQISFVK"},
+            {"id": "rep2", "protein_translation": "MVLSPADKTNVKAAWGK"},
+        ]
+
+    def test_build_search_db_mmseqs_not_available(self, temp_dir):
+        """Test that build_search_db raises when mmseqs not available."""
+        with patch.object(MMSeqsUtils, '_check_mmseqs_availability'):
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+            utils.mmseqs_available = False
+
+            proteins = [{"id": "p1", "protein_translation": "MKTAY"}]
+            with pytest.raises(RuntimeError, match="MMseqs2 is not available"):
+                utils.build_search_db(proteins, Path(temp_dir) / "db")
+
+    def test_build_search_db_empty_list(self, mock_utils, temp_dir):
+        """Test that empty protein list raises ValueError."""
+        with pytest.raises(ValueError, match="proteins list cannot be empty"):
+            mock_utils.build_search_db([], Path(temp_dir) / "db")
+
+    def test_build_search_db_missing_id(self, mock_utils, temp_dir):
+        """Test that protein without id raises ValueError."""
+        proteins = [{"protein_translation": "MKTAY"}]
+        with pytest.raises(ValueError, match="missing 'id' field"):
+            mock_utils.build_search_db(proteins, Path(temp_dir) / "db")
+
+    def test_build_search_db_missing_sequence(self, mock_utils, temp_dir):
+        """Test that protein without sequence raises ValueError."""
+        proteins = [{"id": "prot1"}]
+        with pytest.raises(ValueError, match="missing 'protein_translation' field"):
+            mock_utils.build_search_db(proteins, Path(temp_dir) / "db")
+
+    def test_build_search_db_success(self, mock_utils, sample_proteins, temp_dir):
+        """Test successful database build with mocked subprocess calls."""
+        captured_cmds = []
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            if "createdb" in cmd:
+                # Simulate the primary db file being created.
+                Path(cmd[-1]).write_text("fake db")
+            return result
+
+        out_dir = Path(temp_dir) / "refdb"
+        with patch('subprocess.run', side_effect=mock_run):
+            db_path = mock_utils.build_search_db(sample_proteins, out_dir, threads=4)
+
+        assert db_path == out_dir / "searchDB"
+
+        createdb_cmd = next(c for c in captured_cmds if "createdb" in c)
+        assert mock_utils.mmseqs_executable in createdb_cmd
+
+        createindex_cmd = next(c for c in captured_cmds if "createindex" in c)
+        assert "--threads" in createindex_cmd
+        assert createindex_cmd[createindex_cmd.index("--threads") + 1] == "4"
+
+    def test_build_search_db_createdb_failure(self, mock_utils, sample_proteins, temp_dir):
+        """Test handling of createdb failure."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "createdb error"
+
+        with patch('subprocess.run', return_value=mock_result):
+            with pytest.raises(RuntimeError, match="mmseqs createdb failed"):
+                mock_utils.build_search_db(sample_proteins, Path(temp_dir) / "db")
+
+    def test_build_search_db_createindex_failure(self, mock_utils, sample_proteins, temp_dir):
+        """Test handling of createindex failure."""
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            if "createdb" in cmd:
+                result.returncode = 0
+                Path(cmd[-1]).write_text("fake db")
+            else:
+                result.returncode = 1
+                result.stderr = "createindex error"
+            return result
+
+        with patch('subprocess.run', side_effect=mock_run):
+            with pytest.raises(RuntimeError, match="mmseqs createindex failed"):
+                mock_utils.build_search_db(sample_proteins, Path(temp_dir) / "db")
+
+
+class TestSearchProteins:
+    """Test suite for search_proteins method."""
+
+    @pytest.fixture
+    def mock_utils(self, temp_dir):
+        """Create MMSeqsUtils instance with mocked availability."""
+        with patch.object(MMSeqsUtils, '_check_mmseqs_availability'):
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+            utils.mmseqs_available = True
+            return utils
+
+    @pytest.fixture
+    def sample_proteins(self):
+        """Create sample query protein data for testing."""
+        return [
+            {"id": "query1", "protein_translation": "MKTAYIAKQRQISFVK"},
+            {"id": "query2", "protein_translation": "MVLSPADKTNVKAAWGK"},
+        ]
+
+    @pytest.fixture
+    def fake_db_path(self, temp_dir):
+        """A stand-in path for a prebuilt search database."""
+        db_path = Path(temp_dir) / "searchDB"
+        db_path.write_text("fake db")
+        return db_path
+
+    def _mock_run_factory(self, tsv_rows):
+        """Build a subprocess.run side_effect that writes *tsv_rows* on convertalis."""
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            if "convertalis" in cmd:
+                output_path = cmd[-3]  # ... <tsv_output> --format-output <cols>
+                with open(output_path, 'w') as f:
+                    for row in tsv_rows:
+                        f.write("\t".join(str(v) for v in row) + "\n")
+            return result
+        return mock_run
+
+    def test_search_proteins_mmseqs_not_available(self, temp_dir, fake_db_path):
+        """Test that search_proteins raises when mmseqs not available."""
+        with patch.object(MMSeqsUtils, '_check_mmseqs_availability'):
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+            utils.mmseqs_available = False
+
+            proteins = [{"id": "p1", "protein_translation": "MKTAY"}]
+            with pytest.raises(RuntimeError, match="MMseqs2 is not available"):
+                utils.search_proteins(proteins, fake_db_path, min_seq_id=0.5, coverage=0.5)
+
+    def test_search_proteins_empty_list(self, mock_utils, fake_db_path):
+        """Test that empty protein list raises ValueError."""
+        with pytest.raises(ValueError, match="proteins list cannot be empty"):
+            mock_utils.search_proteins([], fake_db_path, min_seq_id=0.5, coverage=0.5)
+
+    def test_search_proteins_missing_id(self, mock_utils, fake_db_path):
+        """Test that protein without id raises ValueError."""
+        proteins = [{"protein_translation": "MKTAY"}]
+        with pytest.raises(ValueError, match="missing 'id' field"):
+            mock_utils.search_proteins(proteins, fake_db_path, min_seq_id=0.5, coverage=0.5)
+
+    def test_search_proteins_missing_sequence(self, mock_utils, fake_db_path):
+        """Test that protein without sequence raises ValueError."""
+        proteins = [{"id": "prot1"}]
+        with pytest.raises(ValueError, match="missing 'protein_translation' field"):
+            mock_utils.search_proteins(proteins, fake_db_path, min_seq_id=0.5, coverage=0.5)
+
+    def test_search_proteins_db_not_found(self, mock_utils, sample_proteins, temp_dir):
+        """Test that a missing database path raises ValueError."""
+        missing_db = Path(temp_dir) / "does_not_exist_db"
+        with pytest.raises(ValueError, match="MMseqs2 database not found"):
+            mock_utils.search_proteins(sample_proteins, missing_db, min_seq_id=0.5, coverage=0.5)
+
+    def test_search_proteins_success_returns_exact_keys_and_fraction_identity(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that hits carry exactly the documented keys with identity as a fraction."""
+        # pident is a PERCENTAGE (mmseqs convention); qcov is already a fraction.
+        tsv_rows = [
+            ("query1", "target1", "97.300", "1.000", "1.5e-100", "350.0"),
+        ]
+        with patch('subprocess.run', side_effect=self._mock_run_factory(tsv_rows)):
+            hits = mock_utils.search_proteins(
+                sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+            )
+
+        assert len(hits) == 1
+        hit = hits[0]
+        assert set(hit.keys()) == {
+            "query_id", "target_id", "identity", "coverage", "evalue", "bits"
+        }
+        assert hit["query_id"] == "query1"
+        assert hit["target_id"] == "target1"
+        # 97.300 (percent) must be normalised to a 0.0-1.0 fraction.
+        assert hit["identity"] == pytest.approx(0.973)
+        assert 0.0 < hit["identity"] <= 1.0
+        assert hit["coverage"] == pytest.approx(1.0)
+        assert hit["evalue"] == pytest.approx(1.5e-100)
+        assert hit["bits"] == pytest.approx(350.0)
+
+    def test_search_proteins_filters_below_thresholds(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that hits below min_seq_id or coverage are excluded."""
+        tsv_rows = [
+            ("query1", "target_good", "90.000", "0.900", "1e-50", "200.0"),
+            ("query1", "target_low_identity", "40.000", "0.900", "1e-10", "80.0"),
+            ("query2", "target_low_coverage", "90.000", "0.300", "1e-10", "80.0"),
+        ]
+        with patch('subprocess.run', side_effect=self._mock_run_factory(tsv_rows)):
+            hits = mock_utils.search_proteins(
+                sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+            )
+
+        assert len(hits) == 1
+        assert hits[0]["target_id"] == "target_good"
+
+    def test_search_proteins_createdb_failure(self, mock_utils, sample_proteins, fake_db_path):
+        """Test handling of createdb failure."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "createdb error"
+
+        with patch('subprocess.run', return_value=mock_result):
+            with pytest.raises(RuntimeError, match="mmseqs createdb failed"):
+                mock_utils.search_proteins(
+                    sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+                )
+
+    def test_search_proteins_search_failure(self, mock_utils, sample_proteins, fake_db_path):
+        """Test handling of search step failure."""
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            if "createdb" in cmd:
+                result.returncode = 0
+            elif cmd[1] == "search":
+                result.returncode = 1
+                result.stderr = "search error"
+            return result
+
+        with patch('subprocess.run', side_effect=mock_run):
+            with pytest.raises(RuntimeError, match="mmseqs search failed"):
+                mock_utils.search_proteins(
+                    sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+                )
+
+    def test_search_proteins_convertalis_failure(self, mock_utils, sample_proteins, fake_db_path):
+        """Test handling of convertalis step failure."""
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            if "convertalis" in cmd:
+                result.returncode = 1
+                result.stderr = "convertalis error"
+            else:
+                result.returncode = 0
+            return result
+
+        with patch('subprocess.run', side_effect=mock_run):
+            with pytest.raises(RuntimeError, match="mmseqs convertalis failed"):
+                mock_utils.search_proteins(
+                    sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+                )
+
+    def test_search_proteins_sets_parameters_explicitly(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that min_seq_id, coverage, cov-mode and threads are passed explicitly."""
+        captured_cmds = []
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._mock_run_factory([])(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=mock_run):
+            mock_utils.search_proteins(
+                sample_proteins, fake_db_path,
+                min_seq_id=0.6, coverage=0.7, threads=3, sensitivity=6.5
+            )
+
+        search_cmd = next(c for c in captured_cmds if len(c) > 1 and c[1] == "search")
+        assert "--min-seq-id" in search_cmd
+        assert search_cmd[search_cmd.index("--min-seq-id") + 1] == "0.6"
+        assert "-c" in search_cmd
+        assert search_cmd[search_cmd.index("-c") + 1] == "0.7"
+        assert "--cov-mode" in search_cmd
+        assert "--threads" in search_cmd
+        assert search_cmd[search_cmd.index("--threads") + 1] == "3"
+        assert "-s" in search_cmd
+        assert search_cmd[search_cmd.index("-s") + 1] == "6.5"
+
+
+class TestParseSearchTsv:
+    """Test suite for the _parse_search_tsv helper."""
+
+    @pytest.fixture
+    def mock_utils(self, temp_dir):
+        """Create MMSeqsUtils instance with mocked availability."""
+        with patch.object(MMSeqsUtils, '_check_mmseqs_availability'):
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+            return utils
+
+    def test_parse_search_tsv_converts_pident_percentage_to_fraction(self, mock_utils, temp_dir):
+        """Test that the pident percentage column is normalised to a fraction."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t85.0\t1.0\t1e-20\t100.0\n")
+
+        hits = mock_utils._parse_search_tsv(tsv_file, min_seq_id=0.0, coverage=0.0)
+
+        assert len(hits) == 1
+        assert hits[0]["identity"] == pytest.approx(0.85)
+
+    def test_parse_search_tsv_filters_below_min_seq_id(self, mock_utils, temp_dir):
+        """Test that rows below min_seq_id are dropped."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t40.0\t1.0\t1e-20\t100.0\n")
+
+        hits = mock_utils._parse_search_tsv(tsv_file, min_seq_id=0.5, coverage=0.0)
+        assert hits == []
+
+    def test_parse_search_tsv_filters_below_coverage(self, mock_utils, temp_dir):
+        """Test that rows below coverage are dropped."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t90.0\t0.2\t1e-20\t100.0\n")
+
+        hits = mock_utils._parse_search_tsv(tsv_file, min_seq_id=0.0, coverage=0.5)
+        assert hits == []
+
+    def test_parse_search_tsv_empty_file(self, mock_utils, temp_dir):
+        """Test parsing an empty TSV file."""
+        tsv_file = Path(temp_dir) / "empty.tsv"
+        tsv_file.write_text("")
+
+        hits = mock_utils._parse_search_tsv(tsv_file, min_seq_id=0.0, coverage=0.0)
+        assert hits == []
+
+    def test_parse_search_tsv_exact_keys(self, mock_utils, temp_dir):
+        """Test that parsed hits carry exactly the six documented keys."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t100.0\t1.0\t0.0\t500.0\n")
+
+        hits = mock_utils._parse_search_tsv(tsv_file, min_seq_id=0.0, coverage=0.0)
+        assert len(hits) == 1
+        assert set(hits[0].keys()) == {
+            "query_id", "target_id", "identity", "coverage", "evalue", "bits"
+        }
+
+
+@pytest.mark.integration
+class TestMMSeqsSearchIntegration:
+    """Integration tests for build_search_db/search_proteins (require MMseqs2)."""
+
+    def test_build_and_search_real_proteins(self, temp_dir):
+        """Test building a real search DB and searching real proteins against it."""
+        try:
+            utils = MMSeqsUtils(
+                token_file=Path(temp_dir) / "tokens",
+                kbase_token_file=Path(temp_dir) / "kbase_token"
+            )
+        except Exception:
+            pytest.skip("MMseqs2 not available")
+
+        if not utils.mmseqs_available:
+            pytest.skip("MMseqs2 not installed")
+
+        rep_seq = (
+            "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVK"
+            "ALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWE"
+        )
+        other_seq = (
+            "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSHGSAQVKGHG"
+            "KKVADALTNAVAHVDDMPNALSALSDLHAHKLRVDPVNFKLLSHCLLVTLAAHLPAEFTP"
+        )
+
+        references = [
+            {"id": "rep1", "protein_translation": rep_seq},
+            {"id": "rep2", "protein_translation": other_seq},
+        ]
+        db_path = utils.build_search_db(references, Path(temp_dir) / "refdb")
+        assert db_path.exists()
+
+        queries = [
+            {"id": "query1", "protein_translation": rep_seq},
+        ]
+        hits = utils.search_proteins(queries, db_path, min_seq_id=0.5, coverage=0.5)
+
+        assert len(hits) >= 1
+        best_hit = hits[0]
+        assert best_hit["query_id"] == "query1"
+        assert best_hit["target_id"] == "rep1"
+        # Identical sequence against itself should be a near-perfect match,
+        # and MUST be a fraction, not a percentage.
+        assert 0.9 <= best_hit["identity"] <= 1.0
+        assert 0.0 < best_hit["coverage"] <= 1.0
+
+        # The same database can be searched again without rebuilding.
+        hits_again = utils.search_proteins(queries, db_path, min_seq_id=0.5, coverage=0.5)
+        assert len(hits_again) == len(hits)

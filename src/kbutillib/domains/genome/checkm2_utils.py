@@ -298,6 +298,8 @@ class CheckM2Utils(SharedEnvUtils):
             "docker", "run", "--rm",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--network", "none",
+            "-e", "HOME=/tmp",
+            "-e", "XDG_CACHE_HOME=/tmp/.cache",
             "--entrypoint", "micromamba",
             self._docker_image,
             "run", "-n", "checkm2", "checkm2", "--version",

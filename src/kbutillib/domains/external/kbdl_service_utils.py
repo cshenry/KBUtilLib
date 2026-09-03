@@ -64,12 +64,13 @@ Deliberately NOT implemented:
   it is out of scope by design.
 
 Job submission envelope is ``{"schema_version": "1", "job_type": <name>,
-"params": {...}}`` for the eight job types: ``KBDLGenomeAnnotation``,
+"params": {...}}`` for the nine job types: ``KBDLGenomeAnnotation``,
 ``KBDLModelReconstruction``, ``KBDLFitnessModelAnalysis``, ``KBDLSKANI``,
 ``KBDLCheckM2``, ``KBDLBuildGenome``, ``KBDLBuildSKANIDB``,
-``KBDLUploadObject`` (the last of which is only ever submitted as a side
-effect of :meth:`KBDLServiceUtils.upload_object`'s multipart call -- there
-is no standalone JSON path to it, since its params alone carry no bytes).
+``KBDLStoreLoad``, ``KBDLUploadObject`` (the last of which is only ever
+submitted as a side effect of :meth:`KBDLServiceUtils.upload_object`'s
+multipart call -- there is no standalone JSON path to it, since its
+params alone carry no bytes).
 
 Contract note (``kbdl-atp-safe-at-scale-v1``): the result payloads for
 ``KBDLFitnessModelAnalysis`` and ``KBDLModelReconstruction`` jobs gained
@@ -87,6 +88,11 @@ Errors -- distinguishable, typed, and raised from :meth:`_raise_for_status`:
   validation) -> :class:`KBDLInvalidInputError`.
 - any other 400 -> :class:`KBDLBadRequestError`.
 - 401 (the auth service rejected the token) -> :class:`KBDLAuthenticationError`.
+- 403 (the token is valid but the caller is not permitted to perform this
+  operation) -> :class:`KBDLNotAuthorizedError`. Deliberately distinct
+  from 401 -- a rejected token and a valid-but-unpermitted token are
+  different failure modes, and conflating them would send an operator
+  chasing fresh tokens forever for what is actually a missing permission.
 - 503 (the upstream KBase auth service was unreachable/failing) ->
   :class:`KBDLUpstreamAuthUnavailableError`. Deliberately distinct from 401
   -- see ``kbdl_service.identity``: a token problem and an auth-service
@@ -139,6 +145,7 @@ __all__ = [
     "KBDLUnsupportedSchemaVersionError",
     "KBDLInvalidInputError",
     "KBDLAuthenticationError",
+    "KBDLNotAuthorizedError",
     "KBDLUpstreamAuthUnavailableError",
     "KBDLNotFoundError",
     "KBDLConflictError",
@@ -152,7 +159,7 @@ KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 #: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
 DEFAULT_BASE_URL = "http://127.0.0.1:8791"
 
-#: The eight job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
+#: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
 JOB_TYPE_MODEL_RECONSTRUCTION = "KBDLModelReconstruction"
 JOB_TYPE_FITNESS_MODEL_ANALYSIS = "KBDLFitnessModelAnalysis"
@@ -160,6 +167,7 @@ JOB_TYPE_SKANI = "KBDLSKANI"
 JOB_TYPE_CHECKM2 = "KBDLCheckM2"
 JOB_TYPE_BUILD_GENOME = "KBDLBuildGenome"
 JOB_TYPE_BUILD_SKANI_DB = "KBDLBuildSKANIDB"
+JOB_TYPE_STORE_LOAD = "KBDLStoreLoad"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
 
 #: The only schema_version this client (and the v0 service) speaks.
@@ -207,6 +215,18 @@ class KBDLInvalidInputError(KBDLServiceError):
 
 class KBDLAuthenticationError(KBDLServiceError):
     """HTTP 401: the KBase auth service rejected the token."""
+
+
+class KBDLNotAuthorizedError(KBDLServiceError):
+    """HTTP 403: the token is valid but the caller is not permitted to
+    perform this operation.
+
+    Deliberately a different type than :class:`KBDLAuthenticationError` --
+    401 means the token itself was rejected, 403 means the token is valid
+    but the caller lacks permission for the requested operation. Conflating
+    the two would send an operator chasing fresh tokens forever for what is
+    actually a missing permission.
+    """
 
 
 class KBDLUpstreamAuthUnavailableError(KBDLServiceError):
@@ -327,6 +347,8 @@ class KBDLServiceUtils(SharedEnvUtils):
             raise KBDLAuthenticationError(
                 str(detail) if detail else "authentication rejected"
             )
+        if status == 403:
+            raise KBDLNotAuthorizedError(str(detail) if detail else "not authorized")
         if status == 404:
             raise KBDLNotFoundError(str(detail) if detail else "not found")
         if status == 409:
@@ -485,6 +507,16 @@ class KBDLServiceUtils(SharedEnvUtils):
         exactly one of ``fasta``/``archive``, ``delete_archive_on_completion``).
         """
         return self._submit(JOB_TYPE_CHECKM2, params)
+
+    def submit_store_load(self, source_job_ids: List[str]) -> str:
+        """Submit a ``KBDLStoreLoad`` job. Returns the job id.
+
+        See ``kbdl_service.schemas.store_load.KBDLStoreLoadParams`` in the
+        service repo for the accepted ``params`` shape: a single
+        ``source_job_ids`` list naming the completed jobs whose results
+        should be loaded into the store.
+        """
+        return self._submit(JOB_TYPE_STORE_LOAD, {"source_job_ids": source_job_ids})
 
     def submit_build_skani_db(self, **params: Any) -> str:
         """Submit a ``KBDLBuildSKANIDB`` job. Returns the job id.

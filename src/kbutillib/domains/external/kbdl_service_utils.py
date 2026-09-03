@@ -64,12 +64,12 @@ Deliberately NOT implemented:
   it is out of scope by design.
 
 Job submission envelope is ``{"schema_version": "1", "job_type": <name>,
-"params": {...}}`` for the seven job types: ``KBDLGenomeAnnotation``,
+"params": {...}}`` for the eight job types: ``KBDLGenomeAnnotation``,
 ``KBDLModelReconstruction``, ``KBDLFitnessModelAnalysis``, ``KBDLSKANI``,
-``KBDLCheckM2``, ``KBDLBuildGenome``, ``KBDLUploadObject`` (the last of
-which is only ever submitted as a side effect of
-:meth:`KBDLServiceUtils.upload_object`'s multipart call -- there is no
-standalone JSON path to it, since its params alone carry no bytes).
+``KBDLCheckM2``, ``KBDLBuildGenome``, ``KBDLBuildSKANIDB``,
+``KBDLUploadObject`` (the last of which is only ever submitted as a side
+effect of :meth:`KBDLServiceUtils.upload_object`'s multipart call -- there
+is no standalone JSON path to it, since its params alone carry no bytes).
 
 Contract note (``kbdl-atp-safe-at-scale-v1``): the result payloads for
 ``KBDLFitnessModelAnalysis`` and ``KBDLModelReconstruction`` jobs gained
@@ -105,7 +105,7 @@ completion):
   the job's ``state`` is ``"completed"`` or ``"failed"``. ``sleep_fn`` and
   ``time_fn`` are injectable (mirroring ``kbdl_service.identity``'s own
   clock-injection pattern) so tests never really sleep.
-- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the seven
+- :meth:`KBDLServiceUtils.submit_and_wait` -- submits one of the eight
   job types and returns its result, raising :class:`KBDLJobFailedError` if
   the job ends in ``"failed"``.
 
@@ -152,13 +152,14 @@ KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 #: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
 DEFAULT_BASE_URL = "http://127.0.0.1:8791"
 
-#: The seven job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
+#: The eight job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
 JOB_TYPE_MODEL_RECONSTRUCTION = "KBDLModelReconstruction"
 JOB_TYPE_FITNESS_MODEL_ANALYSIS = "KBDLFitnessModelAnalysis"
 JOB_TYPE_SKANI = "KBDLSKANI"
 JOB_TYPE_CHECKM2 = "KBDLCheckM2"
 JOB_TYPE_BUILD_GENOME = "KBDLBuildGenome"
+JOB_TYPE_BUILD_SKANI_DB = "KBDLBuildSKANIDB"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
 
 #: The only schema_version this client (and the v0 service) speaks.
@@ -484,6 +485,14 @@ class KBDLServiceUtils(SharedEnvUtils):
         exactly one of ``fasta``/``archive``, ``delete_archive_on_completion``).
         """
         return self._submit(JOB_TYPE_CHECKM2, params)
+
+    def submit_build_skani_db(self, **params: Any) -> str:
+        """Submit a ``KBDLBuildSKANIDB`` job. Returns the job id.
+
+        See ``kbdl_service.schemas.build_skani_db.KBDLBuildSKANIDBParams``
+        (``sources``, ``name``, ``visibility``).
+        """
+        return self._submit(JOB_TYPE_BUILD_SKANI_DB, params)
 
     # ── job lifecycle ────────────────────────────────────────────────────
 

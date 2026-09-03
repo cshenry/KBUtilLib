@@ -231,6 +231,15 @@ def test_constructor_accepts_no_username_parameter():
             "KBDLBuildGenome",
             {"skani_db": {"object_id": "db-1"}, "genbank": "gb-text", "fasta": "seq"},
         ),
+        (
+            "submit_build_skani_db",
+            "KBDLBuildSKANIDB",
+            {
+                "sources": [{"object_id": "genome-1"}, {"object_id": "genome-2"}],
+                "name": "my-skani-db",
+                "visibility": "private",
+            },
+        ),
     ],
 )
 def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(

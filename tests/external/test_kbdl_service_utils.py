@@ -23,6 +23,7 @@ from kbutillib.domains.external.kbdl_service_utils import (
     KBDLConflictError,
     KBDLInvalidInputError,
     KBDLJobFailedError,
+    KBDLNotAuthorizedError,
     KBDLNotFoundError,
     KBDLPayloadTooLargeError,
     KBDLServiceUtils,
@@ -239,6 +240,11 @@ def test_constructor_accepts_no_username_parameter():
                 "name": "my-skani-db",
                 "visibility": "private",
             },
+        ),
+        (
+            "submit_store_load",
+            "KBDLStoreLoad",
+            {"source_job_ids": ["job-1", "job-2"]},
         ),
     ],
 )
@@ -648,6 +654,34 @@ def test_submit_and_wait_returns_result_on_completion():
     assert result == {"results": {"q1": []}}
 
 
+def test_submit_and_wait_works_with_store_load_job_type():
+    """submit_store_load's job type flows through the same generic
+    submit_and_wait/poll_until_terminal helpers as every other job type --
+    no special-casing needed."""
+    session = FakeSession(
+        [
+            FakeResponse(202, {"job_id": "j1"}),
+            FakeResponse(200, {"state": "completed"}),
+            FakeResponse(200, {"loaded": ["job-1", "job-2"]}),
+        ]
+    )
+    client = make_client(session)
+
+    result = client.submit_and_wait(
+        "KBDLStoreLoad",
+        {"source_job_ids": ["job-1", "job-2"]},
+        sleep_fn=lambda _seconds: None,
+        time_fn=lambda: 0.0,
+    )
+
+    assert result == {"loaded": ["job-1", "job-2"]}
+    assert session.calls[0]["json"] == {
+        "schema_version": "1",
+        "job_type": "KBDLStoreLoad",
+        "params": {"source_job_ids": ["job-1", "job-2"]},
+    }
+
+
 def test_submit_and_wait_raises_typed_error_on_failure():
     session = FakeSession(
         [
@@ -735,6 +769,32 @@ def test_401_and_503_are_distinguishable_typed_errors():
 
     assert not issubclass(KBDLAuthenticationError, KBDLUpstreamAuthUnavailableError)
     assert not issubclass(KBDLUpstreamAuthUnavailableError, KBDLAuthenticationError)
+
+
+def test_401_and_403_are_distinguishable_typed_errors():
+    """401 (invalid token) and 403 (valid token, missing permission) must
+    never be conflated -- otherwise an operator would chase fresh tokens
+    forever for what is actually a missing permission."""
+    session_401 = FakeSession(
+        [
+            FakeResponse(
+                401, {"detail": {"error": "invalid_token", "message": "bad token"}}
+            )
+        ]
+    )
+    with pytest.raises(KBDLAuthenticationError):
+        make_client(session_401).list_jobs()
+
+    session_403 = FakeSession(
+        [FakeResponse(403, {"detail": "not permitted to submit KBDLStoreLoad jobs"})]
+    )
+    with pytest.raises(KBDLNotAuthorizedError):
+        make_client(session_403).list_jobs()
+
+    assert KBDLNotAuthorizedError is not KBDLAuthenticationError
+    assert not issubclass(KBDLAuthenticationError, KBDLNotAuthorizedError)
+    assert not issubclass(KBDLNotAuthorizedError, KBDLAuthenticationError)
+    assert issubclass(KBDLNotAuthorizedError, kbdl_client_module.KBDLServiceError)
 
 
 def test_404_surfaces_typed_error():

@@ -12,7 +12,7 @@ __all__ = [
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ...core.shared_env_utils import SharedEnvUtils
 
@@ -523,6 +523,394 @@ class MMSeqsUtils(SharedEnvUtils):
                 membership[member] = representative
 
         return membership
+
+    def build_search_db(
+        self,
+        proteins: List[Dict[str, Any]],
+        out_dir: Union[str, Path],
+        *,
+        threads: int = 1
+    ) -> Path:
+        """Build a reusable, indexed MMseqs2 sequence database for searching.
+
+        Unlike the transient databases created inside cluster_proteins()
+        (which live in a temp dir and are discarded), the database built
+        here is written to *out_dir* and left in place so it can be used
+        as the target of many later search_proteins() calls without being
+        rebuilt each time.
+
+        Args:
+            proteins: List of protein dictionaries, each containing at minimum:
+                - id: Unique identifier for the protein
+                - protein_translation: Amino acid sequence
+            out_dir: Directory to write the database into. Created if it
+                does not already exist.
+            threads: Number of threads to use for index creation. Default: 1
+
+        Returns:
+            Path to the created MMseqs2 sequence database (the base path;
+            MMseqs2 stores several sibling files alongside it, e.g.
+            ``<returned_path>.dbtype``, ``<returned_path>.index``). Pass
+            this path as ``db_path`` to search_proteins().
+
+        Raises:
+            RuntimeError: If MMseqs2 is not available, or if the
+                ``createdb``/``createindex`` subprocess calls fail.
+            ValueError: If proteins list is empty or malformed.
+
+        Example:
+            >>> utils = MMSeqsUtils()
+            >>> reps = [{"id": "rep1", "protein_translation": "MKTAYIAKQRQISFVK"}]
+            >>> db_path = utils.build_search_db(reps, "/tmp/refdb")
+            >>> hits = utils.search_proteins(query_proteins, db_path,
+            ...                               min_seq_id=0.5, coverage=0.8)
+        """
+        self.initialize_call(
+            "build_search_db",
+            {
+                "num_proteins": len(proteins),
+                "out_dir": str(out_dir),
+                "threads": threads
+            },
+            print_params=True
+        )
+
+        if not self.mmseqs_available:
+            raise RuntimeError(
+                "MMseqs2 is not available. Please install MMseqs2 first."
+            )
+
+        if not proteins:
+            raise ValueError("proteins list cannot be empty")
+
+        # Validate protein data
+        for i, protein in enumerate(proteins):
+            if "id" not in protein:
+                raise ValueError(f"Protein at index {i} missing 'id' field")
+            if "protein_translation" not in protein:
+                raise ValueError(
+                    f"Protein '{protein.get('id', i)}' missing 'protein_translation' field"
+                )
+
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        fasta_file = out_path / "sequences.fasta"
+        self._write_fasta(proteins, fasta_file)
+
+        db_path = out_path / "searchDB"
+        index_tmp_path = out_path / "createindex_tmp"
+
+        # Step 1: Create sequence database
+        self.log_info("Creating MMseqs2 search database...")
+        create_db_cmd = [
+            self.mmseqs_executable, "createdb",
+            str(fasta_file),
+            str(db_path)
+        ]
+        result = subprocess.run(
+            create_db_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if result.returncode != 0:
+            self.log_error(f"createdb failed: {result.stderr}")
+            raise RuntimeError(f"mmseqs createdb failed: {result.stderr}")
+
+        # Step 2: Build the k-mer/sequence index so the database can be
+        # searched against repeatedly without re-indexing.
+        self.log_info(f"Indexing MMseqs2 search database ({len(proteins)} proteins)...")
+        create_index_cmd = [
+            self.mmseqs_executable, "createindex",
+            str(db_path),
+            str(index_tmp_path),
+            "--threads", str(threads)
+        ]
+        result = subprocess.run(
+            create_index_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600
+        )
+        if result.returncode != 0:
+            self.log_error(f"createindex failed: {result.stderr}")
+            raise RuntimeError(f"mmseqs createindex failed: {result.stderr}")
+
+        # The createindex scratch directory is not needed once indexing
+        # succeeds; the persistent artifacts live alongside db_path.
+        try:
+            import shutil
+            shutil.rmtree(index_tmp_path)
+        except Exception as e:
+            self.log_warning(f"Failed to clean up createindex tmp directory: {e}")
+
+        self.log_info(f"Search database ready at {db_path}")
+        return db_path
+
+    def search_proteins(
+        self,
+        proteins: List[Dict[str, Any]],
+        db_path: Union[str, Path],
+        *,
+        min_seq_id: float,
+        coverage: float,
+        threads: int = 1,
+        sensitivity: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """Search protein sequences against a prebuilt MMseqs2 database.
+
+        Runs ``mmseqs search`` of *proteins* against the database at
+        *db_path* (as built by build_search_db()), then ``mmseqs
+        convertalis`` to produce a tabular alignment report, and returns
+        one dict per accepted hit.
+
+        Identity-unit conversion (read this before using the result):
+            MMseqs2's ``convertalis`` module can report sequence identity
+            in two different units depending on which output column is
+            requested: ``fident`` is already a 0.0-1.0 fraction, while
+            ``pident`` is a 0-100 PERCENTAGE. This method explicitly
+            requests the ``pident`` column via ``--format-output`` and
+            divides it by 100.0 before returning, so the ``identity``
+            field below is ALWAYS a fraction in (0.0, 1.0] -- callers
+            never need to know (or guess) which unit MMseqs2 used
+            internally.
+
+        Args:
+            proteins: List of query protein dictionaries, each containing
+                at minimum:
+                - id: Unique identifier for the protein
+                - protein_translation: Amino acid sequence
+            db_path: Path to a database created by build_search_db().
+            min_seq_id: Minimum sequence identity threshold, as a fraction
+                (0.0-1.0), a hit must meet to be returned.
+            coverage: Minimum query-coverage threshold, as a fraction
+                (0.0-1.0), a hit must meet to be returned. Coverage is
+                computed as coverage of the QUERY sequence (mmseqs
+                ``--cov-mode 2``), since proteins are being placed against
+                representatives that may differ in length.
+            threads: Number of threads to use. Default: 1
+            sensitivity: Sensitivity parameter (-s). Higher is more
+                sensitive but slower. If None, uses MMseqs2's default.
+
+        Returns:
+            List of hit dicts, one per accepted alignment, each with
+            exactly these keys:
+                - query_id: str -- the 'id' of the input protein
+                - target_id: str -- the database entry id the hit landed on
+                - identity: float -- sequence identity as a FRACTION in
+                  (0.0, 1.0], converted from mmseqs2's ``pident`` column
+                  (see "Identity-unit conversion" above)
+                - coverage: float -- query coverage as a fraction (0.0-1.0]
+                - evalue: float
+                - bits: float
+            Only hits meeting BOTH min_seq_id and coverage are included.
+
+        Raises:
+            RuntimeError: If MMseqs2 is not available, or if the
+                ``createdb``/``search``/``convertalis`` subprocess calls
+                fail.
+            ValueError: If proteins list is empty or malformed, or if
+                db_path does not point to an existing MMseqs2 database.
+
+        Example:
+            >>> utils = MMSeqsUtils()
+            >>> hits = utils.search_proteins(
+            ...     query_proteins, db_path, min_seq_id=0.5, coverage=0.8
+            ... )
+            >>> hits[0]["identity"]  # e.g. 0.87, never 87.0
+            0.87
+        """
+        self.initialize_call(
+            "search_proteins",
+            {
+                "num_proteins": len(proteins),
+                "db_path": str(db_path),
+                "min_seq_id": min_seq_id,
+                "coverage": coverage,
+                "threads": threads,
+                "sensitivity": sensitivity
+            },
+            print_params=True
+        )
+
+        if not self.mmseqs_available:
+            raise RuntimeError(
+                "MMseqs2 is not available. Please install MMseqs2 first."
+            )
+
+        if not proteins:
+            raise ValueError("proteins list cannot be empty")
+
+        # Validate protein data
+        for i, protein in enumerate(proteins):
+            if "id" not in protein:
+                raise ValueError(f"Protein at index {i} missing 'id' field")
+            if "protein_translation" not in protein:
+                raise ValueError(
+                    f"Protein '{protein.get('id', i)}' missing 'protein_translation' field"
+                )
+
+        db_path = Path(db_path)
+        if not db_path.exists():
+            raise ValueError(f"MMseqs2 database not found at {db_path}")
+
+        work_dir = tempfile.mkdtemp(prefix="mmseqs_search_")
+
+        try:
+            fasta_file = Path(work_dir) / "query.fasta"
+            self._write_fasta(proteins, fasta_file)
+
+            query_db_path = Path(work_dir) / "queryDB"
+            result_db_path = Path(work_dir) / "resultDB"
+            tmp_path = Path(work_dir) / "tmp"
+            tsv_output = Path(work_dir) / "search_results.tsv"
+
+            # Step 1: Create query sequence database
+            self.log_info("Creating MMseqs2 query database...")
+            create_db_cmd = [
+                self.mmseqs_executable, "createdb",
+                str(fasta_file),
+                str(query_db_path)
+            ]
+            result = subprocess.run(
+                create_db_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode != 0:
+                self.log_error(f"createdb failed: {result.stderr}")
+                raise RuntimeError(f"mmseqs createdb failed: {result.stderr}")
+
+            # Step 2: Search query proteins against the prebuilt database
+            self.log_info(
+                f"Searching {len(proteins)} proteins against {db_path} "
+                f"(min_seq_id={min_seq_id}, coverage={coverage})..."
+            )
+            search_cmd = [
+                self.mmseqs_executable, "search",
+                str(query_db_path),
+                str(db_path),
+                str(result_db_path),
+                str(tmp_path),
+                "--min-seq-id", str(min_seq_id),
+                "-c", str(coverage),
+                "--cov-mode", "2",
+                "--threads", str(threads)
+            ]
+            if sensitivity is not None:
+                search_cmd.extend(["-s", str(sensitivity)])
+
+            result = subprocess.run(
+                search_cmd,
+                capture_output=True,
+                text=True,
+                timeout=600  # 10 minute timeout for search
+            )
+            if result.returncode != 0:
+                self.log_error(f"search failed: {result.stderr}")
+                raise RuntimeError(f"mmseqs search failed: {result.stderr}")
+
+            # Step 3: Convert results to a tabular report
+            self.log_info("Converting search results to tabular format...")
+            convertalis_cmd = [
+                self.mmseqs_executable, "convertalis",
+                str(query_db_path),
+                str(db_path),
+                str(result_db_path),
+                str(tsv_output),
+                "--format-output", "query,target,pident,qcov,evalue,bits"
+            ]
+            result = subprocess.run(
+                convertalis_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode != 0:
+                self.log_error(f"convertalis failed: {result.stderr}")
+                raise RuntimeError(f"mmseqs convertalis failed: {result.stderr}")
+
+            # Step 4: Parse and filter results
+            hits = self._parse_search_tsv(
+                tsv_output, min_seq_id=min_seq_id, coverage=coverage
+            )
+
+            self.log_info(f"Search complete: {len(hits)} hits passed filters")
+
+            return hits
+
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(work_dir)
+            except Exception as e:
+                self.log_warning(f"Failed to clean up temp directory: {e}")
+
+    def _parse_search_tsv(
+        self,
+        tsv_path: Path,
+        min_seq_id: float,
+        coverage: float
+    ) -> List[Dict[str, Any]]:
+        """Parse MMseqs2 convertalis tabular output into filtered hit dicts.
+
+        Expects rows produced with
+        ``--format-output query,target,pident,qcov,evalue,bits``.
+
+        The ``pident`` column emitted by ``mmseqs convertalis`` is a
+        PERCENTAGE in the range 0-100 (as distinct from the ``fident``
+        column, which is already a 0.0-1.0 fraction). This method divides
+        pident by 100.0 so the ``identity`` value returned here is always
+        a fraction in (0.0, 1.0].
+
+        Args:
+            tsv_path: Path to the convertalis TSV output.
+            min_seq_id: Minimum identity fraction (0.0-1.0) a hit must meet.
+            coverage: Minimum query-coverage fraction (0.0-1.0) a hit must meet.
+
+        Returns:
+            List of hit dicts with keys: query_id, target_id, identity,
+            coverage, evalue, bits. Only hits meeting both min_seq_id and
+            coverage are included.
+        """
+        hits: List[Dict[str, Any]] = []
+
+        with open(tsv_path, 'r') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                parts = line.rstrip("\n").split('\t')
+                if len(parts) < 6:
+                    continue
+
+                query_id, target_id, pident_str, qcov_str, evalue_str, bits_str = parts[:6]
+
+                pident = float(pident_str)
+                assert 0.0 <= pident <= 100.0, (
+                    f"Unexpected pident value {pident} outside [0, 100]; "
+                    "mmseqs convertalis output format may have changed"
+                )
+                # Normalise mmseqs2's percent-identity column to a fraction.
+                identity = pident / 100.0
+                hit_coverage = float(qcov_str)
+                evalue = float(evalue_str)
+                bits = float(bits_str)
+
+                if identity < min_seq_id or hit_coverage < coverage:
+                    continue
+
+                hits.append({
+                    "query_id": query_id,
+                    "target_id": target_id,
+                    "identity": identity,
+                    "coverage": hit_coverage,
+                    "evalue": evalue,
+                    "bits": bits
+                })
+
+        return hits
 
 
 # ── Composition-based implementation ─────────────────────────────────────

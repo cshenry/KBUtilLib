@@ -14,7 +14,6 @@ import hashlib
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Import path + version
 # ---------------------------------------------------------------------------
@@ -260,7 +259,10 @@ def test_canonical_payload_ensure_ascii_false_preserves_non_ascii() -> None:
 
 
 def test_content_hash_matches_sha256_of_canonical_payload() -> None:
-    from kbutillib.domains.identity import canonical_payload, content_hash  # noqa: PLC0415
+    from kbutillib.domains.identity import (  # noqa: PLC0415
+        canonical_payload,
+        content_hash,
+    )
 
     obj = {"z": [3, 2, 1], "a": None}
     expected = hashlib.sha256(canonical_payload(obj)).hexdigest()

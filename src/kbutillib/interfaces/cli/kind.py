@@ -1,10 +1,10 @@
-"""``kbu king`` — self-install this repo's KING apps into a local KING.
+"""``kbu kind`` — self-install this repo's KING apps into a local KING.
 
 Thin CLI facade over the vendored ``kbutillib.agents.king_install`` module
 (see its module docstring for the on-disk ``$KING_APPS_DIR`` contract and
 the Acceptance Criteria it implements). Reads this repo's OWN packaged
 bundles — no cross-repo dependency; a checkout/install of KBUtilLib alone
-is enough to run ``kbu king install``.
+is enough to run ``kbu kind install``.
 
 This repo ships more than one bundle, selected with ``--app``:
 
@@ -15,7 +15,7 @@ This repo ships more than one bundle, selected with ``--app``:
   rail.
 
 With no ``--app``, every bundle is acted on. That is deliberate: the point
-of ``kbu king install`` is "make what this repo offers visible to KING",
+of ``kbu kind install`` is "make what this repo offers visible to KING",
 and a per-app default would silently ship a subset.
 
 Exit codes on ``status`` follow the CRAFT CLI convention already used
@@ -91,12 +91,12 @@ def _json_option(fn):
     )(fn)
 
 
-@click.group("king")
-def king_cmd() -> None:
+@click.group("kind")
+def kind_cmd() -> None:
     """Self-install this repo's KING apps into a local KING (`~/king-apps/`)."""
 
 
-@king_cmd.command("install")
+@kind_cmd.command("install")
 @_app_option
 @_apps_dir_option
 @_json_option
@@ -119,7 +119,7 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
 
     for result in results:
         click.echo(
-            f"kbu king install: id={result['id']}  apps_dir={result['apps_dir']}"
+            f"kbu kind install: id={result['id']}  apps_dir={result['apps_dir']}"
         )
         click.echo(
             f"  [{'PASS' if result['cli_on_path'] else 'FAIL'}] "
@@ -139,7 +139,7 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
     click.echo(f"  serve-king.sh: {results[-1]['serve_script']}")
 
 
-@king_cmd.command("uninstall")
+@kind_cmd.command("uninstall")
 @_app_option
 @_apps_dir_option
 @_json_option
@@ -160,11 +160,11 @@ def uninstall_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) ->
 
     for result in results:
         click.echo(
-            f"kbu king uninstall: id={result['id']}  removed={result['removed']}"
+            f"kbu kind uninstall: id={result['id']}  removed={result['removed']}"
         )
 
 
-@king_cmd.command("status")
+@kind_cmd.command("status")
 @_app_option
 @_apps_dir_option
 @_json_option
@@ -184,7 +184,7 @@ def status_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> No
         click.echo(json.dumps(results))
     else:
         for result in results:
-            click.echo(f"kbu king status: id={result['id']}  [{result['color']}]")
+            click.echo(f"kbu kind status: id={result['id']}  [{result['color']}]")
             click.echo(
                 f"  [{'PASS' if result['cli_on_path'] else 'FAIL'}] cli-on-path"
             )

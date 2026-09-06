@@ -36,9 +36,9 @@ kbu doctor                      # check all backend availability (exits 0 if all
 ### KING agent bundle commands
 
 ```console
-kbu king status                 # show installed KING bundles
-kbu king install <bundle>       # install a KING bundle
-kbu king uninstall <bundle>     # remove a KING bundle
+kbu kind status                 # show installed KING bundles
+kbu kind install <bundle>       # install a KING bundle
+kbu kind uninstall <bundle>     # remove a KING bundle
 ```
 
 ## What lives here
@@ -48,7 +48,7 @@ kbu king uninstall <bundle>     # remove a KING bundle
 | `__init__.py` | Click group root (`kbu`); entry point for the `kbu` script |
 | `cap.py` | `kbu cap` subgroup — list, info, run |
 | `bootstrap.py` | `kbu bootstrap` / `kbu new-project` project scaffolding |
-| `king.py` | `kbu king` subgroup — bundle install/uninstall/status |
+|  `kind.py` | `kbu kind` subgroup — bundle install/uninstall/status |
 | `doctor.py` | `kbu doctor` — per-backend availability diagnostics |
 | `new_capability.py` | `kbu new-capability` — interactive capability scaffolder |
 | `templates/` | Jinja2 templates used by `new-capability` |

@@ -1,6 +1,6 @@
-"""Tests for ``kbu king`` — the KING self-install verb group.
+"""Tests for ``kbu kind`` — the KING self-install verb group.
 
-Exercises the CLI (`kbu king install|uninstall|status`) against a temp
+Exercises the CLI (`kbu kind install|uninstall|status`) against a temp
 ``$KING_APPS_DIR``, plus the vendored ``kbutillib.king_install`` module
 directly for the union-recompose case (installing a second, independent
 fixture bundle to prove this app's fragment survives -- the same on-disk
@@ -37,7 +37,7 @@ _BUNDLE_DIR = _SRC_DIR / "kbutillib" / "king_app"
 def _json_one(result: Any) -> Any:
     """Sole element of a ``--json`` payload, which is always a LIST.
 
-    ``kbu king`` grew a second bundle (``persistentai-wake``), so ``--json``
+    ``kbu kind`` grew a second bundle (``persistentai-wake``), so ``--json``
     emits one object per app acted on -- a list even for a single ``--app``.
     Asserting the length here also proves the ``--app`` selector really
     narrowed the run rather than silently acting on everything.
@@ -505,3 +505,24 @@ class TestWakeBundle:
         assert r.exit_code == 1, r.output  # amber, because persistentai is absent
         colors = {e["id"]: e["color"] for e in json.loads(r.output)}
         assert colors == {"kbutillib-modeling": "green", "persistentai-wake": "amber"}
+
+
+class TestRetiredKingAlias:
+    """`kbu king` was renamed to `kbu kind`; the old spelling must still work."""
+
+    def test_king_alias_still_resolves(self):
+        """`kbu king --help` resolves to the kind group (cw-king still calls it)."""
+        from kbutillib.interfaces.cli import main
+
+        result = CliRunner().invoke(main, ["king", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "install" in result.output
+
+    def test_king_alias_not_advertised(self):
+        """The retired name is resolvable but never listed in --help."""
+        from kbutillib.interfaces.cli import main
+
+        result = CliRunner().invoke(main, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "\n  kind" in result.output
+        assert "\n  king" not in result.output

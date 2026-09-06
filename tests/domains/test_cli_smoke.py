@@ -38,10 +38,10 @@ def test_model_cmd_importable() -> None:
 
 
 
-def test_king_cmd_importable() -> None:
-    """kbutillib.interfaces.cli.king_cmd is importable."""
-    from kbutillib.interfaces.cli import king_cmd  # noqa: PLC0415
-    assert king_cmd is not None
+def test_kind_cmd_importable() -> None:
+    """kbutillib.interfaces.cli.kind_cmd is importable."""
+    from kbutillib.interfaces.cli import kind_cmd  # noqa: PLC0415
+    assert kind_cmd is not None
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +125,10 @@ def test_new_capability_cmd_importable() -> None:
     assert new_capability_cmd is not None
 
 
-def test_king_cmd_help_exits_ok() -> None:
-    """kbu king --help exits with code 0."""
+def test_kind_cmd_help_exits_ok() -> None:
+    """kbu kind --help exits with code 0."""
     from click.testing import CliRunner  # noqa: PLC0415
-    from kbutillib.interfaces.cli import king_cmd  # noqa: PLC0415
+    from kbutillib.interfaces.cli import kind_cmd  # noqa: PLC0415
     runner = CliRunner()
-    result = runner.invoke(king_cmd, ["--help"])
+    result = runner.invoke(kind_cmd, ["--help"])
     assert result.exit_code == 0

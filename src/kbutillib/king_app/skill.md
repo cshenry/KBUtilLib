@@ -195,7 +195,7 @@ PY
 - This text is injected via `KING_CONTEXT` only; it is **not** registered
   as a Claude Code skill (no `~/.claude/skills/` entry), because this
   session has no `Skill` tool to invoke one with.
-- These modeling verbs are intended **local-only**. If `kbu king status`
+- These modeling verbs are intended **local-only**. If `kbu kind status`
   (or the orientation you were given) warns that KING's LLM route is
   non-local, treat any model/genome data you handle as something you
   should not casually paste into that route.

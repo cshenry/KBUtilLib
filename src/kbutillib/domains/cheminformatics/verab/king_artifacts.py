@@ -239,7 +239,7 @@ def emit_king_workflow(
         "needed to reproduce or extend the analysis.\n\n"
         "**Note:** This directory contains *reproducible-run inputs* (seeds, rules,\n"
         "manifest) and a *ready-to-run prompt* — it is NOT itself a KING bundle.\n"
-        "To install the kbu verab KING bundle, see `kbu king install`.\n\n"
+        "To install the kbu verab KING bundle, see `kbu kind install`.\n\n"
         "---\n\n"
         "## Goal\n\n"
         "Reproduce the verAB O-demethylation rule discovery for the five canonical\n"

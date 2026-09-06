@@ -27,7 +27,7 @@ from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
 from .jobs import jobs_cmd
-from .king import king_cmd
+from .kind import kind_cmd
 from .migrate import migrate_cmd
 from .model import model_cmd
 from .new_project import new_project_command
@@ -39,7 +39,20 @@ from .update import update_command
 from .verab import verab_cmd
 
 
-@click.group()
+# Retired command names that still resolve, so callers pinned to the old
+# spelling keep working. Aliases are NOT in ``commands``, so they never appear
+# in ``--help`` -- the new name is the only one advertised.
+_COMMAND_ALIASES = {"king": "kind"}
+
+
+class _AliasedGroup(click.Group):
+    """Click group that resolves the retired names in ``_COMMAND_ALIASES``."""
+
+    def get_command(self, ctx: click.Context, cmd_name: str):
+        return super().get_command(ctx, _COMMAND_ALIASES.get(cmd_name, cmd_name))
+
+
+@click.group(cls=_AliasedGroup)
 @click.version_option()
 def main() -> None:
     """kbu -- KBUtilLib developer CLI."""
@@ -54,7 +67,7 @@ main.add_command(init_command, name="init")
 main.add_command(init_notebook_cmd, name="init-notebook")
 main.add_command(jobs_cmd, name="jobs")
 main.add_command(jobdaemon_cmd, name="jobdaemon")
-main.add_command(king_cmd, name="king")
+main.add_command(kind_cmd, name="kind")
 main.add_command(migrate_cmd, name="migrate")
 main.add_command(model_cmd, name="model")
 main.add_command(new_project_command, name="new-project")

@@ -21,7 +21,7 @@ from kbutillib.interfaces.cli import (  # noqa: F401
     init_notebook_cmd,
     jobdaemon_cmd,
     jobs_cmd,
-    king_cmd,
+    kind_cmd,
     main,
     migrate_cmd,
     model_cmd,

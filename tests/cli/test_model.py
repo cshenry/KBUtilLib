@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import now_utc_iso, write_project_manifest
+from kbutillib.interfaces.cli.manifest import now_utc_iso, write_project_manifest
 
 try:
     import cobra  # noqa: F401

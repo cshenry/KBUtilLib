@@ -6,7 +6,7 @@ list at once, mirroring AIAssistant's :class:`TaskPlanError` pattern.
 
 Programmatic API::
 
-    from kbutillib.cli.buildplan import load_buildplan, BuildPlanError
+    from kbutillib.interfaces.cli.buildplan import load_buildplan, BuildPlanError
     try:
         load_buildplan("subprojects/my_sp/buildplan.json")
     except BuildPlanError as exc:

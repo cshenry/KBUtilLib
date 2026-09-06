@@ -20,7 +20,7 @@ _CONFLICT_PATTERN = re.compile(r"\(Conflict")
 def find_machine_configs_dir() -> Path:
     """Locate the ``machine_configs/`` directory at the KBUtilLib repo root.
 
-    Walks up from this file's location (``src/kbutillib/cli/machine.py``)
+    Walks up from this file's location (``src/kbutillib/interfaces/cli/machine.py``)
     until it finds a directory containing ``machine_configs/``.
     """
     current = Path(__file__).resolve().parent

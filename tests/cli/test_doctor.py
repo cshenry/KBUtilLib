@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from kbutillib.cli.init import (
+from kbutillib.interfaces.cli.init import (
     _BACKEND_PROBES,
     _probe_all_backends,
     _probe_backend,
@@ -58,31 +58,31 @@ class TestDoctorExitCode:
         runner = CliRunner()
         with (
             patch(
-                "kbutillib.cli.init._probe_init_done",
+                "kbutillib.interfaces.cli.init._probe_init_done",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_cursor_on_path",
+                "kbutillib.interfaces.cli.init._probe_cursor_on_path",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_claude_extension",
+                "kbutillib.interfaces.cli.init._probe_claude_extension",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_kbu_version",
+                "kbutillib.interfaces.cli.init._probe_kbu_version",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_jupyter_kernel",
+                "kbutillib.interfaces.cli.init._probe_jupyter_kernel",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_fba_imports",
+                "kbutillib.interfaces.cli.init._probe_fba_imports",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_tomli_w",
+                "kbutillib.interfaces.cli.init._probe_tomli_w",
                 return_value=("PASS", "ok"),
             ),
         ):
@@ -103,31 +103,31 @@ class TestDoctorExitCode:
         with (
             patch("importlib.util.find_spec", side_effect=always_none),
             patch(
-                "kbutillib.cli.init._probe_init_done",
+                "kbutillib.interfaces.cli.init._probe_init_done",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_cursor_on_path",
+                "kbutillib.interfaces.cli.init._probe_cursor_on_path",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_claude_extension",
+                "kbutillib.interfaces.cli.init._probe_claude_extension",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_kbu_version",
+                "kbutillib.interfaces.cli.init._probe_kbu_version",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_jupyter_kernel",
+                "kbutillib.interfaces.cli.init._probe_jupyter_kernel",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_fba_imports",
+                "kbutillib.interfaces.cli.init._probe_fba_imports",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_tomli_w",
+                "kbutillib.interfaces.cli.init._probe_tomli_w",
                 return_value=("PASS", "ok"),
             ),
         ):
@@ -153,31 +153,31 @@ class TestDoctorBackendOutput:
         runner = CliRunner()
         with (
             patch(
-                "kbutillib.cli.init._probe_init_done",
+                "kbutillib.interfaces.cli.init._probe_init_done",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_cursor_on_path",
+                "kbutillib.interfaces.cli.init._probe_cursor_on_path",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_claude_extension",
+                "kbutillib.interfaces.cli.init._probe_claude_extension",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_kbu_version",
+                "kbutillib.interfaces.cli.init._probe_kbu_version",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_jupyter_kernel",
+                "kbutillib.interfaces.cli.init._probe_jupyter_kernel",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_fba_imports",
+                "kbutillib.interfaces.cli.init._probe_fba_imports",
                 return_value=("PASS", "ok"),
             ),
             patch(
-                "kbutillib.cli.init._probe_tomli_w",
+                "kbutillib.interfaces.cli.init._probe_tomli_w",
                 return_value=("PASS", "ok"),
             ),
         ):
@@ -230,13 +230,13 @@ class TestDoctorRegistryOutput:
         """Run doctor with machine probes mocked to PASS."""
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.init._probe_init_done", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_cursor_on_path", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_claude_extension", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_kbu_version", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_jupyter_kernel", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_fba_imports", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_tomli_w", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_init_done", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_cursor_on_path", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_claude_extension", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_kbu_version", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_jupyter_kernel", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_fba_imports", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_tomli_w", return_value=("PASS", "ok")),
         ):
             result = runner.invoke(doctor_command, [], catch_exceptions=False)
         return result.output
@@ -273,13 +273,13 @@ class TestDoctorVersionOutput:
     def doctor_output(self) -> str:
         runner = CliRunner()
         with (
-            patch("kbutillib.cli.init._probe_init_done", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_cursor_on_path", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_claude_extension", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_kbu_version", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_jupyter_kernel", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_fba_imports", return_value=("PASS", "ok")),
-            patch("kbutillib.cli.init._probe_tomli_w", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_init_done", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_cursor_on_path", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_claude_extension", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_kbu_version", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_jupyter_kernel", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_fba_imports", return_value=("PASS", "ok")),
+            patch("kbutillib.interfaces.cli.init._probe_tomli_w", return_value=("PASS", "ok")),
         ):
             result = runner.invoke(doctor_command, [], catch_exceptions=False)
         return result.output
@@ -423,7 +423,7 @@ class TestProbeRegistrySummary:
     def test_never_raises(self) -> None:
         """Probe never propagates an exception."""
         with patch(
-            "kbutillib.cli.init._probe_registry_summary",
+            "kbutillib.interfaces.cli.init._probe_registry_summary",
             wraps=_probe_registry_summary,
         ):
             # Call directly — must not raise under any circumstance

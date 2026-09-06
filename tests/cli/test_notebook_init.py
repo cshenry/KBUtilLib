@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.notebook_init — ``kbu notebook-init`` command.
+"""Tests for kbutillib.interfaces.cli.notebook_init — ``kbu notebook-init`` command.
 
 Coverage
 --------
@@ -36,7 +36,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.notebook_init import (
+from kbutillib.interfaces.cli.notebook_init import (
     _DROPBOX_PROJECTS,
     _NOTEBOOK_WORKSPACES,
     _WORKNB_BUNDLE,
@@ -124,7 +124,7 @@ class TestResolveRepo:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Bare name resolves to legacy Projects/<name> when that path exists."""
-        import kbutillib.cli.notebook_init as _mod
+        import kbutillib.interfaces.cli.notebook_init as _mod
 
         fake_projects = tmp_path / "Dropbox" / "Projects"
         fake_projects.mkdir(parents=True)
@@ -141,7 +141,7 @@ class TestResolveRepo:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Bare name with group resolves to NotebookWorkspaces/<group>/<name>."""
-        import kbutillib.cli.notebook_init as _mod
+        import kbutillib.interfaces.cli.notebook_init as _mod
 
         fake_projects = tmp_path / "Dropbox" / "Projects"
         fake_projects.mkdir(parents=True)
@@ -157,7 +157,7 @@ class TestResolveRepo:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Bare name for a nonexistent repo without group raises UsageError."""
-        import kbutillib.cli.notebook_init as _mod
+        import kbutillib.interfaces.cli.notebook_init as _mod
         import click
 
         fake_projects = tmp_path / "Dropbox" / "Projects"
@@ -968,7 +968,7 @@ def patched_projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[P
 
     Returns (fake_projects, fake_notebook_workspaces).
     """
-    import kbutillib.cli.notebook_init as _mod
+    import kbutillib.interfaces.cli.notebook_init as _mod
 
     fake_projects = tmp_path / "Dropbox" / "Projects"
     fake_projects.mkdir(parents=True)

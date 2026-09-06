@@ -39,6 +39,7 @@ from .session import session_cmd
 from .set_cmd import set_cmd
 from .subproject import subproject_cmd
 from .update import update_command
+from .verab import verab_cmd
 
 
 @click.group()
@@ -71,25 +72,4 @@ main.add_command(update_command, name="update")
 main.add_command(cap_cmd, name="cap")
 main.add_command(new_capability_cmd, name="new-capability")
 
-# verAB CLI — loaded via direct file import to avoid circular import between
-# kbutillib.cli and kbutillib.interfaces.cli (WP17 shim relationship).
-import importlib.util as _util
-import sys as _sys
-import pathlib as _pathlib
-
-_verab_path = _pathlib.Path(__file__).resolve().parent.parent.parent / "cli" / "verab.py"
-if "kbutillib.cli.verab" not in _sys.modules:
-    _spec = _util.spec_from_file_location("kbutillib.cli.verab", _verab_path)
-    _verab_mod = _util.module_from_spec(_spec)
-    _sys.modules["kbutillib.cli.verab"] = _verab_mod
-    # Also set as attribute on parent package so attribute access works
-    if "kbutillib.cli" in _sys.modules:
-        setattr(_sys.modules["kbutillib.cli"], "verab", _verab_mod)
-    _spec.loader.exec_module(_verab_mod)
-else:
-    _verab_mod = _sys.modules["kbutillib.cli.verab"]
-
-verab_cmd = _verab_mod.verab_cmd
 main.add_command(verab_cmd, name="verab")
-
-del _util, _pathlib, _verab_path, _verab_mod

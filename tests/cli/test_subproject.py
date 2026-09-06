@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.subproject — state machine, manifest, CLI commands."""
+"""Tests for kbutillib.interfaces.cli.subproject — state machine, manifest, CLI commands."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     read_subproject_manifest,
     write_subproject_manifest,
 )
-from kbutillib.cli.subproject import (
+from kbutillib.interfaces.cli.subproject import (
     _FORWARD,
     _REVERSE,
     _STATES,
@@ -29,7 +29,7 @@ from kbutillib.cli.subproject import (
 
 def _make_project(tmp_path: Path, name: str = "myproj") -> Path:
     """Create a minimal kbu-project.toml in *tmp_path* and return the root."""
-    from kbutillib.cli.manifest import write_project_manifest
+    from kbutillib.interfaces.cli.manifest import write_project_manifest
     root = tmp_path / name
     root.mkdir(exist_ok=True)
     write_project_manifest(root, {

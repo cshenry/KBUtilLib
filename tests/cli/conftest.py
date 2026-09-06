@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     write_project_manifest,
     write_subproject_manifest,

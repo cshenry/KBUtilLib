@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.adopt._inventory — AC #32 through #38.
+"""Tests for kbutillib.interfaces.cli.adopt._inventory — AC #32 through #38.
 
 Each test class documents which Acceptance Criterion it covers.
 All tests use ``tmp_path`` fixtures to build fake directory trees.
@@ -14,7 +14,7 @@ from typing import Any
 import nbformat
 import pytest
 
-from kbutillib.cli.adopt._inventory import (
+from kbutillib.interfaces.cli.adopt._inventory import (
     AdoptionInventory,
     _is_relative_path,
     scan_archive,

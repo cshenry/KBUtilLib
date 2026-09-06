@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from kbutillib.cli.beril import beril_cmd
+from kbutillib.interfaces.cli.beril import beril_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ class TestWorktreeNew:
         def fake_open_cursor(wt_ctx, project_id):
             opened.append(project_id)
 
-        monkeypatch.setattr("kbutillib.cli.beril._open_cursor_workspace", fake_open_cursor)
+        monkeypatch.setattr("kbutillib.interfaces.cli.beril._open_cursor_workspace", fake_open_cursor)
 
         result = _cli_invoke(
             ["new", "--open", "gamma"],
@@ -310,7 +310,7 @@ class TestWorktreeOpen:
         def fake_open_cursor(wt_ctx, project_id):
             opened.append(project_id)
 
-        monkeypatch.setattr("kbutillib.cli.beril._open_cursor_workspace", fake_open_cursor)
+        monkeypatch.setattr("kbutillib.interfaces.cli.beril._open_cursor_workspace", fake_open_cursor)
 
         result = _cli_invoke(["open", "cursor-open"], str(scratch_beril), str(worktree_root))
         assert result.exit_code == 0, result.output
@@ -830,7 +830,7 @@ class TestOpenCursorWorkspace:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_open_cursor_workspace calls subprocess.Popen when cursor is on PATH."""
-        from kbutillib.cli.beril import _WorktreeCtx, _open_cursor_workspace
+        from kbutillib.interfaces.cli.beril import _WorktreeCtx, _open_cursor_workspace
 
         wt_root = tmp_path / "worktrees"
         wt_root.mkdir()
@@ -846,8 +846,8 @@ class TestOpenCursorWorkspace:
             launched.append(cmd)
             return MagicMock()
 
-        monkeypatch.setattr("kbutillib.cli.beril.shutil.which", lambda n: "/usr/bin/cursor" if n == "cursor" else None)
-        monkeypatch.setattr("kbutillib.cli.beril.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("kbutillib.interfaces.cli.beril.shutil.which", lambda n: "/usr/bin/cursor" if n == "cursor" else None)
+        monkeypatch.setattr("kbutillib.interfaces.cli.beril.subprocess.Popen", fake_popen)
 
         runner = CliRunner()
         with runner.isolated_filesystem():
@@ -860,7 +860,7 @@ class TestOpenCursorWorkspace:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_open_cursor_workspace prints a manual instruction when cursor is absent."""
-        from kbutillib.cli.beril import _open_cursor_workspace
+        from kbutillib.interfaces.cli.beril import _open_cursor_workspace
 
         wt_root = tmp_path / "worktrees"
         wt_root.mkdir()
@@ -868,7 +868,7 @@ class TestOpenCursorWorkspace:
         class FakeCtx:
             worktree_root = wt_root
 
-        monkeypatch.setattr("kbutillib.cli.beril.shutil.which", lambda n: None)
+        monkeypatch.setattr("kbutillib.interfaces.cli.beril.shutil.which", lambda n: None)
 
         runner = CliRunner()
         result_output = []

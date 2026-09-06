@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.dropfile_emitter — atomic JSON drop-file writer."""
+"""Tests for kbutillib.interfaces.cli.dropfile_emitter — atomic JSON drop-file writer."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kbutillib.cli.dropfile_emitter import emit_session_dropfile
+from kbutillib.interfaces.cli.dropfile_emitter import emit_session_dropfile
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

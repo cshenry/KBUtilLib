@@ -1000,7 +1000,7 @@ class TestDoctor:
         with the CWD set to harness_dir so harness.toml discovery works.
         """
         from click.testing import CliRunner
-        from kbutillib.cli.harness import doctor_cmd
+        from kbutillib.interfaces.cli.harness import doctor_cmd
 
         old_cwd = os.getcwd()
         try:

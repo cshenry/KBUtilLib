@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.migrate — ``kbu migrate`` command.
+"""Tests for kbutillib.interfaces.cli.migrate — ``kbu migrate`` command.
 
 Covers Acceptance Criteria #39, #40, and #41 from the kbutillib-v2 PRD.
 
@@ -24,7 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import now_utc_iso, write_project_manifest, write_subproject_manifest
+from kbutillib.interfaces.cli.manifest import now_utc_iso, write_project_manifest, write_subproject_manifest
 
 
 # ---------------------------------------------------------------------------

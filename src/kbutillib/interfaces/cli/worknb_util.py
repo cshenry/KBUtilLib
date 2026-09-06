@@ -1,4 +1,4 @@
-"""``kbutillib.cli.worknb_util`` — render and smart-merge helpers for the
+"""``kbutillib.interfaces.cli.worknb_util`` — render and smart-merge helpers for the
 work-notebook ``util.py`` template (Module 4 of the work-notebooks PRD).
 
 This module is intentionally *separate* from the BERIL ``init_notebook``

@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.manifest — shared TOML I/O helpers."""
+"""Tests for kbutillib.interfaces.cli.manifest — shared TOML I/O helpers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     append_notebook_entry_or_update,
     append_session_ref,
     now_utc_iso,

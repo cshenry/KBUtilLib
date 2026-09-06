@@ -93,7 +93,7 @@ _bootstrap_sys_paths()
 
 ## 5. Canonical `util.py` skeleton
 
-The unified template is at `src/kbutillib/cli/templates/util.py.tmpl`
+The unified template is at `src/kbutillib/interfaces/cli/templates/util.py.tmpl`
 (the file rendered by `kbu init-notebook`).  A project's `util.py`
 extends this with project-specific constants and helpers below the marker.
 

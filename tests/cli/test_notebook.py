@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.notebook — list, mark-run, exec subcommands."""
+"""Tests for kbutillib.interfaces.cli.notebook — list, mark-run, exec subcommands."""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     read_subproject_manifest,
     write_project_manifest,
     write_subproject_manifest,
 )
-from kbutillib.cli.notebook import list_notebooks, mark_run
+from kbutillib.interfaces.cli.notebook import list_notebooks, mark_run
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -408,7 +408,7 @@ class TestExecNotebook:
     def test_stop_on_error_by_default(self, tmp_path: Path) -> None:
         """A cell that raises stops execution when allow_errors=False."""
         from nbclient.exceptions import CellExecutionError
-        from kbutillib.cli.notebook import exec_notebook
+        from kbutillib.interfaces.cli.notebook import exec_notebook
 
         root = _make_project(tmp_path)
         sp_dir = _create_subproject(root, "sp1")
@@ -483,7 +483,7 @@ class TestExecNotebook:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """_select_kernel emits a warning and returns 'python3' when project kernel absent."""
-        from kbutillib.cli.notebook import _select_kernel
+        from kbutillib.interfaces.cli.notebook import _select_kernel
         from jupyter_client.kernelspec import find_kernel_specs
 
         root = _make_project(tmp_path, name="no_such_kernel_xyz")
@@ -502,7 +502,7 @@ class TestExecNotebook:
     ) -> None:
         """KBU_NOTEBOOK_CELL_TIMEOUT=1 causes a sleep(5) cell to time out."""
         from nbclient.exceptions import CellTimeoutError
-        from kbutillib.cli.notebook import exec_notebook
+        from kbutillib.interfaces.cli.notebook import exec_notebook
 
         root = _make_project(tmp_path)
         sp_dir = _create_subproject(root, "sp1")

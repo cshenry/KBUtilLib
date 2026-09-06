@@ -14,13 +14,13 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     read_subproject_manifest,
     write_project_manifest,
     write_subproject_manifest,
 )
-from kbutillib.cli.subproject import (
+from kbutillib.interfaces.cli.subproject import (
     _FORWARD,
     _NEXT_ACTION,
     _REVERSE,

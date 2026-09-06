@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.binding — project-to-AIAssistant project_id binding."""
+"""Tests for kbutillib.interfaces.cli.binding — project-to-AIAssistant project_id binding."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kbutillib.cli.binding import resolve_binding, set_binding
-from kbutillib.cli.manifest import now_utc_iso, write_project_manifest
+from kbutillib.interfaces.cli.binding import resolve_binding, set_binding
+from kbutillib.interfaces.cli.manifest import now_utc_iso, write_project_manifest
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ class TestSetBinding:
         root = tmp_path / "proj"
         root.mkdir()
         _make_project(root)
-        from kbutillib.cli.manifest import read_project_manifest
+        from kbutillib.interfaces.cli.manifest import read_project_manifest
         before = read_project_manifest(root)
         set_binding(root, "testid", "Test")
         after = read_project_manifest(root)

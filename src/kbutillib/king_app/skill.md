@@ -168,7 +168,7 @@ Before writing a `kbu model exec` script, read:
 - `~/Dropbox/Projects/KBUtilLib/agent-io/docs/kbu-model-cli.md` — the full
   CLI reference this skill text summarizes (verb-by-verb JSON schemas,
   accepted forms, provenance contract).
-- `~/Dropbox/Projects/KBUtilLib/src/kbutillib/cli/model.py` — the module
+- `~/Dropbox/Projects/KBUtilLib/src/kbutillib/interfaces/cli/model.py` — the module
   docstring and each verb's implementation; every verb is a thin facade,
   so reading it shows you exactly which `MSReconstructionUtils`/
   `MSFBAUtils` methods to call yourself.

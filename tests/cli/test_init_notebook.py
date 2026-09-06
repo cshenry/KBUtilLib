@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.init_notebook — ``kbu init-notebook`` command."""
+"""Tests for kbutillib.interfaces.cli.init_notebook — ``kbu init-notebook`` command."""
 
 from __future__ import annotations
 

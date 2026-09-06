@@ -32,7 +32,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from kbutillib.cli.researchos import researchos_cmd
+from kbutillib.interfaces.cli.researchos import researchos_cmd
 
 
 # ===========================================================================
@@ -1526,7 +1526,7 @@ class TestCLINew:
         fake_run, _ = _make_fake_run(ros_root=ros_root, create_project_dir=True)
 
         with patch("subprocess.run", side_effect=fake_run):
-            with patch("kbutillib.cli.researchos.shutil.which", return_value=None):
+            with patch("kbutillib.interfaces.cli.researchos.shutil.which", return_value=None):
                 result = cli.invoke(["new", "--open", "AIALE", "OpenTest"])
 
         assert result.exit_code == 0, result.output
@@ -1561,7 +1561,7 @@ class TestCLIOpen:
         opened = []
         monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/cursor" if n == "cursor" else None)
         monkeypatch.setattr(
-            "kbutillib.cli.researchos.subprocess.Popen",
+            "kbutillib.interfaces.cli.researchos.subprocess.Popen",
             lambda cmd, **kw: opened.append(cmd),
         )
 

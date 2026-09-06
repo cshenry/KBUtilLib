@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.init — ``kbu init`` and ``kbu doctor`` subcommands."""
+"""Tests for kbutillib.interfaces.cli.init — ``kbu init`` and ``kbu doctor`` subcommands."""
 
 from __future__ import annotations
 

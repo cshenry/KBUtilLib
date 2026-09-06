@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from kbutillib.cli.worknb_util import (
+from kbutillib.interfaces.cli.worknb_util import (
     WORKNB_UTIL_MARKER,
     render_worknb_util_template,
     smart_merge_worknb_util,

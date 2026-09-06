@@ -146,7 +146,7 @@ def _build_venv(
             # venvman may write activate.sh; try resolving from it
             activate_sh = harness_dir / "activate.sh"
             if activate_sh.exists():
-                from kbutillib.cli._template_ops import parse_virtual_env_from_activate
+                from kbutillib.interfaces.cli._template_ops import parse_virtual_env_from_activate
                 venv_dir = parse_virtual_env_from_activate(activate_sh)
                 if venv_dir:
                     candidate = venv_dir / "bin" / "python"

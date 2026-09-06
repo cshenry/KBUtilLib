@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.machine — alias resolution and config loading."""
+"""Tests for kbutillib.interfaces.cli.machine — alias resolution and config loading."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ class TestResolveAlias:
             with patch("kbutillib.interfaces.cli.machine.resolve_alias.__module__", "kbutillib.interfaces.cli.machine"):
                 # Patch the actual import inside resolve_alias
                 import importlib
-                import kbutillib.cli.machine as mod
+                import kbutillib.interfaces.cli.machine as mod
 
                 original = mod.resolve_alias
 

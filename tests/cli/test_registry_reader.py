@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.registry_reader — read-only ranked candidate lookup."""
+"""Tests for kbutillib.interfaces.cli.registry_reader — read-only ranked candidate lookup."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kbutillib.cli.registry_reader import rank_candidates
+from kbutillib.interfaces.cli.registry_reader import rank_candidates
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

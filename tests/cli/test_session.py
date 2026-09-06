@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.session — save, list, show subcommands.
+"""Tests for kbutillib.interfaces.cli.session — save, list, show subcommands.
 
 The old _route_save_aia direct save_session path has been removed.  Tests now
 verify the new drop-file behaviour: bound project emits a drop-file AND writes
@@ -18,13 +18,13 @@ import yaml
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     read_subproject_manifest,
     write_project_manifest,
     write_subproject_manifest,
 )
-from kbutillib.cli.session import _detect_aiassistant, _find_project_root
+from kbutillib.interfaces.cli.session import _detect_aiassistant, _find_project_root
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ def _create_subproject(root: Path, sp_name: str) -> Path:
 
 def _add_binding(root: Path, project_id: str, project_name: str) -> None:
     """Add an [aiassistant] binding to the project's kbu-project.toml."""
-    from kbutillib.cli.binding import set_binding
+    from kbutillib.interfaces.cli.binding import set_binding
     set_binding(root, project_id, project_name)
 
 

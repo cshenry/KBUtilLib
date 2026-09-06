@@ -31,7 +31,7 @@ from click.testing import CliRunner
 if TYPE_CHECKING:  # only for the "click.testing.Result" string annotations below
     import click.testing
 
-from kbutillib.cli.beril import (
+from kbutillib.interfaces.cli.beril import (
     _DIST_NAME,
     _SKILL_NAMES,
     beril_cmd,
@@ -117,7 +117,7 @@ def _run_doctor(root: Path) -> "click.testing.Result":
 # Helpers for mocking the pip skip / import-success paths
 # ---------------------------------------------------------------------------
 
-_MODULE = "kbutillib.cli.beril"
+_MODULE = "kbutillib.interfaces.cli.beril"
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ class TestPipStep:
 
     def test_pip_skipped_when_version_matches(self, fake_beril_root: Path) -> None:
         """pip install is NOT called when installed version == deployer version."""
-        from kbutillib.cli.beril import _deployer_version
+        from kbutillib.interfaces.cli.beril import _deployer_version
 
         deployer_ver = _deployer_version()
 
@@ -312,7 +312,7 @@ class TestDoctor:
 
     def test_doctor_green_after_clean_install(self, fake_beril_root: Path) -> None:
         """doctor exits 0 after a successful install with mocked version/import checks."""
-        from kbutillib.cli.beril import _deployer_version
+        from kbutillib.interfaces.cli.beril import _deployer_version
 
         deployer_ver = _deployer_version()
         self._do_install(fake_beril_root)
@@ -327,7 +327,7 @@ class TestDoctor:
 
     def test_doctor_fail_missing_skill_dir(self, fake_beril_root: Path) -> None:
         """doctor exits non-zero when a skill dir is missing."""
-        from kbutillib.cli.beril import _deployer_version
+        from kbutillib.interfaces.cli.beril import _deployer_version
 
         deployer_ver = _deployer_version()
         self._do_install(fake_beril_root)
@@ -345,7 +345,7 @@ class TestDoctor:
 
     def test_doctor_fail_import_fails(self, fake_beril_root: Path) -> None:
         """doctor exits non-zero when import kbutillib fails under the interpreter."""
-        from kbutillib.cli.beril import _deployer_version
+        from kbutillib.interfaces.cli.beril import _deployer_version
 
         deployer_ver = _deployer_version()
         self._do_install(fake_beril_root)

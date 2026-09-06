@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.bootstrap — ``kbu bootstrap`` subcommand.
+"""Tests for kbutillib.interfaces.cli.bootstrap — ``kbu bootstrap`` subcommand.
 
 Covers all 38 Acceptance Criteria from the kbu-bootstrap-v1 PRD.
 """
@@ -37,7 +37,7 @@ from kbutillib.interfaces.cli.bootstrap import (
     bootstrap,
     bootstrap_command,
 )
-from kbutillib.cli.manifest import now_utc_iso, sha256_file, write_project_manifest
+from kbutillib.interfaces.cli.manifest import now_utc_iso, sha256_file, write_project_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ def _invoke_bootstrap(
 
 class TestAC1Registration:
     def test_bootstrap_command_exported(self) -> None:
-        """bootstrap_command is importable from kbutillib.cli.bootstrap."""
+        """bootstrap_command is importable from kbutillib.interfaces.cli.bootstrap."""
         assert bootstrap_command is not None
 
     def test_bootstrap_in_main_help(self) -> None:
@@ -1113,7 +1113,7 @@ class TestReadmeHandling:
 
     def test_readme_recorded_in_file_hashes_when_written(self, tmp_path: Path) -> None:
         """README.md copied by bootstrap → recorded in [update.file_hashes]."""
-        from kbutillib.cli.manifest import read_project_manifest
+        from kbutillib.interfaces.cli.manifest import read_project_manifest
         result = self._bootstrap(tmp_path, project_name="myproj")
         assert result.exit_code == 0
         cfg = read_project_manifest(tmp_path)
@@ -1121,7 +1121,7 @@ class TestReadmeHandling:
 
     def test_readme_not_recorded_when_user_owned(self, tmp_path: Path) -> None:
         """README.md present from user → NOT added to [update.file_hashes]."""
-        from kbutillib.cli.manifest import read_project_manifest
+        from kbutillib.interfaces.cli.manifest import read_project_manifest
         (tmp_path / "README.md").write_text("# mine\n", encoding="utf-8")
         result = self._bootstrap(tmp_path, project_name="myproj")
         assert result.exit_code == 0

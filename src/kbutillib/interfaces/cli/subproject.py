@@ -177,8 +177,8 @@ def _check_forward_preconditions(
 
 
 def _kbutillib_cli_root() -> Path:
-    """Return the absolute path to ``src/kbutillib/cli/`` inside KBUtilLib."""
-    # subproject.py lives at src/kbutillib/cli/subproject.py
+    """Return the absolute path to ``src/kbutillib/interfaces/cli/`` inside KBUtilLib."""
+    # subproject.py lives at src/kbutillib/interfaces/cli/subproject.py
     return Path(__file__).resolve().parent
 
 
@@ -192,7 +192,7 @@ def _scaffold_subproject(
 
     Uses :func:`kbutillib.layout.subproject_subdirs` for the directory list.
     Renders ``notebooks/util.py`` from the Jinja template at
-    ``src/kbutillib/cli/templates/util.py.tmpl``.
+    ``src/kbutillib/interfaces/cli/templates/util.py.tmpl``.
     Does NOT create ``references.md`` (retired in v2).
     """
     subproject_dir.mkdir(parents=True, exist_ok=True)

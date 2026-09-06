@@ -36,7 +36,7 @@ _NOTEBOOK_SKILL_MD = _KBU_NOTEBOOK_DIR / "SKILL.md"
 _FBA_SKILL_MD = _KBU_FBA_DIR / "SKILL.md"
 _PREFERENCES_MD = _KBU_DIR / "preferences.md"
 # Unified template lives in the CLI templates directory (Task B: single source of truth).
-_UTIL_TMPL = _REPO_ROOT / "src" / "kbutillib" / "cli" / "templates" / "util.py.tmpl"
+_UTIL_TMPL = _REPO_ROOT / "src" / "kbutillib" / "interfaces" / "cli" / "templates" / "util.py.tmpl"
 # The beril/skills/kbu-notebook copy was deleted; this path must NOT exist.
 _OLD_UTIL_TMPL = _KBU_NOTEBOOK_DIR / "util.py.tmpl"
 
@@ -167,14 +167,14 @@ class TestUtilTemplate:
     """The unified util.py.tmpl must pass all Task B acceptance criteria (AC 4, 5, 6)."""
 
     def test_util_tmpl_exists(self):
-        """Unified util.py.tmpl exists at cli/templates/ (AC 4)."""
+        """Unified util.py.tmpl exists at interfaces/cli/templates/ (AC 4)."""
         assert _UTIL_TMPL.exists(), f"Missing unified util.py.tmpl at {_UTIL_TMPL}"
 
     def test_old_util_tmpl_deleted(self):
         """beril/skills/kbu-notebook/util.py.tmpl has been deleted (AC 4)."""
         assert not _OLD_UTIL_TMPL.exists(), (
             f"Duplicate util.py.tmpl still exists at {_OLD_UTIL_TMPL}; "
-            "it must be deleted — cli/templates/util.py.tmpl is the single source of truth."
+            "it must be deleted — interfaces/cli/templates/util.py.tmpl is the single source of truth."
         )
 
     def test_util_tmpl_is_valid_python(self):
@@ -318,7 +318,7 @@ class TestUtilTemplate:
         repo_src = str(_REPO_ROOT / "src")
         if repo_src not in sys.path:
             sys.path.insert(0, repo_src)
-        from kbutillib.cli.init_notebook import _smart_merge_util
+        from kbutillib.interfaces.cli.init_notebook import _smart_merge_util
 
         merged = _smart_merge_util(util_py.read_text(), re_rendered)
         assert merged is not None, (
@@ -524,10 +524,10 @@ class TestNotebookSkillContent:
         )
 
     def test_notebook_skill_template_ref_points_to_cli(self):
-        """kbu-notebook SKILL.md references cli/templates/util.py.tmpl (AC 4)."""
+        """kbu-notebook SKILL.md references interfaces/cli/templates/util.py.tmpl (AC 4)."""
         text = _NOTEBOOK_SKILL_MD.read_text(encoding="utf-8")
-        assert "cli/templates/util.py.tmpl" in text, (
-            "kbu-notebook/SKILL.md must reference cli/templates/util.py.tmpl "
+        assert "interfaces/cli/templates/util.py.tmpl" in text, (
+            "kbu-notebook/SKILL.md must reference interfaces/cli/templates/util.py.tmpl "
             "(the unified single-source template)"
         )
 

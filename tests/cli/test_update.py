@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.update — ``kbu update`` subcommand."""
+"""Tests for kbutillib.interfaces.cli.update — ``kbu update`` subcommand."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import (
+from kbutillib.interfaces.cli.manifest import (
     now_utc_iso,
     sha256_file,
     write_project_manifest,

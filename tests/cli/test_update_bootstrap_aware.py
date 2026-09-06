@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - Python 3.9/3.10 fallback
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.manifest import now_utc_iso, sha256_file, write_project_manifest
+from kbutillib.interfaces.cli.manifest import now_utc_iso, sha256_file, write_project_manifest
 from kbutillib.interfaces.cli.update import (
     TemplateDiff,
     _build_diff,

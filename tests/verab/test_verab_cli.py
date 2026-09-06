@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.verab import verab_cmd
+from kbutillib.interfaces.cli.verab import verab_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ class TestDiscoverJson:
 
     def _invoke_discover_json(self, discovery_return_value):
         runner = CliRunner()
-        with patch("kbutillib.cli.verab._get_toolkit") as mock_get_toolkit:
+        with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.discover_rules.return_value = discovery_return_value
             mock_get_toolkit.return_value = fake_toolkit
@@ -177,7 +177,7 @@ class TestDiscoverJson:
 
     def test_error_path_emits_json_error_and_exit_2(self):
         runner = CliRunner()
-        with patch("kbutillib.cli.verab._get_toolkit") as mock_get_toolkit:
+        with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.discover_rules.side_effect = RuntimeError("pickaxe down")
             mock_get_toolkit.return_value = fake_toolkit
@@ -196,7 +196,7 @@ class TestEnumerateJson:
         canned_compounds = [
             {"id": "cpd_guaiacol", "name": "guaiacol", "smiles": "COc1ccccc1O", "formula": "C7H8O2"},
         ]
-        with patch("kbutillib.cli.verab._get_toolkit") as mock_get_toolkit:
+        with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.enumerate_methoxy_aromatics.return_value = canned_compounds
             mock_get_toolkit.return_value = fake_toolkit
@@ -213,7 +213,7 @@ class TestScreenJson:
 
     def test_json_output_valid(self):
         runner = CliRunner()
-        with patch("kbutillib.cli.verab._get_toolkit") as mock_get_toolkit:
+        with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.screen.return_value = _canned_screening_report()
             mock_get_toolkit.return_value = fake_toolkit
@@ -230,7 +230,7 @@ class TestEmitKingJson:
 
     def test_json_output_valid(self):
         runner = CliRunner()
-        with patch("kbutillib.cli.verab._get_toolkit") as mock_get_toolkit:
+        with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.emit_king_workflow.return_value = _canned_king_artifacts()
             mock_get_toolkit.return_value = fake_toolkit

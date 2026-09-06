@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.new_project — ``kbu new-project`` subcommand."""
+"""Tests for kbutillib.interfaces.cli.new_project — ``kbu new-project`` subcommand."""
 
 from __future__ import annotations
 

@@ -29,7 +29,7 @@ class TestProbeProjectOriginViaManifestPatch:
 
     This is the cleanest approach: _probe_project_origin calls
     read_project_manifest(Path.cwd()), so we patch the function in the
-    kbutillib.cli.init namespace.
+    kbutillib.interfaces.cli.init namespace.
     """
 
     def test_bootstrapped_true(self) -> None:
@@ -183,7 +183,7 @@ class TestDoctorOriginLine:
             return r
 
         # Set up so all 5 status probes pass/skip (no FAIL)
-        from kbutillib.cli.init import _write_marker
+        from kbutillib.interfaces.cli.init import _write_marker
         import tempfile, os
         with tempfile.TemporaryDirectory() as cfg_dir:
             fake_python = Path(cfg_dir) / "venv" / "bin" / "python"

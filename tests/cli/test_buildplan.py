@@ -1,4 +1,4 @@
-"""Tests for kbutillib.cli.buildplan — buildplan.json validator and CLI command."""
+"""Tests for kbutillib.interfaces.cli.buildplan — buildplan.json validator and CLI command."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from kbutillib.cli import main
-from kbutillib.cli.buildplan import BuildPlanError, load_buildplan, validate_buildplan
+from kbutillib.interfaces.cli.buildplan import BuildPlanError, load_buildplan, validate_buildplan
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

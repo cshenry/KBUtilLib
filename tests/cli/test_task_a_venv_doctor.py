@@ -132,7 +132,7 @@ class TestProbeFbaImports:
     """_probe_fba_imports() returns correct status on success and failure."""
 
     def _get_probe(self):
-        from kbutillib.cli.init import _probe_fba_imports
+        from kbutillib.interfaces.cli.init import _probe_fba_imports
         return _probe_fba_imports
 
     def test_probe_passes_when_modules_available(self) -> None:
@@ -215,7 +215,7 @@ class TestProbeFbaImports:
 
     def test_probe_runs_on_current_platform(self) -> None:
         """Probe is not gated to macOS — it runs on any platform."""
-        import kbutillib.cli.init as init_mod
+        import kbutillib.interfaces.cli.init as init_mod
         import inspect
         src = inspect.getsource(init_mod._probe_fba_imports)
         # The probe must NOT contain a sys.platform or _is_darwin check
@@ -239,7 +239,7 @@ class TestProbeTomliW:
     """_probe_tomli_w() returns PASS or WARN on import success/failure."""
 
     def _get_probe(self):
-        from kbutillib.cli.init import _probe_tomli_w
+        from kbutillib.interfaces.cli.init import _probe_tomli_w
         return _probe_tomli_w
 
     def test_probe_passes_when_tomli_w_available(self) -> None:
@@ -273,7 +273,7 @@ class TestProbeTomliW:
 
     def test_probe_runs_on_current_platform(self) -> None:
         """Probe is not gated to macOS."""
-        import kbutillib.cli.init as init_mod
+        import kbutillib.interfaces.cli.init as init_mod
         import inspect
         src = inspect.getsource(init_mod._probe_tomli_w)
         assert "sys.platform" not in src, "_probe_tomli_w must not be gated on sys.platform"

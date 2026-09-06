@@ -1,12 +1,11 @@
-"""kbutillib.agents — single source of truth for agent/skill/bundle/KING/researchOS code.
+"""kbutillib.agents — single source of truth for agent/skill/bundle/KING code.
 
 Public API is re-exported lazily from sub-modules:
 - ``kbutillib.agents.king_install`` — KING bundle installer (load_bundle, install, etc.)
-- ``kbutillib.agents.researchos``   — ResearchOS project scaffolder
 - ``kbutillib.agents.king_app``     — package-data directory (bundle.json, skill.md)
 
-All old import paths (``kbutillib.king_install``, ``kbutillib.researchos``) are shims
-that re-export from here, so existing code is unaffected.
+The old import path ``kbutillib.king_install`` is a shim that re-exports from
+here, so existing code is unaffected.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ if TYPE_CHECKING:
         uninstall,
         write_registry,
     )
-    from kbutillib.agents.researchos import ResearchOSProject, ResearchOSProjectInfo
 
 # ---------------------------------------------------------------------------
 # Lazy __getattr__ — defer import until attribute is accessed
@@ -55,24 +53,12 @@ _KING_INSTALL_SYMBOLS = frozenset(
     ]
 )
 
-_RESEARCHOS_SYMBOLS = frozenset(
-    [
-        "ResearchOSProject",
-        "ResearchOSProjectInfo",
-    ]
-)
-
-
 def __getattr__(name: str):  # type: ignore[return]
     if name in _KING_INSTALL_SYMBOLS:
         import kbutillib.agents.king_install as _ki
 
         return getattr(_ki, name)
-    if name in _RESEARCHOS_SYMBOLS:
-        import kbutillib.agents.researchos as _ros
-
-        return getattr(_ros, name)
     raise AttributeError(f"module 'kbutillib.agents' has no attribute {name!r}")
 
 
-__all__ = sorted(_KING_INSTALL_SYMBOLS | _RESEARCHOS_SYMBOLS)
+__all__ = sorted(_KING_INSTALL_SYMBOLS)

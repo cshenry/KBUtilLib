@@ -36,10 +36,6 @@ def test_model_cmd_importable() -> None:
     assert model_cmd is not None
 
 
-def test_notebook_cmd_importable() -> None:
-    """kbutillib.interfaces.cli.notebook_cmd is importable."""
-    from kbutillib.interfaces.cli import notebook_cmd  # noqa: PLC0415
-    assert notebook_cmd is not None
 
 
 def test_king_cmd_importable() -> None:
@@ -115,10 +111,6 @@ def test_jobs_cmd_help_exits_ok() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_researchos_cmd_importable() -> None:
-    """kbutillib.interfaces.cli.researchos_cmd is importable."""
-    from kbutillib.interfaces.cli import researchos_cmd  # noqa: PLC0415
-    assert researchos_cmd is not None
 
 
 def test_session_cmd_importable() -> None:

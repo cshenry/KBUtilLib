@@ -31,9 +31,6 @@ from .king import king_cmd
 from .migrate import migrate_cmd
 from .model import model_cmd
 from .new_project import new_project_command
-from .notebook import notebook_cmd
-from .notebook_init import notebook_init_cmd
-from .researchos import researchos_cmd
 from .scaffold import new_capability_cmd
 from .session import session_cmd
 from .set_cmd import set_cmd
@@ -49,7 +46,6 @@ def main() -> None:
 
 
 main.add_command(beril_cmd, name="beril")
-main.add_command(researchos_cmd, name="researchos")
 main.add_command(harness_cmd, name="harness")
 main.add_command(bootstrap_command, name="bootstrap")
 main.add_command(buildplan_cmd, name="buildplan")
@@ -62,8 +58,6 @@ main.add_command(king_cmd, name="king")
 main.add_command(migrate_cmd, name="migrate")
 main.add_command(model_cmd, name="model")
 main.add_command(new_project_command, name="new-project")
-main.add_command(notebook_cmd, name="notebook")
-main.add_command(notebook_init_cmd, name="notebook-init")
 main.add_command(session_cmd, name="session")
 main.add_command(set_cmd, name="set")
 main.add_command(subproject_cmd, name="subproject")

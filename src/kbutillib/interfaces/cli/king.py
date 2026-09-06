@@ -19,7 +19,7 @@ of ``kbu king install`` is "make what this repo offers visible to KING",
 and a per-app default would silently ship a subset.
 
 Exit codes on ``status`` follow the CRAFT CLI convention already used
-elsewhere in this CLI (``kbu researchos``/``kbu doctor``): 0 = green
+elsewhere in this CLI (``kbu doctor``): 0 = green
 (all-ok), 1 = amber (partial -- CLI missing), 2 = red (composed but
 broken). With several apps, the WORST color across them wins — a green
 app does not mask a red sibling.

@@ -254,7 +254,7 @@ class TestOtherCommandsStillRegistered:
         "cmd",
         ["king", "model", "bootstrap", "doctor", "init", "jobs", "session",
          "set", "update", "migrate", "buildplan", "harness", "beril",
-         "researchos", "notebook", "subproject"],
+         "subproject"],
     )
     def test_command_still_registered(self, cmd: str):
         runner = CliRunner()

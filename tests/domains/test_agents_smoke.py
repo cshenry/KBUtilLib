@@ -1,4 +1,4 @@
-"""Smoke tests for agents (king_install, researchOS) + KBUtilLib facade.
+"""Smoke tests for agents (king_install) + KBUtilLib facade.
 
 Verifies import paths and structural API without network calls or side effects.
 These tests are OFFLINE — no agent processes are started.
@@ -21,12 +21,6 @@ def test_agents_king_install_importable() -> None:
     """kbutillib.agents.king_install is importable."""
     from kbutillib.agents import king_install  # noqa: PLC0415
     assert king_install is not None
-
-
-def test_agents_researchos_importable() -> None:
-    """kbutillib.agents.researchos is importable."""
-    from kbutillib.agents import researchos  # noqa: PLC0415
-    assert researchos is not None
 
 
 # ---------------------------------------------------------------------------
@@ -69,41 +63,6 @@ def test_king_install_resolve_apps_dir_callable() -> None:
     """king_install.resolve_apps_dir is callable."""
     from kbutillib.agents.king_install import resolve_apps_dir  # noqa: PLC0415
     assert callable(resolve_apps_dir)
-
-
-# ---------------------------------------------------------------------------
-# 3. researchOS structural API
-# ---------------------------------------------------------------------------
-
-
-def test_researchos_ensure_binary_callable() -> None:
-    """researchos.ensure_research_os_binary is callable."""
-    from kbutillib.agents.researchos import ensure_research_os_binary  # noqa: PLC0415
-    assert callable(ensure_research_os_binary)
-
-
-def test_researchos_register_project_callable() -> None:
-    """researchos.register_project is callable."""
-    from kbutillib.agents.researchos import register_project  # noqa: PLC0415
-    assert callable(register_project)
-
-
-def test_researchos_resolve_root_callable() -> None:
-    """researchos.resolve_researchos_root is callable."""
-    from kbutillib.agents.researchos import resolve_researchos_root  # noqa: PLC0415
-    assert callable(resolve_researchos_root)
-
-
-def test_researchos_resolve_aiassistant_root_callable() -> None:
-    """researchos.resolve_aiassistant_root is callable."""
-    from kbutillib.agents.researchos import resolve_aiassistant_root  # noqa: PLC0415
-    assert callable(resolve_aiassistant_root)
-
-
-def test_researchos_research_project_importable() -> None:
-    """researchos.ResearchOSProject class is importable."""
-    from kbutillib.agents.researchos import ResearchOSProject  # noqa: PLC0415
-    assert ResearchOSProject is not None
 
 
 # ---------------------------------------------------------------------------

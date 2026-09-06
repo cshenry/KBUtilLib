@@ -335,9 +335,9 @@ class TestHelpIntegrity:
         result = runner.invoke(_get_main(), ["--help"], catch_exceptions=False)
         assert "init" in result.output
 
-    def test_help_shows_existing_king(self, runner: CliRunner) -> None:
+    def test_help_shows_existing_kind(self, runner: CliRunner) -> None:
         result = runner.invoke(_get_main(), ["--help"], catch_exceptions=False)
-        assert "king" in result.output
+        assert "kind" in result.output
 
     def test_cap_help_shows_subcommands(self, runner: CliRunner) -> None:
         result = runner.invoke(_get_main(), ["cap", "--help"], catch_exceptions=False)

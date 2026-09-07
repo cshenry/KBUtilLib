@@ -1,10 +1,10 @@
 """Tests for ``kbu kind`` — the KING self-install verb group.
 
 Exercises the CLI (`kbu kind install|uninstall|status`) against a temp
-``$KING_APPS_DIR``, plus the vendored ``kbutillib.king_install`` module
+``$KIND_APPS_DIR``, plus the vendored ``kbutillib.kind_install`` module
 directly for the union-recompose case (installing a second, independent
 fixture bundle to prove this app's fragment survives -- the same on-disk
-contract a sibling installer, e.g. ``assistant king install``, implements
+contract a sibling installer, e.g. ``assistant kind install``, implements
 independently). See `agent-io/prds/king-integration-apps/fullprompt.md`
 Module C, Acceptance Criteria #13-#21.
 """
@@ -21,14 +21,14 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from kbutillib.agents import king_install
+from kbutillib.agents import kind_install
 from kbutillib.cli import main
 
-pytestmark = pytest.mark.king_install
+pytestmark = pytest.mark.kind_install
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SRC_DIR = _REPO_ROOT / "src"
-_BUNDLE_DIR = _SRC_DIR / "kbutillib" / "king_app"
+_BUNDLE_DIR = _SRC_DIR / "kbutillib" / "kind_app"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ def _no_kbu_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _write_fixture_bundle(root: Path, app_id: str, title: str) -> Path:
     """A second, independent fixture bundle -- stands in for a sibling
-    installer (e.g. AIAssistant's ``assistant king install``) to prove
+    installer (e.g. AIAssistant's ``assistant kind install``) to prove
     union-recompose without depending on any other repo's code."""
     bundle_dir = root / f"{app_id}-bundle"
     bundle_dir.mkdir()
@@ -111,7 +111,7 @@ class TestInstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         king_stack_dir = tmp_path / "king-stack"  # deliberately never created
 
         r = _invoke(
@@ -143,9 +143,9 @@ class TestInstall:
         )
         assert "kbu model reconstruct" in context
 
-        # serve-king.sh exports KING_CONTEXT and never writes under
+        # serve-kind.sh exports KING_CONTEXT and never writes under
         # ~/king-stack/king/ (the dir is referenced, but must not exist).
-        serve_script = (apps_dir / "serve-king.sh").read_text()
+        serve_script = (apps_dir / "serve-kind.sh").read_text()
         assert 'export KING_CONTEXT="' in serve_script
         assert str(apps_dir / "CONTEXT.md") in serve_script
         assert not king_stack_dir.exists()
@@ -155,14 +155,14 @@ class TestInstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r1 = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r1.exit_code == 0, r1.output
 
         registry_before = (apps_dir / "registry.json").read_text()
         context_before = (apps_dir / "CONTEXT.md").read_text()
-        serve_before = (apps_dir / "serve-king.sh").read_text()
+        serve_before = (apps_dir / "serve-kind.sh").read_text()
 
         r2 = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r2.exit_code == 0, r2.output
@@ -171,7 +171,7 @@ class TestInstall:
 
         assert (apps_dir / "registry.json").read_text() == registry_before
         assert (apps_dir / "CONTEXT.md").read_text() == context_before
-        assert (apps_dir / "serve-king.sh").read_text() == serve_before
+        assert (apps_dir / "serve-kind.sh").read_text() == serve_before
 
     def test_install_union_recompose_keeps_other_apps_fragment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -181,13 +181,13 @@ class TestInstall:
         registry.json-union recompose contract that lets kbu's and
         assistant's installers coexist."""
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
 
         other_bundle_dir = _write_fixture_bundle(tmp_path, "aiassistant", "AIAssistant")
-        king_install.install(other_bundle_dir, apps_dir=apps_dir)
+        kind_install.install(other_bundle_dir, apps_dir=apps_dir)
 
         context = (apps_dir / "CONTEXT.md").read_text()
         assert (
@@ -211,7 +211,7 @@ class TestInstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _no_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r = _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -231,13 +231,13 @@ class TestStatus:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         # No KING_CONTEXT set in the calling shell -- `king status` is
         # normally run right after `king install`, from an ordinary shell,
         # not from inside a KING launch. "Wired" must be judged from the
-        # generated serve-king.sh wrapper, not the caller's live env.
+        # generated serve-kind.sh wrapper, not the caller's live env.
         monkeypatch.delenv("KING_CONTEXT", raising=False)
         r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -254,9 +254,9 @@ class TestStatus:
     ) -> None:
         """A KING_CONTEXT already correctly set in the current process env
         also counts (e.g. when status is checked from inside a KING-launched
-        shell), even if the serve-king.sh wrapper were somehow unreadable."""
+        shell), even if the serve-kind.sh wrapper were somehow unreadable."""
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         monkeypatch.setenv("KING_CONTEXT", str(apps_dir / "CONTEXT.md"))
@@ -270,7 +270,7 @@ class TestStatus:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         _no_kbu_on_path(tmp_path, monkeypatch)
@@ -285,16 +285,16 @@ class TestStatus:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
-        # Actually break the wiring: corrupt the generated serve-king.sh so
+        # Actually break the wiring: corrupt the generated serve-kind.sh so
         # it no longer exports KING_CONTEXT, and make sure the calling
         # shell doesn't have it set either. (Merely unsetting the calling
-        # shell's env is NOT broken wiring -- serve-king.sh is what wires
+        # shell's env is NOT broken wiring -- serve-kind.sh is what wires
         # KING_CONTEXT for the real launch; status must judge "wired" from
         # that generated script, not the caller's own env.)
-        (apps_dir / "serve-king.sh").write_text("#!/usr/bin/env bash\necho stub\n")
+        (apps_dir / "serve-kind.sh").write_text("#!/usr/bin/env bash\necho stub\n")
         monkeypatch.delenv("KING_CONTEXT", raising=False)
         r = _invoke("king", "status", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 2
@@ -312,7 +312,7 @@ class TestUninstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert (apps_dir / "kbutillib-modeling").is_dir()
 
@@ -331,11 +331,11 @@ class TestUninstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
 
         other_bundle_dir = _write_fixture_bundle(tmp_path, "aiassistant", "AIAssistant")
-        king_install.install(other_bundle_dir, apps_dir=apps_dir)
+        kind_install.install(other_bundle_dir, apps_dir=apps_dir)
 
         r = _invoke("king", "uninstall", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -348,7 +348,7 @@ class TestUninstall:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r = _invoke("king", "uninstall", "--app", "modeling", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -361,7 +361,7 @@ class TestUninstall:
 
 class TestBundleSchema:
     def test_packaged_bundle_conforms_to_schema(self) -> None:
-        loaded = king_install.load_bundle(_BUNDLE_DIR)
+        loaded = kind_install.load_bundle(_BUNDLE_DIR)
         bundle = loaded["bundle"]
         assert set(bundle) >= {"id", "title", "description", "cli"}
         assert bundle["cli"] == "kbu"
@@ -373,14 +373,14 @@ class TestBundleSchema:
         bad_dir.mkdir()
         (bad_dir / "bundle.json").write_text(json.dumps({"id": "x"}))
         (bad_dir / "skill.md").write_text("# X\n")
-        with pytest.raises(king_install.BundleError):
-            king_install.load_bundle(bad_dir)
+        with pytest.raises(kind_install.BundleError):
+            kind_install.load_bundle(bad_dir)
 
 
 # ── the wake bundle (persistentai-wake) ──────────────────────────────────────
 
 
-_WAKE_BUNDLE_DIR = _SRC_DIR / "kbutillib" / "king_app_wake"
+_WAKE_BUNDLE_DIR = _SRC_DIR / "kbutillib" / "kind_app_wake"
 
 
 class TestWakeBundle:
@@ -393,7 +393,7 @@ class TestWakeBundle:
     """
 
     def test_bundle_conforms_to_schema(self) -> None:
-        loaded = king_install.load_bundle(_WAKE_BUNDLE_DIR)
+        loaded = kind_install.load_bundle(_WAKE_BUNDLE_DIR)
         bundle = loaded["bundle"]
         assert set(bundle) >= {"id", "title", "description", "cli"}
         assert bundle["id"] == "persistentai-wake"
@@ -405,7 +405,7 @@ class TestWakeBundle:
         only thing a KOROS session will ever know about this rail. Each
         assertion below is a wrong assumption an agent would otherwise make.
         """
-        skill_md = king_install.load_bundle(_WAKE_BUNDLE_DIR)["skill_md"]
+        skill_md = kind_install.load_bundle(_WAKE_BUNDLE_DIR)["skill_md"]
 
         # Both addressing axes, and the only valid pairings.
         assert "--to-machine primary-laptop" in skill_md
@@ -429,7 +429,7 @@ class TestWakeBundle:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _no_kbu_on_path(tmp_path, monkeypatch)  # neither kbu NOR persistentai
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r = _invoke("king", "install", "--app", "wake", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -455,7 +455,7 @@ class TestWakeBundle:
         """No --app means all of them. A per-app default would silently ship
         a subset, which is exactly how the second app would go unnoticed."""
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
 
         r = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
@@ -476,7 +476,7 @@ class TestWakeBundle:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _fake_kbu_on_path(tmp_path, monkeypatch)
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
 
         r = _invoke("king", "uninstall", "--app", "wake", "--apps-dir", str(apps_dir), "--json")
@@ -494,7 +494,7 @@ class TestWakeBundle:
     ) -> None:
         """A green modeling app must not mask the wake app's missing CLI."""
         _fake_kbu_on_path(tmp_path, monkeypatch)  # kbu present, persistentai not
-        apps_dir = tmp_path / "king-apps"
+        apps_dir = tmp_path / "kind-apps"
         _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
         monkeypatch.delenv("KING_CONTEXT", raising=False)
 
@@ -508,10 +508,10 @@ class TestWakeBundle:
 
 
 class TestRetiredKingAlias:
-    """`kbu king` was renamed to `kbu kind`; the old spelling must still work."""
+    """`kbu kind` was renamed to `kbu kind`; the old spelling must still work."""
 
     def test_king_alias_still_resolves(self):
-        """`kbu king --help` resolves to the kind group (cw-king still calls it)."""
+        """`kbu kind --help` resolves to the kind group (cw-kind still calls it)."""
         from kbutillib.interfaces.cli import main
 
         result = CliRunner().invoke(main, ["king", "--help"])

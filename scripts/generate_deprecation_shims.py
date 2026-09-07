@@ -97,8 +97,9 @@ LEGACY_MODULE_MAP: dict[str, str] = {
     "escher_utils": "domains.notebook.escher_utils",
     # domains.thermo.thermo_utils
     "thermo_utils": "domains.thermo.thermo_utils",
-    # agents.king_install
-    "king_install": "agents.king_install",
+    # agents.kind_install (legacy flat name predates the KING -> KIND rename;
+    # the key is the historical import path and must not move)
+    "king_install": "agents.kind_install",
 }
 
 _TEMPLATE = '''"""Deprecated flat-module shim for ``kbutillib.{old}``.

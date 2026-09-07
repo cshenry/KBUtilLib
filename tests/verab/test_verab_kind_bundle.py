@@ -1,7 +1,7 @@
 """S9 tests — verAB KING app bundle validation.
 
-Verifies that the ``king_app/verab`` bundle directory passes
-``king_install.load_bundle`` schema validation without raising
+Verifies that the ``kind_app/verab`` bundle directory passes
+``kind_install.load_bundle`` schema validation without raising
 ``BundleError``, and that the probe/verify schema is correct.
 
 No live CLI or network access.  Runs fully offline.
@@ -12,14 +12,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import kbutillib
-from kbutillib.agents.king_install import BundleError, load_bundle
+from kbutillib.agents.kind_install import BundleError, load_bundle
 
 
 # ---------------------------------------------------------------------------
 # Fixture: resolve bundle dir from the installed package
 # ---------------------------------------------------------------------------
 
-BUNDLE_DIR: Path = Path(kbutillib.__file__).parent / "king_app" / "verab"
+BUNDLE_DIR: Path = Path(kbutillib.__file__).parent / "kind_app" / "verab"
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ BUNDLE_DIR: Path = Path(kbutillib.__file__).parent / "king_app" / "verab"
 
 
 def test_load_bundle_does_not_raise():
-    """load_bundle(king_app_verab) must succeed without raising BundleError."""
+    """load_bundle(kind_app_verab) must succeed without raising BundleError."""
     result = load_bundle(BUNDLE_DIR)
     assert isinstance(result, dict), "load_bundle must return a dict"
     assert "bundle" in result, "load_bundle result must contain 'bundle' key"

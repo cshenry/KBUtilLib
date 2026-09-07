@@ -1,6 +1,6 @@
 """KING coscientist artifact emission for the verAB O-demethylation workflow.
 
-``emit_king_workflow`` writes a self-describing, reproducible run directory
+``emit_kind_workflow`` writes a self-describing, reproducible run directory
 that a KING coscientist session (or any human collaborator) can use to
 reproduce or extend the verAB methoxy-aromatic Pickaxe rule-discovery
 analysis.
@@ -24,7 +24,7 @@ Design notes
 * ``git_sha`` is obtained with a best-effort ``subprocess`` call; it defaults to
   ``"unknown"`` if git is unavailable or the repo has no commits.
 
-Reuses the ``king_app/skill.md`` voice conventions:
+Reuses the ``kind_app/skill.md`` voice conventions:
 * States the goal plainly.
 * Gives the exact ``kbu verab discover`` command.
 * Names the input files.
@@ -96,7 +96,7 @@ def _discovery_to_rule_rows(discovery: Any) -> List[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def emit_king_workflow(
+def emit_kind_workflow(
     outdir: Any,
     discovery: Any,
     seeds: Optional[Sequence[Dict[str, Any]]] = None,

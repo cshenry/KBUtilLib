@@ -1,11 +1,11 @@
-"""S6 unit tests — KING coscientist artifact emission (king_artifacts.py).
+"""S6 unit tests — KING coscientist artifact emission (kind_artifacts.py).
 
 Tests run without any optional dependency (RDKit, minedatabase):
-  * emit_king_workflow writes all expected files into a tmp_path.
+  * emit_kind_workflow writes all expected files into a tmp_path.
   * seeds.tsv contains the id/smiles rows for all 5 canonical seed compounds.
   * manifest.json parses correctly and lists the expected operator(s).
   * prompt.md mentions ``kbu verab discover`` and all 5 compound names.
-  * No top-level RDKit or minedatabase import in king_artifacts.py.
+  * No top-level RDKit or minedatabase import in kind_artifacts.py.
 
 No test here requires RDKit or a live database.  The synthetic
 VerabDiscoveryResult is built directly from models.py (stdlib only).
@@ -51,28 +51,28 @@ def _build_synthetic_discovery() -> VerabDiscoveryResult:
 
 
 # ---------------------------------------------------------------------------
-# Import safety: king_artifacts.py must be importable without any optional dep
+# Import safety: kind_artifacts.py must be importable without any optional dep
 # ---------------------------------------------------------------------------
 
 
-def test_import_king_artifacts_module():
-    """king_artifacts.py must be importable without RDKit or minedatabase."""
-    from kbutillib.cheminformatics.verab import king_artifacts  # noqa: F401
+def test_import_kind_artifacts_module():
+    """kind_artifacts.py must be importable without RDKit or minedatabase."""
+    from kbutillib.cheminformatics.verab import kind_artifacts  # noqa: F401
 
 
-def test_king_artifacts_no_toplevel_rdkit_import():
-    """king_artifacts.py must NOT import rdkit or minedatabase at module level."""
-    import kbutillib.cheminformatics.verab.king_artifacts as ka_mod
+def test_kind_artifacts_no_toplevel_rdkit_import():
+    """kind_artifacts.py must NOT import rdkit or minedatabase at module level."""
+    import kbutillib.cheminformatics.verab.kind_artifacts as ka_mod
 
     module_dict = vars(ka_mod)
-    assert "rdkit" not in module_dict, "rdkit imported at module level in king_artifacts.py"
-    assert "Chem" not in module_dict, "rdkit.Chem imported at module level in king_artifacts.py"
-    assert "minedatabase" not in module_dict, "minedatabase imported at module level in king_artifacts.py"
+    assert "rdkit" not in module_dict, "rdkit imported at module level in kind_artifacts.py"
+    assert "Chem" not in module_dict, "rdkit.Chem imported at module level in kind_artifacts.py"
+    assert "minedatabase" not in module_dict, "minedatabase imported at module level in kind_artifacts.py"
 
 
-def test_emit_king_workflow_importable_from_package():
-    """emit_king_workflow must be accessible from the top-level verab package."""
-    from kbutillib.cheminformatics.verab import emit_king_workflow  # noqa: F401
+def test_emit_kind_workflow_importable_from_package():
+    """emit_kind_workflow must be accessible from the top-level verab package."""
+    from kbutillib.cheminformatics.verab import emit_kind_workflow  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +80,12 @@ def test_emit_king_workflow_importable_from_package():
 # ---------------------------------------------------------------------------
 
 
-def test_emit_king_workflow_all_files_exist(tmp_path: Path):
-    """emit_king_workflow writes all 6 expected artifact files."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_all_files_exist(tmp_path: Path):
+    """emit_kind_workflow writes all 6 expected artifact files."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    result = emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    result = emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     expected_files = {
         "seeds.tsv",
@@ -104,23 +104,23 @@ def test_emit_king_workflow_all_files_exist(tmp_path: Path):
     assert expected_files == set(result["files"].keys())
 
 
-def test_emit_king_workflow_creates_outdir_if_absent(tmp_path: Path):
-    """emit_king_workflow creates the output directory when it does not exist."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_creates_outdir_if_absent(tmp_path: Path):
+    """emit_kind_workflow creates the output directory when it does not exist."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     target = tmp_path / "new_subdir" / "king_run"
     assert not target.exists()
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(target, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(target, discovery, SEED_COMPOUNDS)
     assert target.is_dir()
 
 
-def test_emit_king_workflow_returns_summary(tmp_path: Path):
-    """emit_king_workflow returns a dict with outdir, files, n_operators, n_seeds."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_returns_summary(tmp_path: Path):
+    """emit_kind_workflow returns a dict with outdir, files, n_operators, n_seeds."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    result = emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    result = emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     assert "outdir" in result
     assert "files" in result
@@ -137,10 +137,10 @@ def test_emit_king_workflow_returns_summary(tmp_path: Path):
 
 def test_seeds_tsv_has_header_and_all_seeds(tmp_path: Path):
     """seeds.tsv must have a header row and one data row per seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     lines = (tmp_path / "seeds.tsv").read_text(encoding="utf-8").strip().splitlines()
     assert lines[0] == "id\tsmiles", f"Unexpected header: {lines[0]!r}"
@@ -157,10 +157,10 @@ def test_seeds_tsv_has_header_and_all_seeds(tmp_path: Path):
 
 def test_seeds_tsv_contains_all_seed_ids(tmp_path: Path):
     """seeds.tsv must contain the id of every seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "seeds.tsv").read_text(encoding="utf-8")
     for seed in SEED_COMPOUNDS:
@@ -169,10 +169,10 @@ def test_seeds_tsv_contains_all_seed_ids(tmp_path: Path):
 
 def test_seeds_tsv_contains_all_seed_smiles(tmp_path: Path):
     """seeds.tsv must contain the SMILES of every seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "seeds.tsv").read_text(encoding="utf-8")
     for seed in SEED_COMPOUNDS:
@@ -188,10 +188,10 @@ def test_seeds_tsv_contains_all_seed_smiles(tmp_path: Path):
 
 def test_seeds_csv_has_header_and_all_seeds(tmp_path: Path):
     """seeds.csv must have a header row and one data row per seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     lines = (tmp_path / "seeds.csv").read_text(encoding="utf-8").strip().splitlines()
     assert lines[0] == "id,smiles", f"Unexpected header: {lines[0]!r}"
@@ -206,10 +206,10 @@ def test_seeds_csv_has_header_and_all_seeds(tmp_path: Path):
 
 def test_discovered_rules_tsv_has_header(tmp_path: Path):
     """discovered_rules.tsv must have the expected header."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     lines = (tmp_path / "discovered_rules.tsv").read_text(encoding="utf-8").strip().splitlines()
     header = lines[0]
@@ -219,10 +219,10 @@ def test_discovered_rules_tsv_has_header(tmp_path: Path):
 
 def test_discovered_rules_tsv_contains_operator(tmp_path: Path):
     """discovered_rules.tsv must list the firing operator."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "discovered_rules.tsv").read_text(encoding="utf-8")
     assert "ruleXXXX" in content
@@ -235,10 +235,10 @@ def test_discovered_rules_tsv_contains_operator(tmp_path: Path):
 
 def test_manifest_json_is_valid_json(tmp_path: Path):
     """manifest.json must be parseable JSON."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     raw = (tmp_path / "manifest.json").read_text(encoding="utf-8")
     manifest = json.loads(raw)
@@ -247,10 +247,10 @@ def test_manifest_json_is_valid_json(tmp_path: Path):
 
 def test_manifest_json_required_keys(tmp_path: Path):
     """manifest.json must contain all required provenance keys."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     required_keys = {
@@ -263,10 +263,10 @@ def test_manifest_json_required_keys(tmp_path: Path):
 
 def test_manifest_json_lists_operators(tmp_path: Path):
     """manifest.json operators field must list the firing operator(s)."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert isinstance(manifest["operators"], list)
@@ -275,10 +275,10 @@ def test_manifest_json_lists_operators(tmp_path: Path):
 
 def test_manifest_json_seeds_count(tmp_path: Path):
     """manifest.json seeds field must have one entry per seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["seeds"]) == len(SEED_COMPOUNDS)
@@ -286,10 +286,10 @@ def test_manifest_json_seeds_count(tmp_path: Path):
 
 def test_manifest_json_tool_name(tmp_path: Path):
     """manifest.json tool field must identify the kbu verab tool."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "kbu" in manifest["tool"], f"Expected 'kbu' in tool name, got {manifest['tool']!r}"
@@ -303,10 +303,10 @@ def test_manifest_json_tool_name(tmp_path: Path):
 
 def test_prompt_md_mentions_kbu_verab_discover(tmp_path: Path):
     """prompt.md must mention the ``kbu verab discover`` command."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     assert "kbu verab discover" in content, (
@@ -316,10 +316,10 @@ def test_prompt_md_mentions_kbu_verab_discover(tmp_path: Path):
 
 def test_prompt_md_mentions_all_5_compound_names(tmp_path: Path):
     """prompt.md must mention all 5 canonical seed compound names."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     expected_names = [
@@ -335,10 +335,10 @@ def test_prompt_md_mentions_all_5_compound_names(tmp_path: Path):
 
 def test_prompt_md_is_markdown(tmp_path: Path):
     """prompt.md must start with a Markdown heading."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     assert content.startswith("#"), "prompt.md must start with a Markdown heading"
@@ -351,11 +351,11 @@ def test_prompt_md_is_markdown(tmp_path: Path):
 
 def test_target_transformation_contains_smarts(tmp_path: Path):
     """target_transformation.txt must contain the VERAB_ODEMETHYLATION_SMARTS."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
     from kbutillib.cheminformatics.verab.smarts import VERAB_ODEMETHYLATION_SMARTS
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "target_transformation.txt").read_text(encoding="utf-8")
     assert VERAB_ODEMETHYLATION_SMARTS in content
@@ -363,10 +363,10 @@ def test_target_transformation_contains_smarts(tmp_path: Path):
 
 def test_target_transformation_contains_ec(tmp_path: Path):
     """target_transformation.txt must reference the EC number 1.14.13.82."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "target_transformation.txt").read_text(encoding="utf-8")
     assert "1.14.13.82" in content
@@ -377,14 +377,14 @@ def test_target_transformation_contains_ec(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_emit_king_workflow_idempotent(tmp_path: Path):
-    """Calling emit_king_workflow twice on the same outdir must not raise."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_idempotent(tmp_path: Path):
+    """Calling emit_kind_workflow twice on the same outdir must not raise."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
     # Second call should overwrite silently
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     # Files should still exist and be valid
     assert (tmp_path / "manifest.json").exists()
@@ -397,9 +397,9 @@ def test_emit_king_workflow_idempotent(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_emit_king_workflow_no_operators(tmp_path: Path):
-    """emit_king_workflow handles a discovery result with no matching operators."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_no_operators(tmp_path: Path):
+    """emit_kind_workflow handles a discovery result with no matching operators."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     empty_discovery = VerabDiscoveryResult(
         rule_set="metacyc_generalized",
@@ -410,7 +410,7 @@ def test_emit_king_workflow_no_operators(tmp_path: Path):
         expansion_summary={"n_compounds": 5, "n_reactions": 0, "warnings": []},
         warnings=["no matches found"],
     )
-    emit_king_workflow(tmp_path, empty_discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, empty_discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["operators"] == []
@@ -425,9 +425,9 @@ def test_emit_king_workflow_no_operators(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_emit_king_workflow_multiple_operators(tmp_path: Path):
-    """emit_king_workflow lists all operators when there are multiple matches."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_multiple_operators(tmp_path: Path):
+    """emit_kind_workflow lists all operators when there are multiple matches."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     match_a = VerabRuleMatch(
         operator="ruleAAAA",
@@ -454,7 +454,7 @@ def test_emit_king_workflow_multiple_operators(tmp_path: Path):
         expansion_summary={"n_compounds": 10, "n_reactions": 5, "warnings": []},
         warnings=[],
     )
-    emit_king_workflow(tmp_path, multi_discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, multi_discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "ruleAAAA" in manifest["operators"]
@@ -470,12 +470,12 @@ def test_emit_king_workflow_multiple_operators(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_emit_king_workflow_default_seeds(tmp_path: Path):
-    """emit_king_workflow defaults to SEED_COMPOUNDS when seeds=None."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+def test_emit_kind_workflow_default_seeds(tmp_path: Path):
+    """emit_kind_workflow defaults to SEED_COMPOUNDS when seeds=None."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    result = emit_king_workflow(tmp_path, discovery, seeds=None)
+    result = emit_kind_workflow(tmp_path, discovery, seeds=None)
 
     assert result["n_seeds"] == len(SEED_COMPOUNDS)
     # seeds.tsv should contain all 5
@@ -485,62 +485,62 @@ def test_emit_king_workflow_default_seeds(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# FIX 5: king_app/verab/ bundle validation (load_bundle on real KING location)
+# FIX 5: kind_app/verab/ bundle validation (load_bundle on real KING location)
 # ---------------------------------------------------------------------------
 
 
-def test_king_app_verab_bundle_load_does_not_raise():
-    """load_bundle(king_app/verab/) must succeed without raising BundleError."""
-    from kbutillib.agents.king_install import load_bundle
+def test_kind_app_verab_bundle_load_does_not_raise():
+    """load_bundle(kind_app/verab/) must succeed without raising BundleError."""
+    from kbutillib.agents.kind_install import load_bundle
 
     import kbutillib
-    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     assert isinstance(result, dict)
     assert "bundle" in result
     assert "skill_md" in result
 
 
-def test_king_app_verab_bundle_id():
-    """king_app/verab/bundle.json 'id' must be 'kbutillib-verab'."""
-    from kbutillib.agents.king_install import load_bundle
+def test_kind_app_verab_bundle_id():
+    """kind_app/verab/bundle.json 'id' must be 'kbutillib-verab'."""
+    from kbutillib.agents.kind_install import load_bundle
 
     import kbutillib
-    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     assert result["bundle"]["id"] == "kbutillib-verab"
 
 
-def test_king_app_verab_bundle_required_fields():
-    """king_app/verab/bundle.json must have all required fields."""
-    from kbutillib.agents.king_install import load_bundle
+def test_kind_app_verab_bundle_required_fields():
+    """kind_app/verab/bundle.json must have all required fields."""
+    from kbutillib.agents.kind_install import load_bundle
 
     import kbutillib
-    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     bundle = result["bundle"]
     for field in ("id", "title", "description", "cli"):
         assert field in bundle and bundle[field], f"Required field '{field}' missing or empty"
 
 
-def test_king_app_verab_skill_md_mentions_verbs():
-    """king_app/verab/skill.md must document the kbu verab verbs."""
-    from kbutillib.agents.king_install import load_bundle
+def test_kind_app_verab_skill_md_mentions_verbs():
+    """kind_app/verab/skill.md must document the kbu verab verbs."""
+    from kbutillib.agents.kind_install import load_bundle
 
     import kbutillib
-    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     skill_md = result["skill_md"]
     for verb in ("discover", "enumerate", "screen", "emit-king"):
         assert verb in skill_md, f"skill.md must mention verb '{verb}'"
 
 
-def test_king_app_verab_skill_md_mentions_mechinformed():
-    """king_app/verab/skill.md must reference mechinformed operators and fallback."""
-    from kbutillib.agents.king_install import load_bundle
+def test_kind_app_verab_skill_md_mentions_mechinformed():
+    """kind_app/verab/skill.md must reference mechinformed operators and fallback."""
+    from kbutillib.agents.kind_install import load_bundle
 
     import kbutillib
-    bundle_dir = Path(kbutillib.__file__).parent / "king_app" / "verab"
+    bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     skill_md = result["skill_md"]
     assert "mechinformed" in skill_md, "skill.md must mention the 'mechinformed' rule set"
@@ -556,10 +556,10 @@ def test_king_app_verab_skill_md_mentions_mechinformed():
 
 def test_manifest_json_records_rule_set_used(tmp_path: Path):
     """manifest.json must contain 'rule_set_used' key recording the actual rule set."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "rule_set_used" in manifest, (
@@ -575,9 +575,9 @@ def test_manifest_rule_set_used_reflects_expansion_summary(tmp_path: Path):
     discover_verab_rules stores the actual rule set in expansion_summary['rule_set_used'].
     When a graceful fallback fires (mechinformed → metacyc_intermediate), rule_set is
     already set to the fallback label.  Here we test with an explicit expansion_summary
-    value to confirm king_artifacts reads it correctly.
+    value to confirm kind_artifacts reads it correctly.
     """
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
     from kbutillib.cheminformatics.verab.models import VerabDiscoveryResult, VerabRuleMatch
 
     match = VerabRuleMatch(
@@ -604,7 +604,7 @@ def test_manifest_rule_set_used_reflects_expansion_summary(tmp_path: Path):
         },
         warnings=["mechinformed TSV not found, fell back to metacyc_intermediate"],
     )
-    emit_king_workflow(tmp_path, discovery_with_summary, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery_with_summary, SEED_COMPOUNDS)
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["rule_set_used"] == "metacyc_intermediate", (
@@ -619,10 +619,10 @@ def test_manifest_rule_set_used_reflects_expansion_summary(tmp_path: Path):
 
 def test_prompt_md_not_called_king_bundle(tmp_path: Path):
     """prompt.md header must clarify it is reproducible inputs, NOT a KING bundle."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     # Must contain the honesty caveat (NOT purely a KING bundle)
@@ -633,10 +633,10 @@ def test_prompt_md_not_called_king_bundle(tmp_path: Path):
 
 def test_prompt_md_mentions_mechinformed(tmp_path: Path):
     """prompt.md must mention the mechinformed rule set default."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     assert "mechinformed" in content, (
@@ -646,10 +646,10 @@ def test_prompt_md_mentions_mechinformed(tmp_path: Path):
 
 def test_prompt_md_mentions_fallback(tmp_path: Path):
     """prompt.md must mention the metacyc_intermediate fallback."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     assert "metacyc_intermediate" in content, (
@@ -659,10 +659,10 @@ def test_prompt_md_mentions_fallback(tmp_path: Path):
 
 def test_prompt_md_mentions_all_kbu_verab_verbs(tmp_path: Path):
     """prompt.md must reference all kbu verab command verbs."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
     discovery = _build_synthetic_discovery()
-    emit_king_workflow(tmp_path, discovery, SEED_COMPOUNDS)
+    emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
     for verb in ("kbu verab discover", "kbu verab enumerate", "kbu verab screen", "kbu verab emit-king"):

@@ -170,7 +170,7 @@ def emit_king_cmd(outdir: str, as_json: bool) -> None:
     """
     try:
         toolkit = _get_toolkit()
-        artifacts = toolkit.verab.emit_king_workflow(outdir)
+        artifacts = toolkit.verab.emit_kind_workflow(outdir)
     except Exception as exc:
         if as_json:
             click.echo(json.dumps({"error": str(exc)}))

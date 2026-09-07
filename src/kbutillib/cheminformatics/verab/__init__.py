@@ -14,7 +14,7 @@ from kbutillib.domains.cheminformatics.verab import (
     ScreeningReport,
     VerabDiscoveryResult,
     VerabRuleMatch,
-    emit_king_workflow,
+    emit_kind_workflow,
 )
 
 __all__ = [
@@ -27,5 +27,5 @@ __all__ = [
     "ScreeningRecord",
     "ScreeningReport",
     "MethoxyAromaticFilter",
-    "emit_king_workflow",
+    "emit_kind_workflow",
 ]

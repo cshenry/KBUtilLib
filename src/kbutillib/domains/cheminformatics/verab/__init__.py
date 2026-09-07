@@ -32,15 +32,15 @@ Public surface
 Later slices (S4-S8) will add:
     * screening.py       — screen_products, predict_genome_degradation
 
-**king_artifacts** — KING coscientist artifact emission (S6):
+**kind_artifacts** — KING coscientist artifact emission (S6):
 
-* :func:`~kbutillib.cheminformatics.verab.king_artifacts.emit_king_workflow`
+* :func:`~kbutillib.cheminformatics.verab.kind_artifacts.emit_kind_workflow`
 """
 
 from __future__ import annotations
 
 from .facade import VerabUtils, VerabUtilsImpl  # noqa: F401
-from .king_artifacts import emit_king_workflow
+from .kind_artifacts import emit_kind_workflow
 from .models import (
     ScreeningRecord,
     ScreeningReport,
@@ -69,7 +69,7 @@ __all__ = [
     # substructure filter (S2)
     "MethoxyAromaticFilter",
     # KING artifact emission (S6)
-    "emit_king_workflow",
+    "emit_kind_workflow",
     # facade
     "VerabUtils",
     "VerabUtilsImpl",

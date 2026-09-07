@@ -266,10 +266,10 @@ def test_live_operator_has_ec_hint(live_discovery):
 @_full_skip(_need_live_chem, _need_rdkit, _need_minedb)
 @pytest.mark.integration
 def test_live_king_artifact_emission(live_discovery, tmp_path):
-    """emit_king_workflow writes all required files; manifest.json lists operators."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    """emit_kind_workflow writes all required files; manifest.json lists operators."""
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
-    summary = emit_king_workflow(tmp_path / "king_run", live_discovery)
+    summary = emit_kind_workflow(tmp_path / "king_run", live_discovery)
 
     # All expected artifact files must exist
     expected_files = [
@@ -305,9 +305,9 @@ def test_live_king_artifact_emission(live_discovery, tmp_path):
 @pytest.mark.integration
 def test_live_king_seeds_tsv_content(live_discovery, tmp_path):
     """seeds.tsv has a header row and one data row per seed compound."""
-    from kbutillib.cheminformatics.verab.king_artifacts import emit_king_workflow
+    from kbutillib.cheminformatics.verab.kind_artifacts import emit_kind_workflow
 
-    summary = emit_king_workflow(tmp_path / "king_seeds_check", live_discovery)
+    summary = emit_kind_workflow(tmp_path / "king_seeds_check", live_discovery)
     seeds_path = Path(summary["files"]["seeds.tsv"])
     lines = seeds_path.read_text(encoding="utf-8").strip().splitlines()
 

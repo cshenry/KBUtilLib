@@ -1,10 +1,10 @@
 """kbutillib.agents — single source of truth for agent/skill/bundle/KING code.
 
 Public API is re-exported lazily from sub-modules:
-- ``kbutillib.agents.king_install`` — KING bundle installer (load_bundle, install, etc.)
-- ``kbutillib.agents.king_app``     — package-data directory (bundle.json, skill.md)
+- ``kbutillib.agents.kind_install`` — KING bundle installer (load_bundle, install, etc.)
+- ``kbutillib.agents.kind_app``     — package-data directory (bundle.json, skill.md)
 
-The old import path ``kbutillib.king_install`` is a shim that re-exports from
+The old import path ``kbutillib.kind_install`` is a shim that re-exports from
 here, so existing code is unaffected.
 """
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kbutillib.agents.king_install import (
+    from kbutillib.agents.kind_install import (
         BundleError,
         compose_context,
         detect_llm_route,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 # Lazy __getattr__ — defer import until attribute is accessed
 # ---------------------------------------------------------------------------
 
-_KING_INSTALL_SYMBOLS = frozenset(
+_KIND_INSTALL_SYMBOLS = frozenset(
     [
         "BundleError",
         "compose_context",
@@ -54,11 +54,11 @@ _KING_INSTALL_SYMBOLS = frozenset(
 )
 
 def __getattr__(name: str):  # type: ignore[return]
-    if name in _KING_INSTALL_SYMBOLS:
-        import kbutillib.agents.king_install as _ki
+    if name in _KIND_INSTALL_SYMBOLS:
+        import kbutillib.agents.kind_install as _ki
 
         return getattr(_ki, name)
     raise AttributeError(f"module 'kbutillib.agents' has no attribute {name!r}")
 
 
-__all__ = sorted(_KING_INSTALL_SYMBOLS)
+__all__ = sorted(_KIND_INSTALL_SYMBOLS)

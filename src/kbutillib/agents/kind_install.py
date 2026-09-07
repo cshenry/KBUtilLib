@@ -2,23 +2,23 @@
 
 **Self-contained: no cross-repo import.** This module does not import
 ``assistant`` (AIAssistant) or KING's own ``king_backend`` package — the only
-coupling to either is the on-disk ``~/king-apps/`` contract documented below,
-which any other tool's own vendored ``<tool>.king_install`` module (e.g.
-AIAssistant's ``assistant.king_install``) implements independently. See
+coupling to either is the on-disk ``~/kind-apps/`` contract documented below,
+which any other tool's own vendored ``<tool>.kind_install`` module (e.g.
+AIAssistant's ``assistant.kind_install``) implements independently. See
 ``agent-io/prds/king-integration-apps/fullprompt.md`` (Module C, Acceptance
 Criteria #13-#21) in the AIAssistant repo for the binding spec this module
 implements.
 
-On-disk contract (``$KING_APPS_DIR``, default ``~/king-apps``)
+On-disk contract (``$KIND_APPS_DIR``, default ``~/kind-apps``)
 ----------------------------------------------------------------
 ::
 
-    $KING_APPS_DIR/
+    $KIND_APPS_DIR/
     ├── registry.json      # {"<id>": {id, title, description, cli, verify,
     │                       #           manifests, bundle_hash,
     │                       #           installed_at, updated_at}, ...}
     ├── CONTEXT.md          # union-recomposed from ALL registered app dirs
-    ├── serve-king.sh        # generated launch wrapper (exports KING_CONTEXT)
+    ├── serve-kind.sh        # generated launch wrapper (exports KING_CONTEXT)
     └── <id>/
         └── skill.md         # this app's injected orientation prose
 
@@ -29,8 +29,8 @@ installs or uninstalls — this is what lets independently-installed apps
 (this one, AIAssistant's, and any future one) coexist without clobbering
 each other's fragment, regardless of install order (AC #15).
 
-Writes are confined to ``$KING_APPS_DIR`` and the generated
-``serve-king.sh`` wrapper; this module never writes anything under KING's
+Writes are confined to ``$KIND_APPS_DIR`` and the generated
+``serve-kind.sh`` wrapper; this module never writes anything under KING's
 own checkout (conventionally ``~/king-stack/king/``) — it only *reads* KING's
 persisted LLM-route settings (best-effort, for the AC #21 warning) and
 references KING's own ``scripts/serve.sh`` path inside the generated
@@ -52,14 +52,34 @@ from typing import Optional
 # ── paths ────────────────────────────────────────────────────────────────
 
 
+# ---------------------------------------------------------------------------
+# DO NOT RENAME the ``KING_*`` names below to ``KIND_*``.
+#
+# The KING -> KIND rename (2026-09-06) covers OUR terminology only. These
+# names are Adam Arkin's API surface -- his code READS them, so renaming them
+# here does not rename our vocabulary, it breaks his software:
+#
+#   KING_CONTEXT      read by king/backend/king_backend/session.py:167
+#   KING_PLUGINS_DIR  read by king/backend/king_backend/config.py:118
+#   KING_SKIP_HOOKS   read by king/scripts/install.sh:176
+#   KING_STACK_DIR    ours, but it NAMES his checkout root (~/king-stack).
+#                     Renaming it while it still points at ~/king-stack would
+#                     trade one confusion for a worse one.
+#
+# ``~/king-stack`` and ``king/scripts/serve.sh`` are his checkout and his
+# script, and are likewise left alone. What DID move is ours: $KIND_APPS_DIR
+# (~/kind-apps), serve-kind.sh, and the kind_install/kind_app names.
+# ---------------------------------------------------------------------------
+
+
 def resolve_apps_dir(explicit: Optional[str] = None) -> Path:
-    """Resolve ``$KING_APPS_DIR`` (env var, else default ``~/king-apps``)."""
+    """Resolve ``$KIND_APPS_DIR`` (env var, else default ``~/kind-apps``)."""
     if explicit:
         return Path(explicit).expanduser()
-    env = os.environ.get("KING_APPS_DIR")
+    env = os.environ.get("KIND_APPS_DIR")
     if env:
         return Path(env).expanduser()
-    return Path.home() / "king-apps"
+    return Path.home() / "kind-apps"
 
 
 def resolve_king_stack_dir(explicit: Optional[str] = None) -> Path:
@@ -76,18 +96,20 @@ def resolve_king_stack_dir(explicit: Optional[str] = None) -> Path:
       is ``~/king``); ``~/king-stack`` does not exist there at all.
 
     Returning ``~/king-stack`` unconditionally meant that on a pod, a bare
-    ``kbu kind install`` generated a ``serve-king.sh`` whose ``exec`` target did
+    ``kbu kind install`` generated a ``serve-kind.sh`` whose ``exec`` target did
     not exist. Nothing failed at install time -- it broke only at the NEXT
     launch, by which point the cause looked unrelated. Detecting the layout
     makes the bare invocation correct in both, instead of relying on every
     caller remembering to set ``KING_STACK_DIR``.
 
-    Used ONLY to point the generated ``serve-king.sh`` wrapper at KING's own
+    Used ONLY to point the generated ``serve-kind.sh`` wrapper at KING's own
     ``scripts/serve.sh`` and (best-effort, read-only) at its persisted
     settings for the LLM-route warning -- never to write anything there.
     """
     if explicit:
         return Path(explicit).expanduser()
+    # KING_STACK_DIR, not KIND_: it names Adam's checkout root. See the
+    # "DO NOT RENAME" block above.
     env = os.environ.get("KING_STACK_DIR")
     if env:
         return Path(env).expanduser()
@@ -152,7 +174,7 @@ def run_verify_probe(bundle: dict) -> dict:
     "The verify probe passes when it exits 0 and (if ``ok_text`` given)
     ``ok_text`` appears in its stdout" (AC #14).  Absent CLI or a missing
     probe command are reported as state, not exceptions -- callers (``king
-    install``/``king status``) must never crash on a missing hand.
+    install``/``kind status``) must never crash on a missing hand.
     """
     cli = bundle.get("cli")
     cli_on_path = bool(cli) and shutil.which(cli) is not None
@@ -203,7 +225,7 @@ def _registry_path(apps_dir: Path) -> Path:
 
 
 def read_registry(apps_dir: Path) -> dict:
-    """Read ``$KING_APPS_DIR/registry.json``; ``{}`` if absent/unparseable."""
+    """Read ``$KIND_APPS_DIR/registry.json``; ``{}`` if absent/unparseable."""
     p = _registry_path(apps_dir)
     if not p.is_file():
         return {}
@@ -265,17 +287,17 @@ def compose_context(apps_dir: Path) -> bool:
     return _write_if_changed(_context_md_path(apps_dir), content)
 
 
-# ── serve-king.sh launch wrapper (AC #13) ───────────────────────────────────
+# ── serve-kind.sh launch wrapper (AC #13) ───────────────────────────────────
 
 
 def _serve_script_path(apps_dir: Path) -> Path:
-    return apps_dir / "serve-king.sh"
+    return apps_dir / "serve-kind.sh"
 
 
 def generate_serve_script(
     apps_dir: Path, king_stack_dir: Optional[Path] = None
 ) -> bool:
-    """Generate/update ``$KING_APPS_DIR/serve-king.sh`` (AC #13).
+    """Generate/update ``$KIND_APPS_DIR/serve-kind.sh`` (AC #13).
 
     Exports ``KING_CONTEXT`` (always) and ``KING_PLUGINS_DIR`` (only when at
     least one registered app declares a non-empty ``manifests`` list), then
@@ -291,10 +313,12 @@ def generate_serve_script(
 
     lines = [
         "#!/usr/bin/env bash",
-        "# Generated by `king install` (kbutillib.king_install) -- do NOT edit",
+        "# Generated by `kind install` (kbutillib.kind_install) -- do NOT edit",
         "# KING's own repo; this wrapper only wires env vars before delegating",
         "# to KING's own launcher. Regenerate via `kbu kind install`.",
         "set -euo pipefail",
+        # KING_CONTEXT / KING_PLUGINS_DIR are read by Adam's backend --
+        # never KIND_. See the "DO NOT RENAME" block above.
         f'export KING_CONTEXT="{context_path}"',
     ]
     if has_manifests:
@@ -316,7 +340,7 @@ def install(
     apps_dir: Optional[Path] = None,
     king_stack_dir: Optional[Path] = None,
 ) -> dict:
-    """Install (or idempotently re-install) this app's bundle into ``$KING_APPS_DIR``.
+    """Install (or idempotently re-install) this app's bundle into ``$KIND_APPS_DIR``.
 
     Never raises for a missing CLI / failed verify probe -- reports state,
     does not crash (per Module C step 1: "Report state, don't crash.").
@@ -374,7 +398,7 @@ def install(
 
 
 def uninstall(app_id: str, apps_dir: Optional[Path] = None) -> dict:
-    """Remove *app_id*'s ``$KING_APPS_DIR/<id>/`` dir + registry entry.
+    """Remove *app_id*'s ``$KIND_APPS_DIR/<id>/`` dir + registry entry.
 
     Recomposes ``CONTEXT.md`` afterward.  An already-absent id is a no-op
     (AC #16).
@@ -415,14 +439,14 @@ def _context_has_header(apps_dir: Path, title: str, app_id: str) -> bool:
 def _king_context_env_resolves(apps_dir: Path) -> bool:
     """Static check of AC #18's "``KING_CONTEXT`` resolves to it".
 
-    Checked primarily against the generated ``serve-king.sh`` wrapper, not
-    the calling process's own environment: ``king status`` is normally run
-    from an ordinary shell (e.g. right after ``king install``, per Module
+    Checked primarily against the generated ``serve-kind.sh`` wrapper, not
+    the calling process's own environment: ``kind status`` is normally run
+    from an ordinary shell (e.g. right after ``kind install``, per Module
     E's orchestrator skill), not from inside a KING launch, so the
     process's live ``KING_CONTEXT`` is almost never set even when
     everything is correctly wired. A ``KING_CONTEXT`` already set correctly
     in the current process env also counts. (Mirrors
-    ``assistant.king_install._serve_script_wires_context`` so both
+    ``assistant.kind_install._serve_script_wires_context`` so both
     installers' ``status`` verbs agree on what "wired" means.)
     """
     context_path = _context_md_path(apps_dir)

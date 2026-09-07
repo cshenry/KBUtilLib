@@ -1,16 +1,16 @@
 """``kbu kind`` — self-install this repo's KING apps into a local KING.
 
-Thin CLI facade over the vendored ``kbutillib.agents.king_install`` module
-(see its module docstring for the on-disk ``$KING_APPS_DIR`` contract and
+Thin CLI facade over the vendored ``kbutillib.agents.kind_install`` module
+(see its module docstring for the on-disk ``$KIND_APPS_DIR`` contract and
 the Acceptance Criteria it implements). Reads this repo's OWN packaged
 bundles — no cross-repo dependency; a checkout/install of KBUtilLib alone
 is enough to run ``kbu kind install``.
 
 This repo ships more than one bundle, selected with ``--app``:
 
-* ``modeling`` (``src/kbutillib/king_app/``, id ``kbutillib-modeling``) —
+* ``modeling`` (``src/kbutillib/kind_app/``, id ``kbutillib-modeling``) —
   the metabolic-modeling verbs.
-* ``wake`` (``src/kbutillib/king_app_wake/``, id ``persistentai-wake``) —
+* ``wake`` (``src/kbutillib/kind_app_wake/``, id ``persistentai-wake``) —
   firing a triggered wake at luna/miles over the ``persistentai`` trigger
   rail.
 
@@ -39,12 +39,12 @@ from typing import Optional
 
 import click
 
-from ...agents import king_install
+from ...agents import kind_install
 
 #: CLI ``--app`` name -> package subdirectory holding that bundle.
 APPS: dict[str, str] = {
-    "modeling": "king_app",
-    "wake": "king_app_wake",
+    "modeling": "kind_app",
+    "wake": "kind_app_wake",
 }
 
 #: Worst-wins ordering for the aggregate ``status`` exit code.
@@ -81,7 +81,7 @@ def _apps_dir_option(fn):
         "--apps-dir",
         default=None,
         metavar="PATH",
-        help="Override $KING_APPS_DIR (default: ~/king-apps).",
+        help="Override $KIND_APPS_DIR (default: ~/kind-apps).",
     )(fn)
 
 
@@ -93,7 +93,7 @@ def _json_option(fn):
 
 @click.group("kind")
 def kind_cmd() -> None:
-    """Self-install this repo's KING apps into a local KING (`~/king-apps/`)."""
+    """Self-install this repo's KING apps into a local KING (`~/kind-apps/`)."""
 
 
 @kind_cmd.command("install")
@@ -101,7 +101,7 @@ def kind_cmd() -> None:
 @_apps_dir_option
 @_json_option
 def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> None:
-    """Compose this repo's bundle(s) into $KING_APPS_DIR and wire serve-king.sh.
+    """Compose this repo's bundle(s) into $KIND_APPS_DIR and wire serve-kind.sh.
 
     Idempotent: re-running on an unchanged bundle is a no-op diff. Never
     fails just because the app's CLI isn't found on PATH -- reports it
@@ -109,7 +109,7 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
     """
     resolved = _apps_dir_opt(apps_dir)
     results = [
-        king_install.install(bundle_dir, apps_dir=resolved)
+        kind_install.install(bundle_dir, apps_dir=resolved)
         for bundle_dir in _bundle_dirs(app)
     ]
 
@@ -136,7 +136,7 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
             )
         click.echo(f"  changed: {result['changed']}")
     click.echo(f"  CONTEXT.md: {results[-1]['context_md']}")
-    click.echo(f"  serve-king.sh: {results[-1]['serve_script']}")
+    click.echo(f"  serve-kind.sh: {results[-1]['serve_script']}")
 
 
 @kind_cmd.command("uninstall")
@@ -144,15 +144,15 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
 @_apps_dir_option
 @_json_option
 def uninstall_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> None:
-    """Remove this repo's app id(s) from $KING_APPS_DIR and recompose CONTEXT.md.
+    """Remove this repo's app id(s) from $KIND_APPS_DIR and recompose CONTEXT.md.
 
     A no-op for any app that was never installed.
     """
     resolved = _apps_dir_opt(apps_dir)
     results = []
     for bundle_dir in _bundle_dirs(app):
-        bundle = king_install.load_bundle(bundle_dir)["bundle"]
-        results.append(king_install.uninstall(bundle["id"], apps_dir=resolved))
+        bundle = kind_install.load_bundle(bundle_dir)["bundle"]
+        results.append(kind_install.uninstall(bundle["id"], apps_dir=resolved))
 
     if as_json:
         click.echo(json.dumps(results))
@@ -176,7 +176,7 @@ def status_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> No
     """
     resolved = _apps_dir_opt(apps_dir)
     results = [
-        king_install.status(bundle_dir, apps_dir=resolved)
+        kind_install.status(bundle_dir, apps_dir=resolved)
         for bundle_dir in _bundle_dirs(app)
     ]
 

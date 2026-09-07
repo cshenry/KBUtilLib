@@ -15,7 +15,7 @@ kbutillib/
 ├── domains/             # Domain implementations (biochem, thermo, cheminformatics, ...)
 ├── interfaces/          # Transport adapters (CLI, MCP, FastAPI, docs)
 ├── agents/              # KING bundles, researchos, agent utilities
-└── king_app/            # Installable KING bundle (main + verab)
+└── kind_app/            # Installable KING bundle (main + verab)
 ```
 
 ## Where to look
@@ -29,7 +29,7 @@ kbutillib/
 | Run the REST API                      | `interfaces/api/`                   |
 | Use the CLI                           | `interfaces/cli/` or `kbu --help`   |
 | Deploy to Poplar                      | `../../deploy/poplar/`              |
-| Add a KING bundle                     | `king_app/` as template             |
+| Add a KING bundle                     | `kind_app/` as template             |
 
 ## Adding a new capability (30-second guide)
 

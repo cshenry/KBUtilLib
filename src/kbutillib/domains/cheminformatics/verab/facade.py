@@ -36,7 +36,7 @@ Usage via the toolkit::
     methoxy_cpds = kbu.verab.enumerate_methoxy_aromatics()
     report = kbu.verab.screen(rule_operators=result.operators, compounds=methoxy_cpds)
     # KING artifact emission
-    paths = kbu.verab.emit_king_workflow("/tmp/king_run")
+    paths = kbu.verab.emit_kind_workflow("/tmp/king_run")
     # Introspection
     print(kbu.verab.status())
 """
@@ -234,7 +234,7 @@ class VerabUtils:
             backend=backend,
         )
 
-    def emit_king_workflow(
+    def emit_kind_workflow(
         self,
         outdir: Any,
         *,
@@ -253,7 +253,7 @@ class VerabUtils:
         Returns:
             Dict with keys ``outdir``, ``files``, ``n_operators``, ``n_seeds``.
         """
-        from .king_artifacts import emit_king_workflow
+        from .kind_artifacts import emit_kind_workflow
 
         if discovery is None:
             discovery = VerabDiscoveryResult(
@@ -262,7 +262,7 @@ class VerabUtils:
                 seeds=list(SEED_COMPOUNDS),
             )
 
-        return emit_king_workflow(outdir, discovery, seeds=discovery.seeds or None)
+        return emit_kind_workflow(outdir, discovery, seeds=discovery.seeds or None)
 
     # ── Phase 2 ─────────────────────────────────────────────────────────
 

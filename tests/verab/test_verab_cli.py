@@ -65,7 +65,7 @@ def _canned_screening_report() -> Any:
     return ScreeningReport(n_source_compounds=1, records=[rec])
 
 
-def _canned_king_artifacts() -> dict:
+def _canned_kind_artifacts() -> dict:
     return {
         "outdir": "/tmp/king_verab",
         "files": ["seeds.tsv", "seeds.csv", "manifest.json"],
@@ -232,7 +232,7 @@ class TestEmitKingJson:
         runner = CliRunner()
         with patch("kbutillib.interfaces.cli.verab._get_toolkit") as mock_get_toolkit:
             fake_toolkit = MagicMock()
-            fake_toolkit.verab.emit_king_workflow.return_value = _canned_king_artifacts()
+            fake_toolkit.verab.emit_kind_workflow.return_value = _canned_kind_artifacts()
             mock_get_toolkit.return_value = fake_toolkit
             result = runner.invoke(main, ["verab", "emit-king", "--json"])
 

@@ -526,3 +526,64 @@ class TestRetiredKingAlias:
         assert result.exit_code == 0, result.output
         assert "\n  kind" in result.output
         assert "\n  king" not in result.output
+
+
+# ── bundle `files` ───────────────────────────────────────────────────────────
+
+
+class TestBundleFiles:
+    """A bundle may declare ``files``, copied beside skill.md in its app dir.
+
+    ``skill.md`` is composed into CONTEXT.md for EVERY session, so a bundle
+    with a long reference splits it out and tells the session to read it on
+    demand. The extra file has to land or that instruction dangles. Kept in
+    step with AIAssistant's vendored copy of this contract, which is where
+    the need showed up (its about-kind bundle).
+    """
+
+    def _bundle_with_files(self, root: Path) -> Path:
+        bundle_dir = _write_fixture_bundle(root, "with-files", "With Files")
+        bundle = json.loads((bundle_dir / "bundle.json").read_text())
+        bundle["files"] = ["reference.md"]
+        (bundle_dir / "bundle.json").write_text(json.dumps(bundle))
+        (bundle_dir / "reference.md").write_text("THE REFERENCE BODY\n")
+        return bundle_dir
+
+    def test_declared_files_land_beside_skill_md(self, tmp_path):
+        apps_dir = tmp_path / "apps"
+        kind_install.install(self._bundle_with_files(tmp_path), apps_dir=apps_dir)
+        assert (apps_dir / "with-files" / "reference.md").read_text() == "THE REFERENCE BODY\n"
+
+    def test_declared_files_stay_out_of_context_md(self, tmp_path):
+        apps_dir = tmp_path / "apps"
+        kind_install.install(self._bundle_with_files(tmp_path), apps_dir=apps_dir)
+        assert "THE REFERENCE BODY" not in (apps_dir / "CONTEXT.md").read_text()
+
+    def test_reinstall_is_idempotent_on_unchanged_files(self, tmp_path):
+        apps_dir = tmp_path / "apps"
+        bundle_dir = self._bundle_with_files(tmp_path)
+        kind_install.install(bundle_dir, apps_dir=apps_dir)
+        second = kind_install.install(bundle_dir, apps_dir=apps_dir)
+        assert second["changed"] is False
+
+    def test_changed_reference_is_reported_as_changed(self, tmp_path):
+        apps_dir = tmp_path / "apps"
+        bundle_dir = self._bundle_with_files(tmp_path)
+        kind_install.install(bundle_dir, apps_dir=apps_dir)
+        (bundle_dir / "reference.md").write_text("EDITED BODY\n")
+        second = kind_install.install(bundle_dir, apps_dir=apps_dir)
+        assert second["changed"] is True
+        assert (apps_dir / "with-files" / "reference.md").read_text() == "EDITED BODY\n"
+
+    def test_files_names_cannot_escape_the_app_dir(self, tmp_path):
+        apps_dir = tmp_path / "apps"
+        bundle_dir = self._bundle_with_files(tmp_path)
+        bundle = json.loads((bundle_dir / "bundle.json").read_text())
+        bundle["files"] = ["../../escaped.md"]
+        (bundle_dir / "bundle.json").write_text(json.dumps(bundle))
+        (bundle_dir / "escaped.md").write_text("nope\n")
+
+        kind_install.install(bundle_dir, apps_dir=apps_dir)
+
+        assert not (apps_dir.parent / "escaped.md").exists()
+        assert (apps_dir / "with-files" / "escaped.md").exists()

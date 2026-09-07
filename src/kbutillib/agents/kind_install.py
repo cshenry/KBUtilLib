@@ -335,6 +335,27 @@ def generate_serve_script(
 # ── install / uninstall (AC #15, #16, #17) ──────────────────────────────────
 
 
+def _copy_bundle_files(bundle_dir: Path, app_dir: Path, bundle: dict) -> bool:
+    """Copy a bundle's optional ``files`` into its app dir beside skill.md.
+
+    ``skill.md`` is injected into CONTEXT.md for EVERY session, so a bundle
+    with a long reference section keeps it out of the prompt and tells the
+    session to read it on demand instead. Those extra files have to land in
+    the app dir or that instruction dangles -- which is exactly what happened
+    to the about-kind bundle when ~/king-apps moved and its reference.md did
+    not follow.
+
+    Names are reduced to their basename: a bundle does not get to write
+    outside its own app dir.
+    """
+    changed = False
+    for name in bundle.get("files") or []:
+        src = bundle_dir / Path(name).name
+        if src.is_file():
+            changed = _write_if_changed(app_dir / src.name, src.read_text()) or changed
+    return changed
+
+
 def install(
     bundle_dir: Path,
     apps_dir: Optional[Path] = None,
@@ -354,6 +375,7 @@ def install(
 
     app_dir = apps_dir / app_id
     skill_changed = _write_if_changed(app_dir / "skill.md", skill_md)
+    skill_changed = _copy_bundle_files(bundle_dir, app_dir, bundle) or skill_changed
 
     registry = read_registry(apps_dir)
     bundle_hash = _sha256_text(

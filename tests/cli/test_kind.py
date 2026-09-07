@@ -138,7 +138,7 @@ class TestInstall:
         # CONTEXT.md contains the exact header + a skill.md fragment
         context = (apps_dir / "CONTEXT.md").read_text()
         assert (
-            "# [KING App] KBUtilLib Metabolic Modeling (id: kbutillib-modeling)"
+            "# [KIND App] KBUtilLib Metabolic Modeling (id: kbutillib-modeling)"
             in context
         )
         assert "kbu model reconstruct" in context
@@ -191,10 +191,10 @@ class TestInstall:
 
         context = (apps_dir / "CONTEXT.md").read_text()
         assert (
-            "# [KING App] KBUtilLib Metabolic Modeling (id: kbutillib-modeling)"
+            "# [KIND App] KBUtilLib Metabolic Modeling (id: kbutillib-modeling)"
             in context
         )
-        assert "# [KING App] AIAssistant (id: aiassistant)" in context
+        assert "# [KIND App] AIAssistant (id: aiassistant)" in context
         assert "Fixture skill body for aiassistant" in context
 
         registry = json.loads((apps_dir / "registry.json").read_text())
@@ -342,7 +342,7 @@ class TestUninstall:
 
         context = (apps_dir / "CONTEXT.md").read_text()
         assert "kbutillib-modeling" not in context
-        assert "# [KING App] AIAssistant (id: aiassistant)" in context
+        assert "# [KIND App] AIAssistant (id: aiassistant)" in context
 
     def test_uninstall_already_absent_is_noop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -444,7 +444,7 @@ class TestWakeBundle:
 
         context = (apps_dir / "CONTEXT.md").read_text()
         assert (
-            "# [KING App] Wake a Persistent Agent (Luna / Miles) "
+            "# [KIND App] Wake a Persistent Agent (Luna / Miles) "
             "(id: persistentai-wake)" in context
         )
         assert "persistentai trigger emit" in context

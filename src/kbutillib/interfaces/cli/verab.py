@@ -12,8 +12,8 @@ enumerate
     Enumerate methoxy-aromatic compounds from the biochem DB (requires RDKit).
 screen
     Screen rule operators x methoxy-aromatics and cross-reference with biochem DB.
-emit-king
-    Write a reproducible KING coscientist input directory.
+emit-kind
+    Write a reproducible KIND coscientist input directory.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ import sys
 from typing import Any
 
 import click
+
+from ._aliases import AliasedGroup
 
 
 # ---------------------------------------------------------------------------
@@ -46,11 +48,22 @@ def _get_toolkit() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@click.group("verab")
+#: Retired verb spellings that still resolve but are never listed in
+#: ``--help``. ``emit-king`` predates the KING -> KIND rename.
+_VERAB_ALIASES = {"emit-king": "emit-kind"}
+
+
+class _VerabGroup(AliasedGroup):
+    """The ``kbu verab`` group; resolves the retired names above."""
+
+    aliases = _VERAB_ALIASES
+
+
+@click.group("verab", cls=_VerabGroup)
 def verab_cmd() -> None:
     """verAB methoxy-aromatic O-demethylation tools.
 
-    Commands for discovering, enumerating, screening, and emitting KING
+    Commands for discovering, enumerating, screening, and emitting KIND
     workflow inputs for the verAB lignin-degradation pathway.
     """
 
@@ -151,20 +164,20 @@ def screen_cmd(as_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# emit-king
+# emit-kind
 # ---------------------------------------------------------------------------
 
 
-@verab_cmd.command("emit-king")
+@verab_cmd.command("emit-kind")
 @click.option(
     "--outdir",
-    default="/tmp/king_verab",
+    default="/tmp/kind_verab",
     show_default=True,
-    help="Output directory for KING workflow artifacts.",
+    help="Output directory for KIND workflow artifacts.",
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON to stdout.")
-def emit_king_cmd(outdir: str, as_json: bool) -> None:
-    """Emit a reproducible KING coscientist input directory for verAB.
+def emit_kind_cmd(outdir: str, as_json: bool) -> None:
+    """Emit a reproducible KIND coscientist input directory for verAB.
 
     Writes seed compounds and operator artifacts to *outdir*. Exits 0 on success.
     """
@@ -182,7 +195,7 @@ def emit_king_cmd(outdir: str, as_json: bool) -> None:
         click.echo(json.dumps(artifacts))
     else:
         files = artifacts.get("files", [])
-        click.echo(f"Emitted {len(files)} KING artifact(s) to {outdir}.")
+        click.echo(f"Emitted {len(files)} KIND artifact(s) to {outdir}.")
 
 
 __all__ = ["verab_cmd", "_get_toolkit"]

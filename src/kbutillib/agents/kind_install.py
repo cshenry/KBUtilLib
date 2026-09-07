@@ -24,7 +24,7 @@ On-disk contract (``$KIND_APPS_DIR``, default ``~/kind-apps``)
 
 ``CONTEXT.md`` is regenerated deterministically from the union of every
 ``registry.json`` entry (ids sorted lexicographically, one
-``# [KING App] <title> (id: <id>)`` header per id) every time ANY app
+``# [KIND App] <title> (id: <id>)`` header per id) every time ANY app
 installs or uninstalls — this is what lets independently-installed apps
 (this one, AIAssistant's, and any future one) coexist without clobbering
 each other's fragment, regardless of install order (AC #15).
@@ -266,7 +266,7 @@ def compose_context(apps_dir: Path) -> bool:
     """Regenerate ``CONTEXT.md`` from the union of ALL registered app dirs.
 
     Deterministic: ids sorted lexicographically; each app's header is
-    exactly ``# [KING App] <title> (id: <id>)``; each id appears exactly
+    exactly ``# [KIND App] <title> (id: <id>)``; each id appears exactly
     once.  This is what lets independently-installed apps coexist --
     whichever installer runs last recomposes a correct superset (AC #15).
     Only writes when the composed content actually changed.
@@ -279,7 +279,7 @@ def compose_context(apps_dir: Path) -> bool:
         skill_text = (
             skill_path.read_text(encoding="utf-8") if skill_path.is_file() else ""
         )
-        header = f"# [KING App] {entry.get('title', app_id)} (id: {app_id})"
+        header = f"# [KIND App] {entry.get('title', app_id)} (id: {app_id})"
         sections.append(f"{header}\n\n{skill_text.strip()}\n")
     content = "\n".join(sections)
     if content:
@@ -432,7 +432,7 @@ def _context_has_header(apps_dir: Path, title: str, app_id: str) -> bool:
     p = _context_md_path(apps_dir)
     if not p.is_file():
         return False
-    header = f"# [KING App] {title} (id: {app_id})"
+    header = f"# [KIND App] {title} (id: {app_id})"
     return header in p.read_text(encoding="utf-8")
 
 

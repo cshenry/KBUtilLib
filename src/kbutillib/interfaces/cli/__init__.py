@@ -27,6 +27,7 @@ from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
 from .jobs import jobs_cmd
+from ._aliases import AliasedGroup
 from .kind import kind_cmd
 from .migrate import migrate_cmd
 from .model import model_cmd
@@ -45,11 +46,10 @@ from .verab import verab_cmd
 _COMMAND_ALIASES = {"king": "kind"}
 
 
-class _AliasedGroup(click.Group):
-    """Click group that resolves the retired names in ``_COMMAND_ALIASES``."""
+class _AliasedGroup(AliasedGroup):
+    """Top-level ``kbu`` group; resolves the retired names above."""
 
-    def get_command(self, ctx: click.Context, cmd_name: str):
-        return super().get_command(ctx, _COMMAND_ALIASES.get(cmd_name, cmd_name))
+    aliases = _COMMAND_ALIASES
 
 
 @click.group(cls=_AliasedGroup)

@@ -531,7 +531,7 @@ def test_kind_app_verab_skill_md_mentions_verbs():
     bundle_dir = Path(kbutillib.__file__).parent / "kind_app" / "verab"
     result = load_bundle(bundle_dir)
     skill_md = result["skill_md"]
-    for verb in ("discover", "enumerate", "screen", "emit-king"):
+    for verb in ("discover", "enumerate", "screen", "emit-kind"):
         assert verb in skill_md, f"skill.md must mention verb '{verb}'"
 
 
@@ -665,5 +665,5 @@ def test_prompt_md_mentions_all_kbu_verab_verbs(tmp_path: Path):
     emit_kind_workflow(tmp_path, discovery, SEED_COMPOUNDS)
 
     content = (tmp_path / "prompt.md").read_text(encoding="utf-8")
-    for verb in ("kbu verab discover", "kbu verab enumerate", "kbu verab screen", "kbu verab emit-king"):
+    for verb in ("kbu verab discover", "kbu verab enumerate", "kbu verab screen", "kbu verab emit-kind"):
         assert verb in content, f"prompt.md must mention '{verb}' command"

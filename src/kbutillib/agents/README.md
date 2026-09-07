@@ -1,6 +1,6 @@
-# kbutillib.agents — KING Bundles & ResearchOS
+# kbutillib.agents — KIND Bundles & ResearchOS
 
-Self-contained KING agent bundles that can be installed into Claude Code, Cursor, or other MCP-compatible agents, plus the `researchos/` configuration manager.
+Self-contained KIND agent bundles that can be installed into Claude Code, Cursor, or other MCP-compatible agents, plus the `researchos/` configuration manager.
 
 ## What lives here
 
@@ -9,16 +9,16 @@ Self-contained KING agent bundles that can be installed into Claude Code, Cursor
 | `kind_install.py` | Bundle install/uninstall/status logic — called by `kbu kind install/uninstall/status` |
 | `researchos/` | Generates `.mcp` and `.claude` configuration files for researchos environments |
 
-**Note on `kind_app/`:** The canonical KING bundle directory is `src/kbutillib/kind_app/` (at the package root, not here). It contains `bundle.json`, `skill.md`, and the `verab/` sub-bundle. `interfaces/cli/king.py` resolves bundles from that root directory. A stale duplicate at `agents/kind_app/` was removed — if you need to reference the bundle location, it is always `src/kbutillib/kind_app/`.
+**Note on `kind_app/`:** The canonical KIND bundle directory is `src/kbutillib/kind_app/` (at the package root, not here). It contains `bundle.json`, `skill.md`, and the `verab/` sub-bundle. `interfaces/cli/king.py` resolves bundles from that root directory. A stale duplicate at `agents/kind_app/` was removed — if you need to reference the bundle location, it is always `src/kbutillib/kind_app/`.
 
-## KING bundles
+## KIND bundles
 
-A KING bundle is a directory containing:
+A KIND bundle is a directory containing:
 - `bundle.json` — bundle metadata: `id`, `name`, `description`, `capabilities`, `mcp_tools`
 - `skill.md` — natural-language skill description for the agent
 - Optional sub-bundles (e.g., `verab/`) for domain-specific capabilities
 
-## Install a KING bundle
+## Install a KIND bundle
 
 ```console
 # List available bundles in the registry

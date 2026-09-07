@@ -1,17 +1,17 @@
-# `kbu king` CLI reference
+# `kbu kind` CLI reference
 
-`kbu king` self-installs this repo's KING apps into a local KING checkout,
-without ever modifying KING's own repository. It is a thin CLI facade over
-the vendored `kbutillib.king_install` module, which reads this repo's OWN
+`kbu kind` self-installs this repo's KIND apps into a local KIND checkout,
+without ever modifying KIND's own repository. It is a thin CLI facade over
+the vendored `kbutillib.kind_install` module, which reads this repo's OWN
 packaged bundles — no cross-repo dependency; a checkout/install of
-KBUtilLib alone is enough to run `kbu king install`.
+KBUtilLib alone is enough to run `kbu kind install`.
 
 ## The two bundles this repo ships
 
 | `--app` | package dir | app id | `cli` |
 |---|---|---|---|
-| `modeling` | `src/kbutillib/king_app/` | `kbutillib-modeling` | `kbu` |
-| `wake` | `src/kbutillib/king_app_wake/` | `persistentai-wake` | `persistentai` |
+| `modeling` | `src/kbutillib/kind_app/` | `kbutillib-modeling` | `kbu` |
+| `wake` | `src/kbutillib/kind_app_wake/` | `persistentai-wake` | `persistentai` |
 
 `modeling` is App-2 in the [king-integration-apps](../prds/) PRD — the
 metabolic-modeling verbs.
@@ -27,7 +27,7 @@ KOROS session will ever know about the rail.
 Its `cli` (`persistentai`) lives in another repo. That is fine and
 expected — `install` never fails on a missing CLI, it reports
 `cli_on_path: false`, and `status` colors the app amber until the CLI
-arrives. **The wake app is only usable on primary-laptop**: a KING session
+arrives. **The wake app is only usable on primary-laptop**: a KIND session
 on the BERDL pod has neither `persistentai` nor the Dropbox-synced trigger
 inbox.
 
@@ -35,18 +35,18 @@ With no `--app`, every verb acts on **all** of this repo's bundles. A
 per-app default would silently ship a subset.
 
 Built for [king-integration-apps](../prds/) Module C/D: composing this
-app's `skill.md` into KING's injected `KING_CONTEXT` orientation and
+app's `skill.md` into KIND's injected `KING_CONTEXT` orientation and
 wiring the launch env, per Acceptance Criteria #13-#21.
 
 ## Verbs
 
 ```
-kbu king install   [--app modeling|wake] [--apps-dir PATH] [--json]
-kbu king uninstall [--app modeling|wake] [--apps-dir PATH] [--json]
-kbu king status    [--app modeling|wake] [--apps-dir PATH] [--json]
+kbu kind install   [--app modeling|wake] [--apps-dir PATH] [--json]
+kbu kind uninstall [--app modeling|wake] [--apps-dir PATH] [--json]
+kbu kind status    [--app modeling|wake] [--apps-dir PATH] [--json]
 ```
 
-`--apps-dir` overrides `$KING_APPS_DIR` (default `~/king-apps`).
+`--apps-dir` overrides `$KIND_APPS_DIR` (default `~/kind-apps`).
 `--app` narrows to one bundle; omitting it acts on all of them.
 
 **`--json` always emits a LIST** of per-app result objects, one per app
@@ -58,31 +58,31 @@ months later.
 ### `install`
 
 Idempotent (AC #17): re-running on an unchanged bundle is a no-op diff —
-no file under `$KING_APPS_DIR` is touched (mtimes unchanged) if nothing
+no file under `$KIND_APPS_DIR` is touched (mtimes unchanged) if nothing
 changed. Never fails just because `kbu` isn't on PATH; reports the state
 instead (`cli_on_path: false`) so the install can complete and the app can
 be verified later once the CLI is installed.
 
-Actions, all confined to `$KING_APPS_DIR` (never `~/king-stack/king/`):
+Actions, all confined to `$KIND_APPS_DIR` (never `~/king-stack/king/`):
 
 1. Verify the hand: `shutil.which("kbu")` plus the bundle's `verify` probe
    (`kbu model --help`, checked for exit 0 and the `ok_text` substring
    `"Metabolic-modeling verbs"`).
-2. Copy `skill.md` to `$KING_APPS_DIR/kbutillib-modeling/skill.md`; record
-   the app in `$KING_APPS_DIR/registry.json` keyed by id
+2. Copy `skill.md` to `$KIND_APPS_DIR/kbutillib-modeling/skill.md`; record
+   the app in `$KIND_APPS_DIR/registry.json` keyed by id
    `kbutillib-modeling`.
-3. **Union-recompose** `$KING_APPS_DIR/CONTEXT.md` from every id currently
+3. **Union-recompose** `$KIND_APPS_DIR/CONTEXT.md` from every id currently
    in `registry.json` (ids sorted lexicographically, one
-   `# [KING App] <title> (id: <id>)` header per id) — this is what lets
+   `# [KIND App] <title> (id: <id>)` header per id) — this is what lets
    this installer and a sibling tool's own `<tool> king install` (e.g.
-   AIAssistant's `assistant king install`) coexist without clobbering each
+   AIAssistant's `assistant kind install`) coexist without clobbering each
    other's fragment, in either install order.
-4. Generate/update `$KING_APPS_DIR/serve-king.sh`, which exports
-   `KING_CONTEXT=$KING_APPS_DIR/CONTEXT.md` (plus `KING_PLUGINS_DIR` only
-   when some registered app declares `manifests`), then `exec`s KING's own
+4. Generate/update `$KIND_APPS_DIR/serve-kind.sh`, which exports
+   `KING_CONTEXT=$KIND_APPS_DIR/CONTEXT.md` (plus `KING_PLUGINS_DIR` only
+   when some registered app declares `manifests`), then `exec`s KIND's own
    `<KING_STACK_DIR>/king/scripts/serve.sh`. `KING_STACK_DIR` defaults to
-   `~/king-stack`. The user launches KING via this wrapper instead of
-   KING's own `serve.sh` directly.
+   `~/king-stack`. The user launches KIND via this wrapper instead of
+   KIND's own `serve.sh` directly.
 
 `--json` output:
 
@@ -95,15 +95,15 @@ Actions, all confined to `$KING_APPS_DIR` (never `~/king-stack/king/`):
 
 ### `uninstall`
 
-Removes `$KING_APPS_DIR/kbutillib-modeling/` and its `registry.json` entry,
+Removes `$KIND_APPS_DIR/kbutillib-modeling/` and its `registry.json` entry,
 then recomposes `CONTEXT.md` (other apps' fragments are preserved). A
 no-op if the app was never installed (AC #16).
 
 ### `status`
 
 Static coloring (AC #18) — there is no live-orientation API to confirm a
-running KING session actually sees the injected text (none exists; a live
-check is a documented **manual** step: launch via `serve-king.sh`, start a
+running KIND session actually sees the injected text (none exists; a live
+check is a documented **manual** step: launch via `serve-kind.sh`, start a
 session, ask the agent what capabilities it has):
 
 - **green**: CLI on PATH AND verify probe passes AND `CONTEXT.md` contains
@@ -121,10 +121,10 @@ researchos`/`kbu doctor`: 0 = green, 1 = amber, 2 = red.
 - **Versions** (AC #20): `kbutillib`/`cobra`/`modelseedpy` versions, probed
   via a `python -c` import in a subprocess against the same interpreter
   `kbu` runs under.
-- **LLM route** (AC #21): reads KING's own persisted
+- **LLM route** (AC #21): reads KIND's own persisted
   `<KING_STACK_DIR>/king/runs/settings.json` directly (read-only; no
   `king_backend` import — that would be a cross-repo dependency). Absent
-  settings means KING's default route (`anthropic`, direct/local, reported
+  settings means KIND's default route (`anthropic`, direct/local, reported
   as local). Route `cborg` (LBNL's hosted gateway) is reported as
   non-local and produces a WARNING, never a block — this app is intended
   local-only.
@@ -139,26 +139,26 @@ researchos`/`kbu doctor`: 0 = green, 1 = amber, 2 = red.
  "llm_route": "anthropic", "llm_route_is_local": true, "llm_route_warning": null}
 ```
 
-## The `~/king-apps/` on-disk contract
+## The `~/kind-apps/` on-disk contract
 
-`kbu king` and any sibling tool's own vendored `<tool>.king_install`
+`kbu kind` and any sibling tool's own vendored `<tool>.kind_install`
 module (each self-contained, no cross-repo import) interoperate purely
 through this on-disk layout:
 
 ```
-$KING_APPS_DIR/                  # default ~/king-apps
+$KIND_APPS_DIR/                  # default ~/kind-apps
 ├── registry.json                 # {"<id>": {id, title, description, cli,
 │                                  #           verify, manifests, bundle_hash,
 │                                  #           installed_at, updated_at}, ...}
 ├── CONTEXT.md                     # union-recomposed from every registry.json entry
-├── serve-king.sh                   # generated launch wrapper
+├── serve-kind.sh                   # generated launch wrapper
 └── kbutillib-modeling/
     └── skill.md                    # this app's injected orientation prose
 ```
 
 Whichever installer runs last recomposes `CONTEXT.md` as a correct
 superset — installing (or uninstalling) one app never drops another's
-fragment. See `src/kbutillib/king_install.py` for the implementation and
+fragment. See `src/kbutillib/kind_install.py` for the implementation and
 `tests/cli/test_king.py::TestInstall::
 test_install_union_recompose_keeps_other_apps_fragment` (and the matching
 `TestUninstall` case) for the automated proof, using an independent
@@ -166,7 +166,7 @@ fixture bundle standing in for a sibling installer's app.
 
 ## Bundle schema (AC #14)
 
-`src/kbutillib/king_app/bundle.json` (shipped as package data — see
+`src/kbutillib/kind_app/bundle.json` (shipped as package data — see
 `[tool.setuptools.package-data]` in `pyproject.toml`):
 
 ```json
@@ -183,9 +183,9 @@ fixture bundle standing in for a sibling installer's app.
 optional. The verify probe passes when the command exits 0 and (if
 `ok_text` is given) that text appears in its stdout.
 
-`src/kbutillib/king_app/skill.md` is authored from the frozen `kbu model
+`src/kbutillib/kind_app/skill.md` is authored from the frozen `kbu model
 --help` surface (Module B, already merged) — see
 [`kbu-model-cli.md`](kbu-model-cli.md) for the CLI reference it summarizes
-for the agent. It is injected into KING sessions via `KING_CONTEXT` only
-and is **not** registered with `claude-skills` (AC #22) — KING sessions
+for the agent. It is injected into KIND sessions via `KING_CONTEXT` only
+and is **not** registered with `claude-skills` (AC #22) — KIND sessions
 have no `Skill` tool to invoke a registered skill with.

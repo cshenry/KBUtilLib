@@ -2,12 +2,12 @@
 
 You have a `kbu` CLI on PATH. Its `kbu verab` verb group gives you
 verAB O-demethylase (EC 1.14.13.82) reaction-discovery, enumeration,
-screening, and KING artifact emission over KBUtilLib's `VerabUtils` API.
+screening, and KIND artifact emission over KBUtilLib's `VerabUtils` API.
 
 ## The canonical arc
 
 ```
-discover → enumerate → screen → emit-king
+discover → enumerate → screen → emit-kind
 ```
 
 Run stages in that order. Each verb accepts `--json` for stable,
@@ -19,7 +19,7 @@ parseable output.
 kbu verab discover   --generations N [--seeds SMILES,...] [--backend pickaxe|retrorules] [--json]
 kbu verab enumerate  --result RESULT.json [--json]
 kbu verab screen     --result RESULT.json [--threshold F] [--json]
-kbu verab emit-king  --result RESULT.json --out DIR [--json]
+kbu verab emit-kind  --result RESULT.json --out DIR [--json]
 ```
 
 ## Scientific context
@@ -37,6 +37,6 @@ rule set when the mechinformed TSV is not found.
 The `screen` verb filters expansion products against the verAB activity
 model, ranking hits by predicted demethylation likelihood.
 
-The `emit-king` verb writes a KING-ready artifact bundle (seeds.tsv,
+The `emit-kind` verb writes a KING-ready artifact bundle (seeds.tsv,
 seeds.csv, discovered_rules.tsv, target_transformation.txt, prompt.md,
 manifest.json) into the specified output directory.

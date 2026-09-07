@@ -35,8 +35,8 @@ Usage via the toolkit::
     # Phase 2 — substructure scan + screening
     methoxy_cpds = kbu.verab.enumerate_methoxy_aromatics()
     report = kbu.verab.screen(rule_operators=result.operators, compounds=methoxy_cpds)
-    # KING artifact emission
-    paths = kbu.verab.emit_kind_workflow("/tmp/king_run")
+    # KIND artifact emission
+    paths = kbu.verab.emit_kind_workflow("/tmp/kind_run")
     # Introspection
     print(kbu.verab.status())
 """
@@ -240,7 +240,7 @@ class VerabUtils:
         *,
         discovery: Optional[VerabDiscoveryResult] = None,
     ) -> Dict[str, Any]:
-        """Write a reproducible KING coscientist input directory.
+        """Write a reproducible KIND coscientist input directory.
 
         If *discovery* is ``None`` an empty :class:`VerabDiscoveryResult` with
         the default rule_set/seeds is used (seeds only; no operators).

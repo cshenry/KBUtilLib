@@ -13,6 +13,7 @@ import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -100,7 +101,7 @@ class TestVerabGroupHelp:
     def test_group_lists_subcommands(self):
         runner = CliRunner()
         result = runner.invoke(main, ["verab", "--help"])
-        for sub in ("discover", "enumerate", "screen", "emit-king"):
+        for sub in ("discover", "enumerate", "screen", "emit-kind"):
             assert sub in result.output, (
                 f"Subcommand '{sub}' not listed in 'kbu verab --help'; output:\n{result.output}"
             )
@@ -111,7 +112,7 @@ class TestVerabGroupHelp:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("subcmd", ["discover", "enumerate", "screen", "emit-king"])
+@pytest.mark.parametrize("subcmd", ["discover", "enumerate", "screen", "emit-kind"])
 def test_subcommand_help_exit_zero(subcmd: str):
     runner = CliRunner()
     result = runner.invoke(main, ["verab", subcmd, "--help"])
@@ -226,7 +227,7 @@ class TestScreenJson:
 
 
 class TestEmitKingJson:
-    """``kbu verab emit-king --json`` emits valid JSON artifacts dict."""
+    """``kbu verab emit-kind --json`` emits valid JSON artifacts dict."""
 
     def test_json_output_valid(self):
         runner = CliRunner()
@@ -234,7 +235,7 @@ class TestEmitKingJson:
             fake_toolkit = MagicMock()
             fake_toolkit.verab.emit_kind_workflow.return_value = _canned_kind_artifacts()
             mock_get_toolkit.return_value = fake_toolkit
-            result = runner.invoke(main, ["verab", "emit-king", "--json"])
+            result = runner.invoke(main, ["verab", "emit-kind", "--json"])
 
         assert result.exit_code == 0, f"exit {result.exit_code}:\n{result.output}"
         parsed = json.loads(result.output)
@@ -271,3 +272,16 @@ class TestOtherCommandsStillRegistered:
         assert "verab" in result.output, (
             f"'verab' not in `kbu --help`; output:\n{result.output}"
         )
+
+def test_emit_king_alias_still_resolves():
+    """The retired ``emit-king`` spelling resolves, but is never advertised.
+
+    Renaming a verb people have in their fingers (and in an unsynced skill on
+    another machine) is only safe if the old spelling keeps working.
+    """
+    from kbutillib.interfaces.cli.verab import verab_cmd
+
+    ctx = click.Context(verab_cmd)
+    assert verab_cmd.get_command(ctx, "emit-king") is not None
+    assert verab_cmd.get_command(ctx, "emit-king").name == "emit-kind"
+    assert "emit-king" not in verab_cmd.list_commands(ctx)

@@ -1,7 +1,7 @@
 {
   "id": "kbutillib-verab",
   "title": "KBUtilLib verAB O-Demethylase",
-  "description": "verAB O-demethylase reaction-discovery and enumeration verbs (discover/enumerate/screen/emit-king) plus a KING artifact emitter, self-installed into a local KING session via `kbu kind install`. Uses EC 1.14.13.82 and canonical seed compounds (vanillate, guaiacol, veratrate).",
+  "description": "verAB O-demethylase reaction-discovery and enumeration verbs (discover/enumerate/screen/emit-kind) plus a KIND artifact emitter, self-installed into a local KIND session via `kbu kind install`. Uses EC 1.14.13.82 and canonical seed compounds (vanillate, guaiacol, veratrate).",
   "cli": "kbu",
   "verify": {
     "cmd": ["kbu", "verab", "--help"],

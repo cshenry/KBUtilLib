@@ -122,7 +122,7 @@ kbu model exec analysis.py --json -- --some-arg value
 2. **KBase workspace reference** — any value containing `/` that is not an
    existing local file is treated as `wsid/object_name` and resolved via
    `KBModelUtils.get_media(..., msmedia=True)`. Requires `KB_AUTH_TOKEN`
-   and network — do not use this form in a local-only KING session unless
+   and network — do not use this form in a local-only KIND session unless
    you know a token is configured.
 
 ## Objective vocabulary (`--objective`)
@@ -196,6 +196,6 @@ PY
   as a Claude Code skill (no `~/.claude/skills/` entry), because this
   session has no `Skill` tool to invoke one with.
 - These modeling verbs are intended **local-only**. If `kbu kind status`
-  (or the orientation you were given) warns that KING's LLM route is
+  (or the orientation you were given) warns that KIND's LLM route is
   non-local, treat any model/genome data you handle as something you
   should not casually paste into that route.

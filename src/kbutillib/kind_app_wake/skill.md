@@ -107,7 +107,7 @@ tell them a wake was requested, and name the `trigger_id`.
   session and are treated as a loop that got past the depth cap.
 - Envelopes carry a depth counter capped at 3. Do not try to work around it.
 - `--from` and `--to` must differ; writing into your own inbox is refused.
-- **This capability exists only on primary-laptop.** A KING/KOROS session
+- **This capability exists only on primary-laptop.** A KIND session
   running on the BERDL pod has neither `persistentai` nor the Dropbox-synced
   inbox, and there is no cross-machine substitute. If `persistentai` is not on
   `PATH`, say the capability is unavailable here rather than looking for

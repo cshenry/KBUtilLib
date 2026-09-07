@@ -47,7 +47,7 @@ python -m pytest tests/ -q --tb=short
 | `modeling/` | 7 | Metabolic modeling: gapfilling, FBA, network expansion, thermo, flux loops |
 | `notebook/` | 11 | Jupyter notebook utilities |
 | `researchos/` | 1 | ResearchOS integration tests |
-| `verab/` | 6 | verAB lignin-degradation pathway: rule discovery, CLI, screening, KING workflow |
+| `verab/` | 6 | verAB lignin-degradation pathway: rule discovery, CLI, screening, KIND workflow |
 
 ## Fixture Discovery
 

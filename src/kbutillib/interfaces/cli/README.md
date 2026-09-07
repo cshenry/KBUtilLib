@@ -33,12 +33,12 @@ kbu new-capability              # interactive scaffold for a new @capability
 kbu doctor                      # check all backend availability (exits 0 if all ok)
 ```
 
-### KING agent bundle commands
+### KIND agent bundle commands
 
 ```console
-kbu kind status                 # show installed KING bundles
-kbu kind install <bundle>       # install a KING bundle
-kbu kind uninstall <bundle>     # remove a KING bundle
+kbu kind status                 # show installed KIND bundles
+kbu kind install <bundle>       # install a KIND bundle
+kbu kind uninstall <bundle>     # remove a KIND bundle
 ```
 
 ## What lives here

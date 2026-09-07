@@ -9,7 +9,7 @@ compound screening via the Verab subpackage.
 
 Two distinct capabilities live here. `NetworkExpansionUtils` expands a seed set of compounds
 through reaction rules to discover reachable metabolites and reactions. `VerabUtils` (backed by
-`verab/`) provides SMARTS rule discovery, substructure screening, KING artifact generation, and
+`verab/`) provides SMARTS rule discovery, substructure screening, KIND artifact generation, and
 substructure analysis. Both share a common abstract backend interface defined in `base.py`.
 
 ## Canonical imports

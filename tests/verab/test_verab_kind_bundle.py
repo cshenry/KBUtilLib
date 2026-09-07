@@ -109,7 +109,7 @@ def test_skill_md_mentions_kbu_verab_verbs():
     """skill.md must document all four verAB verbs."""
     result = load_bundle(BUNDLE_DIR)
     skill_md = result["skill_md"]
-    for verb in ("discover", "enumerate", "screen", "emit-king"):
+    for verb in ("discover", "enumerate", "screen", "emit-kind"):
         assert verb in skill_md, f"skill.md must mention verb '{verb}'"
 
 

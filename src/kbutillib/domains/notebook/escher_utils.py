@@ -1495,6 +1495,67 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
 
         return output_path
 
+    def create_fitness_dashboard(self, model_result, fitness_result, map, output_path,
+                                 propagated_fitness=None, experimental_genes=None,
+                                 annotation=None, agreement=None,
+                                 title="Fitness · Model dashboard", subtitle=""):
+        """Render a self-contained interactive fitness/model dashboard (one HTML).
+
+        Consumes the *native JSON* outputs of the KBDL pipeline and renders one
+        Escher map recolored by fitness CLASS (not flux) via a condition dropdown
+        and an FVA-solution dropdown, plus toggleable experimental/propagated
+        RB-TnSeq badge layers and tabular views (genes+annotation, reactions+classes,
+        conditions, concordance). Cross-genome: keys purely on ModelSEED reaction ids.
+
+        Args:
+            model_result: KBDLModelReconstruction result (dict or path) — its ``model``
+                (cobra JSON) drives GPR/reactions; its ``gaa_data.v2_reaction_fva`` (if
+                present) becomes the FVA-solution dropdown layers.
+            fitness_result: KBDLFitnessModelAnalysis result (dict or path). Its
+                ``gaa_data.v2_fitness_simulation_reaction`` supplies per-condition
+                reaction class + flux.
+            map: map identifier resolvable by :meth:`_load_map` (e.g. ``"modelseed_core"``,
+                ``"modelseed_global"``) or a path to an Escher/KBase map JSON.
+            output_path: where to write the dashboard HTML.
+            propagated_fitness: propagated fitness ({gene: {condition: score}}) or the full
+                KBDLFitnessProp result (its ``fitness`` block is used) — drives the
+                propagated badge + concordance. dict or path.
+            experimental_genes: iterable of gene ids that carry EXPERIMENTAL RB-TnSeq —
+                drives the experimental badge (empty is fine; the layer just stays empty).
+            annotation: KBDLGenomeAnnotation result ({gene: {tool: {ns: [..]}}}) for the
+                gene-annotation table. dict or path.
+            agreement: annotation-agreement JSON (per_gene_confident) for the agreement
+                column. dict or path.
+            title, subtitle: dashboard header text.
+
+        Returns:
+            output_path.
+        """
+        import os as _os
+
+        from .fitness_dashboard import build_dashboard_html
+
+        escher_js = _os.path.join(_import_escher_static(), "escher.min.js")
+        with open(escher_js, encoding="utf-8") as fh:
+            escher_js_text = fh.read()
+        map_json = self._load_map(map)
+        html = build_dashboard_html(
+            model_result, fitness_result, map_json, escher_js_text,
+            propagated_fitness=propagated_fitness, experimental_genes=experimental_genes,
+            annotation=annotation, agreement=agreement, title=title, subtitle=subtitle,
+        )
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        return output_path
+
+
+def _import_escher_static() -> str:
+    """Return the path to the installed escher package's ``static`` dir."""
+    import os as _os
+
+    import escher
+    return _os.path.join(_os.path.dirname(escher.__file__), "static")
+
 
 # ── Composition-based implementation ─────────────────────────────────────
 

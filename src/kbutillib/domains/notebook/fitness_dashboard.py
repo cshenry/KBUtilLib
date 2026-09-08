@@ -405,7 +405,9 @@ try{
     fill_screen:false, menu:'zoom', scroll_behavior:'zoom', use_3d_transform:false,
     reaction_styles:['color','size'], reaction_no_data_color:'#31404f', reaction_no_data_size:6,
     reaction_data:initData, reaction_scale:P.reaction_scale, never_ask_before_quit:true,
-    first_load_callback:function(){ try{ builder=window.builder=this; }catch(e){} drawBadges();
+    first_load_callback:function(){ /* NB: escher invokes this unbound, so `this` is Window --
+      do NOT reassign builder here; the escher.Builder() return value below is the real
+      Builder and the only object carrying set_reaction_data. */ drawBadges();
       const n=document.querySelectorAll('#map-container .reaction').length;
       status('map loaded · '+n+' reactions drawn · '+Object.keys(initData).length+' painted ('+condSel.value+')'); }
   });

@@ -1500,7 +1500,7 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
                                  annotation=None, agreement=None,
                                  title="Fitness · Model dashboard", subtitle="",
                                  escher_url="https://unpkg.com/escher@1.8.1/dist/escher.min.js",
-                                 inline_escher=False):
+                                 inline_escher=True):
         """Render a self-contained interactive fitness/model dashboard (one HTML).
 
         Consumes the *native JSON* outputs of the KBDL pipeline and renders one
@@ -1535,16 +1535,25 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         """
         from .fitness_dashboard import build_dashboard_html
 
-        # Escher is loaded from the standalone dist build (escher_url) via <script src>,
-        # the same build Escher's save_html uses. The pip package's static/escher.min.js
-        # is the Jupyter-WIDGET build and does NOT render standalone, so it is not used
-        # here. Set inline_escher=True only if you supply a standalone-build JS at
-        # escher_url pointing to a local file you want embedded for a fully offline file.
+        # Escher is INLINED by default so the dashboard is genuinely self-contained: it
+        # opens from disk, on a plane or behind a lab firewall, with no network at view
+        # time. build_dashboard_html emits the currentScript publicPath shim ahead of the
+        # bundle; without it webpack's auto-publicPath runtime throws and the map renders
+        # blank (see _PUBLICPATH_SHIM). Prefer the locally installed escher package so a
+        # build needs no network either, and fall back to fetching escher_url. Set
+        # inline_escher=False for the <script src> variant, which needs escher_url live
+        # every time the file is opened.
         escher_js_text = None
         if inline_escher:
-            import urllib.request
-            with urllib.request.urlopen(escher_url) as _r:
-                escher_js_text = _r.read().decode("utf-8")
+            import os as _os
+            local = _os.path.join(_import_escher_static(), "escher.min.js")
+            if _os.path.exists(local):
+                with open(local, encoding="utf-8") as _f:
+                    escher_js_text = _f.read()
+            else:
+                import urllib.request
+                with urllib.request.urlopen(escher_url) as _r:
+                    escher_js_text = _r.read().decode("utf-8")
         map_json = self._load_map(map)
         html = build_dashboard_html(
             model_result, fitness_result, map_json, escher_js=escher_js_text,

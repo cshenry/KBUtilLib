@@ -1,10 +1,12 @@
 """Self-contained interactive fitness/model dashboard generator.
 
 Given the *native JSON* outputs of the KBDL pipeline — a model-reconstruction
-result and a fitness-model-analysis result — render ONE self-contained HTML
-dashboard (inlined Escher map + inlined JS; no external <script src>, so it
-satisfies a strict CSP). The same code visualizes any genome because it keys
-purely on ModelSEED reaction ids.
+result and a fitness-model-analysis result — render ONE HTML dashboard (map data
++ all overlay data + JS inlined). Escher itself is loaded from the standalone
+``dist`` build (the same build Escher's ``save_html`` uses) via a ``<script src>``
+tag by default; pass ``inline_escher=True`` for a fully self-contained/offline
+file (which then requires network only at build time). The same code visualizes
+any genome because it keys purely on ModelSEED reaction ids.
 
 Design (approved JS-swap shell):
   * one Escher map, recolored in-browser via ``builder.set_reaction_data`` when
@@ -261,11 +263,48 @@ def _assemble(model_result, fitness_result, map_json,
     }
 
 
-def build_dashboard_html(model_result, fitness_result, map_json, escher_js: str,
+ESCHER_CDN = "https://unpkg.com/escher@1.8.1/dist/escher.min.js"
+
+
+# Escher's dist bundles are built with webpack ``output.publicPath: 'auto'``. That
+# runtime derives the public path from ``document.currentScript.src``, falling back
+# to scanning <script> tags for one whose src matches /^http(s?):/ — and it THROWS
+# ("Automatic publicPath is not supported in this browser") when neither yields a
+# URL. Both fail for an inlined bundle: an inline <script> has src "", and the
+# fallback's http(s)-only regex can never be satisfied by a file:// page. The bundle
+# then aborts before assigning window.escher and the map silently renders blank.
+#
+# publicPath is only ever consulted for lazy-loaded chunks, which a single inlined
+# bundle never requests, so any truthy value is safe. Shim currentScript to report a
+# SCRIPT element carrying the page URL, deferring to the native getter whenever it
+# does supply a src (i.e. the <script src> path, which is unaffected).
+_PUBLICPATH_SHIM = (
+    "<script>/* escher inline-bundle publicPath shim */(function(){"
+    "var d=Object.getOwnPropertyDescriptor(Document.prototype,'currentScript');"
+    "Object.defineProperty(document,'currentScript',{configurable:true,get:function(){"
+    "var c=d&&d.get?d.get.call(document):null;"
+    "return (c&&c.src)?c:{tagName:'SCRIPT',src:location.href};}});})();</script>"
+)
+
+
+def build_dashboard_html(model_result, fitness_result, map_json, escher_js=None,
                          propagated_fitness=None, experimental_genes=None,
                          annotation=None, agreement=None, title="Fitness · Model dashboard",
-                         subtitle="") -> str:
-    """Assemble + render the full dashboard HTML string."""
+                         subtitle="", escher_url: str = ESCHER_CDN) -> str:
+    """Assemble + render the full dashboard HTML string.
+
+    Escher is loaded from ``escher_url`` (the standalone ``dist`` build, the same
+    one Escher's own ``save_html`` references) via a ``<script src>`` tag. Pass
+    ``escher_js`` (any Escher bundle as a JS string, including the pip package's
+    ``static/escher.min.js``) for a fully self-contained/offline file; it is
+    emitted after ``_PUBLICPATH_SHIM``, without which an inlined bundle throws on
+    webpack's auto-publicPath and the map renders blank. The Jupyter-widget build
+    does render standalone once that shim is in place.
+    """
+    if escher_js:
+        escher_include = _PUBLICPATH_SHIM + "<script>" + escher_js + "</script>"
+    else:
+        escher_include = '<script src="%s" crossorigin="anonymous"></script>' % escher_url
     model_result = _load(model_result)
     fitness_result = _load(fitness_result)
     map_json = _load(map_json)
@@ -291,7 +330,7 @@ def build_dashboard_html(model_result, fitness_result, map_json, escher_js: str,
         "tables": D["tables"],
     }
     payload_json = json.dumps(payload, default=list)
-    return _HTML_TEMPLATE.replace("__ESCHER_JS__", escher_js) \
+    return _HTML_TEMPLATE.replace("__ESCHER_INCLUDE__", escher_include) \
                          .replace("__PAYLOAD__", payload_json) \
                          .replace("__TITLE__", title) \
                          .replace("__SUBTITLE__", subtitle) \
@@ -340,7 +379,7 @@ th{position:sticky;top:0;background:#1e2b3a;cursor:pointer}tr:hover td{backgroun
 <div class="tabs" id="tabs"></div><div class="tabbody" id="tabbody"></div>
 <p class="muted" style="font-size:11px;margin-top:8px">Lines are colored by fitness CLASS (not flux). Badges mark reactions whose genes carry an RB-TnSeq signal. Data: <span id="counts"></span></p>
 </div>
-<script>__ESCHER_JS__</script>
+__ESCHER_INCLUDE__
 <script>
 const P = __PAYLOAD__;
 document.getElementById('counts').textContent = JSON.stringify(__COUNTS__);

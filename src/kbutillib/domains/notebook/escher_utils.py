@@ -1498,7 +1498,9 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
     def create_fitness_dashboard(self, model_result, fitness_result, map, output_path,
                                  propagated_fitness=None, experimental_genes=None,
                                  annotation=None, agreement=None,
-                                 title="Fitness · Model dashboard", subtitle=""):
+                                 title="Fitness · Model dashboard", subtitle="",
+                                 escher_url="https://unpkg.com/escher@1.8.1/dist/escher.min.js",
+                                 inline_escher=False):
         """Render a self-contained interactive fitness/model dashboard (one HTML).
 
         Consumes the *native JSON* outputs of the KBDL pipeline and renders one
@@ -1531,18 +1533,24 @@ class EscherUtils(KBModelUtils, MSBiochemUtils):
         Returns:
             output_path.
         """
-        import os as _os
-
         from .fitness_dashboard import build_dashboard_html
 
-        escher_js = _os.path.join(_import_escher_static(), "escher.min.js")
-        with open(escher_js, encoding="utf-8") as fh:
-            escher_js_text = fh.read()
+        # Escher is loaded from the standalone dist build (escher_url) via <script src>,
+        # the same build Escher's save_html uses. The pip package's static/escher.min.js
+        # is the Jupyter-WIDGET build and does NOT render standalone, so it is not used
+        # here. Set inline_escher=True only if you supply a standalone-build JS at
+        # escher_url pointing to a local file you want embedded for a fully offline file.
+        escher_js_text = None
+        if inline_escher:
+            import urllib.request
+            with urllib.request.urlopen(escher_url) as _r:
+                escher_js_text = _r.read().decode("utf-8")
         map_json = self._load_map(map)
         html = build_dashboard_html(
-            model_result, fitness_result, map_json, escher_js_text,
+            model_result, fitness_result, map_json, escher_js=escher_js_text,
             propagated_fitness=propagated_fitness, experimental_genes=experimental_genes,
             annotation=annotation, agreement=agreement, title=title, subtitle=subtitle,
+            escher_url=escher_url,
         )
         with open(output_path, "w", encoding="utf-8") as fh:
             fh.write(html)

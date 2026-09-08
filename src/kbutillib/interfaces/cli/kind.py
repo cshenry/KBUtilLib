@@ -6,13 +6,17 @@ the Acceptance Criteria it implements). Reads this repo's OWN packaged
 bundles — no cross-repo dependency; a checkout/install of KBUtilLib alone
 is enough to run ``kbu kind install``.
 
-This repo ships more than one bundle, selected with ``--app``:
+This repo ships one bundle, still selectable with ``--app`` (the plumbing
+stays multi-bundle so adding another later needs no shape change):
 
 * ``modeling`` (``src/kbutillib/kind_app/``, id ``kbutillib-modeling``) —
   the metabolic-modeling verbs.
-* ``wake`` (``src/kbutillib/kind_app_wake/``, id ``persistentai-wake``) —
-  firing a triggered wake at luna/miles over the ``persistentai`` trigger
-  rail.
+
+The ``persistentai-wake`` bundle (firing a triggered wake at Chris's
+stewards) was REMOVED from this repo on 2026-09-08: a persistentai
+capability had no business shipping from the modeling library, and it had
+gone stale (pre-rename luna/miles, hardcoded primary-laptop). It now lives
+as the ``trigger-wake`` KIND app in AIAssistant.
 
 With no ``--app``, every bundle is acted on. That is deliberate: the point
 of ``kbu kind install`` is "make what this repo offers visible to KING",
@@ -25,8 +29,8 @@ broken). With several apps, the WORST color across them wins — a green
 app does not mask a red sibling.
 
 ``--json`` always emits a LIST of per-app result objects, one per app
-acted on, even when ``--app`` selects exactly one. It was a bare object
-before this repo shipped a second bundle; a shape that changes with the
+acted on, even when ``--app`` selects exactly one -- and it stays a list
+even now that only ``modeling`` remains. A shape that changes with the
 number of apps is the kind of thing that breaks a caller months later.
 """
 
@@ -44,7 +48,6 @@ from ...agents import kind_install
 #: CLI ``--app`` name -> package subdirectory holding that bundle.
 APPS: dict[str, str] = {
     "modeling": "kind_app",
-    "wake": "kind_app_wake",
 }
 
 #: Worst-wins ordering for the aggregate ``status`` exit code.

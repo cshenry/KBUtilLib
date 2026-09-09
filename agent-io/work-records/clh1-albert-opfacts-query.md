@@ -7,7 +7,11 @@ clh1-albert-opfacts-query
 maestro/developer/clh1-albert-opfacts-query
 
 ## commit_shas
-(filled in below after commit -- see final commit list)
+- e6aa1b903b11225b80214b3dec7120cb15aabfe3 -- docs: record trigger-wake dispatch to Albert for clearinghouse OP1 facts
+
+(Verify with `git log 9066c99..HEAD --format=%H` in the worktree if this
+needs re-checking; this second commit's own sha is necessarily omitted
+from the list above, same as the precedent in clh1-current-state-sql.md.)
 
 ## summary
 

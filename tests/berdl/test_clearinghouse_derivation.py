@@ -30,6 +30,14 @@ import duckdb
 import pytest
 
 from kbutillib.domains.kbase.berdl.clearinghouse_derivation import current_state_sql
+from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
+    DUPLICATE_COLLAPSE,
+    INGEST_BATCH_ID_TIE_BREAK,
+    NEWEST_WINS,
+    RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY,
+    SOURCE_ISOLATION,
+    TERM_REMOVAL,
+)
 
 _TABLE_FQN = "result"
 
@@ -56,11 +64,6 @@ def _for_duckdb(sql: str) -> str:
     docstring.
     """
     return sql.replace("`", '"')
-
-
-def _hash(tag: str) -> bytes:
-    """A deterministic 32-byte stand-in for a real sha256 entity_hash."""
-    return tag.encode("ascii").ljust(32, b"\x00")[:32]
 
 
 class ResultFixture:
@@ -116,24 +119,22 @@ def fixture() -> ResultFixture:
 
 
 class TestDuplicateAppendsCollapse:
-    """Property 1: duplicate identical appends collapse to exactly one row."""
+    """Property 1: duplicate identical appends collapse to exactly one row.
+
+    Rows come from :mod:`kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture`
+    -- the same fixture the in-pod OP3 parity check appends to the real
+    ``result`` table -- rather than being re-typed here, so the two
+    cannot drift apart.
+    """
 
     def test_three_byte_identical_appends_yield_one_current_row(self, fixture):
-        entity_hash = _hash("dup")
-        for i in range(3):
-            fixture.insert(
-                entity_hash=entity_hash,
-                result_type="annotation",
-                source="toolA/1",
-                result_type_version="v1",
-                payload={"ns": {"k": "same"}},
-                observed_at=f"2026-01-01 00:0{i}:00",
-                ingest_batch_id=f"01H00000000000000000000{i}",
-            )
+        case = DUPLICATE_COLLAPSE
+        for row in case.rows:
+            fixture.insert(**row)
         rows = [
             row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         ]
         assert len(rows) == 1
 
@@ -142,29 +143,13 @@ class TestNewestWins:
     """Property 2: the newest row (by observed_at) wins per slot."""
 
     def test_later_observed_at_row_is_the_current_one(self, fixture):
-        entity_hash = _hash("newest")
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "old"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000AA",
-        )
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "new"}},
-            observed_at="2026-01-02 00:00:00",
-            ingest_batch_id="01H0000000000000000000AB",
-        )
+        case = NEWEST_WINS
+        for row in case.rows:
+            fixture.insert(**row)
         rows = [
             row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         ]
         assert len(rows) == 1
         assert json.loads(rows[0]["payload"]) == {"ns": {"k": "new"}}
@@ -182,29 +167,9 @@ class TestIngestBatchIdTieBreak:
     def test_greater_ingest_batch_id_wins_regardless_of_insertion_order(
         self, fixture, shuffle_seed
     ):
-        entity_hash = _hash("tie")
-        rows_to_insert = [
-            {
-                "entity_hash": entity_hash,
-                "result_type": "annotation",
-                "source": "toolA/1",
-                "result_type_version": "v1",
-                "payload": {"ns": {"k": "lower_batch"}},
-                "observed_at": "2026-01-01 00:00:00",
-                "ingest_batch_id": "01H0000000000000000000AA",
-            },
-            {
-                "entity_hash": entity_hash,
-                "result_type": "annotation",
-                "source": "toolA/1",
-                "result_type_version": "v1",
-                "payload": {"ns": {"k": "higher_batch"}},
-                "observed_at": "2026-01-01 00:00:00",  # identical timestamp
-                "ingest_batch_id": "01H0000000000000000000AZ",
-            },
-        ]
+        case = INGEST_BATCH_ID_TIE_BREAK
         rng = random.Random(shuffle_seed)
-        order = rows_to_insert[:]
+        order = list(case.rows)
         rng.shuffle(order)
         for row in order:
             fixture.insert(**row)
@@ -212,11 +177,12 @@ class TestIngestBatchIdTieBreak:
         rows = [
             row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         ]
+        winning_row = max(case.rows, key=lambda row: row["ingest_batch_id"])
         assert len(rows) == 1
-        assert rows[0]["ingest_batch_id"] == "01H0000000000000000000AZ"
-        assert json.loads(rows[0]["payload"]) == {"ns": {"k": "higher_batch"}}
+        assert rows[0]["ingest_batch_id"] == winning_row["ingest_batch_id"]
+        assert json.loads(rows[0]["payload"]) == winning_row["payload"]
 
 
 class TestRemovalProperty:
@@ -228,29 +194,13 @@ class TestRemovalProperty:
     def test_key_dropped_in_newer_payload_is_absent_from_current_state(
         self, fixture
     ):
-        entity_hash = _hash("removal")
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"go": {"term": "GO:0001"}, "ec": {"term": "1.1.1.1"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000BA",
-        )
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"go": {"term": "GO:0001"}},  # 'ec' namespace dropped
-            observed_at="2026-01-02 00:00:00",
-            ingest_batch_id="01H0000000000000000000BB",
-        )
+        case = TERM_REMOVAL
+        for row in case.rows:
+            fixture.insert(**row)
         rows = [
             row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         ]
         assert len(rows) == 1
         current_payload = json.loads(rows[0]["payload"])
@@ -260,64 +210,35 @@ class TestRemovalProperty:
 
 class TestSourceIsolation:
     """Property 5: rows from one source never shadow another source's row
-    for the same entity_hash/result_type -- both tools stay current.
+    for the same entity_hash/result_type -- both tools stay current -- and
+    a ``sources`` filter prunes to exactly the requested sources.
     """
 
     def test_two_tools_annotating_same_entity_both_remain_current(self, fixture):
-        entity_hash = _hash("isolation")
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "from_a"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000CA",
-        )
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolB/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "from_b"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000CA",
-        )
+        case = SOURCE_ISOLATION
+        for row in case.rows:
+            fixture.insert(**row)
         rows = {
             row["source"]: row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         }
-        assert set(rows) == {"toolA/1", "toolB/1"}
-        assert json.loads(rows["toolA/1"]["payload"]) == {"ns": {"k": "from_a"}}
-        assert json.loads(rows["toolB/1"]["payload"]) == {"ns": {"k": "from_b"}}
+        source_a, source_b = case.sources
+        assert set(rows) == {source_a, source_b}
+        assert json.loads(rows[source_a]["payload"]) == {"ns": {"k": "from_a"}}
+        assert json.loads(rows[source_b]["payload"]) == {"ns": {"k": "from_b"}}
 
     def test_sources_filter_prunes_to_requested_sources_only(self, fixture):
-        entity_hash = _hash("prune")
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "from_a"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000DA",
-        )
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolB/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "from_b"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000DA",
-        )
+        case = SOURCE_ISOLATION
+        for row in case.rows:
+            fixture.insert(**row)
+        source_a = case.sources[0]
         rows = [
             row
-            for row in fixture.current_state(sources=["toolA/1"])
-            if row["entity_hash"] == entity_hash
+            for row in fixture.current_state(sources=[source_a])
+            if row["entity_hash"] == case.entity_hash
         ]
-        assert {row["source"] for row in rows} == {"toolA/1"}
+        assert {row["source"] for row in rows} == {source_a}
 
 
 class TestResultTypeVersionOutsideSlotKey:
@@ -327,29 +248,13 @@ class TestResultTypeVersionOutsideSlotKey:
     """
 
     def test_slot_with_only_version_difference_collapses_to_one_row(self, fixture):
-        entity_hash = _hash("version")
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v1",
-            payload={"ns": {"k": "old_version"}},
-            observed_at="2026-01-01 00:00:00",
-            ingest_batch_id="01H0000000000000000000EA",
-        )
-        fixture.insert(
-            entity_hash=entity_hash,
-            result_type="annotation",
-            source="toolA/1",
-            result_type_version="v2",  # schema bump, same slot key
-            payload={"ns": {"k": "new_version"}},
-            observed_at="2026-01-02 00:00:00",
-            ingest_batch_id="01H0000000000000000000EB",
-        )
+        case = RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY
+        for row in case.rows:
+            fixture.insert(**row)
         rows = [
             row
             for row in fixture.current_state()
-            if row["entity_hash"] == entity_hash
+            if row["entity_hash"] == case.entity_hash
         ]
         assert len(rows) == 1
         assert rows[0]["result_type_version"] == "v2"

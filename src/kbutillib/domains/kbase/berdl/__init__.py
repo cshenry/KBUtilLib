@@ -20,6 +20,12 @@ described in ``agent-io/prds/berdl-lakehouse-skills/fullprompt.md``:
   the deep module: locus detection, ``databases()``, ``memberships()``,
   ``load()`` (in-pod only, routed through ``data_lakehouse_ingest.ingest``),
   and ``query()``.
+- :mod:`kbutillib.domains.kbase.berdl.clearinghouse_schema` — the
+  ``kbaseincubator.clearinghouse`` content-hash tables (``entity``,
+  ``canonical_content``, ``result``) as pure config dicts for
+  ``BerdlCapability.load``, plus the hex/binary ``entity_hash`` encoding
+  helpers that bridge :mod:`kbutillib.domains.identity.standardizers`
+  (hex) to this schema's binary storage.
 
 ``naming``, ``membership``, and ``tokens`` are pure logic: no network
 calls, no BERDL pod dependency, and no imports of ``berdl_notebook_utils``.
@@ -39,6 +45,10 @@ from .capability import (
     build_ingest_config,
     select_write_mode,
 )
+from .clearinghouse_schema import NAMESPACE as CLEARINGHOUSE_NAMESPACE
+from .clearinghouse_schema import TENANT as CLEARINGHOUSE_TENANT
+from .clearinghouse_schema import decode_entity_hash, encode_entity_hash
+from .clearinghouse_schema import table_configs as clearinghouse_table_configs
 from .membership import decode_memberships
 from .naming import (
     NormalizedDatabase,
@@ -66,4 +76,9 @@ __all__ = [
     "BerdlMembershipUnavailableError",
     "build_ingest_config",
     "select_write_mode",
+    "CLEARINGHOUSE_TENANT",
+    "CLEARINGHOUSE_NAMESPACE",
+    "clearinghouse_table_configs",
+    "encode_entity_hash",
+    "decode_entity_hash",
 ]

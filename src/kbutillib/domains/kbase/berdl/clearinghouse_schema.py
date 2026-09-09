@@ -70,7 +70,7 @@ column name and fail at runtime. Never emit one here.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 #: The BERDL tenant this namespace lives under.
 TENANT = "kbaseincubator"
@@ -236,3 +236,324 @@ def decode_entity_hash(value: bytes) -> str:
             f"{len(value)}."
         )
     return value.hex()
+
+
+# --------------------------------------------------------------------------
+# Idempotent bootstrap
+# --------------------------------------------------------------------------
+#
+# ``BerdlCapability.load()`` (see capability.py) already resolves
+# create-vs-append per table via ``select_write_mode()``, but it can only
+# report what it found *after* it has already written (its per-table
+# ``existed_before``/``effective_mode`` report is produced in the same pass
+# that calls ``data_lakehouse_ingest.ingest``). A caller that wants to
+# refuse a write *before* it happens -- specifically, before appending to a
+# table whose live partitioning disagrees with this module's config --
+# cannot use ``load()`` alone as a read-only probe, because calling it is
+# itself the write.
+#
+# ``bootstrap()`` therefore requires its injected ``capability`` to expose
+# two small, explicit, read-only operations *in addition to* ``load()``:
+#
+#   - ``capability.table_exists(name, namespace=namespace) -> bool``
+#   - ``capability.table_partition_spec(name, namespace=namespace)
+#         -> list[str] | None``
+#
+# Neither method exists on the real ``BerdlCapability`` today (as of this
+# module's ``capability.py``) -- that class exposes ``load()``, ``query()``,
+# ``databases()``, ``memberships()``, and ``locus()``, but no public,
+# read-only "does this table exist / what is its live partition spec"
+# lookup. Wiring a real adapter around ``BerdlCapability`` that implements
+# these two methods (most plausibly via ``capability.query()`` against
+# Iceberg/Spark catalog metadata, which is exactly the kind of thing that
+# cannot be verified off-pod) is explicitly **not** done here -- see this
+# module's tests, which pass a hand-built fake satisfying this contract,
+# and the task's work-record, which states plainly that the live
+# Iceberg-on-Polaris path is therefore unverified by this change.
+
+
+class BootstrapIndeterminateStateError(RuntimeError):
+    """Raised when a table's existence cannot be positively determined.
+
+    Per the bootstrap safety contract: a lookup error, an ambiguous
+    result, or any other unexpected exception from
+    ``capability.table_exists()`` must never be treated as "the table does
+    not exist" and fallen through to an overwrite. This error is raised
+    instead, and no write is attempted for any table in the same
+    :func:`bootstrap` call.
+    """
+
+
+class BootstrapPartitionSpecMismatchError(RuntimeError):
+    """Raised when a live table's partition spec disagrees with the config.
+
+    This is the load-bearing safety check :func:`bootstrap` exists to
+    provide: there is no check anywhere in the ``BerdlCapability.load()``
+    write path comparing a config's ``partition_by`` against a live
+    table's actual partition spec before appending, and changing a live
+    Iceberg table's partition spec through that path is unsupported and
+    unmeasured. Refusing here, before ever calling ``load()``, is the only
+    place that safety can live. No write is attempted for any table in the
+    same :func:`bootstrap` call -- not just the mismatched one.
+    """
+
+
+#: Attached to every dry-run "would create" report entry. A dry-run
+#: reporting "would create" for a table the operator believes already
+#: exists is a red flag about namespace resolution (wrong tenant, wrong
+#: personal-vs-tenant prefix, etc.) -- not a green light to proceed. This
+#: module deliberately does not try to guess or hardcode the "correct"
+#: namespace-resolution rule (tenant-qualified vs. a personal ``my.``
+#: prefix); that is not verifiable off-pod, so :func:`bootstrap` always
+#: takes ``namespace`` as an explicit, required, caller-supplied parameter.
+_NAMESPACE_RESOLUTION_WARNING = (
+    "This table was not found to exist under the namespace you supplied. "
+    "If you expected it to already exist, this is more likely a wrong or "
+    "misresolved 'namespace' argument than a genuinely new table -- "
+    "verify the namespace before proceeding, since proceeding would "
+    "create a *new* table rather than writing to the one you intended."
+)
+
+
+def _normalize_partition_columns(value: str | Sequence[str] | None) -> list[str]:
+    """Normalize a ``partition_by``-shaped value to a canonical list.
+
+    Accepts the same shapes as ``BerdlCapability.load()``'s ``partition_by``
+    (a bare string, a sequence of strings, or absent/``None``) and a live
+    capability's reported spec (``list[str] | None``), and reduces both to
+    the same ``list[str]`` form -- ``[]`` for "unpartitioned" in either
+    case -- so the two are directly comparable by plain equality. Order is
+    preserved (and therefore significant in the comparison): partition
+    column *order* is part of an Iceberg partition spec, not just its
+    membership.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
+def bootstrap(
+    capability: Any,
+    *,
+    namespace: str,
+    tables: Sequence[Mapping[str, Any]] | None = None,
+    dataset: str = NAMESPACE,
+    tenant: str = TENANT,
+    pipeline_name: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Idempotently create-or-verify the clearinghouse tables.
+
+    Safe to run repeatedly against the same namespace: the first run
+    creates each table that does not yet exist; every subsequent run
+    verifies each table's live partition spec against this config and
+    either appends (spec matches) or refuses (spec disagrees) -- it never
+    re-specs a live table's partitioning and never requests
+    ``'overwrite'`` for a table that already exists.
+
+    Required ``capability`` interface (a real :class:`BerdlCapability` does
+    **not** yet implement the first two of these -- see the module-level
+    note above this function; tests inject a fake):
+
+    - ``load(*, dataset, tables, namespace, tenant=None,
+      pipeline_name=None, ...)`` -- same signature/semantics as
+      :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`.
+      Called once, for every table this call resolves to create/append,
+      with every table's requested mode set to ``'append'`` -- ``bootstrap``
+      itself never requests ``'overwrite'``; ``load()``'s own
+      ``select_write_mode()`` promotes ``'append'`` to ``'overwrite'`` for
+      a table it independently confirms does not yet exist (first
+      creation only). Never called at all in ``dry_run`` mode, and never
+      called if any table in this batch fails its partition-spec check or
+      its existence check.
+    - ``table_exists(name, namespace=namespace) -> bool`` -- read-only
+      existence probe for one table. Any exception raised here is treated
+      as "existence could not be positively determined" (see
+      :class:`BootstrapIndeterminateStateError`), never as "does not
+      exist."
+    - ``table_partition_spec(name, namespace=namespace) -> list[str] |
+      None`` -- read-only lookup of a live table's actual partition
+      column names, in declared order. Only called for a table
+      ``table_exists`` reports as already existing. ``None`` or ``[]``
+      both mean "unpartitioned."
+
+    Args:
+        capability: The injected capability object -- see above. In
+            production this is expected to eventually be (an adapter
+            around) :class:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability`;
+            in tests, a fake.
+        namespace: The Iceberg namespace to bootstrap the tables into.
+            Required and must be given explicitly -- ``bootstrap`` never
+            falls back to ``BerdlCapability.load()``'s ``namespace="default"``
+            default, because doing so is a live path to silently
+            overwriting a populated table looked up under the wrong
+            namespace (see :class:`BootstrapPartitionSpecMismatchError`
+            and the module-level "Idempotent bootstrap" note). Determining
+            the *correct* namespace value (tenant-qualified vs. a personal
+            ``my.`` prefix, etc.) is an operator decision this module
+            deliberately does not make for you.
+        tables: The table configs to bootstrap. Defaults to
+            :func:`table_configs` (the three clearinghouse tables). Tests
+            may pass a smaller/synthetic set.
+        dataset: The ``load()`` call's top-level ``dataset``. Defaults to
+            :data:`NAMESPACE`.
+        tenant: The ``load()`` call's ``tenant`` (used for its
+            membership check). Defaults to :data:`TENANT`.
+        pipeline_name: Forwarded to ``load()`` unchanged.
+        dry_run: When ``True``, performs every read-only check (existence,
+            partition-spec comparison) but never calls ``load()`` -- no
+            table is created, appended to, or refused-into. Use this to
+            preview what a real run would do.
+
+    Returns:
+        A dict with ``'namespace'``, ``'dry_run'``, a ``'tables'`` list
+        (one report dict per table -- ``'name'``, ``'exists'``,
+        ``'expected_partition_by'``, ``'actual_partition_by'`` (present
+        only when the table already existed), ``'action'`` (one of
+        ``'create'``, ``'append'``, or -- ``dry_run`` only, in place of
+        raising -- ``'refuse'`` with a ``'reason'`` string), and -- dry-run
+        "create" entries only -- ``'namespace_warning'``), and
+        ``'load_result'`` (the raw return value of the single
+        ``capability.load()`` call covering every table in this batch, or
+        ``None`` in ``dry_run`` mode). In ``dry_run`` mode, a table whose
+        existence could not be determined is reported with
+        ``'exists': None`` and ``'action': 'refuse'`` rather than raising,
+        so the caller sees a full preview across every table instead of
+        stopping at the first indeterminate one.
+
+    Raises:
+        ValueError: ``namespace`` is empty/falsy.
+        BootstrapIndeterminateStateError: Non-``dry_run`` only. A table's
+            existence could not be positively determined. No table in
+            this batch is written.
+        BootstrapPartitionSpecMismatchError: Non-``dry_run`` only. A
+            table's live partition spec disagrees with this config's
+            ``partition_by``. No table in this batch is written -- not
+            just the mismatched one. The message names both the expected
+            and the actual spec and directs the operator to rebuild by
+            replay (the schema is append-only, so replay is cheap) rather
+            than attempting live partition-spec evolution.
+        BerdlLoadRefusedError: Propagated, untouched, from ``load()`` when
+            ``capability`` is off-pod. No fallback write path is
+            attempted -- in particular, this function never imports or
+            uses ``pyiceberg``, which would bypass the schema enforcement
+            that makes a write through ``load()`` sanctioned in the first
+            place. Never raised in ``dry_run`` mode, since ``load()`` is
+            never called.
+    """
+    if not namespace:
+        raise ValueError(
+            "bootstrap: 'namespace' is required and must be given "
+            "explicitly -- never rely on BerdlCapability.load()'s "
+            "namespace='default' fallback, which is a live path to "
+            "overwriting a populated table looked up under the wrong "
+            "namespace."
+        )
+
+    table_specs = list(tables) if tables is not None else table_configs()
+
+    reports: list[dict[str, Any]] = []
+    to_load: list[dict[str, Any]] = []
+
+    for spec in table_specs:
+        name = spec["name"]
+        expected_partition = _normalize_partition_columns(spec.get("partition_by"))
+
+        try:
+            exists = capability.table_exists(name, namespace=namespace)
+            actual_partition: list[str] | None = None
+            if exists:
+                actual_partition = _normalize_partition_columns(
+                    capability.table_partition_spec(name, namespace=namespace)
+                )
+        except Exception as exc:
+            indeterminate_message = (
+                f"bootstrap: could not positively determine the state of "
+                f"table {namespace!r}.{name!r} ({type(exc).__name__}: "
+                f"{exc}). Refusing rather than treating an indeterminate "
+                "lookup as 'does not exist' and falling through to an "
+                "overwrite. No table in this bootstrap call has been "
+                "written. Resolve the lookup failure and re-run."
+            )
+            if not dry_run:
+                raise BootstrapIndeterminateStateError(indeterminate_message) from exc
+            # Dry-run previews rather than raises: record the refusal this
+            # table's indeterminate state would cause on a real run, and
+            # keep checking the remaining tables.
+            reports.append(
+                {
+                    "name": name,
+                    "exists": None,
+                    "expected_partition_by": expected_partition,
+                    "action": "refuse",
+                    "reason": indeterminate_message,
+                }
+            )
+            continue
+
+        report: dict[str, Any] = {
+            "name": name,
+            "exists": exists,
+            "expected_partition_by": expected_partition,
+        }
+
+        if not exists:
+            report["action"] = "create"
+            if dry_run:
+                report["namespace_warning"] = _NAMESPACE_RESOLUTION_WARNING
+            reports.append(report)
+            to_load.append({**dict(spec), "mode": "append"})
+            continue
+
+        report["actual_partition_by"] = actual_partition
+
+        if actual_partition != expected_partition:
+            mismatch_message = (
+                f"bootstrap: refusing to write to {namespace!r}.{name!r} -- "
+                f"its live partition spec {actual_partition!r} does not "
+                f"match this config's partition_by {expected_partition!r}. "
+                "Changing a live Iceberg table's partition spec through "
+                "this write path is unsupported and unmeasured, so this "
+                "bootstrap will never overwrite it or attempt live "
+                "partition-spec evolution. No table in this bootstrap "
+                "call has been written -- not just this one. If "
+                f"{expected_partition!r} is the partitioning you actually "
+                "want, rebuild the table by replay: drop it and recreate "
+                "under the corrected partition_by, then re-ingest -- the "
+                "clearinghouse schema is append-only, so replay is cheap."
+            )
+            if not dry_run:
+                raise BootstrapPartitionSpecMismatchError(mismatch_message)
+            report["action"] = "refuse"
+            report["reason"] = mismatch_message
+            reports.append(report)
+            continue
+
+        report["action"] = "append"
+        reports.append(report)
+        to_load.append({**dict(spec), "mode": "append"})
+
+    if dry_run:
+        return {
+            "namespace": namespace,
+            "dry_run": True,
+            "tables": reports,
+            "load_result": None,
+        }
+
+    load_result = capability.load(
+        dataset=dataset,
+        tables=to_load,
+        namespace=namespace,
+        tenant=tenant,
+        pipeline_name=pipeline_name,
+    )
+
+    return {
+        "namespace": namespace,
+        "dry_run": False,
+        "tables": reports,
+        "load_result": load_result,
+    }

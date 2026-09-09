@@ -26,6 +26,12 @@ described in ``agent-io/prds/berdl-lakehouse-skills/fullprompt.md``:
   ``BerdlCapability.load``, plus the hex/binary ``entity_hash`` encoding
   helpers that bridge :mod:`kbutillib.domains.identity.standardizers`
   (hex) to this schema's binary storage.
+- :mod:`kbutillib.domains.kbase.berdl.clearinghouse_derivation` — the
+  Spark SQL that derives "current state" from the append-only ``result``
+  table: a window function over the ``(entity_hash, result_type,
+  source)`` slot key, keeping the row with the greatest ``(observed_at,
+  ingest_batch_id)`` in each slot. Pure: no session, no I/O, no pod-only
+  imports.
 
 ``naming``, ``membership``, and ``tokens`` are pure logic: no network
 calls, no BERDL pod dependency, and no imports of ``berdl_notebook_utils``.
@@ -45,6 +51,7 @@ from .capability import (
     build_ingest_config,
     select_write_mode,
 )
+from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_schema import NAMESPACE as CLEARINGHOUSE_NAMESPACE
 from .clearinghouse_schema import TENANT as CLEARINGHOUSE_TENANT
 from .clearinghouse_schema import decode_entity_hash, encode_entity_hash
@@ -81,4 +88,5 @@ __all__ = [
     "clearinghouse_table_configs",
     "encode_entity_hash",
     "decode_entity_hash",
+    "current_state_sql",
 ]

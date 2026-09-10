@@ -11,12 +11,20 @@ running that query does not get a stale answer, it gets a **wrong** one,
 because every superseded row is still sitting in the table.
 
 THE SEMANTICS. Current state for a slot -- a slot being one
-``(entity_hash, result_type, source)`` triple -- is the row with the
-greatest ``(observed_at, ingest_batch_id)`` within that slot. This module
-implements that with a window function:
-``ROW_NUMBER() OVER (PARTITION BY entity_hash, result_type, source ORDER
-BY observed_at DESC, ingest_batch_id DESC)``, keeping only rows where that
-number is ``1``.
+``(entity_hash, entity_type, result_type, source)`` 4-tuple -- is the row
+with the greatest ``(observed_at, ingest_batch_id)`` within that slot.
+``entity_type`` is part of the slot key because ``_standardize_protein``
+and ``_standardize_gene_dna`` are the same standardizer (a bare
+``_clean_sequence_letters``), so a sequence over the alphabet
+{A,C,G,T,N} -- every letter of which is also a valid IUPAC amino-acid
+code -- produces a byte-identical ``entity_hash`` whether submitted as a
+protein or as gene DNA; identity is the pair ``(entity_hash,
+entity_type)``, never ``entity_hash`` alone, and a slot key that omitted
+``entity_type`` would let a protein row and a gene_dna row silently
+shadow each other. This module implements the derivation with a window
+function: ``ROW_NUMBER() OVER (PARTITION BY entity_hash, entity_type,
+result_type, source ORDER BY observed_at DESC, ingest_batch_id DESC)``,
+keeping only rows where that number is ``1``.
 
 Two things are deliberate and must never be "fixed":
 
@@ -61,9 +69,10 @@ from .clearinghouse_schema import table_configs
 __all__ = ["current_state_sql"]
 
 #: The slot key: current state is one row per unique combination of these
-#: columns. ``result_type_version`` is deliberately excluded -- see the
-#: module docstring.
-_SLOT_KEY_COLUMNS = ("entity_hash", "result_type", "source")
+#: columns. ``entity_type`` is included because ``entity_hash`` alone does
+#: not identify an entity (see the module docstring); ``result_type_version``
+#: is deliberately excluded -- also see the module docstring.
+_SLOT_KEY_COLUMNS = ("entity_hash", "entity_type", "result_type", "source")
 
 #: The columns that break ties within a slot, in ``ORDER BY`` precedence.
 #: Both are non-null by construction; see the module docstring for why
@@ -107,46 +116,71 @@ def _result_columns() -> list[str]:
     return [part.strip().split(" ", 1)[0] for part in schema_sql.split(",")]
 
 
-def _quote_source_literal(source: str) -> str:
-    """Single-quote a ``source`` value for embedding in the ``WHERE`` clause.
+def _quote_literal(value: str) -> str:
+    """Single-quote a value for embedding in the ``WHERE`` clause.
 
-    ``source`` values are internal, operator-controlled strings
-    (``<tool>/<version>``, per ``clearinghouse_schema``'s partitioning
-    note) -- never end-user input -- so literal embedding with the
-    standard SQL single-quote escape (``'`` -> ``''``) is the correct
-    choice here: :func:`current_state_sql` returns SQL *text* and nothing
-    else, so there is no side channel through which a separate
-    bind-parameter list could travel back to the caller.
+    Used for both ``source`` and ``entity_type`` filter values. Both are
+    internal, operator-controlled strings (``source`` is ``<tool>/<version>``
+    per ``clearinghouse_schema``'s partitioning note; ``entity_type`` is one
+    of the five stored, schema-recognized values) -- never end-user input
+    -- so literal embedding with the standard SQL single-quote escape
+    (``'`` -> ``''``) is the correct choice here: :func:`current_state_sql`
+    returns SQL *text* and nothing else, so there is no side channel through
+    which a separate bind-parameter list could travel back to the caller.
     """
-    return "'" + source.replace("'", "''") + "'"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _in_predicate(column: str, values: list[str]) -> str:
+    """Build one ``<column> IN (...)`` predicate over quoted values.
+
+    Callers only invoke this for a non-empty ``values`` list; the
+    empty-list ("match nothing") case is handled by the caller as a
+    whole-query ``1 = 0`` short-circuit rather than as an ``IN ()``
+    predicate (which is not universally valid SQL and, more importantly,
+    is not the semantics the caller wants -- see :func:`current_state_sql`).
+    """
+    in_list = ", ".join(_quote_literal(value) for value in values)
+    return f"{column} IN ({in_list})"
 
 
 def current_state_sql(
     result_table_fqn: str,
     *,
     sources: list[str] | None = None,
+    entity_types: list[str] | None = None,
 ) -> str:
     """Build the Spark SQL that derives clearinghouse current state.
 
     Selects, from the append-only ``result`` table, exactly one row per
-    ``(entity_hash, result_type, source)`` slot: the row with the
-    greatest ``(observed_at, ingest_batch_id)`` in that slot. See the
-    module docstring for the full semantics and the two deliberate
-    choices (``ingest_batch_id`` as a mandatory tie-break,
-    ``result_type_version`` excluded from the slot key) that must not be
-    "fixed".
+    ``(entity_hash, entity_type, result_type, source)`` slot: the row
+    with the greatest ``(observed_at, ingest_batch_id)`` in that slot.
+    See the module docstring for the full semantics and the deliberate
+    choices (``entity_type`` included in the slot key, ``ingest_batch_id``
+    as a mandatory tie-break, ``result_type_version`` excluded from the
+    slot key) that must not be "fixed".
 
     Args:
         result_table_fqn: The ``result`` table's fully qualified name,
             dot-separated (e.g. ``"kbaseincubator.clearinghouse.result"``).
             Each segment is backtick-quoted in the emitted SQL.
         sources: If given, pre-filters the underlying rows to only these
-            ``source`` values before windowing (``source`` is the
-            table's partition column, so this is a pruning filter, not
-            merely a convenience one). ``None`` (the default) applies no
-            filter. An empty list is a request to match zero sources, so
-            it filters everything out (``WHERE 1 = 0``) rather than being
-            treated as "no filter".
+            ``source`` values before windowing (``source`` is a partition
+            column on ``result``, so this is a pruning filter, not merely
+            a convenience one). ``None`` (the default) applies no filter.
+            An empty list is a request to match zero sources.
+        entity_types: If given, pre-filters the underlying rows to only
+            these ``entity_type`` values before windowing (``entity_type``
+            is also a partition column on ``result``). ``None`` (the
+            default) applies no filter. An empty list is a request to
+            match zero entity types.
+
+        When both ``sources`` and ``entity_types`` are given, the two
+        filters compose with ``AND`` (never ``OR`` -- ``OR`` would
+        silently broaden the read and destroy the pruning both parameters
+        exist for). An empty list on *either* filter yields ``WHERE
+        1 = 0`` for the whole query, rather than combining an ``1 = 0``
+        guard with the other filter's ``IN`` predicate.
 
     Returns:
         SQL text implementing the derivation. Performs no I/O; holds no
@@ -158,13 +192,22 @@ def current_state_sql(
     order_by = ", ".join(f"{col} DESC" for col in _ORDER_COLUMNS)
     table = _quote_fqn(result_table_fqn)
 
-    if sources is None:
-        where_clause = ""
-    elif len(sources) == 0:
+    matches_nothing = (sources is not None and len(sources) == 0) or (
+        entity_types is not None and len(entity_types) == 0
+    )
+
+    if matches_nothing:
         where_clause = "\n    WHERE 1 = 0"
     else:
-        in_list = ", ".join(_quote_source_literal(source) for source in sources)
-        where_clause = f"\n    WHERE source IN ({in_list})"
+        predicates = []
+        if sources is not None:
+            predicates.append(_in_predicate("source", sources))
+        if entity_types is not None:
+            predicates.append(_in_predicate("entity_type", entity_types))
+        if predicates:
+            where_clause = "\n    WHERE " + " AND ".join(predicates)
+        else:
+            where_clause = ""
 
     return (
         "WITH ranked AS (\n"

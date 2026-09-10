@@ -106,8 +106,13 @@ class ResultFixture:
             ],
         )
 
-    def current_state(self, *, sources: list[str] | None = None) -> list[dict]:
-        sql = current_state_sql(_TABLE_FQN, sources=sources)
+    def current_state(
+        self,
+        *,
+        sources: list[str] | None = None,
+        entity_types: list[str] | None = None,
+    ) -> list[dict]:
+        sql = current_state_sql(_TABLE_FQN, sources=sources, entity_types=entity_types)
         columns = [
             "entity_hash",
             "entity_type",
@@ -250,6 +255,150 @@ class TestSourceIsolation:
         assert {row["source"] for row in rows} == {source_a}
 
 
+class TestEntityTypeInSlotKey:
+    """Property 7: entity_type is part of the slot key, not entity_hash alone.
+
+    ``_standardize_protein`` and ``_standardize_gene_dna`` are the same
+    standardizer (a bare ``_clean_sequence_letters``), so a sequence over
+    the alphabet {A,C,G,T,N} produces a byte-identical ``entity_hash``
+    whether submitted as a protein or as gene DNA. A protein row and a
+    gene_dna row that share an entity_hash, result_type and source must
+    therefore occupy TWO distinct slots -- both must survive as current,
+    never collapsed to one by a window function partitioned on
+    entity_hash/result_type/source alone.
+    """
+
+    def test_protein_and_gene_dna_sharing_hash_both_survive(self, fixture):
+        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        shared_kwargs = dict(
+            entity_hash=entity_hash,
+            result_type="annotation",
+            source="parity-check/entity_type_slot_key/toolA",
+            result_type_version="v1",
+            observed_at="2026-01-01 00:00:00",
+            ingest_batch_id="01HENTITYTYPESLOTKEY0000AA",
+        )
+        fixture.insert(
+            entity_type="protein",
+            payload={"kind": "protein"},
+            **shared_kwargs,
+        )
+        fixture.insert(
+            entity_type="gene_dna",
+            payload={"kind": "gene_dna"},
+            **shared_kwargs,
+        )
+        rows = {
+            row["entity_type"]: row
+            for row in fixture.current_state()
+            if row["entity_hash"] == entity_hash
+        }
+        assert set(rows) == {"protein", "gene_dna"}
+        assert json.loads(rows["protein"]["payload"]) == {"kind": "protein"}
+        assert json.loads(rows["gene_dna"]["payload"]) == {"kind": "gene_dna"}
+
+    def test_entity_types_filter_prunes_to_requested_types_only(self, fixture):
+        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        shared_kwargs = dict(
+            entity_hash=entity_hash,
+            result_type="annotation",
+            source="parity-check/entity_type_slot_key/toolA",
+            result_type_version="v1",
+            observed_at="2026-01-01 00:00:00",
+            ingest_batch_id="01HENTITYTYPESLOTKEY0000AB",
+        )
+        fixture.insert(
+            entity_type="protein",
+            payload={"kind": "protein"},
+            **shared_kwargs,
+        )
+        fixture.insert(
+            entity_type="gene_dna",
+            payload={"kind": "gene_dna"},
+            **shared_kwargs,
+        )
+        rows = [
+            row
+            for row in fixture.current_state(entity_types=["protein"])
+            if row["entity_hash"] == entity_hash
+        ]
+        assert {row["entity_type"] for row in rows} == {"protein"}
+
+    def test_entity_types_and_sources_filters_combine_with_and(self, fixture):
+        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        base = dict(
+            entity_hash=entity_hash,
+            result_type="annotation",
+            result_type_version="v1",
+            observed_at="2026-01-01 00:00:00",
+        )
+        # (protein, sourceA), (protein, sourceB), (gene_dna, sourceA)
+        fixture.insert(
+            entity_type="protein",
+            source="parity-check/entity_type_and_source/toolA",
+            payload={"kind": "protein_a"},
+            ingest_batch_id="01HENTITYTYPEANDSOURCE0AA",
+            **base,
+        )
+        fixture.insert(
+            entity_type="protein",
+            source="parity-check/entity_type_and_source/toolB",
+            payload={"kind": "protein_b"},
+            ingest_batch_id="01HENTITYTYPEANDSOURCE0AB",
+            **base,
+        )
+        fixture.insert(
+            entity_type="gene_dna",
+            source="parity-check/entity_type_and_source/toolA",
+            payload={"kind": "gene_dna_a"},
+            ingest_batch_id="01HENTITYTYPEANDSOURCE0AC",
+            **base,
+        )
+        rows = [
+            row
+            for row in fixture.current_state(
+                sources=["parity-check/entity_type_and_source/toolA"],
+                entity_types=["protein"],
+            )
+            if row["entity_hash"] == entity_hash
+        ]
+        assert len(rows) == 1
+        assert rows[0]["entity_type"] == "protein"
+        assert rows[0]["source"] == "parity-check/entity_type_and_source/toolA"
+
+    def test_empty_entity_types_filters_out_everything(self, fixture):
+        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        fixture.insert(
+            entity_hash=entity_hash,
+            entity_type="protein",
+            result_type="annotation",
+            source="parity-check/entity_type_empty/toolA",
+            result_type_version="v1",
+            payload={"kind": "protein"},
+            observed_at="2026-01-01 00:00:00",
+            ingest_batch_id="01HENTITYTYPEEMPTY0000AA",
+        )
+        rows = fixture.current_state(entity_types=[])
+        assert rows == []
+
+    def test_empty_sources_with_entity_types_still_filters_out_everything(
+        self, fixture
+    ):
+        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        fixture.insert(
+            entity_hash=entity_hash,
+            entity_type="protein",
+            result_type="annotation",
+            source="parity-check/entity_type_empty/toolA",
+            result_type_version="v1",
+            payload={"kind": "protein"},
+            observed_at="2026-01-01 00:00:00",
+            ingest_batch_id="01HENTITYTYPEEMPTY0000AB",
+        )
+        rows = fixture.current_state(sources=[], entity_types=["protein"])
+        assert rows == []
+
+
 class TestResultTypeVersionOutsideSlotKey:
     """Property 6: rows differing only in result_type_version still
     collapse to one current row -- the version is not part of the slot
@@ -311,6 +460,33 @@ class TestDialectConformance:
     def test_no_nulls_first_or_last(self):
         sql = current_state_sql("ns.result")
         assert "NULLS" not in sql.upper()
+
+    def test_partition_by_names_all_four_slot_key_columns_in_order(self):
+        sql = current_state_sql("ns.result")
+        assert (
+            "PARTITION BY entity_hash, entity_type, result_type, source" in sql
+        )
+
+    def test_entity_types_filter_renders_as_where_in(self):
+        sql = current_state_sql("ns.result", entity_types=["protein", "gene_dna"])
+        assert "WHERE entity_type IN ('protein', 'gene_dna')" in sql
+
+    def test_empty_entity_types_list_filters_out_everything(self):
+        sql = current_state_sql("ns.result", entity_types=[])
+        assert "WHERE 1 = 0" in sql
+
+    def test_no_entity_types_filter_when_none(self):
+        sql = current_state_sql("ns.result")
+        assert "entity_type IN" not in sql
+
+    def test_sources_and_entity_types_combine_with_and(self):
+        sql = current_state_sql(
+            "ns.result", sources=["toolA/1"], entity_types=["protein"]
+        )
+        assert (
+            "WHERE source IN ('toolA/1') AND entity_type IN ('protein')" in sql
+        )
+        assert " OR " not in sql
 
     def test_function_returns_plain_text_with_no_i_o(self):
         # Calling it twice with the same args is byte-identical -- pure.

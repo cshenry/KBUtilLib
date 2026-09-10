@@ -42,9 +42,10 @@ tool output and can be found again later with a simple ``source LIKE
 'parity-check/%'`` filter. They are expected to remain in the append-only
 ``result`` table forever -- re-running this script appends *more* rows to
 the same fixture slots, which changes nothing about the current-state
-answer for those slots (same ``entity_hash``/``result_type``/``source``,
-so still the same slot; newest ``(observed_at, ingest_batch_id)`` still
-wins). They can never shadow, or be shadowed by, a real annotation's slot.
+answer for those slots (same ``entity_hash``/``entity_type``/
+``result_type``/``source``, so still the same slot; newest
+``(observed_at, ingest_batch_id)`` still wins). They can never shadow, or
+be shadowed by, a real annotation's slot.
 
 Usage (from a kbhub notebook cell or terminal), after confirming OP1 and
 OP2 in the runbook:
@@ -113,6 +114,28 @@ def _build_fixture_dataframe(spark: Any):
     ``clearinghouse_schema._RESULT_COLUMNS``) -- an explicit schema is
     built here rather than left to inference precisely so this doesn't
     silently write ``observed_at`` as a string.
+
+    BOTH THE SCHEMA AND THE ROWS ARE BUILT FROM THE SAME PARSED ``columns``
+    list, and the rows are built POSITIONALLY rather than from a
+    hand-maintained ``Row(field=...)`` keyword list. That is deliberate: it
+    closes two failure modes the keyword list left open.
+
+    * A column added to ``clearinghouse_schema._RESULT_COLUMNS`` is picked
+      up here automatically. The keyword list did not track ``entity_type``
+      when it joined the slot key, so the schema declared eight
+      non-nullable fields while the rows supplied seven -- a mismatch an
+      operator would first have met at the OP3 write step, against the
+      live table (task 914).
+    * ``Row(**kwargs)`` field ORDER is a pyspark-version-dependent detail
+      (Spark sorted keyword fields alphabetically before 3.0 and preserves
+      entry order from 3.0 on), so a keyword-built row's positional
+      alignment against a declared ``StructType`` is not something this
+      script could settle off-pod. Building positionally from the list
+      that built the schema makes the question moot.
+
+    A fixture row missing a declared column now raises ``KeyError`` naming
+    that column, here and off-pod, rather than silently short-supplying
+    the write.
     """
     from datetime import datetime
 
@@ -142,16 +165,16 @@ def _build_fixture_dataframe(spark: Any):
         ]
     )
 
+    def cell(name: str, value: Any) -> Any:
+        """Coerce one fixture value to its declared Spark column type."""
+        if name == "payload":
+            return json.dumps(value)
+        if name == "observed_at":
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        return value
+
     rows = [
-        Row(
-            entity_hash=row["entity_hash"],
-            result_type=row["result_type"],
-            source=row["source"],
-            result_type_version=row["result_type_version"],
-            payload=json.dumps(row["payload"]),
-            observed_at=datetime.strptime(row["observed_at"], "%Y-%m-%d %H:%M:%S"),
-            ingest_batch_id=row["ingest_batch_id"],
-        )
+        Row(*(cell(name, row[name]) for name, _sql_type in columns))
         for row in ALL_PARITY_ROWS
     ]
     return spark.createDataFrame(rows, schema=schema)

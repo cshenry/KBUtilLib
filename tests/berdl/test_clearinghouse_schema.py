@@ -14,6 +14,7 @@ import re
 import pytest
 
 from kbutillib.domains.identity import standardizers
+from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import ALL_PARITY_ROWS
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     NAMESPACE,
     TENANT,
@@ -201,3 +202,41 @@ class TestHexBridgeToStandardizers:
         hex_digest = standardizers.entity_hash("protein", "MKV*")
         binary_value = encode_entity_hash(hex_digest)
         assert decode_entity_hash(binary_value) == hex_digest
+
+
+class TestParityFixtureMatchesResultSchema:
+    """Regression test for task 914: ``scripts/clearinghouse_parity_check.py``
+    builds its Spark rows POSITIONALLY from the ``result`` table's declared
+    column list, looking each column up by name in the fixture dicts. That is
+    only safe while every fixture row supplies exactly the declared columns,
+    which is the invariant asserted here.
+
+    It is asserted in this file, off-pod and without ``pyspark``, because the
+    failure it guards is otherwise invisible until an operator runs OP3
+    against the live table: when ``entity_type`` joined the slot key, the
+    parity script's hand-maintained ``Row(field=...)`` keyword list was not
+    updated, so the schema declared eight non-nullable fields while the rows
+    supplied seven. Do not remove this as redundant with the DuckDB
+    derivation tests -- those insert positionally from a hand-written
+    ``INSERT`` statement and so cannot detect a fixture/schema divergence.
+    """
+
+    def _result_column_names(self):
+        configs = {table["name"]: table for table in table_configs()}
+        return list(_columns_from_schema_sql(configs["result"]["schema_sql"]))
+
+    def test_every_fixture_row_supplies_exactly_the_declared_result_columns(self):
+        declared = set(self._result_column_names())
+        assert declared, "result schema declared no columns"
+        for index, row in enumerate(ALL_PARITY_ROWS):
+            assert set(row) == declared, (
+                f"ALL_PARITY_ROWS[{index}] does not match the declared result "
+                f"columns: missing {sorted(declared - set(row))!r}, "
+                f"unexpected {sorted(set(row) - declared)!r}"
+            )
+
+    def test_entity_type_is_declared_and_supplied_by_every_fixture_row(self):
+        # Named separately from the set-equality test above so a future
+        # regression on this specific column fails with an obvious name.
+        assert "entity_type" in self._result_column_names()
+        assert all("entity_type" in row for row in ALL_PARITY_ROWS)

@@ -94,6 +94,7 @@ RESULT_TABLE_FQN = f"{TENANT}.{NAMESPACE}.result"
 #: ``clearinghouse_schema``'s ``result`` table declaration.
 _RESULT_COLUMNS = (
     "entity_hash",
+    "entity_type",
     "result_type",
     "source",
     "result_type_version",

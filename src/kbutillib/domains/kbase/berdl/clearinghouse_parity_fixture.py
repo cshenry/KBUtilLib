@@ -33,8 +33,12 @@ write to, and the prefix is what keeps them from ever being mistaken for
 real tool output and lets an operator find and account for them later.
 Per the runbook, these rows are expected to remain in the table
 permanently -- the schema is append-only by design -- and this is
-harmless, since each occupies its own ``(entity_hash, result_type,
-source)`` slot and can never shadow or be shadowed by a real slot.
+harmless, since each occupies its own ``(entity_hash, entity_type,
+result_type, source)`` slot and can never shadow or be shadowed by a
+real slot. ``entity_type`` is part of the slot key because
+``_standardize_protein`` and ``_standardize_gene_dna`` are the same
+standardizer, so ``entity_hash`` alone does not uniquely identify an
+entity -- the pair ``(entity_hash, entity_type)`` does.
 """
 
 from __future__ import annotations
@@ -87,9 +91,9 @@ class ParityCase:
             scope its read to exactly this case's rows.
         rows: The fixture rows to insert/append, each shaped as the
             keyword arguments for a ``result``-table row: ``entity_hash``
-            (bytes), ``result_type``, ``source``, ``result_type_version``,
-            ``payload`` (a plain ``dict``, not yet JSON-encoded),
-            ``observed_at``, ``ingest_batch_id``.
+            (bytes), ``entity_type``, ``result_type``, ``source``,
+            ``result_type_version``, ``payload`` (a plain ``dict``, not
+            yet JSON-encoded), ``observed_at``, ``ingest_batch_id``.
     """
 
     property_key: str
@@ -115,6 +119,7 @@ DUPLICATE_COLLAPSE = ParityCase(
     rows=tuple(
         {
             "entity_hash": fixture_entity_hash("parity-dup"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _DUPLICATE_COLLAPSE_SOURCE,
             "result_type_version": "v1",
@@ -139,6 +144,7 @@ NEWEST_WINS = ParityCase(
     rows=(
         {
             "entity_hash": fixture_entity_hash("parity-newest"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _NEWEST_WINS_SOURCE,
             "result_type_version": "v1",
@@ -148,6 +154,7 @@ NEWEST_WINS = ParityCase(
         },
         {
             "entity_hash": fixture_entity_hash("parity-newest"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _NEWEST_WINS_SOURCE,
             "result_type_version": "v1",
@@ -173,6 +180,7 @@ INGEST_BATCH_ID_TIE_BREAK = ParityCase(
     rows=(
         {
             "entity_hash": fixture_entity_hash("parity-tie"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TIE_BREAK_SOURCE,
             "result_type_version": "v1",
@@ -182,6 +190,7 @@ INGEST_BATCH_ID_TIE_BREAK = ParityCase(
         },
         {
             "entity_hash": fixture_entity_hash("parity-tie"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TIE_BREAK_SOURCE,
             "result_type_version": "v1",
@@ -206,6 +215,7 @@ TERM_REMOVAL = ParityCase(
     rows=(
         {
             "entity_hash": fixture_entity_hash("parity-removal"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TERM_REMOVAL_SOURCE,
             "result_type_version": "v1",
@@ -215,6 +225,7 @@ TERM_REMOVAL = ParityCase(
         },
         {
             "entity_hash": fixture_entity_hash("parity-removal"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TERM_REMOVAL_SOURCE,
             "result_type_version": "v1",
@@ -244,6 +255,7 @@ SOURCE_ISOLATION = ParityCase(
     rows=(
         {
             "entity_hash": fixture_entity_hash("parity-isolation"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _SOURCE_ISOLATION_SOURCE_A,
             "result_type_version": "v1",
@@ -253,6 +265,7 @@ SOURCE_ISOLATION = ParityCase(
         },
         {
             "entity_hash": fixture_entity_hash("parity-isolation"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _SOURCE_ISOLATION_SOURCE_B,
             "result_type_version": "v1",
@@ -280,6 +293,7 @@ RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY = ParityCase(
     rows=(
         {
             "entity_hash": fixture_entity_hash("parity-version"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _VERSION_SOURCE,
             "result_type_version": "v1",
@@ -289,6 +303,7 @@ RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY = ParityCase(
         },
         {
             "entity_hash": fixture_entity_hash("parity-version"),
+            "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _VERSION_SOURCE,
             "result_type_version": "v2",  # schema bump, same slot key

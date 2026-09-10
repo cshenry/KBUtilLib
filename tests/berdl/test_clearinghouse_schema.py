@@ -39,6 +39,7 @@ _EXPECTED_COLUMNS = {
     },
     "result": {
         "entity_hash": "BINARY",
+        "entity_type": "STRING",
         "result_type": "STRING",
         "source": "STRING",
         "result_type_version": "STRING",
@@ -76,17 +77,25 @@ class TestTableConfigs:
             actual_columns = _columns_from_schema_sql(configs[name]["schema_sql"])
             assert actual_columns == expected_columns
 
-    def test_result_declares_partition_by_source_and_only_source(self):
+    def test_result_declares_partition_by_source_then_entity_type_in_order(self):
         configs = {table["name"]: table for table in table_configs()}
         partition_by = configs["result"]["partition_by"]
-        if isinstance(partition_by, str):
-            assert partition_by == "source"
-        else:
-            assert list(partition_by) == ["source"]
+        # Order is significant -- an Iceberg partition spec is compared by
+        # list equality, not by membership, so this must not be a set/
+        # membership check: that would pass an order flip that would then
+        # be refused at table-creation time.
+        assert list(partition_by) == ["source", "entity_type"]
 
-    def test_entity_and_canonical_content_declare_no_partition_by(self):
+    def test_entity_declares_partition_by_entity_type(self):
         configs = {table["name"]: table for table in table_configs()}
-        assert "partition_by" not in configs["entity"]
+        partition_by = configs["entity"]["partition_by"]
+        if isinstance(partition_by, str):
+            assert partition_by == "entity_type"
+        else:
+            assert list(partition_by) == ["entity_type"]
+
+    def test_canonical_content_declares_no_partition_by(self):
+        configs = {table["name"]: table for table in table_configs()}
         assert "partition_by" not in configs["canonical_content"]
 
     def test_no_config_value_anywhere_contains_a_parenthesis(self):

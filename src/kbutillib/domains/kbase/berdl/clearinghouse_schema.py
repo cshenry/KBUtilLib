@@ -56,16 +56,27 @@ an in-pod operator step (OP2): create the three tables from a ``kbhub``
 notebook using this module's ``table_configs()``, then inspect the created
 columns' physical types before any production data is loaded.
 
-Partitioning: ``entity`` and ``canonical_content`` are deliberately
-unpartitioned -- bucketing on a hash gives zero read pruning, since a good
-hash scatters uniformly across buckets by design. ``result`` partitions on
-the bare, stored column ``source`` (format ``<tool>/<version>``), because
-that is a real column, not a transform expression. Iceberg partition
-transforms such as ``bucket(256, entity_hash)``, ``truncate(...)``, or
-``days(...)`` are not expressible through this write path: the wrapper
-passes ``partition_by`` straight to PySpark's ``partitionedBy(*cols)`` as
-bare strings, so a transform expression would be read as a nonexistent
-column name and fail at runtime. Never emit one here.
+Partitioning: bucketing on a hash gives zero read pruning, since a good
+hash scatters uniformly across buckets by design -- ``entity_hash`` and
+``content`` are therefore never partition keys anywhere in this module.
+``entity`` partitions on the bare, stored ``entity_type`` column: the
+dedup probe is typed by construction (``standardizers.entity_hash()``
+takes ``entity_type`` as a mandatory positional argument), and identity
+in this schema is the pair ``(entity_hash, entity_type)`` rather than the
+hash alone -- ``entity_type`` is a real, five-valued stored column, which
+is exactly what makes it a usable partition key. ``result`` partitions on
+two bare, stored columns, ``source`` (format ``<tool>/<version>``) then
+``entity_type``, in that order -- the order is significant, since an
+Iceberg partition spec is compared by list equality, not by membership.
+``canonical_content`` remains unpartitioned, but that is deferred pending
+downstream query shapes, not settled: unlike ``entity`` and ``result``,
+no partition key has yet been identified for it, not a considered
+decision that none exists. Iceberg partition transforms such as
+``bucket(256, entity_hash)``, ``truncate(...)``, or ``days(...)`` are not
+expressible through this write path: the wrapper passes ``partition_by``
+straight to PySpark's ``partitionedBy(*cols)`` as bare strings, so a
+transform expression would be read as a nonexistent column name and fail
+at runtime. Never emit one here.
 """
 
 from __future__ import annotations
@@ -101,6 +112,7 @@ _CANONICAL_CONTENT_COLUMNS: tuple[tuple[str, str], ...] = (
 #: Column declarations for the ``result`` table, in DDL order.
 _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entity_hash", "BINARY"),
+    ("entity_type", "STRING"),
     ("result_type", "STRING"),
     ("source", "STRING"),
     ("result_type_version", "STRING"),
@@ -132,11 +144,15 @@ def table_configs() -> list[dict[str, Any]]:
     Each dict is shaped for the ``tables=`` argument of
     :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
     (and, underneath it, :func:`~kbutillib.domains.kbase.berdl.capability.build_ingest_config`):
-    a ``name``, a ``schema_sql`` DDL fragment, and -- for ``result`` only --
-    a ``partition_by`` naming the bare, stored ``source`` column. ``entity``
-    and ``canonical_content`` carry no ``partition_by`` key at all: bucketing
-    a hash column gives zero read pruning, so they are deliberately
-    unpartitioned rather than partitioned on a poor key.
+    a ``name``, a ``schema_sql`` DDL fragment, and -- for ``entity`` and
+    ``result`` -- a ``partition_by`` naming real, stored columns. ``entity``
+    partitions on the bare ``entity_type`` column; ``result`` partitions on
+    the two bare columns ``source`` and ``entity_type``, in that order.
+    ``canonical_content`` carries no ``partition_by`` key at all: bucketing
+    a hash column gives zero read pruning, and that table is
+    content-addressed (two rows colliding on a hash carry identical
+    ``content`` by construction), so it is deliberately unpartitioned
+    rather than partitioned on a poor key.
 
     Returns:
         A new list of three dicts, in the order ``entity``,
@@ -148,6 +164,7 @@ def table_configs() -> list[dict[str, Any]]:
         {
             "name": "entity",
             "schema_sql": _schema_sql(_ENTITY_COLUMNS),
+            "partition_by": "entity_type",
         },
         {
             "name": "canonical_content",
@@ -156,7 +173,7 @@ def table_configs() -> list[dict[str, Any]]:
         {
             "name": "result",
             "schema_sql": _schema_sql(_RESULT_COLUMNS),
-            "partition_by": "source",
+            "partition_by": ["source", "entity_type"],
         },
     ]
 

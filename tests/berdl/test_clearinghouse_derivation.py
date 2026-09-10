@@ -44,6 +44,7 @@ _TABLE_FQN = "result"
 _CREATE_RESULT_TABLE = """
 CREATE TABLE result (
     entity_hash BLOB,
+    entity_type VARCHAR,
     result_type VARCHAR,
     source VARCHAR,
     result_type_version VARCHAR,
@@ -53,7 +54,7 @@ CREATE TABLE result (
 )
 """
 
-_INSERT_ROW = "INSERT INTO result VALUES (?, ?, ?, ?, ?, ?, ?)"
+_INSERT_ROW = "INSERT INTO result VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 
 
 def _for_duckdb(sql: str) -> str:
@@ -83,12 +84,19 @@ class ResultFixture:
         payload: dict,
         observed_at: str,
         ingest_batch_id: str,
+        # Not yet part of the shared parity fixture rows (that is a
+        # separate, later task) -- default every row inserted through
+        # this harness to "protein" so this file's own tests keep
+        # exercising the pre-existing three-column slot key/derivation
+        # logic unchanged while the table's declared column set grows.
+        entity_type: str = "protein",
     ) -> None:
         # Bind the BLOB entity_hash as a parameter -- never a literal.
         self.con.execute(
             _INSERT_ROW,
             [
                 entity_hash,
+                entity_type,
                 result_type,
                 source,
                 result_type_version,
@@ -102,6 +110,7 @@ class ResultFixture:
         sql = current_state_sql(_TABLE_FQN, sources=sources)
         columns = [
             "entity_hash",
+            "entity_type",
             "result_type",
             "source",
             "result_type_version",

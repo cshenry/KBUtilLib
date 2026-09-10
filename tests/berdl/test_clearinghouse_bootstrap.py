@@ -117,9 +117,9 @@ class TestSecondRunNeverRequestsOverwrite:
     def test_second_run_against_existing_tables_requests_append_only(self):
         cap = _FakeCapability(
             existing={
-                "entity": [],
+                "entity": ["entity_type"],
                 "canonical_content": [],
-                "result": ["source"],
+                "result": ["source", "entity_type"],
             }
         )
 
@@ -161,7 +161,7 @@ class TestPartitionSpecGuard:
             bootstrap(cap, namespace=_NAMESPACE, tables=tables)
 
         message = str(excinfo.value)
-        assert "['source']" in message  # expected (config) spec
+        assert "['source', 'entity_type']" in message  # expected (config) spec
         assert "['standardizer_version']" in message  # actual (live) spec
         assert cap.load_calls == []
 
@@ -177,7 +177,7 @@ class TestPartitionSpecGuard:
         assert cap.load_calls == []
 
     def test_matching_live_spec_appends_without_refusing(self):
-        cap = _FakeCapability(existing={"result": ["source"]})
+        cap = _FakeCapability(existing={"result": ["source", "entity_type"]})
         tables = [t for t in table_configs() if t["name"] == "result"]
 
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables)
@@ -186,8 +186,11 @@ class TestPartitionSpecGuard:
         assert cap.load_calls[0]["tables"][0]["mode"] == "append"
 
     def test_unpartitioned_table_with_no_live_partition_matches_none(self):
-        cap = _FakeCapability(existing={"entity": []})
-        tables = [t for t in table_configs() if t["name"] == "entity"]
+        # canonical_content is the table that carries no partition_by --
+        # entity now partitions on entity_type, so it no longer serves as
+        # the "deliberately unpartitioned" example here.
+        cap = _FakeCapability(existing={"canonical_content": []})
+        tables = [t for t in table_configs() if t["name"] == "canonical_content"]
 
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables)
 
@@ -286,9 +289,9 @@ class TestDryRun:
     def test_dry_run_reports_append_for_existing_matching_tables(self):
         cap = _FakeCapability(
             existing={
-                "entity": [],
+                "entity": ["entity_type"],
                 "canonical_content": [],
-                "result": ["source"],
+                "result": ["source", "entity_type"],
             }
         )
         result = bootstrap(cap, namespace=_NAMESPACE, dry_run=True)
@@ -303,7 +306,7 @@ class TestDryRun:
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables, dry_run=True)
 
         assert result["tables"][0]["action"] == "refuse"
-        assert "['source']" in result["tables"][0]["reason"]
+        assert "['source', 'entity_type']" in result["tables"][0]["reason"]
         assert cap.load_calls == []
 
     def test_dry_run_reports_refuse_on_indeterminate_existence_without_raising(self):

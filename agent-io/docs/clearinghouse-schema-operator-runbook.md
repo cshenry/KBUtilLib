@@ -4,6 +4,16 @@
 generally reachable from off-pod worktrees -- treat this document as the
 authoritative reference for the in-pod steps).
 
+**Revised 2026-09-10 for `clearinghouse-lake-1b-partitioned-scheme`**, which
+changed the table layout before OP2 ever ran. The partition specs and the
+`result` slot key below are `-1b`'s. `bootstrap()` reads the live config in
+`clearinghouse_schema.py`, so the DDL it emits is always current -- but the
+expectations this document states are what you compare a dry-run report
+against, and before this revision they described the pre-`-1b` layout. If you
+find yourself reading a dry-run report that disagrees with the text here,
+check `clearinghouse_schema.py` first: the code is the authority, this is a
+description of it.
+
 ## Why this document exists, and why it must be a human
 
 The three clearinghouse tables (`entity`, `canonical_content`, `result`)
@@ -206,9 +216,11 @@ matching `'expected_partition_by'`, and `'action': 'append'`.
 No table is overwritten and no table's partitioning is re-specced.
 
 **How to read a partition-spec refusal.** If a table already exists with a
-live partition spec that disagrees with this module's config (in
-particular, `result` should be partitioned on `source`; `entity` and
-`canonical_content` should be unpartitioned), `bootstrap()` raises
+live partition spec that disagrees with this module's config (as of
+`clearinghouse-lake-1b`: `entity` is partitioned on `entity_type`, `result`
+on `[source, entity_type]`, and `canonical_content` carries no `partition_by`
+key at all -- bucketing it is deliberately deferred pending the `-3-transport`
+and `-4-jobs` access patterns), `bootstrap()` raises
 `BootstrapPartitionSpecMismatchError` naming both the expected and actual
 spec, and **writes nothing for any table in the batch** -- not just the
 mismatched one. **Do not append anyway.** Changing a live Iceberg table's
@@ -296,8 +308,9 @@ What it does:
 mistaken for real tool output, and can be found again later with
 `WHERE source LIKE 'parity-check/%'`. **These rows are expected to remain
 in the append-only `result` table permanently** -- this is expected and
-harmless: they occupy their own `(entity_hash, result_type, source)`
-slots, distinct from any real corpus's slots, and re-running this script
+harmless: they occupy their own
+`(entity_hash, entity_type, result_type, source)` slots, distinct from any
+real corpus's slots, and re-running this script
 appends more rows to those same slots without changing any real
 annotation's current-state answer.
 

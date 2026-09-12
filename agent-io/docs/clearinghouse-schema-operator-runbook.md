@@ -225,8 +225,12 @@ once all three lines print.
    shortcut from inside this runbook.
 4. **Q6 -- "does `kbaseincubator.clearinghouse` exist?" -- has been
    RE-CHECKED at run time, not read off this document or off OP0's
-   write-up.** OP0's reconnaissance found it absent as of 2026-09-10 --
-   **do not cite that date as though it still holds; re-run the check.**
+   write-up.** The most recent finding is OP0's own 2026-09-12 attempt
+   (trigger `004c00fb-1e73-4ebc-b6f0-85909c0c73f4`), which found it
+   absent from the live namespace listing -- a separate, later
+   observation than whatever earlier check the "confirmed absent"
+   phrasing in this runbook's design history traces to. **Do not cite
+   either date as though it still holds; re-run the check.**
    That answer is perishable: if anything creates the namespace under the
    old, unpartitioned pre-`-1b` spec before OP2 runs -- a stray
    `create_namespace_if_not_exists` call (2.0b) against the wrong spec,

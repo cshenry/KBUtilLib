@@ -87,13 +87,26 @@ a. **Catalog fixture: the verbatim output of `DESCRIBE TABLE EXTENDED` and
    real on this cluster. If it's neither, a third parser is a
    one-function addition against the module's existing tests, not a
    rewrite.
-   **Status from the 2026-09-12 attempt: no answer, blocked.** The MCP
-   SQL-execution path (`query_delta_table`, tried against
-   `DESCRIBE TABLE EXTENDED kbaseincubator.genome_clearhouse.genome_quality`,
-   a real existing table chosen as a stand-in) required the approval
-   described above. The read-only metadata fallback (`get_table_schema`)
-   returns bare column names with no partition information -- there is no
-   lower-risk substitute for this question. Still open.
+   **Status: ANSWERED 2026-09-12, and the answer is that this question has
+   no subject on this cluster.** A first, headless attempt was blocked at
+   the approval prompt described above; an attended pod session then
+   settled it. **There is no partitioned Iceberg table anywhere on the
+   accessible cluster** -- all tables in the `kbaseincubator` tenant plus
+   401 tables across every `rw` tenant (`aiale`, `conwaylab`, `emsl`,
+   `ideas`, `kbase`, `kescience`, `globalusers`) were read via pyiceberg
+   `table.spec()`, and every one has an empty partition spec. So there is
+   no existing DDL to validate the adapter's two parser shapes against,
+   and there will not be until OP2 runs: the clearinghouse `entity` table
+   (partitioned on `entity_type`) will be **among the first partitioned
+   tables on this cluster**.
+   **What to do instead -- this is now an OP2 follow-on, not an OP0
+   blocker.** Immediately after OP2 creates `entity`, run
+   `DESCRIBE TABLE EXTENDED` and `SHOW CREATE TABLE` against it and check
+   the output against the adapter's parsers (see 2.3). If it matches
+   neither documented shape, adding a third parser is a one-function
+   change against the module's existing tests. Do not gate OP2 on a
+   pre-existing example that does not exist.
+   Full answer: `trigger-inbox/replies/op0-qb-rw-membership.json`.
 
 b. **`BerdlCapability().memberships()` -- does this identity hold `'rw'`
    on the target tenant?** Why: `BerdlCapability.load()` raises
@@ -102,11 +115,23 @@ b. **`BerdlCapability().memberships()` -- does this identity hold `'rw'`
    (`capability.py`, `load()`'s preflight) -- so a `'no'` here is the
    **longest lead time in this entire sequence**, and is the reason OP0
    runs before everything else, including OP1.
-   **Status from the 2026-09-12 attempt: no answer at all, not even
-   partial.** `memberships()` is behind the same blocked interpreter as
-   (a), and no MCP tool exposes tenant membership -- zero information was
-   gained on this question. Still open, and still the highest-priority
-   unanswered item in this document.
+   **Status: ANSWERED 2026-09-12 -- `'rw'` CONFIRMED. This gate is
+   CLEAR.** A headless attempt gained nothing (`memberships()` sits behind
+   the approval-gated interpreter, and no MCP tool exposes membership); an
+   attended pod session then ran it and `memberships()` returned cleanly,
+   no traceback, with `kbaseincubator: 'rw'` -- not merely `'ro'`. So
+   `BerdlCapability.load()` will NOT raise `PermissionError` for a write
+   to this tenant, and **the asynchronous human approval step is NOT in
+   this sequence's critical path.**
+   **The identity question is settled too, and settled the strong way.**
+   The answer was obtained as `chenry` / polaris client
+   `f1541da43077cb29`, derived from the pod's `KBASE_AUTH_TOKEN`. There is
+   **no separate service account on kbhub** -- every pod process, attended
+   or unattended, shares that one governance principal. So this is the
+   identity OP2 itself will run as; it is not an interactive-login
+   privilege that the operator step would fail to inherit. That
+   distinction usually has to be checked separately and here it does not.
+   Full answer: `trigger-inbox/replies/op0-qb-rw-membership.json`.
 
 c. **Which `namespace` and `tenant`/`tenant_name` argument values actually
    address `kbaseincubator.clearinghouse`.** The MCP lists namespaces
@@ -218,8 +243,12 @@ once all three lines print.
    unpartitioned) are `clearinghouse-lake-1b-partitioned-scheme`'s;
    confirm that revision merged before trusting the expectations in
    2.1-2.3.
-3. **OP0 confirmed `'rw'` membership** on the target tenant (OP0.b). If
-   OP0.b came back anything other than a confirmed `'rw'`, stop here:
+3. **OP0 confirmed `'rw'` membership** on the target tenant (OP0.b).
+   **This one is already satisfied**: confirmed 2026-09-12 by an attended
+   pod session, `kbaseincubator: 'rw'`, on the same governance principal
+   OP2 runs as (see OP0.b). Tick it and move on -- but tick it by reading
+   OP0.b, not by trusting this sentence. If OP0.b had come back anything
+   other than a confirmed `'rw'`, you would stop here:
    `BerdlCapability.load()` will refuse with `PermissionError`, and its
    own remedy is "an asynchronous human approval step" you cannot
    shortcut from inside this runbook.
@@ -534,6 +563,27 @@ is `string`, **stop before loading any data**: drop the affected table(s),
 adjust however this write path needs to be told to honor `BINARY` (a
 pod-only detail this module deliberately does not guess at), recreate via
 `bootstrap()`, and re-verify with this same check before proceeding.
+
+**Second acceptance item, added after OP0.a: validate the adapter's
+partition-spec parsers here, because this is the first chance anyone
+gets.** OP0.a established there is no pre-existing partitioned Iceberg
+table on this cluster, so `entity` (partitioned on `entity_type`) is
+likely the first one. While you have the session open, capture the
+verbatim output of both:
+
+```python
+print(spark.sql(f"DESCRIBE TABLE EXTENDED `{NAMESPACE}`.`entity`").collect())
+print(spark.sql(f"SHOW CREATE TABLE `{NAMESPACE}`.`entity`").collect())
+```
+
+and check it against `clearinghouse_bootstrap_adapter.py`'s two parsers --
+the `# Partitioning` / `Part 0` block and the `PARTITIONED BY (...)`
+clause. A re-run of `bootstrap()` exercises this for real: it takes the
+`'append'` branch, which calls `table_partition_spec`. If that raises
+`PartitionSpecUnparseableError`, this cluster emits a third shape --
+**add a parser for it; do not stub the method to return `[]`.** Record
+the verbatim output either way, since nobody else has ever seen this
+cluster's partitioned-table DDL.
 
 ---
 

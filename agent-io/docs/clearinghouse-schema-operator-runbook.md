@@ -141,8 +141,25 @@ c. **Which `namespace` and `tenant`/`tenant_name` argument values actually
    GUESS THIS** -- a wrong `namespace` is precisely the
    silent-overwrite-under-the-wrong-name failure `bootstrap()`'s required
    `namespace` argument exists to prevent (see 2.1's dry-run warning).
-   **Status: answered from reading installed pod source, NOT confirmed
-   live.** The 2026-09-12 reply: `BerdlCapability.load()`'s `tenant`
+   **Status: ANSWERED AND CONFIRMED LIVE, 2026-09-12.** An attended pod
+   session probed a namespace that really exists and got an unambiguous
+   split -- exactly one form resolves:
+
+       table_exists('genome_quality', namespace='kbaseincubator.genome_clearhouse')  -> True
+       table_exists('genome_quality', namespace='genome_clearhouse')                 -> False
+
+   So the **dotted, tenant-prefixed form is the one that addresses a
+   namespace**, and the bare form does not resolve at all. That only one
+   form returned True is itself the good outcome: had both resolved, the
+   argument would not disambiguate and a wrong-namespace write would be
+   undetectable from the call site.
+   **The values are therefore settled: `namespace="kbaseincubator.clearinghouse"`
+   (dotted) with `tenant="kbaseincubator"` supplied separately.** They are
+   filled in throughout 2.0b, 2.1, 2.2 and 2.3 below -- as confirmed
+   values, not placeholders. Full answer:
+   `trigger-inbox/replies/op0-qcd-namespace-args.json`.
+   The source-derived reasoning this confirmed, kept because it explains
+   *why* the split falls where it does: `BerdlCapability.load()`'s `tenant`
    parameter is used only for the read-write membership check
    (`target_tenant = tenant or dataset`, `capability.py`) and is never
    combined with `namespace` to build a table path; `namespace` instead
@@ -164,16 +181,26 @@ d. **What `berdl_notebook_utils.table_exists` returns for a namespace
    that does not exist** -- `False`, or a raise. Needed because of OP2.0b
    below: if it raises, the namespace must exist (OP2.0b) before anything
    calls `table_exists` or runs 2.1's dry run against it, or that call
-   fails outright instead of reporting `'create'`.
-   **Status: partially answered from source, not confirmed live.** The
-   installed `berdl_notebook_utils.table_exists` has no `try`/`except` at
-   all -- a bare `db_table = f"{namespace}.{table_name}"; return
-   spark.catalog.tableExists(db_table)` -- so it will not itself swallow
-   or translate anything. Whether this cluster's Iceberg-REST/Polaris
-   catalog makes PySpark's own `tableExists()` raise or return `False` for
-   a missing namespace is exactly what source-reading cannot settle, and
-   the 2026-09-12 attempt could not run this against a real missing
-   namespace to observe it. Confirm by observation, not inference.
+   fails outright instead of reporting `'create'`. (It does not raise --
+   see the status below.)
+   **Status: ANSWERED AND CONFIRMED LIVE, 2026-09-12 -- it returns
+   `False`, it does NOT raise.** Probed against the genuinely absent
+   namespace:
+
+       table_exists('entity', namespace='kbaseincubator.clearinghouse')  -> False
+       stdout: Table kbaseincubator.clearinghouse.entity does not exist.
+
+   The installed `berdl_notebook_utils.table_exists` has no `try`/`except`
+   at all -- a bare `db_table = f"{namespace}.{table_name}"; return
+   spark.catalog.tableExists(db_table)` -- so this is PySpark's own
+   behaviour against this cluster's Iceberg-REST/Polaris catalog, which
+   resolves a missing namespace as "table not found" rather than an error.
+   **IMPLICATION, and it relaxes the ordering: 2.1's dry run CAN be run
+   before OP2.0b creates the namespace.** It will report `'create'` for
+   all three tables rather than failing outright. Namespace creation stays
+   its own deliberate write step; it simply is not a precondition of the
+   dry run. Full answer:
+   `trigger-inbox/replies/op0-qcd-namespace-args.json`.
 
 **One live fact did land from the 2026-09-12 attempt**, independent of the
 four questions above: `kbaseincubator.clearinghouse` is **absent** from
@@ -375,7 +402,7 @@ a bare `BerdlCapability()` into `bootstrap()` directly -- it is not a bug
 in `bootstrap()`. Import and construct `ClearinghouseBootstrapCapability`
 as shown above and pass that instead.
 
-### 2.0b -- create the namespace (do this before the dry run)
+### 2.0b -- create the namespace (before the REAL run, not necessarily before the dry run)
 
 **Nothing in the sanctioned write path creates a namespace.** `bootstrap()`
 does not -- it only creates tables inside a namespace it assumes already
@@ -389,26 +416,41 @@ anywhere in between.
 src/` finds only its own definition). Since OP0 found
 `kbaseincubator.clearinghouse` absent from the live namespace listing (see
 OP0 and the precondition list below -- **that finding is perishable and
-must be re-checked here, not assumed**), **OP2 fails without this step**:
-`table_exists`, `table_partition_spec`, and `load()` are all asking about
-a namespace that does not exist yet.
+must be re-checked here, not assumed**), **OP2's real run fails without
+this step.**
 
-Run this from an attended pod session, before 2.1's dry run:
+**Be precise about WHERE it fails, because OP0.d settled this and the
+obvious guess is wrong.** `table_exists` does NOT fail on an absent
+namespace -- it was probed live against `kbaseincubator.clearinghouse`
+and returned `False` cleanly, no exception. So the read-only probes are
+fine, and `bootstrap()`'s dry run is fine: it will simply report
+`'action': 'create'` for all three tables, which is the correct answer.
+The failure comes later, at the `data_lakehouse_ingest.ingest()` call the
+real run makes into a namespace that is not there.
+
+**So the ordering is a choice, and the better one is dry run first.**
+2.1 is side-effect-free and costs nothing, and running it before you
+create anything tells you what `bootstrap()` intends while the namespace
+is still absent -- which is also the state in which a `'create'` for all
+three tables is unambiguously right rather than something you have to
+reason about. Create the namespace after the dry run reads clean, and
+before 2.2.
+
+Run this from an attended pod session:
 
 ```python
 from kbutillib.domains.kbase.berdl.transports import InPodTransport
 
-# NAMESPACE/TENANT_NAME are UNRESOLVED PLACEHOLDERS -- see OP0.c, and the
-# matching note in 2.1 below. Fill them in from OP0's confirmed answer,
-# not from memory, and not as a literal copy of the placeholder itself.
-NAMESPACE = "<<OP0.c -- confirm before use>>"
-TENANT_NAME = "<<OP0.c -- confirm before use>>"
+# CONFIRMED LIVE by OP0.c on 2026-09-12 -- the dotted form is the one that
+# resolves; the bare form returns False. Do not shorten NAMESPACE.
+NAMESPACE = "kbaseincubator.clearinghouse"
+TENANT_NAME = "kbaseincubator"
 
 transport = InPodTransport()
 spark = transport.spark_session()
 transport.create_namespace_if_not_exists(
     spark,
-    namespace=NAMESPACE,      # UNRESOLVED -- see above.
+    namespace=NAMESPACE,      # dotted, per OP0.c.
     tenant_name=TENANT_NAME,  # NOTE THE NAME: this parameter is spelled
                               # `tenant_name` here, not `tenant` -- see
                               # the warning below.
@@ -448,21 +490,17 @@ with `dry_run=True` **before** the real run:
 ```python
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import bootstrap
 
-# NAMESPACE/TENANT_NAME are UNRESOLVED PLACEHOLDERS, not confirmed values --
-# see OP0.c. Source-derived reading (NOT live-confirmed): the whole dotted
-# string "kbaseincubator.clearinghouse" for NAMESPACE, a bare
-# "kbaseincubator" for TENANT_NAME. This module's own NAMESPACE constant
-# (clearinghouse_schema.NAMESPACE == "clearinghouse", bare) is a DIFFERENT
-# thing -- the top-level 'dataset' identifier, not this Iceberg-catalog
-# namespace argument -- and must not be assumed to be the same string.
-# Fill these in from OP0's confirmed answer, not from this comment.
-NAMESPACE = "<<OP0.c -- confirm before use>>"
-TENANT_NAME = "<<OP0.c -- confirm before use>>"
+# CONFIRMED LIVE by OP0.c on 2026-09-12. Note that this module's own
+# NAMESPACE constant (clearinghouse_schema.NAMESPACE == "clearinghouse",
+# bare) is a DIFFERENT thing -- the top-level 'dataset' identifier, not
+# this Iceberg-catalog namespace argument. The bare form was probed and
+# returned False; it does not address a namespace. Do not substitute it.
+NAMESPACE = "kbaseincubator.clearinghouse"
+TENANT_NAME = "kbaseincubator"
 
 report = bootstrap(
     my_capability,       # your OP2.0 adapter, not a bare BerdlCapability()
-    namespace=NAMESPACE,  # UNRESOLVED -- see above and OP0.c; do not run
-                          # this with the placeholder still in place.
+    namespace=NAMESPACE,  # dotted, confirmed live -- see OP0.c.
     dry_run=True,
 )
 for table in report["tables"]:
@@ -495,9 +533,7 @@ real run.
 ```python
 report = bootstrap(
     my_capability,
-    namespace=NAMESPACE,  # same UNRESOLVED placeholder as 2.1 -- confirm
-                          # against OP0.c before running; do not re-guess
-                          # a literal here even if 2.1's dry run "worked".
+    namespace=NAMESPACE,  # same confirmed value as 2.1 (OP0.c).
     dry_run=False,
 )
 print(report)
@@ -551,8 +587,8 @@ cluster's Iceberg catalog exposes -- `DESCRIBE`, `SHOW CREATE TABLE`, or
 Spark's catalog API all work):
 
 ```python
-# NAMESPACE is the same UNRESOLVED placeholder as 2.1/2.2 -- OP0.c, not a
-# literal you retype here from this document.
+# NAMESPACE is the same confirmed value as 2.1/2.2 (OP0.c):
+# "kbaseincubator.clearinghouse", dotted.
 for table in ("entity", "canonical_content", "result"):
     print(table, spark.sql(f"DESCRIBE `{NAMESPACE}`.`{table}`").collect())
 ```

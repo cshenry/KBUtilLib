@@ -225,12 +225,20 @@ once all three lines print.
    shortcut from inside this runbook.
 4. **Q6 -- "does `kbaseincubator.clearinghouse` exist?" -- has been
    RE-CHECKED at run time, not read off this document or off OP0's
-   write-up.** The most recent finding is OP0's own 2026-09-12 attempt
-   (trigger `004c00fb-1e73-4ebc-b6f0-85909c0c73f4`), which found it
-   absent from the live namespace listing -- a separate, later
-   observation than whatever earlier check the "confirmed absent"
-   phrasing in this runbook's design history traces to. **Do not cite
-   either date as though it still holds; re-run the check.**
+   write-up.** This absence has now been observed **twice, independently,
+   two days apart** -- and neither confirms the other still holds:
+     - Albert, in-pod, 2026-09-10, read-only, no `COUNT(*)`, nothing
+       written (trigger `64960fc9`; PRD `clearinghouse-lake-1c-pod-operator`
+       names this trigger as the source of record and its own notes call
+       the answer "PERISHABLE" in as many words).
+     - OP0's own 2026-09-12 attempt (trigger
+       `004c00fb-1e73-4ebc-b6f0-85909c0c73f4`), which independently found it
+       absent from the live namespace listing.
+
+   **Two confirmations two days apart make this answer sound more settled,
+   not less perishable -- that inference is exactly backwards. Do not cite
+   either date, or both together, as though repetition were durability;
+   re-run the check.**
    That answer is perishable: if anything creates the namespace under the
    old, unpartitioned pre-`-1b` spec before OP2 runs -- a stray
    `create_namespace_if_not_exists` call (2.0b) against the wrong spec,

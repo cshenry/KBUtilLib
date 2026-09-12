@@ -48,8 +48,114 @@ that stands in for the whole lakehouse boundary -- they do not prove
 anything about the real tenant, the real catalog, or the real column
 types. OP3, and only OP3, runs against the real thing.
 
-Do these three steps **in order**. OP1 is blocking: do not attempt OP2 or
-OP3 until it succeeds.
+Do these four steps **in order**. OP0 is read-only reconnaissance; OP1 is
+blocking: do not attempt OP2 or OP3 until it succeeds.
+
+---
+
+## OP0 -- read-only reconnaissance (do this first)
+
+Before OP1, answer these four questions -- all read-only, none of them
+writes, alters, or drops anything -- in **one attended pod session**, and
+write every answer **verbatim** to
+`~/Dropbox/Projects/AIAssistant/trigger-inbox/replies/`.
+
+**Why OP0 has to be an attended, in-pod, human step, and not something
+dispatched headlessly.** This exact reconnaissance was already attempted
+headlessly once: trigger `004c00fb-1e73-4ebc-b6f0-85909c0c73f4`
+(`jane` -> `albert` on `kbhub`, answered 2026-09-12T18:27Z, status
+`"partial"`). Read that reply in full before you start --
+`~/Dropbox/Projects/AIAssistant/trigger-inbox/replies/004c00fb-1e73-4ebc-b6f0-85909c0c73f4.json`
+-- so you don't re-run an attempt that already failed the same way. It
+found that two of the four questions below need either the conda
+interpreter that has `berdl_notebook_utils` importable
+(`/opt/conda/bin/python3.13`) or the MCP SQL-execution tool
+(`query_delta_table`, `engine="spark"`), and **both require an
+interactive tool-permission approval that no headless poll-wake session
+can grant** -- the read-only MCP metadata tools were not gated, but none
+of them substitutes (see (a) below). That is exactly why this is an
+operator-runbook step rather than an automated one: the approval those
+two paths need is a human sitting at an attended session clicking
+"allow." **Do not re-dispatch that envelope expecting a different
+headless answer -- answer these four from an attended pod session.**
+
+a. **Catalog fixture: the verbatim output of `DESCRIBE TABLE EXTENDED` and
+   of `SHOW CREATE TABLE`, against any existing partitioned Iceberg table
+   on this cluster.** Why: the adapter's two parsers
+   (`clearinghouse_bootstrap_adapter.py`) were written off-pod against two
+   documented Spark catalog shapes; this is what confirms which one is
+   real on this cluster. If it's neither, a third parser is a
+   one-function addition against the module's existing tests, not a
+   rewrite.
+   **Status from the 2026-09-12 attempt: no answer, blocked.** The MCP
+   SQL-execution path (`query_delta_table`, tried against
+   `DESCRIBE TABLE EXTENDED kbaseincubator.genome_clearhouse.genome_quality`,
+   a real existing table chosen as a stand-in) required the approval
+   described above. The read-only metadata fallback (`get_table_schema`)
+   returns bare column names with no partition information -- there is no
+   lower-risk substitute for this question. Still open.
+
+b. **`BerdlCapability().memberships()` -- does this identity hold `'rw'`
+   on the target tenant?** Why: `BerdlCapability.load()` raises
+   `PermissionError` outright without it, and that error's own message
+   calls the remedy "an asynchronous human approval step"
+   (`capability.py`, `load()`'s preflight) -- so a `'no'` here is the
+   **longest lead time in this entire sequence**, and is the reason OP0
+   runs before everything else, including OP1.
+   **Status from the 2026-09-12 attempt: no answer at all, not even
+   partial.** `memberships()` is behind the same blocked interpreter as
+   (a), and no MCP tool exposes tenant membership -- zero information was
+   gained on this question. Still open, and still the highest-priority
+   unanswered item in this document.
+
+c. **Which `namespace` and `tenant`/`tenant_name` argument values actually
+   address `kbaseincubator.clearinghouse`.** The MCP lists namespaces
+   dotted (e.g. `kbaseincubator.genome_clearhouse`), while this codebase's
+   two relevant calls take `namespace` and a tenant argument separately,
+   and `BerdlCapability.load()` defaults `namespace="default"`. **DO NOT
+   GUESS THIS** -- a wrong `namespace` is precisely the
+   silent-overwrite-under-the-wrong-name failure `bootstrap()`'s required
+   `namespace` argument exists to prevent (see 2.1's dry-run warning).
+   **Status: answered from reading installed pod source, NOT confirmed
+   live.** The 2026-09-12 reply: `BerdlCapability.load()`'s `tenant`
+   parameter is used only for the read-write membership check
+   (`target_tenant = tenant or dataset`, `capability.py`) and is never
+   combined with `namespace` to build a table path; `namespace` instead
+   goes straight through to `berdl_notebook_utils.table_exists`, whose
+   installed body does a bare `f"{namespace}.{table_name}"`. Every
+   existing `kbaseincubator` namespace observed live is addressed as the
+   whole dotted string (`kbaseincubator.genome_clearhouse`,
+   `kbaseincubator.fitness`, `kbaseincubator.pangea`). Putting those
+   together, the likely shape is `namespace="kbaseincubator.clearinghouse"`
+   (the whole dotted string) with a bare `tenant="kbaseincubator"`
+   supplied separately, for the permission check only -- **but this is
+   source-derived, not a confirmed live result.** Sections 2.1, 2.2, and
+   2.3 below mark their `namespace` example values as unresolved
+   placeholders for exactly this reason -- do not fill them in from this
+   paragraph alone; confirm end to end (a real `table_exists` call, or
+   2.1's dry run) before trusting it for the real run.
+
+d. **What `berdl_notebook_utils.table_exists` returns for a namespace
+   that does not exist** -- `False`, or a raise. Needed because of OP2.0b
+   below: if it raises, the namespace must exist (OP2.0b) before anything
+   calls `table_exists` or runs 2.1's dry run against it, or that call
+   fails outright instead of reporting `'create'`.
+   **Status: partially answered from source, not confirmed live.** The
+   installed `berdl_notebook_utils.table_exists` has no `try`/`except` at
+   all -- a bare `db_table = f"{namespace}.{table_name}"; return
+   spark.catalog.tableExists(db_table)` -- so it will not itself swallow
+   or translate anything. Whether this cluster's Iceberg-REST/Polaris
+   catalog makes PySpark's own `tableExists()` raise or return `False` for
+   a missing namespace is exactly what source-reading cannot settle, and
+   the 2026-09-12 attempt could not run this against a real missing
+   namespace to observe it. Confirm by observation, not inference.
+
+**One live fact did land from the 2026-09-12 attempt**, independent of the
+four questions above: `kbaseincubator.clearinghouse` is **absent** from
+the live namespace listing, and a same-tenant sibling,
+`kbaseincubator.genome_clearhouse`, **exists** and is unrelated (see OP2's
+precondition list below -- that absence is perishable and must be
+re-checked at OP2 run time, not assumed from this section).
 
 ---
 
@@ -100,60 +206,198 @@ once all three lines print.
 
 ## OP2 -- create the tables
 
+**Preconditions -- confirm all four before running anything below.**
+
+1. **The adapter exists and is wired.** `ClearinghouseBootstrapCapability`
+   (`src/kbutillib/domains/kbase/berdl/clearinghouse_bootstrap_adapter.py`)
+   is importable, and you are constructing it as shown in 2.0 -- not
+   passing a bare `BerdlCapability()` into `bootstrap()`.
+2. **The `-1b` runbook revision is on `main`.** The partition specs and
+   table layout this document describes (`entity` on `entity_type`,
+   `result` on `[source, entity_type]` in that order, `canonical_content`
+   unpartitioned) are `clearinghouse-lake-1b-partitioned-scheme`'s;
+   confirm that revision merged before trusting the expectations in
+   2.1-2.3.
+3. **OP0 confirmed `'rw'` membership** on the target tenant (OP0.b). If
+   OP0.b came back anything other than a confirmed `'rw'`, stop here:
+   `BerdlCapability.load()` will refuse with `PermissionError`, and its
+   own remedy is "an asynchronous human approval step" you cannot
+   shortcut from inside this runbook.
+4. **Q6 -- "does `kbaseincubator.clearinghouse` exist?" -- has been
+   RE-CHECKED at run time, not read off this document or off OP0's
+   write-up.** OP0's reconnaissance found it absent as of 2026-09-10 --
+   **do not cite that date as though it still holds; re-run the check.**
+   That answer is perishable: if anything creates the namespace under the
+   old, unpartitioned pre-`-1b` spec before OP2 runs -- a stray
+   `create_namespace_if_not_exists` call (2.0b) against the wrong spec,
+   or any other pod session bootstrapping it ahead of you -- correcting
+   it costs a **multi-terabyte replay** (rebuilding the table from source
+   under the corrected spec, see 2.2's partition-spec-refusal guidance),
+   not a five-minute fix. **Do not confuse this with
+   `kbaseincubator.genome_clearhouse`, which EXISTS, is unrelated, and
+   holds `genome_quality` and `skani_distances`** -- a near-miss an
+   operator skimming namespace names could land on by mistake.
+
 ### 2.0 -- the capability seam you will hit here (read this first)
 
 `bootstrap()` (`clearinghouse_schema.bootstrap()`) requires its injected
 `capability` argument to expose three things:
 
-- `capability.load(*, dataset, tables, namespace, tenant=None, pipeline_name=None)`
+- `capability.load(*, dataset, tables, namespace, tenant=None, pipeline_name=None, ...)`
   -- same shape as `BerdlCapability.load()`.
 - `capability.table_exists(name, namespace=namespace) -> bool` -- read-only.
 - `capability.table_partition_spec(name, namespace=namespace) -> list[str] | None`
-  -- read-only.
+  -- read-only (`bootstrap()`'s own contract still accepts `None` as
+  meaning "unpartitioned"; see below for what the concrete adapter
+  actually returns).
 
-**The stock `BerdlCapability` does not implement the last two.** Its only
-existence check anywhere in the write path is a private, in-pod-only call
-inside `load()` itself -- `transport.table_exists(load_spark, name,
-namespace=namespace)` on `InPodTransport` (`transports.py`), which takes a
-`spark` session as its first argument and is not exposed as a public,
-capability-level, read-only method. There is no `table_partition_spec`
-reader anywhere in this repo, on `BerdlCapability`, `InPodTransport`, or
-otherwise.
+**The stock `BerdlCapability` implements only `load()`.** Passing a bare
+`BerdlCapability()` straight into `bootstrap()` raises `AttributeError`
+(`'BerdlCapability' object has no attribute 'table_exists'`, wrapped by
+`bootstrap()` into `BootstrapIndeterminateStateError`, since the lookup
+happens inside its existence-check `try`/`except`) -- there is no
+`table_exists`/`table_partition_spec` reader anywhere on `BerdlCapability`
+itself.
 
-This is a known, accepted gap in what shipped from the earlier phases, not
-an oversight you're the first to discover: the tests in
-`test_clearinghouse_bootstrap.py` exercise `bootstrap()` entirely against a
-hand-built fake capability (`_FakeCapability`) that implements this
-three-method contract, specifically because wiring a real adapter around
-`BerdlCapability` -- most plausibly via `capability.query()` against
-Iceberg/Spark catalog metadata -- is exactly the kind of thing that cannot
-be verified off-pod. **You are the first person to run this against a real
-capability, and you have to build or adapt one first.**
+**Why `bootstrap()` needs these two read-only probes at all, rather than
+just calling `load()` and looking at what it reports.**
+`BerdlCapability.load()` already resolves create-vs-append per table
+internally (`select_write_mode()`), but it can only report what it found
+*after* it has already written -- its per-table `existed_before`/
+`effective_mode` report is produced in the same pass that calls
+`data_lakehouse_ingest.ingest`. A caller that wants to **refuse** a write
+*before* it happens -- specifically, before appending to a table whose
+live partitioning disagrees with this module's config -- cannot use
+`load()` alone as that probe, because calling it **is** the write.
+`bootstrap()`'s `BootstrapPartitionSpecMismatchError` (2.2, below) is the
+one place that safety exists, and it only works because these two probes
+answer before any write is attempted.
 
-Concretely, before you can call `bootstrap()` for real, write a small
-in-pod adapter (or a subclass, or a wrapper object -- whatever mechanism
-fits how you're already interacting with `BerdlCapability` in the pod) that:
+**You do not need to build an adapter -- the prior phase of this PRD
+already did.** Import and construct it like this:
 
-- Delegates `load(...)` straight to a real `BerdlCapability().load(...)`.
-- Implements `table_exists(name, namespace=namespace)` -- most plausibly by
-  querying Iceberg catalog metadata via `capability.query(sql,
-  engine="spark")` (e.g. `SHOW TABLES IN <namespace>` or a catalog
-  information-schema query -- the exact SQL is a pod-only detail; use
-  whichever this cluster's Iceberg catalog actually exposes), or via
-  `InPodTransport.table_exists(spark, name, namespace=namespace)` directly
-  if you're comfortable reaching past `BerdlCapability`'s public surface
-  for this one read.
-- Implements `table_partition_spec(name, namespace=namespace)` -- there is
-  no existing reader for this anywhere in the codebase; you will need a
-  catalog-metadata query for the live partition columns (e.g. inspecting
-  the table's `DESCRIBE`/`SHOW CREATE TABLE` output or the Iceberg
-  `partitions`/`snapshots` metadata tables) and translate it to the
-  `list[str]` shape `bootstrap()` expects (`[]` for unpartitioned).
+```python
+from kbutillib.domains.kbase.berdl.capability import BerdlCapability
+from kbutillib.domains.kbase.berdl.clearinghouse_bootstrap_adapter import (
+    ClearinghouseBootstrapCapability,
+)
+
+my_capability = ClearinghouseBootstrapCapability(BerdlCapability())
+```
+
+`ClearinghouseBootstrapCapability`
+(`src/kbutillib/domains/kbase/berdl/clearinghouse_bootstrap_adapter.py`)
+**wraps** a `BerdlCapability` -- it does not subclass it, and this module
+never modifies `capability.py`, `transports.py`, or
+`clearinghouse_schema.py`. It resolves one Spark session lazily (on first
+use, not in `__init__`) and shares it between the `table_exists` probe
+and the forwarded `load()` call, so the guard and the write it guards can
+never end up looking at two different sessions. Concretely, on this
+adapter: `table_exists(name, *, namespace)` (`namespace` is keyword-only)
+delegates to `InPodTransport.table_exists(spark, name,
+namespace=namespace)` -- the exact probe `BerdlCapability.load()` itself
+uses -- rather than a hand-rolled query, so this guard can never disagree
+with the write it guards; and `table_partition_spec(name, *, namespace)`
+(also keyword-only) is annotated `-> list[str]` and **never returns
+`None`** -- it either returns the live partition columns, `[]` for a
+table it positively confirms is unpartitioned, or raises (see below). If
+you need `spark` or `transport` overridden (to reuse a session you
+already opened), the constructor takes both as optional keyword-only
+arguments: `ClearinghouseBootstrapCapability(BerdlCapability(),
+spark=my_spark, transport=my_transport)`.
+
+**Hand-rolling another adapter is no longer the expected path.** Use
+`ClearinghouseBootstrapCapability`; if it is genuinely insufficient for
+something this runbook doesn't anticipate, raise that as its own issue
+rather than writing a parallel adapter that the rest of this document
+doesn't know about.
+
+**The one rule an operator can defeat, and must not.** If
+`table_partition_spec` raises `PartitionSpecUnparseableError`
+(`clearinghouse_bootstrap_adapter.PartitionSpecUnparseableError`), that is
+the adapter **refusing to guess** at a catalog response it does not
+recognise -- it is not a bug to patch around. **The fix is to add a
+parser for this cluster's real output** (a pure function alongside the
+module's existing two, `_parse_describe_table_extended_partition_spec`
+and `_parse_show_create_table_partition_spec`) -- **never to pass in a
+stub that returns `[]`.** `canonical_content` is genuinely unpartitioned,
+and `bootstrap()` treats both `[]` and `None` as "unpartitioned" -- a stub
+that returns `[]` on a parse failure would silently pass
+`canonical_content`'s check having determined nothing at all, defeating
+the one safety check `bootstrap()` exists to provide. The error message
+names the table, the namespace, and the first ~200 characters of the raw
+catalog output, so you can write the missing parser in one round trip.
 
 An `AttributeError` at this step (`'BerdlCapability' object has no
-attribute 'table_exists'`) means you skipped this -- it is not a bug in
-`bootstrap()`, and it is the expected first failure mode for anyone who
-tries to pass a bare `BerdlCapability()` straight in.
+attribute 'table_exists'`) means you skipped the import above and passed
+a bare `BerdlCapability()` into `bootstrap()` directly -- it is not a bug
+in `bootstrap()`. Import and construct `ClearinghouseBootstrapCapability`
+as shown above and pass that instead.
+
+### 2.0b -- create the namespace (do this before the dry run)
+
+**Nothing in the sanctioned write path creates a namespace.** `bootstrap()`
+does not -- it only creates tables inside a namespace it assumes already
+exists. `BerdlCapability.load()` goes straight from its membership
+preflight to its per-table existence probe to the
+`data_lakehouse_ingest.ingest()` call; there is no namespace-creation step
+anywhere in between.
+`InPodTransport.create_namespace_if_not_exists`
+(`src/kbutillib/domains/kbase/berdl/transports.py`, ~line 169) exists, and
+**nothing in this repo calls it** (`grep -rn create_namespace_if_not_exists
+src/` finds only its own definition). Since OP0 found
+`kbaseincubator.clearinghouse` absent from the live namespace listing (see
+OP0 and the precondition list below -- **that finding is perishable and
+must be re-checked here, not assumed**), **OP2 fails without this step**:
+`table_exists`, `table_partition_spec`, and `load()` are all asking about
+a namespace that does not exist yet.
+
+Run this from an attended pod session, before 2.1's dry run:
+
+```python
+from kbutillib.domains.kbase.berdl.transports import InPodTransport
+
+# NAMESPACE/TENANT_NAME are UNRESOLVED PLACEHOLDERS -- see OP0.c, and the
+# matching note in 2.1 below. Fill them in from OP0's confirmed answer,
+# not from memory, and not as a literal copy of the placeholder itself.
+NAMESPACE = "<<OP0.c -- confirm before use>>"
+TENANT_NAME = "<<OP0.c -- confirm before use>>"
+
+transport = InPodTransport()
+spark = transport.spark_session()
+transport.create_namespace_if_not_exists(
+    spark,
+    namespace=NAMESPACE,      # UNRESOLVED -- see above.
+    tenant_name=TENANT_NAME,  # NOTE THE NAME: this parameter is spelled
+                              # `tenant_name` here, not `tenant` -- see
+                              # the warning below.
+    iceberg=True,             # already the default; explicit for clarity.
+)
+```
+
+**Read both signatures yourself before you fill in `TENANT_NAME` -- the
+two calls you make back to back spell the tenant argument differently,
+and assuming they're the same name is a real trap.**
+`InPodTransport.create_namespace_if_not_exists(self, spark,
+namespace="default", tenant_name=None, iceberg=True)` takes `tenant_name`.
+`BerdlCapability.load(...)` (which 2.2's real run calls, through the
+adapter) takes `tenant`, not `tenant_name` -- there is no `tenant_name`
+parameter anywhere on `BerdlCapability`. Passing the wrong keyword gets
+you a `TypeError` at best; passing the right keyword with the wrong
+*value* gets you a wrong-tenant permission check at worst. Use the
+argument values OP0 established (OP0.c), not guessed ones, for both
+calls -- and confirm them against OP0's own caveat that its finding is
+source-derived, not live-confirmed.
+
+**Why this is a separate operator step, not folded into `bootstrap()`.**
+Creating the namespace is a **write** -- it is the act that commits the
+tenant and the name -- and putting it inside `bootstrap()` would mean a
+*dry run* could no longer be run without first creating something. That
+would defeat the entire purpose of 2.1 below: a dry run is supposed to be
+side-effect-free, and "silently create the namespace as a side effect of
+checking whether one is needed" is exactly the kind of undisclosed write
+this runbook's other warnings tell you not to accept from any step in
+this sequence.
 
 ### 2.1 -- dry run first
 
@@ -163,9 +407,21 @@ with `dry_run=True` **before** the real run:
 ```python
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import bootstrap
 
+# NAMESPACE/TENANT_NAME are UNRESOLVED PLACEHOLDERS, not confirmed values --
+# see OP0.c. Source-derived reading (NOT live-confirmed): the whole dotted
+# string "kbaseincubator.clearinghouse" for NAMESPACE, a bare
+# "kbaseincubator" for TENANT_NAME. This module's own NAMESPACE constant
+# (clearinghouse_schema.NAMESPACE == "clearinghouse", bare) is a DIFFERENT
+# thing -- the top-level 'dataset' identifier, not this Iceberg-catalog
+# namespace argument -- and must not be assumed to be the same string.
+# Fill these in from OP0's confirmed answer, not from this comment.
+NAMESPACE = "<<OP0.c -- confirm before use>>"
+TENANT_NAME = "<<OP0.c -- confirm before use>>"
+
 report = bootstrap(
-    my_capability,               # your OP2.0 adapter, not a bare BerdlCapability()
-    namespace="clearinghouse",   # confirm this is the namespace you intend
+    my_capability,       # your OP2.0 adapter, not a bare BerdlCapability()
+    namespace=NAMESPACE,  # UNRESOLVED -- see above and OP0.c; do not run
+                          # this with the placeholder still in place.
     dry_run=True,
 )
 for table in report["tables"]:
@@ -198,7 +454,9 @@ real run.
 ```python
 report = bootstrap(
     my_capability,
-    namespace="clearinghouse",
+    namespace=NAMESPACE,  # same UNRESOLVED placeholder as 2.1 -- confirm
+                          # against OP0.c before running; do not re-guess
+                          # a literal here even if 2.1's dry run "worked".
     dry_run=False,
 )
 print(report)
@@ -252,8 +510,10 @@ cluster's Iceberg catalog exposes -- `DESCRIBE`, `SHOW CREATE TABLE`, or
 Spark's catalog API all work):
 
 ```python
+# NAMESPACE is the same UNRESOLVED placeholder as 2.1/2.2 -- OP0.c, not a
+# literal you retype here from this document.
 for table in ("entity", "canonical_content", "result"):
-    print(table, spark.sql(f"DESCRIBE `clearinghouse`.`{table}`").collect())
+    print(table, spark.sql(f"DESCRIBE `{NAMESPACE}`.`{table}`").collect())
 ```
 
 Confirm `entity_hash`'s reported type is `binary`, not `string`, in every
@@ -302,6 +562,23 @@ What it does:
    - `result_type_version` differences alone never fork a slot.
 4. Prints one `PASS`/`FAIL` line per property plus a final summary, and
    exits non-zero if any property fails.
+
+**Known-defect note, task 914.** `_build_fixture_dataframe`'s Spark `Row`
+construction used to be built from a hand-maintained keyword field list
+that omitted `entity_type` from the `result` schema's eight declared
+columns, which would have made every OP3 run fail its write step against
+the live table the first time an operator tried it (filed as task 914).
+**As of this revision that defect is already fixed** (commit `a4e332d`,
+"fix: build parity-check fixture rows positionally from the declared
+schema" -- an ancestor of this document's own base commit): rows are now
+built positionally from the same parsed column list that builds the
+schema, so a column is picked up automatically rather than needing a
+keyword list kept in sync, and the invariant is regression-tested off-pod
+in `tests/berdl/test_clearinghouse_schema.py::TestParityFixtureMatchesResultSchema`.
+**OP3 is not currently blocked by task 914.** (This corrects the
+design-time expectation for this task, which described the defect as
+still open; read the code before trusting a description of it, here as
+everywhere else in this document.) It does not block OP2 either way.
 
 **Every fixture row's `source` carries the `parity-check/` prefix**
 (`PARITY_SOURCE_PREFIX` in the fixture module) so these rows can never be
@@ -363,8 +640,10 @@ and OP3 (the parity check's fixture append): both go through
 to a raw Iceberg write.
 
 **An `AttributeError` calling `bootstrap()` against a bare
-`BerdlCapability()`** means you skipped OP2.0 -- see that section for what
-you need to build first.
+`BerdlCapability()`** means you skipped OP2.0's import -- construct
+`ClearinghouseBootstrapCapability(BerdlCapability())` (from
+`kbutillib.domains.kbase.berdl.clearinghouse_bootstrap_adapter`) and pass
+that instead; see that section for the exact import and construction.
 
 **A namespace-resolution warning on a dry run** (OP2.1) means stop and
 verify the `namespace` argument before proceeding -- see that section for

@@ -302,18 +302,30 @@ def pytest_configure(config):
         "markers",
         "kbase: mark test as requiring a live KBase token (skipped unless KBASE_LIVE_TESTS=1)",
     )
+    config.addinivalue_line(
+        "markers",
+        "prott5_model: mark test as loading the real ProtT5 model (slow, GPU-hungry; "
+        "skipped unless PROTT5_LIVE_TESTS=1)",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip @pytest.mark.kbase tests unless KBASE_LIVE_TESTS=1 is set."""
-    skip_kbase = pytest.mark.skip(
-        reason="KBase live tests disabled (set KBASE_LIVE_TESTS=1 to run)"
-    )
-    if os.environ.get("KBASE_LIVE_TESTS") == "1":
-        return
-    for item in items:
-        if "kbase" in item.keywords:
-            item.add_marker(skip_kbase)
+    """Skip live-model tests unless their opt-in env var is set."""
+    if os.environ.get("KBASE_LIVE_TESTS") != "1":
+        skip_kbase = pytest.mark.skip(
+            reason="KBase live tests disabled (set KBASE_LIVE_TESTS=1 to run)"
+        )
+        for item in items:
+            if "kbase" in item.keywords:
+                item.add_marker(skip_kbase)
+
+    if os.environ.get("PROTT5_LIVE_TESTS") != "1":
+        skip_prott5 = pytest.mark.skip(
+            reason="ProtT5 model tests disabled (set PROTT5_LIVE_TESTS=1 to run)"
+        )
+        for item in items:
+            if "prott5_model" in item.keywords:
+                item.add_marker(skip_prott5)
 
 
 # ---------------------------------------------------------------------------

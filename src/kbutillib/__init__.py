@@ -151,6 +151,12 @@ except ImportError as e:
     KBPLMUtils = None
 
 try:
+    from .domains.ai.prott5_utils import ProtT5Utils
+except ImportError as e:
+    _import_error("prott5_utils", e)
+    ProtT5Utils = None
+
+try:
     from .domains.external.kb_uniprot_utils import KBUniProtUtils
 except ImportError as e:
     _import_error("kb_uniprot_utils", e)
@@ -385,6 +391,11 @@ except ImportError:
     KBPLMUtilsImpl = None
 
 try:
+    from .domains.ai.prott5_utils import ProtT5UtilsImpl
+except ImportError:
+    ProtT5UtilsImpl = None
+
+try:
     from .domains.external.bvbrc_utils import BVBRCUtilsImpl
 except ImportError:
     BVBRCUtilsImpl = None
@@ -545,6 +556,7 @@ __all__ = [
     "ToolUnavailableError",
     "TransytUtils",
     "OntomapUtils",
+    "ProtT5Utils",
     # Composition-based Impl classes
     "AICurationUtilsImpl",
     "ArgoUtilsImpl",
@@ -575,6 +587,7 @@ __all__ = [
     "ThermoUtilsImpl",
     "PredictiveThermoUtilsImpl",
     "OntomapUtilsImpl",
+    "ProtT5UtilsImpl",
     # Endpoints
     "base_url",
     "env_from_url",

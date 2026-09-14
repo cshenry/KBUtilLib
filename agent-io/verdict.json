@@ -1,17 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "berdl-query.md satisfies all success criteria (routing, alias trap via naming.py, dual-name rule, discovery, cross-catalog joins, time-travel-as-recovery, honest off-pod caveats) and matches naming.py/capability.py ground truth; diff touches only agent-io/, no Python modified.",
-  "criteria": [
-    {"criterion": "Frontmatter conforms to existing skills", "status": "pass"},
-    {"criterion": "Trino/Spark routing, Trino read-only rejects writes", "status": "pass"},
-    {"criterion": "my/{username} alias trap routed through naming.py (to_trino_alias/to_spark_alias)", "status": "pass", "note": "verified against src/kbutillib/domains/kbase/berdl/naming.py, including the qualified my.dataset1 form"},
-    {"criterion": "Dual dotted/underscored rule: prefer dotted, mark underscored legacy, never present as unrelated", "status": "pass", "note": "verified against normalize_databases/NormalizedDatabase"},
-    {"criterion": "Discovery commands for both engines", "status": "pass"},
-    {"criterion": "Cross-catalog joins", "status": "pass"},
-    {"criterion": "Time travel identified as post-overwrite recovery path", "status": "pass"},
-    {"criterion": "Off-pod honesty: tenant catalogs only AND not yet proven end to end", "status": "pass"},
-    {"criterion": "Directs to BerdlCapability instead of reimplementing", "status": "pass"},
-    {"criterion": "No Python module modified", "status": "pass", "note": "git diff --name-only main...HEAD shows only agent-io/skills/berdl-query.md and agent-io/work-records/skill-berdl-query.md"}
-  ],
-  "tests_run": []
+  "reason": "ProtT5Utils meets every spec item: UZOB->X + space-separation, residue-count batching, padding-safe mean-pool (slices [:n_res], excludes EOS+padding), CUDA/CPU auto-select with CPU fallback, fp16 on GPU, OOM halving back-off to single-seq, and non-silent truncation via truncated_ids. Tests pass 12 passed/1 skipped (real-model test correctly gated by PROTT5_LIVE_TESTS); the padding test runs every CI via a fake position-encoder. Impl class and SharedEnvUtils base follow repo conventions; conftest refactor preserves KBase gating. No fixes needed.",
+  "stamp": {
+    "task_id": "task-723007cb",
+    "branch": "maestro/reviewer/background-this-prompt-is-self-c-task-723007cb",
+    "commit": null
+  }
 }

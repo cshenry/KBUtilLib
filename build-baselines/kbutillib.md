@@ -1,0 +1,135 @@
+# Test baseline — KBUtilLib
+
+- **repo:** kbutillib
+- **base_commit:** `0f8480327b52b208ea8aa366b9c738576162d912`
+- **captured:** 2026-09-13
+- **captured_by:** maestro developer task-95f69f0b
+- **interpreter:** cpython-3.11.15
+- **pytest_version:** 9.1.1
+- **compare_by:** name (nodeid), NEVER count
+
+## How this was captured
+
+This baseline was captured in a **minimal task venv** that is missing several optional scientific dependencies (`pandas`, `torch`, `rdkit`, and the pydantic-backed capability stack). Because of that:
+
+- 7 test modules could **not be collected at all** (hard `ModuleNotFoundError` at import) and were excluded via `--ignore`:
+
+  - `tests/berdl/test_clearinghouse_derivation.py`
+  - `tests/biochem/test_escher_utils.py`
+  - `tests/biochem/test_ms_biochem_deltag.py`
+  - `tests/kbase/test_kb_annotation_utils_parquet.py`
+  - `tests/modeling/test_comprehensive_gapfill_wrapper.py`
+  - `tests/modeling/test_ms_reconstruction_utils.py`
+  - `tests/notebook`
+
+- The remaining collectable subset produced **99 failed, 2591 passed, 386 skipped, 1 error**. Every one of the 99 failures and the 1 error traces to a missing optional dependency (predominantly `pandas` and the capabilities that import it), not to a product defect.
+
+### Command
+
+```
+python -m pytest -q --ignore=tests/berdl/test_clearinghouse_derivation.py --ignore=tests/biochem/test_escher_utils.py --ignore=tests/biochem/test_ms_biochem_deltag.py --ignore=tests/kbase/test_kb_annotation_utils_parquet.py --ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py --ignore=tests/modeling/test_ms_reconstruction_utils.py --ignore=tests/notebook
+```
+
+On a fully-provisioned environment this set will differ. Compare by test NAME: a name here but absent on your branch is fine (fixed / different env); a name absent here but present on your branch is the regression signal to investigate.
+
+## known_failing (99)
+
+- `tests/biochem/test_registry_biochem.py::TestAvailability::test_registry_status_never_raises`
+- `tests/biochem/test_registry_biochem.py::TestDecoratorInertness::test_capability_attribute_attached`
+- `tests/biochem/test_registry_biochem.py::TestDecoratorInertness::test_collect_capabilities_inertness`
+- `tests/biochem/test_registry_biochem.py::TestDecoratorInertness::test_decorated_method_is_callable`
+- `tests/biochem/test_registry_biochem.py::TestDecoratorInertness::test_method_raises_same_error_without_db`
+- `tests/biochem/test_registry_biochem.py::TestDecoratorInertness::test_no_functools_wrapper`
+- `tests/biochem/test_registry_biochem.py::TestRegisterAllBiochem::test_biochem_domain_filter`
+- `tests/biochem/test_registry_biochem.py::TestRegisterAllBiochem::test_biochem_specs_count`
+- `tests/biochem/test_registry_biochem.py::TestRegisterAllBiochem::test_global_registry_smoke`
+- `tests/biochem/test_registry_biochem.py::TestRegisterAllBiochem::test_individual_specs_by_name`
+- `tests/biochem/test_registry_biochem.py::TestRegisterAllBiochem::test_register_all_returns_biochem_specs`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_compound_by_id_input_missing_raises`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_compound_by_id_input_valid`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_compound_by_id_output_defaults`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_compound_by_id_output_with_value`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_reaction_by_id_input_missing_raises`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_reaction_by_id_input_valid`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_reaction_by_id_output_defaults`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_get_reaction_by_id_output_with_value`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_schemas_importable_from_domain_package`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_search_compounds_input_defaults`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_search_compounds_input_with_values`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_search_compounds_output_defaults`
+- `tests/biochem/test_registry_biochem.py::TestSchemas::test_search_compounds_output_with_hits`
+- `tests/cli/test_doctor.py::TestDoctorRegistryOutput::test_output_shows_biochem_domain`
+- `tests/cli/test_doctor.py::TestProbeRegistrySummary::test_detail_contains_biochem_when_registered`
+- `tests/cli/test_kind.py::TestBareInstall::test_bare_install_ships_every_app_this_repo_offers`
+- `tests/cli/test_kind.py::TestBundleFiles::test_changed_reference_is_reported_as_changed`
+- `tests/cli/test_kind.py::TestBundleFiles::test_declared_files_land_beside_skill_md`
+- `tests/cli/test_kind.py::TestBundleFiles::test_declared_files_stay_out_of_context_md`
+- `tests/cli/test_kind.py::TestBundleFiles::test_files_names_cannot_escape_the_app_dir`
+- `tests/cli/test_kind.py::TestBundleFiles::test_reinstall_is_idempotent_on_unchanged_files`
+- `tests/cli/test_kind.py::TestInstall::test_install_idempotent_second_run_is_noop_diff`
+- `tests/cli/test_kind.py::TestInstall::test_install_reports_state_when_cli_missing_never_crashes`
+- `tests/cli/test_kind.py::TestInstall::test_install_union_recompose_keeps_other_apps_fragment`
+- `tests/cli/test_kind.py::TestInstall::test_install_writes_context_registry_and_serve_script`
+- `tests/cli/test_kind.py::TestStatus::test_status_amber_when_cli_absent`
+- `tests/cli/test_kind.py::TestStatus::test_status_green_via_live_king_context_env_too`
+- `tests/cli/test_kind.py::TestStatus::test_status_green_when_cli_present_probe_passes_and_wired`
+- `tests/cli/test_kind.py::TestStatus::test_status_red_when_king_context_not_wired`
+- `tests/cli/test_kind.py::TestUninstall::test_uninstall_already_absent_is_noop`
+- `tests/cli/test_kind.py::TestUninstall::test_uninstall_keeps_other_apps_fragment`
+- `tests/cli/test_kind.py::TestUninstall::test_uninstall_removes_id_and_recomposes`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_exits_zero_for_known_cap`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_get_compound_by_id_info`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_get_reaction_by_id_info`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_shows_availability`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_shows_input_schema`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_shows_output_schema`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_shows_tags`
+- `tests/core/test_cli_cap.py::TestCapInfo::test_shows_transports`
+- `tests/core/test_cli_cap.py::TestCapList::test_filter_by_domain`
+- `tests/core/test_cli_cap.py::TestCapList::test_json_output_is_valid`
+- `tests/core/test_cli_cap.py::TestCapList::test_shows_domain_column`
+- `tests/core/test_cli_cap.py::TestCapList::test_shows_three_biochem_caps`
+- `tests/core/test_composition_smoke.py::TestNotebookSessionKbu::test_notebook_session_kbu_returns_facade`
+- `tests/core/test_registry_parity.py::test_biochem_caps_have_correct_domain`
+- `tests/core/test_registry_parity.py::test_biochem_caps_present`
+- `tests/core/test_registry_parity.py::test_biochem_caps_retrievable_by_domain_filter`
+- `tests/core/test_registry_parity.py::test_kbutillib_app_has_biochem_attr`
+- `tests/core/test_registry_parity.py::test_register_all_yields_at_least_3_caps`
+- `tests/domains/test_agents_smoke.py::test_kbutillib_biochem_property_type`
+- `tests/domains/test_agents_smoke.py::test_kbutillib_thermo_property_type`
+- `tests/domains/test_biochem_smoke.py::test_biochem_domain_all_contains_expected`
+- `tests/domains/test_biochem_smoke.py::test_compartment_types_has_cytosol`
+- `tests/domains/test_biochem_smoke.py::test_compartment_types_is_dict`
+- `tests/domains/test_biochem_smoke.py::test_get_compound_by_id_schema_importable`
+- `tests/domains/test_biochem_smoke.py::test_get_reaction_by_id_schema_importable`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_has_available`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_has_get_compound_by_id`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_has_get_reaction_by_id`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_has_search_compounds`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_has_unavailable_reason`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_impl_importable`
+- `tests/domains/test_biochem_smoke.py::test_ms_biochem_utils_importable`
+- `tests/domains/test_biochem_smoke.py::test_search_compounds_schema_importable`
+- `tests/domains/test_modeling_smoke.py::test_model_standardization_utils_class_importable`
+- `tests/domains/test_modeling_smoke.py::test_model_standardization_utils_has_model_standardization`
+- `tests/domains/test_modeling_smoke.py::test_model_standardization_utils_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_cache_entry_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_cache_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_domain_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_experiment_store_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_session_has_cache`
+- `tests/domains/test_notebook_smoke.py::test_notebook_session_has_experiments`
+- `tests/domains/test_notebook_smoke.py::test_notebook_session_has_for_notebook`
+- `tests/domains/test_notebook_smoke.py::test_notebook_session_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_strain_store_importable`
+- `tests/domains/test_notebook_smoke.py::test_notebook_vector_store_importable`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_all_three_biochem_caps_have_correct_paths`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_input_schema_from_pydantic_model`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_method_is_post`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_output_schema_from_pydantic_model`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_path_contains_capability_name`
+- `tests/interfaces/test_api.py::TestCapabilityToRouteMeta::test_returns_dict_with_required_keys`
+- `tests/interfaces/test_mcp_server.py::TestCapabilityToToolSpec::test_biochem_caps_have_correct_names`
+- `tests/interfaces/test_mcp_server.py::TestCapabilityToToolSpec::test_get_compound_by_id_schema_has_compound_id`
+- `tests/interfaces/test_mcp_server.py::TestCapabilityToToolSpec::test_get_reaction_by_id_schema_has_reaction_id`
+- `tests/interfaces/test_mcp_server.py::TestCapabilityToToolSpec::test_search_compounds_schema_has_properties`

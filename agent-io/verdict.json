@@ -1,9 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "Fifteen-table split is correct: table_configs() returns exactly 15 configs in documented order with names == table_name(type,kind); ENTITY_TYPES renamed gene_dna->gene with no live gene_dna reference remaining (only a rename-documenting comment and a negative ValueError test); partition_by is standardizer_version on the 4 gene/protein entity+content tables and source on the 5 result tables, genuinely absent on the other 6; no config value contains a parenthesis; entity and result schemas are byte-identical across types; content schemas carry the required type-specific columns (gene protein_entity_hash BINARY, function definition STRING no name, genome fasta_reference+metadata no sequence); encode/decode_entity_hash byte-identical to base; schema stays pod-free. Ran berdl+standardizer suites in the task venv (installed pytest+duckdb): base c61e930 = 198 passed, branch = 208 passed, zero failures, no NEW failures. No fix-up commit needed.",
+  "reason": "union_view_sql() added to clearinghouse_schema.py: emits CREATE OR REPLACE VIEW DDL naming all five per-type tables for all_entity/all_content/all_result; all_content selects only the four shared columns plus a literal entity_type discriminator and no specialized columns, raises ValueError on unknown kind, performs no I/O, and adds no pyspark import. Base main 181 pass / branch 192 pass, no new failures. No fix-up commit made.",
   "stamp": {
-    "task_id": "task-5c0970a7",
-    "branch": "maestro/reviewer/background-possibly-unreachable--task-5c0970a7",
-    "commit": "c084faa32f7d20d17d2ab4b5cb53933cd60b48a4"
+    "task_id": "task-82a8877a",
+    "branch": "maestro/reviewer/background-possibly-unreachable--task-82a8877a",
+    "commit": "0e60674140c9cf2908694e329d4f0c832f1219e9"
   }
 }

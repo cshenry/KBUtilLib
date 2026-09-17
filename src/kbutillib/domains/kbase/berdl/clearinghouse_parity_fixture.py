@@ -27,24 +27,31 @@ suite) and in-pod (by the OP3 parity script).
 
 Every fixture row's ``source`` carries the :data:`PARITY_SOURCE_PREFIX`
 tag (``"parity-check/"``). In the DuckDB surrogate tests this is
-cosmetic. In the real, live ``result`` table it is load-bearing: OP3
-appends these rows to the SAME append-only table real annotation tools
-write to, and the prefix is what keeps them from ever being mistaken for
-real tool output and lets an operator find and account for them later.
-Per the runbook, these rows are expected to remain in the table
-permanently -- the schema is append-only by design -- and this is
+cosmetic. In the real, live per-type ``<entity_type>_result`` table it is
+load-bearing: OP3 appends these rows to the SAME append-only table real
+annotation tools write to (resolved via
+:func:`kbutillib.domains.kbase.berdl.clearinghouse_schema.table_name` for
+each row's ``entity_type`` -- these protein rows land in
+``protein_result``), and the prefix is what keeps them from ever being
+mistaken for real tool output and lets an operator find and account for
+them later. Per the runbook, these rows are expected to remain in the
+table permanently -- the schema is append-only by design -- and this is
 harmless, since each occupies its own ``(entity_hash, entity_type,
 result_type, source)`` slot and can never shadow or be shadowed by a
 real slot. ``entity_type`` is part of the slot key because
 ``_standardize_protein`` and ``_standardize_gene`` are the same
 standardizer, so ``entity_hash`` alone does not uniquely identify an
-entity -- the pair ``(entity_hash, entity_type)`` does.
+entity -- the pair ``(entity_hash, entity_type)`` does. It is also, now,
+what selects which of the five per-type ``result`` tables a row belongs
+to (see :func:`rows_by_entity_type` and :attr:`ParityCase.entity_type`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import ENTITY_TYPES
 
 #: Prefix every parity-check fixture row's ``source`` carries. See the
 #: module docstring. ``<property_key>/<tool>`` keeps every property's
@@ -102,6 +109,33 @@ class ParityCase:
     result_type: str
     sources: tuple[str, ...]
     rows: tuple[dict[str, Any], ...]
+
+    @property
+    def entity_type(self) -> str:
+        """The single ``entity_type`` every row in this case shares.
+
+        Under the fifteen per-entity-type-table scheme, a case's rows are
+        appended to, and queried from, the ``<entity_type>_result`` table
+        resolved via
+        :func:`kbutillib.domains.kbase.berdl.clearinghouse_schema.table_name`.
+        Every row in a single :class:`ParityCase` targets one slot family
+        and therefore one entity type; this property surfaces it so the
+        parity check can resolve the per-type result table without
+        re-deriving the type at each call site.
+
+        Raises:
+            ValueError: If this case's rows carry more than one distinct
+                ``entity_type`` (a fixture-construction error -- a single
+                case must not straddle two per-type result tables).
+        """
+        types = {row["entity_type"] for row in self.rows}
+        if len(types) != 1:
+            raise ValueError(
+                f"ParityCase {self.property_key!r} spans multiple "
+                f"entity_types {sorted(types)!r}; a case must target exactly "
+                "one per-type result table."
+            )
+        return next(iter(types))
 
 
 _RESULT_TYPE = "annotation"
@@ -338,3 +372,35 @@ ALL_PARITY_SOURCES: tuple[str, ...] = tuple(
 ALL_PARITY_ROWS: tuple[dict[str, Any], ...] = tuple(
     row for case in PARITY_CASES for row in case.rows
 )
+
+
+def rows_by_entity_type() -> dict[str, tuple[dict[str, Any], ...]]:
+    """Group :data:`ALL_PARITY_ROWS` by each row's ``entity_type``.
+
+    Under the fifteen per-entity-type-table scheme, the parity fixture is no
+    longer a single ``result`` table's worth of rows: each row belongs in
+    its own ``<entity_type>_result`` table (resolved via
+    :func:`kbutillib.domains.kbase.berdl.clearinghouse_schema.table_name`).
+    This helper returns exactly the rows destined for each type's table,
+    keyed by ``entity_type``.
+
+    Iteration is over :data:`ENTITY_TYPES` (the schema module's canonical,
+    ordered tuple), never a local literal list, so the returned dict's keys
+    appear in the same order the schema declares and adding a sixth entity
+    type upstream needs no edit here. Only entity types that actually appear
+    in the fixture rows are included -- a type with no fixture rows is
+    omitted rather than mapped to an empty tuple, so a caller iterating the
+    result never targets a table it has nothing to append.
+
+    Returns:
+        A dict mapping each ``entity_type`` present in :data:`ALL_PARITY_ROWS`
+        to the tuple of its rows, in :data:`ENTITY_TYPES` order.
+    """
+    grouped: dict[str, tuple[dict[str, Any], ...]] = {}
+    for entity_type in ENTITY_TYPES:
+        rows = tuple(
+            row for row in ALL_PARITY_ROWS if row["entity_type"] == entity_type
+        )
+        if rows:
+            grouped[entity_type] = rows
+    return grouped

@@ -21,12 +21,16 @@ proves the derivation's *logic* (which row wins a slot, which scope
 excludes which), never the Spark-on-Iceberg dialect the query actually
 runs under in production. This script is the one thing in the whole
 change that exercises the real dependency: it appends a small, clearly
-marked fixture to the REAL, live ``result`` table through the sanctioned
-write path (:meth:`BerdlCapability.load`, which is what applies schema
-enforcement -- never a raw ``pyiceberg`` write; see the runbook's "if
-something goes wrong" section for why that shortcut is refused even under
-failure pressure), runs the real ``current_state_sql()`` SQL text against
-it via Spark, and asserts the SAME six properties the DuckDB tests assert.
+marked fixture to the REAL, live per-type ``<entity_type>_result`` tables
+(after the fifteen-table split there is no single ``result`` table; each
+row lands in the table resolved by ``clearinghouse_schema.table_name`` for
+its ``entity_type`` -- these protein fixture rows land in
+``protein_result``) through the sanctioned write path
+(:meth:`BerdlCapability.load`, which is what applies schema enforcement --
+never a raw ``pyiceberg`` write; see the runbook's "if something goes
+wrong" section for why that shortcut is refused even under failure
+pressure), runs the real ``current_state_sql()`` SQL text against each via
+Spark, and asserts the SAME six properties the DuckDB tests assert.
 
 THE FIXTURE IS SHARED, NOT RE-TYPED. Every row this script appends comes
 from :mod:`kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture` --
@@ -40,8 +44,9 @@ carries the ``parity-check/`` prefix (see that module's
 ``PARITY_SOURCE_PREFIX``), so these rows can never be mistaken for real
 tool output and can be found again later with a simple ``source LIKE
 'parity-check/%'`` filter. They are expected to remain in the append-only
-``result`` table forever -- re-running this script appends *more* rows to
-the same fixture slots, which changes nothing about the current-state
+per-type ``<entity_type>_result`` tables forever -- re-running this script
+appends *more* rows to the same fixture slots, which changes nothing about
+the current-state
 answer for those slots (same ``entity_hash``/``entity_type``/
 ``result_type``/``source``, so still the same slot; newest
 ``(observed_at, ingest_batch_id)`` still wins). They can never shadow, or
@@ -68,28 +73,41 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     ALL_PARITY_ROWS,
     PARITY_CASES,
     ParityCase,
+    rows_by_entity_type,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     NAMESPACE,
     TENANT,
     table_configs,
+    table_name,
 )
 
-#: The ``result`` table's fully qualified name, as passed to
-#: :func:`current_state_sql`. :mod:`clearinghouse_derivation`'s own
-#: docstring uses the three-part, tenant-qualified form
-#: (``"kbaseincubator.clearinghouse.result"``) as its worked example, so
-#: that is what this script defaults to. NOTE, per the runbook's OP2
-#: namespace-resolution warning: ``BerdlCapability.load()``'s own
-#: postflight row-count/history queries use a *two-part* form instead
-#: (bare ``namespace.table``, no tenant segment -- see ``capability.py``,
-#: ``load()``'s postflight block). Which form actually resolves against
-#: the live Iceberg catalog is not verifiable off-pod. If this script's
-#: query step fails to find the table under the three-part form, retry
-#: with the two-part form (``f"{NAMESPACE}.result"``) before assuming
-#: anything else is wrong -- and note in your parity-check record which
-#: form worked, since the next operator will hit the same fork.
-RESULT_TABLE_FQN = f"{TENANT}.{NAMESPACE}.result"
+
+def _result_table_fqn(entity_type: str) -> str:
+    """The per-type ``<entity_type>_result`` table's fully qualified name.
+
+    Under the fifteen-table split there is no single ``result`` table to
+    default to: each entity type has its own ``<entity_type>_result`` table,
+    whose bare name is resolved through
+    :func:`kbutillib.domains.kbase.berdl.clearinghouse_schema.table_name`
+    (the ONLY sanctioned name builder -- never string-concatenated here) and
+    qualified with the tenant and namespace. :mod:`clearinghouse_derivation`
+    documents this three-part, tenant-qualified form
+    (e.g. ``"kbaseincubator.clearinghouse.protein_result"``) as its worked
+    example, so that is what this script passes to :func:`current_state_sql`.
+
+    NOTE, per the runbook's OP2 namespace-resolution warning:
+    ``BerdlCapability.load()``'s own postflight row-count/history queries
+    use a *two-part* form instead (bare ``namespace.table``, no tenant
+    segment -- see ``capability.py``, ``load()``'s postflight block). Which
+    form actually resolves against the live Iceberg catalog is not
+    verifiable off-pod. If this script's query step fails to find the table
+    under the three-part form, retry with the two-part form
+    (``f"{NAMESPACE}.{table_name(entity_type, 'result')}"``) before assuming
+    anything else is wrong -- and note in your parity-check record which
+    form worked, since the next operator will hit the same fork.
+    """
+    return f"{TENANT}.{NAMESPACE}.{table_name(entity_type, 'result')}"
 
 #: Column order for rows returned from the Spark query, matching
 #: ``clearinghouse_schema``'s ``result`` table declaration.
@@ -104,16 +122,19 @@ _RESULT_COLUMNS = (
     "ingest_batch_id",
 )
 
-def _build_fixture_dataframe(spark: Any):
-    """Build the Spark DataFrame of every parity fixture row.
+def _build_fixture_dataframe(
+    spark: Any, entity_type: str, rows_for_type: tuple[dict[str, Any], ...]
+):
+    """Build the Spark DataFrame of one entity type's parity fixture rows.
 
     Deferred pyspark import -- see module docstring. Parses each fixture
     row's ``observed_at`` string into a real ``datetime`` and each
-    ``payload`` dict into its JSON-text form, matching the ``result``
-    table's declared ``TIMESTAMP``/``STRING`` column types (see
-    ``clearinghouse_schema._RESULT_COLUMNS``) -- an explicit schema is
-    built here rather than left to inference precisely so this doesn't
-    silently write ``observed_at`` as a string.
+    ``payload`` dict into its JSON-text form, matching the
+    ``<entity_type>_result`` table's declared ``TIMESTAMP``/``STRING``
+    column types (see ``clearinghouse_schema._RESULT_COLUMNS`` -- the
+    ``result`` schema is GENERIC across all five per-type result tables) --
+    an explicit schema is built here rather than left to inference
+    precisely so this doesn't silently write ``observed_at`` as a string.
 
     BOTH THE SCHEMA AND THE ROWS ARE BUILT FROM THE SAME PARSED ``columns``
     list, and the rows are built POSITIONALLY rather than from a
@@ -153,7 +174,8 @@ def _build_fixture_dataframe(spark: Any):
         "STRING": StringType(),
         "TIMESTAMP": TimestampType(),
     }
-    result_config = next(t for t in table_configs() if t["name"] == "result")
+    result_table = table_name(entity_type, "result")
+    result_config = next(t for t in table_configs() if t["name"] == result_table)
     columns = [
         part.strip().split(" ", 1)
         for part in result_config["schema_sql"].split(",")
@@ -175,38 +197,62 @@ def _build_fixture_dataframe(spark: Any):
 
     rows = [
         Row(*(cell(name, row[name]) for name, _sql_type in columns))
-        for row in ALL_PARITY_ROWS
+        for row in rows_for_type
     ]
     return spark.createDataFrame(rows, schema=schema)
 
 
-def _append_fixture_rows(capability: BerdlCapability, spark: Any) -> dict[str, Any]:
-    """Append every parity fixture row to the real ``result`` table.
+def _append_fixture_rows(
+    capability: BerdlCapability, spark: Any
+) -> dict[str, dict[str, Any]]:
+    """Append the parity fixture rows to each per-type ``<type>_result`` table.
 
-    Goes through :meth:`BerdlCapability.load` (-> ``data_lakehouse_ingest.
-    ingest``), the same sanctioned write path OP2 uses to create the
-    tables in the first place -- this function never imports or uses
-    ``pyiceberg`` directly, which would bypass the schema enforcement
-    that makes a write through ``load()`` sanctioned. See the runbook's
-    "if something goes wrong" section.
+    Under the fifteen-table split the fixture no longer targets a single
+    ``result`` table: each row belongs in its own ``<entity_type>_result``
+    table. :func:`rows_by_entity_type` groups the shared fixture rows by
+    ``entity_type`` (iterating :data:`ENTITY_TYPES`, not a local list), and
+    each group is written to its own table, resolved via
+    :func:`table_name` -- never a string-concatenated name.
+
+    Every write goes through :meth:`BerdlCapability.load` (->
+    ``data_lakehouse_ingest.ingest``), the same sanctioned write path OP2
+    uses to create the tables in the first place -- this function never
+    imports or uses ``pyiceberg`` directly, which would bypass the schema
+    enforcement that makes a write through ``load()`` sanctioned. See the
+    runbook's "if something goes wrong" section.
+
+    Returns:
+        A dict mapping each per-type ``result`` table name to that table's
+        ``load()`` return value.
     """
-    result_config = next(t for t in table_configs() if t["name"] == "result")
-    df = _build_fixture_dataframe(spark)
-    return capability.load(
-        dataset=NAMESPACE,
-        tables=[{**result_config, "mode": "append"}],
-        namespace=NAMESPACE,
-        tenant=TENANT,
-        dataframes={"result": df},
-        spark=spark,
-    )
+    load_results: dict[str, dict[str, Any]] = {}
+    for entity_type, rows_for_type in rows_by_entity_type().items():
+        result_table = table_name(entity_type, "result")
+        result_config = next(
+            t for t in table_configs() if t["name"] == result_table
+        )
+        df = _build_fixture_dataframe(spark, entity_type, rows_for_type)
+        load_results[result_table] = capability.load(
+            dataset=NAMESPACE,
+            tables=[{**result_config, "mode": "append"}],
+            namespace=NAMESPACE,
+            tenant=TENANT,
+            dataframes={result_table: df},
+            spark=spark,
+        )
+    return load_results
 
 
 def _query_current_state(
-    capability: BerdlCapability, sources: tuple[str, ...]
+    capability: BerdlCapability, entity_type: str, sources: tuple[str, ...]
 ) -> list[dict[str, Any]]:
-    """Run ``current_state_sql()`` through Spark and shape rows as dicts."""
-    sql = current_state_sql(RESULT_TABLE_FQN, sources=list(sources))
+    """Run ``current_state_sql()`` against one type's ``result`` table.
+
+    The table is the ``<entity_type>_result`` table resolved via
+    :func:`table_name` (never string-concatenated) and qualified by
+    :func:`_result_table_fqn`.
+    """
+    sql = current_state_sql(_result_table_fqn(entity_type), sources=list(sources))
     spark_rows = capability.query(sql, engine="spark")
     return [
         {column: row[column] for column in _RESULT_COLUMNS} for row in spark_rows
@@ -267,7 +313,9 @@ def _check_property(
             }
             filtered_rows = [
                 row
-                for row in _query_current_state(capability, (source_a,))
+                for row in _query_current_state(
+                    capability, case.entity_type, (source_a,)
+                )
                 if row["entity_hash"] == case.entity_hash
             ]
             filtered_sources = {row["source"] for row in filtered_rows}
@@ -304,15 +352,20 @@ def main() -> int:
     transport = InPodTransport()
     spark = transport.spark_session()
 
+    target_tables = ", ".join(
+        _result_table_fqn(entity_type) for entity_type in rows_by_entity_type()
+    )
     print(
         f"Appending {len(ALL_PARITY_ROWS)} parity-check fixture rows to "
-        f"{RESULT_TABLE_FQN} ..."
+        f"{target_tables} ..."
     )
     _append_fixture_rows(capability, spark)
 
     all_passed = True
     for case in PARITY_CASES:
-        current_rows = _query_current_state(capability, case.sources)
+        current_rows = _query_current_state(
+            capability, case.entity_type, case.sources
+        )
         passed, reason = _check_property(capability, case, current_rows)
         status = "PASS" if passed else "FAIL"
         suffix = f" ({reason})" if reason else ""

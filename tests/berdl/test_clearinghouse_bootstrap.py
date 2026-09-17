@@ -235,7 +235,9 @@ class TestIndeterminateExistenceRefuses:
     def test_existence_check_raising_causes_refusal_not_overwrite(self):
         cap = _FakeCapability(existence_error=RuntimeError("catalog lookup timed out"))
 
-        with pytest.raises(BootstrapIndeterminateStateError, match="entity"):
+        # genome_entity is table_configs()[0], so it is the first table
+        # whose existence lookup fails; the refusal message must name it.
+        with pytest.raises(BootstrapIndeterminateStateError, match="genome_entity"):
             bootstrap(cap, namespace=_NAMESPACE)
 
         assert cap.load_calls == []

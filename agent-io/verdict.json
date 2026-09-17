@@ -1,9 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "Per-type table targeting done correctly: all table names via clearinghouse_schema.table_name() (no literal concatenation), grouping/iteration via ENTITY_TYPES, 4-tuple slot key (incl entity_type) retained. berdl suite: 192 passed on base main 81abd08 and 192 passed on branch -- no new failures. No fixes needed.",
+  "reason": "Docs-only change to clearinghouse_derivation.py: module docstring states result_table_fqn names a per-type table (e.g. gene_result) and that the entity_types filter is redundant-but-harmless on a single-typed table; _SLOT_KEY_COLUMNS is still the 4-tuple with a comment recording entity_type is deliberately retained. Executable code is byte-identical to base (AST-equal after stripping docstrings; diff is only docstring + #: comment additions). PRD premise confirmed (current_state_sql already takes result_table_fqn, no code change needed). berdl tests: 192 passed / 25 skipped, identical on base and branch, no new failures.",
   "stamp": {
-    "task_id": "task-f05971e2",
-    "branch": "maestro/reviewer/background-possibly-unreachable--task-f05971e2",
-    "commit": "1d6f2035abbbea5628452b81459f08007cca6e07"
+    "task_id": "task-5817da1f",
+    "branch": "maestro/reviewer/background-possibly-unreachable--task-5817da1f",
+    "commit": null
   }
 }

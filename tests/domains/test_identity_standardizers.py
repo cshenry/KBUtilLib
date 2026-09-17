@@ -148,31 +148,31 @@ def test_protein_hash_over_residue_letters_only_no_header_no_newlines() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gene_dna
+# gene
 # ---------------------------------------------------------------------------
 
 
-def test_gene_dna_strips_header_whitespace_then_uppercases() -> None:
+def test_gene_strips_header_whitespace_then_uppercases() -> None:
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
     raw = ">contig1\nacgt\nacgt\n"
-    assert standardize("gene_dna", raw) == "ACGTACGT"
+    assert standardize("gene", raw) == "ACGTACGT"
 
 
-def test_gene_dna_preserves_characters_outside_acgtn() -> None:
+def test_gene_preserves_characters_outside_acgtn() -> None:
     """Characters outside ACGTN (e.g. ambiguity codes) are preserved, not rejected."""
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
-    assert standardize("gene_dna", "acgtnryw") == "ACGTNRYW"
+    assert standardize("gene", "acgtnryw") == "ACGTNRYW"
 
 
-def test_gene_dna_is_not_reverse_complement_folded() -> None:
+def test_gene_is_not_reverse_complement_folded() -> None:
     """The canonical form of a sequence and its reverse complement must differ."""
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
     forward = "AAGT"
     revcomp = forward[::-1].translate(str.maketrans("ACGT", "TGCA"))
-    assert standardize("gene_dna", forward) != standardize("gene_dna", revcomp)
+    assert standardize("gene", forward) != standardize("gene", revcomp)
 
 
 # ---------------------------------------------------------------------------

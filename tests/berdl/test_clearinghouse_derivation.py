@@ -258,17 +258,17 @@ class TestSourceIsolation:
 class TestEntityTypeInSlotKey:
     """Property 7: entity_type is part of the slot key, not entity_hash alone.
 
-    ``_standardize_protein`` and ``_standardize_gene_dna`` are the same
+    ``_standardize_protein`` and ``_standardize_gene`` are the same
     standardizer (a bare ``_clean_sequence_letters``), so a sequence over
     the alphabet {A,C,G,T,N} produces a byte-identical ``entity_hash``
     whether submitted as a protein or as gene DNA. A protein row and a
-    gene_dna row that share an entity_hash, result_type and source must
+    gene row that share an entity_hash, result_type and source must
     therefore occupy TWO distinct slots -- both must survive as current,
     never collapsed to one by a window function partitioned on
     entity_hash/result_type/source alone.
     """
 
-    def test_protein_and_gene_dna_sharing_hash_both_survive(self, fixture):
+    def test_protein_and_gene_sharing_hash_both_survive(self, fixture):
         entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
         shared_kwargs = dict(
             entity_hash=entity_hash,
@@ -284,8 +284,8 @@ class TestEntityTypeInSlotKey:
             **shared_kwargs,
         )
         fixture.insert(
-            entity_type="gene_dna",
-            payload={"kind": "gene_dna"},
+            entity_type="gene",
+            payload={"kind": "gene"},
             **shared_kwargs,
         )
         rows = {
@@ -293,9 +293,9 @@ class TestEntityTypeInSlotKey:
             for row in fixture.current_state()
             if row["entity_hash"] == entity_hash
         }
-        assert set(rows) == {"protein", "gene_dna"}
+        assert set(rows) == {"protein", "gene"}
         assert json.loads(rows["protein"]["payload"]) == {"kind": "protein"}
-        assert json.loads(rows["gene_dna"]["payload"]) == {"kind": "gene_dna"}
+        assert json.loads(rows["gene"]["payload"]) == {"kind": "gene"}
 
     def test_entity_types_filter_prunes_to_requested_types_only(self, fixture):
         entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
@@ -313,8 +313,8 @@ class TestEntityTypeInSlotKey:
             **shared_kwargs,
         )
         fixture.insert(
-            entity_type="gene_dna",
-            payload={"kind": "gene_dna"},
+            entity_type="gene",
+            payload={"kind": "gene"},
             **shared_kwargs,
         )
         rows = [
@@ -332,7 +332,7 @@ class TestEntityTypeInSlotKey:
             result_type_version="v1",
             observed_at="2026-01-01 00:00:00",
         )
-        # (protein, sourceA), (protein, sourceB), (gene_dna, sourceA)
+        # (protein, sourceA), (protein, sourceB), (gene, sourceA)
         fixture.insert(
             entity_type="protein",
             source="parity-check/entity_type_and_source/toolA",
@@ -348,9 +348,9 @@ class TestEntityTypeInSlotKey:
             **base,
         )
         fixture.insert(
-            entity_type="gene_dna",
+            entity_type="gene",
             source="parity-check/entity_type_and_source/toolA",
-            payload={"kind": "gene_dna_a"},
+            payload={"kind": "gene_a"},
             ingest_batch_id="01HENTITYTYPEANDSOURCE0AC",
             **base,
         )
@@ -468,8 +468,8 @@ class TestDialectConformance:
         )
 
     def test_entity_types_filter_renders_as_where_in(self):
-        sql = current_state_sql("ns.result", entity_types=["protein", "gene_dna"])
-        assert "WHERE entity_type IN ('protein', 'gene_dna')" in sql
+        sql = current_state_sql("ns.result", entity_types=["protein", "gene"])
+        assert "WHERE entity_type IN ('protein', 'gene')" in sql
 
     def test_empty_entity_types_list_filters_out_everything(self):
         sql = current_state_sql("ns.result", entity_types=[])

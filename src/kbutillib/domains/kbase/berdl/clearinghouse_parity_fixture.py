@@ -36,7 +36,7 @@ permanently -- the schema is append-only by design -- and this is
 harmless, since each occupies its own ``(entity_hash, entity_type,
 result_type, source)`` slot and can never shadow or be shadowed by a
 real slot. ``entity_type`` is part of the slot key because
-``_standardize_protein`` and ``_standardize_gene_dna`` are the same
+``_standardize_protein`` and ``_standardize_gene`` are the same
 standardizer, so ``entity_hash`` alone does not uniquely identify an
 entity -- the pair ``(entity_hash, entity_type)`` does.
 """

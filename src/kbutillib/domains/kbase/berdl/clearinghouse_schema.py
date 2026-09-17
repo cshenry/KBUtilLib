@@ -1,10 +1,35 @@
 """Table configs and hash-encoding helpers for the content-hash clearinghouse.
 
-This defines the three Apache Iceberg tables of the ``kbaseincubator``
-tenant's ``clearinghouse`` namespace in the BER Data Lakehouse -- ``entity``,
-``canonical_content``, and ``result`` -- as pure, pod-free config dicts
-shaped for :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
+This defines the fifteen Apache Iceberg tables of the ``kbaseincubator``
+tenant's ``clearinghouse`` namespace in the BER Data Lakehouse as pure,
+pod-free config dicts shaped for
+:meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
 (``tables=table_configs()``), plus a pair of hash-encoding helpers.
+
+The fifteen tables are ``<entity_type>_<kind>`` (type-first) for each of the
+five entity types -- ``genome``, ``protein``, ``gene``, ``function``,
+``ontology_term`` -- and each of the three kinds -- ``entity``, ``content``,
+``result``. This replaces the earlier three-table scheme (a single
+``entity``/``canonical_content``/``result`` triple partitioned by
+``entity_type``): the corpus carries a roughly 5000:1 row-count skew across
+types (gene ~5B rows vs. function/ontology_term ~1M), and Iceberg table
+PROPERTIES (target file size, compaction, sort order, snapshot expiry),
+query PLANNING scope, and COMMIT concurrency are all table-level and cannot
+be tuned per partition. Splitting one physical table per entity type is the
+only place those knobs become per-type.
+
+The ``entity`` and ``result`` kinds carry a GENERIC schema identical across
+all five types (they differ only in physical table, partitioning and
+properties). The ``content`` kind is TYPE-SPECIALIZED: every content table
+carries the shared tail (``entity_hash``, ``standardizer_version``,
+``observed_at``, ``ingest_batch_id``) but a different type-specific head
+(protein/gene carry a sequence; genome carries assembly metadata plus a
+``fasta_reference`` POINTER to the sequence and never the sequence itself,
+since 10M genomes inlined would be ~50TB; and so on).
+
+The public :func:`table_name` resolver is the ONLY place a clearinghouse
+table name is constructed -- ``f"{entity_type}_{kind}"`` -- so the config
+generator and every caller share one definition and cannot drift.
 
 Why the hash needs an encoding boundary at all: the platform's only hashing
 surface, :mod:`kbutillib.domains.identity.standardizers`, returns
@@ -32,8 +57,10 @@ byte-for-byte comparison correct in the first place, and because
 string-formatted SQL is an injection surface regardless.
 
 Column types are declared exactly once, in ``_ENTITY_COLUMNS``,
-``_CANONICAL_CONTENT_COLUMNS``, and ``_RESULT_COLUMNS`` below, as ordered
-``(name, sql_type)`` pairs. ``entity_hash`` is declared as bare ``BINARY``,
+``_CONTENT_TYPE_HEAD`` + ``_CONTENT_COMMON_TAIL`` (a per-type mapping
+composing each type's head onto a shared tail declared once), and
+``_RESULT_COLUMNS`` below, as ordered ``(name, sql_type)`` pairs.
+``entity_hash`` is declared as bare ``BINARY``,
 not a parameterized ``BINARY 32`` spelling -- Spark SQL's ``BinaryType`` has
 no length parameter, so a length suffix would not be valid DDL, and this
 module's config values must in any case never contain a parenthesis (that
@@ -52,26 +79,30 @@ through unchanged and validate neither, so whether Spark/Iceberg accepts
 bare ``BINARY`` through this specific write path, and whether the
 resulting column is genuinely binary rather than STRING, is **not
 verifiable off-pod** and is not asserted here as fact. Confirming that is
-an in-pod operator step (OP2): create the three tables from a ``kbhub``
+an in-pod operator step (OP2): create the tables from a ``kbhub``
 notebook using this module's ``table_configs()``, then inspect the created
 columns' physical types before any production data is loaded.
 
 Partitioning: bucketing on a hash gives zero read pruning, since a good
-hash scatters uniformly across buckets by design -- ``entity_hash`` and
-``content`` are therefore never partition keys anywhere in this module.
-``entity`` partitions on the bare, stored ``entity_type`` column: the
-dedup probe is typed by construction (``standardizers.entity_hash()``
-takes ``entity_type`` as a mandatory positional argument), and identity
-in this schema is the pair ``(entity_hash, entity_type)`` rather than the
-hash alone -- ``entity_type`` is a real, five-valued stored column, which
-is exactly what makes it a usable partition key. ``result`` partitions on
-two bare, stored columns, ``source`` (format ``<tool>/<version>``) then
-``entity_type``, in that order -- the order is significant, since an
-Iceberg partition spec is compared by list equality, not by membership.
-``canonical_content`` remains unpartitioned, but that is deferred pending
-downstream query shapes, not settled: unlike ``entity`` and ``result``,
-no partition key has yet been identified for it, not a considered
-decision that none exists. Iceberg partition transforms such as
+hash scatters uniformly across buckets by design -- ``entity_hash`` is
+therefore never a partition key anywhere in this module. Because each
+entity type now has its own physical tables, ``entity_type`` is no longer a
+useful partition key (it is single-valued within each table), so the
+partition columns differ from the old scheme:
+
+  - ``standardizer_version`` on ``gene_entity``, ``protein_entity``,
+    ``gene_content``, ``protein_content`` -- the four high-volume tables
+    where a standardizer bump is the axis worth pruning on.
+  - ``source`` (format ``<tool>/<version>``) on all five ``<type>_result``
+    tables.
+  - NO partition key at all on the remaining six -- ``genome_entity``,
+    ``function_entity``, ``ontology_term_entity``, ``genome_content``,
+    ``function_content``, ``ontology_term_content`` -- whose row counts are
+    low enough (~1M-10M) that a partition key buys nothing.
+
+For the unpartitioned tables the config omits the ``partition_by`` key
+entirely (rather than emitting a falsy value), so an absent key
+unambiguously means "unpartitioned". Iceberg partition transforms such as
 ``bucket(256, entity_hash)``, ``truncate(...)``, or ``days(...)`` are not
 expressible through this write path: the wrapper passes ``partition_by``
 straight to PySpark's ``partitionedBy(*cols)`` as bare strings, so a
@@ -89,9 +120,19 @@ TENANT = "kbaseincubator"
 #: The Iceberg namespace within the tenant.
 NAMESPACE = "clearinghouse"
 
-#: Column declarations for the ``entity`` table, in DDL order. Declared once;
-#: every other reference to these columns (``table_configs()``, tests)
-#: derives from this tuple rather than repeating the list.
+#: The only ``entity_type`` values the clearinghouse recognizes -- matches
+#: the ``entity_type`` values :mod:`kbutillib.domains.identity.standardizers`
+#: standardizes. This is also the order in which per-kind configs are
+#: emitted by :func:`table_configs`.
+ENTITY_TYPES = ("genome", "protein", "gene", "function", "ontology_term")
+
+#: The three physical kinds a clearinghouse table can be.
+_KINDS = ("entity", "content", "result")
+
+#: Column declarations for every ``<type>_entity`` table, in DDL order.
+#: GENERIC: identical for all five entity types. Declared once; every other
+#: reference to these columns (``table_configs()``, tests) derives from this
+#: tuple rather than repeating the list.
 _ENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entity_hash", "BINARY"),
     ("entity_type", "STRING"),
@@ -100,16 +141,8 @@ _ENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ingest_batch_id", "STRING"),
 )
 
-#: Column declarations for the ``canonical_content`` table, in DDL order.
-_CANONICAL_CONTENT_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("entity_hash", "BINARY"),
-    ("content", "STRING"),
-    ("standardizer_version", "STRING"),
-    ("observed_at", "TIMESTAMP"),
-    ("ingest_batch_id", "STRING"),
-)
-
-#: Column declarations for the ``result`` table, in DDL order.
+#: Column declarations for every ``<type>_result`` table, in DDL order.
+#: GENERIC: identical for all five entity types.
 _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entity_hash", "BINARY"),
     ("entity_type", "STRING"),
@@ -121,10 +154,77 @@ _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ingest_batch_id", "STRING"),
 )
 
-#: The only ``entity_type`` values the clearinghouse recognizes -- matches
-#: the ``entity_type`` values :mod:`kbutillib.domains.identity.standardizers`
-#: standardizes.
-ENTITY_TYPES = ("genome", "protein", "gene_dna", "function", "ontology_term")
+#: The tail every ``<type>_content`` table shares, declared ONCE and composed
+#: onto each type's type-specific head below. ``entity_hash`` leads every
+#: content table and is prepended separately (see :func:`_content_columns`),
+#: so this tuple holds only the trailing common columns.
+_CONTENT_COMMON_TAIL: tuple[tuple[str, str], ...] = (
+    ("standardizer_version", "STRING"),
+    ("observed_at", "TIMESTAMP"),
+    ("ingest_batch_id", "STRING"),
+)
+
+#: The type-specific HEAD columns for each ``<type>_content`` table, in DDL
+#: order, sitting between the leading ``entity_hash`` and the shared tail.
+#: genome_content stores a POINTER (``fasta_reference``) to the sequence plus
+#: assembly metadata -- never the sequence inlined -- so it has no ``sequence``
+#: column; 10M genomes inlined would be ~50TB.
+_CONTENT_TYPE_HEAD: dict[str, tuple[tuple[str, str], ...]] = {
+    "genome": (
+        ("fasta_reference", "STRING"),
+        ("taxon_id", "STRING"),
+        ("assembly_accession", "STRING"),
+        ("n_contigs", "INT"),
+        ("total_length", "BIGINT"),
+        ("is_closed", "BOOLEAN"),
+    ),
+    "protein": (
+        ("sequence", "STRING"),
+        ("seq_length", "INT"),
+    ),
+    "gene": (
+        ("sequence", "STRING"),
+        ("seq_length", "INT"),
+        ("protein_entity_hash", "BINARY"),
+    ),
+    "function": (
+        ("definition", "STRING"),
+    ),
+    "ontology_term": (
+        ("term_id", "STRING"),
+        ("name", "STRING"),
+        ("namespace", "STRING"),
+        ("definition", "STRING"),
+    ),
+}
+
+
+def _content_columns(entity_type: str) -> tuple[tuple[str, str], ...]:
+    """Compose a ``<type>_content`` column list: hash + type head + tail.
+
+    ``entity_hash`` leads, the type-specific head follows, and the shared
+    tail (declared once in :data:`_CONTENT_COMMON_TAIL`) closes -- so the
+    common columns live in exactly one place across all five content tables.
+    """
+    return (
+        (("entity_hash", "BINARY"),)
+        + _CONTENT_TYPE_HEAD[entity_type]
+        + _CONTENT_COMMON_TAIL
+    )
+
+
+#: Which single bare, stored column each ``<type>_entity``/``<type>_content``
+#: table partitions on, when it partitions at all. Only the four high-volume
+#: tables appear here; a type absent from a kind's map is unpartitioned. See
+#: the module docstring's "Partitioning" section for the rationale.
+_ENTITY_PARTITION_BY: dict[str, str] = {
+    "gene": "standardizer_version",
+    "protein": "standardizer_version",
+}
+_CONTENT_PARTITION_BY: dict[str, str] = {
+    "gene": "standardizer_version",
+    "protein": "standardizer_version",
+}
 
 #: Raw byte length of a sha256 digest -- the width of ``entity_hash``.
 _HASH_BYTES = 32
@@ -138,44 +238,91 @@ def _schema_sql(columns: tuple[tuple[str, str], ...]) -> str:
     return ", ".join(f"{name} {sql_type}" for name, sql_type in columns)
 
 
+def table_name(entity_type: str, kind: str) -> str:
+    """Return the physical table name ``f"{entity_type}_{kind}"``.
+
+    This is the ONLY place a clearinghouse table name is constructed, so the
+    config generator and every caller share one definition and cannot drift.
+
+    Args:
+        entity_type: One of :data:`ENTITY_TYPES` (``"genome"``,
+            ``"protein"``, ``"gene"``, ``"function"``, ``"ontology_term"``).
+        kind: One of ``"entity"``, ``"content"``, ``"result"``.
+
+    Returns:
+        The ``<entity_type>_<kind>`` table name.
+
+    Raises:
+        ValueError: If ``entity_type`` is not a known entity type, or if
+            ``kind`` is not a known kind. An unknown value must never
+            silently yield a name for a table that does not exist.
+    """
+    if entity_type not in ENTITY_TYPES:
+        raise ValueError(
+            f"table_name: unknown entity_type {entity_type!r}; "
+            f"expected one of {ENTITY_TYPES!r}."
+        )
+    if kind not in _KINDS:
+        raise ValueError(
+            f"table_name: unknown kind {kind!r}; "
+            f"expected one of {_KINDS!r}."
+        )
+    return f"{entity_type}_{kind}"
+
+
 def table_configs() -> list[dict[str, Any]]:
-    """Return the three clearinghouse table configs for ``BerdlCapability.load``.
+    """Return the fifteen clearinghouse table configs for ``BerdlCapability.load``.
 
     Each dict is shaped for the ``tables=`` argument of
     :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
     (and, underneath it, :func:`~kbutillib.domains.kbase.berdl.capability.build_ingest_config`):
-    a ``name``, a ``schema_sql`` DDL fragment, and -- for ``entity`` and
-    ``result`` -- a ``partition_by`` naming real, stored columns. ``entity``
-    partitions on the bare ``entity_type`` column; ``result`` partitions on
-    the two bare columns ``source`` and ``entity_type``, in that order.
-    ``canonical_content`` carries no ``partition_by`` key at all: bucketing
-    a hash column gives zero read pruning, and that table is
-    content-addressed (two rows colliding on a hash carry identical
-    ``content`` by construction), so it is deliberately unpartitioned
-    rather than partitioned on a poor key.
+    a ``name`` (always :func:`table_name` for its type and kind, so the
+    generator and resolver cannot drift), a ``schema_sql`` DDL fragment, and
+    a ``partition_by`` ONLY on the tables that partition -- ``gene_entity``,
+    ``protein_entity``, ``gene_content`` and ``protein_content`` on
+    ``standardizer_version``, and all five ``<type>_result`` on ``source``.
+    The other six configs carry no ``partition_by`` key at all (its absence
+    means "unpartitioned"; see the module docstring's "Partitioning"
+    section).
 
     Returns:
-        A new list of three dicts, in the order ``entity``,
-        ``canonical_content``, ``result``. Freshly built on every call, so
-        callers may freely mutate the result (e.g. to add ``bronze_path``
-        for bronze-mode ingest) without affecting this module's constants.
+        A new list of fifteen dicts in a deterministic, documented order:
+        all five ``<type>_entity`` configs in :data:`ENTITY_TYPES` order,
+        then all five ``<type>_content``, then all five ``<type>_result``.
+        Freshly built on every call, so callers may freely mutate the result
+        (e.g. to add ``bronze_path`` for bronze-mode ingest) without
+        affecting this module's constants.
     """
-    return [
-        {
-            "name": "entity",
+    configs: list[dict[str, Any]] = []
+
+    for entity_type in ENTITY_TYPES:
+        config: dict[str, Any] = {
+            "name": table_name(entity_type, "entity"),
             "schema_sql": _schema_sql(_ENTITY_COLUMNS),
-            "partition_by": "entity_type",
-        },
-        {
-            "name": "canonical_content",
-            "schema_sql": _schema_sql(_CANONICAL_CONTENT_COLUMNS),
-        },
-        {
-            "name": "result",
-            "schema_sql": _schema_sql(_RESULT_COLUMNS),
-            "partition_by": ["source", "entity_type"],
-        },
-    ]
+        }
+        if entity_type in _ENTITY_PARTITION_BY:
+            config["partition_by"] = _ENTITY_PARTITION_BY[entity_type]
+        configs.append(config)
+
+    for entity_type in ENTITY_TYPES:
+        config = {
+            "name": table_name(entity_type, "content"),
+            "schema_sql": _schema_sql(_content_columns(entity_type)),
+        }
+        if entity_type in _CONTENT_PARTITION_BY:
+            config["partition_by"] = _CONTENT_PARTITION_BY[entity_type]
+        configs.append(config)
+
+    for entity_type in ENTITY_TYPES:
+        configs.append(
+            {
+                "name": table_name(entity_type, "result"),
+                "schema_sql": _schema_sql(_RESULT_COLUMNS),
+                "partition_by": "source",
+            }
+        )
+
+    return configs
 
 
 def encode_entity_hash(value: str | bytes) -> bytes:
@@ -412,7 +559,7 @@ def bootstrap(
             ``my.`` prefix, etc.) is an operator decision this module
             deliberately does not make for you.
         tables: The table configs to bootstrap. Defaults to
-            :func:`table_configs` (the three clearinghouse tables). Tests
+            :func:`table_configs` (the fifteen clearinghouse tables). Tests
             may pass a smaller/synthetic set.
         dataset: The ``load()`` call's top-level ``dataset``. Defaults to
             :data:`NAMESPACE`.

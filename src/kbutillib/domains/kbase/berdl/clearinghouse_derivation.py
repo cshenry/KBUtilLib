@@ -14,13 +14,13 @@ THE SEMANTICS. Current state for a slot -- a slot being one
 ``(entity_hash, entity_type, result_type, source)`` 4-tuple -- is the row
 with the greatest ``(observed_at, ingest_batch_id)`` within that slot.
 ``entity_type`` is part of the slot key because ``_standardize_protein``
-and ``_standardize_gene_dna`` are the same standardizer (a bare
+and ``_standardize_gene`` are the same standardizer (a bare
 ``_clean_sequence_letters``), so a sequence over the alphabet
 {A,C,G,T,N} -- every letter of which is also a valid IUPAC amino-acid
 code -- produces a byte-identical ``entity_hash`` whether submitted as a
 protein or as gene DNA; identity is the pair ``(entity_hash,
 entity_type)``, never ``entity_hash`` alone, and a slot key that omitted
-``entity_type`` would let a protein row and a gene_dna row silently
+``entity_type`` would let a protein row and a gene row silently
 shadow each other. This module implements the derivation with a window
 function: ``ROW_NUMBER() OVER (PARTITION BY entity_hash, entity_type,
 result_type, source ORDER BY observed_at DESC, ingest_batch_id DESC)``,
@@ -64,7 +64,7 @@ something provable off-pod.
 
 from __future__ import annotations
 
-from .clearinghouse_schema import table_configs
+from .clearinghouse_schema import ENTITY_TYPES, table_configs, table_name
 
 __all__ = ["current_state_sql"]
 
@@ -103,16 +103,20 @@ def _quote_fqn(fqn: str) -> str:
 
 
 def _result_columns() -> list[str]:
-    """Column names of the ``result`` table, in DDL order.
+    """Column names of a ``<type>_result`` table, in DDL order.
 
     Derived from :func:`clearinghouse_schema.table_configs` rather than
     re-typed here, so this module and the schema module cannot silently
     drift apart -- per the task's instruction to reuse the previous
     phase's table/column names rather than re-typing them as string
-    literals.
+    literals. The result schema is GENERIC (byte-identical across all five
+    ``<type>_result`` tables in the fifteen-table scheme), so any one of
+    them defines the column list this derivation reads; the first entity
+    type's result table is used as that canonical reference.
     """
+    reference_result = table_name(ENTITY_TYPES[0], "result")
     configs = {table["name"]: table for table in table_configs()}
-    schema_sql = configs["result"]["schema_sql"]
+    schema_sql = configs[reference_result]["schema_sql"]
     return [part.strip().split(" ", 1)[0] for part in schema_sql.split(",")]
 
 

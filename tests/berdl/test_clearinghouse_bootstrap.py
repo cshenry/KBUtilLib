@@ -26,6 +26,22 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
 
 _NAMESPACE = "clearinghouse"
 
+#: Every table name the fifteen-table config emits.
+_ALL_TABLE_NAMES = [t["name"] for t in table_configs()]
+
+#: Live partition spec every table would report after a first bootstrap
+#: run created it, keyed by name -- built straight from the config so the
+#: fake and the config cannot drift.
+_LIVE_SPECS: dict[str, list[str]] = {}
+for _t in table_configs():
+    _pb = _t.get("partition_by")
+    if _pb is None:
+        _LIVE_SPECS[_t["name"]] = []
+    elif isinstance(_pb, str):
+        _LIVE_SPECS[_t["name"]] = [_pb]
+    else:
+        _LIVE_SPECS[_t["name"]] = list(_pb)
+
 
 class _FakeCapability:
     """A minimal fake satisfying ``bootstrap()``'s required capability
@@ -80,21 +96,17 @@ class _FakeCapability:
         return {"ingest_result": "ok", "tables": kwargs["tables"]}
 
 
-class TestFirstRunCreatesAllThree:
-    def test_empty_namespace_creates_all_three_tables(self):
+class TestFirstRunCreatesAllTables:
+    def test_empty_namespace_creates_all_tables(self):
         cap = _FakeCapability()
         result = bootstrap(cap, namespace=_NAMESPACE)
 
         assert result["dry_run"] is False
-        assert [t["name"] for t in result["tables"]] == [
-            "entity",
-            "canonical_content",
-            "result",
-        ]
+        assert [t["name"] for t in result["tables"]] == _ALL_TABLE_NAMES
         assert all(t["action"] == "create" for t in result["tables"])
         assert len(cap.load_calls) == 1
         loaded_names = [t["name"] for t in cap.load_calls[0]["tables"]]
-        assert loaded_names == ["entity", "canonical_content", "result"]
+        assert loaded_names == _ALL_TABLE_NAMES
         # bootstrap() itself never requests 'overwrite' -- it always
         # requests 'append' and lets load()'s own select_write_mode()
         # promote it on first creation.
@@ -115,13 +127,7 @@ class TestFirstRunCreatesAllThree:
 
 class TestSecondRunNeverRequestsOverwrite:
     def test_second_run_against_existing_tables_requests_append_only(self):
-        cap = _FakeCapability(
-            existing={
-                "entity": ["entity_type"],
-                "canonical_content": [],
-                "result": ["source", "entity_type"],
-            }
-        )
+        cap = _FakeCapability(existing=dict(_LIVE_SPECS))
 
         result = bootstrap(cap, namespace=_NAMESPACE)
 
@@ -130,16 +136,12 @@ class TestSecondRunNeverRequestsOverwrite:
         requested_modes = {
             table["name"]: table["mode"] for table in cap.load_calls[0]["tables"]
         }
-        assert requested_modes == {
-            "entity": "append",
-            "canonical_content": "append",
-            "result": "append",
-        }
+        assert requested_modes == {name: "append" for name in _ALL_TABLE_NAMES}
         assert "overwrite" not in requested_modes.values()
 
     def test_two_runs_back_to_back_never_request_overwrite(self):
         """Run once against an empty namespace, then again -- the second
-        run's fake now has all three tables 'existing' (see
+        run's fake now has all tables 'existing' (see
         ``_FakeCapability.load``) and must request 'append' for all of
         them, never 'overwrite'.
         """
@@ -149,19 +151,21 @@ class TestSecondRunNeverRequestsOverwrite:
 
         assert len(cap.load_calls) == 2
         second_call_modes = [t["mode"] for t in cap.load_calls[1]["tables"]]
-        assert second_call_modes == ["append", "append", "append"]
+        assert second_call_modes == ["append"] * len(_ALL_TABLE_NAMES)
 
 
 class TestPartitionSpecGuard:
     def test_mismatch_against_live_table_refuses_and_names_both_specs(self):
-        cap = _FakeCapability(existing={"result": ["standardizer_version"]})
-        tables = [t for t in table_configs() if t["name"] == "result"]
+        # protein_result partitions on 'source' in the fifteen-table scheme;
+        # a live table partitioned on 'standardizer_version' must be refused.
+        cap = _FakeCapability(existing={"protein_result": ["standardizer_version"]})
+        tables = [t for t in table_configs() if t["name"] == "protein_result"]
 
         with pytest.raises(BootstrapPartitionSpecMismatchError) as excinfo:
             bootstrap(cap, namespace=_NAMESPACE, tables=tables)
 
         message = str(excinfo.value)
-        assert "['source', 'entity_type']" in message  # expected (config) spec
+        assert "['source']" in message  # expected (config) spec
         assert "['standardizer_version']" in message  # actual (live) spec
         assert cap.load_calls == []
 
@@ -169,7 +173,7 @@ class TestPartitionSpecGuard:
         """A mismatch on one table must refuse before writing *any* table
         in the same bootstrap() call -- including tables that were fine.
         """
-        cap = _FakeCapability(existing={"result": ["standardizer_version"]})
+        cap = _FakeCapability(existing={"protein_result": ["standardizer_version"]})
 
         with pytest.raises(BootstrapPartitionSpecMismatchError):
             bootstrap(cap, namespace=_NAMESPACE)
@@ -177,8 +181,8 @@ class TestPartitionSpecGuard:
         assert cap.load_calls == []
 
     def test_matching_live_spec_appends_without_refusing(self):
-        cap = _FakeCapability(existing={"result": ["source", "entity_type"]})
-        tables = [t for t in table_configs() if t["name"] == "result"]
+        cap = _FakeCapability(existing={"protein_result": ["source"]})
+        tables = [t for t in table_configs() if t["name"] == "protein_result"]
 
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables)
 
@@ -186,11 +190,10 @@ class TestPartitionSpecGuard:
         assert cap.load_calls[0]["tables"][0]["mode"] == "append"
 
     def test_unpartitioned_table_with_no_live_partition_matches_none(self):
-        # canonical_content is the table that carries no partition_by --
-        # entity now partitions on entity_type, so it no longer serves as
-        # the "deliberately unpartitioned" example here.
-        cap = _FakeCapability(existing={"canonical_content": []})
-        tables = [t for t in table_configs() if t["name"] == "canonical_content"]
+        # genome_content carries no partition_by in the fifteen-table scheme,
+        # so it is the "deliberately unpartitioned" example here.
+        cap = _FakeCapability(existing={"genome_content": []})
+        tables = [t for t in table_configs() if t["name"] == "genome_content"]
 
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables)
 
@@ -247,10 +250,10 @@ class TestIndeterminateExistenceRefuses:
 
     def test_partition_spec_lookup_raising_also_refuses(self):
         cap = _FakeCapability(
-            existing={"result": ["source"]},
+            existing={"protein_result": ["source"]},
             partition_spec_error=RuntimeError("could not read table metadata"),
         )
-        tables = [t for t in table_configs() if t["name"] == "result"]
+        tables = [t for t in table_configs() if t["name"] == "protein_result"]
 
         with pytest.raises(BootstrapIndeterminateStateError):
             bootstrap(cap, namespace=_NAMESPACE, tables=tables)
@@ -287,26 +290,20 @@ class TestDryRun:
             assert "namespace_warning" not in table
 
     def test_dry_run_reports_append_for_existing_matching_tables(self):
-        cap = _FakeCapability(
-            existing={
-                "entity": ["entity_type"],
-                "canonical_content": [],
-                "result": ["source", "entity_type"],
-            }
-        )
+        cap = _FakeCapability(existing=dict(_LIVE_SPECS))
         result = bootstrap(cap, namespace=_NAMESPACE, dry_run=True)
 
         assert all(t["action"] == "append" for t in result["tables"])
         assert cap.load_calls == []
 
     def test_dry_run_reports_refuse_on_partition_mismatch_without_raising(self):
-        cap = _FakeCapability(existing={"result": ["standardizer_version"]})
-        tables = [t for t in table_configs() if t["name"] == "result"]
+        cap = _FakeCapability(existing={"protein_result": ["standardizer_version"]})
+        tables = [t for t in table_configs() if t["name"] == "protein_result"]
 
         result = bootstrap(cap, namespace=_NAMESPACE, tables=tables, dry_run=True)
 
         assert result["tables"][0]["action"] == "refuse"
-        assert "['source', 'entity_type']" in result["tables"][0]["reason"]
+        assert "['source']" in result["tables"][0]["reason"]
         assert cap.load_calls == []
 
     def test_dry_run_reports_refuse_on_indeterminate_existence_without_raising(self):
@@ -324,12 +321,12 @@ class TestDryRun:
         table) -- load() must never be called regardless of what any
         individual table's plan is.
         """
-        cap = _FakeCapability(existing={"result": ["standardizer_version"]})
+        cap = _FakeCapability(existing={"protein_result": ["standardizer_version"]})
         bootstrap(cap, namespace=_NAMESPACE, dry_run=True)
         assert cap.load_calls == []
         # And the fake's own state (which only load() mutates) is
         # unchanged.
-        assert cap._tables == {"result": ["standardizer_version"]}
+        assert cap._tables == {"protein_result": ["standardizer_version"]}
 
 
 class TestNoHardcodedNamespaceRule:

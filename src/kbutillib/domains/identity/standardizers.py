@@ -17,7 +17,7 @@ Public interface (kept intentionally small and stable):
     content_hash(obj) -> str
 
 Supported ``entity_type`` values: ``"function"``, ``"protein"``,
-``"gene_dna"``, ``"genome"``, ``"ontology_term"``. See each
+``"gene"``, ``"genome"``, ``"ontology_term"``. See each
 ``_standardize_*`` helper below for the exact rule it encodes.
 
 Pure standard library — no third-party dependencies (hashlib, json, re,
@@ -46,7 +46,7 @@ STANDARDIZER_VERSION = "1.0"
 _SUPPORTED_ENTITY_TYPES = (
     "function",
     "protein",
-    "gene_dna",
+    "gene",
     "genome",
     "ontology_term",
 )
@@ -83,7 +83,7 @@ def _standardize_function(raw: str) -> str:
 def _clean_sequence_letters(raw: str) -> str:
     """Strip FASTA header lines and all whitespace/newlines, then uppercase.
 
-    Shared by the protein and gene_dna rules: both strip any line beginning
+    Shared by the protein and gene rules: both strip any line beginning
     with ``>`` and all whitespace, then uppercase the remaining residue
     letters. Neither rule filters or rejects characters based on an
     expected alphabet — ambiguity codes, unexpected letters, and (for
@@ -109,7 +109,7 @@ def _standardize_protein(raw: str) -> str:
     return _clean_sequence_letters(raw)
 
 
-def _standardize_gene_dna(raw: str) -> str:
+def _standardize_gene(raw: str) -> str:
     """Standardize a DNA sequence.
 
     Strips FASTA header lines and all whitespace/newlines, then uppercases.
@@ -127,7 +127,7 @@ def _standardize_genome(raw: Iterable[str]) -> str:
     canonical form for a genome may be large; callers are not required to
     store it — only ``entity_hash`` of it need be kept.
     """
-    canonical_contigs = [_standardize_gene_dna(contig) for contig in raw]
+    canonical_contigs = [_standardize_gene(contig) for contig in raw]
     canonical_contigs.sort()
     return "|".join(canonical_contigs)
 
@@ -150,7 +150,7 @@ def _standardize_ontology_term(raw: str) -> str:
 _STANDARDIZERS = {
     "function": _standardize_function,
     "protein": _standardize_protein,
-    "gene_dna": _standardize_gene_dna,
+    "gene": _standardize_gene,
     "genome": _standardize_genome,
     "ontology_term": _standardize_ontology_term,
 }
@@ -160,7 +160,7 @@ def standardize(entity_type: str, raw: Any) -> str:
     """Return the canonical string form of ``raw`` for the given entity type.
 
     Args:
-        entity_type: One of ``"function"``, ``"protein"``, ``"gene_dna"``,
+        entity_type: One of ``"function"``, ``"protein"``, ``"gene"``,
             ``"genome"``, ``"ontology_term"``.
         raw: The raw representation. A ``str`` for every entity type except
             ``"genome"``, which takes an iterable of contig ``str`` values.

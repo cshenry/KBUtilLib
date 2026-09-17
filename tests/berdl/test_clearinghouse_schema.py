@@ -1,12 +1,13 @@
 """Unit tests for kbutillib.domains.kbase.berdl.clearinghouse_schema.
 
 Pure logic, no network, no live BERDL pod: table config shape for
-``BerdlCapability.load``, and the hex/binary ``entity_hash`` encoding
-round-trip. Per the module docstring, the encode/decode helpers exist to
-bridge :mod:`kbutillib.domains.identity.standardizers` (hex digests) to
-this schema's binary ``entity_hash`` column -- the hex-vs-binary
-non-equality test below is a regression test for exactly that gap, not a
-redundant one, and must not be removed as trivial.
+``BerdlCapability.load`` (the fifteen ``<entity_type>_<kind>`` tables), and
+the hex/binary ``entity_hash`` encoding round-trip. Per the module
+docstring, the encode/decode helpers exist to bridge
+:mod:`kbutillib.domains.identity.standardizers` (hex digests) to this
+schema's binary ``entity_hash`` column -- the hex-vs-binary non-equality
+test below is a regression test for exactly that gap, not a redundant one,
+and must not be removed as trivial.
 """
 
 import re
@@ -16,38 +17,41 @@ import pytest
 from kbutillib.domains.identity import standardizers
 from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import ALL_PARITY_ROWS
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    ENTITY_TYPES,
     NAMESPACE,
     TENANT,
     decode_entity_hash,
     encode_entity_hash,
     table_configs,
+    table_name,
 )
 
-_EXPECTED_COLUMNS = {
-    "entity": {
-        "entity_hash": "BINARY",
-        "entity_type": "STRING",
-        "standardizer_version": "STRING",
-        "observed_at": "TIMESTAMP",
-        "ingest_batch_id": "STRING",
-    },
-    "canonical_content": {
-        "entity_hash": "BINARY",
-        "content": "STRING",
-        "standardizer_version": "STRING",
-        "observed_at": "TIMESTAMP",
-        "ingest_batch_id": "STRING",
-    },
-    "result": {
-        "entity_hash": "BINARY",
-        "entity_type": "STRING",
-        "result_type": "STRING",
-        "source": "STRING",
-        "result_type_version": "STRING",
-        "payload": "STRING",
-        "observed_at": "TIMESTAMP",
-        "ingest_batch_id": "STRING",
-    },
+#: Columns every ``<type>_entity`` table declares (GENERIC across types).
+_ENTITY_COLUMNS = {
+    "entity_hash": "BINARY",
+    "entity_type": "STRING",
+    "standardizer_version": "STRING",
+    "observed_at": "TIMESTAMP",
+    "ingest_batch_id": "STRING",
+}
+
+#: Columns every ``<type>_result`` table declares (GENERIC across types).
+_RESULT_COLUMNS = {
+    "entity_hash": "BINARY",
+    "entity_type": "STRING",
+    "result_type": "STRING",
+    "source": "STRING",
+    "result_type_version": "STRING",
+    "payload": "STRING",
+    "observed_at": "TIMESTAMP",
+    "ingest_batch_id": "STRING",
+}
+
+#: The shared tail every ``<type>_content`` table carries.
+_CONTENT_COMMON_TAIL = {
+    "standardizer_version": "STRING",
+    "observed_at": "TIMESTAMP",
+    "ingest_batch_id": "STRING",
 }
 
 
@@ -60,44 +64,189 @@ def _columns_from_schema_sql(schema_sql: str) -> dict[str, str]:
     return columns
 
 
+def _configs_by_name() -> dict[str, dict]:
+    return {table["name"]: table for table in table_configs()}
+
+
 class TestModuleConstants:
     def test_tenant_and_namespace(self):
         assert TENANT == "kbaseincubator"
         assert NAMESPACE == "clearinghouse"
 
+    def test_entity_types_are_the_renamed_five(self):
+        # The gene_dna -> gene rename (2026-09-14): table_name() builds
+        # f"{entity_type}_{kind}", so gene_entity is only reachable once the
+        # type itself is renamed.
+        assert ENTITY_TYPES == (
+            "genome",
+            "protein",
+            "gene",
+            "function",
+            "ontology_term",
+        )
+
+
+class TestTableName:
+    def test_composes_type_and_kind(self):
+        assert table_name("gene", "entity") == "gene_entity"
+        assert table_name("genome", "content") == "genome_content"
+        assert table_name("protein", "result") == "protein_result"
+
+    def test_raises_on_unknown_entity_type(self):
+        with pytest.raises(ValueError):
+            table_name("gene_dna", "entity")
+        with pytest.raises(ValueError):
+            table_name("bogus", "entity")
+
+    def test_raises_on_unknown_kind(self):
+        with pytest.raises(ValueError):
+            table_name("gene", "canonical_content")
+        with pytest.raises(ValueError):
+            table_name("gene", "bogus")
+
 
 class TestTableConfigs:
-    def test_returns_exactly_three_tables_with_expected_names(self):
+    def test_returns_exactly_fifteen_configs_with_the_expected_names(self):
         configs = table_configs()
         names = [table["name"] for table in configs]
-        assert names == ["entity", "canonical_content", "result"]
+        expected = (
+            [f"{t}_entity" for t in ENTITY_TYPES]
+            + [f"{t}_content" for t in ENTITY_TYPES]
+            + [f"{t}_result" for t in ENTITY_TYPES]
+        )
+        # Documented order: all five entity, then all five content, then all
+        # five result, each in ENTITY_TYPES order.
+        assert names == expected
+        assert len(configs) == 15
+        assert len(set(names)) == 15
 
-    def test_each_table_has_the_exact_expected_columns_and_types(self):
-        configs = {table["name"]: table for table in table_configs()}
-        for name, expected_columns in _EXPECTED_COLUMNS.items():
-            actual_columns = _columns_from_schema_sql(configs[name]["schema_sql"])
-            assert actual_columns == expected_columns
+    def test_every_name_equals_table_name_resolver(self):
+        # Generator and resolver must not drift: each config's name is
+        # exactly table_name(entity_type, kind) for its type and kind.
+        expected = set()
+        for kind in ("entity", "content", "result"):
+            for entity_type in ENTITY_TYPES:
+                expected.add(table_name(entity_type, kind))
+        actual = {table["name"] for table in table_configs()}
+        assert actual == expected
 
-    def test_result_declares_partition_by_source_then_entity_type_in_order(self):
-        configs = {table["name"]: table for table in table_configs()}
-        partition_by = configs["result"]["partition_by"]
-        # Order is significant -- an Iceberg partition spec is compared by
-        # list equality, not by membership, so this must not be a set/
-        # membership check: that would pass an order flip that would then
-        # be refused at table-creation time.
-        assert list(partition_by) == ["source", "entity_type"]
+    def test_entity_tables_have_the_generic_entity_columns(self):
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            cols = _columns_from_schema_sql(
+                configs[f"{entity_type}_entity"]["schema_sql"]
+            )
+            assert cols == _ENTITY_COLUMNS
 
-    def test_entity_declares_partition_by_entity_type(self):
-        configs = {table["name"]: table for table in table_configs()}
-        partition_by = configs["entity"]["partition_by"]
-        if isinstance(partition_by, str):
-            assert partition_by == "entity_type"
-        else:
-            assert list(partition_by) == ["entity_type"]
+    def test_result_tables_have_the_generic_result_columns(self):
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            cols = _columns_from_schema_sql(
+                configs[f"{entity_type}_result"]["schema_sql"]
+            )
+            assert cols == _RESULT_COLUMNS
 
-    def test_canonical_content_declares_no_partition_by(self):
-        configs = {table["name"]: table for table in table_configs()}
-        assert "partition_by" not in configs["canonical_content"]
+    def test_all_entity_schemas_are_byte_identical(self):
+        # "Generic schema, split physically": every <type>_entity table's
+        # schema_sql must be byte-for-byte identical -- the test most likely
+        # to catch an accidental divergence.
+        configs = _configs_by_name()
+        schemas = {configs[f"{t}_entity"]["schema_sql"] for t in ENTITY_TYPES}
+        assert len(schemas) == 1
+
+    def test_all_result_schemas_are_byte_identical(self):
+        configs = _configs_by_name()
+        schemas = {configs[f"{t}_result"]["schema_sql"] for t in ENTITY_TYPES}
+        assert len(schemas) == 1
+
+    def test_content_tables_carry_the_shared_tail(self):
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            cols = _columns_from_schema_sql(
+                configs[f"{entity_type}_content"]["schema_sql"]
+            )
+            # entity_hash leads every content table.
+            assert next(iter(cols)) == "entity_hash"
+            assert cols["entity_hash"] == "BINARY"
+            for name, sql_type in _CONTENT_COMMON_TAIL.items():
+                assert cols[name] == sql_type
+
+    def test_content_type_specific_columns(self):
+        configs = _configs_by_name()
+
+        protein = _columns_from_schema_sql(
+            configs["protein_content"]["schema_sql"]
+        )
+        assert protein["sequence"] == "STRING"
+        assert protein["seq_length"] == "INT"
+
+        gene = _columns_from_schema_sql(configs["gene_content"]["schema_sql"])
+        assert gene["sequence"] == "STRING"
+        assert gene["seq_length"] == "INT"
+        # Nullable pointer -- not every gene codes for a protein.
+        assert gene["protein_entity_hash"] == "BINARY"
+
+        function = _columns_from_schema_sql(
+            configs["function_content"]["schema_sql"]
+        )
+        assert function["definition"] == "STRING"
+        assert "name" not in function
+
+        ontology = _columns_from_schema_sql(
+            configs["ontology_term_content"]["schema_sql"]
+        )
+        for col in ("term_id", "name", "namespace", "definition"):
+            assert ontology[col] == "STRING"
+
+        genome = _columns_from_schema_sql(
+            configs["genome_content"]["schema_sql"]
+        )
+        assert genome["fasta_reference"] == "STRING"
+        assert genome["taxon_id"] == "STRING"
+        assert genome["assembly_accession"] == "STRING"
+        assert genome["n_contigs"] == "INT"
+        assert genome["total_length"] == "BIGINT"
+        assert genome["is_closed"] == "BOOLEAN"
+        # A genome stores a POINTER to its FASTA, never the sequence inlined.
+        assert "sequence" not in genome
+
+    def test_standardizer_version_partitioning_on_exactly_four_tables(self):
+        configs = _configs_by_name()
+        partitioned = {
+            name
+            for name, cfg in configs.items()
+            if cfg.get("partition_by") == "standardizer_version"
+        }
+        assert partitioned == {
+            "gene_entity",
+            "protein_entity",
+            "gene_content",
+            "protein_content",
+        }
+
+    def test_source_partitioning_on_exactly_the_five_result_tables(self):
+        configs = _configs_by_name()
+        partitioned = {
+            name
+            for name, cfg in configs.items()
+            if cfg.get("partition_by") == "source"
+        }
+        assert partitioned == {f"{t}_result" for t in ENTITY_TYPES}
+
+    def test_the_six_unpartitioned_tables_omit_the_key_entirely(self):
+        configs = _configs_by_name()
+        unpartitioned = {
+            "genome_entity",
+            "function_entity",
+            "ontology_term_entity",
+            "genome_content",
+            "function_content",
+            "ontology_term_content",
+        }
+        for name in unpartitioned:
+            # Assert key ABSENCE, not a falsy value: an absent key is the
+            # unambiguous signal for "unpartitioned".
+            assert "partition_by" not in configs[name], name
 
     def test_no_config_value_anywhere_contains_a_parenthesis(self):
         """Guards against an Iceberg partition-transform expression (e.g.
@@ -125,7 +274,7 @@ class TestTableConfigs:
         first = table_configs()
         first[0]["name"] = "mutated"
         second = table_configs()
-        assert second[0]["name"] == "entity"
+        assert second[0]["name"] == "genome_entity"
 
 
 class TestEntityHashRoundTrip:
@@ -219,11 +368,17 @@ class TestParityFixtureMatchesResultSchema:
     supplied seven. Do not remove this as redundant with the DuckDB
     derivation tests -- those insert positionally from a hand-written
     ``INSERT`` statement and so cannot detect a fixture/schema divergence.
+
+    The result schema is GENERIC (byte-identical across the five
+    ``<type>_result`` tables), so any one of them defines the declared
+    columns the parity rows must supply.
     """
 
     def _result_column_names(self):
-        configs = {table["name"]: table for table in table_configs()}
-        return list(_columns_from_schema_sql(configs["result"]["schema_sql"]))
+        configs = _configs_by_name()
+        return list(
+            _columns_from_schema_sql(configs["protein_result"]["schema_sql"])
+        )
 
     def test_every_fixture_row_supplies_exactly_the_declared_result_columns(self):
         declared = set(self._result_column_names())

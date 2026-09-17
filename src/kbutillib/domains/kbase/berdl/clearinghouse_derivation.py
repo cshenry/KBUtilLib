@@ -50,6 +50,22 @@ rejected before write, so encoding null-handling here would be encoding a
 state that must never reach the table), and no DuckDB-only BLOB literal
 or timestamp-helper syntax.
 
+PER-TYPE RESULT TABLES. In the fifteen-table per-entity-type clearinghouse
+scheme, ``result_table_fqn`` names a **per-type** result table such as
+``gene_result`` or ``protein_result``, not a single shared ``result``
+table. This module needs no code change for that: :func:`current_state_sql`
+already takes ``result_table_fqn`` as a parameter and interpolates it as
+given, and the ``<type>_result`` schema is GENERIC (byte-identical across
+all five types), so the derived column list and window logic are the same
+whichever per-type table is named. A consequence is that the
+``entity_types`` filter parameter is REDUNDANT-BUT-HARMLESS when the named
+table is already single-typed: every row in ``gene_result`` already has
+``entity_type = 'gene'``, so filtering on it prunes nothing further. It is
+retained rather than removed because it stays correct and useful if this
+derivation is pointed at a cross-type source (e.g. a UNION-ALL view over
+several ``<type>_result`` tables), and removing it would narrow a merged,
+working interface for no benefit.
+
 :func:`current_state_sql` is pure: it holds no session, performs no I/O,
 makes no network call, and imports nothing pod-only, which is what makes
 it testable off-pod. This module's own test suite
@@ -72,6 +88,15 @@ __all__ = ["current_state_sql"]
 #: columns. ``entity_type`` is included because ``entity_hash`` alone does
 #: not identify an entity (see the module docstring); ``result_type_version``
 #: is deliberately excluded -- also see the module docstring.
+#:
+#: ``entity_type`` is DELIBERATELY RETAINED here even though, in the
+#: fifteen-table per-type scheme, a single ``<type>_result`` table holds
+#: exactly one ``entity_type`` value -- which makes it constant within any
+#: one table and therefore redundant in this window key. Redundant is not
+#: incorrect: keeping it produces the same partitioning on a single-typed
+#: table and stays correct if this derivation is ever pointed at a
+#: cross-type source (e.g. a UNION-ALL view). Do NOT "clean it up" by
+#: dropping it -- that would be a gratuitous change to merged, working code.
 _SLOT_KEY_COLUMNS = ("entity_hash", "entity_type", "result_type", "source")
 
 #: The columns that break ties within a slot, in ``ORDER BY`` precedence.

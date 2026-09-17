@@ -24,6 +24,7 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     encode_entity_hash,
     table_configs,
     table_name,
+    union_view_sql,
 )
 
 #: Columns every ``<type>_entity`` table declares (GENERIC across types).
@@ -395,3 +396,112 @@ class TestParityFixtureMatchesResultSchema:
         # regression on this specific column fails with an obvious name.
         assert "entity_type" in self._result_column_names()
         assert all("entity_type" in row for row in ALL_PARITY_ROWS)
+
+
+class TestUnionViewSql:
+    """The three cross-type UNION ALL views (all_entity/all_content/all_result).
+
+    After the fifteen-table split, the cross-type query surface is restored
+    by three ``UNION ALL`` views. These tests assert, off-pod on SQL TEXT
+    only, that each view names all five of its per-type tables; that
+    ``all_content`` -- whose five tables have deliberately divergent
+    columns -- unions ONLY the four shared columns plus an ``entity_type``
+    discriminator and reconciles none of the type-specialized content
+    columns; and that an unknown kind raises ``ValueError``.
+    """
+
+    _FQN_PREFIX = f"{TENANT}.{NAMESPACE}"
+
+    #: The four columns common to all five ``<type>_content`` tables.
+    _CONTENT_COMMON_COLUMNS = (
+        "entity_hash",
+        "standardizer_version",
+        "observed_at",
+        "ingest_batch_id",
+    )
+
+    #: Type-specialized content columns that must NOT appear in all_content.
+    _CONTENT_SPECIALIZED_COLUMNS = (
+        "sequence",
+        "seq_length",
+        "protein_entity_hash",
+        "definition",
+        "term_id",
+        "name",
+        "namespace",
+        "fasta_reference",
+        "taxon_id",
+        "assembly_accession",
+        "n_contigs",
+        "total_length",
+        "is_closed",
+    )
+
+    def _sql(self, kind):
+        return union_view_sql(kind, fqn_prefix=self._FQN_PREFIX)
+
+    def test_all_entity_names_all_five_entity_tables(self):
+        sql = self._sql("all_entity")
+        for entity_type in ENTITY_TYPES:
+            assert table_name(entity_type, "entity") in sql
+
+    def test_all_content_names_all_five_content_tables(self):
+        sql = self._sql("all_content")
+        for entity_type in ENTITY_TYPES:
+            assert table_name(entity_type, "content") in sql
+
+    def test_all_result_names_all_five_result_tables(self):
+        sql = self._sql("all_result")
+        for entity_type in ENTITY_TYPES:
+            assert table_name(entity_type, "result") in sql
+
+    def test_each_view_has_five_union_branches(self):
+        for kind in ("all_entity", "all_content", "all_result"):
+            sql = self._sql(kind)
+            # Five per-type tables joined by four UNION ALL separators.
+            assert sql.count("UNION ALL") == len(ENTITY_TYPES) - 1
+
+    def test_view_ddl_is_create_or_replace_view(self):
+        for kind in ("all_entity", "all_content", "all_result"):
+            sql = self._sql(kind)
+            assert "CREATE OR REPLACE VIEW" in sql
+            # The view name itself is backtick-quoted, per _quote_fqn.
+            assert f"`{kind}`" in sql
+
+    def test_all_content_selects_only_common_columns_plus_discriminator(self):
+        sql = self._sql("all_content")
+        # Every one of the four shared columns is selected.
+        for col in self._CONTENT_COMMON_COLUMNS:
+            assert f"`{col}`" in sql
+        # A literal entity_type discriminator is projected for each branch.
+        assert "AS `entity_type`" in sql
+        for entity_type in ENTITY_TYPES:
+            assert f"'{entity_type}' AS `entity_type`" in sql
+
+    def test_all_content_references_no_specialized_content_columns(self):
+        sql = self._sql("all_content")
+        for col in self._CONTENT_SPECIALIZED_COLUMNS:
+            assert col not in sql, (
+                f"all_content must not reference the type-specialized "
+                f"content column {col!r}; it can only union the shared subset."
+            )
+
+    def test_all_content_does_not_use_star(self):
+        # A `SELECT *` across divergent content schemas is exactly the
+        # failure mode this view exists to avoid.
+        assert "SELECT *" not in self._sql("all_content")
+
+    def test_fqn_prefix_is_a_parameter_not_hardcoded(self):
+        # Passing a different prefix must flow through unchanged (and
+        # backtick-quoted), proving the prefix is not hardcoded.
+        sql = union_view_sql("all_entity", fqn_prefix="my_tenant.my_ns")
+        assert "`my_tenant`.`my_ns`" in sql
+
+    def test_unknown_kind_raises_value_error(self):
+        with pytest.raises(ValueError):
+            union_view_sql("all_bogus", fqn_prefix=self._FQN_PREFIX)
+
+    def test_bare_kind_without_all_prefix_raises_value_error(self):
+        # "entity" is a table kind, not a view kind -- must be rejected.
+        with pytest.raises(ValueError):
+            union_view_sql("entity", fqn_prefix=self._FQN_PREFIX)

@@ -129,6 +129,10 @@ ENTITY_TYPES = ("genome", "protein", "gene", "function", "ontology_term")
 #: The three physical kinds a clearinghouse table can be.
 _KINDS = ("entity", "content", "result")
 
+#: The three cross-type UNION ALL views :func:`union_view_sql` can emit, one
+#: per kind, each named ``all_<kind>``.
+_VIEW_KINDS = ("all_entity", "all_content", "all_result")
+
 #: Column declarations for every ``<type>_entity`` table, in DDL order.
 #: GENERIC: identical for all five entity types. Declared once; every other
 #: reference to these columns (``table_configs()``, tests) derives from this
@@ -162,6 +166,19 @@ _CONTENT_COMMON_TAIL: tuple[tuple[str, str], ...] = (
     ("standardizer_version", "STRING"),
     ("observed_at", "TIMESTAMP"),
     ("ingest_batch_id", "STRING"),
+)
+
+#: The columns common to ALL five ``<type>_content`` tables -- the ONLY
+#: columns ``all_content`` may union. The five content tables have
+#: deliberately divergent type-specialized heads (a sequence, assembly
+#: metadata, a definition, ontology fields), so a full union across them is
+#: impossible; ``all_content`` selects strictly this shared subset (the
+#: leading ``entity_hash`` prepended by :func:`_content_columns`, plus
+#: :data:`_CONTENT_COMMON_TAIL`'s names) and a literal ``entity_type``
+#: discriminator, and reconciles none of the type-specialized columns. See
+#: the module docstring and :func:`union_view_sql`.
+_CONTENT_COMMON_COLUMNS: tuple[str, ...] = ("entity_hash",) + tuple(
+    name for name, _sql_type in _CONTENT_COMMON_TAIL
 )
 
 #: The type-specific HEAD columns for each ``<type>_content`` table, in DDL
@@ -323,6 +340,89 @@ def table_configs() -> list[dict[str, Any]]:
         )
 
     return configs
+
+
+def _quote_fqn(fqn: str) -> str:
+    """Backtick-quote each dot-separated segment of an identifier.
+
+    Matches the convention used by ``_quote_fqn`` in
+    :mod:`kbutillib.domains.kbase.berdl.clearinghouse_derivation` and by
+    ``BerdlCapability.load()``: every segment between dots gets its own pair
+    of backticks, so a multi-part identifier such as
+    ``tenant.namespace.table`` is never misread with a dot inside a segment
+    as a qualifier boundary. A segment that already arrives backtick-quoted
+    is not double-quoted.
+    """
+    return ".".join(f"`{segment.strip('`')}`" for segment in fqn.split("."))
+
+
+def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
+    """Return ``CREATE OR REPLACE VIEW`` DDL for one cross-type union view.
+
+    After the fifteen-table split, the cross-type query surface is restored
+    by three ``UNION ALL`` views, each named ``all_<kind>`` and each
+    unioning the five per-type tables of that kind:
+
+    - ``all_entity`` and ``all_result`` union EVERY column, because their
+      five per-type tables are schema-identical (the ``entity`` and
+      ``result`` kinds carry a GENERIC schema across all five types).
+    - ``all_content`` CANNOT union every column: the five ``<type>_content``
+      tables have deliberately divergent type-specialized columns
+      (``sequence``, ``fasta_reference``/``taxon_id``, ``definition``,
+      ``term_id``/``name``, ...). It therefore selects ONLY the columns
+      common to all five (:data:`_CONTENT_COMMON_COLUMNS`) plus a literal
+      ``entity_type`` discriminator, and reconciles none of the specialized
+      columns. Attempting a full union of divergent content schemas is the
+      failure mode this view exists to avoid.
+
+    This module stays pod-free and emits SQL TEXT only: it performs no I/O,
+    imports no ``pyspark``, and creates nothing itself.
+
+    Args:
+        kind: One of ``"all_entity"``, ``"all_content"``, ``"all_result"``.
+        fqn_prefix: The fully-qualified prefix the per-type tables live
+            under -- typically ``f"{TENANT}.{NAMESPACE}"`` -- taken as a
+            parameter rather than hardcoded. Each segment is backtick-quoted
+            (via :func:`_quote_fqn`) and joined with the per-type table name
+            (also backtick-quoted) so the emitted references are fully
+            qualified and safely quoted.
+
+    Returns:
+        The ``CREATE OR REPLACE VIEW <view> AS <SELECT> UNION ALL ...`` DDL
+        text naming all five per-type tables of ``kind``.
+
+    Raises:
+        ValueError: If ``kind`` is not one of the three known view kinds.
+    """
+    if kind not in _VIEW_KINDS:
+        raise ValueError(
+            f"union_view_sql: unknown kind {kind!r}; "
+            f"expected one of {_VIEW_KINDS!r}."
+        )
+
+    table_kind = kind[len("all_") :]
+    view_fqn = _quote_fqn(f"{fqn_prefix}.{kind}")
+
+    branches: list[str] = []
+    for entity_type in ENTITY_TYPES:
+        table_fqn = _quote_fqn(f"{fqn_prefix}.{table_name(entity_type, table_kind)}")
+        if table_kind == "content":
+            # Divergent content schemas: union only the shared subset plus a
+            # literal entity_type discriminator (the physical content tables
+            # carry no stored entity_type column).
+            select_list = ", ".join(
+                f"`{col}`" for col in _CONTENT_COMMON_COLUMNS
+            )
+            branches.append(
+                f"SELECT {select_list}, "
+                f"'{entity_type}' AS `entity_type` FROM {table_fqn}"
+            )
+        else:
+            # Schema-identical tables: union every column.
+            branches.append(f"SELECT * FROM {table_fqn}")
+
+    body = "\n    UNION ALL\n    ".join(branches)
+    return f"CREATE OR REPLACE VIEW {view_fqn} AS\n    {body}"
 
 
 def encode_entity_hash(value: str | bytes) -> bytes:

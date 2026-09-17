@@ -1,5 +1,38 @@
 # Clearinghouse Schema -- Operator Runbook
 
+> # STOP -- DO NOT RUN OP2. THIS DOCUMENT DESCRIBES A SUPERSEDED SCHEME.
+>
+> **Halted 2026-09-13 by Chris Henry.** Verbatim: *"So wait - I don't want to
+> proceed with just three tables. We expanded this to separate tables for each
+> entity type. I really want to review the proposed scheme before we actually
+> instantiate it on the DataLake."*
+>
+> Everything below OP2 describes the `clearinghouse-lake-1b-partitioned-scheme`
+> layout of 2026-09-10: three Iceberg tables in `kbaseincubator.clearinghouse`
+> (`entity` partitioned on `entity_type`, `result` on `[source, entity_type]`,
+> `canonical_content` unpartitioned). **That is no longer the intended design.**
+> The replacement uses a separate table per entity type. The new scheme is not
+> yet written down -- it is not in this document, not in the `-1b` PRD, and not
+> in any design record -- which is exactly why it must be settled before any
+> write.
+>
+> **Why this is a hard stop and not a caution.** OP2 is the first WRITE in the
+> sequence and it bakes the layout in at creation. This document's own OP2
+> preconditions say that correcting a namespace created under the wrong spec
+> costs a **multi-terabyte replay**, not a five-minute fix. That warning was
+> written against a stray third party bootstrapping ahead of the operator; as of
+> this banner the same risk comes from following these instructions.
+>
+> **What is still safe.** OP0 (read-only reconnaissance) and OP1 (the
+> three-package import check) touch nothing and remain valid. OP2, OP2.0b and
+> OP3 must not run.
+>
+> **Tracked as task 1020** in Jane's store (`persistentai task show --agent jane
+> 1020`). Continuation 69, which asked go/no-go on OP2 as specified below, was
+> dismissed against it. Remove this banner only when the settled scheme has
+> replaced the OP2 sections and the `-1b` PRD has been updated or superseded.
+
+
 **PRD**: `clearinghouse-lake-1-schema` (KBDLJobRunningPrototype, on `wip`; not
 generally reachable from off-pod worktrees -- treat this document as the
 authoritative reference for the in-pod steps).

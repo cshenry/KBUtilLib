@@ -1,57 +1,30 @@
 # Clearinghouse Schema -- Operator Runbook
 
-> # STOP -- DO NOT RUN OP2. THIS DOCUMENT DESCRIBES A SUPERSEDED SCHEME.
->
-> **Halted 2026-09-13 by Chris Henry.** Verbatim: *"So wait - I don't want to
-> proceed with just three tables. We expanded this to separate tables for each
-> entity type. I really want to review the proposed scheme before we actually
-> instantiate it on the DataLake."*
->
-> Everything below OP2 describes the `clearinghouse-lake-1b-partitioned-scheme`
-> layout of 2026-09-10: three Iceberg tables in `kbaseincubator.clearinghouse`
-> (`entity` partitioned on `entity_type`, `result` on `[source, entity_type]`,
-> `canonical_content` unpartitioned). **That is no longer the intended design.**
-> The replacement uses a separate table per entity type. The new scheme is not
-> yet written down -- it is not in this document, not in the `-1b` PRD, and not
-> in any design record -- which is exactly why it must be settled before any
-> write.
->
-> **Why this is a hard stop and not a caution.** OP2 is the first WRITE in the
-> sequence and it bakes the layout in at creation. This document's own OP2
-> preconditions say that correcting a namespace created under the wrong spec
-> costs a **multi-terabyte replay**, not a five-minute fix. That warning was
-> written against a stray third party bootstrapping ahead of the operator; as of
-> this banner the same risk comes from following these instructions.
->
-> **What is still safe.** OP0 (read-only reconnaissance) and OP1 (the
-> three-package import check) touch nothing and remain valid. OP2, OP2.0b and
-> OP3 must not run.
->
-> **Tracked as task 1020** in Jane's store (`persistentai task show --agent jane
-> 1020`). Continuation 69, which asked go/no-go on OP2 as specified below, was
-> dismissed against it. Remove this banner only when the settled scheme has
-> replaced the OP2 sections and the `-1b` PRD has been updated or superseded.
-
-
 **PRD**: `clearinghouse-lake-1-schema` (KBDLJobRunningPrototype, on `wip`; not
 generally reachable from off-pod worktrees -- treat this document as the
 authoritative reference for the in-pod steps).
 
-**Revised 2026-09-10 for `clearinghouse-lake-1b-partitioned-scheme`**, which
-changed the table layout before OP2 ever ran. The partition specs and the
-`result` slot key below are `-1b`'s. `bootstrap()` reads the live config in
-`clearinghouse_schema.py`, so the DDL it emits is always current -- but the
-expectations this document states are what you compare a dry-run report
-against, and before this revision they described the pre-`-1b` layout. If you
-find yourself reading a dry-run report that disagrees with the text here,
-check `clearinghouse_schema.py` first: the code is the authority, this is a
-description of it.
+**Revised 2026-09-17 for `clearinghouse-lake-1d-per-entity-type-tables`**,
+which replaced the three-table scheme with FIFTEEN tables named by entity
+type (`<entity_type>_<kind>`, type-first). The driver is a ~5000:1 row-count
+skew across entity types (gene ~5B, protein ~1B, genome ~10M, function ~1M,
+ontology_term ~1M): Iceberg table PROPERTIES (target file size, compaction,
+sort order, snapshot expiry), query PLANNING scope, and COMMIT concurrency
+are all table-level and cannot be tuned per partition, so a separate physical
+table per entity type is the only place those knobs become per-type. The
+partition specs below are `-1d`'s. `bootstrap()` reads the live config in
+`clearinghouse_schema.py` (`table_configs()`), so the DDL it emits is always
+current -- but the expectations this document states are what you compare a
+dry-run report against. If you find yourself reading a dry-run report that
+disagrees with the text here, check `clearinghouse_schema.py` first: the code
+is the authority, this is a description of it.
 
 ## Why this document exists, and why it must be a human
 
-The three clearinghouse tables (`entity`, `canonical_content`, `result`)
-this PRD defines live inside the BERDL JupyterHub pod (host `kbhub`), inside
-the `kbaseincubator` tenant. No automated build agent can reach that pod:
+The fifteen clearinghouse tables (`<entity_type>_<kind>` for each of the five
+entity types and each of the three kinds `entity`/`content`/`result`) this
+PRD defines live inside the BERDL JupyterHub pod (host `kbhub`), inside the
+`kbaseincubator` tenant. No automated build agent can reach that pod:
 
 - `BerdlCapability.load()` (`src/kbutillib/domains/kbase/berdl/capability.py`)
   refuses off-pod by design (`BerdlLoadRefusedError`) -- see its `locus()`
@@ -297,12 +270,13 @@ once all three lines print.
    (`src/kbutillib/domains/kbase/berdl/clearinghouse_bootstrap_adapter.py`)
    is importable, and you are constructing it as shown in 2.0 -- not
    passing a bare `BerdlCapability()` into `bootstrap()`.
-2. **The `-1b` runbook revision is on `main`.** The partition specs and
-   table layout this document describes (`entity` on `entity_type`,
-   `result` on `[source, entity_type]` in that order, `canonical_content`
-   unpartitioned) are `clearinghouse-lake-1b-partitioned-scheme`'s;
-   confirm that revision merged before trusting the expectations in
-   2.1-2.3.
+2. **The `-1d` runbook revision is on `main`.** The fifteen-table layout
+   and partition specs this document describes (the four high-volume
+   `gene_entity`/`protein_entity`/`gene_content`/`protein_content` on
+   `standardizer_version`, all five `<type>_result` on `source`, and the
+   remaining six unpartitioned) are
+   `clearinghouse-lake-1d-per-entity-type-tables`'s; confirm that revision
+   merged before trusting the expectations in 2.1-2.3.
 3. **OP0 confirmed `'rw'` membership** on the target tenant (OP0.b).
    **This one is already satisfied**: confirmed 2026-09-12 by an attended
    pod session, `kbaseincubator: 'rw'`, on the same governance principal
@@ -328,8 +302,9 @@ once all three lines print.
    not less perishable -- that inference is exactly backwards. Do not cite
    either date, or both together, as though repetition were durability;
    re-run the check.**
-   That answer is perishable: if anything creates the namespace under the
-   old, unpartitioned pre-`-1b` spec before OP2 runs -- a stray
+   That answer is perishable: if anything creates the namespace under a
+   superseded spec (the old three-table scheme, or the tables under any
+   partitioning other than `-1d`'s) before OP2 runs -- a stray
    `create_namespace_if_not_exists` call (2.0b) against the wrong spec,
    or any other pod session bootstrapping it ahead of you -- correcting
    it costs a **multi-terabyte replay** (rebuilding the table from source
@@ -338,6 +313,54 @@ once all three lines print.
    `kbaseincubator.genome_clearhouse`, which EXISTS, is unrelated, and
    holds `genome_quality` and `skani_distances`** -- a near-miss an
    operator skimming namespace names could land on by mistake.
+
+### The fifteen tables this creates, and their partition specs
+
+`bootstrap()` creates the tables `clearinghouse_schema.table_configs()`
+emits -- fifteen of them, `<entity_type>_<kind>` (type-first) for each of
+the five entity types (`genome`, `protein`, `gene`, `function`,
+`ontology_term`) and each of the three kinds (`entity`, `content`,
+`result`). **This list is a description of `table_configs()`; the module is
+the authority. If a dry-run report disagrees with this list, the module
+wins -- read `clearinghouse_schema.py` and treat this table as stale.**
+
+| Table | Kind | `partition_by` |
+|---|---|---|
+| `genome_entity` | entity | _(none -- unpartitioned)_ |
+| `protein_entity` | entity | `standardizer_version` |
+| `gene_entity` | entity | `standardizer_version` |
+| `function_entity` | entity | _(none -- unpartitioned)_ |
+| `ontology_term_entity` | entity | _(none -- unpartitioned)_ |
+| `genome_content` | content | _(none -- unpartitioned)_ |
+| `protein_content` | content | `standardizer_version` |
+| `gene_content` | content | `standardizer_version` |
+| `function_content` | content | _(none -- unpartitioned)_ |
+| `ontology_term_content` | content | _(none -- unpartitioned)_ |
+| `genome_result` | result | `source` |
+| `protein_result` | result | `source` |
+| `gene_result` | result | `source` |
+| `function_result` | result | `source` |
+| `ontology_term_result` | result | `source` |
+
+Only four tables partition on `standardizer_version` -- the high-volume
+`gene`/`protein` `entity` and `content` tables, where a standardizer bump
+is the axis worth pruning on. All five `<type>_result` tables partition on
+`source` (format `<tool>/<version>`). The remaining six -- the `genome`,
+`function`, and `ontology_term` `entity` and `content` tables -- carry no
+`partition_by` key at all, their row counts (~1M-10M) being low enough that
+a partition key buys nothing. For the unpartitioned tables the config omits
+the `partition_by` key entirely rather than emitting a falsy value, so an
+absent key unambiguously means "unpartitioned."
+
+The `entity` and `result` kinds carry a GENERIC schema identical across all
+five types. The `content` kind is TYPE-SPECIALIZED: each `<type>_content`
+table carries the shared tail (`entity_hash BINARY`,
+`standardizer_version STRING`, `observed_at TIMESTAMP`,
+`ingest_batch_id STRING`) plus a different type-specific head
+(protein/gene carry a `sequence`; `gene_content` also carries a NULLABLE
+`protein_entity_hash BINARY`; `genome_content` carries assembly metadata
+plus a `fasta_reference` POINTER to the sequence and never the sequence
+itself, since 10M genomes inlined would be ~50TB).
 
 ### 2.0 -- the capability seam you will hit here (read this first)
 
@@ -421,11 +444,13 @@ recognise -- it is not a bug to patch around. **The fix is to add a
 parser for this cluster's real output** (a pure function alongside the
 module's existing two, `_parse_describe_table_extended_partition_spec`
 and `_parse_show_create_table_partition_spec`) -- **never to pass in a
-stub that returns `[]`.** `canonical_content` is genuinely unpartitioned,
+stub that returns `[]`.** The six unpartitioned tables (`genome_entity`,
+`function_entity`, `ontology_term_entity`, `genome_content`,
+`function_content`, `ontology_term_content`) are genuinely unpartitioned,
 and `bootstrap()` treats both `[]` and `None` as "unpartitioned" -- a stub
-that returns `[]` on a parse failure would silently pass
-`canonical_content`'s check having determined nothing at all, defeating
-the one safety check `bootstrap()` exists to provide. The error message
+that returns `[]` on a parse failure would silently pass one of those
+tables' checks having determined nothing at all, defeating the one safety
+check `bootstrap()` exists to provide. The error message
 names the table, the namespace, and the first ~200 characters of the raw
 catalog output, so you can write the missing parser in one round trip.
 
@@ -457,7 +482,7 @@ obvious guess is wrong.** `table_exists` does NOT fail on an absent
 namespace -- it was probed live against `kbaseincubator.clearinghouse`
 and returned `False` cleanly, no exception. So the read-only probes are
 fine, and `bootstrap()`'s dry run is fine: it will simply report
-`'action': 'create'` for all three tables, which is the correct answer.
+`'action': 'create'` for all fifteen tables, which is the correct answer.
 The failure comes later, at the `data_lakehouse_ingest.ingest()` call the
 real run makes into a namespace that is not there.
 
@@ -465,7 +490,7 @@ real run makes into a namespace that is not there.
 2.1 is side-effect-free and costs nothing, and running it before you
 create anything tells you what `bootstrap()` intends while the namespace
 is still absent -- which is also the state in which a `'create'` for all
-three tables is unambiguously right rather than something you have to
+fifteen tables is unambiguously right rather than something you have to
 reason about. Create the namespace after the dry run reads clean, and
 before 2.2.
 
@@ -585,10 +610,11 @@ No table is overwritten and no table's partitioning is re-specced.
 
 **How to read a partition-spec refusal.** If a table already exists with a
 live partition spec that disagrees with this module's config (as of
-`clearinghouse-lake-1b`: `entity` is partitioned on `entity_type`, `result`
-on `[source, entity_type]`, and `canonical_content` carries no `partition_by`
-key at all -- bucketing it is deliberately deferred pending the `-3-transport`
-and `-4-jobs` access patterns), `bootstrap()` raises
+`clearinghouse-lake-1d`: the four high-volume tables `gene_entity`,
+`protein_entity`, `gene_content`, `protein_content` on
+`standardizer_version`; all five `<type>_result` on `source`; and the
+remaining six `entity`/`content` tables unpartitioned -- see the
+fifteen-table list above), `bootstrap()` raises
 `BootstrapPartitionSpecMismatchError` naming both the expected and actual
 spec, and **writes nothing for any table in the batch** -- not just the
 mismatched one. **Do not append anyway.** Changing a live Iceberg table's
@@ -613,36 +639,53 @@ the one step where a silently-wrong type gets caught, and it must be
 caught here: discovering *after* the real annotation corpus has been
 loaded that `entity_hash` is actually `STRING` means every already-written
 row's hash has to be re-encoded (or the table rebuilt from source) at full
-corpus scale, instead of a five-minute fix against three empty tables.
+corpus scale, instead of a five-minute fix against empty tables.
 
-Run, against each of the three tables (using whichever introspection this
-cluster's Iceberg catalog exposes -- `DESCRIBE`, `SHOW CREATE TABLE`, or
-Spark's catalog API all work):
+`entity_hash` is a `BINARY` column on all fifteen tables (it leads the
+GENERIC `entity` and `result` schemas and is the first column of every
+type-specialized `content` schema), so the risk that this write path
+silently demotes it to `STRING` is the same on every table. Check at least
+one table of EACH KIND -- one `<type>_entity`, one `<type>_content`, one
+`<type>_result` -- since the three kinds carry different `schema_sql`
+fragments through the write path and a demotion could in principle hit one
+kind's DDL and not another's. Checking all fifteen is fine too and costs
+only more `DESCRIBE`s; the minimum bar is one per kind.
+
+Run, against at least one table of each kind (using whichever introspection
+this cluster's Iceberg catalog exposes -- `DESCRIBE`, `SHOW CREATE TABLE`,
+or Spark's catalog API all work):
 
 ```python
 # NAMESPACE is the same confirmed value as 2.1/2.2 (OP0.c):
-# "kbaseincubator.clearinghouse", dotted.
-for table in ("entity", "canonical_content", "result"):
+# "kbaseincubator.clearinghouse", dotted. One table of each kind; extend
+# the list to all fifteen if you prefer belt-and-braces.
+for table in ("genome_entity", "genome_content", "genome_result"):
     print(table, spark.sql(f"DESCRIBE `{NAMESPACE}`.`{table}`").collect())
 ```
 
-Confirm `entity_hash`'s reported type is `binary`, not `string`, in every
-table that has the column (`entity`, `canonical_content`, `result`). If it
-is `string`, **stop before loading any data**: drop the affected table(s),
-adjust however this write path needs to be told to honor `BINARY` (a
-pod-only detail this module deliberately does not guess at), recreate via
-`bootstrap()`, and re-verify with this same check before proceeding.
+Confirm `entity_hash`'s reported type is `binary`, not `string`, on every
+table you check. (On `gene_content` the same check applies to
+`protein_entity_hash`, the other `BINARY` column, if you inspect that
+table.) If it is `string`, **stop before loading any data**: drop the
+affected table(s), adjust however this write path needs to be told to honor
+`BINARY` (a pod-only detail this module deliberately does not guess at),
+recreate via `bootstrap()`, and re-verify with this same check before
+proceeding.
 
 **Second acceptance item, added after OP0.a: validate the adapter's
 partition-spec parsers here, because this is the first chance anyone
 gets.** OP0.a established there is no pre-existing partitioned Iceberg
-table on this cluster, so `entity` (partitioned on `entity_type`) is
-likely the first one. While you have the session open, capture the
-verbatim output of both:
+table on this cluster, so one of the partitioned clearinghouse tables is
+likely the first one. Pick any partitioned table -- e.g. `gene_entity`
+(partitioned on `standardizer_version`) or `genome_result` (partitioned on
+`source`). While you have the session open, capture the verbatim output of
+both:
 
 ```python
-print(spark.sql(f"DESCRIBE TABLE EXTENDED `{NAMESPACE}`.`entity`").collect())
-print(spark.sql(f"SHOW CREATE TABLE `{NAMESPACE}`.`entity`").collect())
+TABLE = "gene_entity"  # any partitioned table: the four *_entity/*_content
+                       # on standardizer_version, or any *_result on source.
+print(spark.sql(f"DESCRIBE TABLE EXTENDED `{NAMESPACE}`.`{TABLE}`").collect())
+print(spark.sql(f"SHOW CREATE TABLE `{NAMESPACE}`.`{TABLE}`").collect())
 ```
 
 and check it against `clearinghouse_bootstrap_adapter.py`'s two parsers --
@@ -653,6 +696,52 @@ clause. A re-run of `bootstrap()` exercises this for real: it takes the
 **add a parser for it; do not stub the method to return `[]`.** Record
 the verbatim output either way, since nobody else has ever seen this
 cluster's partitioned-table DDL.
+
+### 2.4 -- create the three cross-type UNION ALL views (after table creation)
+
+**Do this only after 2.2's real run has created all fifteen tables and
+2.3's acceptance checks pass.** The fifteen-table split fragments what used
+to be a single cross-type query surface, so this PRD restores it with three
+`UNION ALL` views -- `all_entity`, `all_content`, `all_result` -- each
+unioning the five per-type tables of one kind.
+`clearinghouse_schema.union_view_sql(kind, *, fqn_prefix=...)` emits the
+`CREATE OR REPLACE VIEW ... AS <SELECT> UNION ALL ...` DDL text; like the
+rest of that module it is pod-free and creates nothing itself, so an
+operator runs the emitted SQL from an attended pod session:
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    TENANT,
+    union_view_sql,
+)
+
+# The per-type tables live under the tenant-qualified prefix. TENANT is
+# "kbaseincubator"; the views are created alongside their tables in the
+# clearinghouse namespace.
+FQN_PREFIX = f"{TENANT}.clearinghouse"
+
+for kind in ("all_entity", "all_content", "all_result"):
+    ddl = union_view_sql(kind, fqn_prefix=FQN_PREFIX)
+    print(ddl)
+    spark.sql(ddl)
+```
+
+- `all_entity` and `all_result` union EVERY column (`SELECT *`), because
+  their five per-type tables are schema-identical (the `entity` and
+  `result` kinds carry a GENERIC schema across all five types).
+- `all_content` CANNOT union every column: the five `<type>_content` tables
+  have deliberately divergent type-specialized columns. It selects ONLY the
+  columns common to all five (`entity_hash`, `standardizer_version`,
+  `observed_at`, `ingest_batch_id`) plus a literal `entity_type`
+  discriminator, and reconciles none of the type-specialized columns.
+
+**These views are metadata-only and safe to drop and recreate.** A view
+carries no data of its own -- it is a stored `SELECT` over the physical
+tables -- so dropping one, or re-running `CREATE OR REPLACE VIEW`, costs
+nothing and requires **no multi-terabyte replay**. This is the one step in
+OP2 that is freely reversible: if a view is wrong, drop it and re-emit it
+from `union_view_sql()`. That is the opposite of the physical tables, whose
+partitioning is baked in at creation and correctable only by replay (2.2).
 
 ---
 
@@ -677,9 +766,12 @@ What it does:
    fixture in this script, is what keeps the two from silently drifting
    apart -- a parity check run against a fixture that no longer matches
    what the DuckDB tests exercise would prove nothing.
-2. Appends those rows to the real, live `result` table through
-   `BerdlCapability.load()` -- the same sanctioned write path OP2 uses --
-   never a raw `pyiceberg` write (see "if something goes wrong" below).
+2. Appends those rows to the real, live per-type `<entity_type>_result`
+   tables through `BerdlCapability.load()` -- the same sanctioned write path
+   OP2 uses -- never a raw `pyiceberg` write (see "if something goes wrong"
+   below). After the fifteen-table split there is no single `result` table;
+   each fixture row lands in the `<entity_type>_result` table resolved by
+   `clearinghouse_schema.table_name` for its `entity_type`.
 3. Runs the real `current_state_sql()` SQL text against the live table via
    Spark, once per property, and asserts the same six properties the
    DuckDB tests assert:
@@ -715,7 +807,7 @@ everywhere else in this document.) It does not block OP2 either way.
 (`PARITY_SOURCE_PREFIX` in the fixture module) so these rows can never be
 mistaken for real tool output, and can be found again later with
 `WHERE source LIKE 'parity-check/%'`. **These rows are expected to remain
-in the append-only `result` table permanently** -- this is expected and
+in the append-only `<entity_type>_result` tables permanently** -- this is expected and
 harmless: they occupy their own
 `(entity_hash, entity_type, result_type, source)` slots, distinct from any
 real corpus's slots, and re-running this script
@@ -730,13 +822,14 @@ passed:
 |---|---|---|
 | _(fill in)_ | _(fill in)_ | _(fill in: ALL PASS / n FAILED, which)_ |
 
-If `RESULT_TABLE_FQN` in the script (`kbaseincubator.clearinghouse.result`)
-does not resolve, see the comment above that constant in
-`scripts/clearinghouse_parity_check.py` -- `BerdlCapability.load()`'s own
-postflight queries use a different, two-part form
-(`clearinghouse.result`, no tenant segment), and which form actually
-resolves against the live catalog is not verifiable off-pod. Try the
-two-part form next, and record in this log which one worked.
+If a per-type table FQN does not resolve, see the docstring of
+`_result_table_fqn` in `scripts/clearinghouse_parity_check.py` -- it builds
+the three-part, tenant-qualified form
+(e.g. `kbaseincubator.clearinghouse.protein_result`), but
+`BerdlCapability.load()`'s own postflight queries use a different, two-part
+form (`clearinghouse.protein_result`, no tenant segment), and which form
+actually resolves against the live catalog is not verifiable off-pod. Try
+the two-part form next, and record in this log which one worked.
 
 ---
 

@@ -102,14 +102,15 @@ a. **Catalog fixture: the verbatim output of `DESCRIBE TABLE EXTENDED` and
    `ideas`, `kbase`, `kescience`, `globalusers`) were read via pyiceberg
    `table.spec()`, and every one has an empty partition spec. So there is
    no existing DDL to validate the adapter's two parser shapes against,
-   and there will not be until OP2 runs: the clearinghouse `entity` table
-   (partitioned on `entity_type`) will be **among the first partitioned
-   tables on this cluster**.
+   and there will not be until OP2 runs: the first partitioned clearinghouse
+   table OP2 creates (one of the four `<type>_entity`/`<type>_content` tables
+   on `standardizer_version`, or one of the five `<type>_result` tables on
+   `source`) will be **among the first partitioned tables on this cluster**.
    **What to do instead -- this is now an OP2 follow-on, not an OP0
-   blocker.** Immediately after OP2 creates `entity`, run
-   `DESCRIBE TABLE EXTENDED` and `SHOW CREATE TABLE` against it and check
-   the output against the adapter's parsers (see 2.3). If it matches
-   neither documented shape, adding a third parser is a one-function
+   blocker.** Immediately after OP2 creates the tables, run
+   `DESCRIBE TABLE EXTENDED` and `SHOW CREATE TABLE` against any partitioned
+   one and check the output against the adapter's parsers (see 2.3). If it
+   matches neither documented shape, adding a third parser is a one-function
    change against the module's existing tests. Do not gate OP2 on a
    pre-existing example that does not exist.
    Full answer: `trigger-inbox/replies/op0-qb-rw-membership.json`.
@@ -203,7 +204,7 @@ d. **What `berdl_notebook_utils.table_exists` returns for a namespace
    resolves a missing namespace as "table not found" rather than an error.
    **IMPLICATION, and it relaxes the ordering: 2.1's dry run CAN be run
    before OP2.0b creates the namespace.** It will report `'create'` for
-   all three tables rather than failing outright. Namespace creation stays
+   all fifteen tables rather than failing outright. Namespace creation stays
    its own deliberate write step; it simply is not a precondition of the
    dry run. Full answer:
    `trigger-inbox/replies/op0-qcd-namespace-args.json`.

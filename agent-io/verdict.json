@@ -1,9 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "test_clearinghouse_bootstrap.py already asserts all 15 per-type tables in table_configs() order (via _ALL_TABLE_NAMES) and dry-run-without-writes, migrated by task 1 (6e79e4c); the branch's one commit fixes the last holdover (match=\"entity\" -> match=\"genome_entity\", table_configs()[0]) -- strictly stronger, no assertion weakened/deleted. Verified table_configs()==15 in correct order/partitioning, no standalone entity/canonical_content/result refs remain, capability hardcodes no count. berdl suite 192 passed on both base and branch (installed pytest+duckdb into task venv).",
+  "reason": "Docs-only rewrite of the runbook OP2 sections to the fifteen-table scheme is correct: STOP banner fully removed, OP2 table list matches clearinghouse_schema.table_configs() exactly (verified by running it) in names/order/partition specs for all 15 tables, the 2.4 UNION ALL views step (all_entity/all_content/all_result) is added and noted metadata-only/droppable, and the binary-type acceptance check now requires one table per kind. OP0, OP1, the OP2 precondition list including the Q6 namespace check, and the multi-terabyte-replay warning are all preserved. I committed a small fix-up (da4c641) correcting two stale three-table references the rewrite missed in OP0 (OP0.a's nonexistent `entity` table partitioned on entity_type; OP0.c/d's 'all three tables' -> 'all fifteen'). berdl tests: 192 passed on both base and branch (docs-only diff, no new failures).",
   "stamp": {
-    "task_id": "task-53990b81",
-    "branch": "maestro/reviewer/background-possibly-unreachable--task-53990b81",
-    "commit": "536bd0e8802e0ec0e9732cad5ff938705b8ca849"
+    "task_id": "task-ce05ae05",
+    "branch": "maestro/reviewer/task-dev-1075-clh1d-runbook-op2-task-ce05ae05",
+    "commit": "da4c641687404a23a089d797bae46fbdf085bf24"
   }
 }

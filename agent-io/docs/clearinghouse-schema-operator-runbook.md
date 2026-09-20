@@ -500,20 +500,26 @@ Run this from an attended pod session:
 ```python
 from kbutillib.domains.kbase.berdl.transports import InPodTransport
 
-# CONFIRMED LIVE by OP0.c on 2026-09-12 -- the dotted form is the one that
-# resolves; the bare form returns False. Do not shorten NAMESPACE.
-NAMESPACE = "kbaseincubator.clearinghouse"
+# NAMESPACE (dotted) is used by table_exists, table_configs and BerdlCapability.load().
+# Do NOT shorten it for those calls -- OP0.c confirmed the bare form returns False
+# for table_exists. The create_namespace_if_not_exists call below is DIFFERENT:
+# it prepends tenant_name as the catalog internally, so it takes the bare child name.
+NAMESPACE = "kbaseincubator.clearinghouse"  # dotted -- for table_exists / load()
 TENANT_NAME = "kbaseincubator"
 
 transport = InPodTransport()
 spark = transport.spark_session()
 transport.create_namespace_if_not_exists(
     spark,
-    namespace=NAMESPACE,      # dotted, per OP0.c.
-    tenant_name=TENANT_NAME,  # NOTE THE NAME: this parameter is spelled
-                              # `tenant_name` here, not `tenant` -- see
-                              # the warning below.
-    iceberg=True,             # already the default; explicit for clarity.
+    namespace="clearinghouse",  # BARE CHILD -- not NAMESPACE (dotted). This function
+                                # computes full_ns = f"{tenant_name}.{namespace}",
+                                # so passing the dotted form yields
+                                # kbaseincubator.kbaseincubator.clearinghouse ->
+                                # NoSuchNamespaceException. Confirmed OP2 2026-09-20.
+    tenant_name=TENANT_NAME,    # NOTE THE NAME: this parameter is spelled
+                                # `tenant_name` here, not `tenant` -- see
+                                # the warning below.
+    iceberg=True,               # already the default; explicit for clarity.
 )
 ```
 

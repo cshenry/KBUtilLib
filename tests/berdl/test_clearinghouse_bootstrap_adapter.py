@@ -758,3 +758,159 @@ class TestSchemaOnlyCreatePath:
 
         assert len(underlying.load_calls) == 1
         assert session.statements == []
+
+
+# --------------------------------------------------------------------------
+# 9: the partitioning shape the BERDL cluster actually emits
+# --------------------------------------------------------------------------
+
+
+def _berdl_describe_rows(*partition_columns: str, metadata_column: bool = True):
+    """Build DESCRIBE TABLE EXTENDED rows in the shape measured ON-POD.
+
+    Transcribed from the OP2 acceptance run of 2026-09-20 (reply
+    ``trigger-inbox/replies/op2-create-clearinghouse-tables-ROUND2.json``,
+    ``gene_entity``): a ``# Partition Information`` header, a
+    ``# col_name`` label row, then the partition columns as PLAIN rows --
+    NOT the numbered ``Part <N>`` rows this parser was first written for.
+    """
+    rows = [
+        ("entity_hash", "binary", None),
+        ("entity_type", "string", None),
+        ("standardizer_version", "string", None),
+        ("observed_at", "timestamp", None),
+        ("ingest_batch_id", "string", None),
+    ]
+    if partition_columns:
+        rows.append(("# Partition Information", "", ""))
+        rows.append(("# col_name", "data_type", "comment"))
+        for column in partition_columns:
+            rows.append((column, "string", None))
+    rows.append(("# Metadata Columns", "", ""))
+    if partition_columns and metadata_column:
+        struct = ",".join(f"{c}:string" for c in partition_columns)
+        rows.append(("_partition", f"struct<{struct}>", ""))
+    rows.append(("_spec_id", "int", ""))
+    rows.append(("# Detailed Table Information", "", ""))
+    rows.append(("Name", f"{_NAMESPACE}.gene_entity", None))
+    return rows
+
+
+class TestBerdlPartitionInformationShape:
+    """The live cluster's shape, and the silent ``[]`` it used to produce.
+
+    Measured on-pod 2026-09-20: ``table_partition_spec`` returned ``[]``
+    -- "unpartitioned" -- for all nine genuinely partitioned clearinghouse
+    tables, because neither parser recognised this shape. ``bootstrap()``
+    reads ``[]`` as unpartitioned, so the partition-spec safety check
+    passed while having determined nothing, and the first idempotent
+    re-run would have raised a FALSE mismatch (``[]`` vs
+    ``['standardizer_version']``).
+    """
+
+    def test_single_partition_column_is_read(self):
+        rows = _berdl_describe_rows("standardizer_version")
+        assert _parse_partition_spec(
+            rows, name="gene_entity", namespace=_NAMESPACE
+        ) == ["standardizer_version"]
+
+    def test_it_no_longer_silently_reports_unpartitioned(self):
+        """The regression assertion: this exact input used to give []."""
+        rows = _berdl_describe_rows("standardizer_version")
+        assert (
+            _parse_partition_spec(rows, name="gene_entity", namespace=_NAMESPACE) != []
+        )
+
+    def test_partition_column_order_is_preserved(self):
+        rows = _berdl_describe_rows("source", "standardizer_version")
+        assert _parse_partition_spec(
+            rows, name="gene_result", namespace=_NAMESPACE
+        ) == ["source", "standardizer_version"]
+
+    def test_a_genuinely_unpartitioned_table_still_reports_empty(self):
+        """``[]`` must stay reachable -- six clearinghouse tables are
+        genuinely unpartitioned, and turning every ``[]`` into a raise
+        would break them.
+        """
+        rows = _berdl_describe_rows()
+        assert (
+            _parse_partition_spec(rows, name="genome_entity", namespace=_NAMESPACE)
+            == []
+        )
+
+    def test_metadata_column_alone_raises_rather_than_reporting_empty(self):
+        """A ``_partition`` struct column is independent evidence the table
+        IS partitioned. If it is present and no partitioning block was
+        understood, reporting ``[]`` would be the silent pass again.
+        """
+        rows = [
+            ("entity_hash", "binary", None),
+            ("# Some Unknown Future Header", "", ""),
+            ("standardizer_version", "string", None),
+            ("# Metadata Columns", "", ""),
+            ("_partition", "struct<standardizer_version:string>", ""),
+            ("# Detailed Table Information", "", ""),
+            ("Name", f"{_NAMESPACE}.gene_entity", None),
+        ]
+        with pytest.raises(PartitionSpecUnparseableError, match="_partition"):
+            _parse_partition_spec(rows, name="gene_entity", namespace=_NAMESPACE)
+
+    def test_an_empty_partition_information_block_raises(self):
+        rows = [
+            ("entity_hash", "binary", None),
+            ("# Partition Information", "", ""),
+            ("# col_name", "data_type", "comment"),
+            ("# Detailed Table Information", "", ""),
+            ("Name", f"{_NAMESPACE}.gene_entity", None),
+        ]
+        with pytest.raises(PartitionSpecUnparseableError):
+            _parse_partition_spec(rows, name="gene_entity", namespace=_NAMESPACE)
+
+    def test_a_transform_in_the_plain_shape_raises(self):
+        rows = [
+            ("entity_hash", "binary", None),
+            ("# Partition Information", "", ""),
+            ("# col_name", "data_type", "comment"),
+            ("bucket(256, entity_hash)", "int", None),
+            ("# Detailed Table Information", "", ""),
+            ("Name", f"{_NAMESPACE}.gene_entity", None),
+        ]
+        with pytest.raises(PartitionSpecUnparseableError, match="transform"):
+            _parse_partition_spec(rows, name="gene_entity", namespace=_NAMESPACE)
+
+    def test_the_numbered_part_shape_still_works(self):
+        """The original shape is still handled -- this fix adds a shape,
+        it does not replace one.
+        """
+        rows = _describe_extended_rows(("Part 0", "standardizer_version"))
+        assert _parse_partition_spec(
+            rows, name="gene_entity", namespace=_NAMESPACE
+        ) == ["standardizer_version"]
+
+    def test_bootstrap_rerun_against_the_real_shape_takes_the_append_branch(self):
+        """End-to-end: the false-mismatch that would have blocked re-runs.
+
+        Before the fix this raised ``BootstrapPartitionSpecMismatchError``
+        comparing ``[]`` against ``['standardizer_version']``.
+        """
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=True)
+        underlying = _FakeUnderlyingCapability(
+            query_result=_berdl_describe_rows("standardizer_version")
+        )
+        adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
+
+        result = bootstrap(
+            adapter,
+            namespace=_NAMESPACE,
+            tables=[
+                {
+                    "name": "gene_entity",
+                    "schema_sql": "entity_hash BINARY",
+                    "partition_by": "standardizer_version",
+                }
+            ],
+        )
+
+        assert result["tables"][0]["action"] == "append"
+        assert result["tables"][0]["actual_partition_by"] == ["standardizer_version"]

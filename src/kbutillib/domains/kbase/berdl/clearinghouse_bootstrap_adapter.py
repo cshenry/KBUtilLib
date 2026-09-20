@@ -90,6 +90,25 @@ _DETAILED_INFO_HEADER = "# Detailed Table Information"
 #: e.g. ``"Part 0"``.
 _PART_ROW_PATTERN = re.compile(r"^Part\s+(\d+)$")
 
+#: Header line this cluster's ``DESCRIBE TABLE EXTENDED`` prints ahead of
+#: its partition columns, which it lists as PLAIN ``col_name`` rows rather
+#: than the numbered ``Part <N>`` rows of the ``# Partitioning`` shape.
+#: Measured on the BERDL pod 2026-09-20 during OP2 acceptance (2.3) -- see
+#: :func:`_parse_describe_table_extended_partition_spec`.
+_PARTITION_INFORMATION_HEADER = "# Partition Information"
+
+#: Column-header row this cluster emits immediately after
+#: :data:`_PARTITION_INFORMATION_HEADER`; it labels the columns and is not
+#: itself a partition column.
+_COL_NAME_SUBHEADER = "# col_name"
+
+#: Metadata column this cluster exposes for a partitioned table, typed
+#: ``struct<...>`` over the partition columns. Its PRESENCE is independent
+#: evidence that a table IS partitioned, which is what lets an
+#: unrecognised partitioning block be told apart from a genuinely
+#: unpartitioned table instead of silently reported as ``[]``.
+_PARTITION_METADATA_COLUMN = "_partition"
+
 #: Substring (case-insensitive) identifying a ``SHOW CREATE TABLE`` result.
 _CREATE_TABLE_MARKER = "CREATE TABLE"
 
@@ -255,42 +274,121 @@ def _parse_describe_table_extended_partition_spec(
         name: Table name, used only to build an error message.
         namespace: Namespace, used only to build an error message.
 
+    **Two partitioning-block shapes are recognised**, because the live
+    BERDL cluster does not emit the one this parser was originally written
+    for. Measured on-pod 2026-09-20 during OP2 acceptance step 2.3:
+
+    - ``# Partitioning`` followed by numbered ``Part <N>`` rows -- the
+      shape assumed off-pod, still handled.
+    - ``# Partition Information`` followed by a ``# col_name`` label row
+      and then the partition columns as PLAIN ``col_name`` rows, running
+      until the next ``#`` header. This is what the BERDL cluster actually
+      emits, and it was returning ``[]`` -- "unpartitioned" -- for all
+      nine genuinely partitioned clearinghouse tables.
+
+    **Why that ``[]`` was the worst possible answer, and why this function
+    now raises instead.** ``bootstrap()`` reads ``[]`` as "unpartitioned",
+    so an unrecognised block silently passed the partition-spec check for
+    every partitioned table while having determined nothing -- precisely
+    the failure this module's contract forbids, and it would also have
+    raised a FALSE ``BootstrapPartitionSpecMismatchError`` on the first
+    idempotent re-run (``[]`` vs the expected ``['standardizer_version']``).
+    A partitioned table on this cluster also exposes a ``_partition``
+    metadata column typed ``struct<...>``; its presence is INDEPENDENT
+    evidence that the table is partitioned, so when it appears and no
+    partitioning block was understood, this raises rather than reporting
+    ``[]``.
+
+    Args:
+        rows: The collected rows from running :func:`_describe_table_extended_sql`
+            via ``capability.query(sql, engine="spark")`` -- any sequence
+            of row-like objects supporting positional ``row[0]``/``row[1]``
+            access.
+        name: Table name, used only to build an error message.
+        namespace: Namespace, used only to build an error message.
+
     Returns:
         ``None`` if ``rows`` is not recognisable as this shape at all (no
         ``# Detailed Table Information`` header found -- the caller should
         try the next recognised shape). ``[]`` if the shape *is*
         recognised and the table is positively reported as unpartitioned
-        (no ``# Partitioning`` header). Otherwise the partition column
-        names, in declared (``Part <N>``) order.
+        (no partitioning block AND no ``_partition`` metadata column).
+        Otherwise the partition column names, in declared order.
 
     Raises:
-        PartitionSpecUnparseableError: A ``Part`` row's value contains a
+        PartitionSpecUnparseableError: A partition row's value contains a
             parenthesis -- a partition *transform* expression (e.g.
             ``bucket(256, entity_hash)``) rather than a bare column name.
             Raised immediately; never silently reduced to a bare column
             name and never allows falling through to try the other shape.
+            Also raised when a ``_partition`` metadata column says the
+            table IS partitioned but no partitioning block was understood,
+            and when a recognised partitioning header is followed by no
+            partition columns at all.
     """
     saw_detailed_info = False
     saw_partitioning = False
+    saw_partition_information = False
+    saw_partition_metadata_column = False
+    in_partition_information = False
     parts_by_index: dict[int, str] = {}
+    plain_partition_columns: list[str] = []
 
     for row in rows:
         raw_col_name = _row_get(row, 0)
         col_name = "" if raw_col_name is None else str(raw_col_name).strip()
+        raw_value = _row_get(row, 1)
+        value = "" if raw_value is None else str(raw_value).strip()
 
         if col_name == _DETAILED_INFO_HEADER:
             saw_detailed_info = True
+            in_partition_information = False
             continue
         if col_name == _PARTITIONING_HEADER:
             saw_partitioning = True
+            in_partition_information = False
+            continue
+        if col_name == _PARTITION_INFORMATION_HEADER:
+            saw_partition_information = True
+            in_partition_information = True
+            continue
+        if col_name == _COL_NAME_SUBHEADER:
+            # The label row inside the block, not a partition column.
+            continue
+        if col_name.startswith("#"):
+            # Any other section header closes the partition-information
+            # block -- notably '# Metadata Columns', which follows it.
+            in_partition_information = False
+            # fall through: the row may still be the _partition column
+            # check below on a later iteration, not this header itself.
+            continue
+
+        if col_name == _PARTITION_METADATA_COLUMN and value.startswith("struct<"):
+            saw_partition_metadata_column = True
+            continue
+
+        if in_partition_information:
+            if not col_name:
+                continue
+            if "(" in col_name or ")" in col_name:
+                _raise_unparseable(
+                    name,
+                    namespace,
+                    rows,
+                    reason=(
+                        f"partition column {col_name!r} is a transform "
+                        "expression, not a bare column name -- this "
+                        "codebase cannot express partition transforms "
+                        "(see clearinghouse_schema.py's no-parenthesis rule)"
+                    ),
+                )
+            plain_partition_columns.append(col_name)
             continue
 
         match = _PART_ROW_PATTERN.match(col_name)
         if match is None:
             continue
 
-        raw_value = _row_get(row, 1)
-        value = "" if raw_value is None else str(raw_value).strip()
         if "(" in value or ")" in value:
             _raise_unparseable(
                 name,
@@ -307,9 +405,51 @@ def _parse_describe_table_extended_partition_spec(
 
     if not saw_detailed_info:
         return None
-    if not saw_partitioning:
-        return []
-    return [parts_by_index[i] for i in sorted(parts_by_index)]
+
+    if saw_partition_information:
+        if not plain_partition_columns:
+            _raise_unparseable(
+                name,
+                namespace,
+                rows,
+                reason=(
+                    f"a {_PARTITION_INFORMATION_HEADER!r} header was "
+                    "present but no partition columns were read out of "
+                    "it -- the table is partitioned and this parser did "
+                    "not understand how"
+                ),
+            )
+        return plain_partition_columns
+
+    if saw_partitioning:
+        if not parts_by_index:
+            _raise_unparseable(
+                name,
+                namespace,
+                rows,
+                reason=(
+                    f"a {_PARTITIONING_HEADER!r} header was present but "
+                    "no 'Part <N>' rows were read out of it -- the table "
+                    "is partitioned and this parser did not understand how"
+                ),
+            )
+        return [parts_by_index[i] for i in sorted(parts_by_index)]
+
+    if saw_partition_metadata_column:
+        _raise_unparseable(
+            name,
+            namespace,
+            rows,
+            reason=(
+                f"a {_PARTITION_METADATA_COLUMN!r} metadata column of "
+                "struct type says this table IS partitioned, but no "
+                "partitioning block in this output was recognised -- "
+                "reporting [] here would silently pass bootstrap()'s "
+                "partition-spec check for a partitioned table"
+            ),
+        )
+
+    return []
 
 
 def _extract_balanced_parens(text: str, open_paren_index: int) -> str:

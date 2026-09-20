@@ -287,10 +287,27 @@ once all three lines print.
    `BerdlCapability.load()` will refuse with `PermissionError`, and its
    own remedy is "an asynchronous human approval step" you cannot
    shortcut from inside this runbook.
-4. **Q6 -- "does `kbaseincubator.clearinghouse` exist?" -- has been
+4. **Q6 -- "what state is `kbaseincubator.clearinghouse` in?" -- has been
    RE-CHECKED at run time, not read off this document or off OP0's
-   write-up.** This absence has now been observed **twice, independently,
-   two days apart** -- and neither confirms the other still holds:
+   write-up.**
+
+   **The expected answer changed on 2026-09-20, and an operator carrying
+   the old one will misread a correct state as an alarm.** The 2026-09-20
+   attended attempt ran 2.0b and created the namespace before hitting the
+   seam bug in 2.2 (see 2.0, "the schema-only seam"). So:
+
+   - **PRESENT and EMPTY** (`list_tables` -> `[]`) is now the CORRECT
+     resumable state, not a red flag. Tick this precondition and resume
+     at 2.2 -- **do not re-run 2.0b.**
+   - **ABSENT** means something removed it since; run 2.0b, then 2.2.
+   - **PRESENT and NON-EMPTY** is the one that stops you. STOP and
+     establish which partition spec those tables carry before writing
+     anything -- that is the multi-terabyte-replay hazard this
+     precondition exists for.
+
+   The original absence was observed **twice, independently, two days
+   apart** -- and neither confirmed the other still held, which is exactly
+   how it went stale:
      - Albert, in-pod, 2026-09-10, read-only, no `COUNT(*)`, nothing
        written (trigger `64960fc9`; PRD `clearinghouse-lake-1c-pod-operator`
        names this trigger as the source of record and its own notes call
@@ -384,6 +401,55 @@ happens inside its existence-check `try`/`except`) -- there is no
 `table_exists`/`table_partition_spec` reader anywhere on `BerdlCapability`
 itself.
 
+### The schema-only seam -- what `load()` does when `bootstrap()` calls it
+
+**This is the bug that blocked OP2 on 2026-09-20, and the fix changed
+which code actually creates the tables.** Read it before 2.2, because the
+expected output of 2.2 changed with it.
+
+`bootstrap()` takes no `dataframes` and no `paths` parameters, so it has
+no data source to offer and can never supply one -- every `load()` call it
+makes is schema-only by construction. The adapter used to forward those
+straight to `BerdlCapability.load()`, which always drives
+`data_lakehouse_ingest.ingest()` and whose `build_ingest_config()` raises:
+
+```
+ValueError: build_ingest_config: bronze mode (no 'dataframes' given)
+requires 'paths' with a 'bronze_base'.
+```
+
+Neither half was wrong on its own. Creating an empty table is a DDL
+operation, not an ingest; the adapter is the seam where that translation
+belongs, and it now does the translation:
+
+- **Schema-only** (no `dataframes`, no `paths.bronze_base`) -- the adapter
+  runs one `CREATE TABLE IF NOT EXISTS <ns>.<table> (<schema_sql>) USING
+  iceberg [PARTITIONED BY (...)]` per table, on the same Spark session
+  `table_exists` probed with. Column types come **verbatim** from
+  `table_configs()`'s `schema_sql`, so `entity_hash BINARY` is *declared*
+  to the catalog rather than inferred from data. Every statement is built
+  before any is run, so a malformed table config creates nothing at all
+  rather than the prefix of tables preceding it.
+- **Data-bearing** (`dataframes`, or `paths` with a `bronze_base`) --
+  forwarded to `BerdlCapability.load()` unchanged. The real corpus loads
+  are unaffected, and `BerdlCapability`'s own invariant is intact: every
+  *data* write still routes through `data_lakehouse_ingest.ingest`, never
+  a raw `writeTo`. No row is written on the DDL path.
+
+**What was deliberately NOT done, and why it matters to you.** No empty
+DataFrame and no stub bronze path is fabricated to force the call through
+`ingest()`. Either would let the column types be INFERRED, which is the
+silent `BINARY` -> `STRING` demotion of `entity_hash` that 2.3 exists to
+catch. If you find yourself tempted to hand-roll one at the console to get
+past a failure here: that is the same shortcut, and 2.3 is downstream of
+it.
+
+**Still not verifiable off-pod**, same caveat as everything else in this
+document: that this cluster's Iceberg catalog accepts `USING iceberg` DDL
+and honours the declared `BINARY` and `PARTITIONED BY` is asserted by the
+emitted statement, not measured. **2.3 is the step that measures it**, and
+it is now more load-bearing than before, not less.
+
 **Why `bootstrap()` needs these two read-only probes at all, rather than
 just calling `load()` and looking at what it reports.**
 `BerdlCapability.load()` already resolves create-vs-append per table
@@ -462,6 +528,14 @@ in `bootstrap()`. Import and construct `ClearinghouseBootstrapCapability`
 as shown above and pass that instead.
 
 ### 2.0b -- create the namespace (before the REAL run, not necessarily before the dry run)
+
+> **ALREADY DONE as of 2026-09-20 -- check before you run this.** The
+> attended pod session that day ran this step successfully;
+> `kbaseincubator.clearinghouse` exists and is EMPTY (`list_tables` ->
+> `[]`). It then hit the 2.2 seam bug (2.0, "the schema-only seam") and
+> created no tables. If your Q6 re-check (precondition 4) finds the
+> namespace present and empty, **skip this section and resume at 2.2.**
+> Everything below applies only if the namespace is genuinely absent.
 
 **Nothing in the sanctioned write path creates a namespace.** `bootstrap()`
 does not -- it only creates tables inside a namespace it assumes already
@@ -605,15 +679,27 @@ print(report)
 ```
 
 **Expected output, first (creating) run** -- every table's report entry has
-`'exists': False`, `'action': 'create'`, and `report['load_result']` is the
-`BerdlCapability.load()` report dict (`{'ingest_result': ..., 'tables':
-[...]}`) with one entry per table, `'operation': 'create'`.
+`'exists': False` and `'action': 'create'`, and `report['load_result']` is
+the adapter's schema-only report: `{'schema_only': True, 'dataset': ...,
+'namespace': ..., 'tables': [...]}`, one entry per table carrying its
+`'name'`, `'operation': 'create_if_not_exists'`, and the exact
+`'statement'` that was executed for it.
+
+**Capture `report['load_result']['tables']` before moving on.** Each
+entry's `'statement'` is the DDL actually run, so 2.3 can compare what the
+catalog reports against what was asked for, without re-deriving it from
+`table_configs()`. Since the 2026-09-20 fix this is the only record of the
+DDL that created these tables.
 
 **Expected output, a re-run against the same namespace (idempotent)** --
 every table's report entry has `'exists': True`, `'actual_partition_by'`
-matching `'expected_partition_by'`, and `'action': 'append'`.
-`report['load_result']`'s per-table entries show `'operation': 'append'`.
-No table is overwritten and no table's partitioning is re-specced.
+matching `'expected_partition_by'`, and `'action': 'append'`. The
+schema-only `load_result` still reports `'create_if_not_exists'` per
+table, and `IF NOT EXISTS` makes each statement a no-op against a table
+that already exists -- which is correct, since `bootstrap()` has no rows
+to append in the first place and has already refused the whole batch if
+any live spec disagreed. No table is overwritten and no table's
+partitioning is re-specced.
 
 **How to read a partition-spec refusal.** If a table already exists with a
 live partition spec that disagrees with this module's config (as of
@@ -638,10 +724,22 @@ to patch the partitioning of the live table in place.
 **Do this immediately after table creation succeeds, before any real
 corpus is loaded.** `clearinghouse_schema.py`'s own module docstring flags
 this explicitly: `entity_hash` is declared as bare `BINARY` in this
-module's `schema_sql`, but whether Spark SQL's `data_lakehouse_ingest`
-write path actually honors that declaration -- as opposed to silently
-creating a `STRING` column -- is **not verifiable off-pod** and is not
-asserted as fact anywhere in the earlier phases' code or tests. This is
+module's `schema_sql`, but whether the write path actually honors that
+declaration -- as opposed to silently creating a `STRING` column -- is
+**not verifiable off-pod** and is not asserted as fact anywhere in the
+earlier phases' code or tests.
+
+**The 2026-09-20 seam fix narrowed this risk without removing it, and the
+check is unchanged.** Table creation now emits `CREATE TABLE ... USING
+iceberg` DDL carrying `entity_hash BINARY` literally (2.0, "the
+schema-only seam"), so the type is *declared* to the catalog rather than
+inferred by `data_lakehouse_ingest` from data. That removes the inference
+step, which was the likeliest demotion path -- but whether this cluster's
+Iceberg catalog honours a declared `BINARY` is still unmeasured, and the
+DDL statement itself was emitted by code no on-pod run has yet exercised.
+**Run this step. Do not skip it because the type is now declared**; a
+declaration the catalog quietly ignores looks identical from here to an
+inference that guessed wrong, and both cost the same replay. This is
 the one step where a silently-wrong type gets caught, and it must be
 caught here: discovering *after* the real annotation corpus has been
 loaded that `entity_hash` is actually `STRING` means every already-written

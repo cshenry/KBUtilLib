@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import pytest
 
-from kbutillib.domains.kbase.berdl.capability import BerdlCapability
+from kbutillib.domains.kbase.berdl.capability import (
+    BerdlCapability,
+    build_ingest_config,
+)
 from kbutillib.domains.kbase.berdl.clearinghouse_bootstrap_adapter import (
     ClearinghouseBootstrapCapability,
     PartitionSpecUnparseableError,
+    _create_table_sql,
     _describe_table_extended_sql,
     _parse_describe_table_extended_partition_spec,
     _parse_partition_spec,
@@ -28,6 +32,7 @@ from kbutillib.domains.kbase.berdl.clearinghouse_bootstrap_adapter import (
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     BootstrapIndeterminateStateError,
     bootstrap,
+    table_configs,
 )
 
 _NAMESPACE = "clearinghouse"
@@ -38,13 +43,59 @@ _NAMESPACE = "clearinghouse"
 # --------------------------------------------------------------------------
 
 
+class _FakeSpark:
+    """Stands in for a Spark session: only ``sql``, recording statements.
+
+    The adapter's schema-only ``load()`` path runs DDL on the session it
+    resolved, so a bare ``object()`` no longer stands in for one -- every
+    fake session in this module must be able to record a ``sql()`` call.
+    """
+
+    def __init__(self, *, sql_error=None):
+        self.statements: list[str] = []
+        self._sql_error = sql_error
+
+    def sql(self, statement):
+        self.statements.append(statement)
+        if self._sql_error is not None:
+            raise self._sql_error
+        return []
+
+
+class _ContractCheckingCapability:
+    """A fake ``BerdlCapability`` that enforces the REAL ``load()`` contract.
+
+    ``_FakeUnderlyingCapability.load`` accepts any kwargs, which is exactly
+    why the ``bootstrap()`` <-> ``load()`` seam broke undetected until an
+    on-pod run hit it on 2026-09-20: ``bootstrap()`` calls ``load()`` with
+    no ``dataframes`` and no ``paths``, and the real
+    ``BerdlCapability.load()`` routes that into ``build_ingest_config()``,
+    which raises ``ValueError`` for bronze mode without a ``bronze_base``.
+    This fake calls the REAL ``build_ingest_config`` so that contract is
+    exercised off-pod, where ``BerdlCapability.load()`` itself cannot run.
+    """
+
+    def __init__(self):
+        self.load_calls: list[dict] = []
+
+    def load(self, **kwargs):
+        self.load_calls.append(kwargs)
+        build_ingest_config(
+            kwargs["dataset"],
+            kwargs["tables"],
+            dataframes=kwargs.get("dataframes"),
+            paths=kwargs.get("paths"),
+        )
+        return {"ingest_result": "ok"}
+
+
 class _FakeTransport:
     """Stands in for ``InPodTransport``: only ``spark_session`` and
     ``table_exists`` -- the two members the adapter actually calls.
     """
 
     def __init__(self, spark=None, *, exists=True, exists_error=None):
-        self._spark = spark if spark is not None else object()
+        self._spark = spark if spark is not None else _FakeSpark()
         self._exists = exists
         self._exists_error = exists_error
         self.spark_session_calls = 0
@@ -102,15 +153,20 @@ def _describe_extended_rows(*part_pairs: tuple[str, str]) -> list[tuple]:
 
 class TestAdapterSatisfiesBootstrapContract:
     def test_bootstrap_accepts_adapter_without_attributeerror(self):
-        transport = _FakeTransport(exists=False)
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
         underlying = _FakeUnderlyingCapability()
         adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
 
         result = bootstrap(adapter, namespace=_NAMESPACE)
 
         assert result["dry_run"] is False
-        assert len(underlying.load_calls) == 1
         assert all(t["action"] == "create" for t in result["tables"])
+        # bootstrap() has no data source, so its load() is schema-only and
+        # is served by DDL here rather than forwarded to the wrapped
+        # capability -- see TestSchemaOnlyCreatePath.
+        assert underlying.load_calls == []
+        assert len(session.statements) == 15
 
     def test_bare_berdl_capability_still_fails_the_bootstrap_contract(self):
         """A bare ``BerdlCapability`` has no ``table_exists``/
@@ -137,21 +193,53 @@ class TestAdapterSatisfiesBootstrapContract:
 
 class TestSessionIdentity:
     def test_table_exists_and_load_share_the_same_spark_session(self):
-        session = object()
+        session = _FakeSpark()
         transport = _FakeTransport(session, exists=True)
         underlying = _FakeUnderlyingCapability()
         adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
 
         adapter.table_exists("entity", namespace=_NAMESPACE)
-        adapter.load(dataset="clearinghouse", tables=[], namespace=_NAMESPACE)
+        adapter.load(
+            dataset="clearinghouse",
+            tables=[],
+            namespace=_NAMESPACE,
+            dataframes={"entity": object()},
+        )
 
         assert transport.table_exists_calls[0][0] is session
         assert underlying.load_calls[0]["spark"] is session
         # Only resolved once, not once per call.
         assert transport.spark_session_calls == 1
 
+    def test_schema_only_ddl_runs_on_the_probed_session(self):
+        """The schema-only path must share session identity too.
+
+        ``table_exists`` decides create-vs-skip and the ``CREATE TABLE``
+        acts on that decision, so the two disagreeing about which session
+        they are looking at is the same defect on the DDL path as on the
+        forwarded one -- only with a table created in a catalog the probe
+        never read.
+        """
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
+        underlying = _FakeUnderlyingCapability()
+        adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
+
+        adapter.table_exists("gene_entity", namespace=_NAMESPACE)
+        adapter.load(
+            dataset="clearinghouse",
+            tables=[{"name": "gene_entity", "schema_sql": "entity_hash BINARY"}],
+            namespace=_NAMESPACE,
+        )
+
+        assert transport.table_exists_calls[0][0] is session
+        assert len(session.statements) == 1
+        assert transport.spark_session_calls == 1
+        # Nothing was forwarded: the wrapped capability was never called.
+        assert underlying.load_calls == []
+
     def test_explicitly_supplied_spark_is_used_and_never_re_resolved(self):
-        session = object()
+        session = _FakeSpark()
         transport = _FakeTransport(exists=True)
         underlying = _FakeUnderlyingCapability()
         adapter = ClearinghouseBootstrapCapability(
@@ -159,7 +247,12 @@ class TestSessionIdentity:
         )
 
         adapter.table_exists("entity", namespace=_NAMESPACE)
-        adapter.load(dataset="clearinghouse", tables=[], namespace=_NAMESPACE)
+        adapter.load(
+            dataset="clearinghouse",
+            tables=[],
+            namespace=_NAMESPACE,
+            dataframes={"entity": object()},
+        )
 
         assert transport.table_exists_calls[0][0] is session
         assert underlying.load_calls[0]["spark"] is session
@@ -170,8 +263,8 @@ class TestSessionIdentity:
         passing its own ``spark=`` into ``load()`` must not be able to
         desynchronize it from the session ``table_exists`` probes with.
         """
-        session = object()
-        other_session = object()
+        session = _FakeSpark()
+        other_session = _FakeSpark()
         transport = _FakeTransport(session, exists=True)
         underlying = _FakeUnderlyingCapability()
         adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
@@ -182,6 +275,7 @@ class TestSessionIdentity:
             tables=[],
             namespace=_NAMESPACE,
             spark=other_session,
+            dataframes={"entity": object()},
         )
 
         assert underlying.load_calls[0]["spark"] is session
@@ -204,9 +298,26 @@ class TestSqlEmitters:
             "SHOW CREATE TABLE `clearinghouse`.`result`"
         )
 
-    def test_emitters_backtick_quote_namespace_and_name_separately(self):
+    def test_emitters_quote_each_namespace_segment_separately(self):
+        """One backtick pair PER dot-separated namespace segment.
+
+        A production clearinghouse namespace is dotted
+        (``kbaseincubator.clearinghouse``), and quoting it as a single
+        identifier yields a two-part name whose first part contains a dot,
+        which Spark does not resolve -- measured in-pod as defect D2
+        (``agent-io/prds/berdl-smoke-verification/in-pod-results.md``),
+        where ``` `ns`.`t1` ``` raised ``TABLE_OR_VIEW_NOT_FOUND`` while
+        ``` `c`.`n`.`t1` ``` resolved.
+        """
+        sql = _describe_table_extended_sql(
+            "gene_entity", "kbaseincubator.clearinghouse"
+        )
+        assert "`kbaseincubator`.`clearinghouse`.`gene_entity`" in sql
+
+    def test_emitters_never_split_a_table_name_on_a_dot(self):
+        """A dot inside a table NAME is part of the name, not a separator."""
         sql = _describe_table_extended_sql("my.table", "my.ns")
-        assert "`my.ns`.`my.table`" in sql
+        assert "`my`.`ns`.`my.table`" in sql
 
 
 # --------------------------------------------------------------------------
@@ -447,3 +558,203 @@ class TestEngineSparkOnEveryQuery:
 
         result = adapter.table_partition_spec("entity", namespace=_NAMESPACE)
         assert result == ["entity_type"]
+
+
+# --------------------------------------------------------------------------
+# 8: the schema-only create path (the bootstrap() <-> load() seam)
+# --------------------------------------------------------------------------
+
+
+class TestSchemaOnlyCreatePath:
+    """The seam that blocked OP2 on 2026-09-20.
+
+    ``bootstrap()`` takes no ``dataframes`` and no ``paths`` parameters,
+    so every ``load()`` call it makes is schema-only by construction. The
+    adapter used to forward those straight to ``BerdlCapability.load()``,
+    whose ``build_ingest_config()`` raises ``ValueError: bronze mode (no
+    'dataframes' given) requires 'paths' with a 'bronze_base'``. It now
+    creates the tables with DDL instead.
+    """
+
+    def test_bootstrap_through_a_contract_checking_capability_no_longer_raises(self):
+        """The regression test for the OP2 blocker.
+
+        This drives the exact call ``bootstrap()`` makes into a fake whose
+        ``load()`` runs the REAL ``build_ingest_config``. Before the fix
+        this raised ``ValueError`` about bronze mode and ``bronze_base``;
+        after it, ``load()`` is never reached at all.
+        """
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
+        underlying = _ContractCheckingCapability()
+        adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
+
+        result = bootstrap(adapter, namespace="kbaseincubator.clearinghouse")
+
+        assert underlying.load_calls == []
+        assert result["load_result"]["schema_only"] is True
+        assert len(session.statements) == 15
+
+    def test_the_old_forwarding_behaviour_really_did_raise(self):
+        """Guards the regression test above against passing vacuously.
+
+        If ``build_ingest_config`` ever stopped rejecting a no-source
+        call, the test above would pass whether or not the adapter was
+        fixed. This asserts the rejection is still real.
+        """
+        with pytest.raises(ValueError, match="bronze_base"):
+            build_ingest_config(
+                "clearinghouse",
+                [{"name": "gene_entity", "mode": "append"}],
+            )
+
+    def test_every_clearinghouse_table_gets_exactly_one_statement(self):
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
+        adapter = ClearinghouseBootstrapCapability(
+            _FakeUnderlyingCapability(), transport=transport
+        )
+
+        result = adapter.load(
+            dataset="clearinghouse",
+            tables=table_configs(),
+            namespace="kbaseincubator.clearinghouse",
+        )
+
+        assert [report["name"] for report in result["tables"]] == [
+            config["name"] for config in table_configs()
+        ]
+        assert len(session.statements) == 15
+        assert all(
+            statement.startswith("CREATE TABLE IF NOT EXISTS")
+            for statement in session.statements
+        )
+
+    def test_ddl_declares_schema_sql_verbatim_and_uses_iceberg(self):
+        sql = _create_table_sql(
+            {"name": "gene_entity", "schema_sql": "entity_hash BINARY, src STRING"},
+            "kbaseincubator.clearinghouse",
+        )
+        assert sql == (
+            "CREATE TABLE IF NOT EXISTS "
+            "`kbaseincubator`.`clearinghouse`.`gene_entity` "
+            "(entity_hash BINARY, src STRING) USING iceberg"
+        )
+
+    def test_ddl_carries_partitioned_by_when_the_config_partitions(self):
+        sql = _create_table_sql(
+            {
+                "name": "gene_entity",
+                "schema_sql": "entity_hash BINARY",
+                "partition_by": "standardizer_version",
+            },
+            "kbaseincubator.clearinghouse",
+        )
+        assert sql.endswith("USING iceberg PARTITIONED BY (`standardizer_version`)")
+
+    def test_ddl_omits_partitioned_by_when_the_config_does_not_partition(self):
+        sql = _create_table_sql(
+            {"name": "genome_entity", "schema_sql": "entity_hash BINARY"},
+            "kbaseincubator.clearinghouse",
+        )
+        assert "PARTITIONED BY" not in sql
+
+    def test_partition_column_order_is_preserved(self):
+        """Partition column ORDER is part of an Iceberg partition spec."""
+        sql = _create_table_sql(
+            {
+                "name": "t",
+                "schema_sql": "a STRING, b STRING",
+                "partition_by": ["b", "a"],
+            },
+            "ns",
+        )
+        assert sql.endswith("PARTITIONED BY (`b`, `a`)")
+
+    def test_entity_hash_is_declared_binary_on_every_generated_statement(self):
+        """The BINARY declaration is the point of emitting DDL at all.
+
+        Runbook acceptance step 2.3 exists because an INFERRED schema can
+        silently demote ``entity_hash`` to ``STRING``. Declaring it in the
+        DDL is what makes that demotion the catalog's problem rather than
+        an unmeasured gamble.
+        """
+        for config in table_configs():
+            sql = _create_table_sql(config, "kbaseincubator.clearinghouse")
+            assert "entity_hash BINARY" in sql
+
+    def test_a_config_without_schema_sql_raises_before_anything_runs(self):
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
+        adapter = ClearinghouseBootstrapCapability(
+            _FakeUnderlyingCapability(), transport=transport
+        )
+
+        with pytest.raises(ValueError, match="schema_sql"):
+            adapter.load(
+                dataset="clearinghouse",
+                tables=[
+                    {"name": "good", "schema_sql": "a STRING"},
+                    {"name": "bad"},
+                ],
+                namespace="kbaseincubator.clearinghouse",
+            )
+
+        # The whole batch failed: not even the well-formed table ran.
+        assert session.statements == []
+
+    def test_namespace_is_never_created_by_this_path(self):
+        """Nothing in the sanctioned write path creates a namespace
+        (runbook 2.0b), and this path must not start.
+        """
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=False)
+        adapter = ClearinghouseBootstrapCapability(
+            _FakeUnderlyingCapability(), transport=transport
+        )
+
+        adapter.load(
+            dataset="clearinghouse",
+            tables=table_configs(),
+            namespace="kbaseincubator.clearinghouse",
+        )
+
+        assert not any(
+            "CREATE NAMESPACE" in statement.upper()
+            or "CREATE DATABASE" in statement.upper()
+            for statement in session.statements
+        )
+
+    def test_a_data_bearing_load_still_forwards_untouched(self):
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=True)
+        underlying = _FakeUnderlyingCapability()
+        adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
+        frames = {"gene_entity": object()}
+
+        adapter.load(
+            dataset="clearinghouse",
+            tables=[{"name": "gene_entity", "mode": "append"}],
+            namespace="kbaseincubator.clearinghouse",
+            dataframes=frames,
+        )
+
+        assert len(underlying.load_calls) == 1
+        assert underlying.load_calls[0]["dataframes"] is frames
+        assert session.statements == []
+
+    def test_a_bronze_mode_load_still_forwards_untouched(self):
+        session = _FakeSpark()
+        transport = _FakeTransport(session, exists=True)
+        underlying = _FakeUnderlyingCapability()
+        adapter = ClearinghouseBootstrapCapability(underlying, transport=transport)
+
+        adapter.load(
+            dataset="clearinghouse",
+            tables=[{"name": "gene_entity", "bronze_path": "x", "format": "parquet"}],
+            namespace="kbaseincubator.clearinghouse",
+            paths={"bronze_base": "s3a://bucket/bronze"},
+        )
+
+        assert len(underlying.load_calls) == 1
+        assert session.statements == []

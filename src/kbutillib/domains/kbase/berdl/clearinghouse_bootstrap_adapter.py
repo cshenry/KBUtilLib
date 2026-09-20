@@ -71,8 +71,9 @@ name.
 from __future__ import annotations
 
 import re
-from typing import Any, NoReturn, Sequence
+from typing import Any, Mapping, NoReturn, Sequence
 
+from .clearinghouse_schema import _normalize_partition_columns
 from .transports import InPodTransport
 
 #: Header line Spark's ``DESCRIBE TABLE EXTENDED`` prints ahead of the
@@ -148,10 +149,82 @@ def _raise_unparseable(name: str, namespace: str, raw: Any, *, reason: str) -> N
 
 
 def _quote_fqn(name: str, namespace: str) -> str:
-    """Backtick-quote ``namespace.name``, matching ``capability.py``'s
-    own ``` `ns`.`table` ``` quoting for the postflight row-count query.
+    """Backtick-quote a namespace-qualified table name, one quote pair per
+    dot-separated namespace segment.
+
+    A production clearinghouse ``namespace`` is itself dotted
+    (``"kbaseincubator.clearinghouse"``), and quoting a dotted namespace as
+    a SINGLE identifier -- ``` `kbaseincubator.clearinghouse`.`gene_entity` ```
+    -- produces a two-part name whose first part literally contains a dot,
+    which Spark does not resolve. That shape was measured failing in-pod:
+    see ``agent-io/prds/berdl-smoke-verification/in-pod-results.md`` defect
+    D2, where ``` `ns`.`t1` ``` raised ``TABLE_OR_VIEW_NOT_FOUND`` while
+    both ``ns.t1`` and ``` `c`.`n`.`t1` ``` resolved. So each namespace
+    segment gets its own quote pair.
+
+    The table ``name`` is quoted as one identifier and is never split: a
+    dot inside a table name is part of that name, not a level separator.
+    (Clearinghouse table names never contain a dot -- ``table_name()``
+    builds ``<entity_type>_<kind>`` -- but the rule is asserted here rather
+    than assumed.)
     """
-    return f"`{namespace}`.`{name}`"
+    segments = [segment for segment in namespace.split(".") if segment]
+    return ".".join(f"`{segment}`" for segment in [*segments, name])
+
+
+def _create_table_sql(spec: Mapping[str, Any], namespace: str) -> str:
+    """Emit ``CREATE TABLE IF NOT EXISTS`` DDL for one clearinghouse table.
+
+    The column types come verbatim from the table config's ``schema_sql``
+    -- the same fragment ``clearinghouse_schema.table_configs()`` builds --
+    so ``entity_hash BINARY`` is DECLARED to the catalog rather than
+    inferred from data. That is the whole reason this path emits DDL
+    instead of routing an empty write through ``data_lakehouse_ingest``:
+    an inferred schema is exactly the silent ``BINARY`` -> ``STRING``
+    demotion the runbook's acceptance step 2.3 exists to catch.
+
+    ``IF NOT EXISTS`` makes the statement idempotent, which matches
+    ``bootstrap()``'s own contract: ``bootstrap()`` has already probed
+    existence and already refused the whole batch if any live table's
+    partition spec disagreed, so by the time this runs, a table that
+    exists is one whose spec was verified to match and for which creation
+    is correctly a no-op.
+
+    Args:
+        spec: One table config -- ``'name'`` and ``'schema_sql'`` required,
+            ``'partition_by'`` optional (absent means unpartitioned).
+        namespace: The Iceberg namespace, dotted or bare.
+
+    Returns:
+        The single ``CREATE TABLE IF NOT EXISTS ... USING iceberg
+        [PARTITIONED BY (...)]`` statement for this table.
+
+    Raises:
+        ValueError: ``spec`` has no ``'name'``, or no ``'schema_sql'``.
+            Never emits a ``CREATE TABLE`` with a guessed or empty column
+            list -- a table created with the wrong schema is the
+            multi-TB-replay hazard this whole sequence guards against.
+    """
+    name = spec.get("name")
+    if not name:
+        raise ValueError(f"_create_table_sql: table config missing 'name': {spec!r}")
+    schema_sql = spec.get("schema_sql")
+    if not schema_sql:
+        raise ValueError(
+            f"_create_table_sql: table config for {name!r} has no 'schema_sql'. "
+            "Refusing to emit CREATE TABLE with a guessed or empty column "
+            "list -- creating a clearinghouse table under the wrong schema "
+            "is only fixable by dropping it and replaying the corpus."
+        )
+    sql = (
+        f"CREATE TABLE IF NOT EXISTS {_quote_fqn(name, namespace)} "
+        f"({schema_sql}) USING iceberg"
+    )
+    partition_by = _normalize_partition_columns(spec.get("partition_by"))
+    if partition_by:
+        columns = ", ".join(f"`{column}`" for column in partition_by)
+        sql += f" PARTITIONED BY ({columns})"
+    return sql
 
 
 def _describe_table_extended_sql(name: str, namespace: str) -> str:
@@ -460,23 +533,108 @@ class ClearinghouseBootstrapCapability:
         pipeline_name: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Forward to the wrapped capability's ``load()``.
+        """Create the tables (schema-only), or forward a data-bearing load.
 
-        Passes this adapter's single resolved Spark session as ``spark=``
-        -- the same session object :meth:`table_exists` probes with --
-        overriding any ``spark`` the caller supplied, so the probe and the
-        write can never end up looking at two different sessions.
+        **Schema-only mode** -- no ``dataframes`` and no ``paths`` with a
+        ``'bronze_base'``. This is the shape ``bootstrap()`` always calls
+        in, by construction: ``bootstrap()`` takes no ``dataframes`` and no
+        ``paths`` parameters, so it has no data source to offer and can
+        never supply one. Each table is created with a single
+        ``CREATE TABLE IF NOT EXISTS ... USING iceberg [PARTITIONED BY
+        (...)]`` statement built from its own ``schema_sql`` (see
+        :func:`_create_table_sql`), run on this adapter's one resolved
+        Spark session.
+
+        The two halves used to disagree here, and that disagreement was
+        OP2's blocker on 2026-09-20: this method forwarded straight to
+        ``BerdlCapability.load()``, whose ``build_ingest_config()`` raises
+        ``ValueError: bronze mode (no 'dataframes' given) requires 'paths'
+        with a 'bronze_base'``. ``BerdlCapability.load()`` always drives
+        ``data_lakehouse_ingest.ingest()`` and has no schema-only path;
+        ``bootstrap()`` has no data. Neither side is wrong on its own --
+        creating an empty table is a DDL operation, not an ingest, and
+        this adapter is the seam where that translation belongs.
+
+        Three things this deliberately does NOT do, each load-bearing:
+
+        - It does **not** fabricate an empty DataFrame or a stub bronze
+          path to force the call through ``ingest()``. Either would let
+          the column types be INFERRED rather than declared, which is the
+          silent ``BINARY`` -> ``STRING`` demotion of ``entity_hash`` that
+          runbook acceptance step 2.3 exists to catch, and a table created
+          under the wrong type or the wrong partition spec is only
+          fixable by dropping it and replaying the corpus.
+        - It does **not** widen ``capability.py``. ``BerdlCapability``'s
+          own invariant -- every *data* write routes through
+          ``data_lakehouse_ingest.ingest``, never a raw ``writeTo`` -- is
+          untouched: no row is written on this path. Declaring a schema is
+          not writing data.
+        - It does **not** create the namespace. Nothing in the sanctioned
+          write path does (runbook 2.0b); an absent namespace surfaces
+          here as the catalog's own error rather than being papered over.
+
+        **Data-bearing mode** -- ``dataframes``, or ``paths`` carrying a
+        ``'bronze_base'``. Forwarded to the wrapped capability's
+        ``load()`` unchanged, passing this adapter's single resolved Spark
+        session as ``spark=`` -- the same session object
+        :meth:`table_exists` probes with, overriding any ``spark`` the
+        caller supplied, so the probe and the write can never end up
+        looking at two different sessions.
+
+        Returns:
+            Data-bearing mode: the wrapped ``load()``'s return value,
+            unchanged. Schema-only mode: a dict with ``'schema_only':
+            True``, ``'namespace'``, ``'dataset'`` and a ``'tables'`` list
+            carrying each table's ``'name'`` and the exact ``'statement'``
+            that was executed for it -- so the operator can diff the DDL
+            actually run against ``table_configs()`` without re-deriving
+            it, and step 2.3 has the emitted spec in hand.
+
+        Raises:
+            ValueError: Schema-only mode, when a table config has no
+                ``'name'`` or no ``'schema_sql'`` -- raised by
+                :func:`_create_table_sql` before ANY statement is run, so
+                a malformed batch creates no tables at all rather than the
+                prefix of them preceding the bad entry.
         """
-        kwargs.pop("spark", None)
-        return self._capability.load(
-            dataset=dataset,
-            tables=tables,
-            namespace=namespace,
-            tenant=tenant,
-            pipeline_name=pipeline_name,
-            spark=self._get_spark(),
-            **kwargs,
-        )
+        paths = kwargs.get("paths") or {}
+        if kwargs.get("dataframes") or paths.get("bronze_base"):
+            kwargs.pop("spark", None)
+            return self._capability.load(
+                dataset=dataset,
+                tables=tables,
+                namespace=namespace,
+                tenant=tenant,
+                pipeline_name=pipeline_name,
+                spark=self._get_spark(),
+                **kwargs,
+            )
+
+        # Build every statement BEFORE running any of them, so a malformed
+        # table config fails the whole batch rather than leaving the
+        # namespace holding the tables that happened to precede it.
+        statements = [
+            (_create_table_sql(spec, namespace), spec["name"]) for spec in tables
+        ]
+
+        spark = self._get_spark()
+        reports: list[dict[str, Any]] = []
+        for statement, name in statements:
+            spark.sql(statement)
+            reports.append(
+                {
+                    "name": name,
+                    "statement": statement,
+                    "operation": "create_if_not_exists",
+                }
+            )
+
+        return {
+            "schema_only": True,
+            "dataset": dataset,
+            "namespace": namespace,
+            "tables": reports,
+        }
 
     def table_exists(self, name: str, *, namespace: str) -> bool:
         """Read-only existence probe, delegating to the transport's own check.

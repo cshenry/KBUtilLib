@@ -235,7 +235,19 @@ def _append_fixture_rows(
         load_results[result_table] = capability.load(
             dataset=NAMESPACE,
             tables=[{**result_config, "mode": "append"}],
-            namespace=NAMESPACE,
+            # TENANT-QUALIFIED, not bare NAMESPACE. load() probes existence
+            # under this value, while data_lakehouse_ingest derives its own
+            # target as f"{tenant}.{dataset}" and ignores the parameter
+            # (in-pod defect D1, dev 1206). Passing bare "clearinghouse"
+            # made every probe miss -- the tables live at
+            # "kbaseincubator.clearinghouse" -- so select_write_mode() saw
+            # table_exists=False and silently promoted this 'append' to
+            # 'overwrite'. Harmless only while the *_result tables are
+            # empty; those tables are exactly where the real annotation
+            # corpus lands, so it is a data-loss path the moment they are
+            # not. This makes the probe read where the write actually goes;
+            # it does NOT fix D1 itself, which is capability-level.
+            namespace=f"{TENANT}.{NAMESPACE}",
             tenant=TENANT,
             dataframes={result_table: df},
             spark=spark,

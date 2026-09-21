@@ -27,6 +27,7 @@ from kbutillib.domains.kbase.berdl.capability import (
     BerdlCapability,
     BerdlLoadRefusedError,
     BerdlMembershipUnavailableError,
+    _quote_fqn,
     berdl_notebook_utils_importable,
     build_ingest_config,
     select_write_mode,
@@ -531,3 +532,40 @@ class TestMembershipsOffPod:
 
         with pytest.raises(BerdlMembershipUnavailableError):
             cap.memberships()
+
+
+class TestQuoteFqn:
+    """load()'s postflight fully-qualified name is quoted per segment.
+
+    The production namespace is dotted (``kbaseincubator.clearinghouse``).
+    Quoting a dotted namespace as a SINGLE identifier
+    (``` `kbaseincubator.clearinghouse`.`t` ```) yields a two-part name
+    whose first part contains a dot, which Spark does not resolve --
+    measured in-pod raising ``TABLE_OR_VIEW_NOT_FOUND`` while the
+    per-segment shape resolved. Each namespace segment must get its own
+    backtick pair. This mirrors the ``_quote_fqn`` rule in
+    clearinghouse_bootstrap_adapter / _derivation / _schema.
+    """
+
+    def test_two_segment_namespace_quotes_each_segment(self):
+        assert (
+            _quote_fqn("protein_result", "kbaseincubator.clearinghouse")
+            == "`kbaseincubator`.`clearinghouse`.`protein_result`"
+        )
+
+    def test_single_segment_namespace(self):
+        assert (
+            _quote_fqn("protein_result", "clearinghouse")
+            == "`clearinghouse`.`protein_result`"
+        )
+
+    def test_table_name_is_never_split_on_a_dot(self):
+        # A dot inside a table name is part of the name, not a level
+        # separator: the name is quoted as one identifier.
+        assert (
+            _quote_fqn("my.table", "kbaseincubator.clearinghouse")
+            == "`kbaseincubator`.`clearinghouse`.`my.table`"
+        )
+
+    def test_empty_namespace_segments_are_dropped(self):
+        assert _quote_fqn("t", "a..b") == "`a`.`b`.`t`"

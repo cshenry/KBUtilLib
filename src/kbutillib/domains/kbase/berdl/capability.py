@@ -50,6 +50,41 @@ POD_MACHINE = "kbhub"
 _VALID_WRITE_MODES = ("overwrite", "append")
 
 
+def _quote_fqn(name: str, namespace: str) -> str:
+    """Backtick-quote a namespace-qualified table name, one quote pair per
+    dot-separated namespace segment.
+
+    Mirrors the ``_quote_fqn`` rule already written three times in this
+    package -- ``clearinghouse_bootstrap_adapter._quote_fqn(name, namespace)``,
+    ``clearinghouse_derivation._quote_fqn(fqn)`` and
+    ``clearinghouse_schema._quote_fqn(fqn)`` -- kept as a local helper so the
+    general ``capability`` module does not depend on those leaf modules.
+
+    A production clearinghouse ``namespace`` is itself dotted
+    (``"kbaseincubator.clearinghouse"``), and quoting a dotted namespace as a
+    SINGLE identifier -- ``` `kbaseincubator.clearinghouse`.`protein_result` ```
+    -- produces a two-part name whose first part literally contains a dot,
+    which Spark does not resolve (measured in-pod raising
+    ``TABLE_OR_VIEW_NOT_FOUND`` while both the unbackticked three-part name and
+    the per-segment backticked ``` `c`.`n`.`t` ``` resolved). So each namespace
+    segment gets its own quote pair.
+
+    The table ``name`` is quoted as one identifier and is never split: a dot
+    inside a table name is part of that name, not a level separator.
+
+    Args:
+        name: The table name, quoted as a single identifier.
+        namespace: A possibly-dotted namespace, e.g.
+            ``"kbaseincubator.clearinghouse"``. Empty segments are dropped.
+
+    Returns:
+        The fully backtick-quoted identifier, e.g.
+        ```` `kbaseincubator`.`clearinghouse`.`protein_result` ````.
+    """
+    segments = [segment for segment in namespace.split(".") if segment]
+    return ".".join(f"`{segment}`" for segment in [*segments, name])
+
+
 def berdl_notebook_utils_importable() -> bool:
     """Test whether the pod-only ``berdl_notebook_utils`` package is importable.
 
@@ -530,7 +565,7 @@ class BerdlCapability:
 
         # -- Postflight: verify by row count and snapshot history -----
         for report in table_reports:
-            fqn = f"`{resolved_namespace}`.`{report['name']}`"
+            fqn = _quote_fqn(report["name"], resolved_namespace)
             try:
                 count_rows = load_spark.sql(
                     f"SELECT COUNT(*) AS n FROM {fqn}"

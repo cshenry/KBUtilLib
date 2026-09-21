@@ -1,9 +1,9 @@
 {
   "verdict": "pass",
-  "reason": "Fix resolves the write-target namespace once via create_namespace_if_not_exists and uses it for both the existence probe and postflight, closing the silent append->overwrite demotion (dev 1206 D1). All 4 ACs are covered by new tests; 191 berdl tests pass and ruff is clean. Dotted-namespace probing and create_namespace_if_not_exists's return contract are confirmed by the smoke-verification and OP2 runbook evidence. The separate postflight D2 backtick bug is out of scope and not regressed (already null).",
+  "reason": "load() postflight now builds a per-segment quoted fqn via _quote_fqn, byte-identical to clearinghouse_bootstrap_adapter's helper and kept local to avoid inverting the module dependency; grep confirms it was the only whole-namespace-backtick site in capability.py; new tests assert exact strings for two-segment and one-segment namespaces; ingest namespace derivation untouched (D1 out of scope, correctly noted). 195/195 berdl tests pass (one pre-existing collection error in unchanged test_clearinghouse_derivation.py from missing duckdb dep, fails identically on main).",
   "stamp": {
-    "task_id": "task-ab806a18",
-    "branch": "maestro/reviewer/dev-1206-fix-load-in-kbutillib-b-task-ab806a18",
-    "commit": "b715c8c58d8c318731730452657addc2315e7358"
+    "task_id": "task-fbe776d7",
+    "branch": "maestro/reviewer/dispatch-dev-1194-berdlcapabilit-task-fbe776d7",
+    "commit": "907ae056a214bffb2652c7d9b35f148d4ba34527"
   }
 }

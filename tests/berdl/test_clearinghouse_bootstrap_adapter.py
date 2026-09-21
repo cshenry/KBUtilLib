@@ -671,17 +671,15 @@ class TestSchemaOnlyCreatePath:
         )
         assert sql.endswith("PARTITIONED BY (`b`, `a`)")
 
-    def test_entity_hash_is_declared_binary_on_every_generated_statement(self):
-        """The BINARY declaration is the point of emitting DDL at all.
-
-        Runbook acceptance step 2.3 exists because an INFERRED schema can
-        silently demote ``entity_hash`` to ``STRING``. Declaring it in the
-        DDL is what makes that demotion the catalog's problem rather than
-        an unmeasured gamble.
+    def test_entity_hash_is_declared_string_on_every_generated_statement(self):
+        """entity_hash is declared STRING (hex) since dev 1219: ingest has
+        no BINARY in its schema_sql type map, so a BINARY table accepts no
+        writes through the sanctioned path.
         """
         for config in table_configs():
             sql = _create_table_sql(config, "kbaseincubator.clearinghouse")
-            assert "entity_hash BINARY" in sql
+            assert "entity_hash STRING" in sql
+            assert "BINARY" not in sql
 
     def test_a_config_without_schema_sql_raises_before_anything_runs(self):
         session = _FakeSpark()

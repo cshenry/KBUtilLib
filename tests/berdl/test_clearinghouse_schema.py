@@ -29,7 +29,7 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
 
 #: Columns every ``<type>_entity`` table declares (GENERIC across types).
 _ENTITY_COLUMNS = {
-    "entity_hash": "BINARY",
+    "entity_hash": "STRING",
     "entity_type": "STRING",
     "standardizer_version": "STRING",
     "observed_at": "TIMESTAMP",
@@ -38,7 +38,7 @@ _ENTITY_COLUMNS = {
 
 #: Columns every ``<type>_result`` table declares (GENERIC across types).
 _RESULT_COLUMNS = {
-    "entity_hash": "BINARY",
+    "entity_hash": "STRING",
     "entity_type": "STRING",
     "result_type": "STRING",
     "source": "STRING",
@@ -168,7 +168,7 @@ class TestTableConfigs:
             )
             # entity_hash leads every content table.
             assert next(iter(cols)) == "entity_hash"
-            assert cols["entity_hash"] == "BINARY"
+            assert cols["entity_hash"] == "STRING"
             for name, sql_type in _CONTENT_COMMON_TAIL.items():
                 assert cols[name] == sql_type
 
@@ -185,7 +185,7 @@ class TestTableConfigs:
         assert gene["sequence"] == "STRING"
         assert gene["seq_length"] == "INT"
         # Nullable pointer -- not every gene codes for a protein.
-        assert gene["protein_entity_hash"] == "BINARY"
+        assert gene["protein_entity_hash"] == "STRING"
 
         function = _columns_from_schema_sql(
             configs["function_content"]["schema_sql"]
@@ -281,26 +281,25 @@ class TestTableConfigs:
 class TestEntityHashRoundTrip:
     _HEX = "a" * 63 + "b"  # a valid 64-char hex string
 
-    def test_hex_to_bytes_to_hex_is_identity(self):
+    def test_encode_returns_the_canonical_hex_string(self):
         encoded = encode_entity_hash(self._HEX)
-        assert isinstance(encoded, bytes)
-        assert len(encoded) == 32
+        assert isinstance(encoded, str)
+        assert len(encoded) == 64
         assert decode_entity_hash(encoded) == self._HEX
 
-    def test_uppercase_hex_input_yields_same_bytes_as_lowercase(self):
-        assert encode_entity_hash(self._HEX.upper()) == encode_entity_hash(
-            self._HEX.lower()
-        )
+    def test_uppercase_hex_input_yields_the_same_value_as_lowercase(self):
+        """STRING equality is case-sensitive, so this is the load-bearing
+        normalisation: an uppercase digest must bind as the stored form.
+        """
+        assert encode_entity_hash(self._HEX.upper()) == self._HEX.lower()
 
     def test_decode_output_is_always_lowercase(self):
-        encoded = encode_entity_hash(self._HEX.upper())
-        decoded = decode_entity_hash(encoded)
-        assert decoded == decoded.lower()
+        decoded = decode_entity_hash(self._HEX.upper())
         assert decoded == self._HEX.lower()
 
-    def test_bytes_input_passes_through_unchanged(self):
+    def test_raw_bytes_input_encodes_to_hex(self):
         raw = bytes(range(32))
-        assert encode_entity_hash(raw) == raw
+        assert encode_entity_hash(raw) == raw.hex()
 
     @pytest.mark.parametrize(
         "bad_value",
@@ -322,36 +321,50 @@ class TestEntityHashRoundTrip:
 
     def test_decode_rejects_wrong_length_or_type(self):
         with pytest.raises(ValueError):
-            decode_entity_hash(b"\x00" * 31)
+            decode_entity_hash("a" * 63)
         with pytest.raises(ValueError):
-            decode_entity_hash("not bytes")
+            decode_entity_hash("g" * 64)
+
+    def test_decode_refuses_bytes_from_the_retired_binary_schema(self):
+        """A bytes value read from this column means a row was written
+        under the retired BINARY schema -- fail rather than convert it.
+        """
+        with pytest.raises(ValueError):
+            decode_entity_hash(bytes(range(32)))
+
+
+class TestNoBinaryColumnSurvives:
+    """Guards the 2026-09-21 reversal (dev 1219).
+
+    data_lakehouse_ingest has no BINARY in its schema_sql type map, so a
+    BINARY column makes every sanctioned write into that table fail. A
+    Spark CREATE succeeding proves nothing here -- OP2 created BINARY
+    tables that then accepted zero rows.
+    """
+
+    def test_no_table_config_declares_a_binary_column(self):
+        for config in table_configs():
+            assert "BINARY" not in config["schema_sql"].upper(), config["name"]
 
 
 class TestHexBridgeToStandardizers:
-    """Regression test: a standardizer's hex digest must never be mistaken
-    for the binary column value -- see the module docstring's "gap is not
-    cosmetic" paragraph. This is deliberately not redundant with the
-    round-trip tests above: those confirm encode/decode agree with each
-    other, this confirms the *raw hex string* is not itself usable where
-    the binary encoding is required.
+    """The stored form IS the standardizer's own output.
+
+    The column holds the lowercase hex digest the standardizers emit, so a
+    standardizer hash passes through the encode seam unchanged. Were that
+    ever to stop being true -- a standardizer emitting uppercase, or the
+    column changing form again -- every dedup probe would silently match
+    nothing, which is the failure these tests exist to catch.
     """
 
-    def test_hex_digest_is_not_equal_to_its_binary_encoding(self):
+    def test_standardizer_digest_is_already_the_stored_form(self):
         hex_digest = standardizers.entity_hash("function", "example function")
         assert re.fullmatch(r"[0-9a-f]{64}", hex_digest)
-        binary_value = encode_entity_hash(hex_digest)
-        # The whole point: a hex STRING and its binary encoding must never
-        # compare equal. If a caller bound the hex string directly against
-        # a BINARY column, this would be the (false) equality that makes
-        # every dedup probe silently return 'unknown'.
-        assert hex_digest != binary_value
-        assert isinstance(hex_digest, str)
-        assert isinstance(binary_value, bytes)
+        assert encode_entity_hash(hex_digest) == hex_digest
 
-    def test_binary_encoding_round_trips_back_to_the_standardizer_hex(self):
+    def test_standardizer_digest_round_trips(self):
         hex_digest = standardizers.entity_hash("protein", "MKV*")
-        binary_value = encode_entity_hash(hex_digest)
-        assert decode_entity_hash(binary_value) == hex_digest
+        assert decode_entity_hash(encode_entity_hash(hex_digest)) == hex_digest
 
 
 class TestParityFixtureMatchesResultSchema:

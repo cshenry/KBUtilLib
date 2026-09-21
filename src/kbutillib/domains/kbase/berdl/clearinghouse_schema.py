@@ -31,57 +31,54 @@ The public :func:`table_name` resolver is the ONLY place a clearinghouse
 table name is constructed -- ``f"{entity_type}_{kind}"`` -- so the config
 generator and every caller share one definition and cannot drift.
 
-Why the hash needs an encoding boundary at all: the platform's only hashing
-surface, :mod:`kbutillib.domains.identity.standardizers`, returns
-``entity_hash()``/``content_hash()`` as a 64-character **hex string**
-(``hashlib.sha256(...).hexdigest()``). This module stores that same hash as
-raw **32-byte binary**, not hex text -- hex would double the width of the
-largest column in a corpus heading toward roughly one billion rows, for no
-benefit. That size decision creates a representation gap: a hex digest
-handed to a probe query and a raw-bytes column in the table are different
-values by every equality comparison, even though they encode the same
-identity. :func:`encode_entity_hash` and :func:`decode_entity_hash` are the
-one seam that crosses that gap, so no caller improvises its own hex/bytes
-conversion at a query site.
+Why the hash is stored as hex STRING, and why it still has a boundary:
+the platform's only hashing surface,
+:mod:`kbutillib.domains.identity.standardizers`, returns
+``entity_hash()``/``content_hash()`` as a 64-character lowercase **hex
+string** (``hashlib.sha256(...).hexdigest()``), and ``entity_hash`` (and
+``gene_content.protein_entity_hash``) store exactly that string.
 
-The gap is not cosmetic. A caller who plugs a standardizer's hex digest
-straight into a dedup probe against the binary ``entity_hash`` column --
-whether as a bound parameter or, worse, interpolated as a hex literal in
-SQL text -- gets zero matches against every already-ingested row,
-concludes the clearinghouse is empty for that corpus, and fails open into
-recomputing work that was already done. **Always** encode with
-:func:`encode_entity_hash` before binding, and **always** bind the
-resulting 32 raw bytes as a query parameter -- never format a hex string
-into SQL text, both because parameter binding is what makes the
-byte-for-byte comparison correct in the first place, and because
-string-formatted SQL is an injection surface regardless.
+These columns were first declared ``BINARY`` -- raw 32 bytes, half the
+width of hex in a corpus heading toward roughly a billion rows. That was
+reversed on 2026-09-21, by Chris's decision, after the on-pod OP3 run
+measured that no row could be written: ``data_lakehouse_ingest``, which
+every sanctioned write goes through, re-parses each table's ``schema_sql``
+and its type map has no ``BINARY`` ("Unsupported data type 'BINARY' in
+schema_sql", ``data_lakehouse_ingest/orchestrator/schema_utils.py``, dev
+1219). Spark DDL accepted ``BINARY`` and OP2 verified the tables honoured
+it, so the lake could be created but never written. **Do not reintroduce
+``BINARY`` here** unless ``data_lakehouse_ingest`` has gained it and a
+write -- not a create -- has been measured on-pod; a create proves only
+that Spark accepts the type. The cost accepted is doubled hash width.
+
+Hex storage removes the bytes-vs-hex gap but opens a narrower one: STRING
+equality is case-sensitive, so an uppercase hex digest and the stored
+lowercase form are different values by every comparison, even though they
+encode the same identity. A dedup probe bound with an uppercase digest
+gets zero matches against every already-ingested row, concludes the
+clearinghouse is empty for that corpus, and fails open into recomputing
+work already done. :func:`encode_entity_hash` and
+:func:`decode_entity_hash` are the one seam that normalises to the stored
+form, so no caller improvises its own conversion at a query site.
+**Always** pass a hash through :func:`encode_entity_hash` before binding
+it, and **always** bind it as a query parameter -- never format it into
+SQL text, both because the seam is what guarantees the canonical form and
+because string-formatted SQL is an injection surface regardless.
 
 Column types are declared exactly once, in ``_ENTITY_COLUMNS``,
 ``_CONTENT_TYPE_HEAD`` + ``_CONTENT_COMMON_TAIL`` (a per-type mapping
 composing each type's head onto a shared tail declared once), and
-``_RESULT_COLUMNS`` below, as ordered ``(name, sql_type)`` pairs.
-``entity_hash`` is declared as bare ``BINARY``,
-not a parameterized ``BINARY 32`` spelling -- Spark SQL's ``BinaryType`` has
-no length parameter, so a length suffix would not be valid DDL, and this
-module's config values must in any case never contain a parenthesis (that
-is also the guard against a partition-transform expression such as
+``_RESULT_COLUMNS`` below, as ordered ``(name, sql_type)`` pairs. The
+64-character width and hex alphabet are enforced in Python, at the
+boundary, by :func:`encode_entity_hash` and :func:`decode_entity_hash` --
+not by the DDL. This module's config values must never contain a
+parenthesis (the guard against a partition-transform expression such as
 ``bucket 256 entity_hash`` leaking into a config; see "Partitioning"
-below). The 32-byte width is enforced in Python, at the boundary, by
-:func:`encode_entity_hash` and :func:`decode_entity_hash` -- not by the
-DDL. Each table config carries the column declarations as a
-``schema_sql`` DDL fragment (e.g. ``"entity_hash BINARY, entity_type
+below). Each table config carries the column declarations as a
+``schema_sql`` DDL fragment (e.g. ``"entity_hash STRING, entity_type
 STRING, ..."``) rather than a ``schema`` object built from a PySpark
 ``StructType`` -- ``pyspark`` is not, and must not become, a dependency of
 this off-pod module, and a DDL string is legible without one.
-:func:`~kbutillib.domains.kbase.berdl.capability.build_ingest_config` and
-``data_lakehouse_ingest.ingest`` pass either ``schema`` or ``schema_sql``
-through unchanged and validate neither, so whether Spark/Iceberg accepts
-bare ``BINARY`` through this specific write path, and whether the
-resulting column is genuinely binary rather than STRING, is **not
-verifiable off-pod** and is not asserted here as fact. Confirming that is
-an in-pod operator step (OP2): create the tables from a ``kbhub``
-notebook using this module's ``table_configs()``, then inspect the created
-columns' physical types before any production data is loaded.
 
 Partitioning: bucketing on a hash gives zero read pruning, since a good
 hash scatters uniformly across buckets by design -- ``entity_hash`` is
@@ -138,7 +135,7 @@ _VIEW_KINDS = ("all_entity", "all_content", "all_result")
 #: reference to these columns (``table_configs()``, tests) derives from this
 #: tuple rather than repeating the list.
 _ENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("entity_hash", "BINARY"),
+    ("entity_hash", "STRING"),
     ("entity_type", "STRING"),
     ("standardizer_version", "STRING"),
     ("observed_at", "TIMESTAMP"),
@@ -148,7 +145,7 @@ _ENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
 #: Column declarations for every ``<type>_result`` table, in DDL order.
 #: GENERIC: identical for all five entity types.
 _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("entity_hash", "BINARY"),
+    ("entity_hash", "STRING"),
     ("entity_type", "STRING"),
     ("result_type", "STRING"),
     ("source", "STRING"),
@@ -202,7 +199,7 @@ _CONTENT_TYPE_HEAD: dict[str, tuple[tuple[str, str], ...]] = {
     "gene": (
         ("sequence", "STRING"),
         ("seq_length", "INT"),
-        ("protein_entity_hash", "BINARY"),
+        ("protein_entity_hash", "STRING"),
     ),
     "function": (
         ("definition", "STRING"),
@@ -224,7 +221,7 @@ def _content_columns(entity_type: str) -> tuple[tuple[str, str], ...]:
     common columns live in exactly one place across all five content tables.
     """
     return (
-        (("entity_hash", "BINARY"),)
+        (("entity_hash", "STRING"),)
         + _CONTENT_TYPE_HEAD[entity_type]
         + _CONTENT_COMMON_TAIL
     )
@@ -425,22 +422,23 @@ def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
     return f"CREATE OR REPLACE VIEW {view_fqn} AS\n    {body}"
 
 
-def encode_entity_hash(value: str | bytes) -> bytes:
-    """Encode an ``entity_hash`` to the raw 32-byte form stored in Iceberg.
+def encode_entity_hash(value: str | bytes) -> str:
+    """Normalise an ``entity_hash`` to the lowercase hex form stored in Iceberg.
 
-    Accepts either a 64-character hex string (as returned by
+    Accepts either a 64-character hex string in any case (as returned by
     :func:`kbutillib.domains.identity.standardizers.entity_hash` /
-    ``content_hash``) or 32 raw bytes already in that form, and returns 32
-    raw bytes in both cases -- the exact value to bind as a query parameter
-    against the binary ``entity_hash`` column, never interpolated into
-    SQL text as a hex literal.
+    ``content_hash``) or 32 raw bytes, and returns the 64-character
+    **lowercase** hex string in both cases -- the exact value to bind as a
+    query parameter against the STRING ``entity_hash`` column, never
+    interpolated into SQL text. Lowercasing is the point: STRING equality
+    is case-sensitive, so an uppercase digest matches no stored row.
 
     Args:
         value: A 64-character hex string (case-insensitive) or 32 raw
             bytes.
 
     Returns:
-        The 32-byte raw encoding.
+        The 64-character lowercase hex form.
 
     Raises:
         ValueError: If ``value`` is a ``str`` of the wrong length, contains
@@ -453,53 +451,57 @@ def encode_entity_hash(value: str | bytes) -> bytes:
                 f"encode_entity_hash: expected {_HASH_BYTES} raw bytes, "
                 f"got {len(value)}."
             )
-        return value
+        return value.hex()
     if isinstance(value, str):
-        if len(value) != _HASH_HEX_CHARS:
-            raise ValueError(
-                f"encode_entity_hash: expected a {_HASH_HEX_CHARS}-character "
-                f"hex string, got length {len(value)}."
-            )
-        try:
-            return bytes.fromhex(value)
-        except ValueError as exc:
-            raise ValueError(
-                f"encode_entity_hash: {value!r} is not a valid hex string."
-            ) from exc
+        return _canonical_hex(value, caller="encode_entity_hash")
     raise ValueError(
         "encode_entity_hash: expected a str (hex) or bytes (raw), got "
         f"{type(value).__name__}."
     )
 
 
-def decode_entity_hash(value: bytes) -> str:
-    """Decode a raw 32-byte ``entity_hash`` to its lowercase hex form.
+def decode_entity_hash(value: str) -> str:
+    """Validate a stored ``entity_hash`` and return its canonical hex form.
 
-    The inverse of :func:`encode_entity_hash`'s bytes-producing direction:
-    round-tripping ``decode_entity_hash(encode_entity_hash(hex_str))``
+    The column now holds hex, so decoding is validation plus normalisation:
+    it confirms a value read back from the ``entity_hash`` column is a
+    well-formed 64-character hex digest and returns it lowercased.
+    Round-tripping ``decode_entity_hash(encode_entity_hash(hex_str))``
     reproduces ``hex_str.lower()`` exactly.
 
     Args:
-        value: 32 raw bytes, as stored in the ``entity_hash`` column or
-            returned by :func:`encode_entity_hash`.
+        value: A 64-character hex string, as stored in the ``entity_hash``
+            column or returned by :func:`encode_entity_hash`.
 
     Returns:
         The lowercase 64-character hex form.
 
     Raises:
-        ValueError: If ``value`` is not ``bytes`` or is not exactly 32
-            bytes long.
+        ValueError: If ``value`` is not a ``str``, is not 64 characters,
+            or contains non-hex characters. Raw ``bytes`` are refused: a
+            ``bytes`` value read from this column means a row was written
+            under the retired ``BINARY`` schema, which is worth failing on
+            rather than silently converting.
     """
-    if not isinstance(value, bytes):
+    if not isinstance(value, str):
         raise ValueError(
-            f"decode_entity_hash: expected bytes, got {type(value).__name__}."
+            f"decode_entity_hash: expected str, got {type(value).__name__}."
         )
-    if len(value) != _HASH_BYTES:
+    return _canonical_hex(value, caller="decode_entity_hash")
+
+
+def _canonical_hex(value: str, *, caller: str) -> str:
+    """Validate a 64-character hex digest and return it lowercased."""
+    if len(value) != _HASH_HEX_CHARS:
         raise ValueError(
-            f"decode_entity_hash: expected {_HASH_BYTES} raw bytes, got "
-            f"{len(value)}."
+            f"{caller}: expected a {_HASH_HEX_CHARS}-character hex string, "
+            f"got length {len(value)}."
         )
-    return value.hex()
+    try:
+        bytes.fromhex(value)
+    except ValueError as exc:
+        raise ValueError(f"{caller}: {value!r} is not a valid hex string.") from exc
+    return value.lower()
 
 
 # --------------------------------------------------------------------------

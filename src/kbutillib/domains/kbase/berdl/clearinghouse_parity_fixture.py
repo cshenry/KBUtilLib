@@ -48,6 +48,7 @@ to (see :func:`rows_by_entity_type` and :attr:`ParityCase.entity_type`).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,15 +61,16 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import ENTITY_TYPES
 PARITY_SOURCE_PREFIX = "parity-check/"
 
 
-def fixture_entity_hash(tag: str) -> bytes:
-    """A deterministic 32-byte stand-in ``entity_hash`` for a fixture tag.
+def fixture_entity_hash(tag: str) -> str:
+    """A deterministic stand-in ``entity_hash`` for a fixture tag.
 
-    Not a real sha256 digest -- just a fixed-width byte string derived
-    from ``tag``, matching the shape :func:`current_state_sql`'s slot key
-    expects. Deterministic so re-running the parity check (or re-running
-    the test suite) always targets the same slot.
+    The lowercase 64-character sha256 hex digest of ``tag`` -- the same
+    shape the standardizers emit and the STRING ``entity_hash`` column
+    stores, so fixture rows are indistinguishable in form from real ones.
+    Deterministic so re-running the parity check (or re-running the test
+    suite) always targets the same slot.
     """
-    return tag.encode("ascii").ljust(32, b"\x00")[:32]
+    return hashlib.sha256(tag.encode("ascii")).hexdigest()
 
 
 def fixture_source(property_key: str, tool: str) -> str:
@@ -98,14 +100,14 @@ class ParityCase:
             scope its read to exactly this case's rows.
         rows: The fixture rows to insert/append, each shaped as the
             keyword arguments for a ``result``-table row: ``entity_hash``
-            (bytes), ``entity_type``, ``result_type``, ``source``,
+            (64-char lowercase hex str), ``entity_type``, ``result_type``, ``source``,
             ``result_type_version``, ``payload`` (a plain ``dict``, not
             yet JSON-encoded), ``observed_at``, ``ingest_batch_id``.
     """
 
     property_key: str
     description: str
-    entity_hash: bytes
+    entity_hash: str
     result_type: str
     sources: tuple[str, ...]
     rows: tuple[dict[str, Any], ...]

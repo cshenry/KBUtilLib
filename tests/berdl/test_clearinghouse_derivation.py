@@ -37,13 +37,14 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY,
     SOURCE_ISOLATION,
     TERM_REMOVAL,
+    fixture_entity_hash,
 )
 
 _TABLE_FQN = "result"
 
 _CREATE_RESULT_TABLE = """
 CREATE TABLE result (
-    entity_hash BLOB,
+    entity_hash VARCHAR,
     entity_type VARCHAR,
     result_type VARCHAR,
     source VARCHAR,
@@ -77,7 +78,7 @@ class ResultFixture:
     def insert(
         self,
         *,
-        entity_hash: bytes,
+        entity_hash: str,
         result_type: str,
         source: str,
         result_type_version: str,
@@ -91,7 +92,7 @@ class ResultFixture:
         # logic unchanged while the table's declared column set grows.
         entity_type: str = "protein",
     ) -> None:
-        # Bind the BLOB entity_hash as a parameter -- never a literal.
+        # Bind the hex entity_hash as a parameter -- never a literal.
         self.con.execute(
             _INSERT_ROW,
             [
@@ -269,7 +270,7 @@ class TestEntityTypeInSlotKey:
     """
 
     def test_protein_and_gene_sharing_hash_both_survive(self, fixture):
-        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        entity_hash = fixture_entity_hash("shared-hash")
         shared_kwargs = dict(
             entity_hash=entity_hash,
             result_type="annotation",
@@ -298,7 +299,7 @@ class TestEntityTypeInSlotKey:
         assert json.loads(rows["gene"]["payload"]) == {"kind": "gene"}
 
     def test_entity_types_filter_prunes_to_requested_types_only(self, fixture):
-        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        entity_hash = fixture_entity_hash("shared-hash")
         shared_kwargs = dict(
             entity_hash=entity_hash,
             result_type="annotation",
@@ -325,7 +326,7 @@ class TestEntityTypeInSlotKey:
         assert {row["entity_type"] for row in rows} == {"protein"}
 
     def test_entity_types_and_sources_filters_combine_with_and(self, fixture):
-        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        entity_hash = fixture_entity_hash("shared-hash")
         base = dict(
             entity_hash=entity_hash,
             result_type="annotation",
@@ -367,7 +368,7 @@ class TestEntityTypeInSlotKey:
         assert rows[0]["source"] == "parity-check/entity_type_and_source/toolA"
 
     def test_empty_entity_types_filters_out_everything(self, fixture):
-        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        entity_hash = fixture_entity_hash("shared-hash")
         fixture.insert(
             entity_hash=entity_hash,
             entity_type="protein",
@@ -384,7 +385,7 @@ class TestEntityTypeInSlotKey:
     def test_empty_sources_with_entity_types_still_filters_out_everything(
         self, fixture
     ):
-        entity_hash = b"shared-hash-bytes".ljust(32, b"\x00")
+        entity_hash = fixture_entity_hash("shared-hash")
         fixture.insert(
             entity_hash=entity_hash,
             entity_type="protein",

@@ -719,7 +719,12 @@ the corrected `partition_by` (a fresh `bootstrap()` call against the empty
 namespace), and re-ingest whatever was already written into it. Do not try
 to patch the partitioning of the live table in place.
 
-### 2.3 -- acceptance step: confirm `entity_hash` is genuinely BINARY
+### 2.3 -- acceptance step: confirm `entity_hash` has its declared type
+
+> **Superseded type, 2026-09-21.** `entity_hash` is now declared
+> `STRING` (lowercase hex), not `BINARY` -- see OP2R. Where this section
+> says `BINARY` below, check for `string`. The reasoning about checking
+> one table per kind still holds.
 
 **Do this immediately after table creation succeeds, before any real
 corpus is loaded.** `clearinghouse_schema.py`'s own module docstring flags
@@ -849,6 +854,91 @@ from `union_view_sql()`. That is the opposite of the physical tables, whose
 partitioning is baked in at creation and correctable only by replay (2.2).
 
 ---
+
+## OP2R -- rebuild the fifteen tables with a STRING `entity_hash` (2026-09-21)
+
+**Run this once, before OP3, if the live tables were created under the
+old `BINARY` schema** -- which the tables created on 2026-09-20 were.
+
+**Why.** OP2 created the tables through Spark DDL, which accepts `BINARY`,
+and 2.3 verified the catalog honoured it. But every *write* goes through
+`BerdlCapability.load()` -> `data_lakehouse_ingest.ingest`, which
+re-parses `schema_sql` and has no `BINARY` in its type map: OP3 on
+2026-09-21 failed with `Unsupported data type 'BINARY' in schema_sql`,
+and **no row can be written to a `BINARY` table through the sanctioned
+path** (dev 1219). Chris decided on 2026-09-21 to store the hash as the
+64-character lowercase hex string the standardizers already emit.
+`entity_hash` on all fifteen tables and `gene_content.protein_entity_hash`
+are now `STRING`. The cost accepted is doubled hash width.
+
+**This drops fifteen production tables. It is safe ONLY because they are
+empty,** and the procedure below refuses to drop anything unless it has
+positively counted zero rows in every one of them. Do not work around that
+check. If any table holds rows, STOP: that is a replay decision, not a
+runbook step.
+
+**Precondition: the STRING schema is the code you are running.**
+
+```python
+import kbutillib
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import table_configs
+print(kbutillib.__file__)
+assert all("BINARY" not in c["schema_sql"].upper() for c in table_configs()), \
+    "This checkout still declares BINARY -- Dropbox has not caught up. Stop."
+print("schema is STRING -- proceed")
+```
+
+**R.1 -- count every table. Refuse unless all fifteen are empty.**
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import table_configs
+
+NS = ["kbaseincubator", "clearinghouse"]
+def fqn(name): return ".".join(f"`{p}`" for p in [*NS, name])
+
+counts = {}
+for c in table_configs():
+    counts[c["name"]] = spark.sql(f"SELECT COUNT(*) AS n FROM {fqn(c['name'])}").collect()[0]["n"]
+print(counts)
+assert len(counts) == 15, f"expected 15 tables, counted {len(counts)}"
+assert all(n == 0 for n in counts.values()), "NOT EMPTY -- STOP. Do not drop."
+print("all fifteen empty -- safe to drop")
+```
+
+A `TABLE_OR_VIEW_NOT_FOUND` here for any table is also a STOP: it means
+the namespace is not in the state this runbook assumes, and dropping the
+rest would leave you guessing which tables were ever there.
+
+**R.2 -- drop the three views, then the fifteen tables.** Views first,
+since they reference the tables.
+
+```python
+for view in ("all_entity", "all_content", "all_result"):
+    spark.sql(f"DROP VIEW IF EXISTS {fqn(view)}")
+for c in table_configs():
+    spark.sql(f"DROP TABLE IF EXISTS {fqn(c['name'])}")
+print(spark.sql("SHOW TABLES IN `kbaseincubator`.`clearinghouse`").collect())
+```
+
+The final listing should be empty. **Do not drop the namespace** -- it
+stays, empty, and is the correct state for R.3. The names come from
+`table_configs()` rather than being typed by hand, so this cannot drop a
+table the module does not own.
+
+**R.3 -- recreate.** Run 2.1 (dry run: all fifteen `'action': 'create'`)
+and then 2.2 exactly as written above. Capture
+`report['load_result']['tables']` -- each `'statement'` should now read
+`entity_hash STRING`, and none should contain `BINARY`.
+
+**R.4 -- acceptance.** Run 2.3, now checking that `entity_hash` (and
+`gene_content.protein_entity_hash`) report `string` on at least one table
+of each kind, and that the partition specs are unchanged. Then 2.4 to
+recreate the three views. Then re-run the 2.1 dry run once more: all
+fifteen should now report `exists=True`, `'action': 'append'`, and
+`actual_partition_by` equal to `expected_partition_by` -- the proof that
+the partition-spec reader still works against the recreated tables.
+
+Then OP3.
 
 ## OP3 -- run the parity check
 

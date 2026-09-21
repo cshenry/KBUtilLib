@@ -199,11 +199,11 @@ def _create_table_sql(spec: Mapping[str, Any], namespace: str) -> str:
 
     The column types come verbatim from the table config's ``schema_sql``
     -- the same fragment ``clearinghouse_schema.table_configs()`` builds --
-    so ``entity_hash BINARY`` is DECLARED to the catalog rather than
-    inferred from data. That is the whole reason this path emits DDL
-    instead of routing an empty write through ``data_lakehouse_ingest``:
-    an inferred schema is exactly the silent ``BINARY`` -> ``STRING``
-    demotion the runbook's acceptance step 2.3 exists to catch.
+    so every column type and the partition spec are DECLARED to the
+    catalog rather than inferred from data. That is why this path emits DDL
+    instead of routing an empty write through ``data_lakehouse_ingest``: an
+    inferred schema or partition spec is only checkable after the fact, and
+    a table created wrong is only fixable by dropping it and replaying.
 
     ``IF NOT EXISTS`` makes the statement idempotent, which matches
     ``bootstrap()``'s own contract: ``bootstrap()`` has already probed
@@ -711,11 +711,10 @@ class ClearinghouseBootstrapCapability:
 
         - It does **not** fabricate an empty DataFrame or a stub bronze
           path to force the call through ``ingest()``. Either would let
-          the column types be INFERRED rather than declared, which is the
-          silent ``BINARY`` -> ``STRING`` demotion of ``entity_hash`` that
-          runbook acceptance step 2.3 exists to catch, and a table created
-          under the wrong type or the wrong partition spec is only
-          fixable by dropping it and replaying the corpus.
+          the column types and partition spec be INFERRED rather than
+          declared, and a table created under the wrong type or the
+          wrong partition spec is only fixable by dropping it and
+          replaying the corpus.
         - It does **not** widen ``capability.py``. ``BerdlCapability``'s
           own invariant -- every *data* write routes through
           ``data_lakehouse_ingest.ingest``, never a raw ``writeTo`` -- is

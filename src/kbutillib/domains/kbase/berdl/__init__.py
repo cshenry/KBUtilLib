@@ -23,9 +23,9 @@ described in ``agent-io/prds/berdl-lakehouse-skills/fullprompt.md``:
 - :mod:`kbutillib.domains.kbase.berdl.clearinghouse_schema` — the
   ``kbaseincubator.clearinghouse`` content-hash tables (``entity``,
   ``canonical_content``, ``result``) as pure config dicts for
-  ``BerdlCapability.load``, plus the hex/binary ``entity_hash`` encoding
-  helpers that bridge :mod:`kbutillib.domains.identity.standardizers`
-  (hex) to this schema's binary storage.
+  ``BerdlCapability.load``, plus the ``entity_hash`` normalisation
+  helpers that canonicalise :mod:`kbutillib.domains.identity.standardizers`
+  hex digests to this schema's lowercase-hex STRING storage.
 - :mod:`kbutillib.domains.kbase.berdl.clearinghouse_derivation` — the
   Spark SQL that derives "current state" from the append-only ``result``
   table: a window function over the ``(entity_hash, result_type,

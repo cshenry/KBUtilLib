@@ -354,9 +354,12 @@ class BerdlCapability:
 
         Preflight (before any staging or writing): resolve locus and
         refuse off-pod; confirm read-write membership on ``tenant`` (or
-        ``dataset`` when ``tenant`` is not given); resolve, for each
-        table, whether it exists and whether the operation will create,
-        append, or replace it (via :func:`select_write_mode`).
+        ``dataset`` when ``tenant`` is not given); resolve the single
+        write-target namespace ``ingest`` will use (from ``tenant`` /
+        ``dataset``, not the ``namespace`` parameter); resolve, for each
+        table, whether it exists in that namespace and whether the
+        operation will create, append, or replace it (via
+        :func:`select_write_mode`).
 
         Postflight: verify each table by row count and by reading its
         Iceberg snapshot history, and report the new snapshot.
@@ -381,8 +384,12 @@ class BerdlCapability:
             paths: Bronze-mode ``'paths'`` section (``'bronze_base'``
                 required). Required when ``dataframes`` is not given.
             defaults: Passed through as the config's ``'defaults'``.
-            namespace: The Iceberg namespace tables live in, used for the
-                existence check.
+            namespace: Deprecated and ignored. The existence check and
+                postflight now use the namespace ``data_lakehouse_ingest``
+                actually writes to, resolved once from ``tenant``/``dataset``
+                via ``create_namespace_if_not_exists`` (dev 1206, defect D1).
+                Kept only for backward-compatible call signatures; passing it
+                no longer affects where existence is probed.
             spark: An existing Spark session. When not given, one is
                 obtained from the in-pod transport.
             minio_client: Forwarded to ``ingest`` (bronze mode).
@@ -394,8 +401,10 @@ class BerdlCapability:
             obtainable) the post-load row count and new snapshot id.
 
         Raises:
-            BerdlLoadRefusedError: Off-pod. No data is staged, no artifact
-                is generated, and no work is dispatched.
+            BerdlLoadRefusedError: Off-pod, or when the write-target
+                namespace cannot be resolved before the existence check. No
+                data is staged, no artifact is generated, and no work is
+                dispatched.
             PermissionError: When the caller does not hold read-write
                 membership on the target tenant.
             ValueError: Invalid table/config shape -- see
@@ -432,6 +441,42 @@ class BerdlCapability:
 
         load_spark = spark if spark is not None else transport.spark_session()
 
+        # -- Preflight: resolve the write-target namespace ONCE -------
+        # ``data_lakehouse_ingest.ingest`` derives its own write target as
+        # f"{tenant}.{dataset}" (personal catalog: f"my.{dataset}") and
+        # IGNORES the ``namespace`` parameter entirely. If the existence
+        # probe below used the ``namespace`` argument directly (default
+        # "default"), it would query a namespace the write never touches:
+        # ``table_exists`` returns False, ``select_write_mode('append', ...)``
+        # returns 'overwrite', and a requested append silently becomes a
+        # destructive overwrite (measured data loss -- dev 1206, defect D1).
+        #
+        # ``create_namespace_if_not_exists`` computes and RETURNS the same
+        # resolved namespace ingest writes to (it prepends ``tenant_name``
+        # as the catalog internally, so it takes the BARE ``dataset`` as
+        # ``namespace`` and the tenant as ``tenant_name``). Resolving it
+        # here once and using it for both the existence probe and the
+        # postflight FQN makes the probe read exactly where the write goes.
+        resolved_namespace = transport.create_namespace_if_not_exists(
+            load_spark, namespace=dataset, tenant_name=tenant
+        )
+        if not resolved_namespace:
+            # The write-target namespace could not be determined. Refuse
+            # rather than fall back to ``namespace`` (and thus to the
+            # destructive-overwrite path): a probe against the wrong
+            # namespace is exactly the silent append -> overwrite demotion
+            # this resolution exists to prevent (dev 1206, AC 3).
+            raise BerdlLoadRefusedError(
+                "BerdlCapability.load() refused: could not resolve the "
+                "write-target namespace for dataset "
+                f"{dataset!r} (tenant {tenant!r}); "
+                "create_namespace_if_not_exists returned "
+                f"{resolved_namespace!r}. Refusing rather than probing table "
+                "existence against a namespace the write will not target, "
+                "which would silently promote an 'append' to a destructive "
+                "'overwrite'. No data has been staged and no write attempted."
+            )
+
         # -- Preflight: per-table existence + mode resolution ---------
         resolved_tables: list[dict[str, Any]] = []
         table_reports: list[dict[str, Any]] = []
@@ -439,7 +484,9 @@ class BerdlCapability:
             table = dict(raw_table)
             name = table["name"]
             requested_mode = table.get("mode", "append")
-            exists = transport.table_exists(load_spark, name, namespace=namespace)
+            exists = transport.table_exists(
+                load_spark, name, namespace=resolved_namespace
+            )
             effective_mode = select_write_mode(requested_mode, table_exists=exists)
             table["mode"] = effective_mode
             if "partition_by" in table:
@@ -483,7 +530,7 @@ class BerdlCapability:
 
         # -- Postflight: verify by row count and snapshot history -----
         for report in table_reports:
-            fqn = f"`{namespace}`.`{report['name']}`"
+            fqn = f"`{resolved_namespace}`.`{report['name']}`"
             try:
                 count_rows = load_spark.sql(
                     f"SELECT COUNT(*) AS n FROM {fqn}"

@@ -16,6 +16,9 @@ fail in-pod, and -- because the refusal branch was then never taken --
 open real Spark Connect sessions inside a suite that promises no network.
 """
 
+import sys
+import types
+
 import pytest
 
 from kbutillib.domains.kbase.berdl import capability as capability_module
@@ -28,6 +31,7 @@ from kbutillib.domains.kbase.berdl.capability import (
     build_ingest_config,
     select_write_mode,
 )
+from kbutillib.domains.kbase.berdl.transports import InPodTransport
 
 
 @pytest.fixture
@@ -295,6 +299,226 @@ class TestLoadOffPod:
                 tables=[{"name": "dataset1"}],
                 dataframes={"dataset1": object()},
             )
+
+
+class _FakeSpark:
+    """A Spark stand-in that records SQL and returns empty results."""
+
+    def __init__(self):
+        self.statements: list[str] = []
+
+    def sql(self, statement):
+        self.statements.append(statement)
+        return _FakeCollectable()
+
+
+class _FakeCollectable:
+    def collect(self):
+        return []
+
+
+class _FakeInPodTransport(InPodTransport):
+    """An ``InPodTransport`` that never touches the pod.
+
+    Subclasses the real class (so ``load()``'s ``isinstance`` assertion
+    passes) but bypasses ``__init__`` -- which imports ``berdl_notebook_utils``
+    -- and records the namespaces its probes and namespace-resolver see.
+
+    ``create_namespace_if_not_exists`` mirrors the real function's contract:
+    it resolves and RETURNS ``f"{tenant_name}.{namespace}"`` (personal
+    catalog ``f"my.{namespace}"`` when no tenant), which is exactly the
+    namespace ``data_lakehouse_ingest.ingest`` writes to.
+    """
+
+    def __init__(self, *, exists=True, resolved_namespace=None):
+        # Deliberately does NOT call super().__init__(): that imports the
+        # pod-only package. We only need the recorded-call surface below.
+        self._spark = _FakeSpark()
+        self._exists = exists
+        self._resolved_override = resolved_namespace
+        self.table_exists_calls: list[tuple] = []
+        self.create_namespace_calls: list[tuple] = []
+
+    def spark_session(self):
+        return self._spark
+
+    def create_namespace_if_not_exists(
+        self, spark, namespace="default", tenant_name=None, iceberg=True
+    ):
+        self.create_namespace_calls.append((namespace, tenant_name))
+        if self._resolved_override is not None:
+            return self._resolved_override
+        prefix = tenant_name if tenant_name is not None else "my"
+        return f"{prefix}.{namespace}"
+
+    def table_exists(self, spark, table_name, namespace="default"):
+        self.table_exists_calls.append((table_name, namespace))
+        return self._exists
+
+
+class _RecordingIngest:
+    """Captures the config each ``ingest`` call receives so tests can read
+    the effective per-table write mode.
+    """
+
+    def __init__(self):
+        self.configs: list[dict] = []
+
+    def __call__(self, config, **kwargs):
+        self.configs.append(config)
+        return {"status": "ok"}
+
+
+@pytest.fixture
+def fake_ingest(monkeypatch):
+    """Install a fake ``data_lakehouse_ingest`` module (pod-only, absent
+    off-pod) so ``load()``'s deferred ``from data_lakehouse_ingest import
+    ingest`` resolves to a recording double.
+    """
+    recorder = _RecordingIngest()
+    module = types.ModuleType("data_lakehouse_ingest")
+    module.ingest = recorder
+    monkeypatch.setitem(sys.modules, "data_lakehouse_ingest", module)
+    return recorder
+
+
+@pytest.mark.usefixtures("force_in_pod")
+class TestLoadNamespaceResolution:
+    """dev 1206 / defect D1: the existence probe must query the namespace
+    the write actually targets, so a requested ``append`` against an
+    existing table is never silently promoted to a destructive ``overwrite``.
+    """
+
+    def _capability(self, transport, monkeypatch):
+        cap = BerdlCapability()
+        cap._transport = transport
+        # rw membership on any tenant/dataset -- the membership gate is not
+        # what these tests exercise.
+        monkeypatch.setattr(
+            cap, "memberships", lambda: {"kbaseincubator": "rw"}
+        )
+        return cap
+
+    def test_append_to_existing_table_stays_append_not_overwrite(
+        self, monkeypatch, fake_ingest
+    ):
+        """AC 1 + AC 4: append against an existing table performs an append.
+
+        The table exists at the WRITE-TARGET namespace
+        ('kbaseincubator.clearinghouse'), not at the caller's 'default'.
+        With the defect, the probe queried 'default', missed, and the write
+        mode became 'overwrite'. This asserts it stays 'append'.
+        """
+        transport = _FakeInPodTransport(exists=True)
+        cap = self._capability(transport, monkeypatch)
+
+        report = cap.load(
+            dataset="clearinghouse",
+            tenant="kbaseincubator",
+            tables=[{"name": "t1", "mode": "append"}],
+            dataframes={"t1": object()},
+            namespace="default",  # the destructive default the defect used
+        )
+
+        # AC 2: the probe queried the resolved write-target namespace.
+        assert transport.table_exists_calls == [
+            ("t1", "kbaseincubator.clearinghouse")
+        ]
+        # AC 4: the config handed to ingest requested 'append', never
+        # 'overwrite'.
+        assert len(fake_ingest.configs) == 1
+        modes = [t["mode"] for t in fake_ingest.configs[0]["tables"]]
+        assert modes == ["append"]
+        table_report = report["tables"][0]
+        assert table_report["effective_mode"] == "append"
+        assert table_report["operation"] == "append"
+        assert table_report["existed_before"] is True
+
+    def test_probe_ignores_the_default_namespace_parameter(
+        self, monkeypatch, fake_ingest
+    ):
+        """AC 2: the caller's ``namespace`` no longer steers the probe.
+
+        Even a wildly wrong ``namespace`` cannot redirect the existence
+        probe away from the write target.
+        """
+        transport = _FakeInPodTransport(exists=True)
+        cap = self._capability(transport, monkeypatch)
+
+        cap.load(
+            dataset="clearinghouse",
+            tenant="kbaseincubator",
+            tables=[{"name": "t1", "mode": "append"}],
+            dataframes={"t1": object()},
+            namespace="a_wrong_namespace",
+        )
+
+        assert transport.table_exists_calls[0][1] == "kbaseincubator.clearinghouse"
+
+    def test_resolution_happens_once_and_matches_ingest_target(
+        self, monkeypatch, fake_ingest
+    ):
+        """The write-target namespace is resolved exactly once, via
+        create_namespace_if_not_exists, from dataset + tenant.
+        """
+        transport = _FakeInPodTransport(exists=True)
+        cap = self._capability(transport, monkeypatch)
+
+        cap.load(
+            dataset="clearinghouse",
+            tenant="kbaseincubator",
+            tables=[{"name": "t1", "mode": "append"}],
+            dataframes={"t1": object()},
+        )
+
+        # Called once, with the BARE dataset as namespace and the tenant as
+        # tenant_name (the real function prepends the tenant as the catalog).
+        assert transport.create_namespace_calls == [
+            ("clearinghouse", "kbaseincubator")
+        ]
+
+    def test_unresolvable_namespace_raises_not_overwrite(
+        self, monkeypatch, fake_ingest
+    ):
+        """AC 3: if the write-target namespace cannot be determined, load()
+        raises rather than probing (and thus falling into the destructive
+        overwrite path). No ingest call is made.
+        """
+        transport = _FakeInPodTransport(exists=True, resolved_namespace="")
+        cap = self._capability(transport, monkeypatch)
+
+        with pytest.raises(BerdlLoadRefusedError, match="write-target namespace"):
+            cap.load(
+                dataset="clearinghouse",
+                tenant="kbaseincubator",
+                tables=[{"name": "t1", "mode": "append"}],
+                dataframes={"t1": object()},
+            )
+
+        # It refused BEFORE any probe or ingest -- no destructive path taken.
+        assert transport.table_exists_calls == []
+        assert fake_ingest.configs == []
+
+    def test_append_to_missing_table_still_becomes_overwrite(
+        self, monkeypatch, fake_ingest
+    ):
+        """Non-regression: when the table genuinely does not exist at the
+        write target, append-to-nonexistent still resolves to 'overwrite'
+        (ingest itself rejects append-to-nonexistent). The fix only stops
+        the FALSE-negative probe, it does not change this legitimate case.
+        """
+        transport = _FakeInPodTransport(exists=False)
+        cap = self._capability(transport, monkeypatch)
+
+        cap.load(
+            dataset="clearinghouse",
+            tenant="kbaseincubator",
+            tables=[{"name": "t1", "mode": "append"}],
+            dataframes={"t1": object()},
+        )
+
+        modes = [t["mode"] for t in fake_ingest.configs[0]["tables"]]
+        assert modes == ["overwrite"]
 
 
 @pytest.mark.usefixtures("force_off_pod")

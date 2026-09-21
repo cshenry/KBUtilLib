@@ -787,10 +787,13 @@ def _berdl_describe_rows(*partition_columns: str, metadata_column: bool = True):
         for column in partition_columns:
             rows.append((column, "string", None))
     rows.append(("# Metadata Columns", "", ""))
-    if partition_columns and metadata_column:
+    rows.append(("_spec_id", "int", ""))
+    if metadata_column:
+        # Every Iceberg table on this cluster exposes a ``_partition``
+        # metadata column: ``struct<col:type,...>`` when partitioned,
+        # empty ``struct<>`` when NOT (measured on-pod 2026-09-20).
         struct = ",".join(f"{c}:string" for c in partition_columns)
         rows.append(("_partition", f"struct<{struct}>", ""))
-    rows.append(("_spec_id", "int", ""))
     rows.append(("# Detailed Table Information", "", ""))
     rows.append(("Name", f"{_NAMESPACE}.gene_entity", None))
     return rows
@@ -831,12 +834,38 @@ class TestBerdlPartitionInformationShape:
         """``[]`` must stay reachable -- six clearinghouse tables are
         genuinely unpartitioned, and turning every ``[]`` into a raise
         would break them.
+
+        Regression for the empty-``struct<>`` bug (found on-pod
+        2026-09-21): the fixture carries the real ``_partition struct<>``
+        metadata column an unpartitioned table exposes. Before the fix,
+        ``value.startswith('struct<')`` matched ``struct<>`` and the empty
+        struct was misread as partitioning evidence, so this raised
+        ``PartitionSpecUnparseableError`` instead of returning ``[]``.
         """
         rows = _berdl_describe_rows()
+        assert any(
+            r[0] == "_partition" and r[1] == "struct<>" for r in rows
+        ), "fixture must model the empty _partition struct<> an unpartitioned table emits"
         assert (
             _parse_partition_spec(rows, name="genome_entity", namespace=_NAMESPACE)
             == []
         )
+
+    def test_empty_partition_struct_is_not_evidence_of_partitioning(self):
+        """An empty ``_partition struct<>`` alone (no partitioning block)
+        must read as unpartitioned, not raise -- the exact 2026-09-21
+        on-pod failure of the six ``*_entity``/``*_content`` tables.
+        """
+        rows = _berdl_describe_rows("standardizer_version", metadata_column=True)
+        # Sanity: with a partition column the struct is non-empty and read.
+        assert _parse_partition_spec(
+            rows, name="protein_entity", namespace=_NAMESPACE
+        ) == ["standardizer_version"]
+        # And the empty-struct case does not raise.
+        rows = _berdl_describe_rows()
+        assert _parse_describe_table_extended_partition_spec(
+            rows, name="genome_entity", namespace=_NAMESPACE
+        ) == []
 
     def test_metadata_column_alone_raises_rather_than_reporting_empty(self):
         """A ``_partition`` struct column is independent evidence the table

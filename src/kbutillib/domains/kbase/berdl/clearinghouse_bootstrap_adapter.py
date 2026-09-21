@@ -102,11 +102,14 @@ _PARTITION_INFORMATION_HEADER = "# Partition Information"
 #: itself a partition column.
 _COL_NAME_SUBHEADER = "# col_name"
 
-#: Metadata column this cluster exposes for a partitioned table, typed
-#: ``struct<...>`` over the partition columns. Its PRESENCE is independent
-#: evidence that a table IS partitioned, which is what lets an
-#: unrecognised partitioning block be told apart from a genuinely
-#: unpartitioned table instead of silently reported as ``[]``.
+#: Metadata column every Iceberg table on this cluster exposes, typed
+#: ``struct<col:type,...>`` over the partition columns for a partitioned
+#: table and empty ``struct<>`` for an unpartitioned one. A NON-EMPTY
+#: struct is independent evidence that a table IS partitioned, which is
+#: what lets an unrecognised partitioning block be told apart from a
+#: genuinely unpartitioned table instead of silently reported as ``[]``.
+#: Its mere presence is NOT evidence -- an unpartitioned table has it too,
+#: as an empty ``struct<>``.
 _PARTITION_METADATA_COLUMN = "_partition"
 
 #: Substring (case-insensitive) identifying a ``SHOW CREATE TABLE`` result.
@@ -363,7 +366,16 @@ def _parse_describe_table_extended_partition_spec(
             # check below on a later iteration, not this header itself.
             continue
 
-        if col_name == _PARTITION_METADATA_COLUMN and value.startswith("struct<"):
+        if (
+            col_name == _PARTITION_METADATA_COLUMN
+            and value.startswith("struct<")
+            and value != "struct<>"
+        ):
+            # A NON-EMPTY struct (``struct<col:type,...>``) is evidence the
+            # table is partitioned. An EMPTY ``struct<>`` is what this
+            # cluster emits for a genuinely UNPARTITIONED Iceberg table --
+            # every table exposes a ``_partition`` metadata column, so its
+            # mere presence is not evidence; only a non-empty struct is.
             saw_partition_metadata_column = True
             continue
 

@@ -3,7 +3,10 @@
   "status": "draft",
   "prd_name": "kbu-prott5-and-horizyn-client-v1",
   "repo": "KBUtilLib",
-  "repos": ["KBUtilLib", "KBDLJobRunningPrototype"],
+  "repos": [
+    "KBUtilLib",
+    "KBDLJobRunningPrototype"
+  ],
   "authored_by": "miles",
   "authored_on": "2026-09-22",
   "session_id": "7ed8e324-97bf-5c2e-aa34-5d11efcbe768",
@@ -12,8 +15,10 @@
   "review_session_id": "0fb3ff0e-dcc3-51c0-8e74-f035b62e5d5f",
   "review_rounds": 1,
   "confront_rounds": 0,
-  "draft_commit": null,
-  "depends_on": ["kbdl-horizyn-v1"],
+  "draft_commit": "d1221bdae726a0b0ed1bf912fa825708d58cd8bd",
+  "depends_on": [
+    "kbdl-horizyn-v1"
+  ],
   "review_protocol": "Drafted single-pass by a `w` session on 2026-09-22 without the /ai-design grill or a taskplan, then matured in review round 1 by a `d` session the same day. Round 1 re-researched the draft against origin/main of both repos and found its central premise false (ProtT5Utils had already been merged on 2026-09-13 as 215625c; the drafting session read a clone 116 commits behind). Scope was re-centred onto the silent model_path/model_name break, the missing canonical sections were written, taskplan.json was authored and validated, and a cross-family confront was dispatched. Subsequent rounds: Chris edits fullprompt.md in place with (CSH ...) markers; `/ai-design --review kbu-prott5-and-horizyn-client-v1` diffs against draft_commit and folds.",
   "summary": "Make the already-built KBDLHorizyn job type safe to run. Three changes: (1) fix a SILENT model-identity bug -- KBDL's adapter calls ProtT5Utils(model_name=...) while KBUtilLib's constructor takes model_path=, and BaseUtils absorbs unknown kwargs via setattr, so the operator's configured KBDL_PROT_T5_MODEL is discarded with no error and the hardcoded default checkpoint is used instead; (2) add JOB_TYPE_HORIZYN + submit_horizyn to the KBUtilLib KBDL client; (3) declare a prott5 optional-dependency extra and validate the embedding path numerically against the 2026-09-21 eval baseline (44.6/64.0/66.3% recall), pinned to max_residues=1000 to match how that baseline was measured.",
   "superseded_claims": [

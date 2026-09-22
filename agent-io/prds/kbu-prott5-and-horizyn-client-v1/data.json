@@ -15,7 +15,7 @@
   "review_session_id": "0fb3ff0e-dcc3-51c0-8e74-f035b62e5d5f",
   "review_rounds": 1,
   "confront_rounds": 1,
-  "draft_commit": "d1221bdae726a0b0ed1bf912fa825708d58cd8bd",
+  "draft_commit": "e81bda6b6dee9b7dc7c9db12feff82593c37fb56",
   "depends_on": [
     "kbdl-horizyn-v1"
   ],

@@ -1,0 +1,67 @@
+{
+  "command_type": "prd-draft",
+  "status": "draft",
+  "prd_name": "kbu-prott5-and-horizyn-client-v1",
+  "repo": "KBUtilLib",
+  "repos": ["KBUtilLib", "KBDLJobRunningPrototype"],
+  "authored_by": "miles",
+  "authored_on": "2026-09-22",
+  "session_id": "7ed8e324-97bf-5c2e-aa34-5d11efcbe768",
+  "reviewed_by": "miles",
+  "reviewed_on": "2026-09-22",
+  "review_session_id": "0fb3ff0e-dcc3-51c0-8e74-f035b62e5d5f",
+  "review_rounds": 1,
+  "confront_rounds": 0,
+  "draft_commit": null,
+  "depends_on": ["kbdl-horizyn-v1"],
+  "review_protocol": "Drafted single-pass by a `w` session on 2026-09-22 without the /ai-design grill or a taskplan, then matured in review round 1 by a `d` session the same day. Round 1 re-researched the draft against origin/main of both repos and found its central premise false (ProtT5Utils had already been merged on 2026-09-13 as 215625c; the drafting session read a clone 116 commits behind). Scope was re-centred onto the silent model_path/model_name break, the missing canonical sections were written, taskplan.json was authored and validated, and a cross-family confront was dispatched. Subsequent rounds: Chris edits fullprompt.md in place with (CSH ...) markers; `/ai-design --review kbu-prott5-and-horizyn-client-v1` diffs against draft_commit and folds.",
+  "summary": "Make the already-built KBDLHorizyn job type safe to run. Three changes: (1) fix a SILENT model-identity bug -- KBDL's adapter calls ProtT5Utils(model_name=...) while KBUtilLib's constructor takes model_path=, and BaseUtils absorbs unknown kwargs via setattr, so the operator's configured KBDL_PROT_T5_MODEL is discarded with no error and the hardcoded default checkpoint is used instead; (2) add JOB_TYPE_HORIZYN + submit_horizyn to the KBUtilLib KBDL client; (3) declare a prott5 optional-dependency extra and validate the embedding path numerically against the 2026-09-21 eval baseline (44.6/64.0/66.3% recall), pinned to max_residues=1000 to match how that baseline was measured.",
+  "superseded_claims": [
+    "Draft claimed ProtT5Utils 'does not exist on any KBUtilLib branch'. FALSE -- merged 2026-09-13 as 215625c with full tests; the drafting session read a clone 116 commits behind origin/main.",
+    "Draft's pinned decision 'the consumer wins, use model_name' is resolved the other way: model_path is canonical (the library merged first and is tested/documented against it) and the KBDL call site is corrected. See Q1.",
+    "Draft's D4 ('truncation belongs to the caller, do not implement it here') contradicted the merged module, which truncates at max_residues and reports truncated_ids. Superseded by Q5: keep it, and pass the service's cap through explicitly.",
+    "Draft claimed the client 'enumerates exactly five job types'. There are nine constants and eight submit_* methods, and the two docstring edits the draft prescribed target text that does not exist.",
+    "Draft's numeric acceptance could not have passed as written: the baseline was measured at MAX_RESIDUES=1000 while the module and service default to 5000. See Q4."
+  ],
+  "tasks": [
+    {
+      "task_id": "kbdl-callsite-fix",
+      "description": "KBDLJobRunningPrototype: in job_types/horizyn.py::_embed_proteins, construct ProtT5Utils with model_path= (not model_name=) and pass max_residues= from settings.prot_t5_max_residues; add a test using a recording double that asserts both keywords",
+      "status": "planned",
+      "notes": "The regression test for the actual bug. Existing adapter tests stub _embed_proteins itself as a seam, which is exactly why the constructor mismatch shipped unnoticed."
+    },
+    {
+      "task_id": "kbu-model-name-guard",
+      "description": "KBUtilLib: add an explicit keyword-only model_name=None to ProtT5Utils.__init__ that raises TypeError naming model_path when supplied; model_path stays canonical (no alias, no warning); two tests, neither requiring torch",
+      "status": "planned",
+      "notes": "Loud by design -- the failure mode being prevented is silence. Guards one name only; BaseUtils' repo-wide setattr-swallow is out of scope (G6)."
+    },
+    {
+      "task_id": "kbu-submit-horizyn",
+      "description": "KBUtilLib: add JOB_TYPE_HORIZYN = 'KBDLHorizyn' and submit_horizyn(**params) to domains/external/kbdl_service_utils.py, mirroring submit_skani; copy the submit_skani test",
+      "status": "planned",
+      "notes": "Explicit non-goal: do NOT chase the draft's 'five -> six job types' docstring edits. No such text exists; the module docstring enumerates endpoints and submit_and_wait says 'JOB_TYPE_GENOME_ANNOTATION, etc.'"
+    },
+    {
+      "task_id": "kbu-prott5-extra",
+      "description": "KBUtilLib: add prott5 = [torch, transformers, sentencepiece] to [project.optional-dependencies]; NOT folded into the ai extra (httpx-only, Argo/lp-solver client) and NOT added to all (docs build must not pull CUDA torch)",
+      "status": "planned",
+      "notes": "sentencepiece is listed explicitly because ProtT5's T5Tokenizer needs it and its absence surfaces as a confusing tokenizer error, not a clean ImportError."
+    },
+    {
+      "task_id": "numeric-acceptance",
+      "description": "Re-run the 2026-09-21 eval with the embedding step routed through ProtT5Utils (model_path=, max_residues=1000); require recall@1/@5/@10 within +/-2pp of 44.6/64.0/66.3; commit a report at agent-io/research/prott5-utils-numeric-acceptance.md",
+      "status": "planned",
+      "notes": "maestro lane, h100 -- GPU work loading a 3B-param encoder. Runs at LIBRARY level, not through the KBDL service, so it does not depend on the out-of-scope ops wiring. Tolerance not exact equality: fp16 accumulation is non-associative and batch composition differs from the reference."
+    }
+  ],
+  "out_of_scope": [
+    "Live poplar env wiring (KBDL_HORIZYN_CHECKPOINT / KBDL_PROT_T5_MODEL) and service restart -- ops step with its own change control; required for end-to-end runs but NOT a prerequisite for anything in this PRD (Q3)",
+    "Any other change to the KBDL service beyond the two keyword arguments in _embed_proteins -- no schema, adapter logic, scoring, index or object-type changes",
+    "Rebuilding or re-registering the reaction index (ref:a9f38994)",
+    "Fixing BaseUtils' swallow-unknown-kwargs behaviour repo-wide (G6) -- real and recorded, deliberately not attempted",
+    "A new or fine-tuned ProtT5 model; embedding cache/persistence",
+    "Renaming ProtT5Utils' public parameter -- settled as model_path (Q1)",
+    "End-to-end validation through the running service -- available later as an ops-gated check"
+  ]
+}

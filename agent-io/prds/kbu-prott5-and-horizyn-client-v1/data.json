@@ -14,7 +14,7 @@
   "reviewed_on": "2026-09-22",
   "review_session_id": "0fb3ff0e-dcc3-51c0-8e74-f035b62e5d5f",
   "review_rounds": 1,
-  "confront_rounds": 0,
+  "confront_rounds": 1,
   "draft_commit": "d1221bdae726a0b0ed1bf912fa825708d58cd8bd",
   "depends_on": [
     "kbdl-horizyn-v1"
@@ -68,5 +68,6 @@
     "A new or fine-tuned ProtT5 model; embedding cache/persistence",
     "Renaming ProtT5Utils' public parameter -- settled as model_path (Q1)",
     "End-to-end validation through the running service -- available later as an ops-gated check"
-  ]
+  ],
+  "confront": "round 1 ran 2026-09-22 via maestro task-9a3f8d46 (codex backend, h100); 6 stall points returned, 5 kept and folded, 1 partially dropped as already answered in taskplan.json which the confront could not see; 2 free-critique items adopted"
 }

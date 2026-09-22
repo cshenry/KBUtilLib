@@ -66,11 +66,23 @@ No `prott5` extra exists in `pyproject.toml`. The existing `ai` extra is
 so putting `torch` there would push multi-gigabyte wheels into every `ai`
 install. See Q6.
 
+**6. The live service has never been able to run this job type.** The poplar
+`kbdl-worker@` units set neither `KBDL_PROT_T5_MODEL` nor
+`KBDL_HORIZYN_CHECKPOINT`, and `KBDLHorizyn` is absent from the unit's
+`KBDL_JOB_CONCURRENCY` list. Since `capabilities.py` refuses the job type while
+`prot_t5_model` is unset, every submission is rejected at the gate. This is why
+finding 2 is latent rather than actively corrupting, and it means `KBDLHorizyn`
+is built, merged, indexed and unreachable. See Q8.1 and G1.
+
 ### Links to research output
 
-The research for this round was a local-corpus source read performed in session;
-there is no separate Maestro external scan to link. See the quality report below
-for why.
+The research for this round was a local-corpus source read plus a live-service
+inspection, both performed in session; there is no separate Maestro external
+scan to link. A cross-family confront WAS dispatched against this document
+(`task-9a3f8d46`, codex backend on h100) and its committed stall report lives on
+the task branch `maestro/researcher/you-are-the-autonomous-build-con-task-9a3f8d46`
+at `agent-io/confront/stall-report.md`; its adjudication is recorded in the
+Revision Log. See the quality report below for what was and was not searched.
 
 ### Quality report
 
@@ -86,12 +98,18 @@ established that the mismatch is *silent* rather than a `TypeError`);
 the KBDL adapter's `_embed_proteins` and its call site; `kbdl_service/config.py`
 defaults; and the 2026-09-21 eval's `run_eval.py` and measurement report.
 
-**Confidence: high on the code facts, medium on deployment facts.** Every claim
-about code is quoted from `origin/main` of both repos and is checkable. The
-weak spot is the live poplar service environment: what `KBDL_PROT_T5_MODEL` is
-actually set to there is not readable from this session, and it determines
-whether finding 2 is currently harmless or actively corrupting. That is recorded
-as the first item of Q8 rather than guessed at.
+**Confidence: high on the code facts, high on the one deployment fact that
+mattered.** Every claim about code is quoted from `origin/main` of both repos
+and is checkable. The deployment question — what `KBDL_PROT_T5_MODEL` is set to
+on poplar, which determines whether finding 2 is currently harmless or actively
+corrupting — was open when this round began and was closed by reading the
+running service directly (`systemctl --user cat kbdl-worker@1.service`): it is
+unset, so the defect is latent. That is recorded as Q8.1.
+
+The remaining deployment uncertainty is narrower and is not resolvable by
+reading anything: whether the `/scratch` artifacts the numeric acceptance needs
+will still exist when that task runs. It is recorded as Q8.2 with the assumption
+stated.
 
 **What was NOT searched, and why.** No external literature / prior-art scan was
 dispatched to Maestro. This round's work is a two-line consumer fix, a
@@ -102,11 +120,19 @@ If a future round reopens the embedding *approach* (a different PLM, a
 fine-tune, a caching layer), that scan becomes worth running and has not been
 done.
 
-**Known thin spots.** The equivalence of the module's pooling
-(`n_res` derived from the cleaned string) and the reference's
-(`attention_mask.sum() - 1`) is argued from the ProtT5 tokenizer's
-one-token-per-residue behaviour, not demonstrated. G3 records this; the
-numeric acceptance task is what would actually catch a divergence.
+**Known thin spots.** The equivalence of the module's pooling (`n_res` derived
+from the cleaned string) and the reference's (`attention_mask.sum() - 1`) is
+argued from the ProtT5 tokenizer's one-token-per-residue behaviour rather than
+demonstrated from first principles. The confront round surfaced this as worth
+testing directly, and Testing Decisions now specifies an assertion for it — but
+that test needs the real tokenizer, so it runs only under `PROTT5_LIVE_TESTS=1`
+and a routine CI run still would not catch a tokenizer-behaviour change. G3
+records what remains open.
+
+A second thin spot is unchanged: nothing in this round exercised the real ProtT5
+model. Every claim about embedding behaviour rests on reading the merged code and
+on the 2026-09-21 measurement, not on a fresh run. The numeric acceptance task is
+what converts that from argument to evidence, and it has not run yet.
 
 ## Revision Log
 
@@ -121,6 +147,17 @@ Revision Log, User Stories, Open Questions, Gotchas, Sources Consulted),
 corrected the numeric acceptance criterion to pin `max_residues=1000` (Q4),
 decoupled that acceptance from the out-of-scope ops wiring by running it at
 library level (Q3), and authored `taskplan.json`.
+
+Also closed Q8.1 by measurement rather than assumption: the live poplar worker
+units set neither Horizyn env var, so the defect is confirmed latent and no
+stored result is tainted — which reframed G1 from "results may be suspect" to
+"land the fix before the wiring". Ran a cross-family confront (`task-9a3f8d46`,
+codex on h100); kept five of its six stall points — pinning the guard's exact
+message, the extras' version-bound policy, the new members' placement, the
+acceptance tolerance as arithmetic rather than prose, and an explicit note that
+cross-repo landing order is safe in either direction — and adopted two free-
+critique items, a tokenizer-coupling test that partly closes G3 and a CPU-only
+torch install route.
 
 ## Problem Statement
 
@@ -249,11 +286,30 @@ which is the single function in the KBDL service that imports `ProtT5Utils`:
   churn without benefit. Only the **keyword passed to the constructor** must
   change.
 
+**Cross-repo landing order is safe in either direction, and this is not
+obvious.** The KBDL fix lands first (taskplan phase 1) and the KBUtilLib guard
+second (phase 2), but there is no window in which the two repos are
+incompatible: `model_path` is *already* the real parameter on KBUtilLib `main`,
+so a KBDL that has been fixed to pass `model_path=` works against both the
+current and the guarded KBUtilLib. The guard only ever rejects `model_name=`,
+which after phase 1 nothing passes. No feature flag, no coordinated release,
+and no rollback coupling is needed.
+
 ### D2 — The confusable name becomes a loud failure, not a silent one
 
 `ProtT5Utils.__init__` gains an explicit keyword-only `model_name` parameter
 defaulting to `None`. When it is not `None`, the constructor raises `TypeError`
 with a message naming `model_path` as the correct parameter.
+
+**The message text is pinned**, so the implementation and its test cannot drift
+apart, and so the criterion is checkable rather than a matter of taste:
+
+```
+ProtT5Utils has no 'model_name' parameter; use 'model_path' instead.
+```
+
+Tests assert on that exact string. If it is reworded later, the test moves with
+it in the same commit.
 
 This exists because of exactly what happened here: `BaseUtils.__init__` absorbs
 every unrecognised keyword argument via `setattr`, so a mistyped or
@@ -290,9 +346,13 @@ tested behaviour for no functional gain.
 
 In `src/kbutillib/domains/external/kbdl_service_utils.py`:
 
-- Add `JOB_TYPE_HORIZYN = "KBDLHorizyn"` alongside the nine existing constants.
+- Add `JOB_TYPE_HORIZYN = "KBDLHorizyn"` **immediately after
+  `JOB_TYPE_UPLOAD_OBJECT`**, the last of the nine existing constants, so the
+  block stays one contiguous run of assignments.
 - Add `submit_horizyn(self, **params: Any) -> str` returning
-  `self._submit(JOB_TYPE_HORIZYN, params)`, mirroring `submit_skani` exactly.
+  `self._submit(JOB_TYPE_HORIZYN, params)`, mirroring `submit_skani` exactly and
+  placed **immediately after `submit_skani`**, keeping the `submit_*` methods
+  together and the new one adjacent to the sibling it copies.
 - **Do not** attempt the docstring edits the earlier draft prescribed. The module
   docstring enumerates HTTP endpoints, not job types, and `submit_and_wait`'s
   docstring says "(`JOB_TYPE_GENOME_ANNOTATION`, etc.)" — neither contains a
@@ -321,6 +381,28 @@ deliberately **not** added to `all`, which exists to install "everything needed
 to run all transports + build docs" — a docs build has no business pulling a
 CUDA-enabled torch.
 
+**Version bounds: bare names, deliberately, and this is a decision rather than
+an omission.** The sibling extras do carry lower bounds (`mcp >=1.27,<2`,
+`fastapi >=0.110`, `httpx[socks] >=0.28`), so "match the siblings" is genuinely
+ambiguous here and is resolved explicitly: list `torch`, `transformers` and
+`sentencepiece` **unpinned**.
+
+The reason is that a bound nobody has tested is worse than no bound. The
+siblings' floors were set against versions the repo actually exercises in CI;
+this extra is never installed in CI (see G7), so any floor written here would be
+invented. `torch` additionally has a version/build matrix (CUDA vs CPU, platform
+wheels) that a single floor cannot express correctly. An unpinned extra installs
+the current release and fails visibly if that release is incompatible; an
+invented floor fails obscurely and silently constrains users for years. **Do not
+add version bounds to this extra without testing them.**
+
+**CPU-only installs need a documented route.** The default `pip install
+kbutillib[prott5]` pulls a CUDA-enabled `torch` on Linux, which is several
+gigabytes and pointless on a CPU-only machine. Note in the extra's comment that
+CPU-only users should install torch first from the CPU index
+(`pip install torch --index-url https://download.pytorch.org/whl/cpu`) and then
+install the extra, which will find the requirement already satisfied.
+
 The existing lazy-import behaviour inside `_load()` already raises `ImportError`
 with an install hint, and the KBDL adapter already maps `ImportError` to
 `DEPENDENCY_UNAVAILABLE`. That path is the contract and needs no change; the
@@ -341,13 +423,31 @@ one:
   module's 5000 default would embed long enzymes more fully than the baseline
   did and change the numbers for a legitimate reason, which is indistinguishable
   from a real regression.
-- **Tolerance-based, not exact.** The reference batches a fixed 16 sequences per
-  forward pass; the module batches by residue count. Mean-pooling is per-sequence
-  and padding-excluded, so batch composition should not change results in exact
-  arithmetic — but fp16 accumulation on CUDA is not associative, so small drift
-  is expected. Require each of the three recall figures within **±2 percentage
-  points** of baseline. A tokenisation or pooling error produces a collapse of
-  tens of points, not two.
+- **Tolerance-based, not exact, and stated as arithmetic rather than prose.** The
+  reference batches a fixed 16 sequences per forward pass; the module batches by
+  residue count. Mean-pooling is per-sequence and padding-excluded, so batch
+  composition should not change results in exact arithmetic — but fp16
+  accumulation on CUDA is not associative, so small drift is expected.
+
+  "Within 2 percentage points" is ambiguous between an absolute and a relative
+  reading and flips near-boundary outcomes, so the comparison is pinned as a
+  formula. Express each recall as a **fraction in [0, 1]** and require, for each
+  of k = 1, 5, 10:
+
+  ```
+  abs(measured_k - baseline_k) <= 0.02
+  ```
+
+  with `baseline_1 = 0.446`, `baseline_5 = 0.640`, `baseline_10 = 0.663`.
+  Compare the **unrounded** computed fractions — do not round to one decimal
+  place and then compare, which would let a genuine 2.04-point drift pass. A
+  tokenisation or pooling error produces a collapse of tens of points, not two.
+
+- **The output artifact is `agent-io/research/prott5-utils-numeric-acceptance.md`**
+  in KBDLJobRunningPrototype, recording the three measured fractions, the three
+  absolute deltas, the model path, `max_residues`, the device, and a pass/fail
+  verdict per k. The original `run_eval.py` is not modified — the variant is a
+  new script beside it, because `run_eval.py` is the baseline record.
 
 It runs **at library level, not through the KBDL service**. Going through the
 service would require `KBDL_PROT_T5_MODEL` and `KBDL_HORIZYN_CHECKPOINT` to be
@@ -390,6 +490,17 @@ sentinel value, so any pooling over padding is unmistakable rather than subtle.
   with `model_path=` set to the settings value and `max_residues=` set to
   `settings.prot_t5_max_residues`. This is the regression test for the actual
   bug and is the most important test in this PRD.
+
+- **The pooling/tokenizer coupling (closes G3).** The module slices to `n_res`,
+  the residue count of its own cleaned string; the reference slices to
+  `attention_mask.sum() - 1`. These agree only while the ProtT5 tokenizer emits
+  exactly one token per residue plus one trailing EOS — an assumption the design
+  rests on and nothing currently checks. Add a test, behind the existing
+  `prott5_model` + `slow` markers (it needs the real sentencepiece tokenizer, not
+  the encoder weights), that tokenises a handful of sequences of differing
+  lengths and asserts `attention_mask[i].sum() - 1 == n_res` for each. This is
+  cheap, it runs only when `PROTT5_LIVE_TESTS=1`, and it converts an assumption
+  into an assertion.
 
 - **`submit_horizyn`.** Copy the existing `submit_skani` test in
   `tests/external/test_kbdl_service_utils.py`: assert the client POSTs
@@ -537,34 +648,56 @@ recorded separately and is not fixed by this PRD.
 
 ### Q8. What I could not decide and did not guess
 
-Two external facts are genuinely unreadable from this session, and neither was
-guessed at:
+One item was resolved by direct measurement during this round; one remains
+genuinely undeterminable and was not guessed at.
 
-1. **What `KBDL_PROT_T5_MODEL` is actually set to on the live poplar
-   deployment.** This determines whether Q1's defect is presently harmless or
-   presently corrupting. If it is the stock `Rostlab/prot_t5_xl_half_uniref50-enc`
-   id, the silent fallback happens to land on the right model and no result has
-   been affected. If it is a local checkpoint path — likely, given the Horizyn
-   artifacts live at `/scratch/chenry/horizyn-artifacts/` — then every Horizyn
-   run since wiring has embedded with the wrong model. **Assumption made:** the
-   conservative case, that it may be a local path. The fix is specified
-   identically either way, so the uncertainty changes the urgency, not the work.
-2. **Whether `/scratch/chenry/horizyn-artifacts/horizyn_v1_0_inf.ckpt` and the
-   eval set will still exist when the numeric acceptance task runs.** They are
-   present now (verified 2026-09-22), but `/scratch` is explicitly ephemeral on
-   this host. **Assumption made:** present at build time; the acceptance task is
-   instructed to fail loudly naming the missing path rather than silently
-   substituting or skipping.
+1. **RESOLVED — what `KBDL_PROT_T5_MODEL` is set to on the live poplar
+   deployment: it is not set at all.** This was open when the round began and was
+   closed by reading the running service rather than reasoning about it. The live
+   `kbdl-worker@` systemd units on poplar set neither `KBDL_PROT_T5_MODEL` nor
+   `KBDL_HORIZYN_CHECKPOINT`, and `KBDLHorizyn` does not appear in the unit's
+   `KBDL_JOB_CONCURRENCY` list either (verified 2026-09-22 via
+   `systemctl --user cat kbdl-worker@1.service`). With `DEFAULT_PROT_T5_MODEL =
+   None`, `capabilities.py` therefore rejects every `KBDLHorizyn` submission at
+   the capability gate.
+
+   **Consequence: Q1's defect is confirmed latent, and no production result is
+   tainted.** No Horizyn job has ever run on the live service, so the silent
+   wrong-model fallback has never produced a stored result. This lowers the
+   urgency of the fix but *raises* the urgency of its ordering — see G1. It also
+   means the job type is built, merged, indexed and **unreachable**, which is
+   tracked outside this PRD as an ops item.
+
+2. **UNRESOLVED — whether `/scratch/chenry/horizyn-artifacts/horizyn_v1_0_inf.ckpt`
+   and the eval set will still exist when the numeric acceptance task runs.** They
+   are present now (verified 2026-09-22), but `/scratch` is explicitly ephemeral
+   on this host and nothing pins them. **Assumption made:** present at build time;
+   the acceptance task is instructed to fail loudly naming the missing path rather
+   than silently substituting a smaller set or reporting success on a skip.
 
 ## Gotchas and Unintuitive Consequences
 
-**G1 — Fixing the bug will look like causing one.** On any deployment where
-`KBDL_PROT_T5_MODEL` differs from `Rostlab/prot_t5_xl_half_uniref50-enc`, jobs
-that previously "succeeded" will start producing different embeddings and
-different rankings. That is the fix working, not a regression — but anyone
-comparing before and after without knowing this will read it as one. Any Horizyn
-results produced between the ops wiring and this fix are suspect and should be
-regarded as having used the default checkpoint regardless of configuration.
+**G1 — There is a window in which this bug becomes real, and it opens the moment
+someone does the ops wiring.** As measured in Q8.1, `KBDL_PROT_T5_MODEL` is
+currently unset on poplar, so `capabilities.py` rejects every Horizyn submission
+and the silent wrong-model fallback has never executed. No stored result is
+tainted.
+
+That safety is incidental, not designed, and it ends the instant an operator
+sets the variable. **If the ops wiring lands before this fix, every Horizyn job
+run in between silently embeds with the hardcoded default checkpoint regardless
+of what was configured** — and because the vectors stay finite, 1024-d and
+plausible, nothing will flag it. The two changes are independent and are owned
+by different people, which is exactly the condition under which they get
+sequenced wrongly. **Land the fix first.** If the wiring somehow lands first,
+treat every Horizyn result produced before the fix as having used the default
+checkpoint irrespective of configuration.
+
+On a deployment where the configured model is *not* the stock
+`Rostlab/prot_t5_xl_half_uniref50-enc`, applying the fix will also change
+rankings relative to any such interim runs. That is the fix working, not a
+regression — but anyone diffing before and after without this context will read
+it as one.
 
 **G2 — The fix can expose a pre-existing index/model mismatch.** The registered
 reaction index `ref:a9f38994…` was built against one specific ProtT5 checkpoint.
@@ -575,13 +708,21 @@ checkpoint than the index was built with will produce systematically poor recall
 identity honest does not make it correct; it makes it checkable.
 
 **G3 — The module's pooling and the reference's are equivalent only by
-assumption.** `run_eval.py` slices to `attention_mask[j].sum() - 1`; the merged
-module slices to `n_res`, the residue count of its own cleaned string. These
-agree only while the ProtT5 tokenizer emits exactly one token per residue plus a
-single trailing EOS. That holds for single-letter residues after UZOB→X mapping,
-which is why the module is correct — but the two are not the *same* computation,
-and a tokenizer change would break them differently. The numeric acceptance task
-is the only thing that would catch it.
+assumption — now asserted, but only under an opt-in marker.** `run_eval.py`
+slices to `attention_mask[j].sum() - 1`; the merged module slices to `n_res`, the
+residue count of its own cleaned string. These agree only while the ProtT5
+tokenizer emits exactly one token per residue plus a single trailing EOS. That
+holds for single-letter residues after UZOB→X mapping, which is why the module is
+correct — but the two are not the *same* computation, and a tokenizer change
+would break them differently.
+
+This round added a test asserting the equivalence directly (Testing Decisions),
+which is a real improvement over relying on the numeric acceptance to notice.
+The catch: it needs the real sentencepiece tokenizer, so it sits behind the
+`prott5_model` + `slow` markers and runs only when `PROTT5_LIVE_TESTS=1`. **A
+routine CI run still will not catch a tokenizer-behaviour change**, so this
+closes the gap for anyone who runs the live suite and leaves it open for anyone
+who does not.
 
 **G4 — Batch composition differs from the reference, so exact equality is the
 wrong bar.** The reference uses a fixed 16 sequences per forward pass; the module
@@ -605,6 +746,14 @@ KBUtilLib. `model_name` gets an explicit guard because it has already cost a
 production defect; every other mistyped kwarg to every other util is still
 absorbed silently. That is a real, repo-wide hazard this PRD deliberately does
 not fix.
+
+The cheap general fix, if someone takes it up later, is a debug-mode warning
+rather than a behaviour change: have `BaseUtils.__init__` log at warning level
+when it absorbs a keyword that no class in the MRO declares, gated so it is off
+by default. That surfaces the whole class of defect without breaking any caller
+currently relying on the setattr behaviour — which, given it has been the
+convention for a long time, some almost certainly are. Recorded here rather than
+scoped in, because doing it properly means auditing those callers.
 
 **G7 — A green CI run does not mean the embedding path works.** The real-model
 test is behind the `prott5_model` and `slow` markers and requires
@@ -728,3 +877,29 @@ behind — this is what caught the draft's false premise):**
 - **Conventions to match:** `domains/ai/argo_utils.py`, `domains/ai/kb_plm_utils.py`
   and `domains/ai/__init__.py` for the public/Impl and lazy-loader pattern;
   `submit_skani` and its test for the client addition.
+
+## Acceptance Criteria
+
+1. `kbdl_service/job_types/horizyn.py::_embed_proteins` constructs `ProtT5Utils` with the keyword `model_path=`, fed from the service's `prot_t5_model` setting.
+2. The same call passes `max_residues=` fed from the service's `prot_t5_max_residues` setting.
+3. The string `model_name=` no longer appears as a `ProtT5Utils` constructor argument anywhere in the KBDL service.
+4. A KBDL test exercises `_embed_proteins` with `ProtT5Utils` replaced by a recording double and asserts both keyword arguments and their values.
+5. `ProtT5Utils.__init__` accepts an explicit keyword-only `model_name` parameter defaulting to `None`.
+6. Supplying `model_name` raises `TypeError` with the exact message `ProtT5Utils has no 'model_name' parameter; use 'model_path' instead.`
+7. `model_path` remains the canonical parameter and `ProtT5Utils(model_path="x")` still constructs and sets `.model_path == "x"`.
+8. The two guard tests pass with neither `torch` nor `transformers` installed.
+9. A test behind the `prott5_model` and `slow` markers asserts `attention_mask[i].sum() - 1 == n_res` for sequences of differing lengths, using the real tokenizer.
+10. `kbdl_service_utils.py` defines `JOB_TYPE_HORIZYN = "KBDLHorizyn"` immediately after `JOB_TYPE_UPLOAD_OBJECT`.
+11. `kbdl_service_utils.py` defines `submit_horizyn(**params)` delegating to `self._submit(JOB_TYPE_HORIZYN, params)`, placed immediately after `submit_skani`.
+12. A client test asserts `submit_horizyn` posts `{"schema_version": "1", "job_type": "KBDLHorizyn", "params": {...}}` and returns the job id.
+13. The `kbdl_service_utils.py` module docstring and the `submit_and_wait` docstring are byte-identical to the base commit.
+14. `pyproject.toml` parses and `[project.optional-dependencies]` contains `prott5` listing `torch`, `transformers` and `sentencepiece`, all unpinned.
+15. The `prott5` extra's comment documents the CPU-only install route via the PyTorch CPU index.
+16. The `ai` and `all` extras are byte-identical to the base commit and contain no `torch`.
+17. `src/kbutillib/domains/ai/prott5_utils.py` is unchanged by the packaging task.
+18. The numeric acceptance run embeds via `ProtT5Utils` constructed with `model_path=` and `max_residues=1000`.
+19. For each of k = 1, 5, 10, `abs(measured_k - baseline_k) <= 0.02` holds on unrounded fractions, with baselines 0.446, 0.640 and 0.663.
+20. A report at `agent-io/research/prott5-utils-numeric-acceptance.md` records the three measured fractions, the three absolute deltas, the model path, `max_residues`, the device, and a per-k verdict.
+21. The original `run_eval.py` is unmodified; the acceptance variant is a separate committed script.
+22. If any prerequisite artifact is absent, the acceptance task fails naming the missing path rather than reporting success on a skipped run.
+23. In every task, no test that passed on the base commit fails on the branch.

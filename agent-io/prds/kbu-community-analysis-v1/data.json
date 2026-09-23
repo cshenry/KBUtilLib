@@ -27,7 +27,7 @@
   },
   "open_question_counts": {
     "IRREVERSIBLE": 1,
-    "MEDIUM": 3,
+    "MEDIUM": 4,
     "LOW": 6,
     "NONE": 0,
     "terminal_could_not_decide": 4
@@ -70,5 +70,24 @@
     "corrected_while_folding": "S6 recommended detecting QP capability via comm.mscomm._QP_CAPABLE. That attribute does not exist -- _QP_CAPABLE and _pick_qp_backend are MODULE-level names in mscommunity.mscommsim. Folded in the corrected form.",
     "free_critique_folded": "Capture upstream's stdout during delegate calls so the silent kinetic-constraint removal becomes CommunityFBAResult.kinetics_relaxed and .notes, and the print noise stops reaching the notebook."
   },
-  "acceptance_criteria_count": 32
+  "acceptance_criteria_count": 35,
+  "upstream_pin": {
+    "repo": "https://github.com/ModelSEED/MSCommunity",
+    "commit": "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc",
+    "date": "2026-09-23",
+    "is_floor": true,
+    "why_floor": "Before b14f50f a float abundance raised TypeError in MSCommunity.__init__, and gapfill's solver string landed on MSGapfill's atp_gapfilling positional so any truthy value silently ran an ATP gapfill. Both are code paths this module uses."
+  },
+  "upstream_refresh_2026_09_23": {
+    "previous_pin": "b5f37c4b1a42175503cf52aebc5ab9c4cc330b1e",
+    "commits": 5,
+    "substantive": [
+      "57e1504 member biomass drain detection + member_kinetic_reactions membership rule + new close_member_drains kwarg",
+      "b14f50f build_solver/final_solver, float abundances, MSGapfill solver positional"
+    ],
+    "design_change": "New Q5: close_member_drains = abundances_were_supplied. Existing Q5..Q11 renumbered to Q6..Q12; the terminal could-not-decide entry is now Q12.",
+    "new_gotcha": "With close_member_drains=True, test_individual_species(interacting=False) reads zero growth for every member -- it disables the other members, zeroing bio1, and bio1 is then the only outlet for the tested member's biomass. Upstream fixed this for _solo_max_batch (mscommsim.py:886-888) and NOT for test_individual_species (mscommsim.py:387-400). test_member_growth therefore reopens the drains inside the model context manager.",
+    "escher_finding": "NO community Escher visualization exists in MSCommunity. mscommviz.py is byte-identical across b5f37c4b..2dcff16; grep -ri escher returns nothing on main, nothing on the gpu branch (bb26f99, 2026-06-11, 11 commits behind, no commits of its own), and nothing on freiburgermsu/MSCommunity (branches: main bdc5316 and fix/member-biomass-drains 57e1504, both already merged). Q4's per-member projection is therefore unchanged.",
+    "review_rounds_unchanged": "0 -- this refresh came from upstream, not from Chris. Counting it as a review round would open the ready gate on a document he has not read."
+  }
 }

@@ -4,6 +4,33 @@
 
 ### Important findings
 
+**Upstream moved on 2026-09-23, and three of the five new commits fix defects this design
+would have hit.** The pin advances from `b5f37c4b` to `2dcff16` (tip 2026-09-23 08:52).
+What changed, and why each matters here:
+
+- **`b14f50f` made plain float abundances work.** Before it,
+  `MSCommunity.__init__` evaluated `"abundance" in <float>` and raised `TypeError`.
+  This PRD passes `abundances={model_id: float}`, so the draft as written was specified
+  against a path that did not run. The pin is therefore a **minimum**, not a preference.
+- **`b14f50f` also fixed `gapfill`'s solver argument**, which had been passed as
+  `MSGapfill`'s seventh positional — now `atp_gapfilling` — so a truthy solver string
+  *silently switched every community gapfill into ATP-gapfilling mode*.
+  `gapfill_community(solver="glpk")` would have done exactly that.
+- **`b14f50f` added `build_solver` / `final_solver`** to `build_from_species_models`:
+  populate the merged model under GLPK, then one clean rebuild under the configured solver.
+  Incremental constraint addition into optlang's Gurobi interface is superlinear; the
+  authors report equivalence verified at 32, 64 and 128 members.
+- **`57e1504` added `close_member_drains`**, and it is the one that changes results rather
+  than merely unbreaking them. See Q5 — it is a new decision this PRD now has to make.
+
+**There is no community Escher visualization in MSCommunity.** This was checked directly
+rather than assumed: `mscommviz.py` is byte-identical between `b5f37c4b` and `2dcff16`;
+`grep -ri escher` over the whole repository returns nothing on `main`, nothing on the only
+other branch (`gpu`, last touched 2026-06-11 and eleven commits behind), and nothing on
+`freiburgermsu/MSCommunity`, whose only two branches are `main` and the already-merged
+`fix/member-biomass-drains`. Q4's per-member projection therefore stands unchanged, not
+because it was re-argued but because the alternative does not exist to adopt.
+
 **MSCommunity has been extracted out of ModelSEEDpy, and the two copies have diverged.**
 `modelseedpy/community/mscommunity.py` (718 lines) still ships a class called `MSCommunity`
 with `build_from_species_models` as a *method*, plus `compute_interactions`, `run` and
@@ -44,7 +71,7 @@ model rather than adding a constraint, and `predict_abundances(update_abundances
 silently rewrites it again mid-analysis.
 Any wrapper that hides this will produce results that depend on call order.
 
-**Four module-level `@staticmethod` decorators in `mscommviz.py` are a Python-version
+**Four module-level** `@staticmethod` **decorators in** `mscommviz.py` **are a Python-version
 landmine.** Lines 37, 84, 99 and 252 decorate *module-level* functions (`run_fba`,
 `abundance_variability_analysis`, `interactions`, `visual_interactions`).
 `staticmethod` objects only became directly callable in Python 3.10.
@@ -80,11 +107,13 @@ records only a path and a git URL, so this design adds a `commit` key.
 ### Links
 
 - [External scan: community modeling and visualization prior art](research/external-scan.md)
-  — literature, competing toolkits (MICOM, SteadyCom, SMETANA, COMETS, PyCoMo, MMinte,
-  BacArena, gapseq), the abundance-semantics trap, visualization prior art, and
-  GitHub-only-dependency practice.
-  Produced by Maestro task `task-c1a370b4` on h100 (codex backend) and verified from the
-  task branch rather than from its reported status.
+— literature, competing toolkits (MICOM, SteadyCom, SMETANA, COMETS, PyCoMo, MMinte,
+BacArena, gapseq), the abundance-semantics trap, visualization prior art, and
+GitHub-only-dependency practice.
+Produced by Maestro task `task-c1a370b4` on h100 (codex backend) and verified from the
+task branch rather than from its reported status.
+
+
 
 ### Quality report
 
@@ -115,8 +144,8 @@ No MSCommunity code was *executed*. The claims about compartment renaming, abund
 mutation and the `@staticmethod` hazard come from reading source, not from running it;
 the first two are structural enough to be safe, the third was independently verified
 against Python's own `staticmethod` semantics.
-No profiling was done, so the batched-LP passthrough (Q10) is specified but its
-performance claim is untested.
+No profiling was done; the confront round removed the batched-LP passthrough claim
+entirely (Q10), so nothing in the design now rests on an unmeasured performance argument.
 
 **Confidence.** High on the module's placement, construction and dependency handling —
 those follow patterns already in the repo.
@@ -125,21 +154,34 @@ this design invents rather than follows.
 
 ## Revision Log
 
+- **Round 0.1 — 2026-09-23 (upstream refresh, NOT a review round).**
+  Re-pinned MSCommunity from `b5f37c4b` to `2dcff16` after five commits landed the same day.
+  Three fixed defects this design would have hit (float abundances raised `TypeError`;
+  `gapfill`'s solver string silently forced ATP-gapfilling; build-time solver scaling), so
+  the pin is now a floor. One added `close_member_drains`, which is a genuine new decision
+  and is recorded as Q5 together with the trap it sets for `test_member_growth`.
+  Checked for the community Escher viz that prompted this refresh: it does not exist
+  anywhere in the repository or its fork, so Q4 is unchanged.
+  `review_rounds` stays **0** — nothing here came from Chris, and counting an upstream
+  refresh as his review round would open the ready gate on a document he has not read.
+
 - **Round 0 — 2026-09-23 (draft).** Initial single-pass draft.
-  Wraps the standalone MSCommunity package (not `modelseedpy.community`) as a new
-  `domains/modeling/ms_community_utils.py` reached through `kbu.community`.
-  Scope covers construction, simulation, and visualization (cross-feeding table, graph and
-  rendered network, plus a per-member Escher projection); dynamic/kinetic FBA is deferred.
-  The h100 external scan returned during authoring and was folded before commit: it
-  confirmed the typed-result and per-member-overlay decisions, added `cross_feeding_graph`,
-  added a refusal on fixed-abundances-plus-growth-floor, and added a pinned commit SHA to
-  the dependency entry.
-  Confront round 1 (cross-family codex, `task-63133ccb`) also ran before commit: 18 stall
-  points, 14 folded, 2 answered by changing the design (FVA and the batched-LP backends are
-  no longer claimed as exposed), 2 declined with reasons. Its sharpest catch was that the
-  new exceptions should derive from the existing `kbutillib.core.errors` hierarchy rather
-  than bare `Exception`; its most consequential was that nothing persisted the community
-  provenance across a save/load round trip.
+Wraps the standalone MSCommunity package (not `modelseedpy.community`) as a new
+`domains/modeling/ms_community_utils.py` reached through `kbu.community`.
+Scope covers construction, simulation, and visualization (cross-feeding table, graph and
+rendered network, plus a per-member Escher projection); dynamic/kinetic FBA is deferred.
+The h100 external scan returned during authoring and was folded before commit: it
+confirmed the typed-result and per-member-overlay decisions, added `cross_feeding_graph`,
+added a refusal on fixed-abundances-plus-growth-floor, and added a pinned commit SHA to
+the dependency entry.
+Confront round 1 (cross-family codex, `task-63133ccb`) also ran before commit: 18 stall
+points, 14 folded, 2 answered by changing the design (FVA and the batched-LP backends are
+no longer claimed as exposed), 2 declined with reasons. Its sharpest catch was that the
+new exceptions should derive from the existing `kbutillib.core.errors` hierarchy rather
+than bare `Exception`; its most consequential was that nothing persisted the community
+provenance across a save/load round trip.
+
+
 
 ## Problem Statement
 
@@ -159,12 +201,14 @@ The practical consequences are concrete:
 
 1. Community work is done in one-off scripts that are not reproducible and not shared.
 2. The wrong `MSCommunity` gets imported, and the failure is silent — the older class has
-   most of the same method names, so the script runs and returns different numbers.
+  most of the same method names, so the script runs and returns different numbers.
 3. Abundance semantics get confused. MSCommunity treats abundance as something that is
-   *written into the biomass reaction*, so a script that predicts abundances and then runs
+  *written into the biomass reaction*, so a script that predicts abundances and then runs
    another simulation has silently changed the model underneath itself.
 4. Community results cannot be visualized with the tools the rest of the toolkit uses, so
-   they are inspected as raw flux dictionaries.
+  they are inspected as raw flux dictionaries.
+
+
 
 ## Solution
 
@@ -210,80 +254,92 @@ vector legible to a single-organism Escher map.
 Three properties hold throughout:
 
 - **Abundance is an input unless you ask for a prediction.** Nothing in this module
-  rewrites a community's abundances as a side effect of another call.
+rewrites a community's abundances as a side effect of another call.
 - **Every simulation result says whether it can be trusted.** MSCommunity logs sub-optimal
-  solutions rather than raising; the wrapper surfaces that as a field.
+solutions rather than raising; the wrapper surfaces that as a field.
 - **Absent optional dependencies degrade, they do not crash.** `kbu.community.available`
-  is `False` with a `unavailable_reason` naming what is missing, exactly as
-  `MSFBAUtilsImpl` already does.
+is `False` with a `unavailable_reason` naming what is missing, exactly as
+`MSFBAUtilsImpl` already does.
+
+
 
 ## User Stories
 
 1. As a modeler, I want to merge a list of single-species COBRA models into one community
-   model with a single call, so that I do not have to reproduce MSCommunity's compartment
+  model with a single call, so that I do not have to reproduce MSCommunity's compartment
    and biomass renaming by hand.
 2. As a modeler, I want to supply relative abundances when I build the community, so that
-   the community biomass reaction reflects the composition I measured.
+  the community biomass reaction reflects the composition I measured.
 3. As a modeler, I want to build a community without supplying abundances and have them
-   default to uniform, so that I can get a first answer quickly.
+  default to uniform, so that I can get a first answer quickly.
 4. As a modeler, I want to load member models from the KBase workspace by reference and
-   build a community from them, so that community work uses the same object sources as the
+  build a community from them, so that community work uses the same object sources as the
    rest of my notebook.
 5. As a modeler, I want to save a community model back to the workspace, so that a
-   collaborator can load exactly what I simulated.
+  collaborator can load exactly what I simulated.
 6. As a modeler, I want to export a community model to SBML, so that I can hand it to a
-   tool outside the ModelSEED ecosystem.
+  tool outside the ModelSEED ecosystem.
 7. As a modeler, I want to run community FBA on a named medium and get community growth,
-   per-member growth, and exchange fluxes in one result object, so that I do not have to
+  per-member growth, and exchange fluxes in one result object, so that I do not have to
    pick those apart from a raw solution.
 8. As a modeler, I want the result to tell me when the LP was sub-optimal, so that I do not
-   publish fluxes MSCommunity itself considers untrustworthy.
+  publish fluxes MSCommunity itself considers untrustworthy.
 9. As a modeler, I want to run a pFBA community simulation, so that the flux distribution
-   is parsimonious rather than arbitrary among equivalent optima.
+  is parsimonious rather than arbitrary among equivalent optima.
 10. As a modeler, I want to predict member abundances from a medium, so that I can compare
-    predicted composition against 16S or metagenomic data.
+  predicted composition against 16S or metagenomic data.
 11. As a modeler, I want abundance prediction to leave my community object unchanged unless
-    I explicitly ask it to update, so that a sequence of analyses is order-independent.
+  I explicitly ask it to update, so that a sequence of analyses is order-independent.
 12. As a modeler, I want to run a MICOM-style tradeoff simulation, so that I can compare a
-    cooperative optimum against a more realistic self-interested one.
+  cooperative optimum against a more realistic self-interested one.
 13. As a modeler, I want a clear error when MICOM is requested without a QP-capable solver,
-    naming which solvers would work, rather than an optlang exception.
+  naming which solvers would work, rather than an optlang exception.
 14. As a modeler, I want to test each member's growth alone and in the community, so that I
-    can tell cross-feeding dependence from independence.
+  can tell cross-feeding dependence from independence.
 15. As a modeler, I want to gapfill a community model on a medium, so that a community that
-    cannot grow can be made to grow and I can see what was added.
+  cannot grow can be made to grow and I can see what was added.
 16. As a modeler, I want the cross-feeding exchange table as a DataFrame, so that I can
-    filter, join and export it like any other result.
+  filter, join and export it like any other result.
 17. As a modeler, I want a rendered cross-feeding network diagram, so that I can see at a
-    glance who feeds whom.
+  glance who feeds whom.
 18. As a modeler, I want the cross-feeding table even when graphviz is not installed, so
-    that a missing system binary costs me the picture and not the analysis.
+  that a missing system binary costs me the picture and not the analysis.
 19. As a modeler, I want to view one member's fluxes *as realized inside the community* on
-    a standard Escher map, so that I can use the maps I already have.
+  a standard Escher map, so that I can use the maps I already have.
 20. As a modeler, I want that member view to be visibly labelled as a projection, so that I
-    do not mistake it for a single-organism simulation.
+  do not mistake it for a single-organism simulation.
 21. As a modeler, I want `kbu.community.available` to tell me whether the module can run and
-    why not, so that I can diagnose a broken environment without reading a traceback.
+  why not, so that I can diagnose a broken environment without reading a traceback.
 22. As a modeler, I want the module to fail loudly and specifically if it picks up
-    `modelseedpy.community.MSCommunity` instead of the standalone package, so that the
+  `modelseedpy.community.MSCommunity` instead of the standalone package, so that the
     divergence never silently changes my results.
 23. As a maintainer, I want MSCommunity declared in `dependencies.yaml` like the other
-    GitHub-only dependencies, so that a fresh checkout resolves it the same way.
+  GitHub-only dependencies, so that a fresh checkout resolves it the same way.
 24. As a maintainer, I want the module's methods registered as capabilities, so that they
-    appear in the CLI/MCP/API transports without extra wiring.
+  appear in the CLI/MCP/API transports without extra wiring.
 25. As a maintainer, I want tests that run without MSCommunity installed, so that CI stays
-    green on a machine that has only the core dependencies.
+  green on a machine that has only the core dependencies.
 26. As a modeler, I want the cross-feeding network as a `networkx` graph object, so that I
-    can filter it, count it, or render it with a library of my own choosing rather than
+  can filter it, count it, or render it with a library of my own choosing rather than
     being confined to the one picture the module draws.
 27. As a modeler, I want to be told when I have over-specified the problem — fixed
-    abundances together with a per-member growth floor — so that I get a named refusal
+  abundances together with a per-member growth floor — so that I get a named refusal
     instead of an infeasible LP I have to diagnose.
-28. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
-    drift reported as a warning, so that a divergent local checkout is visible without
+28. As a modeler, I want the abundances I supply to actually bind, so that the member growth
+    rates and kinetic coefficient I read off the solution reflect the composition I declared
+    rather than a member synthesising biomass and discarding it.
+29. As a modeler, I want solo member growth to be measured correctly even on an
+    abundance-bound community, so that "grows alone" and "grows in the community" remain
+    comparable instead of one of them silently reading zero.
+30. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
+  drift reported as a warning, so that a divergent local checkout is visible without
     blocking anyone who is deliberately working ahead of the pin.
 
+
+
 ## Implementation Decisions
+
+
 
 ### Module placement and shape
 
@@ -291,10 +347,10 @@ The module is `src/kbutillib/domains/modeling/ms_community_utils.py`.
 It follows the two-class convention already used by every module in that domain:
 
 - `MSCommunityUtils(KBModelUtils)` — the implementation, inheriting the model/media/
-  workspace surface it needs (`get_model`, `get_media`, `save_model`, `_parse_id`).
+workspace surface it needs (`get_model`, `get_media`, `save_model`, `_parse_id`).
 - `MSCommunityUtilsImpl` — the composition wrapper: holds `env` and sibling `Impl`s,
-  constructs the delegate inside `try/except`, exposes `available` /
-  `unavailable_reason` / `__dir__` / `__getattr__`, exactly as `MSFBAUtilsImpl` does.
+constructs the delegate inside `try/except`, exposes `available` /
+`unavailable_reason` / `__dir__` / `__getattr__`, exactly as `MSFBAUtilsImpl` does.
 
 `__all__ = ["MSCommunityUtils", "MSCommunityUtilsImpl"]`.
 
@@ -312,7 +368,7 @@ def community(self) -> MSCommunityUtilsImpl:
 with `self._community = None` added to `__init__` alongside the other backing fields, and a
 `TYPE_CHECKING` import next to the other `.domains.modeling` imports.
 `kbutillib/__init__.py` gains a guarded re-export using the existing `_import_error`
-pattern, exporting the symbol **`MSCommunityUtils`** (the legacy class, matching how
+pattern, exporting the symbol `MSCommunityUtils` (the legacy class, matching how
 `MSFBAUtils` and `MSReconstructionUtils` are re-exported there — `*Impl` classes are reached
 through the facade and are *not* re-exported at package top level).
 `domains/modeling/README.md` gains a row in its module table.
@@ -325,13 +381,22 @@ MSCommunity is declared in `dependencies.yaml`:
   mscommunity:
     path: "../MSCommunity"
     git: "https://github.com/ModelSEED/MSCommunity.git"
+    commit: "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc"
 ```
+
+**The pin is a FLOOR, not a preference.** Three defects fixed on 2026-09-23 sit directly
+under this design: before `b14f50f`, `abundances={model_id: float}` raised `TypeError` in
+`MSCommunity.__init__`, and `gapfill(solver=...)` landed on `MSGapfill`'s `atp_gapfilling`
+positional so any truthy solver string silently ran an ATP gapfill instead of the one
+asked for. A checkout older than `2dcff16` does not merely lack improvements; it fails or
+lies on two of this module's own code paths. The mismatch warning below therefore matters
+more than a normal pin would.
 
 Import resolution is a single private helper, `_import_mscommunity()`, which:
 
 1. attempts `import mscommunity` normally (covers the case where it is pip-installed);
 2. on `ImportError`, calls `get_dependency_path("mscommunity")` and, when that returns a
-   path containing a `mscommunity/` package directory, prepends it to `sys.path` and
+  path containing a `mscommunity/` package directory, prepends it to `sys.path` and
    retries;
 3. returns the module or `None` — never raises.
 
@@ -339,18 +404,17 @@ It then **asserts provenance**, with both sides of the rule bound so the allowli
 neither too strict nor too lax:
 
 - **ACCEPT** when the resolved `MSCommunity` class has `__module__` starting with
-  `mscommunity.` — which admits `mscommunity.mscommsim.MSCommunity` and any future
-  re-export inside that package.
+`mscommunity.` — which admits `mscommunity.mscommsim.MSCommunity` and any future
+re-export inside that package.
 - **REJECT** otherwise, and specifically when it starts with `modelseedpy`.
 
 On rejection the module reports itself unavailable with a stable message, quoted here
 because the tests assert on it:
-`"resolved MSCommunity is modelseedpy.community.MSCommunity (the superseded copy), not the
-standalone mscommunity package"`, with the actually-resolved `__module__` appended.
+`"resolved MSCommunity is modelseedpy.community.MSCommunity (the superseded copy), not the standalone mscommunity package"`, with the actually-resolved `__module__` appended.
 This check is the whole defense against the divergence, so it is a hard gate, not a warning.
 
 **Commit pinning.** The `dependencies.yaml` entry carries
-`commit: "b5f37c4b1a42175503cf52aebc5ab9c4cc330b1e"`, and the SHA is also a module constant,
+`commit: "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc"`, and the SHA is also a module constant,
 `PINNED_MSCOMMUNITY_COMMIT`. `_import_mscommunity()` compares it best-effort against the
 resolved checkout's HEAD and **logs a warning on mismatch — it never raises and never
 refuses the import.** The check lives here and not in `DependencyManager`, which stays
@@ -392,7 +456,8 @@ reconstructed afterwards.
 
 ```
 build_community(member_models, abundances=None, model_id=None, name=None,
-                kinetic_coeff=750, element_limits=None, printing=False) -> CommunityModel
+                kinetic_coeff=750, element_limits=None, printing=False,
+                build_solver="glpk", final_solver=None) -> CommunityModel
 load_community(id_or_ref, ws=None, member_ids=None) -> CommunityModel
 save_community(comm, workspace=None, objid=None, suffix=None)
 export_community_sbml(comm, path)
@@ -401,24 +466,40 @@ export_community_sbml(comm, path)
 `member_models` accepts cobra models, `MSModelUtil`s, or workspace references — resolved
 through `self._check_and_convert_model` and `self.get_model`, matching how the rest of the
 modeling domain accepts models.
+
+**`close_member_drains` is derived, not exposed as a free parameter.** It is set to
+`abundances is not None` — the same fact as `abundances_were_supplied` — per Q5, and
+recorded on the handle. The caller does not get a third thing to reason about: saying
+"these are the abundances" is the same statement as "make them bind."
+
+`build_solver` and `final_solver` are forwarded to `build_from_species_models` with
+upstream's defaults (`"glpk"` and `None`), which preserve behavior. They are reachable
+rather than hard-coded because incremental constraint addition into optlang's Gurobi
+interface is superlinear: upstream populates the merged model under GLPK and does one clean
+rebuild at the end, reporting equivalence verified at 32, 64 and 128 members. A caller
+assembling a large community is who needs them.
 `abundances` is a `{model_id: float}` mapping; it is normalized to sum to 1 and stored.
 When omitted, members are uniform.
 
-**`save_community` writes our own provenance into the model, and `load_community` reads it
+`save_community` **writes our own provenance into the model, and** `load_community` **reads it
 back.** This is the round-trip the rest of the design depends on and it must be bound
 explicitly: `build_community` captures `member_ids` and `source_model_ids` because upstream
 destroys them, and without persisting that capture a save/load cycle throws it away again —
 after which `render_member_map` cannot resolve a member's source model and raises. So
 `save_community` writes
 
-    model.notes["kbutil.community"] = json.dumps({
-        "schema_version": 1,
-        "member_ids": [...],
-        "source_model_ids": {...},
-        "abundances": {...},
-        "kinetic_coeff": 750,
-        "abundances_were_supplied": bool,
-    })
+CSH: Can we add a JSON export that exports the model using a custom JSON format that puts community model metadata (e.g. member names, abundances, element limits etc) and nests the cobrapy json of the community model.
+
+```
+model.notes["kbutil.community"] = json.dumps({
+    "schema_version": 1,
+    "member_ids": [...],
+    "source_model_ids": {...},
+    "abundances": {...},
+    "kinetic_coeff": 750,
+    "abundances_were_supplied": bool,
+})
+```
 
 as a JSON **string** (workspace `notes` values are not reliably structured), and the object
 is saved through the existing `self.save_model` path as an ordinary `KBaseFBA.FBAModel` — a
@@ -452,13 +533,13 @@ gapfill_community(comm, media=None, target=None, templates=None, models=None,
 an error rather than raising, so a wrapper that does not surface it hands the caller numbers
 its own author marked untrustworthy.
 
-**`media_id` is bound, not incidental.** When `media` is a name or reference it is resolved
+`media_id` **is bound, not incidental.** When `media` is a name or reference it is resolved
 through `self.get_media` and `media_id` is the resolved object's id; when `media` is already
 a media object, its id; when `media` is `None`, the literal string `"<model-default>"`.
 Provenance is the point — two results that cannot say what medium they came from cannot be
 compared.
 
-**`kinetics_relaxed` and `notes` exist to recover what upstream only prints.** MSCommunity
+`kinetics_relaxed` **and** `notes` **exist to recover what upstream only prints.** MSCommunity
 announces its most consequential silent behaviors on stdout rather than raising or recording
 them — the kinetic-constraint removal described under Gotchas is a `print`, not a flag. So
 every delegate call is wrapped in `contextlib.redirect_stdout`, the captured text is scanned
@@ -479,8 +560,8 @@ It defaults to `0.0`, matching upstream's deliberate choice: the historical defa
 applied in a way that had no effect on the LP, so enforcing a floor by default would silently
 change every existing result.
 
-**A positive `min_member_growth` combined with caller-supplied fixed abundances raises
-`CommunitySolverError` before the solve.** This is the scan's most actionable finding: every
+**A positive** `min_member_growth` **combined with caller-supplied fixed abundances raises**
+`CommunitySolverError` **before the solve.** This is the scan's most actionable finding: every
 surveyed toolkit that permits both reports users hitting infeasibility and reading it as a
 modelling failure rather than as an over-specified problem. Fixing composition *and*
 imposing a per-member growth floor over-determines the system in the common case, and an
@@ -498,6 +579,22 @@ primary biomass reaction** (`comm.mscomm.primary_biomass`) — which is the only
 `set_abundance` touches. Members' own `primary_biomass` reactions are not modified by
 `set_abundance` and are not snapshotted. Restore happens in a `finally` block via
 `add_metabolites(..., combine=False)`.
+
+**`test_member_growth` must reopen the drains it asks about, and this is not optional.**
+With `close_member_drains=True`, `test_individual_species(interacting=False)` reads **zero
+growth for every member** — silently, with no error. The mechanism is exact: it disables the
+other members, which zeroes `bio1`, and `bio1` is then the only outlet for the member under
+test's biomass because its drain is shut. Upstream fixed this for `_solo_max_batch`, which
+restores the target's drain from the `biomass_drain_bounds` snapshot taken at construction
+(`mscommsim.py:886-888`), and did **not** fix it for `test_individual_species`, which has no
+drain handling at all (`mscommsim.py:387-400`). Verified by reading both.
+
+So `test_member_growth` reopens every member's drain from `member.biomass_drain_bounds`
+inside the model's context manager before delegating, and the restoration is automatic on
+exit. It does this only when `comm.mscomm.close_member_drains` is True and
+`interacting=False` — the two conditions that together produce the false zeros — and it
+records in the returned DataFrame's `.attrs` that drains were reopened for the measurement,
+so a solo growth rate is never silently comparable with a coupled one.
 
 `run_micom` checks for a QP-capable solver *before* dispatching and raises a
 `CommunitySolverError` naming the acceptable solvers (`gurobi`, `cplex`, `osqp`, or the
@@ -561,10 +658,10 @@ better than the guidance.
 
 1. Take `member_id`, look up its community index `i` (1-based, from `member_ids`).
 2. From the result's flux series, select reactions whose compartment suffix is `c{i}` or
-   the shared `e0`, plus the member's `bio{n}` reaction.
+  the shared `e0`, plus the member's `bio{n}` reaction.
 3. Rewrite `_c{i}` → `_c0` in those reaction IDs, and map `bio{n}` → `bio1`.
 4. Hand the rewritten flux dict and the *member's source model* to
-   `self.escher.create_map_html2(model, map, output_path, flux=...)`.
+  `self.escher.create_map_html2(model, map, output_path, flux=...)`.
 
 Step 4 uses the **source single-species model**, not the community model, precisely because
 the Escher map was drawn against single-organism IDs. The community supplies the fluxes;
@@ -611,15 +708,17 @@ names rather than being a second thing to keep in sync.
 ### Error types
 
 Three exceptions, defined in the module and exported through `__all__`.
-They derive from **KBUtilLib's existing hierarchy in `kbutillib/core/errors.py`**, not from
+They derive from **KBUtilLib's existing hierarchy in** `kbutillib/core/errors.py`, not from
 bare `Exception`, so CLI/API error mapping keeps working:
 
 - `CommunityDependencyError(BackendUnavailableError)` — MSCommunity absent, or the wrong one
-  resolved. `BackendUnavailableError` already subclasses `KBUtilLibError` and is the type the
-  cheminformatics and thermo backends raise for exactly this condition.
+resolved. `BackendUnavailableError` already subclasses `KBUtilLibError` and is the type the
+cheminformatics and thermo backends raise for exactly this condition.
 - `CommunitySolverError(KBUtilLibError)` — no QP solver for MICOM; the over-specification
-  refusal; infeasibility where a solution was required.
+refusal; infeasibility where a solution was required.
 - `CommunityVisualizationError(KBUtilLibError)` — graphviz package or `dot` binary missing.
+
+
 
 ## Testing Decisions
 
@@ -633,40 +732,39 @@ So the test suite is two-tier:
 **Tier 1 — no MSCommunity, no solver (runs in CI).** These are the majority.
 
 - `_import_mscommunity()` returns `None` cleanly when neither a pip install nor a
-  `dependencies.yaml` path is available, and `available` is then `False` with a reason
-  naming MSCommunity.
+`dependencies.yaml` path is available, and `available` is then `False` with a reason
+naming MSCommunity.
 - The provenance gate: a fake module whose `MSCommunity.__module__` is
-  `modelseedpy.community.mscommunity` is **rejected**, with the reason naming the
-  superseded copy. This is the divergence defense and it is the single most important test
-  in the file.
+`modelseedpy.community.mscommunity` is **rejected**, with the reason naming the
+superseded copy. This is the divergence defense and it is the single most important test
+in the file.
 - `_unwrap` returns the underlying function for a `staticmethod` and is identity for a
-  plain function.
+plain function.
 - The member-map projection is tested as a **pure function** on a synthetic flux dict:
-  `{"rxn00001_c2": 5.0, "rxn00002_c1": 1.0, "EX_cpd00027_e0": -3.0, "bio3": 0.4}` with
-  `member_ids=["A","B"]` and `member_id="B"` yields `{"rxn00001_c0": 5.0,
-  "EX_cpd00027_e0": -3.0, "bio1": 0.4}` and drops `rxn00002_c1`.
-  Extracting the rewrite into a module-level function is what makes this testable without
-  cobra, and is required.
+`{"rxn00001_c2": 5.0, "rxn00002_c1": 1.0, "EX_cpd00027_e0": -3.0, "bio3": 0.4}` with
+`member_ids=["A","B"]` and `member_id="B"` yields `{"rxn00001_c0": 5.0, "EX_cpd00027_e0": -3.0, "bio1": 0.4}` and drops `rxn00002_c1`.
+Extracting the rewrite into a module-level function is what makes this testable without
+cobra, and is required.
 - Abundance normalization: `{"a": 3, "b": 1}` becomes `{"a": 0.75, "b": 0.25}`.
 - `MSCommunityUtilsImpl` constructs successfully with a missing delegate and raises a clear
-  `RuntimeError` on attribute access, matching `MSFBAUtilsImpl`'s contract.
+`RuntimeError` on attribute access, matching `MSFBAUtilsImpl`'s contract.
 - The facade property exists, is lazy, and is idempotent — extend the existing
-  `tests/core/test_composition_smoke.py` rather than writing a new smoke test.
+`tests/core/test_composition_smoke.py` rather than writing a new smoke test.
 
 **Tier 2 — MSCommunity present (marked, skipped by default).** Guarded by a
 `pytest.mark.skipif` on `_import_mscommunity() is None`, following the existing
 `tests/modeling/test_predictive_thermo.py` pattern for dependency-gated tests.
 
 - Build a two-member community from `tests/conftest.py`'s `mini_model` fixture duplicated
-  and re-identified; assert `member_ids`, `source_model_ids`, and that compartments `c1`
-  and `c2` both appear.
+and re-identified; assert `member_ids`, `source_model_ids`, and that compartments `c1`
+and `c2` both appear.
 - `predict_abundances(update=False)` leaves `comm.mscomm.abundances` and the primary
-  biomass stoichiometry **byte-identical**; `update=True` changes them.
-  This is the non-mutation guarantee and it is worth a real model to test.
+biomass stoichiometry **byte-identical**; `update=True` changes them.
+This is the non-mutation guarantee and it is worth a real model to test.
 - `run_community_fba` on an infeasible medium returns a result with `trustworthy=False`
-  rather than raising.
+rather than raising.
 - `run_micom` on a GLPK-only environment raises `CommunitySolverError` naming the QP
-  solvers.
+solvers.
 
 **Prior art in the codebase.** `tests/modeling/test_ms_remote_solver_utils.py` for
 dependency-gated modeling tests, `tests/core/test_composition_smoke.py` for facade
@@ -685,6 +783,7 @@ Changing a decision means editing its `DECIDED:` line — and then the propagati
 Entries are ordered by blast radius descending.
 
 ### Q1. Does `predict_abundances` mutate the community by default? — DECIDED: No. Non-mutating by default; `update=True` is opt-in.
+
 **Blast radius:** IRREVERSIBLE
 **Why:** This is the module's central semantic promise and it is baked into every caller's
 mental model from the first use. MSCommunity's `set_abundance` rewrites the primary biomass
@@ -700,6 +799,7 @@ dataclass's `abundances` field stops being meaningful as a record of what was bu
 flag show upstream treats the mutation as a special case too.
 
 ### Q2. Do the wrappers return MSCommunity objects or KBUtilLib-owned result types? — DECIDED: A `CommunityModel` handle plus dataclass results, with `comm.mscomm` exposed as an escape hatch.
+
 **Blast radius:** MEDIUM
 **Why:** Returning raw MSCommunity objects would make the module a pass-through with no
 value beyond import resolution, and would lose the provenance `build_from_species_models`
@@ -717,6 +817,7 @@ which is this call, but it argues from other tools' experience rather than from 
 about MSCommunity, so it corroborates the shape without testing it here.
 
 ### Q3. Which MSCommunity do we wrap? — DECIDED: The standalone `mscommunity` package, with a hard provenance gate rejecting `modelseedpy.community`.
+
 **Blast radius:** MEDIUM
 **Why:** The standalone repo is the maintained line (tip 2026-08-27; adds `micom`,
 regularization, the determinizing QP split, and batched LP). The copy inside ModelSEEDpy
@@ -732,6 +833,7 @@ provenance test is inverted.
 re-absorb it, which would make the gate wrong rather than merely unnecessary.
 
 ### Q4. How is a community model displayed on an Escher map? — DECIDED: Per-member projection onto the member's own source model and an ordinary single-organism map.
+
 **Blast radius:** MEDIUM
 **Why:** Escher maps are keyed on reaction ID and every map KBUtilLib can reach is drawn
 against `_c0`/`_e0`. A community model uses `_c1.._cN` with a shared `_e0`. The three
@@ -753,7 +855,33 @@ dependency of the new module, simplifying the facade property.
 is what the field does) but unchanged on the *usability* — nobody has looked at one of
 these projections yet, which is what would settle it.
 
-### Q5. Where does MSCommunity get declared as a dependency? — DECIDED: `dependencies.yaml`, not `pyproject.toml`.
+### Q5. Do we close the member biomass drains? — DECIDED: Yes, exactly when the caller supplied abundances; `close_member_drains = comm.abundances_were_supplied`.
+**Blast radius:** MEDIUM
+**Why:** Upstream added `close_member_drains` in `57e1504` (2026-09-23) and states the rule
+plainly: set it True "whenever the declared abundance vector is meant to BIND -- any run
+where you read member growth rates or a kinetic coefficient off the solution."
+That is precisely the case this module creates whenever a caller passes `abundances`, which
+Q1 defines as an input that binds. With the drain open a member can synthesise biomass and
+immediately discard it, so its biomass flux exceeds `abundance * bio1` and the CommKinetics
+right-hand side inflates with it — each drained unit buys `kinetic_coef - 1` units of flux
+budget. Upstream measured 83% of one member's biomass leaving through the drain on a
+two-member denitrifying SynCom, and closing the drains moved the lowest feasible kinetic
+coefficient from 1285 to 1481.
+Tying it to `abundances_were_supplied` rather than exposing a third state keeps the rule
+derivable from something the caller already said, instead of asking them to understand a
+flux-budget argument in order to pick a boolean.
+**If you disagree:** `build_community` stops forwarding the flag and upstream's `False`
+default applies; every member growth rate and every kinetic coefficient this module reports
+changes; the `test_member_growth` drain-reopening guard below becomes dead code; and the
+acceptance criteria covering both are removed. Note the reversal is **silent** — numbers
+move, nothing errors.
+**Confidence:** high on the rule, because upstream states the condition and this design
+satisfies it exactly. Medium on the *default* for a community built without abundances,
+where `False` is chosen only because there is no declared vector to bind and upstream's own
+default agrees.
+
+### Q6. Where does MSCommunity get declared as a dependency? — DECIDED: `dependencies.yaml`, not `pyproject.toml`.
+
 **Blast radius:** LOW
 **Why:** MSCommunity has no PyPI release (`setup.py`, version 0.0.1). A `pyproject.toml`
 entry would have to be a git URL, which breaks `pip install KBUtilLib` for anyone without
@@ -763,7 +891,7 @@ already uses for exactly this class of dependency — `modelseedpy`, `ModelSEEDD
 `None` rather than raising when the checkout is absent.
 The scan's one objection to a bare VCS dependency is reproducibility: it recommends pinning
 a **tested commit SHA rather than a branch**. `dependencies.yaml` as used today records only
-`path` and `git`, so the entry adds a third key, `commit: b5f37c4b`, and
+`path` and `git`, so the entry adds a third key, `commit: 2dcff16`, and
 `_import_mscommunity()` logs a warning (never raises) when the resolved checkout's HEAD does
 not match it. Pinning without enforcing keeps a developer working on a newer MSCommunity from
 being blocked, while still making the drift visible.
@@ -775,7 +903,8 @@ from git to exercise Tier 2.
 and no other entry carries one, so it must be additive: `DependencyManager._load_config`
 ignores unknown keys, which was checked, but nothing else in the repo reads it yet.
 
-### Q6. What happens when graphviz is missing? — DECIDED: The cross-feeding *table* still works; only rendering raises, and the error names which of package-or-binary is missing.
+### Q7. What happens when graphviz is missing? — DECIDED: The cross-feeding *table* still works; only rendering raises, and the error names which of package-or-binary is missing.
+
 **Blast radius:** LOW
 **Why:** `graphviz` needs both a Python package and a `dot` system binary, and the binary is
 the one that is usually absent on a cluster. Splitting `cross_feeding_table` from
@@ -785,7 +914,8 @@ Upstream couples them: `interactions(visualize=True)` is the default path.
 `CommunityVisualizationError` loses its reason to exist as a separate type.
 **Confidence:** high.
 
-### Q7. Which module does the community code live in? — DECIDED: `domains/modeling/ms_community_utils.py`, not a new `domains/community/`.
+### Q8. Which module does the community code live in? — DECIDED: `domains/modeling/ms_community_utils.py`, not a new `domains/community/`.
+
 **Blast radius:** LOW
 **Why:** It is modeling work, it inherits `KBModelUtils`, and it sits beside
 `ms_fba_utils.py` and `ms_reconstruction_utils.py` which it most resembles. A new domain
@@ -797,7 +927,8 @@ its new row.
 **Confidence:** high — a second community module would justify revisiting this, and there is
 exactly one.
 
-### Q8. Do we wrap `MSKineticsFBA` (dynamic/kinetic community FBA over time)? — DECIDED: No, not in v1.
+### Q9. Do we wrap `MSKineticsFBA` (dynamic/kinetic community FBA over time)? — DECIDED: No, not in v1.
+
 **Blast radius:** LOW
 **Why:** It is a different analysis — time-series concentration simulation with its own
 matplotlib plotting, its own kinetics data format, and its own failure modes — and the ask
@@ -809,10 +940,11 @@ kinetics-data file format needs its own decisions, and the taskplan gains a phas
 **Confidence:** high — deferring is reversible; the API it would need is independent of
 everything decided here.
 
-### Q9. Do we expose the batched-LP backends (jax / cupy / pdlp)? — DECIDED: Not in v1. No method takes a `backend` argument; `comm.mscomm.extract_problem()` / `solve_batch()` stay reachable through the escape hatch.
+### Q10. Do we expose the batched-LP backends (jax / cupy / pdlp)? — DECIDED: Not in v1. No method takes a `backend` argument; `comm.mscomm.extract_problem()` / `solve_batch()` stay reachable through the escape hatch.
+
 **Blast radius:** LOW
 **Why:** This entry originally said "passthrough only, `backend=` is forwarded", and the
-confront round found the hole: **no method in the design takes a `backend` argument**, so
+confront round found the hole: **no method in the design takes a** `backend` **argument**, so
 there was nothing to forward it through and the entry described a parameter that did not
 exist. The honest version is that v1 exposes no batched-LP surface at all. That costs
 nothing real — `comm.mscomm.solve_batch(instances, backend="jax")` works today through the
@@ -827,7 +959,8 @@ benchmark, which this design has not run.
 **Confidence:** high on the narrowed decision — "we do not expose it" needs no measurement.
 The earlier passthrough claim was medium-confidence and wrong in a way the confront caught.
 
-### Q10. What is the default `kinetic_coeff`? — DECIDED: 750, upstream's default, surfaced as an explicit parameter and recorded on `CommunityModel`.
+### Q11. What is the default `kinetic_coeff`? — DECIDED: 750, upstream's default, surfaced as an explicit parameter and recorded on `CommunityModel`.
+
 **Blast radius:** LOW
 **Why:** Changing upstream's default would make KBUtilLib results differ from MSCommunity
 results for no stated reason. But it must be *visible*, because it has a real failure mode:
@@ -840,34 +973,36 @@ shifts; and the Gotchas entry on silent kinetic-constraint removal needs rewriti
 **Confidence:** high on matching upstream; low on 750 being a *good* value, which is a
 science question this design does not answer.
 
-### Q11. What I could not decide and did not guess
+### Q12. What I could not decide and did not guess
 
 - **Whether a projected member Escher view is useful in practice.** The mechanism is
-  verified; the usability is asserted. Nobody has looked at one. This is the
-  flag-not-question: no artifact I can read says what a modeler wants to see when they ask
-  to "display a community model", and I assumed the answer is "one member at a time, on the
-  map they already use". If the answer is "the whole community at once", Q4 is wrong and so
-  is a third of the visualization work.
-- **Whether `modelseedpy.community` will be retired.** If ModelSEEDpy drops its copy, Q3's
-  provenance gate becomes dead code; if ModelSEEDpy instead re-absorbs the standalone
-  package, the gate becomes actively wrong. I have no artifact stating either intention —
-  the two repos' git histories do not reference each other.
+verified; the usability is asserted. Nobody has looked at one. This is the
+flag-not-question: no artifact I can read says what a modeler wants to see when they ask
+to "display a community model", and I assumed the answer is "one member at a time, on the
+map they already use". If the answer is "the whole community at once", Q4 is wrong and so
+is a third of the visualization work.
+- **Whether** `modelseedpy.community` **will be retired.** If ModelSEEDpy drops its copy, Q3's
+provenance gate becomes dead code; if ModelSEEDpy instead re-absorbs the standalone
+package, the gate becomes actively wrong. I have no artifact stating either intention —
+the two repos' git histories do not reference each other.
 - **Whether the scan's stripped API names hid a contradiction.** The returned file has
-  every inline code span empty, so wherever it named a class or method the name is gone. Its
-  *arguments* are followable and were folded; its *citations of specific APIs* could not be
-  checked. I did not re-run the scan to recover them, because the findings that mattered —
-  typed results, per-member overlays, validate-incompatible-combinations, pin a SHA — are
-  carried by prose that survived intact.
-- **Whether `load_community` can recover `member_ids` from a saved community model in
-  general.** It works when `model.notes["member_biomass_cpds"]` survives the save/load
-  round trip through the KBase workspace. I could not verify that it does, because it
-  depends on the workspace model serializer's treatment of `notes`, and I did not run one.
-  The design raises rather than guessing when the key is absent, which makes the failure
-  visible instead of wrong.
+every inline code span empty, so wherever it named a class or method the name is gone. Its
+*arguments* are followable and were folded; its *citations of specific APIs* could not be
+checked. I did not re-run the scan to recover them, because the findings that mattered —
+typed results, per-member overlays, validate-incompatible-combinations, pin a SHA — are
+carried by prose that survived intact.
+- **Whether** `load_community` **can recover** `member_ids` **from a saved community model in
+general.** It works when `model.notes["member_biomass_cpds"]` survives the save/load
+round trip through the KBase workspace. I could not verify that it does, because it
+depends on the workspace model serializer's treatment of `notes`, and I did not run one.
+The design raises rather than guessing when the key is absent, which makes the failure
+visible instead of wrong.
+
+
 
 ## Gotchas and Unintuitive Consequences
 
-**`build_from_species_models` renames your models' metabolites and reactions.** It copies
+`build_from_species_models` **renames your models' metabolites and reactions.** It copies
 the inputs, but the copies get compartment suffixes rewritten (`c` → `c{i}`), biomass
 reactions renumbered (`bio2`, `bio3`, …), and non-ModelSEED IDs mangled by
 `correct_nonMSID`. A member model *inside* a community is not the model you passed in, and
@@ -899,12 +1034,23 @@ marker-based, so **an upstream wording change silently stops setting the flag**;
 are asserted in a test against the literal strings in `mscommsim.py` so that drift fails
 loudly rather than quietly.
 
+**Closing the biomass drains silently zeroes solo growth.** This is the sharpest
+consequence of Q5 and it follows from nothing in the Solution section. `close_member_drains`
+makes the declared abundances bind, which is what we want — and it simultaneously breaks
+every measurement that switches the other members off, because `bio1` consumes every
+member's biomass compound and the drain was the only other outlet. Upstream compensated in
+`_solo_max_batch` and not in `test_individual_species`. A caller reaching past this module
+to `comm.mscomm.test_individual_species(interacting=False)` on an abundance-bound community
+gets a table of zeros that looks like a scientific result.
+The related asymmetry is worth holding too: `predict_abundances` and `regularization` go
+through `_solo_max_batch`, so they are safe; the non-batched solo paths are not.
+
 **A sub-optimal LP does not raise.** `_set_solution` logs an error and sets
 `suboptimal_solution = True`, then returns the solution anyway. `trustworthy` exists
 entirely because of this, and any code path that bypasses `CommunityFBAResult` loses the
 signal.
 
-**`micom()` swaps your solver and swaps it back — but not your objective order.** It
+`micom()` **swaps your solver and swaps it back — but not your objective order.** It
 restores the caller's objective *before* restoring the solver, deliberately, because a
 quadratic objective cannot be cloned into a non-QP interface. If an exception escapes
 between those two steps the model is left on the QP backend. Rare, but the model object is
@@ -932,7 +1078,7 @@ see output they did not ask for.
 protects the calls we make; it cannot protect upstream's. On 3.9, `comm.mscomm.interactions()`
 is broken and `kbu.community.cross_feeding_table()` works.
 
-**`EX_` reactions are community-level and cannot be attributed to a member.** In the
+`EX_` **reactions are community-level and cannot be attributed to a member.** In the
 projection, a member's apparent uptake is really the community's. Two members consuming the
 same substrate are indistinguishable in the exchange fluxes. The banner says so; the numbers
 cannot.
@@ -950,7 +1096,7 @@ burst of warnings about `modelseedpy`, `cobrakbase` and `ModelSEEDDatabase` as w
 Verified by reading `core/dependency_manager.py:111-141` and by constructing the facade
 locally, which printed only the existing optional-import summary line.
 
-**A `render_member_map` projection is not a simulation of that member.** It is the member's
+**A** `render_member_map` **projection is not a simulation of that member.** It is the member's
 slice of a community solution, which includes fluxes that only balance because *another*
 member is consuming or producing something. Running the source model alone on the same
 medium will generally give a different answer, and that difference is the interesting
@@ -958,100 +1104,127 @@ result, not an error.
 
 ## Sources Consulted
 
-**MSCommunity** (github.com/ModelSEED/MSCommunity, tip `b5f37c4b`, 2026-08-27):
+**MSCommunity** (github.com/ModelSEED/MSCommunity, tip `2dcff16`, 2026-09-23; re-read in
+full after the five commits that landed that morning, and diffed against `b5f37c4b`):
 
+- The five commits `b5f37c4b..2dcff16` and their messages: `57e1504` (member biomass drain
+  detection, the `member_kinetic_reactions` membership rule, and the new
+  `close_member_drains`), `b14f50f` (build-time solver scaling via `build_solver` /
+  `final_solver`, float abundances, and the `MSGapfill` solver positional), plus the three
+  merge commits. `tests/test_f_biomass_drains.py` read as the upstream contract for the
+  drain behavior.
+- `mscommunity/commkineticpkg.py` — `member_kinetic_reactions`, which now defines member
+  kinetic membership once for both `add_commkinetics` and `CommKineticPkg.build_constraint`;
+  the two previously disagreed on the community biomass reaction.
 - `mscommunity/mscommsim.py` — `MSCommunity.__init__` (compartment/biomass discovery,
-  `CommKineticPkg` construction), `set_abundance` (in-place biomass rewrite), `run_fba`,
-  `_set_solution` (sub-optimality logging), `_comm_growth`, `predict_abundances`
-  (PATCH 3 kinetic-constraint removal), `micom` (QP backend swap), `gapfill`,
-  `test_individual_species`, `extract_problem`/`solve_batch`, `_QP_CAPABLE`.
+`CommKineticPkg` construction), `set_abundance` (in-place biomass rewrite), `run_fba`,
+`_set_solution` (sub-optimality logging), `_comm_growth`, `predict_abundances`
+(PATCH 3 kinetic-constraint removal), `micom` (QP backend swap), `gapfill`,
+`test_individual_species`, `extract_problem`/`solve_batch`, `_QP_CAPABLE`.
 - `mscommunity/commhelper.py` — `build_from_species_models` lines 44–140: the compartment
-  index assignment (`index = 0 if compartment == "e" else model_index`, `model_index`
-  starting at 1), biomass renumbering, and `correct_nonMSID`.
+index assignment (`index = 0 if compartment == "e" else model_index`, `model_index`
+starting at 1), biomass renumbering, and `correct_nonMSID`.
 - `mscommunity/mscommviz.py` — module-level `@staticmethod` at lines 37, 84, 99, 252;
-  `interactions` return shape `(cross_feeding_df, exMets_df)`; `visual_interactions` msdb
-  requirement; `abundance_variability_analysis`; `run_fba`'s `minMemGrwoth` history.
+`interactions` return shape `(cross_feeding_df, exMets_df)`; `visual_interactions` msdb
+requirement; `abundance_variability_analysis`; `run_fba`'s `minMemGrwoth` history.
 - `mscommunity/__init__.py`, `setup.py` — export surface; no PyPI release; dependency list.
-- `mscommunity/mskineticsfba.py` — read to scope Q8; not wrapped.
+- `mscommunity/mskineticsfba.py` — read to scope Q9; not wrapped.
 - `mscommunity/batched_lp.py`, `mscommunity/backends/` — read for the `backend=` passthrough
-  in Q9; not otherwise used.
+in Q10; not otherwise used.
 
 **ModelSEEDpy** (`~/Dropbox/Projects/ModelSEEDpy`):
 
 - `modelseedpy/community/mscommunity.py` — the diverged 718-line copy; `MSCommunity` with
-  `build_from_species_models` as a method, `compute_interactions`, `run`, `steady_com`.
+`build_from_species_models` as a method, `compute_interactions`, `run`, `steady_com`.
 - `modelseedpy/community/__init__.py` — confirms `MSCommunity` is exported by `import *`,
-  which is what makes the name collision live.
+which is what makes the name collision live.
 
 **KBUtilLib** (`~/Dropbox/Projects/KBUtilLib`, branch `wip` at `76d0f65`):
 
 - `src/kbutillib/toolkit.py` — the facade: `__init__` backing fields, the lazy-property
-  pattern, sibling-injection (`MSFBAUtilsImpl(self.env, self.model)`,
-  `EscherUtilsImpl(self.env, self.model, self.biochem)`).
+pattern, sibling-injection (`MSFBAUtilsImpl(self.env, self.model)`,
+`EscherUtilsImpl(self.env, self.model, self.biochem)`).
 - `src/kbutillib/__init__.py` — `_import_error` / `_flush_import_errors` optional-import
-  pattern for legacy class re-exports.
+pattern for legacy class re-exports.
 - `src/kbutillib/domains/modeling/ms_fba_utils.py` — the exemplar: module docstring pinning
-  upstream APIs, `@capability` usage, `MSFBAUtils(KBModelUtils)` plus `MSFBAUtilsImpl` with
-  `available` / `unavailable_reason` / `__dir__` / `__getattr__`.
+upstream APIs, `@capability` usage, `MSFBAUtils(KBModelUtils)` plus `MSFBAUtilsImpl` with
+`available` / `unavailable_reason` / `__dir__` / `__getattr__`.
 - `src/kbutillib/domains/modeling/kb_model_utils.py` — `get_model`, `get_media`,
-  `save_model`, `_check_and_convert_model`, `_parse_id`.
+`save_model`, `_check_and_convert_model`, `_parse_id`.
 - `src/kbutillib/domains/notebook/escher_utils.py` — `create_map_html2`,
-  `_translate_model_with_flux`, `_get_short_reaction_name`, `list_available_maps`;
-  establishes that maps are keyed on reaction ID with `_c0`/`_e0` compartments.
+`_translate_model_with_flux`, `_get_short_reaction_name`, `list_available_maps`;
+establishes that maps are keyed on reaction ID with `_c0`/`_e0` compartments.
 - `src/kbutillib/core/dependency_manager.py` — `get_dependency_path`, `get_data_path`,
-  `initialize_dependencies`.
+`initialize_dependencies`.
 - `src/kbutillib/core/capability.py` — the `@capability` decorator contract (inert to calls;
-  availability degrades gracefully).
+availability degrades gracefully).
 - `src/kbutillib/compartments.py` — `normalize_compartment`; read and found **insufficient**
-  for community compartments: its table stops at `c0`/`e0`/`p0`/`m0` and has no notion of an
-  arbitrary index, which is why the projection carries its own rewrite.
+for community compartments: its table stops at `c0`/`e0`/`p0`/`m0` and has no notion of an
+arbitrary index, which is why the projection carries its own rewrite.
 - `dependencies.yaml`, `pyproject.toml` — the two dependency surfaces and which is which.
 - `tests/conftest.py` (`mini_model`, `kbutillib_app` fixtures), `tests/modeling/`,
-  `tests/core/test_composition_smoke.py` — test conventions.
+`tests/core/test_composition_smoke.py` — test conventions.
 - `src/kbutillib/domains/modeling/README.md`, `src/kbutillib/domains/notebook/README.md` —
-  the module-table convention the new module must join.
+the module-table convention the new module must join.
 - `src/kbutillib/domains/thermo/thermo_predictors/base.py` — `dependency_repo_path`, the
-  worked example of best-effort `get_dependency_path` resolution.
+worked example of best-effort `get_dependency_path` resolution.
 
 **External scan** (`research/external-scan.md`, Maestro `task-c1a370b4`, h100/codex,
 verified from the task branch):
 
 - Section 1 — API shape of MICOM, SteadyCom/SteadyComPy, SMETANA, COMETS, cobrapy community
-  tooling, PyCoMo, MMinte, BacArena, gapseq.
+tooling, PyCoMo, MMinte, BacArena, gapseq.
 - Section 2 — the abundance/growth-rate semantics trap and the infeasibility failure mode
-  that motivated the `run_community_fba` refusal.
+that motivated the `run_community_fba` refusal.
 - Section 3 — visualization libraries and scaling limits (~30–50 nodes; multi-member Escher
-  overlays confusing beyond two or three members).
+overlays confusing beyond two or three members).
 - Section 5 — GitHub-only dependency practice; the commit-SHA pinning recommendation.
 - Eighteen cited URLs. Read and found **degraded**: all inline code spans are empty, so no
-  API name in it is quotable.
+API name in it is quotable.
 
 **Other:**
 
 - `KB-ModelSEEDCommunity/lib/ModelSEEDCommunity/ModelSEEDCommunityImpl.py` and
-  `mscommunitymodule.py` — existing KBase SDK app; read and found not reusable (app-shaped,
-  pinned to the superseded ModelSEEDpy copy).
+`mscommunitymodule.py` — existing KBase SDK app; read and found not reusable (app-shaped,
+pinned to the superseded ModelSEEDpy copy).
 - Local verification of `staticmethod` call semantics under Python 3.11.14.
+- **Negative result, recorded because an absence Chris can see is one he can correct:**
+  `grep -ri escher` over `ModelSEED/MSCommunity` returns nothing on `main` (`2dcff16`),
+  nothing on `gpu` (`bb26f99`, 2026-06-11, eleven commits behind and carrying no commits of
+  its own), and nothing on `freiburgermsu/MSCommunity`, whose only branches are `main`
+  (`bdc5316`, already merged) and `fix/member-biomass-drains` (`57e1504`, already merged).
+  `mscommviz.py` is byte-identical across `b5f37c4b..2dcff16`.
 - `agent-io/prds/kbu-prott5-and-horizyn-client-v1/` — read for current PRD bundle shape in
-  this repo.
+this repo.
+
+
 
 ## Out of Scope
 
-- **Dynamic / kinetic community FBA** (`MSKineticsFBA`) — deferred per Q8.
+- **Dynamic / kinetic community FBA** (`MSKineticsFBA`) — deferred per Q9.
 - **Generating a community-wide Escher map.** No such map exists to build from, and laying
-  one out is a project, not a task.
+one out is a project, not a task. Re-checked 2026-09-23 against MSCommunity tip `2dcff16`:
+the package ships no Escher code of any kind on any branch, so there is nothing upstream to
+adopt here either.
 - **Community model reconstruction from metagenomes.** Members come in as models; producing
-  them is `kbu.recon`'s job.
+them is `kbu.recon`'s job.
 - **A KBase SDK app or narrative report.** This is a library module.
-  `KB-ModelSEEDCommunity` already occupies the app slot and is not touched.
-- **Fixing MSCommunity upstream.** The `@staticmethod` bug, the stdout printing and the
-  silent kinetic-constraint removal are all upstream defects. This PRD works around the
-  first and documents the other two; it does not patch the dependency.
+`KB-ModelSEEDCommunity` already occupies the app slot and is not touched.
+- **Fixing MSCommunity upstream.** The `@staticmethod` bug, the stdout printing, the silent
+kinetic-constraint removal and the unguarded `test_individual_species` under closed drains
+are all upstream defects. This PRD works around the first, second and fourth, and surfaces
+the third into `CommunityFBAResult`; it does not patch the dependency. Where upstream has
+since fixed something itself — as with the biomass drains — the pin is raised rather than
+the workaround kept.
 - **CommPhitting, MSSteadyCom, MSCompatibility, commscores** — the other ModelSEEDpy
-  community modules. Not in the standalone package and not part of the ask.
-- **Adding jax / cupy / ortools to KBUtilLib's dependencies** — per Q9, passthrough only.
+community modules. Not in the standalone package and not part of the ask.
+- **Adding jax / cupy / ortools to KBUtilLib's dependencies**, and the batched-LP surface
+itself — per Q10, v1 exposes no batch API at all; `comm.mscomm.solve_batch` stays reachable
+through the escape hatch.
 - **Benchmarking.** No performance criterion appears in the taskplan because none was
-  measured.
+measured.
+
+
 
 ## Further Notes
 
@@ -1075,7 +1248,7 @@ should fold it and revisit Q2 and Q4 specifically.
 
 ## Acceptance Criteria
 
-1. `dependencies.yaml` declares `mscommunity` with `path`, `git` and `commit: "b5f37c4b1a42175503cf52aebc5ab9c4cc330b1e"`, and `DependencyManager` is unchanged.
+1. `dependencies.yaml` declares `mscommunity` with `path`, `git` and `commit: "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc"`, and `DependencyManager` is unchanged.
 2. `_import_mscommunity()` resolves the package by normal import first, then via `get_dependency_path("mscommunity")`, and returns `None` rather than raising in every failure case.
 3. `_import_mscommunity()` ACCEPTS a `MSCommunity` class whose `__module__` starts with `mscommunity.` and REJECTS one whose `__module__` starts with `modelseedpy`, and the rejection reason contains the literal phrase "the superseded copy" followed by the module path actually resolved.
 4. A commit mismatch between `PINNED_MSCOMMUNITY_COMMIT` and the resolved checkout's HEAD logs a warning naming both SHAs and never raises, never refuses the import.
@@ -1106,4 +1279,8 @@ should fold it and revisit Q2 and Q4 specifically.
 29. No `mscommunity`, `cobra`, `networkx` or `graphviz` symbol is imported at module scope in `ms_community_utils.py`.
 30. `domains/modeling/README.md` lists `ms_community_utils.py` in its module table and canonical imports.
 31. All Tier-1 tests pass with MSCommunity, cobra, graphviz and every solver absent; the Tier-2 file collects and skips cleanly in the same environment.
-32. No test that passed on the base commit fails on the branch.
+32. `build_community` passes `close_member_drains=True` to `MSCommunity` exactly when `abundances` is not None, records it on the handle, and forwards `build_solver` / `final_solver` with upstream's defaults.
+33. `test_member_growth(interacting=False)` on a community built WITH abundances reopens every member's drain from `member.biomass_drain_bounds` inside the model context manager before delegating, and records in the returned DataFrame's `.attrs` that it did so.
+34. A test proves that solo growth measured through `test_member_growth` on an abundance-bound community is non-zero where the same call against `comm.mscomm.test_individual_species(interacting=False)` returns zero — the false-zero this guard exists to prevent.
+35. No test that passed on the base commit fails on the branch.
+

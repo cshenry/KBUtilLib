@@ -1,0 +1,74 @@
+{
+  "prd_name": "kbu-community-analysis-v1",
+  "title": "Community metabolic analysis utilities for KBUtilLib (MSCommunity)",
+  "owning_repo": "KBUtilLib",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "status": "draft",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "draft_commit": null,
+  "review_protocol": "Written single-pass by /ai-design Draft Mode on 2026-09-23. The external research scan (Maestro task-c1a370b4, h100/codex) returned during authoring and was folded before commit. Chris reviews by editing fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-community-analysis-v1` diffs the working tree against draft_commit, classifies and propagates every hunk, and recommits with a fresh baseline. The PRD is held at draft until at least one review round has folded.",
+  "research_must_read": [
+    {
+      "path": "research/external-scan.md",
+      "why": "Maestro task-c1a370b4. Confirms the typed-result (Q2) and per-member-overlay (Q4) decisions; supplied the cross_feeding_graph addition, the over-specification refusal, and the commit-SHA pinning. DEGRADED: every inline code span is empty, so no API name in it is quotable.",
+      "priority": 1
+    }
+  ],
+  "key_findings_2026_09_23": {
+    "mscommunity_divergence": "modelseedpy/community/mscommunity.py (718 lines) and the standalone mscommunity/mscommsim.py (881 lines, tip b5f37c4b, 2026-08-27) both define a class named MSCommunity and both are exported by `import *`. They share most method names, so the wrong import produces plausible wrong numbers rather than an error. This drove the hard provenance gate (Q3).",
+    "compartment_scheme": "build_from_species_models (commhelper.py:44-140) assigns member i (1-BASED) the intracellular compartment c{i}, SHARES one extracellular compartment e0 across all members, and renumbers member biomass reactions to bio2, bio3, ... A single-organism Escher map is drawn against _c0/_e0, which is why a per-member projection is required (Q4).",
+    "abundance_is_stoichiometry": "MSCommunity.set_abundance rewrites the primary biomass reaction's metabolite coefficients in place via add_metabolites(combine=False). Abundance is therefore part of the model, not a constraint, and predict_abundances(update_abundances=True) mutates it mid-analysis. This drove the non-mutating default (Q1).",
+    "staticmethod_hazard": "mscommviz.py lines 37, 84, 99, 252 decorate MODULE-LEVEL functions with @staticmethod. staticmethod objects are only directly callable on Python 3.10+; KBUtilLib declares requires-python >=3.9. Verified against Python's own staticmethod semantics. Drove the _unwrap helper.",
+    "dependency_mechanism": "dependencies.yaml + core/dependency_manager.py already resolves modelseedpy, ModelSEEDDatabase, cobrakbase and cb_annotation_ontology_api as GitHub-only sibling checkouts. _load_config returns the raw YAML dict and initialize_dependencies reads only 'path' and 'git' (verified at dependency_manager.py:62-141), so an added 'commit' key is inert. Drove Q5.",
+    "dependency_warning_side_effect": "initialize_dependencies() prints (not logs) 'Warning: Dependency <name> not found' for EVERY missing entry. SharedEnvUtils constructs its manager with auto_init=False so facade construction is quiet today (verified locally: only the existing optional-import summary line printed), but the singleton used by get_dependency_path has auto_init=True."
+  },
+  "open_question_counts": {
+    "IRREVERSIBLE": 1,
+    "MEDIUM": 3,
+    "LOW": 6,
+    "NONE": 0,
+    "terminal_could_not_decide": 4
+  },
+  "highest_risk_entry": "Q4 \u2014 how a community model is displayed on an Escher map. MEDIUM blast radius at medium confidence: the projection mechanism is verified from source, but nobody has ever looked at one of these member views, so whether it is what a modeler wants when they ask to 'display a community model' is answered by assertion.",
+  "flag_not_question": "No artifact states what a modeler wants to SEE when they ask to display a community model. Assumed: one member at a time, projected onto the single-organism Escher map they already use. If the answer is 'the whole community at once', Q4 is wrong and about a third of the visualization work changes.",
+  "external_research_task": "task-c1a370b4",
+  "confront_task": "task-63133ccb",
+  "out_of_scope": [
+    "MSKineticsFBA dynamic/kinetic community FBA",
+    "a community-wide Escher map",
+    "community reconstruction from metagenomes",
+    "a KBase SDK app or narrative report",
+    "patching MSCommunity upstream",
+    "CommPhitting / MSSteadyCom / MSCompatibility / commscores",
+    "adding jax / cupy / ortools to KBUtilLib dependencies",
+    "benchmarking"
+  ],
+  "confront_round_1": {
+    "task_id": "task-63133ccb",
+    "backend": "codex",
+    "machine": "h100",
+    "date": "2026-09-23",
+    "artifact": "research/confront-round-1.md",
+    "verified": "read from branch maestro/researcher/you-are-the-autonomous-build-con-task-63133ccb; both required sections present",
+    "stall_points": 18,
+    "folded": 14,
+    "design_changed": 2,
+    "declined": [
+      "S7 env-var half: an MSCOMMUNITY_MSDB_PATH fallback for the case where upstream stops accepting msdb_path= -- declined as untestable dead code that would hide a real signature break behind a silent fallback.",
+      "Free critique: raise KBUtilLib's minimum Python to 3.10 to dodge the mscommviz staticmethod hazard -- declined because that is a library-wide decision this PRD does not get to make; _unwrap costs one line."
+    ],
+    "adjudicated_by": "jane, in-session -- Draft Mode does not block on Chris for a drop-list",
+    "sharpest_catch": "S12: the new exceptions should derive from kbutillib.core.errors (BackendUnavailableError / KBUtilLibError), which EXISTS at core/errors.py:18-22. The draft had specified bare Exception. Verified before folding.",
+    "most_consequential": "S4+S13: nothing persisted the community provenance across a save/load round trip, so source_model_ids was lost and render_member_map would fail after a reload. Now save_community writes model.notes['kbutil.community'] as JSON and load_community reads it back, with acceptance criterion 9 covering the round trip.",
+    "design_changes": [
+      "S11: fva_reactions REMOVED from run_community_fba -- upstream's result shape is unspecified and CommunityFBAResult had no field for it; reachable via the escape hatch.",
+      "S16: Q9 rewritten. The draft claimed a `backend=` passthrough, but NO method took that argument, so it described a parameter that did not exist. v1 now exposes no batched-LP surface at all."
+    ],
+    "corrected_while_folding": "S6 recommended detecting QP capability via comm.mscomm._QP_CAPABLE. That attribute does not exist -- _QP_CAPABLE and _pick_qp_backend are MODULE-level names in mscommunity.mscommsim. Folded in the corrected form.",
+    "free_critique_folded": "Capture upstream's stdout during delegate calls so the silent kinetic-constraint removal becomes CommunityFBAResult.kinetics_relaxed and .notes, and the print noise stops reaching the notebook."
+  },
+  "acceptance_criteria_count": 32
+}

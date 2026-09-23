@@ -70,15 +70,13 @@
     "LOW": 4,
     "NONE": 1,
     "ordering_rule": "entries are ORDERED by blast radius descending; Q-NUMBERS are stable ids, not positions; Q11 (terminal could-not-decide) always sorts last",
-    "highest_risk_entry": "Q10 -- pod data reachability. Low confidence, irreversible blast radius. Everything was read on primary-laptop; KIND primarily runs on the kbhub pod, which uses selective Dropbox sync. If the runs tree is not reachable there, the join has nowhere to live and Q1 moves with it.",
-    "second_highest": "Q12 -- how much CAC conformance is owed. Irreversible, medium confidence, and the premise reached this session BY RELAY about the sibling's app rather than from Chris directly.",
+    "highest_risk_entry": "Q1 -- the storage schema boundary. Which statistics are precomputed into SQL columns is the part most likely to need a second pass (see G21, version-stamped summaries). Q10 and Q12, previously the two weakest irreversible entries, were both resolved by Chris on 2026-09-23.",
+    "second_highest": "Q7 -- record identity collapsing re-runs to one row. Medium confidence; an argument exists that re-runs are themselves interesting.",
     "note": "Q15 (unattributed records as a first-class state) added after the sibling exchange"
   },
   "could_not_decide": [
-    "Whether ~/Dropbox/Science/runs and the KBDL object store are reachable from the kbhub pod. One question to Albert via cw-trigger-wake answers it; costs a paid session there, so needs Chris's yes.",
-    "Whether Chris wants arc analysis records in git history (Q6 decides no).",
-    "Whether 'an official app in KOROS' was said about THIS app -- it was relayed from session 1f49b595, who was told it about the annotation app.",
-    "Whether 'official' means contributed UPSTREAM into king/koros, or a registered conformant capability in our own repo. Designed for the second; the consume-only interlock forbids the first.",
+    "Whether the KBDL object store is reachable from the kbhub pod. The runs tree is (Chris, 2026-09-23); the object store was never checked and the artifact resolver degrades without it.",
+    "Whether 'official' means contributed UPSTREAM into king/koros, or a registered conformant capability in our own repo. Chris confirmed the designation applies to this app but not which reading of it. Designed for the second; the consume-only interlock forbids the first.",
     "The CAC's own unfilled <fill:> seams: the ORCID handoff (C), the id-normalization helper (E), and the contract_version gate mechanics (F)."
   ],
   "artifact_id": null,
@@ -191,5 +189,23 @@
       "G22 the two-tier split forecloses cross-subject detail queries; the fix is a derived index, not a schema change",
       "G23 recording is on by default so the write side must fail soft and never break a pipeline run"
     ]
+  },
+  "chris_answers_2026_09_23": {
+    "official_app_in_koros": {
+      "question": "Did 'official app in KOROS' apply to this app or only the annotation twin?",
+      "answer": "Yes - it applies to both.",
+      "effect": "Q12's premise is Chris's direct word, not an inference from the apps being twins. Confidence medium -> HIGH. Relay caveat removed from the closing output and from the terminal could-not-decide list."
+    },
+    "pod_reachability": {
+      "question": "Is ~/Dropbox/Science/runs reachable from the kbhub pod?",
+      "answer": "Yes, it definitely is.",
+      "effect": "Q10's load-bearing unknown is closed. Confidence low -> HIGH on the runs tree (recorded as Chris's assertion, not a probe). No cw-trigger-wake to Albert was needed. Only the KBDL object store remains unchecked, and artifact resolution keeps its degrade path."
+    },
+    "runs_root_resolution": {
+      "instruction": "KOROS_HOME should be used for the path to projects.... don't assume it's Dropbox/Science/runs.",
+      "effect": "Corrected the runs-root precedence everywhere: explicit --runs-root, then $KOROS_HOME/runs, then $KING_KOROS_RUNS, then raise. No hardcoded fallback path anywhere in the PRD or the taskplan.",
+      "verified_in_source": "KOROS_HOME is the WORKSPACE ROOT with runs at $KOROS_HOME/runs (koros_start.py:24-27, research_init.py:98-102, koros/INSTALL.md:88-92). KING's override is KING_KOROS_RUNS (king_backend/config.py:25).",
+      "skill_defect_found": "the cw-kind skill instructs resolving via 'config.KOROS_RUNS / $KIND_KOROS_RUNS'. KIND_KOROS_RUNS DOES NOT EXIST anywhere in the stack -- the real name is KING_KOROS_RUNS, and the KING->KIND rename left this behind. The skill also gives ~/Dropbox/Science/runs as the pod path, which is one machine's local layout. This PRD's first draft inherited both errors from the skill. Filed as a separate task."
+    }
   }
 }

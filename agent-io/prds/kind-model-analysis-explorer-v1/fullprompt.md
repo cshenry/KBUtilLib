@@ -56,6 +56,7 @@ as an explicit parameter (Q4).
 **4. Arcs are directories, not records, and their metadata is thinner than it looks.**
 Layout is `<runs_root>/<project>/arcs/<slug>/` with a `PROVENANCE.json` per
 arc; `king_backend/p0.py:93` also accepts a project dir that is itself an arc.
+**The runs root is resolved, never assumed** — see the correction in finding 12.
 A live example (`runs/genome-clearinghouse/arcs/mag-integration-arc`) carries
 `run_id, run_name, created_at, created_by, init_provenance, project, role,
 leg_of, parent, history`
@@ -201,6 +202,32 @@ Two findings that changed decisions in this PRD:
   concordance categories and a summary but no MCC; the arc-level view adds it
   (Q14).
 
+**12. THE RUNS ROOT IS AN ENV-RESOLVED PATH AND THE SKILL DOCUMENTING IT IS
+WRONG.** Chris, 2026-09-23: *"KOROS_HOME should be used for the path to
+projects.... don't assume it's Dropbox/Science/runs."* Checked against source
+rather than taken on the instruction, and he is right — with a wrinkle worth
+recording, because **two different variables exist and they belong to different
+tools**:
+
+- **`KOROS_HOME` — koros's own, and the one that matters here.** koros resolves
+  its runs root as `--runs-root` → **`$KOROS_HOME/runs`** → the repo's `runs/`
+  (`koros/skills/koros-start/koros_start.py:24-27`,
+  `research_init.py:98-102`, `koros_project.py:496,509`, and
+  `koros/INSTALL.md:88-92`: *"An installed koros looks for your runs under
+  `$KOROS_HOME`"*). Note the shape: `KOROS_HOME` is the **workspace root**, and
+  runs live at `$KOROS_HOME/runs` — it is not itself the runs directory.
+- **`KING_KOROS_RUNS` — KING's override**, at `king_backend/config.py:25`:
+  `KOROS_RUNS = Path(os.environ.get("KING_KOROS_RUNS", KOROS_DIR / "runs"))`.
+
+**The `cw-kind` skill names neither correctly.** It says to "resolve via
+`config.KOROS_RUNS` / `$KIND_KOROS_RUNS`", and **`KIND_KOROS_RUNS` does not
+exist anywhere in the stack** — the real variable is `KING_KOROS_RUNS` (KING,
+not KIND; the rename left this behind). It also gives
+`~/Dropbox/Science/runs` as the pod path, which is a local fact about this
+laptop, not a constant. This PRD's first draft inherited both errors from the
+skill. Filed against the skill separately; **read the source, not the skill**,
+for this.
+
 ### Links to full research output
 
 - [External prior-art scan](research/external-scan.md) — run on h100 as Maestro
@@ -233,7 +260,7 @@ KBUtilLib source including `escher_utils.py`, `fitness_dashboard.py`,
 `kind_app/bundle.json` and its `skill.md`;
 KBDL source including all ten job types, `object_store/store.py`,
 `object_store/references.py`, and the clearinghouse module;
-the live KOROS runs tree at `~/Dropbox/Science/runs` including a real
+the live KOROS runs tree on THIS laptop (at `~/Dropbox/Science/runs`, which is this machine's `$KOROS_HOME/runs` and not a constant — finding 12) including a real
 `PROVENANCE.json` and a real arc directory listing;
 the KBDL PRD corpus (30 PRDs) with `kbdl-fitness-prop-v1` and
 `clearinghouse-lake-1d-per-entity-type-tables` read in substance;
@@ -244,10 +271,11 @@ the AIAssistant project registry.
 - **The pod.** Everything here was read on primary-laptop. KIND's *primary*
   environment is the kbhub BERDL pod, where the five repos sit flat in `~`,
   `KING_STATE` is `~/kind-apps`, and kbhub runs **selective** Dropbox sync that
-  excludes several `Projects/*` repos. Whether `~/Dropbox/Science/runs` and the
-  KBDL object store are reachable from the pod **was not verified** and is the
-  single largest hole in this research. It is carried as Q10 and as the
-  terminal could-not-decide entry, not silently assumed.
+  excludes several `Projects/*` repos. Whether the runs tree and the KBDL
+  object store are reachable from the pod was the single largest hole in this
+  research when it was written. **Chris confirmed on 2026-09-23 that the runs
+  tree is reachable**, which closes the half that mattered; the object store
+  remains unchecked and keeps its degrade path. See Q10.
 - **A running KIND server.** No live `GET /api/apps` or
   `/api/projects/<p>/overview` call was made; the endpoint shapes come from
   source and docs. The manifest is written from the live
@@ -501,8 +529,8 @@ The interface this PRD is written against:
 
 ```python
 def resolve_runs_root() -> Path: ...
-    # KIND_KOROS_RUNS, then KOROS config, then pod layout, then laptop layout.
-    # Raises rather than guessing.
+    # explicit --runs-root, then $KOROS_HOME/runs, then $KING_KOROS_RUNS.
+    # RAISES rather than guessing. NO hardcoded path, ever.
 
 class KorosArcStore:
     def list_projects(self) -> list[ProjectRecord]: ...
@@ -1028,24 +1056,31 @@ re-read for the change. The seam itself does not move either way.
 **Confidence:** high — the direction follows from Chris's stated build order,
 not from a preference.
 
-### Q10. Is the data reachable from the kbhub pod, where KIND primarily runs? -- DECIDED: assume the runs tree is reachable and the KBDL object store may not be; make object-store access optional and degrade to file-path artifacts.
+### Q10. Is the data reachable from the kbhub pod, where KIND primarily runs? -- DECIDED: the KOROS runs tree IS reachable (confirmed by Chris); the KBDL object store may not be, so object-store access stays optional and degrades to file-path artifacts.
 
 **Blast radius:** IRREVERSIBLE
-**Why:** KIND's primary environment is the pod, kbhub runs **selective**
-Dropbox sync that deliberately excludes several `Projects/*` repos, and this
-was **not verified** from the pod during this session. Designing as though both
-stores are present would produce an app that works on the laptop and is empty
-on the machine it is meant to run on. Making object-store access optional means
-the app degrades to whatever artifacts are reachable as file paths rather than
-failing.
+**Why:** KIND's primary environment is the pod, and kbhub runs **selective**
+Dropbox sync that deliberately excludes several `Projects/*` repos — so whether
+the runs tree is visible there was the load-bearing unknown in this design.
+**Chris confirmed it on 2026-09-23: it is reachable.** That settles the half
+that mattered, because both apps enumerate projects and arcs from
+`PROVENANCE.json` to render level 0, and an unreachable runs tree would have
+left the app empty on the machine it is meant to run on.
+Q1's storage change settles the other half from the opposite direction: the
+per-user database is created in the pod home directory, so it is reachable by
+construction. What remains genuinely uncertain is only the **KBDL object
+store**, which is why artifact resolution keeps its degrade path.
 **If you disagree:** if the object store turns out to be fully reachable from
 the pod, the optional path is dead weight and `p3-artifact-resolver` simplifies
 to a single code path. If the *runs tree* turns out **not** to be reachable,
 the entire design changes — there is no arc to stamp, and the join would have
 to move to a central index on the pod, taking Q1 with it.
-**Confidence:** low — this is the least-verified load-bearing assumption in the
-PRD, and it is low-confidence with an irreversible blast radius, which is why
-it sorts here despite being listed last among the irreversibles.
+**Confidence:** HIGH on the runs tree, on Chris's direct confirmation rather
+than a probe — worth stating as his assertion rather than a measurement, but he
+is the authority on his own pod. Medium on the object store, which nobody has
+checked and which the degrade path makes survivable either way. This entry was
+the PRD's weakest irreversible call when it was written; it is now among its
+strongest.
 
 ### Q12. How much CAC conformance does "an official app in KOROS" actually require? -- DECIDED: the plane-1 + plane-2 profile, which the contract calls universal. NOT plane 3, which it calls opt-in.
 
@@ -1069,10 +1104,12 @@ and a lakehouse dependency this PRD does not currently have. It also becomes
 the right call the moment the annotation app wants to consume model output,
 because I3 forbids the two apps importing each other — they must meet in the
 lakehouse.
-**Confidence:** medium — **the instruction reached this session by relay**,
-about the *annotation* app, not this one. The contract reading is high
-confidence; whether Chris meant it for this app at all is not mine to assert.
-Flagged in the closing output as a statement about the ask.
+**Confidence:** HIGH — **confirmed by Chris directly on 2026-09-23**, asked
+whether "official app in KOROS" applied to this app or only the annotation
+twin: *"Yes - it applies to both."* The premise is no longer an inference from
+the two apps being twins, and the entry no longer carries a relay caveat. The
+contract reading (plane-1 + plane-2 universal, plane 3 opt-in) was already high
+confidence from §5; both halves are now settled.
 
 ### Q15. What happens to an analysis that belongs to no arc? -- DECIDED: it is recorded to a root-level unattributed index and surfaced behind an explicit selector. Unattributed is a first-class state, not an error.
 
@@ -1245,21 +1282,17 @@ and its computation come out of `p3-app-skeleton`.
 
 Five external facts are unreconciled, and none was guessed at:
 
-1. **Pod reachability of `~/Dropbox/Science/runs` and of the KBDL object
-   store.** Everything was read on primary-laptop. This is Q10's low
-   confidence, and it is answerable in one question to Albert on kbhub —
-   which needs Chris's yes because it costs a paid session there.
+1. **RESOLVED 2026-09-23.** Pod reachability of the runs tree: Chris confirmed
+   it is reachable, so no envelope to Albert was needed. Only the KBDL object
+   store remains unchecked, and the artifact resolver degrades without it.
 2. **Whether Chris wants arc analysis records in git history.** Q6 decides
    "no" on the reasoning that index churn in `git status` is a cost he has not
    agreed to pay. Nothing in any artifact states how he uses arc git history,
    so this is one of two decisions resting on an assumption about a person
    rather than about a system.
-3. **Whether "an official app in KOROS" was said about THIS app.** It was
-   relayed from session `1f49b595`, who was told it about the *annotation*
-   app. Q12 reads the contract and picks the universal profile; the contract
-   reading is solid, but the premise that the instruction applies here is an
-   inference from the two apps being twins. This is the second person-shaped
-   assumption and is surfaced in the closing output rather than buried.
+3. **RESOLVED 2026-09-23.** Whether "an official app in KOROS" was said about
+   THIS app: asked directly, Chris answered *"Yes - it applies to both."* Q12's
+   premise is no longer an inference.
 4. **Whether "official" means our code is eventually contributed UPSTREAM into
    the `koros`/`king` repos, or stays in KBUtilLib as a registered conformant
    capability.** The consume-only interlock forbids writing into those five
@@ -1492,8 +1525,8 @@ by which `homology` gets laundered.
   negative finding.
 
 **Live data:**
-- `~/Dropbox/Science/runs/` — project listing.
-- `~/Dropbox/Science/runs/genome-clearinghouse/arcs/mag-integration-arc/` —
+- This laptop's runs tree — project listing. Path recorded as an observation about this machine only; the resolved location is `$KOROS_HOME/runs`.
+- `<runs>/genome-clearinghouse/arcs/mag-integration-arc/` —
   full directory listing and `PROVENANCE.json` read verbatim.
 
 **The CAC and its neighbours (`~/king-stack/king/docs`, read this session):**

@@ -1,0 +1,195 @@
+{
+  "prd_name": "kind-model-analysis-explorer-v1",
+  "title": "Models and Analyses \u2014 a KIND app organized by project and arc",
+  "owning_repo": "KBUtilLib",
+  "repos": [
+    "KBUtilLib",
+    "KBDLJobRunningPrototype"
+  ],
+  "status": "draft",
+  "review_rounds": 0,
+  "confront_rounds": 2,
+  "draft_commit": null,
+  "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
+  "hard_external_dependency": {
+    "module": "kbutillib.koros_arc_store",
+    "built_by_prd": "kind-annotation-results-explorer-v1",
+    "owning_repo_of_dependency": "GenomeAnnotationAggregator (PRD) building into KBUtilLib (code)",
+    "why": "Two PRDs designed in parallel share one project/arc layer. It must be built exactly once. Chris stated on 2026-09-23 that the annotation app will likely be built first, so that PRD owns creation and this one consumes.",
+    "blocks": "Every task in this taskplan. Nothing here is dispatchable until kbutillib.koros_arc_store is on KBUtilLib main.",
+    "interface_this_prd_is_written_against": [
+      "resolve_runs_root() -> Path",
+      "KorosArcStore.list_projects() / list_arcs(project) / read_arc(project, arc)",
+      "KorosArcStore.record_analysis(project, arc, rec) \u2014 idempotent on record_id",
+      "KorosArcStore.list_analyses(project, arc, kind=None)",
+      "AnalysisRecord(record_id, kind, created_at, producer, subject, status, artifacts, payload)"
+    ],
+    "seam_that_must_not_change": "an opaque `payload` dict under a NAMESPACED `kind` string; names may move, the seam may not"
+  },
+  "coordination": {
+    "sibling_session": "1f49b595",
+    "sibling_prd": "kind-annotation-results-explorer-v1",
+    "exchange": "Sibling proposed a three-part read-only seam (resolve root / enumerate arcs / list analysis records). This session corrected it: there is no write side, so a reader over records nothing emits returns empty. Reply sent 2026-09-23 13:52Z adding the record_analysis half and the namespaced-kind convention.",
+    "evidence_for_the_correction": "grep -rl 'KOROS_RUNS|koros_runs|Science/runs|arcs/' over KBUtilLib/src/kbutillib and KBDLJobRunningPrototype/src returns zero hits"
+  },
+  "key_findings_2026_09_23": {
+    "levels_3_and_4_already_exist": "EscherUtils.create_fitness_dashboard (escher_utils.py:1498, builder fitness_dashboard.py) already renders the five tabs plus a fitness-class-recoloured Escher map with condition and FVA dropdowns; create_map_html2:1408 renders flux with class overlays and numerical badges. This PRD delegates to both and builds no rendering.",
+    "the_join_key_does_not_exist": "Neither producer repo records project or arc on anything. Verified by grep, not assumed.",
+    "kind_supplies_the_arc_to_sessions": "king_backend/session.py:779 and :865 inject KOROS_ARC into every spawned session. The value is an arc SLUG (koros_start.py:454, test_start.py:134), not a path.",
+    "kbdl_jobs_cannot_read_it": "KBDL jobs run server-side where KOROS_ARC is absent or wrongly inherited, so the arc travels as an explicit JobContext parameter.",
+    "object_store_is_closed": "ObjectMetadata (store.py:57) deliberately withholds fields; its docstring says adding one would be 'a deliberate act' and two test files assert the published payload is unchanged. The join cannot live there.",
+    "clearinghouse_has_no_model_entity": "clearinghouse-lake-1d defines fifteen tables over genome/protein/gene/function/ontology_term. No model or reaction type. Models are not lake rows.",
+    "arcs_are_git_repos": "runs/genome-clearinghouse/arcs/mag-integration-arc contains .git and .gitignore, so an index sidecar dirties the scientist's tree unless gitignored.",
+    "provenance_fields_are_empty_in_practice": "inputs [], tool_versions {}, compute_targets [] on the live arc inspected.",
+    "fitness_vocabulary_is_already_fixed": "essential / active / unused / blocked (+forward/reverse) at fitness_dashboard.py:34-40; concordance computed at :165. Adopted rather than redefined."
+  },
+  "external_research": {
+    "maestro_task_id": "task-f379e8ac",
+    "backend": "codex",
+    "machine": "h100",
+    "expected_output": "agent-io/prds/kind-model-analysis-explorer-v1/research/external-scan.md",
+    "dispatched_at": "2026-09-23T13:53:40Z",
+    "status_at_draft_time": "RETURNED and FOLDED",
+    "bears_on": "Q1 (record schema \u2014 question C asks whether RO-Crate or an MLflow-style index is the standard envelope) and Q3 (question A, Escher web-embedding gotchas)",
+    "honest_note": "Dispatched BEFORE authoring began, per the research split; returned mid-draft and folded before commit. The Research Report quality section states which recommendations were accepted and which declined, and why.",
+    "verdict": "Build it: 'No existing open-source tool provides the exact PROJECT -> ARC -> multi-model drill-down with Escher overlays and fitness agreement as described.'",
+    "recommendations_accepted": [
+      "JSONL failure modes and mitigations: O_APPEND, advisory lock, single-write lines, tolerate truncated final line, last-writer-wins on record_id; SQLite/duckdb past a few MB or thousands of records",
+      "Escher: sandboxed iframe needs BOTH allow-scripts and allow-same-origin; do not embed multi-MB map JSON in the payload; enable_search=false on large maps",
+      "Agreement metric: confusion matrix with MCC, precision, recall (Q14)"
+    ],
+    "recommendations_declined": [
+      "RO-Crate as the record envelope -- declined in Q1: PROVENANCE.json already describes the arc, and RO-Crate describes a crate rather than an append-many log of runs",
+      "Cross-model ID harmonization via MNXref/BiGG -- unnecessary: create_fitness_dashboard already keys purely on ModelSEED reaction ids and is documented cross-genome",
+      "Instantiating escher.Builder ourselves -- we delegate rendering entirely"
+    ]
+  },
+  "open_questions_summary": {
+    "IRREVERSIBLE": 4,
+    "MEDIUM": 5,
+    "LOW": 4,
+    "NONE": 1,
+    "ordering_rule": "entries are ORDERED by blast radius descending; Q-NUMBERS are stable ids, not positions; Q11 (terminal could-not-decide) always sorts last",
+    "highest_risk_entry": "Q10 -- pod data reachability. Low confidence, irreversible blast radius. Everything was read on primary-laptop; KIND primarily runs on the kbhub pod, which uses selective Dropbox sync. If the runs tree is not reachable there, the join has nowhere to live and Q1 moves with it.",
+    "second_highest": "Q12 -- how much CAC conformance is owed. Irreversible, medium confidence, and the premise reached this session BY RELAY about the sibling's app rather than from Chris directly.",
+    "note": "Q15 (unattributed records as a first-class state) added after the sibling exchange"
+  },
+  "could_not_decide": [
+    "Whether ~/Dropbox/Science/runs and the KBDL object store are reachable from the kbhub pod. One question to Albert via cw-trigger-wake answers it; costs a paid session there, so needs Chris's yes.",
+    "Whether Chris wants arc analysis records in git history (Q6 decides no).",
+    "Whether 'an official app in KOROS' was said about THIS app -- it was relayed from session 1f49b595, who was told it about the annotation app.",
+    "Whether 'official' means contributed UPSTREAM into king/koros, or a registered conformant capability in our own repo. Designed for the second; the consume-only interlock forbids the first.",
+    "The CAC's own unfilled <fill:> seams: the ORCID handoff (C), the id-normalization helper (E), and the contract_version gate mechanics (F)."
+  ],
+  "artifact_id": null,
+  "app_id": {
+    "canonical_hyphen": "models-and-analyses",
+    "underscore_derived": "models_and_analyses",
+    "rule": "CAC I4: derived as APP_ID.replace('-','_'), never hand-written. Canonical id == dist name == console command == manifest basename == koros --project token."
+  },
+  "cac_conformance": {
+    "source": "king/docs/CROSS_APP_COMMUNICATION.md, 353 lines, read in full this session -- NOT taken from the sibling's relay",
+    "profile_decided": "plane-1 + plane-2 (the universal profile). Plane 3 declined for v1.",
+    "authority_for_declining": "CAC section 5 verbatim: 'Two adoption profiles: plane-1 is universal; plane-3 is opt-in (evidence-producing apps).'",
+    "invariants_that_bind": [
+      "I1 runs with KING absent; self-registers on serve; --no-king",
+      "I2 trust tiers never laundered",
+      "I4 one canonical hyphen id, underscore form derived",
+      "I5 contract_version 1, hard-gate major / soft-warn minor",
+      "I6 own REST only, no inherited authority"
+    ],
+    "corrections_to_the_relay": [
+      "the relay said four invariants and listed five; there are SIX -- I6 isolation of authority was omitted",
+      "the relay presented full three-plane conformance as the bar; section 5 makes plane 3 opt-in, which materially reduced this PRD's scope"
+    ],
+    "trust_tiers": {
+      "kbdl.model_build": "hypothesis",
+      "kbutillib.reconstruct": "hypothesis",
+      "kbutillib.gapfill": "hypothesis",
+      "kbutillib.fba": "hypothesis",
+      "kbutillib.fva": "hypothesis",
+      "kbdl.fitness_analysis": "hypothesis",
+      "kbdl.fitness_prop": "homology -- propagation through a protein homolog; MUST carry percent identity and the accession reached through"
+    },
+    "never_do": "fork or vendor king_backend.cac; bind to the contract only (consume-only interlock)"
+  },
+  "confront": {
+    "round_1": {
+      "maestro_task_id": "task-e294135c",
+      "outcome": "SUCCESS -- 6842-byte stall report, well-formed with both required sections. NOTE ON THE FALSE ALARM: an earlier check in this session found a 0-byte artifact and a 'scaffold' commit, and the session reported it to Chris as a genuine failure. It was not -- the worker committed the real artifact afterwards. This is the async-landing trap (memory node confront-artifact-lands-after-terminal-status): re-list before concluding a Maestro artifact is absent.",
+      "stall_points": 11,
+      "all_folded": true,
+      "folded_as": "Implementation Decisions section 'Specifications forced by confront round 1' (S1-S11) plus the '## Acceptance Criteria' list; free-critique items folded as gotchas G16-G19 and the Q5/G5 inline_escher toggle",
+      "side_effect_worth_filing": "the codex worker's commit swept 70 files of its own .codex-home state into the task branch (7695 insertions) -- a defect in the confront rail, not in this PRD"
+    },
+    "round_2": {
+      "maestro_task_id": "task-263b2f5c",
+      "outcome": "SUCCESS -- 4542-byte stall report, 14 stall points, attacked the POST-CAC document",
+      "assessment": "substantially WEAKER than round 1. Ten of fourteen stalls were of the form 'I cannot change KBDL / find the CLI / call EscherUtils from this repo' -- an artifact of the adversary running against PRD text in a single checkout, NOT a design underspecification: the taskplan already names each task's owning repo and every prompt is self-contained. Folded the four that were real.",
+      "folded": [
+        "S12 normative per-kind payload schema (round 1 pinned artifacts keys and left payload loose -- a genuine drift risk across two producers)",
+        "S13 the concordance-to-confusion-matrix mapping, including MCC null-not-zero on a zero denominator and excluding unmeasured genes",
+        "S14 the exact .gitignore line and notice policy",
+        "S15 API response schemas and the 202/200/404/500 generation protocol",
+        "G20 backfill emits a coverage report, not a success count"
+      ],
+      "declined": "the ten repo-access stalls, and the free-critique items already covered (SQLite migration threshold is in Q1; tier legend is in Q13; propagated-vs-measured is G15)",
+      "also_fixed_from_it": "p2-kbu-model-stamping now names the exact CLI source path src/kbutillib/interfaces/cli/model.py and the kbu entry point, rather than pointing at a directory"
+    },
+    "cap_note": "2 of 3 rounds used. A third is available if a review round changes an IRREVERSIBLE or MEDIUM decision."
+  },
+  "shared_interface": {
+    "status": "AGREED AND COMMITTED by the sibling at kind-annotation-results-explorer-v1 draft_commit 8a2d8ab; this PRD conforms",
+    "class": "KorosArcStore",
+    "module": "kbutillib.koros_arc_store",
+    "methods": [
+      "list_projects",
+      "list_arcs",
+      "read_arc",
+      "record_analysis",
+      "list_analyses",
+      "read_detail"
+    ],
+    "record_fields": [
+      "record_id",
+      "kind",
+      "created_at",
+      "producer",
+      "subject",
+      "status",
+      "trust_tier",
+      "provenance",
+      "contract_version",
+      "artifacts",
+      "payload"
+    ],
+    "who_contributed_what": {
+      "this_session": "the WRITE side (record_analysis) -- the sibling's original seam was read-only over records nothing emits; the namespaced-kind convention; the arc-sidecar-not-trace.jsonl argument",
+      "the_sibling": "trust_tier / provenance / contract_version as fields distinct from status; PER-WRITER SHARDING against Dropbox conflicted copies; unattributed records as a first-class state"
+    },
+    "storage": "per-user local database in the pod home directory, two-tier schema; sharding WITHDRAWN",
+    "correction_accepted": "a single <arc>/.analyses/index.jsonl WOULD silently lose records: the runs tree is Dropbox-synced, Dropbox writes a conflicted copy rather than merging concurrent appends and reports nothing, and an advisory lock does not cross a sync boundary. The external scan's generic lock+O_APPEND answer was insufficient for this fleet."
+  },
+  "storage_backend": {
+    "decided": "per-user local database in the pod home directory, written by KBUtilLib's KBDL client utilities; on by default on pods, configurable elsewhere",
+    "authority": "Chris, 2026-09-23, verbatim: 'I like the idea of kbdl client creating a local database (optionally configurable with PODs having it on by default) and keeping enough data in the database to make the dashboard for genome annotations and models easy to load BUT does NOT have TOO many rows (meaning genome gene level and reaction level data should be JSON blobs rather than SQL tables.'",
+    "why_it_binds_this_prd": "the instruction names 'the dashboard for genome annotations AND MODELS' and names REACTION-LEVEL data, which is this PRD's domain rather than the annotation twin's. It reached this session as a relay from 1f49b595; the quote itself is what makes it binding, not the relay.",
+    "supersedes": "the per-arc .analyses/*.jsonl sidecar decided earlier in this same draft",
+    "two_tier_schema": {
+      "sql_columns": "navigable dimensions only -- run, project, arc, subject, kind, producer, status, trust_tier, timestamps, counts, precomputed summary statistics",
+      "json_blobs": "gene-level and reaction-level detail, ONE BLOB PER SUBJECT",
+      "only_blob_reader": "read_detail(record_id) -> dict; levels 0 and 1 never call it"
+    },
+    "withdrawn_by_this_change": [
+      "per-writer sharding (the Dropbox conflicted-copy hazard does not exist in a pod home directory)",
+      "Q6 and S14 (.gitignore) -- nothing is written into the arc directory",
+      "S8 append-only read-time dedup -- replaced by an upsert on record_id",
+      "G4 and G18 -- stamping cannot dirty the scientist's arc repo"
+    ],
+    "new_gotchas": [
+      "G21 precomputed statistics need a version stamp or the DB silently holds two populations",
+      "G22 the two-tier split forecloses cross-subject detail queries; the fix is a derived index, not a schema change",
+      "G23 recording is on by default so the write side must fail soft and never break a pipeline run"
+    ]
+  }
+}

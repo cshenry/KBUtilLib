@@ -9,7 +9,7 @@
   "status": "draft",
   "review_rounds": 0,
   "confront_rounds": 2,
-  "draft_commit": null,
+  "draft_commit": "fbf91810a558c7ca8faa9f747cd6f41bd27ba5d3",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
   "hard_external_dependency": {
     "module": "kbutillib.koros_arc_store",

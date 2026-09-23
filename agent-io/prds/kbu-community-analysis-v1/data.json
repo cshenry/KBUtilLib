@@ -8,7 +8,7 @@
   "status": "draft",
   "review_rounds": 0,
   "confront_rounds": 1,
-  "draft_commit": null,
+  "draft_commit": "362c5c7617506bc2d37c35f543ccca4237b8ad82",
   "review_protocol": "Written single-pass by /ai-design Draft Mode on 2026-09-23. The external research scan (Maestro task-c1a370b4, h100/codex) returned during authoring and was folded before commit. Chris reviews by editing fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-community-analysis-v1` diffs the working tree against draft_commit, classifies and propagates every hunk, and recommits with a fresh baseline. The PRD is held at draft until at least one review round has folded.",
   "research_must_read": [
     {

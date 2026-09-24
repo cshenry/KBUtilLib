@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Union
 
 from .exceptions import RecordNotFound, RunsRootResolutionError
 from .records import (
@@ -118,9 +118,7 @@ class KorosArcStore:
         """
         project_path = self.runs_root / project
         if not project_path.is_dir():
-            raise RecordNotFound(
-                f"no project named {project!r} under {self.runs_root}"
-            )
+            raise RecordNotFound(f"no project named {project!r} under {self.runs_root}")
         arcs = [
             self._read_arc_dir(project, arc_dir)
             for arc_dir in self._arc_dirs(project_path)

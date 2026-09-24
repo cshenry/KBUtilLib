@@ -30,7 +30,6 @@ from kbutillib.koros_arc_store.records import (
     NOT_AN_OBJECT,
 )
 
-
 # ── fixture helpers ──────────────────────────────────────────────────────────
 
 # A minimal but realistic PROVENANCE.json matching the live shape: required
@@ -135,18 +134,33 @@ class TestResolveRunsRoot:
 
 class TestContractGuardrails:
     def test_no_kind_koros_runs_reference_in_source(self):
-        src = Path(__file__).resolve().parents[2] / "src" / "kbutillib" / "koros_arc_store"
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "kbutillib"
+            / "koros_arc_store"
+        )
         for py in src.glob("*.py"):
             assert "KIND_KOROS_RUNS" not in py.read_text(encoding="utf-8"), py
 
     def test_no_king_backend_import_in_source(self):
-        src = Path(__file__).resolve().parents[2] / "src" / "kbutillib" / "koros_arc_store"
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "kbutillib"
+            / "koros_arc_store"
+        )
         for py in src.glob("*.py"):
             text = py.read_text(encoding="utf-8")
             assert "king_backend" not in text, py
 
     def test_no_hardcoded_dropbox_science_fallback(self):
-        src = Path(__file__).resolve().parents[2] / "src" / "kbutillib" / "koros_arc_store"
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "kbutillib"
+            / "koros_arc_store"
+        )
         for py in src.glob("*.py"):
             assert "Dropbox/Science" not in py.read_text(encoding="utf-8"), py
 
@@ -313,7 +327,9 @@ class TestLookupErrors:
 
     def test_read_arc_returns_record_never_none_on_invalid(self, tmp_path):
         # read_arc on an invalid arc returns a record, never None, never raises.
-        _write_arc(tmp_path, "proj", "invalid", {"created_at": "2026-01-01T00:00:00.000000Z"})
+        _write_arc(
+            tmp_path, "proj", "invalid", {"created_at": "2026-01-01T00:00:00.000000Z"}
+        )
         store = KorosArcStore(runs_root=tmp_path)
         arc = store.read_arc("proj", "invalid")
         assert isinstance(arc, ArcRecord)

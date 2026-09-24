@@ -937,6 +937,18 @@ defers to it:**
   **stored and flagged, never refused**; only structural validation rejects.
   S11 already required foreign kinds to be *counted* on read; this adds the
   write side, and together they mean neither app can stall the other.
+  **`unknown_kind` is a TRI-STATE, not a boolean** — `0` known, `1` well-formed
+  but unregistered, `2` malformed. Non-zero still means unknown, so a truthiness
+  check stays correct; the reason this app cares about the distinction is that
+  its own foreign-prefix counter (p3) can then separate *a peer app shipped a
+  new kind* (`1`) from *a producer is emitting garbage* (`2`), which are the
+  same number under a boolean and want opposite responses. **Take the `0/1/2`
+  scheme, not the boolean.** `koros-arc-store-v1` currently contradicts itself
+  on this — its S5 and acceptance criterion 26 say malformed is `1`, while its
+  S43 and criterion 74 give the tri-state and say outright that S5 conflated
+  two cases. Both survive in that document and it is BUILDING, so a reviewer
+  reading criterion 26 passes a branch a reviewer reading criterion 74 fails.
+  Tracked as dev 1302 (filed by the annotation twin). This PRD binds to S43.
 - **Their census beats my sample.** Finding 4 above rests on one arc. They
   measured the whole tree: **9 project directories, 8 with an `arcs/`
   subdirectory, 26 arcs, and `inputs` empty and `tool_versions` empty on ALL

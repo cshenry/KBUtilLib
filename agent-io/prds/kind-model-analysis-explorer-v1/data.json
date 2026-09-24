@@ -6,25 +6,35 @@
     "KBUtilLib",
     "KBDLJobRunningPrototype"
   ],
-  "status": "draft",
+  "status": "ready",
   "review_rounds": 1,
   "confront_rounds": 2,
   "draft_commit": "24c5c1d31f2fed0bf386afe4de223581fcafbfa4",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
   "hard_external_dependency": {
-    "module": "kbutillib.koros_arc_store",
-    "built_by_prd": "kind-annotation-results-explorer-v1",
-    "owning_repo_of_dependency": "GenomeAnnotationAggregator (PRD) building into KBUtilLib (code)",
-    "why": "Two PRDs designed in parallel share one project/arc layer. It must be built exactly once. Chris stated on 2026-09-23 that the annotation app will likely be built first, so that PRD owns creation and this one consumes.",
+    "module": "kbutillib.koros_arc_store, plus kbutillib.koros_arc_store_testing (FakeKorosArcStore) and the CAC helpers",
+    "built_by_prd": "koros-arc-store-v1",
+    "owning_repo_of_dependency": "KBUtilLib",
+    "why": "REVISED 2026-09-24. Two PRDs designed in parallel share one project/arc layer that must be built exactly once. It was originally assigned to kind-annotation-results-explorer-v1 on the grounds that Chris would likely build that app first. Chris then chose EXTRACTION -- the recommendation this PRD made in review round 1 -- so the layer now has its own PRD and NEITHER app creates it.",
     "blocks": "Every task in this taskplan. Nothing here is dispatchable until kbutillib.koros_arc_store is on KBUtilLib main.",
     "interface_this_prd_is_written_against": [
       "resolve_runs_root() -> Path",
       "KorosArcStore.list_projects() / list_arcs(project) / read_arc(project, arc)",
-      "KorosArcStore.record_analysis(project, arc, rec) \u2014 idempotent on record_id",
+      "KorosArcStore.record_analysis(project, arc, rec, detail=None) -- idempotent on record_id; the optional `detail` mapping is written to the subject_detail blob. ADDED 2026-09-24 by koros-arc-store-v1 confront round 1 (S4/S7): the inherited interface had a read_detail with no write path. Additive -- existing call sites stay correct.",
       "KorosArcStore.list_analyses(project, arc, kind=None)",
-      "AnalysisRecord(record_id, kind, created_at, producer, subject, status, artifacts, payload)"
+      "KorosArcStore.read_detail(record_id) -- the only blob-opening call",
+      "AnalysisRecord(record_id, kind, created_at, producer, subject, status, trust_tier, provenance, contract_version, artifacts, payload)",
+      "the shared record_id helper and the trust_tier floor helper",
+      "FakeKorosArcStore from kbutillib.koros_arc_store_testing -- NEW: the app tests import this rather than writing their own double"
     ],
-    "seam_that_must_not_change": "an opaque `payload` dict under a NAMESPACED `kind` string; names may move, the seam may not"
+    "seam_that_must_not_change": "an opaque `payload` dict under a NAMESPACED `kind` string; names may move, the seam may not",
+    "repo_slot_caveat": "KBUtilLib is both this module's repo and this app's repo, so under dev 1032 one-branch-per-repo this PRD cannot start while koros-arc-store-v1 is building. kind-annotation-results-explorer-v1 has no such collision -- after the extraction its repos union is KBDLJobRunningPrototype + GenomeAnnotationAggregator only. The two consumers are NOT symmetric in the build order even though the dependency graph says they are.",
+    "corrections_inherited_2026_09_24": [
+      "S4/S7: record_analysis gains an optional detail parameter; runs gains a nullable payload column; the summary columns are optional producer-supplied fields on AnalysisRecord, not computed by the store.",
+      "S11: contract_version gating implements INTEGER COMPARISON ONLY -- equal proceeds, any difference hard-fails naming both versions, NO minor/warn branch. The contradiction is upstream in the CAC, verified by reading it: the wire field is ruled an integer at :141/:173/:252 while section F at :290 describes semver major/minor gating and marks the mechanics an unfilled placeholder at :294. This PRD's p3 success criterion previously required the warn-on-minor behaviour and has been corrected.",
+      "S12: id normalisation applies to APP IDS ONLY and must never be applied to kind, subject or record_id.",
+      "S5: the store holds no list of kinds; unknown_kind is set for a malformed kind, or for a well-formed kind outside a caller-supplied known_kinds set. This app's own foreign-prefix counting (p3) is a SEPARATE concern and is unchanged."
+    ]
   },
   "coordination": {
     "sibling_session": "1f49b595",
@@ -232,8 +242,22 @@
         "Q14 amended: the arc-level MCC carries a floor tier",
         "taskplan: conformance block added to p1, both p2 tasks and p3; p3 success criteria gained the floor-tier requirement"
       ],
-      "merge_recommendation": "DO NOT merge the two app PRDs. DO extract the shared scaffold into koros-arc-store-v1 in KBUtilLib, decomposed into its three responsibilities. Reasoning in Further Notes."
+      "merge_recommendation": "DO NOT merge the two app PRDs. DO extract the shared scaffold into koros-arc-store-v1 in KBUtilLib, decomposed into its three responsibilities. Reasoning in Further Notes.",
+      "merge_recommendation_outcome": "ACCEPTED by Chris on 2026-09-24. koros-arc-store-v1 now exists; both app PRDs are reconciled against it."
     }
   ],
-  "confront_note_round_3": "Round 3 of 3 deliberately NOT spent. Review round 1 added conformance alignment and adopted constraints from an already-reviewed sibling PRD; it reversed no IRREVERSIBLE or MEDIUM decision. Review Mode 5b makes a confront optional in exactly that case. Held in reserve for a round that changes a decision."
+  "confront_note_round_3": "Round 3 of 3 deliberately NOT spent. Review round 1 added conformance alignment and adopted constraints from an already-reviewed sibling PRD; it reversed no IRREVERSIBLE or MEDIUM decision. Review Mode 5b makes a confront optional in exactly that case. Held in reserve for a round that changes a decision.",
+  "extraction_2026_09_24": {
+    "decision": "Chris chose extract over merge -- the recommendation in this PRD's review_history[0].merge_recommendation.",
+    "new_prd": "koros-arc-store-v1, KBUtilLib/agent-io/prds/koros-arc-store-v1/, 4 tasks (p0a-runs-tree-access -> p0b-run-database -> p0c-cac-helpers -> p0d-contract-fake), all KBUtilLib, strictly sequential.",
+    "changed_here": [
+      "hard_external_dependency now names koros-arc-store-v1 as the builder",
+      "taskplan: every reference to kind-annotation-results-explorer-v1 as the module's builder rewritten (10 occurrences across 4 task prompts)",
+      "p3-app-skeleton: 'build the app tests against a fake KorosArcStore fixture' REPLACED by an instruction to import FakeKorosArcStore from kbutillib.koros_arc_store_testing, with a matching success criterion. Writing a second fake is now explicitly forbidden.",
+      "fullprompt: Revision Log round 2; Q2 rewritten with the repo-slot consequence; the Solution and 'consumed shared layer' passages re-pointed",
+      "review_rounds NOT incremented -- a propagation of Chris's structural decision, not a fold of his in-document edits"
+    ],
+    "what_did_not_change": "Nothing this PRD builds. All six tasks, their repos and their success criteria are otherwise untouched."
+  },
+  "status_note": "Corrected 2026-09-24: this field read 'draft' while AIAssistant/state/prd_registry.json -- which is authoritative and is what /ai-conductor reads -- has had it at 'ready' since Chris pressed it on 2026-09-23. The registry was right; this copy was stale."
 }

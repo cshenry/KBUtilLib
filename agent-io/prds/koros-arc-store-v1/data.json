@@ -1,0 +1,137 @@
+{
+  "prd_name": "koros-arc-store-v1",
+  "title": "KOROS arc store \u2014 the shared project/arc navigation and run-record layer for both KIND apps",
+  "owning_repo": "KBUtilLib",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "status": "draft",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "source_prompt": "Chris, 2026-09-24, /ai-jane d \u2014 'Extract koros-arc-store-v1 from the two KIND app PRDs and reconcile both against it'. This answers the STRUCTURAL question both app-design sessions put to him on 2026-09-23: extract the shared scaffold into its own PRD, or merge the two app PRDs. He chose extract.",
+  "review_protocol": "Written in Draft Mode on 2026-09-24 as an EXTRACTION, not a fresh design. Chris edits fullprompt.md in place with (CSH ...) markers; /ai-design --review koros-arc-store-v1 diffs the working tree against draft_commit, classifies every hunk, propagates through body, stories, testing decisions and taskplan, re-derives Gotchas, and recommits with a fresh baseline. The ready gate refuses advance while review_rounds is 0.",
+  "provenance_of_content": {
+    "summary": "Almost nothing in this PRD is new. The technical content was researched, adversarially attacked and reviewed inside kind-annotation-results-explorer-v1 over 2026-09-23, and separately conformance-reviewed by the session that wrote kind-model-analysis-explorer-v1.",
+    "lifted_verbatim": [
+      "p0a-runs-tree-access, p0b-run-database and p0c-cac-helpers task prompts and success criteria, carried from kind-annotation-results-explorer-v1 taskplan.json",
+      "the run-database two-tier schema and DDL, folded there from confront round 1",
+      "the KorosArcStore interface, negotiated between sessions 1f49b595 and 7abb83e1",
+      "the record_id derivation and the artifact URI vocabulary, contributed by 7abb83e1 as conformance defects 2 and 3",
+      "the runs-root resolution chain, corrected by 7abb83e1 as conformance defect 1"
+    ],
+    "inherited_review_credit_NOT_claimed_as_this_document's": {
+      "annotation_prd": "review_rounds 1, confront_rounds 1 (16 binding stalls, 11 folded, 5 folded with correction)",
+      "model_analysis_prd": "review_rounds 1, confront_rounds 2",
+      "cross_prd_conformance_review": "3 defects found in the pre-split p0, all in this material, all fixed",
+      "why_it_is_not_claimed": "review_rounds is a property of a DOCUMENT and this document is new. Self-advancing on inherited provenance is the reasoning that makes the gate stop meaning anything. See Q6."
+    }
+  },
+  "what_the_extraction_changed": [
+    "ADDED p0d-contract-fake: a reference FakeKorosArcStore shipped from the owning module plus a contract suite parameterised over both implementations. Previously kind-model-analysis-explorer-v1 p3-app-skeleton line 63 told its builder to write its own fake, with nothing binding it to the real module. Moved work, not new work. Q4.",
+    "CHANGED the test-fixture path from tests/fixtures/kind_annotation_explorer/ to tests/fixtures/koros_arc_store/. The old path named a consumer app inside a module whose own prompt insists in capitals that its schema names are domain-neutral. Q8.",
+    "CHANGED the BACKGROUND and intro block of all three inherited prompts to cite this PRD and to say BOTH apps are downstream consumers that create nothing, rather than one owning the module.",
+    "CLARIFIED in p0b that significant_params is supplied by the caller and must NEVER become a per-kind table inside the module \u2014 the examples are recorded for shape, not to be hardcoded.",
+    "ADDED an explicit non-goal: this PRD ships a library only. No app, route, manifest or KIND registration."
+  ],
+  "external_research": {
+    "dispatched_for_this_prd": false,
+    "reason": "Both parent PRDs ran a Maestro codex scan on h100, and the model-analysis scan (task-f379e8ac) addressed exactly this module's external question \u2014 whether RO-Crate or an MLflow-style index is the standard run-record envelope, and the failure modes of an append-only JSONL store. Its accepted recommendations (last-writer-wins on record_id; SQLite past a few thousand records) are in this design; RO-Crate was declined with a stated reason. A third scan over extracted text would restate them. This is a recorded decision with named prior work, not a skipped step.",
+    "inherited_scans": [
+      "task-f379e8ac (model-analysis, codex/h100)",
+      "task-a8bc0867 (annotation, codex/h100)"
+    ]
+  },
+  "hard_consumers": {
+    "kind-annotation-results-explorer-v1": {
+      "repo_of_prd": "GenomeAnnotationAggregator",
+      "lost_to_this_prd": [
+        "p0a-runs-tree-access",
+        "p0b-run-database",
+        "p0c-cac-helpers"
+      ],
+      "remaining_tasks": [
+        "p1-kbdl-arc-attribution",
+        "p2-dashboard-and-arc-views",
+        "p3-gene-view-consistency",
+        "p4-kind-registration"
+      ],
+      "blocked_until": "kbutillib.koros_arc_store on KBUtilLib main"
+    },
+    "kind-model-analysis-explorer-v1": {
+      "repo_of_prd": "KBUtilLib",
+      "lost_to_this_prd": [],
+      "change": "its hard_external_dependency now names koros-arc-store-v1 as the builder instead of kind-annotation-results-explorer-v1; p3-app-skeleton imports the shipped fake instead of writing its own",
+      "blocked_until": "kbutillib.koros_arc_store on KBUtilLib main"
+    }
+  },
+  "build_order": "koros-arc-store-v1 (p0a -> p0b -> p0c -> p0d, strictly sequential, all KBUtilLib) lands on main FIRST. Then the two apps are independent of each other, with two caveats: KBUtilLib is both this module's repo and the model-analysis app's repo, so that app cannot start while this builds (dev 1032 one-branch-per-repo); and both apps touch KBDLJobRunningPrototype, needing separate repo slots.",
+  "open_questions_summary": {
+    "IRREVERSIBLE": 3,
+    "MEDIUM": 3,
+    "LOW": 2,
+    "terminal": "Q9 \u2014 what I could not decide and did not guess",
+    "highest_risk_entry": "Q4 \u2014 the reference test double. It is the only genuinely NEW decision in the document, it is at MEDIUM blast radius, and it is the only entry at medium confidence. Everything at IRREVERSIBLE is inherited and has been attacked; this has not.",
+    "ordering_rule": "blast radius descending; Q-numbers are stable ids, not positions"
+  },
+  "could_not_decide": [
+    "Whether the KBDL object store is reachable from the kbhub pod. Bears on this module only through the obj://<object_id> artifact form: the vocabulary is fixed regardless, but whether such a ref resolves on a pod is unverified.",
+    "The CAC's own unfilled <fill:> seams in the id-normalization helper and the contract-version gate mechanics. p0c implements the documented behaviour; the rest will be settled by reading FJ's or genKnown's interop.py.",
+    "Whether 'official app in KOROS' means code contributed upstream into koros/king or our repo conforming to the CAC. Open for both consumers; does not bind this module under either reading, since the consume-only interlock means it never contributes upstream.",
+    "Whether re-runs should collapse to one row. record_id derives from kind + subject + significant_params, so an identical re-run replaces its predecessor and history is lost. The parent PRD flagged the counter-argument and did not resolve it; carried forward unresolved rather than quietly settled by extraction."
+  ],
+  "gotcha_that_needs_acting_on": "G1/Q5: extraction makes kind-annotation-results-explorer-v1 temporarily un-dispatchable. Open continuation 257 (session 1f49b595) instructs an executor session to 'dispatch p0a first, alone'. That instruction is now stale and must be superseded, or an e session dispatches p1-kbdl-arc-attribution into a missing import.",
+  "related_task_rows": {
+    "dev_1262": "cw-kind skill resolves the runs root via KIND_KOROS_RUNS, which does not exist. Both app PRDs inherited the error from it. The corrected chain is already in p0a; the skill is still stale.",
+    "dev_1273": "the three conformance defects found in the pre-split p0-shared-scaffold. All three are fixed in the prompts carried into this plan."
+  },
+  "verified_2026_09_24": {
+    "module_does_not_exist": "grep -rl 'koros_arc_store|KorosArcStore|arc_context' over KBUtilLib/src and KBDLJobRunningPrototype/src returns ZERO hits \u2014 so neither app has been dispatched and the extraction is clean.",
+    "repo_state": "KBUtilLib on wip at 52068b3 (carrying a live sibling's uncommitted kbu-community-analysis-v1 edits \u2014 stage by explicit path only); GenomeAnnotationAggregator on wip at 4723830, clean.",
+    "registry": "both consumer PRDs at status=ready with auto_conduct unset. Nothing builds either autonomously, so this extraction does not race a dispatcher.",
+    "kind_app_dir": "KBUtilLib/src/kbutillib/kind_app/ holds KIND skill bundles (bundle.json, skill.md), NOT Python app code \u2014 it is not a home for this module."
+  },
+  "confront": {
+    "round_1": {
+      "maestro_task_id": "task-adedb702",
+      "backend": "codex",
+      "machine": "h100",
+      "repo": "KBUtilLib",
+      "branch": "maestro/researcher/task-task-adedb702",
+      "artifact": "agent-io/confront/stall-report.md on that branch, 10347 bytes, well-formed (both required sections). Copied to research/confront-round-1-stall-report.md.",
+      "outcome": "SUCCESS. 14 binding stalls, 12 real.",
+      "why_it_landed_better_than_the_twins_round_2": "That round produced ten of fourteen stalls of the form 'I cannot reach X from this worktree' (memory node confront-invents-specifics-it-cannot-reach). This PRD's subject is a self-contained module in the worktree's OWN repo, so the adversary could actually execute it in its head. The failure mode is about reachability, not about the adversary.",
+      "folded": [
+        "S1 ProjectRecord/ArcRecord shapes pinned",
+        "S2 runs-root supplied by argument; named error type",
+        "S3 PROVENANCE required/optional split and a raw passthrough for unlisted keys",
+        "S4/S7 the payload and detail WRITE PATH -- a real contradiction in the inherited interface",
+        "S5 the unknown_kind rule, with no kind registry in the module",
+        "S6 upsert field semantics, created_at preserved",
+        "S9 status vocabulary strict",
+        "S10 db path creation and the read-raises/write-fails-soft asymmetry",
+        "S11 contract_version gating (see below)",
+        "S13 pytest and three fixture subdirectories",
+        "S14 the fake uses in-memory dicts",
+        "free critique: slug verbatim; soft-failed writes log on a named logger and increment a readable counter"
+      ],
+      "folded_with_correction": [
+        "S8 artifacts stays dict[str,str] -- the adversary's list-of-pairs was rejected, but one pinning sentence was added because the ambiguity was real",
+        "S12 id normalisation is APP IDS ONLY -- the adversary's proposal to normalise kind and entity_id was rejected as actively damaging, and the rejection is now written into the prompt as a guard"
+      ],
+      "rejected_on_evidence": [
+        "S5's register_kind() API with KNOWN_KINDS defaulting empty -- badges every record unknown, and a kind registry is exactly the domain knowledge this module may not hold",
+        "S9's case-insensitive coercion -- inconsistent with a module that rejects bad artifact URIs rather than repairing them",
+        "free critique: a provenance_version column (contract_version already versions the record; a second axis with no consumer is speculative)",
+        "free critique: a hard performance budget on blob opening (the contract suite asserts the count directly, which is stronger and needs no threshold chosen without measurement)"
+      ],
+      "S11_note": "THE BEST FIND, AND MY FIRST RESOLUTION OF IT WAS WRONG. The adversary spotted that 'hard-fail on major, warn on compatible minor' contradicts 'contract_version is an INTEGER'. I first wrote that there is no minor. Checking king/docs/CROSS_APP_COMMUNICATION.md showed the contradiction is UPSTREAM: the wire field is ruled an integer at :141/:173/:252, section F states semver gating at :290, and :294 marks the gate mechanics an explicit unfilled placeholder. Final resolution: implement integer comparison only -- equal proceeds, any difference hard-fails -- and implement no minor branch, because with an integer on the wire there is nothing to compare a minor against. Propagated into BOTH consumer apps, whose tasks required the warn-on-minor behaviour.",
+      "cross_prd_propagation": [
+        "kind-model-analysis-explorer-v1: p3-app-skeleton success criterion (S11), the recorded interface (S4/S7 detail parameter), and four fullprompt passages",
+        "kind-annotation-results-explorer-v1: p4-kind-registration prompt (S11) and one fullprompt passage"
+      ],
+      "acceptance_criteria_count": 42,
+      "adjudication_note": "Chris was not asked for a drop-list. Draft Mode does not block on an answer, every disposition is recorded above with its reasoning, and dropping any folded item is a one-line edit."
+    },
+    "cap_note": "1 of 3 rounds used."
+  }
+}

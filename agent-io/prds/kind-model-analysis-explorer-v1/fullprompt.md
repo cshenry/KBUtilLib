@@ -140,8 +140,11 @@ I1 proof.
 basename = koros `--project` token), with the underscore form derived
 mechanically as `id.replace("-","_")` for Python modules and SQL identifiers —
 computed, never hand-chosen.
-**I5** — `contract_version` is required in the manifest from v1, hard-gating on
-a major mismatch and soft-warning on a minor one.
+**I5** — `contract_version` is required in the manifest from v1. The CAC states
+the gate as semver (hard-gate major, soft-warn minor) while ruling the wire
+field an integer, and marks the mechanics unfilled; **we implement the half
+that is implementable — integer comparison, equal proceeds, any difference
+hard-fails.** See `koros-arc-store-v1` S11.
 **I3** — app-to-app is **never** a direct import; it travels as a plane-3
 bundle through a derived lakehouse rendezvous table
 `arkinlab.<app_us>.interop_bundles`.
@@ -317,6 +320,16 @@ data-access layer to change.
 
 ## Revision Log
 
+- **Round 2 — 2026-09-24 (reconciliation, not a review round).** Chris chose
+  EXTRACTION over merging, which is the recommendation this PRD made in round 1.
+  `kbutillib.koros_arc_store` is now built by its own PRD,
+  **`koros-arc-store-v1`** (owning repo KBUtilLib), rather than by
+  `kind-annotation-results-explorer-v1`. Nothing this PRD builds changed; what
+  changed is who the dependency points at, and that the app tests now import a
+  `FakeKorosArcStore` **shipped from that module** instead of writing their own.
+  Q2 rewritten. `review_rounds` deliberately NOT incremented: this propagated a
+  structural decision, it did not fold Chris's in-document edits.
+
 - **Round 1 — 2026-09-23 (review).** Chris's only review instruction was to
   reconcile this PRD against `kind-annotation-results-explorer-v1` and consider
   merging them. Added the **Conformance contract** section: adopted four things
@@ -329,8 +342,9 @@ data-access layer to change.
   shared scaffold into its own.**
 
 - **Round 0 — 2026-09-23 (draft).** Single-pass draft.
-  Written alongside `kind-annotation-results-explorer-v1`, which owns and
-  builds the shared project/arc layer this PRD consumes.
+  Written alongside `kind-annotation-results-explorer-v1`, which at the time
+  owned and built the shared project/arc layer this PRD consumes. That layer
+  moved to `koros-arc-store-v1` on 2026-09-24; see round 2.
   The central finding is that levels 3 and 4 already exist in `EscherUtils`,
   which moved the PRD's centre of gravity from rendering to the missing
   analysis-to-arc join.
@@ -440,9 +454,9 @@ guessing an arc.
 Records are read by a small shared library, `KorosArcStore`, which also resolves the
 runs root across the pod and laptop layouts and enumerates projects and arcs
 from `PROVENANCE.json`.
-**That library is built by `kind-annotation-results-explorer-v1`, not by this
-PRD.** This PRD declares a hard dependency on it and builds against its
-interface. The two apps share the whole left-hand navigation and the record
+**That library is built by `koros-arc-store-v1`, not by this PRD and not by
+the annotation app either.** Both apps declare a hard dependency on it and
+build against its interface; neither creates it. The two apps share the whole left-hand navigation and the record
 store, and share no science code at all.
 
 ## User Stories
@@ -533,9 +547,10 @@ store, and share no science code at all.
 
 ### The consumed shared layer (built elsewhere — do not build it here)
 
-`kbutillib.koros_arc_store`, owned and built by
-`kind-annotation-results-explorer-v1`.
-This PRD's tasks import it and must not create it.
+`kbutillib.koros_arc_store`, owned and built by `koros-arc-store-v1`
+(KBUtilLib), together with `kbutillib.koros_arc_store_testing`, which ships the
+`FakeKorosArcStore` this PRD's app tests import rather than writing their own.
+This PRD's tasks import both and must create neither.
 The interface this PRD is written against:
 
 ```python
@@ -760,10 +775,16 @@ The manifest:
 
 It is written as a **real file** to `~/kind-apps/plugins/models-and-analyses.json`
 — never into `king/plugins/`.
-`contract_version` is compared against KING's on startup: **hard-gate on a
-major mismatch, soft-warn on a minor one** (I5, §F). Failing loud is the
-required behaviour — §F's rationale is that silently misreading a peer's
-evidence across a breaking gap is the laundering hazard I2 forbids.
+`contract_version` is compared against KING's on startup. §F states the gate as
+semver — hard-gate major, soft-warn minor — but §4 rules the wire field an
+**integer** (`:141`, and the DDL at `:173`/`:252`) and §F itself leaves the gate
+mechanics as an unfilled placeholder (`:294`). **With an integer on the wire
+there is nothing to compare a minor against, so we implement integer comparison
+only: equal proceeds, any difference hard-fails with an error naming both
+versions, and no warn branch is written.** Corrected 2026-09-24; see
+`koros-arc-store-v1` S11. Failing loud is the required behaviour either way —
+§F's rationale is that silently misreading a peer's evidence across a breaking
+gap is the laundering hazard I2 forbids.
 
 Registration also runs the plugin-union symlink farm so KIND's own shipped
 plugins are not hidden (`_resolve_plugins` replaces rather than unions).
@@ -1069,9 +1090,11 @@ Tests that assert on the shape of generated HTML are testing
 - **I4, as a derivation** — assert `app_us() == APP_ID.replace("-","_")`, not
   the literal `models_and_analyses`. A test asserting the literal would pass
   while permitting exactly the hand-chosen second spelling I4 forbids.
-- **I5, on both sides of the gate** — a major mismatch refuses startup and a
-  minor one only warns. Testing only the refusal would let a gate that refuses
-  *everything* pass.
+- **I5, on both sides of the gate** — an EQUAL `contract_version` proceeds and a
+  DIFFERING one refuses startup. Testing only the refusal would let a gate that
+  refuses *everything* pass, which is why both sides are asserted. (The
+  minor/warn side is not tested because it is not implemented; see
+  `koros-arc-store-v1` S11.)
 - **The tiers** — every record carries the tier its kind mandates, and
   specifically that `kbdl.fitness_prop` writes `homology` rather than
   `hypothesis`. That one is the likeliest to be got wrong, because
@@ -1126,22 +1149,32 @@ database write semantics; and `read_detail` joins the interface.
 statistics are precomputed into columns is the part most likely to need a
 second pass, and G21 says why.
 
-### Q2. Who builds the shared project/arc layer? -- DECIDED: `kind-annotation-results-explorer-v1` builds it; this PRD declares a hard dependency and builds against the interface without creating it.
+### Q2. Who builds the shared project/arc layer? -- DECIDED: its own PRD, `koros-arc-store-v1` in KBUtilLib. Neither app builds it; both declare a hard dependency. REVISED 2026-09-24 from "the annotation PRD builds it".
 
 **Blast radius:** IRREVERSIBLE
 **Why:** Two PRDs are being designed in parallel against the same layer. If
 both taskplans contain a task that creates `kbutillib.koros_arc_store`, they either
 collide on the same file in two branches or silently produce two divergent
 versions, and the dev-1032 one-branch-per-repo rule makes the collision the
-likelier outcome. Chris said, in this session, that he will likely build the
-annotation app first, which settles the direction: the PRD that dispatches
-first owns creation.
-**If you disagree:** reversing it means this PRD grows a phase-0 task creating
-`kbutillib/koros_arc_store.py`, and the annotation PRD must drop its equivalent task
-and re-point its own consumers — and whichever PRD is dispatched second must be
-re-read for the change. The seam itself does not move either way.
-**Confidence:** high — the direction follows from Chris's stated build order,
-not from a preference.
+likelier outcome. The original answer made whichever app dispatched first the
+owner, which worked but left the highest-risk work in either plan buried inside
+a document about genome annotation. Extraction removes the ownership question
+rather than answering it: the module is one deliverable, dispatched on its own,
+and the ordering is the same for both consumers.
+**If you disagree:** reversing it means folding
+`koros-arc-store-v1`'s four tasks back into one of the two app plans and
+re-pointing the other's preconditions. The seam itself does not move either
+way, which is why this reversal is cheap in code and expensive only in
+documents.
+**Confidence:** high — Chris decided it on 2026-09-24, and both design sessions
+had independently recommended it.
+
+**One consequence that is easy to miss:** KBUtilLib is both the module's repo
+AND this app's repo, so under one-branch-per-repo this PRD cannot start while
+`koros-arc-store-v1` is building. The annotation app has no such collision —
+its own tasks are in KBDLJobRunningPrototype and GenomeAnnotationAggregator.
+The two consumers are therefore *not* symmetric in the build order even though
+the dependency graph says they are.
 
 ### Q10. Is the data reachable from the kbhub pod, where KIND primarily runs? -- DECIDED: the KOROS runs tree IS reachable (confirmed by Chris); the KBDL object store may not be, so object-store access stays optional and degrades to file-path artifacts.
 
@@ -1797,7 +1830,7 @@ vendor that module.**
 15. The prefix filter counts the foreign records it excludes and exposes that count, and a test fails if a foreign-prefix record is silently dropped from a model count.
 16. The app starts and serves `/api/portfolio` with KING absent from the environment, and `--no-king` suppresses self-registration.
 17. `app_us()` is asserted equal to `APP_ID.replace("-","_")` rather than to a literal.
-18. A major `contract_version` mismatch refuses startup with an error naming both versions; a minor mismatch only warns.
+18. A differing `contract_version` refuses startup with an error naming both versions, an equal one proceeds, and no minor/warn branch exists.
 19. The manifest is written under `$KING_STATE/kind-apps/plugins` or `$HOME/kind-apps/plugins` and a test asserts `king/plugins/` is untouched.
 20. `--json` stdout of `kbu model reconstruct|gapfill|fba|fva` is byte-identical with and without a resolvable arc.
 21. Backfill prefers file artifacts over object-store references, marks every record `payload.provenance == "inferred"`, is idempotent across two runs, and writes nothing under `--dry-run`.

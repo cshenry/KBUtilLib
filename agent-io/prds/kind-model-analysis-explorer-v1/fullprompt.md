@@ -320,6 +320,20 @@ data-access layer to change.
 
 ## Revision Log
 
+- **Round 3 — 2026-09-24 (review).** Chris made no in-document edits; this
+  round folded the upstream contract break instead. **Q7 is REVERSED** — on
+  Chris's instruction in `koros-arc-store-v1`, re-runs are no longer collapsed
+  to one row but kept as distinct dated rows grouped by `analysis_id`, and
+  `run_uid` is now required on every `AnalysisRecord` this plan constructs.
+  **One `kbu model` CLI invocation is one run** (Chris, this session). Added the
+  app half he asked for and this plan did not have: stories 33-38 and a new task
+  **`p6-run-history-and-delete`** (7 tasks, 6 phases). Corrected the manifest
+  install path, which resolved to a doubled `~/kind-apps/kind-apps/plugins` on
+  the pod — the primary environment — and the generated-HTML cache path, which
+  had the same defect. New gotchas **G24-G27**; G24 is the one to read, because
+  every count in the app changed meaning and the wrong reading is the plausible
+  one.
+
 - **Round 2 — 2026-09-24 (reconciliation, not a review round).** Chris chose
   EXTRACTION over merging, which is the recommendation this PRD made in round 1.
   `kbutillib.koros_arc_store` is now built by its own PRD,
@@ -542,6 +556,23 @@ store, and share no science code at all.
 32. As a maintainer, I want the app's id to exist in exactly one place with
     every other spelling derived from it, so that renaming it is one edit
     rather than a hunt.
+33. As a scientist, I want every run of an analysis kept and DATED rather than
+    overwritten, so that I can see that I re-ran a model after a gapfill change
+    and compare the two results.
+34. As a scientist, I want the re-runs of one analysis GROUPED under a single
+    line in the arc table rather than repeated as separate rows, so that an
+    arc I have re-analysed five times still reads as one analysis.
+35. As a scientist, I want to expand that group and see each run with its date
+    and its status, so that I can pick the one I actually want to look at.
+36. As a scientist, I want to DELETE a run from the database from inside the
+    app, so that a botched or superseded run stops cluttering the view without
+    my having to touch a database by hand.
+37. As a scientist, I want deleting a run to be visibly distinct from deleting
+    the analysis, and to warn me when I am removing the last run of one, so
+    that I do not silently lose the whole analysis by tidying up.
+38. As a scientist, I want the portfolio and arc counts to count ANALYSES, not
+    runs, so that re-running things does not inflate the numbers into
+    meaninglessness.
 
 ## Implementation Decisions
 
@@ -563,16 +594,30 @@ class KorosArcStore:
     def list_arcs(self, project: str) -> list[ArcRecord]: ...
     def read_arc(self, project: str, arc: str) -> ArcRecord: ...
         # PROVENANCE.json parsed; lineage, leg_of, parent, role included.
-    def record_analysis(self, project: str, arc: str, rec: AnalysisRecord) -> None: ...
-        # append; idempotent on record_id (re-record replaces, never duplicates)
+    def record_analysis(self, project: str, arc: str, rec: AnalysisRecord,
+                        detail: dict | None = None) -> None: ...
+        # upsert on record_id -- a RETRY (same run_uid) replaces; a RE-RUN
+        # (new run_uid) is a NEW dated row sharing the analysis_id.
+        # `detail` is written to the subject_detail blob.
     def list_analyses(self, project: str, arc: str,
-                      kind: str | None = None) -> list[AnalysisRecord]: ...
-    def read_detail(self, record_id: str) -> dict: ...
+                      kind: str | None = None,
+                      analysis_id: str | None = None,
+                      latest_only: bool = False) -> list[AnalysisRecord]: ...
+        # kind and analysis_id combine CONJUNCTIVELY.
+        # latest_only returns exactly one row per analysis_id, newest by created_at.
+    def delete_record(self, record_id: str) -> bool: ...
+        # deletes ONE run. False if the record_id is unknown.
+    def read_detail(self, record_id: str) -> dict | None: ...
         # THE ONLY call that opens a JSON blob. Levels 0 and 1 never call it.
+        # Returns None for a record with no blob; RAISES RecordNotFound for an
+        # unknown record_id. The two cases are NOT the same and must not be
+        # collapsed into a falsy check.
 
 @dataclass
 class AnalysisRecord:
-    record_id: str          # stable, producer-generated
+    record_id: str          # THIS RUN. sha256(analysis_id + NUL + run_uid)
+    analysis_id: str        # THIS ANALYSIS, shared by every re-run of it
+    run_uid: str            # REQUIRED. identifies one execution; see below
     kind: str               # NAMESPACED: 'kbdl.model_build', 'kbutillib.fba', ...
     created_at: str         # ISO8601 UTC
     producer: str           # tool name + version
@@ -585,6 +630,30 @@ class AnalysisRecord:
     artifacts: dict[str, str]   # named refs; never inlined data
     payload: dict           # opaque to the shared layer
 ```
+
+**Identity is SPLIT, and this app is a consumer of that split, not a party to
+it.** `analysis_id = sha256(lower(kind) + NUL + lower(subject) + NUL +
+significant_params)` is what round 0 of this PRD called `record_id`: it names
+the *logical analysis* and is shared by every re-run of it. `record_id =
+sha256(analysis_id + NUL + run_uid)` is the per-run primary key. A **retry**
+reuses its `run_uid` and therefore replaces; a **re-run** is a new `run_uid`,
+a new `record_id`, and a new dated row grouped under the same `analysis_id`.
+See Q7, which this reversed.
+
+**`run_uid` is REQUIRED and a write without one is rejected** with code
+`missing_run_uid`. For this PRD's producer — the `kbu model` CLI — **one CLI
+process invocation is one run** (Chris, 2026-09-24). The `run_uid` is minted
+once at process start and exported so subprocesses inherit it, so a
+`reconstruct → gapfill → fba → fva` invocation writes four records sharing one
+`run_uid` under four distinct `analysis_id`s. That is what makes "delete that
+run" mean the thing a scientist means by it. The KBDL producer's run is its
+job id, which needs no derivation.
+
+**Floats are rejected in `significant_params`** with code `bad_float_param`. A
+producer with a float parameter formats it to a string itself and chooses the
+precision deliberately — because `0.1 + 0.2` is not `0.3`, and an
+`analysis_id` that silently forks on the last mantissa bit produces two
+"analyses" that are the same analysis.
 
 **`status` and `trust_tier` are different questions and the record needs
 both.** `status` says whether the *job* succeeded; `trust_tier` says how strong
@@ -841,10 +910,11 @@ expensive kind, and leaving it implicit is how two apps corrupt one database.
 
 **AGREED, and identical in both documents** — the class `KorosArcStore` in
 `kbutillib.koros_arc_store`; the methods `list_projects`, `list_arcs`,
-`read_arc`, `record_analysis`, `list_analyses`, `read_detail`; the
-`AnalysisRecord` field set including `trust_tier`, `provenance` and
-`contract_version`; namespaced `kind`; `record_analysis` idempotent on
-`record_id`; the per-user local database; and the two-tier schema with
+`read_arc`, `record_analysis`, `list_analyses`, `delete_record`,
+`read_detail`; the `AnalysisRecord` field set including `trust_tier`,
+`provenance`, `contract_version`, `analysis_id` and the required `run_uid`;
+namespaced `kind`; `record_analysis` idempotent on `record_id` (a retry, not a
+re-run — Q7); the per-user local database; and the two-tier schema with
 `read_detail` as the only blob reader.
 
 **ADOPTED FROM THEIRS — their spec is better than mine was and this PRD now
@@ -955,8 +1025,11 @@ be called with a guess.
 A non-deterministic default is untestable.
 
 **S6. Cache location.**
-`$KING_STATE/kind-apps/state/models-and-analyses` when `KING_STATE` is set,
-else `$HOME/kind-apps/state/models-and-analyses`, else a per-user state dir.
+`$KING_STATE/state/models-and-analyses` when `KING_STATE` is set, else
+`~/kind-apps/state/models-and-analyses`. CORRECTED 2026-09-24: the previous
+formula interpolated `kind-apps` INSIDE `$KING_STATE`, which already ends in
+`kind-apps` on the pod, yielding `~/kind-apps/kind-apps/state/...`. Same defect
+as S10, same cause.
 Never inside the five KIND repos and never inside the runs tree.
 
 **S7. Arc slug scope.**
@@ -965,12 +1038,13 @@ Slugs are unique **per project**, not globally. `--arc` accepts
 producer **refuses to stamp** and prints a disambiguation error. Guessing here
 would mis-file records, which Q5's reasoning already rules out.
 
-**S8. Replacement semantics — WITHDRAWN and replaced by Q1.**
-This specified strictly-append-only shards with read-time dedup. With the store
-now a per-user database, `record_analysis` is an upsert keyed on `record_id`
-and `latest_only` is no longer a scan-from-the-end view. The *requirement* is
-unchanged and still tested: re-recording the same logical analysis leaves
-exactly one row, never two.
+**S8. Replacement semantics — WITHDRAWN by Q1, then REVISED by Q7.**
+This originally specified strictly-append-only shards with read-time dedup.
+With the store now a per-user database, `record_analysis` is an upsert keyed on
+`record_id`. The requirement that survives is narrower than it was: a **retry**
+— the same run, same `run_uid` — leaves exactly one row, never two. A
+**re-run** is a new row by design, and the test that once asserted "one row per
+logical analysis" now asserts one row per `(analysis_id, run_uid)` pair.
 
 **S9. Backfill scan strategy.**
 Walk `<runs_root>/*/arcs/*/` for `*.model.json`, `fba/*.json`, `fva/*.json`.
@@ -978,10 +1052,20 @@ Where the KBDL object store is reachable, additionally list by `object_type ∈
 {model, fba, fva}` filtered by owner. **Prefer file artifacts; use store refs
 only when no file is present.**
 
-**S10. Manifest install path.**
-`$KING_STATE/kind-apps/plugins` when `KING_STATE` is set, else
-`$HOME/kind-apps/plugins`, then refresh the union symlink farm. Never
-`king/plugins/`.
+**S10. Manifest install path. CORRECTED 2026-09-24 — the previous formula was
+broken on the pod, which is the primary environment.**
+The target is **`$KING_PLUGINS_DIR` when set, else `~/kind-apps/plugins`**,
+then refresh the union symlink farm. Never `king/plugins/`. **Never derive it
+from `KING_STATE`.**
+The superseded formula was `$KING_STATE/kind-apps/plugins`, and `KING_STATE` is
+per-environment (`cw-kind` lines 30-40): `~/kind-apps` on the pod, `~/king-stack`
+on the laptop. It therefore resolved to `~/kind-apps/kind-apps/plugins` on the
+pod — a doubled path — and `~/king-stack/kind-apps/plugins` on the laptop.
+Neither is the union directory. `cw-kind` hardcodes the literal
+`~/kind-apps/plugins` in both the farm runbook (lines 663-684) and every launch
+line (108, 128, 296), and `KING_PLUGINS_DIR` is what `_resolve_plugins()` reads
+first (`king_backend/config.py:117-127`). Writing to the wrong directory is
+SILENT: see G25.
 
 **S11. Foreign records are COUNTED, never silently dropped.**
 Every read of an arc returns records this app cannot interpret — the annotation
@@ -1099,6 +1183,36 @@ Tests that assert on the shape of generated HTML are testing
   specifically that `kbdl.fitness_prop` writes `homology` rather than
   `hypothesis`. That one is the likeliest to be got wrong, because
   `hypothesis` is the right answer for every other record this PRD writes.
+
+- **Run identity, and the distinction that is easiest to lose** — a RETRY
+  (same `run_uid`) replaces and leaves one row; a RE-RUN (new `run_uid`) leaves
+  two rows sharing one `analysis_id`. Both halves are asserted, because a
+  store that never replaces and a store that always replaces each pass one half.
+- **`run_uid` is required** — constructing an `AnalysisRecord` without one is
+  rejected with `missing_run_uid`, asserted on the error CODE and not on the
+  message text.
+- **One CLI invocation is one run** — a `kbu model` invocation that performs
+  several analyses writes records that share a single `run_uid` and carry
+  distinct `analysis_id`s. This is the test that pins Chris's decision; without
+  it a developer could reasonably mint a `run_uid` per analysis and nothing
+  would fail.
+- **Counts are DISTINCT on `analysis_id`** — an arc holding one analysis with
+  six runs reports one, not six, at level 0 and level 1. G24 is the reasoning;
+  this is the assertion, and it is the single most valuable test in the fold
+  because the wrong answer is self-consistent and looks plausible.
+- **Delete** — `delete_record` on a known run removes exactly that run and
+  leaves its siblings; on an unknown `record_id` it returns `False` rather than
+  raising; and the app invalidates its generated-HTML cache entry for the
+  deleted run (G26).
+- **`read_detail`'s two negative cases are NOT the same** — a record with no
+  blob returns `None`; an unknown `record_id` raises `RecordNotFound`. Asserted
+  separately, because a falsy check collapses them and the collapse is invisible
+  until someone deletes a record.
+- **The manifest actually loads** — the written manifest is read back through
+  KIND's own `plugins.py` loader and appears in `app_manifests()`, rather than
+  being compared to a hand-written expectation. G25 is why: every failure mode
+  here is silent, so a test that asserts a file exists asserts the one thing
+  that was never in doubt.
 
 **Prior art in this codebase:** KBDL's `tests/test_layering.py` enforces
 import-boundary invariants and is the model for asserting that the app layer
@@ -1300,23 +1414,35 @@ question was asked and why it stopped mattering. Gotchas G4 and G18, and
 specification S14, are withdrawn with it.
 **Confidence:** high.
 
-### Q7. What is the record identity, so a re-run replaces rather than duplicates? -- DECIDED: `record_id` is producer-generated and stable across re-runs of the same logical analysis, not content-addressed.
+### Q7. Do re-runs of the same analysis collapse to one row? -- DECIDED: NO. REVERSED 2026-09-24 by Chris in `koros-arc-store-v1`. Re-runs are distinct, dated rows grouped by a stable `analysis_id`, and a run can be DELETED.
 
 **Blast radius:** MEDIUM
-**Why:** Content-addressing would make every re-run a new record, so an arc
-re-analysed five times shows five rows where the scientist did one thing five
-times. A stable id — derived from the kind, the subject, and the significant
-parameters such as media and objective — collapses them to one row showing the
-latest, which is what a table of "models analysed in this arc" should show.
-**If you disagree:** keeping every run means the app needs a history axis on
-every row and the counts at level 0 stop meaning "how much is here" and start
-meaning "how many times did anything run". Concretely `list_analyses` would
-gain a `latest_only` flag and both the arc table and the portfolio counts would
-need a de-duplication pass.
-**Confidence:** medium — an argument exists that re-runs *are* interesting
-(a model re-analysed after a gapfill change), and this decision loses that.
-Mitigated because the failed and superseded records still exist in the JSONL;
-only the view collapses them.
+**Why:** Round 0 decided the opposite — one row per logical analysis, showing
+the latest — on the reasoning that an arc re-analysed five times should not
+show five rows. Chris reversed it in the module PRD: *"runs should be dated and
+ideally grouped in the interace, and critically you should be able to delete a
+run from the database... The apps should offer this kind of delete interface."*
+The reversal is upstream and this PRD consumes it; it is not this document's
+call to re-litigate. The argument that carried it is the one round 0 recorded
+against itself as the counter-argument: **a model re-analysed after a gapfill
+change is a different result, and collapsing it hides exactly the comparison
+the scientist re-ran it to make.** Deletion is what makes keeping every run
+affordable — the answer to clutter is a delete affordance, not a lossy view.
+**What this cost, and it is exactly what round 0 predicted:** its own
+`If you disagree` line said keeping every run means *"the counts at level 0
+stop meaning 'how much is here' and start meaning 'how many times did anything
+run'"*, and that `list_analyses` would need a `latest_only` flag with a
+de-duplication pass on the arc table and portfolio counts. All of that is now
+real and specified: `latest_only` is on the interface, **level 0 and level 1
+counts are DISTINCT-on-`analysis_id`** (see G24), and the arc table groups.
+**If you disagree:** reverting means dropping `run_uid` from every
+`AnalysisRecord` this plan constructs (`p2-kbu-model-stamping`), deleting the
+grouping and dating from `p3-app-skeleton`, deleting `p6-run-history-and-delete`
+outright, and re-pinning `analysis_id` as the primary key in
+`koros-arc-store-v1` — which is `ready`, so the reversion is upstream of here
+and lands on a second PRD.
+**Confidence:** high — it is Chris's direct instruction, quoted, and the
+mechanism is built and specified upstream rather than assumed here.
 
 ### Q13. How are model-derived values kept distinct from experimental data? -- DECIDED: every record carries a CAC `trust_tier` and `provenance`; model output is `hypothesis`, propagated fitness is `homology`, and the concordance view never merges tiers into one undifferentiated number.
 
@@ -1601,6 +1727,50 @@ undifferentiated agreement score. The MCC in Q14 is therefore explicitly a
 for the arc. A reader who wants one number for "how good is this model" will not
 get it, and that is the contract working as intended rather than a gap.
 
+**G24. Every count in this app changed meaning when re-runs stopped
+collapsing, and the wrong reading is the plausible one.**
+Round 0 could count rows, because one row was one analysis. It no longer is. A
+level-0 portfolio count and a level-1 arc count MUST be `DISTINCT` on
+`analysis_id`, or a scientist who re-ran one model six times sees an arc that
+claims six analyses. The failure is quiet and self-consistent: nothing errors,
+the number is just wrong, and it is wrong in the flattering direction — the
+dashboard says more work happened than did. Q7's own superseded text predicted
+this consequence in as many words. Every count in this app is now a count of
+`analysis_id`s unless it explicitly says "runs".
+
+**G25. A misplaced or malformed manifest produces NO error anywhere, on any
+surface.**
+`plugins.py::_load()` returns `[]` when the plugin directory does not exist,
+and its body catches `(OSError, json.JSONDecodeError)` and bare-`continue`s per
+file (lines 25-26). So an app whose manifest went to the wrong directory, or
+whose JSON is malformed, or which omits `type: "app"` (filtered at
+`plugins.py:33`), behaves EXACTLY like an app that was never installed: no log
+line, no warning, no failed request. Install can report success and the app
+simply never appears in KIND. This is why S10 pins the target to
+`$KING_PLUGINS_DIR` and why installation must VERIFY by loading the written
+manifest back through KIND's own loader — an install that only checks it wrote
+a file has checked the one thing that was never in doubt.
+
+**G26. The delete affordance can orphan a blob, and the store will not stop
+it.**
+`delete_record(record_id)` removes one run. The two-tier schema keeps
+gene- and reaction-level detail in a blob per subject, and the generated-HTML
+cache is keyed on `record_id` plus artifact mtimes. Deleting the last run of an
+analysis therefore leaves a cache entry no row points at, and can leave a blob
+the store no longer reaches. Neither is corruption and neither raises. The app
+must invalidate its own cache entry on delete; the blob is the module's
+problem, and this PRD's position is that it must not paper over it by
+suppressing the delete.
+
+**G27. "Delete the run" and "delete the analysis" are one click apart and mean
+very different things.**
+There is no `delete_analysis` on the interface — removing an analysis means
+deleting each of its runs. So the affordance that removes the LAST run of an
+`analysis_id` silently removes the analysis from every count and every table,
+while looking to the user like the same tidying-up action they performed on the
+previous four runs. Story 37 exists because of this: the app must say which one
+is about to happen.
+
 **G15. Propagated fitness looks like measured fitness and is not.**
 `kbdl.fitness_prop` output is `homology` tier — it reached the gene through a
 protein homolog with a percent-identity bridge — while RB-TnSeq fitness is
@@ -1819,19 +1989,19 @@ vendor that module.**
 4. A `kbdl.fitness_prop` record carries its percent-identity bridge metric and the accession reached through in `provenance`, or records an explicit null for the metric with the reason stated in the task report.
 5. `status` and `trust_tier` are independent: a test asserts a `status: "ok"` record can and does carry `trust_tier: "hypothesis"`.
 6. Records are written to the per-user local database in the pod home directory; a test asserts nothing is written into the KOROS runs tree.
-7. `record_analysis` upserts on `record_id`: re-recording the same logical analysis leaves exactly one row, never two.
+7. `record_analysis` upserts on `record_id`: a RETRY (same `run_uid`) leaves exactly one row, never two; a RE-RUN (new `run_uid`) leaves a second dated row sharing the first's `analysis_id`.
 8. A record with a null project and arc is written and is retrievable through the explicit unattributed selector, not dropped.
 9. `artifacts` keys match the per-kind table exactly, and every reference is a bare absolute path, a `file://` URI, or an `obj://<object_id>` URI.
 10. Model rows in the arc view group strictly by `artifacts.model_id` in `model:<ns>:<id>` form, never by subject string.
 11. `GET /api/models/{record_id}/dashboard` accepts a `kbdl.fitness_analysis` record, pairs it with the most recent `kbdl.model_build` sharing its `artifacts.model_id` in the same arc, and returns 404 `model-not-found` when there is none.
 12. Escher map selection defaults to `modelseed_core`, then `modelseed_global`, then the first available map, and returns 404 `no-map` when the list is empty.
-13. Generated HTML is cached under `$KING_STATE/kind-apps/state/models-and-analyses` or the documented fallbacks, never inside the five KIND repos and never inside the runs tree.
+13. Generated HTML is cached under `$KING_STATE/state/models-and-analyses` or `~/kind-apps/state/models-and-analyses`, never inside the five KIND repos and never inside the runs tree, and never at a path that interpolates `kind-apps` inside `$KING_STATE`.
 14. A bare `--arc SLUG` that matches arcs in more than one project refuses to stamp and prints a disambiguation error; `PROJECT/SLUG` resolves unambiguously.
 15. The prefix filter counts the foreign records it excludes and exposes that count, and a test fails if a foreign-prefix record is silently dropped from a model count.
 16. The app starts and serves `/api/portfolio` with KING absent from the environment, and `--no-king` suppresses self-registration.
 17. `app_us()` is asserted equal to `APP_ID.replace("-","_")` rather than to a literal.
 18. A differing `contract_version` refuses startup with an error naming both versions, an equal one proceeds, and no minor/warn branch exists.
-19. The manifest is written under `$KING_STATE/kind-apps/plugins` or `$HOME/kind-apps/plugins` and a test asserts `king/plugins/` is untouched.
+19. The manifest is written to `$KING_PLUGINS_DIR` when set, else `~/kind-apps/plugins`; a test asserts `king/plugins/` is untouched, and a test asserts the resolved path is never derived from `KING_STATE`.
 20. `--json` stdout of `kbu model reconstruct|gapfill|fba|fva` is byte-identical with and without a resolvable arc.
 21. Backfill prefers file artifacts over object-store references, marks every record `payload.provenance == "inferred"`, is idempotent across two runs, and writes nothing under `--dry-run`.
 22. No file in `king`, `koros`, `semcat`, `lakehouse-explorer` or `narrative-connector` is modified by any task in this PRD.

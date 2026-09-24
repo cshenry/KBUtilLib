@@ -7,7 +7,7 @@
     "KBDLJobRunningPrototype"
   ],
   "status": "ready",
-  "review_rounds": 1,
+  "review_rounds": 2,
   "confront_rounds": 2,
   "draft_commit": "a758fb19d7a839e1b9a30c70ed0eed5b94ea2d44",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
@@ -20,12 +20,14 @@
     "interface_this_prd_is_written_against": [
       "resolve_runs_root() -> Path",
       "KorosArcStore.list_projects() / list_arcs(project) / read_arc(project, arc)",
-      "KorosArcStore.record_analysis(project, arc, rec, detail=None) -- idempotent on record_id; the optional `detail` mapping is written to the subject_detail blob. ADDED 2026-09-24 by koros-arc-store-v1 confront round 1 (S4/S7): the inherited interface had a read_detail with no write path. Additive -- existing call sites stay correct.",
-      "KorosArcStore.list_analyses(project, arc, kind=None)",
-      "KorosArcStore.read_detail(record_id) -- the only blob-opening call",
-      "AnalysisRecord(record_id, kind, created_at, producer, subject, status, trust_tier, provenance, contract_version, artifacts, payload)",
-      "the shared record_id helper and the trust_tier floor helper",
-      "FakeKorosArcStore from kbutillib.koros_arc_store_testing -- NEW: the app tests import this rather than writing their own double"
+      "KorosArcStore.record_analysis(project, arc, rec, detail=None) -- upsert on record_id; a RETRY (same run_uid) replaces, a RE-RUN (new run_uid) is a new dated row",
+      "KorosArcStore.list_analyses(project, arc, kind=None, analysis_id=None, latest_only=False) -- kind and analysis_id combine CONJUNCTIVELY; latest_only returns one row per analysis_id",
+      "KorosArcStore.delete_record(record_id) -> bool -- deletes ONE run; False for an unknown record_id",
+      "KorosArcStore.read_detail(record_id) -> dict | None -- None for a record with no blob, RAISES RecordNotFound for an unknown record_id; the two are NOT the same",
+      "AnalysisRecord(record_id, analysis_id, run_uid, kind, created_at, producer, subject, status, trust_tier, provenance, contract_version, artifacts, payload) -- run_uid REQUIRED",
+      "the shared analysis_id/record_id derivation helper and the trust_tier floor helper",
+      "FakeKorosArcStore from kbutillib.koros_arc_store_testing -- the app tests import this rather than writing their own double",
+      "exceptions by NAME: KorosArcStoreError, RunsRootResolutionError, RecordValidationError (stable `code`), RecordNotFound, ContractVersionMismatch"
     ],
     "seam_that_must_not_change": "an opaque `payload` dict under a NAMESPACED `kind` string; names may move, the seam may not",
     "repo_slot_caveat": "KBUtilLib is both this module's repo and this app's repo, so under dev 1032 one-branch-per-repo this PRD cannot start while koros-arc-store-v1 is building. kind-annotation-results-explorer-v1 has no such collision -- after the extraction its repos union is KBDLJobRunningPrototype + GenomeAnnotationAggregator only. The two consumers are NOT symmetric in the build order even though the dependency graph says they are.",
@@ -80,14 +82,14 @@
     "LOW": 4,
     "NONE": 1,
     "ordering_rule": "entries are ORDERED by blast radius descending; Q-NUMBERS are stable ids, not positions; Q11 (terminal could-not-decide) always sorts last",
-    "highest_risk_entry": "Q1 -- the storage schema boundary. Which statistics are precomputed into SQL columns is the part most likely to need a second pass (see G21, version-stamped summaries). Q10 and Q12, previously the two weakest irreversible entries, were both resolved by Chris on 2026-09-23.",
+    "highest_risk_entry": "Q1 -- the storage schema boundary. Which statistics are precomputed into SQL columns is the part most likely to need a second pass (see G21), and Q7's reversal sharpened it: the precomputed summaries now sit alongside a run axis that did not exist when they were specified.",
     "second_highest": "Q7 -- record identity collapsing re-runs to one row. Medium confidence; an argument exists that re-runs are themselves interesting.",
     "note": "Q15 (unattributed records as a first-class state) added after the sibling exchange"
   },
   "could_not_decide": [
-    "Whether the KBDL object store is reachable from the kbhub pod. The runs tree is (Chris, 2026-09-23); the object store was never checked and the artifact resolver degrades without it.",
     "Whether 'official' means contributed UPSTREAM into king/koros, or a registered conformant capability in our own repo. Chris confirmed the designation applies to this app but not which reading of it. Designed for the second; the consume-only interlock forbids the first.",
-    "The CAC's own unfilled <fill:> seams: the ORCID handoff (C), the id-normalization helper (E), and the contract_version gate mechanics (F)."
+    "The CAC's own unfilled <fill:> seams: the ORCID handoff (C), the id-normalization helper (E), and the contract_version gate mechanics (F).",
+    "Whether the KBDL object store is reachable from the kbhub pod. The runs tree is (Chris, 2026-09-23); the object store was never checked and the artifact resolver degrades without it."
   ],
   "artifact_id": null,
   "app_id": {
@@ -270,21 +272,45 @@
       "reason": "pending_reconciliation note added 2026-09-24; baseline advanced so a later --review does not read it as a Chris edit"
     }
   ],
-  "pending_reconciliation_2026_09_24": {
-    "raised": "2026-09-24, koros-arc-store-v1 review round 1 + confront round 2",
-    "why_here": "This PRD is ready and its design session has ENDED. Mail sent to that session on 2026-09-24 05:06Z was never delivered -- a session that ends before its next prompt never receives it. This block is the durable record instead. Tracked as dev 1298.",
-    "the_change": "Chris reversed the re-run behaviour in koros-arc-store-v1: re-runs no longer collapse to one row. Identity is SPLIT -- analysis_id (sha256 over kind + subject + significant_params, the old record_id derivation, now the GROUPING key) and record_id (sha256(analysis_id + NUL + run_uid), one row per run). delete_record(record_id) -> bool added. koros-arc-store-v1 is READY at draft_commit 7660ccd3.",
-    "BREAKING_FOR_THIS_PRD": "run_uid is REQUIRED on AnalysisRecord. Every task in this plan that CONSTRUCTS an AnalysisRecord must supply one or the write is rejected with code missing_run_uid. Readers are unaffected.",
-    "app_work_not_yet_in_this_plan": "Chris: 'runs should be dated and ideally grouped in the interace, and critically you should be able to delete a run from the database... The apps should offer this kind of delete interface.' The data API half is built by koros-arc-store-v1 p0b/p0d. The APP half is not in this plan -- no delete affordance, no grouping or dating of re-runs, because this PRD was written when one analysis was one row.",
-    "other_producer_facing_changes": [
-      "FLOATS ARE REJECTED in significant_params (code bad_float_param). A producer with a float parameter formats it to a string itself, choosing the precision deliberately.",
-      "unknown_kind is now 0 (known) / 1 (well-formed but unregistered) / 2 (malformed), not a boolean. Non-zero still means unknown, so existing rules hold, but a foreign-kind counter can now distinguish a peer app's new kind from a producer bug.",
-      "record_analysis gains an optional detail parameter; the subject_detail blob had no write path before.",
-      "Exceptions are a named hierarchy (KorosArcStoreError, RunsRootResolutionError, RecordValidationError with a stable code, RecordNotFound, ContractVersionMismatch); catch by name.",
-      "read_detail returns None for a record with no blob and raises RecordNotFound for an unknown record_id."
+  "reconciliation_discharged_2026_09_24": {
+    "discharged_in": "review round 2 (/ai-design --review), 2026-09-24",
+    "was": {
+      "raised": "2026-09-24, koros-arc-store-v1 review round 1 + confront round 2",
+      "why_here": "This PRD is ready and its design session has ENDED. Mail sent to that session on 2026-09-24 05:06Z was never delivered -- a session that ends before its next prompt never receives it. This block is the durable record instead. Tracked as dev 1298.",
+      "the_change": "Chris reversed the re-run behaviour in koros-arc-store-v1: re-runs no longer collapse to one row. Identity is SPLIT -- analysis_id (sha256 over kind + subject + significant_params, the old record_id derivation, now the GROUPING key) and record_id (sha256(analysis_id + NUL + run_uid), one row per run). delete_record(record_id) -> bool added. koros-arc-store-v1 is READY at draft_commit 7660ccd3.",
+      "BREAKING_FOR_THIS_PRD": "run_uid is REQUIRED on AnalysisRecord. Every task in this plan that CONSTRUCTS an AnalysisRecord must supply one or the write is rejected with code missing_run_uid. Readers are unaffected.",
+      "app_work_not_yet_in_this_plan": "Chris: 'runs should be dated and ideally grouped in the interace, and critically you should be able to delete a run from the database... The apps should offer this kind of delete interface.' The data API half is built by koros-arc-store-v1 p0b/p0d. The APP half is not in this plan -- no delete affordance, no grouping or dating of re-runs, because this PRD was written when one analysis was one row.",
+      "other_producer_facing_changes": [
+        "FLOATS ARE REJECTED in significant_params (code bad_float_param). A producer with a float parameter formats it to a string itself, choosing the precision deliberately.",
+        "unknown_kind is now 0 (known) / 1 (well-formed but unregistered) / 2 (malformed), not a boolean. Non-zero still means unknown, so existing rules hold, but a foreign-kind counter can now distinguish a peer app's new kind from a producer bug.",
+        "record_analysis gains an optional detail parameter; the subject_detail blob had no write path before.",
+        "Exceptions are a named hierarchy (KorosArcStoreError, RunsRootResolutionError, RecordValidationError with a stable code, RecordNotFound, ContractVersionMismatch); catch by name.",
+        "read_detail returns None for a record with no blob and raises RecordNotFound for an unknown record_id."
+      ],
+      "how_to_act_on_it": "/ai-jane d --review <this prd>. Do NOT patch it from another session: it is ready, and a review round is the vehicle that keeps the document, the taskplan and the baseline consistent.",
+      "separately": "dev 1294 -- this PRD registers its KIND manifest into ~/kind-apps/plugins/, a path that appears NOWHERE in the king stack. KING resolves $KING_PLUGINS_DIR -> <king checkout>/plugins/ -> bundled _plugins, and plugins.py::_load() swallows every error, so the app would simply never appear.",
+      "affected_tasks_in_this_plan": "p2-kbu-model-stamping constructs AnalysisRecords (needs run_uid); p3-app-skeleton and p4-render-endpoints need grouping, dating and a delete affordance."
+    },
+    "how": [
+      "Q7 rewritten as a REVERSAL: re-runs are distinct dated rows grouped by analysis_id, not collapsed. The superseded text's own 'If you disagree' consequences are quoted in the new entry because they all came true.",
+      "run_uid / analysis_id / record_id split folded into the interface block, the AnalysisRecord dataclass, S8, the AGREED interface list, Testing Decisions and Acceptance Criterion 7.",
+      "ONE CLI PROCESS INVOCATION IS ONE RUN -- Chris, 2026-09-24, this session. Minted at process start and exported so subprocesses inherit it. Folded into p2-kbu-model-stamping with a test that pins it.",
+      "floats rejected in significant_params, unknown_kind 0/1/2, named exception hierarchy, read_detail None-vs-RecordNotFound: all folded.",
+      "THE APP HALF, which had no task: stories 33-38, gotchas G26/G27, and a NEW TASK p6-run-history-and-delete (run history endpoint, delete endpoint, cache invalidation, last-run warning). Plan grew 6 -> 7 tasks, 5 -> 6 phases. Chris approved the scope growth in session.",
+      "G24 added: every count is now DISTINCT on analysis_id. This is the quiet one -- counting rows still 'works' and inflates every number."
+    ]
+  },
+  "manifest_path_correction_2026_09_24": {
+    "defect": "S10 specified $KING_STATE/kind-apps/plugins, which resolved to ~/kind-apps/kind-apps/plugins on the POD (the primary environment) and ~/king-stack/kind-apps/plugins on the laptop. Neither is the union dir KING reads. The generated-HTML cache path had the identical doubling.",
+    "corrected_to": "$KING_PLUGINS_DIR when set, else ~/kind-apps/plugins. NEVER derived from KING_STATE.",
+    "verified_in_source": [
+      "cw-kind.md lines 663-684 -- the union symlink-farm runbook hardcodes the literal ~/kind-apps/plugins",
+      "cw-kind.md lines 108, 128, 296 -- every launch line sets KING_PLUGINS_DIR=~/kind-apps/plugins",
+      "cw-kind.md lines 30-40 -- KING_STATE is ~/kind-apps on the pod and ~/king-stack on the laptop, which is what produced the doubling",
+      "king_backend/config.py:117-127 -- _resolve_plugins() reads $KING_PLUGINS_DIR FIRST, then KING_DIR/plugins, then the bundled _plugins",
+      "king_backend/plugins.py:25-26 and :33 -- _load() returns [] for a missing dir and catches (OSError, JSONDecodeError) with a bare continue; app_manifests() filters on type == 'app'. Every failure mode here is SILENT."
     ],
-    "how_to_act_on_it": "/ai-jane d --review <this prd>. Do NOT patch it from another session: it is ready, and a review round is the vehicle that keeps the document, the taskplan and the baseline consistent.",
-    "separately": "dev 1294 -- this PRD registers its KIND manifest into ~/kind-apps/plugins/, a path that appears NOWHERE in the king stack. KING resolves $KING_PLUGINS_DIR -> <king checkout>/plugins/ -> bundled _plugins, and plugins.py::_load() swallows every error, so the app would simply never appear.",
-    "affected_tasks_in_this_plan": "p2-kbu-model-stamping constructs AnalysisRecords (needs run_uid); p3-app-skeleton and p4-render-endpoints need grouping, dating and a delete affordance."
+    "dev_1294_assessment": "dev 1294's CONCLUSION (the app would silently never appear) is right; its REASONING is wrong. It says the manifest must land in king/plugins/ and that ~/kind-apps/plugins appears nowhere in the stack. The string is absent from the king stack BY DESIGN -- the union dir is deliberately outside the five repos, which is what the consume-only interlock requires. Writing into king/plugins/ is what the interlock forbids. Correction raised by the annotation twin (session 82e19588) and INDEPENDENTLY VERIFIED here in cw-kind.md before acceptance, not taken on assertion.",
+    "also_folded": "type: 'app' is mandatory (plugins.py:33) and installation must VERIFY by loading the written manifest back through KIND's own loader -- asserting the file exists asserts the one thing that was never in doubt."
   }
 }

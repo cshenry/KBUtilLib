@@ -133,5 +133,6 @@
       "adjudication_note": "Chris was not asked for a drop-list. Draft Mode does not block on an answer, every disposition is recorded above with its reasoning, and dropping any folded item is a one-line edit."
     },
     "cap_note": "1 of 3 rounds used."
-  }
+  },
+  "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e"
 }

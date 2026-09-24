@@ -9,7 +9,7 @@
   "status": "ready",
   "review_rounds": 1,
   "confront_rounds": 2,
-  "draft_commit": "24c5c1d31f2fed0bf386afe4de223581fcafbfa4",
+  "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
   "hard_external_dependency": {
     "module": "kbutillib.koros_arc_store, plus kbutillib.koros_arc_store_testing (FakeKorosArcStore) and the CAC helpers",
@@ -259,5 +259,11 @@
     ],
     "what_did_not_change": "Nothing this PRD builds. All six tasks, their repos and their success criteria are otherwise untouched."
   },
-  "status_note": "Corrected 2026-09-24: this field read 'draft' while AIAssistant/state/prd_registry.json -- which is authoritative and is what /ai-conductor reads -- has had it at 'ready' since Chris pressed it on 2026-09-23. The registry was right; this copy was stale."
+  "status_note": "Corrected 2026-09-24: this field read 'draft' while AIAssistant/state/prd_registry.json -- which is authoritative and is what /ai-conductor reads -- has had it at 'ready' since Chris pressed it on 2026-09-23. The registry was right; this copy was stale.",
+  "draft_commit_history": [
+    {
+      "superseded": "24c5c1d31f2fed0bf386afe4de223581fcafbfa4",
+      "reason": "reconciliation against koros-arc-store-v1 extraction, 2026-09-24 -- baseline moved so the next --review round does not read my propagation as Chris edits"
+    }
+  ]
 }

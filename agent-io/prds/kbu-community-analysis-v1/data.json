@@ -5,7 +5,7 @@
   "repos": [
     "KBUtilLib"
   ],
-  "status": "draft",
+  "status": "ready",
   "review_rounds": 0,
   "confront_rounds": 2,
   "draft_commit": "12f407e43bf8408e97680ec06d16e30950d71382",
@@ -203,5 +203,7 @@
       "t5-dependency-gated-integration-tests"
     ],
     "parallel": "t3 and t4 are the only genuine parallel pair -- different files, both depending on t2"
-  }
+  },
+  "status_note": "THE REGISTRY IS AUTHORITATIVE for status, not this file. Both now say ready (advanced 2026-09-24). This field is kept in sync deliberately because the mismatch has misled a dispatch before: on 2026-09-22 meeting-action-item-single-producer-v1 was ready in the registry while its data.json still said draft.",
+  "branch_note": "The bundle is committed on wip only. main is 1 commit ahead of wip and wip is 18 ahead of main as of 2026-09-24 04:5xZ. h100 cuts developer worktrees off MAIN, so this bundle is NOT reachable from a worktree -- which is expected and handled: every taskplan task prompt is self-contained and carries its own spec, and any PRD path in a prompt is marked background-only. The conductor reads the PRD from its own wip checkout."
 }

@@ -8,7 +8,7 @@
   ],
   "status": "ready",
   "review_rounds": 2,
-  "confront_rounds": 2,
+  "confront_rounds": 3,
   "draft_commit": "fb9556d3d707f39b57f6956c27cf35627313ba17",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
   "hard_external_dependency": {
@@ -152,11 +152,32 @@
       "branch": "maestro/researcher/consumer-sim-attack-prompt-prd-c-task-36f366a6",
       "dispatched_at": "2026-09-24T17:57Z",
       "dispatched_against": "review round 2 corrected text, KBUtilLib f03a9d2",
-      "status": "DISPATCHED -- not yet fetched or adjudicated",
+      "status": "SUCCESS -- 8775-byte stall report, both required sections, landed 5 minutes after dispatch",
       "why_spent": "Review Mode 5b: this round changed Q7, a MEDIUM blast-radius decision. The reversal itself came from Chris and needs no attack, but p6-run-history-and-delete, the DISTINCT-on-analysis_id count semantics (G24) and the last-run deletion case (G27) are NEW design that nothing has ever attacked.",
       "cap_note": "3 of 3 used. No further confront is available on this PRD.",
       "how_to_verify": "Do NOT trust maestro status alone -- a failed status with a fresh well-formed artifact is SUCCESS (see round_1's false alarm). Read it from the branch: git -C ~/Dropbox/Projects/KBUtilLib show <branch>:agent-io/confront/stall-report.md . Well-formed means it contains BOTH '## STALL REPORT (the binding part)' and '## FREE CRITIQUE (non-binding)'.",
-      "pool_contention": "h100 is concurrently running the dev 1299/1301 tranche (session 4e182133) and the annotation twin's confront task-a71acdac. Expect longer than the usual ~15 minutes."
+      "pool_contention": "h100 is concurrently running the dev 1299/1301 tranche (session 4e182133) and the annotation twin's confront task-a71acdac. Expect longer than the usual ~15 minutes.",
+      "stall_points": 12,
+      "folded": [
+        "S16 resolve_app_state_dir helper",
+        "S17 kbu model hook points + run_uid in the entry point",
+        "S18 poll token schema and 24h GC",
+        "S19 per-key payload types",
+        "S20 MCC threshold is fitness_dashboard.py:170, never redefined",
+        "S21 object-store bounded probe",
+        "S22 tri-state tests deferred upstream"
+      ],
+      "declined": [
+        "koros_arc_store absent from the worktree -- single-checkout artifact; hard_external_dependency already blocks every task",
+        "KBDL JobContext is another repo -- p2-kbdl-arc-parameter owns it",
+        "arc slug collision -- ALREADY specified at fullprompt line 1050 and acceptance criterion 14",
+        "foreign-kind tri-state premise wrong, though its recommendation was taken as S22"
+      ],
+      "self_contradictions_it_caught": "TWO, both introduced by review round 2 in this same session: S1 and acceptance criterion 1 still named the OLD record_id derivation after Q7 split identity, and the taskplan still carried the superseded $KING_STATE cache path after the body was corrected. A developer would have implemented whichever they read first. This is what paid for the round.",
+      "invented_specifics_rejected": [
+        "KBDL_OBJECT_STORE_URL -- does not exist; verified by grep over KBDLJobRunningPrototype/src and KBUtilLib/src. The requirement (a bounded detection rule) was kept; the variable was not.",
+        "'fallback threshold = -1.0' -- the VALUE is right but the framing is wrong. -1.0 is not a fallback, it is the existing hardcoded constant at domains/notebook/fitness_dashboard.py:170. Folded with the citation, because calling it a fallback invites overriding it."
+      ]
     }
   },
   "shared_interface": {
@@ -327,5 +348,15 @@
     ],
     "dev_1294_assessment": "dev 1294's CONCLUSION (the app would silently never appear) is right; its REASONING is wrong. It says the manifest must land in king/plugins/ and that ~/kind-apps/plugins appears nowhere in the stack. The string is absent from the king stack BY DESIGN -- the union dir is deliberately outside the five repos, which is what the consume-only interlock requires. Writing into king/plugins/ is what the interlock forbids. Correction raised by the annotation twin (session 82e19588) and INDEPENDENTLY VERIFIED here in cw-kind.md before acceptance, not taken on assertion.",
     "also_folded": "type: 'app' is mandatory (plugins.py:33) and installation must VERIFY by loading the written manifest back through KIND's own loader -- asserting the file exists asserts the one thing that was never in doubt."
-  }
+  },
+  "sibling_findings_folded_2026_09_24": {
+    "from": "annotation twin, session 82e19588, its confront round 2 (task-a71acdac)",
+    "method": "VERIFIED against this document before folding, not taken on assertion",
+    "T1_identity_helpers_unnamed": "koros-arc-store-v1 gives both derivations and says both helpers live there and nowhere else, but names neither FUNCTION. Folded as STOP-and-report plus a grep-verifiable acceptance criterion forbidding any sha256 over those inputs. Twin tracks it as dev 1306.",
+    "T2_summary_columns_fixed": "CONFIRMED against the upstream DDL. runs carries exactly subject_feature_count, method_count, consistency_overall, consistency_metric_version, ic_corpus_version -- an annotation-shaped set with NO home for any model statistic. Model statistics go in the record's payload, a TEXT column ON runs (upstream S4/S7, its acceptance criterion 15), not the subject_detail blob, so Q1's level-0/1 no-blob boundary holds. THIS ALSO KILLED A FOLD I HAD PLANNED: the confront free critique proposed a stat_version column for G21, and the column set is not ours to extend, so the version stamp goes in payload instead. Recorded as G28.",
+    "T3_no_permanently_empty_column": "CHECKED and clean here. Every value this PRD's views promise has a declared kind that writes it. The twin had to cut CheckM2 for this reason; we had no equivalent.",
+    "T4_shipped_fake": "Already landed in review round 2. Added an acceptance criterion forbidding any local class implementing the interface, which was the part that was missing.",
+    "T5_ready_probe": "REAL here too. The manifest pointed at '/' and /health appeared ZERO times in the bundle. Moved to /health, and p3-app-skeleton now serves it without touching the run database."
+  },
+  "operational_note_maestro_status": "During round 3, `maestro status` returned DIFFERENT status values on consecutive reads of the same task from primary-laptop (published/submitted flapping), with published_at null, retry_count 0 and terminal_at null throughout. The artifact landed 5 minutes after dispatch while the status field still showed nothing terminal. Watch the BRANCH, not the status field, from a non-hub machine. Seen once; not committed as durable memory."
 }

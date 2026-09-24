@@ -320,6 +320,21 @@ data-access layer to change.
 
 ## Revision Log
 
+- **Round 3b — 2026-09-24 (confront round 3, adjudicated).** The cross-family
+  adversary found TWO internal contradictions this PRD introduced in round 3
+  itself: S1 and Acceptance Criterion 1 still named the old `record_id`
+  derivation, and the taskplan still carried the superseded cache path. Both
+  corrected. Six further stalls folded as **S16-S22** (one state-directory
+  helper, exact `kbu model` hook points, poll-token schema, per-key payload
+  types, the MCC threshold, object-store detection); four declined. Five
+  findings from the annotation twin folded as **T1-T4** after verification —
+  the identity helpers are never NAMED upstream (STOP-and-report, never
+  re-implement), the summary-column set is FIXED so model statistics live in
+  `payload`, `ready_probe` moved to `/health`, and no second test double.
+  New gotcha **G28**, which also revises G21: the statistic version stamp goes
+  in `payload`, because a `stat_version` column cannot be had. Confront budget
+  now 3 of 3 — none remain.
+
 - **Round 3 — 2026-09-24 (review).** Chris made no in-document edits; this
   round folded the upstream contract break instead. **Q7 is REVERSED** — on
   Chris's instruction in `koros-arc-store-v1`, re-runs are no longer collapsed
@@ -834,7 +849,7 @@ The manifest:
   "contract_version": 1,
   "launch": {
     "cmd": ["models-and-analyses", "serve", "{port}", "--root-path", "{proxy_path}"],
-    "ready_probe": {"path": "/", "timeout_s": 45}
+    "ready_probe": {"path": "/health", "timeout_s": 45}
   },
   "embed": "iframe",
   "port_strategy": "allocate",
@@ -994,14 +1009,21 @@ not to reintroduce `KIND_KOROS_RUNS`.
 The cross-family adversary stalled on eleven underspecifications. Each is
 resolved here; these are binding, not advisory.
 
-**S1. `record_id` algorithm.**
-`record_id = sha256( lower(kind) || "\0" || lower(subject) || "\0" ||
+**S1. Identity algorithm. CORRECTED 2026-09-24 (review round 2) — this entry
+named the hash below `record_id`, which is now the name of a DIFFERENT value.**
+The derivation below is `analysis_id`, not `record_id`:
+`analysis_id = sha256( lower(kind) || "\0" || lower(subject) || "\0" ||
 canonical_json(significant_params) ).hexdigest()`, where `canonical_json` sorts
 keys and uses compact separators. Significant params per kind: template
 (reconstruct/model_build); media (gapfill); media + objective (fba); media +
-fraction-of-optimum (fva); the condition list (fitness analyses). Truncate to
-32 hex chars for display only, never for identity. Without one algorithm,
-idempotency is undefined and two producers collide.
+fraction-of-optimum (fva); the condition list (fitness analyses). **Floats are
+rejected** in `significant_params` (code `bad_float_param`); format to a string
+and choose the precision deliberately.
+`record_id = sha256( analysis_id || "\0" || run_uid ).hexdigest()` is the
+per-run primary key. Truncate either to 32 hex chars for display only, never
+for identity. Do NOT derive either here — call the shared helper the module
+ships; deriving it per-producer is how two producers write different ids for
+the same analysis. See Q7.
 
 **S2. `artifacts` keys and URI schemes, per kind.**
 Allowed schemes: a bare absolute path or `file://` for files; `obj://<object_id>`
@@ -1152,6 +1174,108 @@ The app above it holds no filesystem knowledge, and the producers below it hold
 no layout knowledge.
 The `payload` field is the seam that keeps two domain apps out of each other's
 schemas.
+
+### Specifications forced by confront round 3 and the sibling exchange
+
+Round 3 (`task-36f366a6`) returned twelve stalls; six are folded below, four
+declined as single-checkout artifacts or already-specified, and two were
+INTERNAL CONTRADICTIONS this PRD had introduced in review round 2 and are
+corrected in place (S1 and Acceptance Criterion 1 still named the old
+`record_id` derivation; the taskplan still carried the superseded cache path).
+Items T1-T5 came from the annotation twin's own round and were VERIFIED against
+this document before folding, not taken on its word.
+
+**S16. One state-directory helper, defined once.**
+`resolve_app_state_dir() -> Path`, creating parents if missing. Precedence:
+`$KING_STATE/state/models-and-analyses`, else
+`~/kind-apps/state/models-and-analyses`. Every caller uses it and the literal
+appears in EXACTLY ONE place. This exists because prose precedence is what
+allowed the doubled `~/kind-apps/kind-apps/...` path to survive two rounds.
+Never interpolate `kind-apps` inside `$KING_STATE` — on the pod `KING_STATE`
+already ends in it.
+
+**S17. `kbu model` hook points, named.**
+Augment the `reconstruct`, `gapfill`, `fba` and `fva` subcommands in
+`src/kbutillib/interfaces/cli/model.py` to accept `--arc` and to call
+`record_analysis` AFTER the run completes and AFTER stdout is flushed, so
+`--json` output stays byte-identical. The `run_uid` is minted ONCE in the
+process entry point — not per subcommand — and exported, which is what makes
+one invocation one run (Q7).
+
+**S18. Poll token schema and lifecycle.**
+`pt-<uuid4>`, stored under `resolve_app_state_dir()/poll/<token>.json` carrying
+`status` (`pending|ready|error`), `record_id`, `map` and `updated_at`. Tokens
+older than 24h are garbage-collected at startup. The 202/200/404/500 protocol
+was already specified; the token itself was not, and a poll flow without a
+token format is not implementable.
+
+**S19. Per-key payload types.**
+`template`, `media`, `objective`: `str`. Counts (`reaction_count`,
+`gene_count`, `method_count`): `int`. `objective_value`,
+`fraction_of_optimum`: `float`. `reactions_added`: list of `str`.
+Nullability is explicit per key; a validator that cannot state a type cannot
+reject garbage. **Note the asymmetry with `significant_params`, and it is
+deliberate:** floats are REJECTED in `significant_params` because they feed the
+`analysis_id` hash, but are FINE in `payload`, which is never hashed.
+
+**S20. The MCC threshold is NOT ours to choose — it already exists.**
+Measured-fitness significance is `measured < -1.0`, hardcoded at
+`domains/notebook/fitness_dashboard.py:170`
+(`meas_imp = measured is not None and measured < -1.0`). The arc-level MCC MUST
+use that same constant, by importing or citing it — **never by redefining it**.
+A second copy silently diverges the moment the dashboard's changes, and the two
+numbers would disagree while both looking authoritative. This is the same
+"adopt rather than redefine" rule already applied to the fitness vocabulary.
+The confront adversary proposed `-1.0` as an invented FALLBACK; it is not a
+fallback, it is the existing value, and the distinction matters because a
+fallback invites overriding it.
+
+**S21. Object-store detection is a bounded probe, not an assumed variable.**
+Backfill attempts the store through the KBDL client's own availability check
+with a **5-second timeout** and a required per-owner filter; on failure it
+skips the store scan and reports `store-unavailable` in the coverage report
+rather than hanging or reporting an empty scan as a complete one.
+**The configuration key is NOT specified here and must be read from the KBDL
+client at build time.** The adversary recommended `KBDL_OBJECT_STORE_URL`;
+that variable DOES NOT EXIST in either repo — verified by grep over
+`KBDLJobRunningPrototype/src` and `KBUtilLib/src`. Do not introduce it. If no
+availability check is exposed, that is a STOP-and-report, not a guess.
+
+**S22. Foreign-kind tri-state tests belong upstream.**
+This PRD asserts only that its own read paths COUNT foreign prefixes and
+distinguish `1` from `2`. Tests of the store's tri-state classification are
+`koros-arc-store-v1`'s, because they require the real store.
+
+**T1. The identity helpers are never NAMED upstream, and that is a live gap.**
+`koros-arc-store-v1` gives both derivations exactly and states that both
+helpers "live here and nowhere else", but names neither FUNCTION. So a producer
+task cannot write the import. The derivations printed in this PRD and in the
+task prompts are there **to RECOGNISE the helpers, NOT to implement them**. If
+the export cannot be found, that is a **STOP-and-report**, never a local
+re-implementation — the quiet failure is a builder who hashes locally because
+the formula was right there in its own prompt, which is the exact defect the
+shared helper exists to prevent. Tracked by the twin as dev 1306.
+
+**T2. The summary-column set is FIXED and this PRD may NOT add to it.**
+`runs` carries exactly `subject_feature_count`, `method_count`,
+`consistency_overall`, `consistency_metric_version`, `ic_corpus_version` — a
+set shaped for the annotation twin. **No model statistic has a column**: not
+growth rate, not reaction or gene count, not gapfilled-reaction count. Those
+live in the record's own **`payload`**, which is a `TEXT` column ON `runs`
+(upstream S4/S7, its acceptance criterion 15) and NOT the `subject_detail`
+blob. So levels 0 and 1 still open no blob and Q1's boundary holds intact —
+but see G28 for what it costs.
+
+**T3. `ready_probe` must point at a route that is guaranteed to be served.**
+Changed from `/` to **`/health`**, and `p3-app-skeleton` serves `/health`
+WITHOUT touching the run database. A probe that fails because no store is
+present makes a working app undiscoverable, and `plugins.py` reports nothing
+either way (G25).
+
+**T4. No second test double, and it is checkable.**
+`FakeKorosArcStore` from `kbutillib.koros_arc_store_testing` is the only
+permitted double. No local class implementing the `KorosArcStore` interface may
+appear in the diff.
 
 ## Testing Decisions
 
@@ -1680,6 +1804,20 @@ on the row saying which. The MCC in Q14/S13 is exactly such a statistic. Every
 precomputed statistic therefore carries the version of the code that computed
 it, and a view that mixes versions says so rather than ranking across them.
 
+**G28. Model statistics live in `payload`, so you cannot SQL-filter or sort on
+them.**
+T2 forced every model-specific number into the record's own `payload` TEXT
+column, because the fixed summary-column set has no home for one. That keeps
+levels 0 and 1 off the detail blob, which is what Q1 promised — but it means
+"sort this arc's models by growth rate" is an **in-app sort over returned
+rows**, not an `ORDER BY`, and "show me every model above a growth threshold"
+cannot be a `WHERE`. For an arc of tens of models that is invisible; it becomes
+real somewhere in the hundreds. The fix if it ever bites is a derived index
+(G22's answer), NOT a schema change — the column set is not ours.
+**This also revises G21:** a version stamp for a precomputed statistic goes in
+`payload` alongside the statistic, NOT in a new `stat_version` column. The
+confront free critique proposed the column; it cannot be had.
+
 **G22. The two-tier split forecloses every cross-subject detail question.**
 "Show me every reaction across all my models where X" cannot be answered by SQL
 once reaction detail is a JSON blob. Every query a drill-down issues is scoped
@@ -1995,7 +2133,7 @@ vendor that module.**
 
 ## Acceptance Criteria
 
-1. `record_id` is the sha256 of lowercased kind, lowercased subject and a canonical sorted-key JSON of the kind's significant parameters, and a test asserts two independent producers computing it for the same logical analysis agree.
+1. `analysis_id` is the sha256 of lowercased kind, lowercased subject and a canonical sorted-key JSON of the kind's significant parameters, and `record_id` is the sha256 of `analysis_id` + NUL + `run_uid`; a test asserts two independent producers computing `analysis_id` for the same logical analysis agree, and that both are obtained from the module's shared helper rather than derived locally.
 2. Every `AnalysisRecord` written carries `trust_tier`, `provenance` and `contract_version`, and a record missing any of them is rejected by the writer.
 3. `trust_tier` is `hypothesis` for `kbdl.model_build`, `kbutillib.reconstruct`, `kbutillib.gapfill`, `kbutillib.fba`, `kbutillib.fva` and `kbdl.fitness_analysis`, and `homology` for `kbdl.fitness_prop`.
 4. A `kbdl.fitness_prop` record carries its percent-identity bridge metric and the accession reached through in `provenance`, or records an explicit null for the metric with the reason stated in the task report.
@@ -2029,3 +2167,14 @@ vendor that module.**
 32. `GET /api/portfolio` and `GET /api/arcs/{project}/{arc}/models` are answerable from SQL columns alone, and a test asserts neither calls `read_detail`.
 33. Every precomputed summary statistic carries the version of the code that computed it, and a view mixing versions says so rather than ranking across them.
 34. A database that is locked, full, read-only, or absent degrades to a warning and the analysis completes; a write failure never fails a pipeline run.
+35. A single `resolve_app_state_dir() -> Path` helper is defined once, creates parents if missing, and the state-directory literal appears in exactly one place in the diff; no path interpolates `kind-apps` inside `$KING_STATE`.
+36. The `run_uid` is minted once in the `kbu model` process entry point and not per subcommand, and a test asserts one invocation performing several analyses yields one `run_uid`; `--json` stdout is byte-identical to the base commit.
+37. A poll token matches `pt-<uuid4>`, is stored under `resolve_app_state_dir()/poll/<token>.json` with `status`, `record_id`, `map` and `updated_at`, and tokens older than 24h are removed at startup.
+38. Every key in the per-kind payload schema declares a type and nullability, and the validator rejects a value of the wrong type; floats are permitted in `payload` and rejected in `significant_params`.
+39. The arc-level MCC uses the significance constant from `domains/notebook/fitness_dashboard.py` rather than a local copy, and a test asserts no second definition of that threshold appears in the diff.
+40. Backfill probes object-store availability with a 5s timeout and a per-owner filter, reports `store-unavailable` in the coverage report when unreachable, and introduces no new object-store environment variable.
+41. No `sha256` call over kind, subject or significant params appears anywhere in the diff: both `analysis_id` and `record_id` come from the module's shared helper, and a missing export is reported as a STOP rather than re-implemented.
+42. No model-specific statistic is written to a `runs` summary column; every such value is in the record's own `payload`, and no migration adding a column to `runs` appears in the diff.
+43. The KIND manifest `ready_probe` points at `/health`, and `/health` responds successfully with no run database present.
+44. No class implementing the `KorosArcStore` interface is defined in this repo's test tree; the tests import `FakeKorosArcStore` from `kbutillib.koros_arc_store_testing`.
+45. Records with no arc are surfaced with a distinct badge in the portfolio view, visibly different from an arc with zero analyses.

@@ -437,11 +437,14 @@ def _range_boundaries(n: int) -> list[str]:
 
 
 def _range_index(entity_hash: str, boundaries: list[str], n: int) -> int:
-    """Route a hash to its range index. Boundary ties go to the LOWER range.
+    """Route a hash to its range index under the half-open ``[lo, hi)`` convention.
 
-    A record whose hash equals a boundary belongs to the range BELOW that
-    boundary (the range that closes at it), so a re-run reproduces the same
-    shards deterministically.
+    Each range ``i`` covers ``[boundaries[i], boundaries[i + 1])``, so a record
+    whose hash equals an interior boundary belongs to the range that STARTS at
+    that boundary (range ``i``), not the one that ends at it. The rule is fixed
+    and total, so a re-run reproduces the same shards deterministically. This
+    routing is what keeps the emitted ranges disjoint (asserted in
+    :func:`_assert_sorted_and_disjoint`).
     """
     # boundaries[i] <= entity_hash gives range i for i in [0, n); clamp the top.
     lo, hi = 0, n - 1

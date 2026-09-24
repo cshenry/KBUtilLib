@@ -116,6 +116,37 @@ class TestTokenizerInput:
 
 
 # ---------------------------------------------------------------------------
+# Constructor guard: model_name is not a parameter (use model_path)
+# ---------------------------------------------------------------------------
+
+
+class TestModelNameGuard:
+    """The ``model_name`` keyword must fail loudly, not be silently swallowed."""
+
+    def test_model_name_raises_typeerror_mentioning_model_path(self):
+        with pytest.raises(TypeError) as excinfo:
+            ProtT5Utils(
+                model_name="anything",
+                config_file=False,
+                token_file=None,
+                kbase_token_file=None,
+            )
+        assert str(excinfo.value) == (
+            "ProtT5Utils has no 'model_name' parameter; use 'model_path' instead."
+        )
+        assert "model_path" in str(excinfo.value)
+
+    def test_model_path_still_constructs_and_is_set(self):
+        u = ProtT5Utils(
+            model_path="x",
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        )
+        assert u.model_path == "x"
+
+
+# ---------------------------------------------------------------------------
 # Batching by residue count (pure)
 # ---------------------------------------------------------------------------
 
@@ -279,6 +310,54 @@ def test_padding_pooling_real_model():
     assert alone["short"].dtype == np.float32
     # fp16 accumulation on GPU introduces small deltas; keep tolerance modest.
     np.testing.assert_allclose(alone["short"], together["short"], rtol=0, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# COUPLING TEST — n_res slicing vs attention_mask.sum() - 1 (opt-in, tokenizer)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.prott5_model
+@pytest.mark.slow
+def test_n_res_matches_attention_mask_sum_minus_one():
+    """The tokenizer must emit exactly one token per residue plus one EOS.
+
+    ProtT5Utils mean-pools by slicing to ``n_res`` (the residue count of its own
+    cleaned string). The reference implementation this module reproduces slices
+    to ``attention_mask.sum() - 1`` instead. Those two agree only while the
+    tokenizer emits exactly one token per residue plus a single trailing EOS —
+    true for single-letter residues after UZOB->X mapping, but nothing in the
+    module asserts it. This test pins that assumption against the real
+    sentencepiece tokenizer (encoder weights are NOT needed).
+
+    Skipped unless PROTT5_LIVE_TESTS=1.
+    """
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    tokenizer = transformers.T5Tokenizer.from_pretrained(
+        "Rostlab/prot_t5_xl_half_uniref50-enc", do_lower_case=False
+    )
+
+    # Sequences of differing lengths; include rare residues (U/Z/O/B) so the
+    # UZOB->X mapping path is exercised too.
+    raw_seqs = [SHORT_SEQ, LONG_SEQ, "MUZOBKV", "ACDEFGHIKLMNPQRSTVWY"]
+    cleaned = [ProtT5Utils._clean_sequence(s) for s in raw_seqs]
+
+    encoded = tokenizer.batch_encode_plus(
+        cleaned,
+        add_special_tokens=True,
+        padding="longest",
+        return_tensors="pt",
+    )
+    attention_mask = encoded["attention_mask"]
+
+    for i, c in enumerate(cleaned):
+        n_res = len(c.split()) if c else 0
+        assert int(attention_mask[i].sum()) - 1 == n_res, (
+            f"tokenizer emitted {int(attention_mask[i].sum())} real tokens for "
+            f"{n_res} residues (expected n_res + 1 for a single EOS): {c!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

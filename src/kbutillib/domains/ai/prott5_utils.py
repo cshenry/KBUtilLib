@@ -71,6 +71,11 @@ class ProtT5Utils(SharedEnvUtils):
             and their ids reported to the caller. Defaults to 5000.
         max_batch_residues: Upper bound on the total residue count per forward
             pass. Batches are packed greedily up to this bound. Defaults to 4096.
+        model_name: Guard-only, keyword-only. Not a real parameter — the
+            checkpoint is selected via ``model_path``. Passing ``model_name``
+            (anything other than ``None``) raises :class:`TypeError` so the
+            once-shipped mistake of calling ``ProtT5Utils(model_name=...)``
+            fails loudly instead of being silently absorbed as a dead attribute.
         **kwargs: Additional keyword arguments forwarded to
             :class:`~kbutillib.core.shared_env_utils.SharedEnvUtils`.
 
@@ -94,8 +99,21 @@ class ProtT5Utils(SharedEnvUtils):
         device: Optional[str] = None,
         max_residues: int = 5000,
         max_batch_residues: int = 4096,
+        *,
+        model_name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
+        # Guard against the constructor-keyword mistake that once shipped
+        # silently: a caller passing ``model_name=`` meant ``model_path=``, but
+        # BaseUtils.__init__ swallows unknown kwargs (setattr), so the intended
+        # checkpoint was discarded with no error. Fail loudly instead of aliasing
+        # or warning — silence is the exact failure mode being prevented.
+        if model_name is not None:
+            raise TypeError(
+                "ProtT5Utils has no 'model_name' parameter; "
+                "use 'model_path' instead."
+            )
+
         super().__init__(**kwargs)
 
         if max_residues < 1:

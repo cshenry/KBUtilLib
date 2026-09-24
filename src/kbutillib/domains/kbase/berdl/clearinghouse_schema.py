@@ -284,6 +284,48 @@ def table_name(entity_type: str, kind: str) -> str:
     return f"{entity_type}_{kind}"
 
 
+def table_columns(entity_type: str, kind: str) -> tuple[tuple[str, str], ...]:
+    """Return the ordered ``(name, sql_type)`` column pairs for one table.
+
+    This is the ONLY sanctioned read of a clearinghouse table's column list:
+    the manifest validator (:mod:`clearinghouse_manifest`) resolves the legal
+    columns of a ``[source.content]`` / ``[source.result]`` block from this
+    function rather than duplicating the per-type column lists, so the schema
+    lives in exactly one place and a manifest naming ``sequence`` for
+    ``genome`` is rejected against the SAME definition the DDL is built from.
+
+    Args:
+        entity_type: One of :data:`ENTITY_TYPES`.
+        kind: One of ``"entity"``, ``"content"``, ``"result"``. ``"entity"``
+            and ``"result"`` return the GENERIC schemas (identical across all
+            five types); ``"content"`` returns the type-specialized schema.
+
+    Returns:
+        The column declarations in DDL order, as ``(name, sql_type)`` pairs.
+
+    Raises:
+        ValueError: If ``entity_type`` or ``kind`` is unknown (validated via
+            :func:`table_name`).
+    """
+    # Validate both arguments through the one resolver, so an unknown type or
+    # kind raises the same ValueError here as everywhere else.
+    table_name(entity_type, kind)
+    if kind == "entity":
+        return _ENTITY_COLUMNS
+    if kind == "result":
+        return _RESULT_COLUMNS
+    return _content_columns(entity_type)
+
+
+def column_names(entity_type: str, kind: str) -> tuple[str, ...]:
+    """Return just the ordered column NAMES for one table.
+
+    Thin convenience over :func:`table_columns` for callers (the manifest
+    validator) that only need the legal name set, not the SQL types.
+    """
+    return tuple(name for name, _sql_type in table_columns(entity_type, kind))
+
+
 def table_configs() -> list[dict[str, Any]]:
     """Return the fifteen clearinghouse table configs for ``BerdlCapability.load``.
 

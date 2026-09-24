@@ -22,6 +22,7 @@ from .buildplan import buildplan_cmd
 
 # WP6: capability registry introspection + scaffolder
 from .capabilities import cap_cmd
+from .clearinghouse import clearinghouse_cmd
 from .harness import harness_cmd
 from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
@@ -62,6 +63,7 @@ main.add_command(beril_cmd, name="beril")
 main.add_command(harness_cmd, name="harness")
 main.add_command(bootstrap_command, name="bootstrap")
 main.add_command(buildplan_cmd, name="buildplan")
+main.add_command(clearinghouse_cmd, name="clearinghouse")
 main.add_command(doctor_command, name="doctor")
 main.add_command(init_command, name="init")
 main.add_command(init_notebook_cmd, name="init-notebook")

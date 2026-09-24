@@ -218,6 +218,11 @@ def test_constructor_accepts_no_username_parameter():
             {"skani_db": {"object_id": "db-1"}, "fasta": "seq"},
         ),
         (
+            "submit_horizyn",
+            "KBDLHorizyn",
+            {"genome": {"object_id": "genome-1"}},
+        ),
+        (
             "submit_checkm2",
             "KBDLCheckM2",
             {"checkm2_db": {"object_id": "db-1"}, "fasta": "seq"},
@@ -263,6 +268,28 @@ def test_submit_each_job_type_issues_expected_envelope_and_returns_job_id(
     assert call["json"] == {
         "schema_version": "1",
         "job_type": job_type,
+        "params": params,
+    }
+
+
+def test_job_type_horizyn_constant():
+    assert kbdl_client_module.JOB_TYPE_HORIZYN == "KBDLHorizyn"
+
+
+def test_submit_horizyn_issues_expected_envelope_and_returns_job_id():
+    session = FakeSession([FakeResponse(202, {"job_id": "job-xyz"})])
+    client = make_client(session)
+
+    params = {"genome": {"object_id": "genome-1"}}
+    job_id = client.submit_horizyn(**params)
+
+    assert job_id == "job-xyz"
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == "http://127.0.0.1:8791/jobs"
+    assert call["json"] == {
+        "schema_version": "1",
+        "job_type": "KBDLHorizyn",
         "params": params,
     }
 

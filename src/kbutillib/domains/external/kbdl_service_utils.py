@@ -169,6 +169,7 @@ JOB_TYPE_BUILD_GENOME = "KBDLBuildGenome"
 JOB_TYPE_BUILD_SKANI_DB = "KBDLBuildSKANIDB"
 JOB_TYPE_STORE_LOAD = "KBDLStoreLoad"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
+JOB_TYPE_HORIZYN = "KBDLHorizyn"
 
 #: The only schema_version this client (and the v0 service) speaks.
 SCHEMA_VERSION = "1"
@@ -499,6 +500,14 @@ class KBDLServiceUtils(SharedEnvUtils):
         exactly one of ``fasta``/``archive``, ``delete_archive_on_completion``).
         """
         return self._submit(JOB_TYPE_SKANI, params)
+
+    def submit_horizyn(self, **params: Any) -> str:
+        """Submit a ``KBDLHorizyn`` job. Returns the job id.
+
+        See ``kbdl_service.schemas.horizyn.KBDLHorizynParams`` for the
+        accepted ``params`` shape.
+        """
+        return self._submit(JOB_TYPE_HORIZYN, params)
 
     def submit_checkm2(self, **params: Any) -> str:
         """Submit a ``KBDLCheckM2`` job. Returns the job id.

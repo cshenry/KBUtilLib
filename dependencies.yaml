@@ -30,3 +30,13 @@ dependencies:
   cb_annotation_ontology_api:
     path: "../cb_annotation_ontology_api"
     git: "https://github.com/kbaseapps/cb_annotation_ontology_api.git"
+
+  mscommunity:
+    path: "../MSCommunity"
+    git: "https://github.com/ModelSEED/MSCommunity.git"
+    commit: "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc"
+
+  escher_edit:
+    path: "../editEscher"
+    git: "https://github.com/ModelSEED/editEscher.git"
+    commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"

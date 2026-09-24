@@ -104,6 +104,13 @@ apidocs = [
 # -- and then install the extra, which will find the torch requirement already
 # satisfied.
 prott5 = ["torch", "transformers", "sentencepiece"]
+# Community modeling stack (domains.modeling.ms_community_utils). The community
+# analysis + Escher-map rendering surface depends on the GitHub-only MSCommunity
+# and editEscher packages, which are resolved through dependencies.yaml rather
+# than PyPI. The only PyPI-installable pieces are editEscher's two required
+# runtime deps (beautifulsoup4, lxml); shapely/pandas are editEscher extras and
+# nothing this module calls needs them, so they are intentionally omitted.
+community = ["beautifulsoup4", "lxml"]
 # Everything needed to run all transports + build docs.
 all = [
   "mcp >=1.27,<2 ; python_version >= '3.10'",

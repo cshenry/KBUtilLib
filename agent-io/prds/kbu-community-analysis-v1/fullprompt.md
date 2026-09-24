@@ -219,6 +219,15 @@ this design invents rather than follows.
 
 ## Revision Log
 
+- **Round 0.4 — 2026-09-24 (Chris's decision folded; advanced to `ready`).**
+  Q7 settled by Chris in his own words — the graphviz renderer is dropped outright — which was
+  the last open judgement call in the bundle. The taskplan was already written and validated
+  (5 tasks, 4 phases, all `in_context`); no change was needed for this round.
+  Advanced to `ready` **on Chris's direct instruction** ("write the task plan and set this as
+  ready for dev"), NOT after a review round. `review_rounds` is still **0** and is deliberately
+  left that way: the field records whether a review round ran, and one did not. See Further
+  Notes for what that means for whoever dispatches this.
+
 - **Round 0.3 — 2026-09-24 (prototype + confront round 2, NOT a review round).**
   Ran the `escher_edit` pipeline rather than only reading it, which closed two recorded unknowns
   and **found a defect in this PRD's own claim**: `compound_names` does not put names on the
@@ -1287,20 +1296,21 @@ metabolites — in a worse layout, and it is the heaviest dependency in the PRD.
 and `lxml`, no binary and no network, and produces a member-box figure plus an interactive
 page. Keeping both would mean maintaining two renderers of one question and specifying a
 fallback between them.
-Note this is a **removal Chris did not ask for** — he asked to add the Escher viz, not to
-drop the other one — so it is flagged here rather than made quietly. The data is unaffected:
-`cross_feeding_table` and `cross_feeding_graph` still return everything the graphviz figure
-was drawn from, and `comm.mscomm.interactions(visualize=True, msdb_path=...)` still works
-through the escape hatch for anyone who wants MSCommunity's native picture.
+**CONFIRMED BY CHRIS, 2026-09-24:** "Yes, drop the graphviz stuff entirely in favor of the
+escher viz." This was raised to him as a removal he had not asked for, with the specific risk
+named — continuity with existing MSCommunity-drawn figures — and he decided against keeping it.
+The entry is settled, not merely proposed.
+The data is unaffected: `cross_feeding_table` and `cross_feeding_graph` still return everything
+the graphviz figure was drawn from, and `comm.mscomm.interactions(visualize=True,
+msdb_path=...)` remains available through the escape hatch.
 **If you disagree:** `render_cross_feeding` comes back with its two-branch dependency probe
 (`graphviz` package vs `dot` binary) and its 40-node warning; `CommunityVisualizationError`
 regains its graphviz meaning alongside the `escher_edit` one; user stories 17 and 18 return;
 and the acceptance criteria covering both renderers are restored. One line in `taskplan.json`
 task `t3` and roughly thirty lines of module code.
-**Confidence:** high that `escher_edit` is the better figure and the lighter dependency.
-Medium on the removal being *wanted* — there may be existing MSCommunity-drawn figures in
-published or in-flight work that a reader expects to match, and that is a fact about Chris's
-own work rather than about the code, so it is his to correct.
+**Confidence:** high, on both halves. `escher_edit` is the better figure and the lighter
+dependency, and the removal is wanted — the one thing this entry could not know was a fact
+about Chris's own work, and he has now supplied it.
 
 ### Q8. Which module does the community code live in? — DECIDED: `domains/modeling/ms_community_utils.py`, not a new `domains/community/`.
 
@@ -1726,6 +1736,22 @@ warning. Two classes share a name, most of their method names, and their general
 A warning would be emitted once, into a notebook that scrolls, and the analysis would
 continue and produce numbers. The failure mode this prevents is not a crash — it is a
 correct-looking result from the wrong code.
+
+**On reaching `ready` with `review_rounds` at 0.** The standing gate is that a PRD completes
+one review round — Chris editing the document and those edits being folded — before it becomes
+dispatchable. That did not happen here. Chris advanced it directly on 2026-09-24, and the
+`review_rounds` field is left at 0 rather than incremented, because the field's job is to record
+whether a review round ran and incrementing it to satisfy a gate would make it lie.
+
+What stands in place of a review round is worth naming, so a dispatcher can judge it: four
+author-side rounds (an upstream re-pin, the editEscher fold, a run prototype, and two
+cross-family confront rounds totalling 47 stall points, 35 folded), plus two design questions
+answered by Chris in the session — which repository the viz lives in, and whether to drop
+graphviz. What is NOT covered is the one thing a review round is actually for: **nobody has read
+this document end to end except its author.** The highest-value early check is therefore the
+build itself — dispatch `t1` first and alone, because it carries the dependency gate, the pure
+helpers and their tests, and a misunderstanding there will surface as a failing test rather than
+as a wrong figure four phases later.
 
 **On the external scan.** `task-c1a370b4` was dispatched to h100 before local research
 began and had not returned at commit time. Its output lands at

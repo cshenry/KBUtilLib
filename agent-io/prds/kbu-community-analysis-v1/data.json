@@ -30,7 +30,12 @@
     "MEDIUM": 4,
     "LOW": 6,
     "NONE": 0,
-    "terminal_could_not_decide": 7
+    "terminal_could_not_decide": 7,
+    "all_decided": true,
+    "settled_by_chris": [
+      "Q4 (which repo the viz lives in)",
+      "Q7 (drop graphviz)"
+    ]
   },
   "highest_risk_entry": "Q7 -- dropping MSCommunity's graphviz cross-feeding renderer. LOW blast radius but it is a REMOVAL Chris did not ask for: he asked to add the Escher viz, not to drop the other one. High confidence that escher_edit is the better figure and lighter dependency; medium confidence the removal is WANTED, because existing or in-flight figures drawn with MSCommunity's renderer are a fact about his own work rather than about the code.",
   "flag_not_question": "ANSWERED 2026-09-24. Round 0's flag was that no artifact said what a modeler wants to see when asked to display a community model; Chris answered by naming ModelSEED/editEscher and the answer was the whole community at once. The open unknown that replaces it is narrower: no map has actually been GENERATED, and escher_edit has no evidence of ever being run against ModelSEED cpd##### ids with names from the ModelSEED biochemistry database.",
@@ -169,5 +174,34 @@
     "new_gotchas": [
       "build_member_reactions returns members in ALPHABETICAL order, and the figure orders its member column by connectivity -- neither matches community index order."
     ]
+  },
+  "q7_resolved_by_chris": {
+    "date": "2026-09-24",
+    "quote": "Yes, drop the graphviz stuff entirely in favor of the escher viz.",
+    "context": "Raised to him as a removal he had not asked for, with the continuity risk named (existing MSCommunity-drawn figures). He decided against keeping it.",
+    "effect": "Q7 settled. render_cross_feeding and graphviz are out; cross_feeding_table, cross_feeding_graph and the comm.mscomm escape hatch remain."
+  },
+  "ready_authorization": {
+    "date": "2026-09-24",
+    "quote": "write the task plan and set this as ready for dev",
+    "by": "chris",
+    "review_rounds_at_advance": 0,
+    "gate_note": "The standing gate requires review_rounds >= 1 before ready. It was NOT met. review_rounds is deliberately left at 0 rather than incremented, because the field records whether a review round ran and incrementing it to satisfy a gate would make it lie. Advanced on Chris's direct instruction.",
+    "what_stands_in_its_place": "Four author-side rounds (upstream re-pin, editEscher fold, run prototype, two cross-family confront rounds totalling 47 stall points with 35 folded) plus two design questions answered by Chris in session. NOT covered: nobody has read the document end to end except its author.",
+    "auto_conduct": "NOT set. Chris said 'ready for dev', not autonomous build, and auto_conduct is outside Jane's authority regardless.",
+    "dispatch_advice": "Send t1 first and alone -- it carries the dependency gate, the pure helpers and their tests, so a misunderstanding surfaces as a failing test rather than as a wrong figure four phases later."
+  },
+  "taskplan_shape": {
+    "tasks": 5,
+    "phases": 4,
+    "all_lane": "in_context",
+    "order": [
+      "t1-module-scaffold-and-dependency-gate",
+      "t2-construction-and-simulation",
+      "t3-visualization",
+      "t4-facade-and-docs-wiring",
+      "t5-dependency-gated-integration-tests"
+    ],
+    "parallel": "t3 and t4 are the only genuine parallel pair -- different files, both depending on t2"
   }
 }

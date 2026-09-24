@@ -109,10 +109,10 @@ from typing import Any, Sequence
 from .capability import BerdlCapability
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_schema import (
+    _KINDS,
     ENTITY_TYPES,
     NAMESPACE,
     TENANT,
-    _KINDS,
     encode_entity_hash,
     table_name,
 )
@@ -757,7 +757,7 @@ class ClearinghouseCapability:
             warnings.append(
                 "include_files is in-pod only (it reads Iceberg .files "
                 "metadata tables via Spark); file counts and sizes are "
-                f"omitted off-pod. Run stats(include_files=True) in the pod "
+                "omitted off-pod. Run stats(include_files=True) in the pod "
                 "for those fields."
             )
 

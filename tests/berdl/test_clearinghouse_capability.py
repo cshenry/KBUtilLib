@@ -36,14 +36,13 @@ import re
 import pytest
 
 from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
+    _HEX_RUN_RE,
     OFFPOD_PAGE_CAP,
     SPARK_PROMOTION_THRESHOLD,
     ClearinghouseCapability,
-    _HEX_RUN_RE,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     ENTITY_TYPES,
-    encode_entity_hash,
     table_name,
 )
 

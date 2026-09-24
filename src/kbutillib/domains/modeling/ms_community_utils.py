@@ -196,7 +196,7 @@ def _best_effort_head_sha(repo_root: Path) -> Optional[str]:
         if head_file.is_file():
             head = head_file.read_text().strip()
             if head.startswith("ref:"):
-                ref = head[len("ref:"):].strip()
+                ref = head[len("ref:") :].strip()
                 ref_file = git_dir / ref
                 if ref_file.is_file():
                     return ref_file.read_text().strip()
@@ -288,7 +288,9 @@ def _import_mscommunity() -> Any:
 
     # Step 3: provenance gate on the resolved MSCommunity class.
     ms_class = _resolve_mscommunity_class(module)
-    resolved_module = getattr(ms_class, "__module__", "") if ms_class is not None else ""
+    resolved_module = (
+        getattr(ms_class, "__module__", "") if ms_class is not None else ""
+    )
     if not resolved_module.startswith("mscommunity."):
         # Reject modelseedpy's superseded copy and anything else off-package.
         _MSCOMMUNITY_CACHE = None

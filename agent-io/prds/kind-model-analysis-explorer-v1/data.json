@@ -265,5 +265,22 @@
       "superseded": "24c5c1d31f2fed0bf386afe4de223581fcafbfa4",
       "reason": "reconciliation against koros-arc-store-v1 extraction, 2026-09-24 -- baseline moved so the next --review round does not read my propagation as Chris edits"
     }
-  ]
+  ],
+  "pending_reconciliation_2026_09_24": {
+    "raised": "2026-09-24, koros-arc-store-v1 review round 1 + confront round 2",
+    "why_here": "This PRD is ready and its design session has ENDED. Mail sent to that session on 2026-09-24 05:06Z was never delivered -- a session that ends before its next prompt never receives it. This block is the durable record instead. Tracked as dev 1298.",
+    "the_change": "Chris reversed the re-run behaviour in koros-arc-store-v1: re-runs no longer collapse to one row. Identity is SPLIT -- analysis_id (sha256 over kind + subject + significant_params, the old record_id derivation, now the GROUPING key) and record_id (sha256(analysis_id + NUL + run_uid), one row per run). delete_record(record_id) -> bool added. koros-arc-store-v1 is READY at draft_commit 7660ccd3.",
+    "BREAKING_FOR_THIS_PRD": "run_uid is REQUIRED on AnalysisRecord. Every task in this plan that CONSTRUCTS an AnalysisRecord must supply one or the write is rejected with code missing_run_uid. Readers are unaffected.",
+    "app_work_not_yet_in_this_plan": "Chris: 'runs should be dated and ideally grouped in the interace, and critically you should be able to delete a run from the database... The apps should offer this kind of delete interface.' The data API half is built by koros-arc-store-v1 p0b/p0d. The APP half is not in this plan -- no delete affordance, no grouping or dating of re-runs, because this PRD was written when one analysis was one row.",
+    "other_producer_facing_changes": [
+      "FLOATS ARE REJECTED in significant_params (code bad_float_param). A producer with a float parameter formats it to a string itself, choosing the precision deliberately.",
+      "unknown_kind is now 0 (known) / 1 (well-formed but unregistered) / 2 (malformed), not a boolean. Non-zero still means unknown, so existing rules hold, but a foreign-kind counter can now distinguish a peer app's new kind from a producer bug.",
+      "record_analysis gains an optional detail parameter; the subject_detail blob had no write path before.",
+      "Exceptions are a named hierarchy (KorosArcStoreError, RunsRootResolutionError, RecordValidationError with a stable code, RecordNotFound, ContractVersionMismatch); catch by name.",
+      "read_detail returns None for a record with no blob and raises RecordNotFound for an unknown record_id."
+    ],
+    "how_to_act_on_it": "/ai-jane d --review <this prd>. Do NOT patch it from another session: it is ready, and a review round is the vehicle that keeps the document, the taskplan and the baseline consistent.",
+    "separately": "dev 1294 -- this PRD registers its KIND manifest into ~/kind-apps/plugins/, a path that appears NOWHERE in the king stack. KING resolves $KING_PLUGINS_DIR -> <king checkout>/plugins/ -> bundled _plugins, and plugins.py::_load() swallows every error, so the app would simply never appear.",
+    "affected_tasks_in_this_plan": "p2-kbu-model-stamping constructs AnalysisRecords (needs run_uid); p3-app-skeleton and p4-render-endpoints need grouping, dating and a delete affordance."
+  }
 }

@@ -146,7 +146,18 @@
       "declined": "the ten repo-access stalls, and the free-critique items already covered (SQLite migration threshold is in Q1; tier legend is in Q13; propagated-vs-measured is G15)",
       "also_fixed_from_it": "p2-kbu-model-stamping now names the exact CLI source path src/kbutillib/interfaces/cli/model.py and the kbu entry point, rather than pointing at a directory"
     },
-    "cap_note": "2 of 3 rounds used. A third is available if a review round changes an IRREVERSIBLE or MEDIUM decision."
+    "cap_note": "2 of 3 rounds used. A third is available if a review round changes an IRREVERSIBLE or MEDIUM decision.",
+    "round_3": {
+      "maestro_task_id": "task-36f366a6",
+      "branch": "maestro/researcher/consumer-sim-attack-prompt-prd-c-task-36f366a6",
+      "dispatched_at": "2026-09-24T17:57Z",
+      "dispatched_against": "review round 2 corrected text, KBUtilLib f03a9d2",
+      "status": "DISPATCHED -- not yet fetched or adjudicated",
+      "why_spent": "Review Mode 5b: this round changed Q7, a MEDIUM blast-radius decision. The reversal itself came from Chris and needs no attack, but p6-run-history-and-delete, the DISTINCT-on-analysis_id count semantics (G24) and the last-run deletion case (G27) are NEW design that nothing has ever attacked.",
+      "cap_note": "3 of 3 used. No further confront is available on this PRD.",
+      "how_to_verify": "Do NOT trust maestro status alone -- a failed status with a fresh well-formed artifact is SUCCESS (see round_1's false alarm). Read it from the branch: git -C ~/Dropbox/Projects/KBUtilLib show <branch>:agent-io/confront/stall-report.md . Well-formed means it contains BOTH '## STALL REPORT (the binding part)' and '## FREE CRITIQUE (non-binding)'.",
+      "pool_contention": "h100 is concurrently running the dev 1299/1301 tranche (session 4e182133) and the annotation twin's confront task-a71acdac. Expect longer than the usual ~15 minutes."
+    }
   },
   "shared_interface": {
     "status": "AGREED AND COMMITTED by the sibling at kind-annotation-results-explorer-v1 draft_commit 8a2d8ab; this PRD conforms",

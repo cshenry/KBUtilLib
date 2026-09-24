@@ -7,7 +7,7 @@
     "KBDLJobRunningPrototype"
   ],
   "status": "draft",
-  "review_rounds": 0,
+  "review_rounds": 1,
   "confront_rounds": 2,
   "draft_commit": "e805700e8acbefec3874cf37991f6e650638ee7a",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
@@ -207,5 +207,33 @@
       "verified_in_source": "KOROS_HOME is the WORKSPACE ROOT with runs at $KOROS_HOME/runs (koros_start.py:24-27, research_init.py:98-102, koros/INSTALL.md:88-92). KING's override is KING_KOROS_RUNS (king_backend/config.py:25).",
       "skill_defect_found": "the cw-kind skill instructs resolving via 'config.KOROS_RUNS / $KIND_KOROS_RUNS'. KIND_KOROS_RUNS DOES NOT EXIST anywhere in the stack -- the real name is KING_KOROS_RUNS, and the KING->KIND rename left this behind. The skill also gives ~/Dropbox/Science/runs as the pod path, which is one machine's local layout. This PRD's first draft inherited both errors from the skill. Filed as a separate task."
     }
-  }
+  },
+  "review_history": [
+    {
+      "round": 1,
+      "date": "2026-09-23",
+      "reviewer": "chris",
+      "instruction": "I don't have comments other than to read the genome annotation app PRD and make sure the two are conformant. It may make sense even to merge them even if this creates a huge prd. Let's review and make a task plan and make this ready for dev",
+      "classified_as": "requirement-added (delivered in chat rather than as in-document markup; no (CSH ...) hunks existed to fold)",
+      "reconciled_against": "kind-annotation-results-explorer-v1 at draft_commit 2f35541 (their review round 1)",
+      "adopted_from_theirs": [
+        "trust-tier FLOOR rule and the no-API-raises-a-tier constraint",
+        "write-time rejection of a non-verified tier with empty provenance",
+        "unknown-kind policy: stored and flagged, counted not dropped",
+        "their full-tree census (9 projects, 8 with arcs/, 26 arcs, inputs and tool_versions empty on ALL 26) replacing this PRD's single-arc sample"
+      ],
+      "defects_found_in_theirs": [
+        "p0-shared-scaffold resolves the runs root from KIND_KOROS_RUNS (does not exist) with a hardcoded ~/Dropbox/Science/runs fallback -- the exact error Chris corrected here at 12:14; still present in their 23:05 edit",
+        "no canonical record_id algorithm -- two producers on one database will duplicate rows for the same logical analysis",
+        "no artifact URI scheme -- each app writes refs the other cannot resolve"
+      ],
+      "propagated": [
+        "Q13 amended: floor rule adopted, write-time provenance enforcement moves into the store",
+        "Q14 amended: the arc-level MCC carries a floor tier",
+        "taskplan: conformance block added to p1, both p2 tasks and p3; p3 success criteria gained the floor-tier requirement"
+      ],
+      "merge_recommendation": "DO NOT merge the two app PRDs. DO extract the shared scaffold into koros-arc-store-v1 in KBUtilLib, decomposed into its three responsibilities. Reasoning in Further Notes."
+    }
+  ],
+  "confront_note_round_3": "Round 3 of 3 deliberately NOT spent. Review round 1 added conformance alignment and adopted constraints from an already-reviewed sibling PRD; it reversed no IRREVERSIBLE or MEDIUM decision. Review Mode 5b makes a confront optional in exactly that case. Held in reserve for a round that changes a decision."
 }

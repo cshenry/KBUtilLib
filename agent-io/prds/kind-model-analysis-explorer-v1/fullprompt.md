@@ -317,6 +317,17 @@ data-access layer to change.
 
 ## Revision Log
 
+- **Round 1 — 2026-09-23 (review).** Chris's only review instruction was to
+  reconcile this PRD against `kind-annotation-results-explorer-v1` and consider
+  merging them. Added the **Conformance contract** section: adopted four things
+  from that PRD (the trust-tier floor rule, write-time `provenance`
+  enforcement, the stored-and-flagged unknown-kind policy, and their full-tree
+  census in place of this PRD's single-arc sample), and recorded three defects
+  in their shared scaffold that land on code this PRD's tasks call. Q13 and Q14
+  amended so the arc-level MCC carries a floor tier. **Recommendation on
+  merging is in Further Notes: do not merge the two app PRDs; extract the
+  shared scaffold into its own.**
+
 - **Round 0 — 2026-09-23 (draft).** Single-pass draft.
   Written alongside `kind-annotation-results-explorer-v1`, which owns and
   builds the shared project/arc layer this PRD consumes.
@@ -799,6 +810,82 @@ Every backfilled record carries `payload.provenance = "inferred"` and the app
 marks those rows visibly.
 Backfill is idempotent on `record_id` and is never run automatically.
 
+### Conformance contract with kind-annotation-results-explorer-v1
+
+Both PRDs build on ONE shared module and ONE shared database. This section is
+the reconciliation, performed against that PRD as committed at `2f35541`
+(review round 1) on 2026-09-23. **Where the two disagree, this section says
+which side is right and why** — a disagreement about a shared store is the
+expensive kind, and leaving it implicit is how two apps corrupt one database.
+
+**AGREED, and identical in both documents** — the class `KorosArcStore` in
+`kbutillib.koros_arc_store`; the methods `list_projects`, `list_arcs`,
+`read_arc`, `record_analysis`, `list_analyses`, `read_detail`; the
+`AnalysisRecord` field set including `trust_tier`, `provenance` and
+`contract_version`; namespaced `kind`; `record_analysis` idempotent on
+`record_id`; the per-user local database; and the two-tier schema with
+`read_detail` as the only blob reader.
+
+**ADOPTED FROM THEIRS — their spec is better than mine was and this PRD now
+defers to it:**
+
+- **The FLOOR rule.** A record summarizing several findings carries the
+  **least-trusted** contributing tier. Adding lower-tier findings lowers the
+  floor; adding higher-tier findings **never** raises it. The shared layer
+  provides the floor helper and **exposes no API that raises a tier**. This
+  matters here specifically: the arc-level MCC (Q14/S13) summarizes many
+  records, so **it carries a floor tier**, and a model-versus-experiment
+  statistic computed over `hypothesis`-tier predictions cannot be presented at
+  a higher tier than its inputs.
+- **Write-time enforcement of `provenance`.** Any tier other than `verified`
+  requires a non-empty `provenance` dict; the store **rejects** a write that
+  omits it. Stronger than this PRD's original "must carry", which was a
+  convention rather than a gate.
+- **The unknown-kind policy** (imitated from
+  `kbdl_service.clearinghouse.result_types`): an unrecognized `kind` is
+  **stored and flagged, never refused**; only structural validation rejects.
+  S11 already required foreign kinds to be *counted* on read; this adds the
+  write side, and together they mean neither app can stall the other.
+- **Their census beats my sample.** Finding 4 above rests on one arc. They
+  measured the whole tree: **9 project directories, 8 with an `arcs/`
+  subdirectory, 26 arcs, and `inputs` empty and `tool_versions` empty on ALL
+  26.** The empty case is the common case, not an anomaly. Also: **a project
+  directory with no `arcs/` subdirectory must enumerate as a project with zero
+  arcs and never raise** — one of the nine live projects is exactly that.
+
+**THREE DEFECTS IN THEIR `p0-shared-scaffold`, each of which lands on code this
+PRD's tasks call.** Raised with that session; recorded here so the build does
+not inherit them silently if the fix does not land first.
+
+1. **The runs-root resolution is wrong, and it is the error Chris personally
+   corrected in this PRD.** Their p0 says *"honor `KIND_KOROS_RUNS` first, then
+   a configured setting, then default to `$HOME/Dropbox/Science/runs`"*.
+   `KIND_KOROS_RUNS` **does not exist anywhere in the stack** (finding 12), the
+   real names are `KOROS_HOME` (as `$KOROS_HOME/runs`) and `KING_KOROS_RUNS`,
+   and the Dropbox path is one machine's layout rather than a constant. Both
+   documents inherited this from the `cw-kind` skill; this one is fixed and
+   theirs is not yet. **Blocking for the shared module** — a scaffold that
+   resolves the runs root wrongly makes every level-0 view empty on any machine
+   whose environment differs.
+2. **No canonical `record_id` algorithm.** Theirs says only "producer-generated".
+   This PRD pins it (S1: sha256 over lowercased kind, lowercased subject and a
+   canonical sorted-key JSON of the significant parameters). **Two producers
+   writing one database with different derivations produce duplicate rows for
+   the same logical analysis**, and the idempotency both documents promise
+   silently stops holding. The algorithm must live in the shared layer, not in
+   each producer.
+3. **No artifact URI scheme.** Theirs says "named refs to files/objects"; this
+   PRD pins bare absolute path, `file://`, or `obj://<object_id>` (S2). Without
+   one vocabulary, each app writes refs the other cannot resolve — which
+   matters the first time one arc carries both kinds of work.
+
+**WHAT THIS PRD DOES ABOUT THEM.** It does not work around them. Its tasks
+declare the shared module a hard precondition and stop if it is absent; if it
+is present but resolves the runs root from a non-existent environment variable,
+that is a defect to fix in the shared module, not to paper over here. The
+`p1-arc-resolver` prompt carries the correct precedence and an explicit warning
+not to reintroduce `KIND_KOROS_RUNS`.
+
 ### Specifications forced by confront round 1
 
 The cross-family adversary stalled on eleven underspecifications. Each is
@@ -1215,6 +1302,16 @@ views, and removes the `homology` distinction on `kbdl.fitness_prop` — which
 would present propagated fitness and measured fitness identically, the case
 §A calls out by name as the category error. It also forecloses plane 3 later,
 since the rendezvous row schema requires a `trust_tier` floor column.
+**Amended, review round 1:** the annotation PRD's **floor rule** is adopted —
+a record summarizing several findings carries the **least-trusted** contributing
+tier, adding higher-tier findings never raises it, and the shared layer exposes
+no API that raises a tier at all. The consequence for this PRD is concrete and
+was not previously stated: **the arc-level MCC (Q14) carries a floor tier**, so
+a statistic computed over `hypothesis`-tier predictions is reported at
+`hypothesis`, never promoted by the presence of measured data on the other side
+of the comparison. Write-time enforcement also moves into the store, which
+rejects a non-`verified` record with an empty `provenance` rather than trusting
+the producer to populate it.
 **Confidence:** high on the requirement, medium on the exact `provenance`
 payload for `kbdl.fitness_prop` — the percent-identity bridge metric exists in
 that job's design (it is the stated advantage of search over clustering), but I
@@ -1276,6 +1373,11 @@ of `fitness_dashboard.py`, which this PRD does not modify.
 **If you disagree:** dropping it leaves the arc table showing raw concordance
 counts per model, which is still usable and is strictly less work — one column
 and its computation come out of `p3-app-skeleton`.
+**Amended, review round 1:** the metric **carries a floor trust tier** under
+the rule adopted into Q13. It compares `hypothesis`-tier predictions against
+measured fitness, so it is reported at the floor — `hypothesis` — and labelled
+as a model-versus-experiment statistic. It is never presented as a `verified`
+measure of model quality because one of its two inputs is measured.
 **Confidence:** high — this is a small, additive, well-evidenced choice.
 
 ### Q11. What I could not decide and did not guess
@@ -1620,6 +1722,47 @@ The ordering constraint worth stating plainly: **nothing in this PRD can be
 dispatched until `kbutillib.koros_arc_store` exists on `main`.** Its phase 1 is
 empty by design. The annotation PRD's phase 1 is this PRD's precondition, and
 a build that starts before that lands will fail at import in every task.
+
+**On merging the two PRDs — recommendation: DO NOT merge the apps; DO extract
+the shared scaffold into a third PRD.**
+
+Chris raised merging on 2026-09-23: *"It may make sense even to merge them even
+if this creates a huge prd."* The instinct is right about the problem and, I
+think, wrong about the remedy. Four reasons, in descending weight.
+
+1. **The dependency that actually hurts is not expressible in either
+   taskplan.** `load_taskplan` validates `depends_on` within one plan only;
+   there is no way to say "this phase depends on a task in another PRD". Today
+   the coupling lives in prose in both documents and in nothing a tool checks.
+   Merging fixes that — and so does extraction, at a fraction of the size.
+2. **The shared scaffold is currently ONE task carrying three responsibilities
+   and roughly fifteen distinct requirements** — runs-tree access, the database
+   and its two-tier schema, the trust-tier enum with the floor rule and the
+   anti-laundering constraint, the unknown-kind policy, and the CAC helpers. By
+   the standard this PRD was held to, that is under-decomposed, and it is the
+   single highest-risk task in either plan because **both apps block on it**.
+   Extraction is the natural moment to split it into three.
+3. **Merging would collapse two different review histories.** This PRD is at
+   `review_rounds` 1 / `confront_rounds` 2; theirs is at 1 / 0. A merged
+   document could not honestly say which half had been adversarially attacked,
+   and the fields that record it would become meaningless. That is a
+   provenance loss, and provenance is the thing these records exist for.
+4. **The apps are otherwise disjoint and ship independently.** Different owning
+   repos, different payload schemas, different renderers — theirs a per-gene
+   multi-method matrix, this one Escher maps. Of a merged plan's eleven tasks,
+   eight would never interact. Merging couples two release schedules that have
+   no reason to be coupled.
+
+**The proposed shape is three PRDs:** `koros-arc-store-v1` in KBUtilLib owning
+the scaffold, decomposed into its three responsibilities; and the two app PRDs,
+each declaring a PRD-level dependency on it. Build order becomes a fact about
+the dev board rather than a paragraph two documents have to keep in sync.
+
+**What this PRD does if the answer is "merge anyway":** its tasks are already
+self-contained prompts and its phases already assume the scaffold exists, so
+they graft onto a merged plan as phases 2–6 with no rewriting — only the
+`depends_on` edges change. Extraction and merging cost the same here; the
+difference is entirely in what the other document has to absorb.
 
 **On the shared surface, revised.** The parallel session's second message
 argued that CAC conformance is now the larger shared surface — the id

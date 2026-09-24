@@ -5,12 +5,17 @@ parses their ``PROVENANCE.json`` into typed records, importing nothing from the
 KING/KOROS backend or any of the five KING/KOROS repos. Two separate KIND apps
 depend on it; nothing here is specific to either one's domain.
 
-This package covers runs-tree access and the per-user run database. The CAC
-helpers are a separate concern delivered in follow-on work.
+This package covers runs-tree access, the per-user run database, and the CAC
+conformance helpers.
 """
 
 from __future__ import annotations
 
+from .conformance import (
+    CONTRACT_VERSION,
+    check_contract_version,
+    module_id,
+)
 from .exceptions import (
     ContractVersionMismatch,
     KorosArcStoreError,
@@ -57,6 +62,10 @@ __all__ = [
     # Run database
     "RunDatabase",
     "resolve_db_path",
+    # CAC conformance helpers
+    "module_id",
+    "check_contract_version",
+    "CONTRACT_VERSION",
     # Exceptions
     "KorosArcStoreError",
     "RunsRootResolutionError",

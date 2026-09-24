@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from .conformance import check_contract_version
 from .exceptions import RecordNotFound, RecordValidationError
 from .identity import canonical_json, derive_analysis_id, derive_record_id
 from .records import (
@@ -347,8 +348,16 @@ class RunDatabase:
         ``run_uid`` are IMMUTABLE — a write changing either on an existing
         ``record_id`` is REJECTED (S17 immutable_field_changed). A re-record with
         no ``detail`` leaves any existing blob in place.
+
+        The CAC contract-version gate (S20) applies here, on WRITE: a record
+        whose ``contract_version`` differs from :data:`CONTRACT_VERSION` raises
+        :class:`ContractVersionMismatch` before anything is stored. Like
+        structural validation this is a rejection, not part of the fail-soft
+        envelope — an incompatible version is a caller bug that must surface.
         """
-        # Validation raises — it is not part of the fail-soft envelope.
+        # The contract-version gate and structural validation both RAISE — they
+        # are not part of the fail-soft envelope.
+        check_contract_version(record.contract_version)
         self._validate_structural(record)
         artifacts = self._normalize_artifacts(record.artifacts or {})
         unknown_kind = self._classify_kind(record.kind)

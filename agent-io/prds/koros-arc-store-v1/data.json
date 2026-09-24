@@ -157,7 +157,7 @@
       "adjudication_note": "Chris was not asked for a drop-list; he had already said to submit for review and then set ready, and Draft/Review Mode does not block on an answer. Every disposition is recorded here and in the S15-S44 block with its reasoning, and dropping any folded item is a one-line edit."
     }
   },
-  "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
+  "draft_commit": "7660ccd378790ba100c4e6deed0138c38365e9a7",
   "review_history": [
     {
       "round": 1,
@@ -202,5 +202,11 @@
       "propagated_to_other_prds": "NONE this round. H3's app-side consequence (both apps must offer a delete affordance and group/date re-runs) is recorded here and routed, not written into their documents -- Chris dispatches this PRD first and submits those separately, and their sessions are live."
     }
   ],
-  "acceptance_criteria_count": 76
+  "acceptance_criteria_count": 76,
+  "draft_commit_history": [
+    {
+      "superseded": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
+      "reason": "review round 1 + confront round 2, 2026-09-24"
+    }
+  ]
 }

@@ -53,6 +53,33 @@ That is a strictly lighter dependency footprint than the graphviz path this PRD 
 specified, which needed a Python package *and* a `dot` system binary *and* the ModelSEED
 biochemistry database — see Q7, where the graphviz renderer is now dropped.
 
+**THE PIPELINE WAS RUN, NOT JUST READ, AND IT FOUND A DEFECT IN THIS PRD'S OWN CLAIM.**
+A three-member synthetic community on ModelSEED `cpd#####` ids was pushed through
+`build_member_reactions` → `build_escher_map` → `render_map_svg(html=True)` in the scratchpad
+on 2026-09-24. It works: 3 member reactions, 16 nodes, 16 segments, one block, a
+2292×1734 canvas at 1.32:1; the two compounds constructed as cross-fed were the two detected
+and dashed (4 of 4 segments); `member_box` present on 3 of 3 reactions; three distinct member
+colours applied across 16 segments; SVG and interactive HTML both written, the HTML fetching
+nothing external. That closes two of this PRD's own recorded unknowns — no map had been
+generated, and `escher_edit` had no evidence of being run against ModelSEED ids.
+
+It also disproved a claim this PRD had made. **`write_escher_svg` labels metabolite nodes from
+`bigg_id`, not from `name`** (`render.py:185`), so passing `compound_names` does *not* put
+display names on the static figure — the generated SVG's ten text elements were seven
+`cpd#####` ids and three member names. The names do reach the JSON's `name` field, and
+`interactive.py:491-493` composes tooltips as `"{name} ({bigg_id})"`, so the interactive page
+*does* read `D-Glucose (cpd00027)`. Static figure: ids. Interactive page and Escher's own
+viewer: names.
+
+**And a naive label swap would break the layout, which is why this needed measuring.**
+`MapStyle.fitted_column_dx` sizes the input/output columns from `_label_width` over the
+compound **ids**, with an 8-character default — and a ModelSEED id is exactly 8 characters.
+Measured on the same sample, the widest name is **2.88× the widest id** (270px vs 94px). So
+the room reserved is sized for ids. The fix is upstream's own documented override:
+`fitted_column_dx(names.values())` then `MapStyle(input_column_dx=-w, output_column_dx=w)`,
+verified to be accepted and to widen the canvas from 2292 to 2644 on that sample. This is
+what the `label_compounds` parameter does, and why it is opt-in.
+
 **There is no Escher code in MSCommunity itself** — checked on 2026-09-23 and worth recording
 so nobody looks there again: `mscommviz.py` is byte-identical between `b5f37c4b` and
 `2dcff16`, and `grep -ri escher` returns nothing on `main`, nothing on `gpu` (2026-06-11,
@@ -135,6 +162,15 @@ records only a path and a git URL, so this design adds a `commit` key.
 
 ### Links
 
+- [Prototype community map](research/prototype-community-map.svg) — generated 2026-09-24 from a
+  three-member synthetic community on ModelSEED ids, with its
+  [map JSON](research/prototype-community-map.json) and
+  [interactive page](research/prototype-community-map.html). This is the evidence behind Q4 and
+  behind the `label_compounds` decision; open the SVG to see what the figure actually looks
+  like.
+- [Confront round 1](research/confront-round-1.md) and
+  [confront round 2](research/confront-round-2.md) — the cross-family stall reports and, in
+  `data.json`, the adjudication of each with reasons for every decline.
 - [External scan: community modeling and visualization prior art](research/external-scan.md)
 — literature, competing toolkits (MICOM, SteadyCom, SMETANA, COMETS, PyCoMo, MMinte,
 BacArena, gapseq), the abundance-semantics trap, visualization prior art, and
@@ -182,6 +218,17 @@ Medium on the result-object shape and on the Escher projection, which are the tw
 this design invents rather than follows.
 
 ## Revision Log
+
+- **Round 0.3 — 2026-09-24 (prototype + confront round 2, NOT a review round).**
+  Ran the `escher_edit` pipeline rather than only reading it, which closed two recorded unknowns
+  and **found a defect in this PRD's own claim**: `compound_names` does not put names on the
+  static figure, and the layout reserves label room sized from the ids, so names need a
+  column-widening pass. That is now the `label_compounds` parameter, defaulting to `"id"`.
+  Confront round 2 (`task-80a75ae8`) returned 29 stall points: 21 folded, 5 declined, 3 already
+  satisfied. Its best catch was that `cross_feeding_graph` as a `DiGraph` would silently
+  overwrite parallel exchanges — now a `MultiDiGraph`. Four of the five declines were the
+  adversary inventing upstream APIs its worktree cannot see. Twelve exact literals are now bound
+  in one place. `review_rounds` still **0**.
 
 - **Round 0.2 — 2026-09-24 (editEscher folded, NOT a review round).**
   Chris supplied `ModelSEED/editEscher`, which is where the community Escher viz actually
@@ -403,14 +450,17 @@ is `False` with a `unavailable_reason` naming what is missing, exactly as
   map in a series, so that I can read one member across conditions.
 32. As a modeler, I want to colour members by taxonomic group with a legend, so that a
   forty-member community reads as phyla rather than as forty indistinguishable boxes.
-33. As a modeler, I want compound nodes labelled with real names rather than ModelSEED ids,
-  so that the figure is readable by someone who does not know the database.
-34. As a modeler, I want the adapter between the community fluxes and the map builder to be
+33. As a modeler, I want compound names available on the figure — in the interactive
+  tooltips by default, and on the static figure when I ask for it — so that a reader who does
+  not know the ModelSEED database can follow it.
+34. As a modeler, I want asking for names on the static figure to widen the layout to fit
+  them, so that I get readable labels rather than labels overlapping the nodes.
+35. As a modeler, I want the adapter between the community fluxes and the map builder to be
   a public method I can inspect, so that when a figure looks wrong I can check the numbers
   going into it rather than guessing.
-35. As a modeler, I want to be warned rather than silently given an unreadable figure when
+36. As a modeler, I want to be warned rather than silently given an unreadable figure when
   the community is too large for the layout to stay legible.
-36. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
+37. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
   drift reported as a warning, so that a divergent local checkout is visible without
     blocking anyone who is deliberately working ahead of the pin.
 
@@ -613,7 +663,7 @@ run_community_fba(comm, media=None, pfba=False, min_member_growth=0.0)
                   -> CommunityFBAResult
 predict_abundances(comm, media=None, pfba=True, regularization=True,
                    update=False, determinize=False) -> dict[str, float] | None
-run_micom(comm, media, tradeoff=0.6) -> list[CommunityFBAResult]
+run_micom(comm, media, tradeoff=0.6) -> CommunityFBAResult
 test_member_growth(comm, media=None, interacting=True) -> pandas.DataFrame
 gapfill_community(comm, media=None, target=None, templates=None, models=None,
                   solver="glpk") -> GapfillResult
@@ -689,6 +739,12 @@ exit. It does this only when `comm.mscomm.close_member_drains` is True and
 records in the returned DataFrame's `.attrs` that drains were reopened for the measurement,
 so a solo growth rate is never silently comparable with a coupled one.
 
+`run_micom` takes **one medium and returns one result**, not a list. Upstream's `micom()`
+accepts either a single medium or a sequence and always returns a list; wrapping that shape
+through would make every caller unwrap a one-element list for the overwhelmingly common case.
+A caller sweeping media loops, which is also what `render_community_map` wants as its
+`{label: result}` input.
+
 `run_micom` checks for a QP-capable solver *before* dispatching and raises a
 `CommunitySolverError` naming the acceptable solvers (`gurobi`, `cplex`, `osqp`, or the
 `hybrid` HiGHS+OSQP path) when none is available, rather than letting optlang raise from
@@ -708,9 +764,9 @@ cross_feeding_table(comm, result=None, media=None, flux_threshold=1.0,
 cross_feeding_graph(comm, result=None, min_abs_flux=1e-4) -> networkx.DiGraph
 fluxes_by_member(comm, result=None, min_abs_flux=0.0) -> dict[str, dict[str, float]]
 render_community_map(comm, result_or_results, output_path, *, min_abs_flux=0.0,
-                     skip_amino_acids=False, member_groups=None,
-                     member_legend=None, style=None, svg=True, html=True,
-                     map_name=None) -> CommunityMapArtifacts
+                     skip_amino_acids=False, label_compounds="id",
+                     member_groups=None, member_legend=None, style=None,
+                     svg=True, html=True, map_name=None) -> CommunityMapArtifacts
 render_member_map(comm, member_id, map, output_path, result=None,
                   **escher_kwargs) -> Path
 ```
@@ -725,11 +781,19 @@ inside its `if visualize:` branch (`mscommviz.py:99-252`). The confront round pr
 `MSCOMMUNITY_MSDB_PATH` environment-variable fallback; **declined**, as untestable dead code
 that would hide a real signature break behind a silent fallback.
 
-`cross_feeding_graph` builds a `networkx.DiGraph` from the cross-feeding DataFrame, one node
-per member plus an `Environment` node, one edge per donor→recipient metabolite carrying
-`metabolite`, `flux` and `abs_flux`. Edges below `min_abs_flux` are dropped. It exists
-because the external scan's clearest visualization finding is that a layer should emit a
-graph object and not only rendered files: a caller who wants Plotly, Cytoscape, their own
+`cross_feeding_graph` builds a **`networkx.MultiDiGraph`** from the cross-feeding DataFrame:
+one node per member plus an `Environment` node, and one edge per
+donor→recipient→**metabolite** triple, keyed on the metabolite id and carrying `metabolite`,
+`flux` and `abs_flux`. Edges below `min_abs_flux` are dropped.
+
+**It must be a MultiDiGraph, not a DiGraph**, and the confront round caught this: two members
+commonly trade several metabolites, and a `DiGraph` holds at most one edge per ordered pair, so
+every exchange after the first would be **silently overwritten**. A caller counting exchanges
+would get the number of trading *pairs* and have no way to tell. Using the metabolite id as the
+edge key also makes a specific transfer addressable.
+
+It exists because the external scan's clearest visualization finding is that a layer should
+emit a graph object and not only rendered files: a caller who wants Plotly, Cytoscape, their own
 layout, or simply an edge count should not have to go through a renderer to get one.
 
 `fluxes_by_member` is the **adapter**, and it is public because it is the seam between the
@@ -786,6 +850,29 @@ wrapping it.
 default because silently hiding metabolites from a figure someone will interpret is not a
 default anyone should get without asking.
 
+**`label_compounds` controls what the STATIC figure calls each compound, and its default is
+the ModelSEED id.** This is the one place where the obvious thing is wrong, so it is specified
+rather than left to the builder. `escher_edit` draws node labels from `bigg_id`
+(`render.py:185`), so `compound_names` alone puts names in the JSON and in the interactive
+tooltips (`"D-Glucose (cpd00027)"`) while the static SVG still reads `cpd00027`.
+
+- `label_compounds="id"` (default) — upstream behaviour, and the only setting where the
+  reserved label room certainly matches the text drawn.
+- `label_compounds="name"` — names on the static figure too. Because
+  `MapStyle.fitted_column_dx` reserves horizontal room from the **ids** (an 8-character
+  default, and a ModelSEED id is exactly 8 characters) while measured names run about 2.9×
+  wider, this MUST widen the columns *before* layout using upstream's documented override:
+  compute `w = style.fitted_column_dx(names.values())`, derive a new style as
+  `MapStyle(input_column_dx=-w, output_column_dx=w, ...)`, lay out with that, and swap the
+  `<text class="node-label label">` contents after render in a small BeautifulSoup pass — bs4
+  is already an `escher_edit` dependency. Verified in the scratchpad: the override is accepted
+  and widened the canvas from 2292 to 2644 on the sample.
+- `label_compounds="name_id"` — `"<name> (<id>)"`, sized the same way.
+
+The default is `"id"` rather than `"name"` because a figure whose labels overflow the room
+reserved for them is worse than one whose labels are terse, and only the id case is guaranteed
+safe without the widening pass. Never mutate a caller-supplied `MapStyle`; derive a new one.
+
 Returns a `CommunityMapArtifacts` dataclass carrying `map_json`, `svg` and `html` paths (the
 last two `None` when not requested) plus `n_members`, `n_compounds` and `n_blocks` — counts
 a caller needs to judge whether the figure is readable, and which the acceptance criteria
@@ -815,6 +902,100 @@ standalone simulation.
 because a member's uptake is not separable from the community's on a shared extracellular
 compartment.
 
+### Bound strings, shapes and defaults
+
+Confront round 2 asked for twelve separate exact literals, on the ground that a test grepping
+free-form text is a test that breaks on a reword. Rather than scatter them, they are bound
+here, and this is the single place to change any of them.
+
+**Exact messages.** Tests assert these; the module builds them from f-strings with exactly
+this wording.
+
+- Provenance rejection: `"resolved MSCommunity is modelseedpy.community.MSCommunity (the
+  superseded copy), not the standalone mscommunity package: {resolved_module}"`
+- Commit mismatch (one per package, logged at WARNING, never raised):
+  `"{package} commit mismatch: pinned {pinned_sha}, found {found_sha}"`
+- `load_community` with no recoverable provenance: `"Cannot reconstruct community provenance:
+  no kbutil.community notes, no member_ids argument, and no member_biomass_cpds in
+  model.notes."`
+- `render_member_map` with no source model: `"No source model id recorded for member
+  {member_id}; cannot render member projection."`
+- Unknown notes schema: `"Unsupported kbutil.community schema_version: {v}"` — `load_community`
+  accepts `{1}` and raises on anything else. Declaring the policy now is cheaper than
+  discovering later that an old reader silently mis-parsed a new writer.
+- The member-projection banner, verbatim: `"Member {member_id} projected from community
+  {community_id} on medium {media_id} (community growth {growth:.4f}/hr). EX_ exchange
+  reactions are community-level on the shared e0 compartment and cannot be attributed to a
+  single member; EX_ fluxes are shown as community totals."`
+
+**Upstream stdout markers**, as module-level constants so a wording change is a one-line fix
+and the test that asserts them against `mscommsim.py` fails loudly:
+`KINETICS_RELAXED_MARKER = "Kinetic constraints disabled"` and
+`NO_GROWTH_MARKER = "doesn't grow"`.
+
+**Exact shapes.**
+
+- `CommunityModel.source_model_ids` is `{member_id: source_model_id}` — member first. Example:
+  `{"iML1515": "iML1515", "Bth": "Bth_draft_v2"}`. Getting the direction wrong breaks
+  `render_member_map`, which looks up by member.
+- `CommunityFBAResult.fluxes` is a `pandas.Series` indexed by **string reaction id** with float
+  values and no NaNs.
+- `model.notes["member_biomass_cpds"]` is upstream's and is a **dict**, `{model_id:
+  [biomass_compound, ...]}` — verified from `mscommsim.py:239`, which iterates it with
+  `.items()`, and `commhelper.py`, which builds it with `setdefault(org_model.id,
+  []).append(met)`. It is **not** an ordered list; confront round 2 proposed binding it as one
+  and that is declined as factually wrong.
+- `build_community`'s `model_id` becomes the underlying cobra model's `id` and `name` its
+  `name`; both are echoed into the `kbutil.community` notes.
+- `predict_abundances` records `{"regularization": bool, "determinize": bool}` in the result's
+  `notes`, so a returned abundance vector says which subroutine produced it.
+
+**Defaults and determinism.**
+
+- `render_community_map`'s `style` defaults to `escher_edit.MapStyle()` and the **same
+  instance** goes to `build_escher_map(style=)` and `render_map_svg(layout=)`.
+- Multi-condition blocks are assembled in **sorted label order**, and labels must be unique
+  non-empty strings. Dict insertion order would make a figure depend on how the caller happened
+  to build its mapping, which is exactly the kind of irreproducibility a figure in a paper
+  cannot have.
+- `n_compounds` is the count of **distinct compound ids across all blocks** (the union), not a
+  per-block maximum.
+- `export_community_sbml` creates parent directories and overwrites by default, with
+  `overwrite=True` in the signature so a caller can opt out. It delegates to
+  `comm.mscomm.to_sbml`, which already does the `makedirs`. Confront round 2 proposed routing
+  through a `KBModelUtils.CobraModelConverter.to_cobra` helper; **declined — no such API exists
+  in this repo**, and MSCommunity already exposes the exporter.
+- `gapfill_community` forwards by keyword to upstream's **real** parameter names,
+  `default_gapfill_templates` and `default_gapfill_models` — not `templates` / `models`, which
+  confront round 2 proposed and which would be silently swallowed by `**kwargs`-free positional
+  binding. This matters more than usual here: the historical `MSGapfill` positional bug this
+  PRD already documents was exactly a mis-bound gapfill argument.
+- Compounds appearing **only** in the `Environment` column — no member carries a non-zero flux
+  for them — are excluded from `fluxes_by_member`, from compound-name resolution, and from
+  `n_compounds`.
+- `_import_escher_edit` and `_import_mscommunity` both **prefer an already-importable package**
+  on `sys.path` and only fall back to the declared dependency path, so a developer's editable
+  install wins over the checkout.
+
+**Two bindings confront round 2 asked for and did not get, both because it does not have
+MSCommunity in its worktree and guessed:**
+
+- It proposed reading drain bounds from `comm.mscomm.member_biomass_drains[member_id]`. **No
+  such attribute exists.** The verified path is `member.biomass_drain_bounds`, a
+  `(lower, upper)` tuple snapshotted per member at construction (`mscommsim.py:153`, with the
+  comment saying it is kept precisely so the drain can be restored where a member is measured
+  alone). Using the invented path would leave solo growth reading zero — the exact failure the
+  guard exists to prevent.
+- It proposed stripping `_c\d+` and `_e0` suffixes from compound ids used as fallback labels.
+  **Unnecessary:** `interactions()` already strips `_e0` when it builds the DataFrame index, and
+  community cross-feeding ids are therefore bare `cpd#####`. A strip pass would be dead code
+  that looks load-bearing.
+
+One further decline, on proportionality rather than fact: confront round 2 proposed normalizing
+abundances through `Decimal` at 1e-12 and rounding to 8 decimal places for note stability.
+Declined — abundances are caller-supplied input, float normalization is what upstream does, and
+a `Decimal` path buys reproducibility in a field nothing compares exactly.
+
 ### Calling into `mscommviz` safely
 
 The module never calls `mscommviz.interactions` (or its three siblings) directly.
@@ -837,12 +1018,12 @@ following `ms_fba_utils.py`. Registration is inert to direct calls; it is what m
 methods reachable from the CLI, MCP and HTTP transports without further wiring.
 
 **Capability names are public API and are bound here**, because a later rename breaks every
-CLI and HTTP caller: `community.build_community`, `community.load_community`,
-`community.save_community`, `community.export_community_sbml`,
+CLI and HTTP caller. There are **fourteen**: `community.build_community`,
+`community.load_community`, `community.save_community`, `community.export_community_sbml`,
 `community.run_community_fba`, `community.predict_abundances`, `community.run_micom`,
 `community.test_member_growth`, `community.gapfill_community`,
-`community.cross_feeding_table`, `community.cross_feeding_graph`,
-`community.fluxes_by_member`, `community.render_community_map`,
+`community.cross_feeding_table`, `community.fluxes_by_member`,
+`community.cross_feeding_graph`, `community.render_community_map`,
 `community.render_member_map`.
 These are `@capability`'s default `"<domain>.<fn.__name__>"`, so they follow from the method
 names rather than being a second thing to keep in sync.
@@ -1015,6 +1196,16 @@ member and carries no intracellular reactions at all, so it cannot show what a m
 metabolism is doing. The per-member projection is a **pathway** view on an ordinary
 single-organism map, and cannot show the community. Dropping either would leave a real
 question unanswerable.
+
+**One sub-decision rides inside this entry rather than taking its own number**, because it is
+the same question — how the community is displayed — and renumbering the section a third time
+risks the cross-references more than the separation is worth: **compound labels on the static
+figure default to ModelSEED ids, not names** (`label_compounds="id"`). `escher_edit` draws
+node labels from `bigg_id`, and the layout reserves horizontal room sized from the ids, so
+names-on-the-static-figure requires a column-widening pass and is therefore opt-in. Names are
+always present in the map JSON and in the interactive tooltips regardless. If you would rather
+the static figure read `D-Glucose` by default, that is a one-word change to the default and the
+widening pass runs on every map.
 
 Ordering matters and is part of the decision: `render_community_map` is the primary view —
 the one a notebook reaches for first and the one that goes in a paper — and
@@ -1300,6 +1491,26 @@ drawing, so two per-condition maps drawn independently disagree about which memb
 `render_community_map` builds the mapping once from `comm.member_ids` and reuses it — invisible
 when it works, and a subtly wrong figure series when it is forgotten.
 
+**Passing `compound_names` does not put names on the static figure.** `escher_edit` draws
+metabolite node labels from `bigg_id` (`render.py:185`); `compound_names` sets the JSON's
+`name` field, which drives the interactive tooltips and Escher's own viewer. So the same map
+reads `cpd00027` as a static SVG and `D-Glucose (cpd00027)` on hover in the HTML. Verified by
+generating one: its ten text elements were seven ids and three member names.
+
+**And the reserved label room is sized from the ids, so swapping labels naively overflows.**
+`MapStyle.fitted_column_dx` computes its column offsets from `_label_width` over the compound
+**ids**, defaulting to eight characters — which is exactly a ModelSEED id. Measured on a
+three-compound sample the widest name was **2.88×** the widest id (270px against 94px). A
+post-render text swap with no widening pass therefore pushes labels into the column nodes.
+This is why `label_compounds` defaults to `"id"` and why `"name"` recomputes the column
+offsets through upstream's documented override before laying out.
+
+**`build_member_reactions` returns members in ALPHABETICAL order, not the order you passed
+them.** It sorts by member name. The figure's own member column is then ordered by
+connectivity, not alphabetically either, so neither matches community index order. This is
+harmless for colours — the palette mapping is keyed by name — but a reader expecting the
+member column to follow the abundance vector or the community index will misread it.
+
 **The cross-feeding DataFrame has no compound names in it.** `interactions()` assembles a
 `"Metabolites/Donor"` display-name column and then drops it before returning, so anything
 drawing from `cross_feeding_df` gets bare `cpd#####` ids. A reader would reasonably assume the
@@ -1560,9 +1771,25 @@ should fold it and revisit Q2 and Q4 specifically.
 34. `render_community_map` builds `escher_edit.palette.member_colors` EXACTLY ONCE from `comm.member_ids` and passes the identical mapping to every render call, verified against a fake `escher_edit` that records its calls.
 35. `render_community_map` resolves compound display names through the biochemistry sibling and falls back to using compound ids as their own names when biochem is unavailable, without raising.
 36. `render_community_map` returns a `CommunityMapArtifacts` carrying `map_json`, `svg`, `html`, `n_members`, `n_compounds` and `n_blocks`, with `svg` / `html` set to None when not requested.
-37. `_import_escher_edit()` adds `<declared path>/src` to `sys.path` — not the repo root — and returns None rather than raising when the package is absent; it applies NO provenance gate.
-38. `dependencies.yaml` declares `escher_edit` with `path: "../editEscher"`, its git URL, and `commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"`; `pyproject.toml` gains a `community` extra carrying `beautifulsoup4` and `lxml` only.
-39. `test_member_growth(interacting=False)` on a community built WITH abundances reopens every member's drain from `member.biomass_drain_bounds` inside the model context manager before delegating, and records in the returned DataFrame's `.attrs` that it did so.
-40. A test proves that solo growth measured through `test_member_growth` on an abundance-bound community is non-zero where the same call against `comm.mscomm.test_individual_species(interacting=False)` returns zero — the false-zero this guard exists to prevent.
-41. No test that passed on the base commit fails on the branch.
+37. `label_compounds` defaults to `"id"` and leaves upstream's labels untouched; `"name"` and `"name_id"` first derive a NEW `MapStyle` whose `input_column_dx` / `output_column_dx` come from `fitted_column_dx` over the display NAMES, lay out with that style, and only then rewrite the `<text class="node-label label">` contents. A caller-supplied `MapStyle` is never mutated.
+38. A test asserts that `label_compounds="name"` produces a wider canvas than `label_compounds="id"` for the same community when the names are longer than the ids.
+39. `_import_escher_edit()` adds `<declared path>/src` to `sys.path` — not the repo root — and returns None rather than raising when the package is absent; it applies NO provenance gate.
+40. `dependencies.yaml` declares `escher_edit` with `path: "../editEscher"`, its git URL, and `commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"`; `pyproject.toml` gains a `community` extra carrying `beautifulsoup4` and `lxml` only.
+41. `test_member_growth(interacting=False)` on a community built WITH abundances reopens every member's drain from `member.biomass_drain_bounds` inside the model context manager before delegating, and records in the returned DataFrame's `.attrs` that it did so.
+42. A test proves that solo growth measured through `test_member_growth` on an abundance-bound community is non-zero where the same call against `comm.mscomm.test_individual_species(interacting=False)` returns zero — the false-zero this guard exists to prevent.
+43. No test that passed on the base commit fails on the branch.
+44. `cross_feeding_graph` returns a `networkx.MultiDiGraph` (not a `DiGraph`) with one edge per donor->recipient->metabolite triple keyed on the metabolite id, and a test proves two metabolites traded between the same ordered member pair both survive.
+45. `run_micom` takes one medium and returns a single `CommunityFBAResult`, not a list.
+46. Exactly fourteen capabilities are registered, matching the `community.<method_name>` list in Implementation Decisions.
+47. The provenance-rejection message, the commit-mismatch warning, the `load_community` no-provenance error, the `render_member_map` no-source-model error, the unknown-schema error and the member-projection banner all match the literals bound in Implementation Decisions, and a test asserts each.
+48. `KINETICS_RELAXED_MARKER` and `NO_GROWTH_MARKER` exist as module-level constants and are asserted against the literal text in `mscommsim.py`.
+49. `test_member_growth` reads drain bounds from `member.biomass_drain_bounds` and NOT from any `comm.mscomm.member_biomass_drains` attribute, which does not exist.
+50. `load_community` treats `model.notes["member_biomass_cpds"]` as a dict `{model_id: [compound, ...]}`, not as an ordered list.
+51. `gapfill_community` forwards to upstream as `default_gapfill_templates` / `default_gapfill_models`, never as `templates` / `models`.
+52. Multi-condition blocks are assembled in sorted label order, labels are required to be unique non-empty strings, and `n_compounds` is the union of distinct compound ids across blocks.
+53. `export_community_sbml` delegates to `comm.mscomm.to_sbml`, creates parent directories, and takes `overwrite=True` in its signature.
+54. Compounds appearing only in the `Environment` column are excluded from `fluxes_by_member`, from compound-name resolution and from `n_compounds`.
+55. `_import_escher_edit` and `_import_mscommunity` prefer an already-importable package over the `dependencies.yaml` path.
+56. `load_community` accepts `kbutil.community` `schema_version` 1 and raises on any other value.
+57. `predict_abundances` records `{"regularization": bool, "determinize": bool}` in the result notes.
 

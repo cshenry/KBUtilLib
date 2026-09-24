@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg class="escher-svg" height="1734.4" viewBox="-400.0 -400.0 2291.52 1734.4" width="2291.52" xmlns="http://www.w3.org/2000/svg">
+ <defs>
+  <style type="text/css">
+   svg.escher-svg #canvas{stroke:none;fill:#fff}svg.escher-svg .label{font-family:sans-serif;font-style:italic;font-weight:700;font-size:8px;fill:#000;stroke:none}svg.escher-svg .reaction-label{font-size:29.4px;fill:#202078;stroke:#000000;stroke-width:0.294px;text-rendering:optimizelegibility}svg.escher-svg .node-label{font-size:19.6px;fill:#222222;stroke:#000000;stroke-width:0.196px;}svg.escher-svg .text-label .label,svg.escher-svg .text-label-input{font-size:52.92px}svg.escher-svg .node-circle{stroke-width:2px}svg.escher-svg .midmarker-circle,svg.escher-svg .multimarker-circle{fill:#fff;fill-opacity:.2;stroke:#323232}svg.escher-svg .metabolite-circle{stroke:#222222;fill:#222222}svg.escher-svg .segment{stroke:#5aa6df;stroke-width:14px;fill:none}svg.escher-svg .arrowhead{fill:#334E75}
+  </style>
+ </defs>
+ <rect height="1734.4" id="canvas" width="2291.52" x="-400.0" y="-400.0"/>
+ <g id="reactions">
+  <g class="reaction" id="r0">
+   <g class="segment-group" id="s0">
+    <path class="segment" d="M725.76,929.4 L745.76,929.4" style="stroke:#2a78d6;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s1">
+    <path class="segment" d="M765.76,929.4 L745.76,929.4" style="stroke:#2a78d6;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s2">
+    <path class="segment" d="M810.680,928.180 C995.160,918.252 1166.271,849.511 1234.848,787.276" style="stroke:#2a78d6;stroke-width:14px"/>
+    <g class="arrowheads">
+     <path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#2a78d6" transform="translate(1234.8478759981203,787.2759028469418)rotate(227.77539617332002)"/>
+    </g>
+   </g>
+   <g class="segment-group" id="s3" stroke-dasharray="11.2,7">
+    <path class="segment" d="M680.840,924.964 C584.391,905.985 510.940,830.702 509.014,789.324" style="stroke:#2a78d6;stroke-width:14px"/>
+   </g>
+   <g class="segment-group" id="s4" stroke-dasharray="11.2,7">
+    <path class="segment" d="M810.680,908.030 C949.407,830.480 1024.420,675.736 1004.550,590.245" style="stroke:#2a78d6;stroke-width:14px"/>
+    <g class="arrowheads">
+     <path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#2a78d6" transform="translate(1004.5501037860973,590.2451111676377)rotate(166.9155600398575)"/>
+    </g>
+   </g>
+  </g>
+  <g class="reaction" id="r1">
+   <g class="segment-group" id="s5">
+    <path class="segment" d="M725.76,89.4 L745.76,89.4" style="stroke:#eb6834;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s6">
+    <path class="segment" d="M765.76,89.4 L745.76,89.4" style="stroke:#eb6834;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s7" stroke-dasharray="11.2,7">
+    <path class="segment" d="M672.020,99.012 C522.618,161.666 683.733,509.400 915.760,509.400" style="stroke:#eb6834;stroke-width:14px"/>
+   </g>
+   <g class="segment-group" id="s8">
+    <path class="segment" d="M672.020,90.362 C504.715,96.278 346.025,128.568 263.556,161.643" style="stroke:#eb6834;stroke-width:14px"/>
+   </g>
+   <g class="segment-group" id="s9">
+    <path class="segment" d="M819.500,91.140 C1000.594,102.740 1167.366,170.282 1234.848,231.524" style="stroke:#eb6834;stroke-width:14px"/>
+    <g class="arrowheads">
+     <path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#eb6834" transform="translate(1234.8478759981203,231.52409715305816)rotate(-47.77539617332005)"/>
+    </g>
+   </g>
+  </g>
+  <g class="reaction" id="r2">
+   <g class="segment-group" id="s10">
+    <path class="segment" d="M725.76,509.4 L745.76,509.4" style="stroke:#1baf7a;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s11">
+    <path class="segment" d="M765.76,509.4 L745.76,509.4" style="stroke:#1baf7a;stroke-width:14px;display:none"/>
+   </g>
+   <g class="segment-group" id="s12">
+    <path class="segment" d="M689.660,510.193 C501.801,518.389 325.763,588.822 247.045,660.261" style="stroke:#1baf7a;stroke-width:14px"/>
+   </g>
+   <g class="segment-group" id="s13">
+    <path class="segment" d="M801.860,510.191 C989.686,518.358 1165.180,588.298 1234.848,651.524" style="stroke:#1baf7a;stroke-width:14px"/>
+    <g class="arrowheads">
+     <path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#1baf7a" transform="translate(1234.8478759981203,651.5240971530582)rotate(-47.77539617332002)"/>
+    </g>
+   </g>
+   <g class="segment-group" id="s14">
+    <path class="segment" d="M689.660,508.962 C515.945,504.787 348.918,471.393 263.556,437.157" style="stroke:#1baf7a;stroke-width:14px"/>
+   </g>
+   <g class="segment-group" id="s15" stroke-dasharray="11.2,7">
+    <path class="segment" d="M801.860,511.861 C1032.864,544.767 955.549,894.318 583.116,749.483" style="stroke:#1baf7a;stroke-width:14px"/>
+    <g class="arrowheads">
+     <path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#1baf7a" transform="translate(583.1163877379275,749.4830396758607)rotate(111.25050550713324)"/>
+    </g>
+   </g>
+  </g>
+ </g>
+ <g id="nodes">
+  <g class="node" id="n0">
+   <circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,404.4)"/>
+   <text class="node-label label" text-anchor="end" transform="translate(94.08,409.29999999999995)">
+    cpd00027
+   </text>
+  </g>
+  <g class="node" id="n1">
+   <circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,194.4)"/>
+   <text class="node-label label" text-anchor="end" transform="translate(94.08,199.3)">
+    cpd00048
+   </text>
+  </g>
+  <g class="node" id="n2">
+   <circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,719.4)"/>
+   <text class="node-label label" text-anchor="end" transform="translate(94.08,724.3)">
+    cpd00007
+   </text>
+  </g>
+  <g class="node" id="n3">
+   <circle class="node-circle metabolite-circle" r="78.0" transform="translate(1309.6399999999999,299.4)"/>
+   <text class="node-label label" transform="translate(1397.44,304.3)">
+    cpd00239
+   </text>
+  </g>
+  <g class="node" id="n4">
+   <circle class="node-circle metabolite-circle" r="78.0" transform="translate(1309.6399999999999,719.4)"/>
+   <text class="node-label label" transform="translate(1397.44,724.3)">
+    cpd00011
+   </text>
+  </g>
+  <g class="node" id="n5">
+   <circle class="node-circle metabolite-circle" r="60.0" transform="translate(505.76,719.4)"/>
+   <text class="node-label label" text-anchor="end" transform="translate(435.96,724.3)">
+    cpd00029
+   </text>
+  </g>
+  <g class="node" id="n6">
+   <circle class="node-circle metabolite-circle" r="60.0" transform="translate(985.76,509.4)"/>
+   <text class="node-label label" transform="translate(1055.56,514.3)">
+    cpd00047
+   </text>
+  </g>
+  <g class="node" id="n7">
+   <circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,929.4)"/>
+  </g>
+  <g class="node" id="n8">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,929.4)"/>
+  </g>
+  <g class="node" id="n9">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,929.4)"/>
+  </g>
+  <g class="node" id="n10">
+   <circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,89.4)"/>
+  </g>
+  <g class="node" id="n11">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,89.4)"/>
+  </g>
+  <g class="node" id="n12">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,89.4)"/>
+  </g>
+  <g class="node" id="n13">
+   <circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,509.4)"/>
+  </g>
+  <g class="node" id="n14">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,509.4)"/>
+  </g>
+  <g class="node" id="n15">
+   <circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,509.4)"/>
+  </g>
+ </g>
+ <g id="text-labels">
+ </g>
+ <g id="member-boxes">
+  <rect class="member-box" data-reaction="r0" fill="#2a78d6" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="129.840" x="680.840" y="902.700"/>
+  <g class="reaction-label-group" data-reaction="r0" transform="translate(692.840,939.690)">
+   <text class="reaction-label label" style="fill:#ffffff;stroke:none">
+    Btheta
+   </text>
+  </g>
+  <rect class="member-box" data-reaction="r1" fill="#eb6834" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="147.480" x="672.020" y="62.700"/>
+  <g class="reaction-label-group" data-reaction="r1" transform="translate(684.020,99.690)">
+   <text class="reaction-label label" style="fill:#222222;stroke:none">
+    Dvulgar
+   </text>
+  </g>
+  <rect class="member-box" data-reaction="r2" fill="#1baf7a" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="112.200" x="689.660" y="482.700"/>
+  <g class="reaction-label-group" data-reaction="r2" transform="translate(701.660,519.690)">
+   <text class="reaction-label label" style="fill:#222222;stroke:none">
+    Ecoli
+   </text>
+  </g>
+ </g>
+</svg>

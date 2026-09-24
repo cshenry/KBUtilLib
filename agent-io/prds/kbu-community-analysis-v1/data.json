@@ -7,7 +7,7 @@
   ],
   "status": "draft",
   "review_rounds": 0,
-  "confront_rounds": 1,
+  "confront_rounds": 2,
   "draft_commit": "f247a3c8f0eb37024398c38a71368ead08af8e71",
   "review_protocol": "Written single-pass by /ai-design Draft Mode on 2026-09-23. The external research scan (Maestro task-c1a370b4, h100/codex) returned during authoring and was folded before commit. Chris reviews by editing fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-community-analysis-v1` diffs the working tree against draft_commit, classifies and propagates every hunk, and recommits with a fresh baseline. The PRD is held at draft until at least one review round has folded.",
   "research_must_read": [
@@ -70,7 +70,7 @@
     "corrected_while_folding": "S6 recommended detecting QP capability via comm.mscomm._QP_CAPABLE. That attribute does not exist -- _QP_CAPABLE and _pick_qp_backend are MODULE-level names in mscommunity.mscommsim. Folded in the corrected form.",
     "free_critique_folded": "Capture upstream's stdout during delegate calls so the silent kinetic-constraint removal becomes CommunityFBAResult.kinetics_relaxed and .notes, and the print noise stops reaching the notebook."
   },
-  "acceptance_criteria_count": 41,
+  "acceptance_criteria_count": 57,
   "upstream_refresh_2026_09_23": {
     "previous_pin": "b5f37c4b1a42175503cf52aebc5ab9c4cc330b1e",
     "commits": 5,
@@ -126,5 +126,48 @@
     "not_wrapped": "build_map_from_interactions and parse_interaction_matrix are study-specific (a wide ASVMetaboliteInteractions.csv with <diet>-ABX_<day> ids); the design builds on build_member_reactions + build_escher_map instead. escher_edit's map-EDITING modules (filter_map, clean_json, layout, reverse_reactions) are out of scope.",
     "review_rounds_unchanged": "0 -- this fold came from Chris naming a repository, not from him editing the PRD. The ready gate still wants a review round over the document."
   },
-  "user_story_count": 36
+  "user_story_count": 37,
+  "confront_round_2": {
+    "task_id": "task-80a75ae8",
+    "backend": "codex",
+    "machine": "h100",
+    "date": "2026-09-24",
+    "artifact": "research/confront-round-2.md",
+    "ran_against": "f247a3c -- BEFORE the label_compounds prototype findings, so it does not cover them",
+    "verified": "read from branch maestro/researcher/you-are-the-autonomous-build-con-task-80a75ae8; both required sections present",
+    "stall_points": 29,
+    "folded": 21,
+    "declined": 5,
+    "already_satisfied": 3,
+    "best_catch": "S10: cross_feeding_graph was specified as a networkx.DiGraph, which holds at most one edge per ordered pair -- so two metabolites traded between the same member pair would have been SILENTLY OVERWRITTEN and a caller counting exchanges would have got the number of trading pairs. Now a MultiDiGraph keyed on metabolite id.",
+    "second_catch": "S1: the PRD said 'thirteen' capabilities while listing fourteen -- a real internal inconsistency introduced when fluxes_by_member was added.",
+    "simplification_taken": "S27: run_micom returned list[CommunityFBAResult] for a single medium; now returns one result.",
+    "declined_with_reasons": [
+      "S5: proposed reading drain bounds from comm.mscomm.member_biomass_drains[member_id]. NO SUCH ATTRIBUTE -- the verified path is member.biomass_drain_bounds (mscommsim.py:153). The adversary lacks MSCommunity in its worktree and guessed; implementing its version would leave solo growth reading zero, the exact failure the guard prevents.",
+      "S9: proposed binding model.notes['member_biomass_cpds'] as an ordered list. It is a DICT {model_id: [compound, ...]}, verified at mscommsim.py:239 which iterates it with .items().",
+      "S3: proposed routing SBML export through KBModelUtils.CobraModelConverter.to_cobra, which does not exist in this repo. MSCommunity already exposes to_sbml.",
+      "S15: proposed gapfill kwargs templates= / models=. Upstream's real names are default_gapfill_templates / default_gapfill_models.",
+      "S12: proposed stripping _c\\d+ / _e0 from fallback labels. Unnecessary -- interactions() already strips _e0, so community ids are bare cpd#####.",
+      "S14 (proportionality, not fact): proposed Decimal abundance normalization at 1e-12 rounded to 8dp. Abundances are caller input, float normalization is what upstream does, and nothing compares those notes exactly."
+    ],
+    "pattern_worth_noting": "Four of the five declines are the adversary inventing an upstream API because the confront worktree contains KBUtilLib but not MSCommunity or editEscher. Its specification-tightening requests were sound; its claims about upstream symbol names were not, and its own free critique flagged this limitation honestly."
+  },
+  "prototype_2026_09_24": {
+    "what": "Ran build_member_reactions -> build_escher_map -> render_map_svg(html=True) on a 3-member synthetic community keyed by ModelSEED cpd ids, in the session scratchpad.",
+    "artifacts": [
+      "research/prototype-community-map.json",
+      "research/prototype-community-map.svg",
+      "research/prototype-community-map.html"
+    ],
+    "observed": "3 member reactions, 16 nodes, 16 segments, 1 block, canvas 2292x1734 at 1.32:1. The two compounds constructed as cross-fed were the two detected and dashed (4/4 segments). member_box present on 3/3 reactions. Three distinct member colours across 16 segments. SVG 9KB, HTML 29KB, no external fetches.",
+    "closed_unknowns": [
+      "no map had been generated",
+      "escher_edit had no evidence of running against ModelSEED cpd ids"
+    ],
+    "defect_it_found": "write_escher_svg labels metabolite nodes from bigg_id, not name (render.py:185), so compound_names does NOT put display names on the static figure -- user story 33 as originally written was undeliverable. Names DO reach the JSON and the interactive tooltips compose 'name (id)' (interactive.py:491-493).",
+    "measurement": "MapStyle.fitted_column_dx sizes columns from compound IDS with an 8-char default -- exactly a ModelSEED id length. Widest name measured 2.88x the widest id (270px vs 94px), so a naive post-render label swap overflows. Upstream's documented input_column_dx/output_column_dx override was verified to be accepted and widened the canvas 2292 -> 2644 when sized from names. That is what label_compounds='name' does.",
+    "new_gotchas": [
+      "build_member_reactions returns members in ALPHABETICAL order, and the figure orders its member column by connectivity -- neither matches community index order."
+    ]
+  }
 }

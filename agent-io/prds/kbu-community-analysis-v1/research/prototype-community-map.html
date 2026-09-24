@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>synthetic_community</title>
+<style>
+html, body { margin: 0; height: 100%; background: #ffffff; overflow: hidden; }
+svg.escher-svg { display: block; width: 100vw; height: 100vh;
+  touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+svg.escher-svg.panning { cursor: grabbing; }
+svg.escher-svg * { pointer-events: none; }
+svg.escher-svg .segment-hit { fill: none; stroke: transparent; stroke-width: 12px;
+  vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
+svg.escher-svg .hover-target { fill: transparent; stroke: transparent; stroke-width: 8px;
+  vector-effect: non-scaling-stroke; pointer-events: all; cursor: pointer; }
+svg.escher-svg.dimmed :is(.segment-group, .node, #member-boxes > *,
+  .reaction > .reaction-label-group):not(.hl) { opacity: 0.12; }
+#escher-tip { position: fixed; z-index: 2; pointer-events: none; max-width: 340px;
+  padding: 6px 9px; background: #ffffff; color: #222222; border: 1px solid #d4d4d4;
+  border-radius: 6px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#escher-tip b { font-weight: 650; }
+#escher-tip .muted { color: #666666; }
+#escher-controls { position: fixed; z-index: 2; top: 10px; right: 10px; display: flex;
+  gap: 4px; align-items: center; font: 12px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #555555; }
+#escher-controls span { margin-right: 6px; background: rgba(255, 255, 255, 0.85);
+  padding: 3px 6px; border-radius: 4px; }
+#escher-controls button { min-width: 30px; height: 30px; padding: 0 8px; font: inherit;
+  font-size: 15px; color: #222222; background: #ffffff; border: 1px solid #cfcfcf;
+  border-radius: 5px; cursor: pointer; }
+#escher-controls button:hover { background: #f2f2f2; }
+@media (max-width: 600px) { #escher-controls span { display: none; } }
+</style>
+</head>
+<body>
+<svg class="escher-svg" preserveAspectRatio="xMidYMid meet" viewBox="-400.0 -400.0 2291.52 1734.4" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<style type="text/css">
+   svg.escher-svg #canvas{stroke:none;fill:#fff}svg.escher-svg .label{font-family:sans-serif;font-style:italic;font-weight:700;font-size:8px;fill:#000;stroke:none}svg.escher-svg .reaction-label{font-size:29.4px;fill:#202078;stroke:#000000;stroke-width:0.294px;text-rendering:optimizelegibility}svg.escher-svg .node-label{font-size:19.6px;fill:#222222;stroke:#000000;stroke-width:0.196px;}svg.escher-svg .text-label .label,svg.escher-svg .text-label-input{font-size:52.92px}svg.escher-svg .node-circle{stroke-width:2px}svg.escher-svg .midmarker-circle,svg.escher-svg .multimarker-circle{fill:#fff;fill-opacity:.2;stroke:#323232}svg.escher-svg .metabolite-circle{stroke:#222222;fill:#222222}svg.escher-svg .segment{stroke:#5aa6df;stroke-width:14px;fill:none}svg.escher-svg .arrowhead{fill:#334E75}
+  </style>
+</defs>
+<rect height="1734.4" id="canvas" width="2291.52" x="-400.0" y="-400.0"/>
+<g id="segment-hits"><path class="segment-hit" d="M810.680,928.180 C995.160,918.252 1166.271,849.511 1234.848,787.276" data-key="s2"/><path class="segment-hit" d="M680.840,924.964 C584.391,905.985 510.940,830.702 509.014,789.324" data-key="s3"/><path class="segment-hit" d="M810.680,908.030 C949.407,830.480 1024.420,675.736 1004.550,590.245" data-key="s4"/><path class="segment-hit" d="M672.020,99.012 C522.618,161.666 683.733,509.400 915.760,509.400" data-key="s7"/><path class="segment-hit" d="M672.020,90.362 C504.715,96.278 346.025,128.568 263.556,161.643" data-key="s8"/><path class="segment-hit" d="M819.500,91.140 C1000.594,102.740 1167.366,170.282 1234.848,231.524" data-key="s9"/><path class="segment-hit" d="M689.660,510.193 C501.801,518.389 325.763,588.822 247.045,660.261" data-key="s12"/><path class="segment-hit" d="M801.860,510.191 C989.686,518.358 1165.180,588.298 1234.848,651.524" data-key="s13"/><path class="segment-hit" d="M689.660,508.962 C515.945,504.787 348.918,471.393 263.556,437.157" data-key="s14"/><path class="segment-hit" d="M801.860,511.861 C1032.864,544.767 955.549,894.318 583.116,749.483" data-key="s15"/></g><g id="reactions">
+<g class="reaction" id="r0">
+<g class="segment-group" data-member="r0" id="s0">
+<path class="segment" d="M725.76,929.4 L745.76,929.4" style="stroke:#2a78d6;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-member="r0" id="s1">
+<path class="segment" d="M765.76,929.4 L745.76,929.4" style="stroke:#2a78d6;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-flux="1" data-member="r0" data-node="n4" id="s2">
+<path class="segment" d="M810.680,928.180 C995.160,918.252 1166.271,849.511 1234.848,787.276" style="stroke:#2a78d6;stroke-width:14px"/>
+<g class="arrowheads">
+<path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#2a78d6" transform="translate(1234.8478759981203,787.2759028469418)rotate(227.77539617332002)"/>
+</g>
+</g>
+<g class="segment-group" data-flux="-3" data-member="r0" data-node="n5" id="s3" stroke-dasharray="11.2,7">
+<path class="segment" d="M680.840,924.964 C584.391,905.985 510.940,830.702 509.014,789.324" style="stroke:#2a78d6;stroke-width:14px"/>
+</g>
+<g class="segment-group" data-flux="2.5" data-member="r0" data-node="n6" id="s4" stroke-dasharray="11.2,7">
+<path class="segment" d="M810.680,908.030 C949.407,830.480 1024.420,675.736 1004.550,590.245" style="stroke:#2a78d6;stroke-width:14px"/>
+<g class="arrowheads">
+<path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#2a78d6" transform="translate(1004.5501037860973,590.2451111676377)rotate(166.9155600398575)"/>
+</g>
+</g>
+</g>
+<g class="reaction" id="r1">
+<g class="segment-group" data-member="r1" id="s5">
+<path class="segment" d="M725.76,89.4 L745.76,89.4" style="stroke:#eb6834;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-member="r1" id="s6">
+<path class="segment" d="M765.76,89.4 L745.76,89.4" style="stroke:#eb6834;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-flux="-2" data-member="r1" data-node="n6" id="s7" stroke-dasharray="11.2,7">
+<path class="segment" d="M672.020,99.012 C522.618,161.666 683.733,509.400 915.760,509.400" style="stroke:#eb6834;stroke-width:14px"/>
+</g>
+<g class="segment-group" data-flux="-1.5" data-member="r1" data-node="n1" id="s8">
+<path class="segment" d="M672.020,90.362 C504.715,96.278 346.025,128.568 263.556,161.643" style="stroke:#eb6834;stroke-width:14px"/>
+</g>
+<g class="segment-group" data-flux="1.2" data-member="r1" data-node="n3" id="s9">
+<path class="segment" d="M819.500,91.140 C1000.594,102.740 1167.366,170.282 1234.848,231.524" style="stroke:#eb6834;stroke-width:14px"/>
+<g class="arrowheads">
+<path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#eb6834" transform="translate(1234.8478759981203,231.52409715305816)rotate(-47.77539617332005)"/>
+</g>
+</g>
+</g>
+<g class="reaction" id="r2">
+<g class="segment-group" data-member="r2" id="s10">
+<path class="segment" d="M725.76,509.4 L745.76,509.4" style="stroke:#1baf7a;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-member="r2" id="s11">
+<path class="segment" d="M765.76,509.4 L745.76,509.4" style="stroke:#1baf7a;stroke-width:14px;display:none"/>
+</g>
+<g class="segment-group" data-flux="-8" data-member="r2" data-node="n2" id="s12">
+<path class="segment" d="M689.660,510.193 C501.801,518.389 325.763,588.822 247.045,660.261" style="stroke:#1baf7a;stroke-width:14px"/>
+</g>
+<g class="segment-group" data-flux="6" data-member="r2" data-node="n4" id="s13">
+<path class="segment" d="M801.860,510.191 C989.686,518.358 1165.180,588.298 1234.848,651.524" style="stroke:#1baf7a;stroke-width:14px"/>
+<g class="arrowheads">
+<path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#1baf7a" transform="translate(1234.8478759981203,651.5240971530582)rotate(-47.77539617332002)"/>
+</g>
+</g>
+<g class="segment-group" data-flux="-10" data-member="r2" data-node="n0" id="s14">
+<path class="segment" d="M689.660,508.962 C515.945,504.787 348.918,471.393 263.556,437.157" style="stroke:#1baf7a;stroke-width:14px"/>
+</g>
+<g class="segment-group" data-flux="4" data-member="r2" data-node="n5" id="s15" stroke-dasharray="11.2,7">
+<path class="segment" d="M801.860,511.861 C1032.864,544.767 955.549,894.318 583.116,749.483" style="stroke:#1baf7a;stroke-width:14px"/>
+<g class="arrowheads">
+<path class="arrowhead" d="M-10.0,0 L0,13.0 L10.0,0 Z" style="fill:#1baf7a" transform="translate(583.1163877379275,749.4830396758607)rotate(111.25050550713324)"/>
+</g>
+</g>
+</g>
+</g>
+<g id="nodes">
+<g class="node" data-key="n0" id="n0">
+<circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,404.4)"/>
+<text class="node-label label" text-anchor="end" transform="translate(94.08,409.29999999999995)">cpd00027</text>
+</g>
+<g class="node" data-key="n1" id="n1">
+<circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,194.4)"/>
+<text class="node-label label" text-anchor="end" transform="translate(94.08,199.3)">cpd00048</text>
+</g>
+<g class="node" data-key="n2" id="n2">
+<circle class="node-circle metabolite-circle" r="78.0" transform="translate(181.88,719.4)"/>
+<text class="node-label label" text-anchor="end" transform="translate(94.08,724.3)">cpd00007</text>
+</g>
+<g class="node" data-key="n3" id="n3">
+<circle class="node-circle metabolite-circle" r="78.0" transform="translate(1309.6399999999999,299.4)"/>
+<text class="node-label label" transform="translate(1397.44,304.3)">cpd00239</text>
+</g>
+<g class="node" data-key="n4" id="n4">
+<circle class="node-circle metabolite-circle" r="78.0" transform="translate(1309.6399999999999,719.4)"/>
+<text class="node-label label" transform="translate(1397.44,724.3)">cpd00011</text>
+</g>
+<g class="node" data-key="n5" id="n5">
+<circle class="node-circle metabolite-circle" r="60.0" transform="translate(505.76,719.4)"/>
+<text class="node-label label" text-anchor="end" transform="translate(435.96,724.3)">cpd00029</text>
+</g>
+<g class="node" data-key="n6" id="n6">
+<circle class="node-circle metabolite-circle" r="60.0" transform="translate(985.76,509.4)"/>
+<text class="node-label label" transform="translate(1055.56,514.3)">cpd00047</text>
+</g>
+<g class="node" id="n7">
+<circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,929.4)"/>
+</g>
+<g class="node" id="n8">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,929.4)"/>
+</g>
+<g class="node" id="n9">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,929.4)"/>
+</g>
+<g class="node" id="n10">
+<circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,89.4)"/>
+</g>
+<g class="node" id="n11">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,89.4)"/>
+</g>
+<g class="node" id="n12">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,89.4)"/>
+</g>
+<g class="node" id="n13">
+<circle class="node-circle midmarker-circle" r="5.0" transform="translate(745.76,509.4)"/>
+</g>
+<g class="node" id="n14">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(725.76,509.4)"/>
+</g>
+<g class="node" id="n15">
+<circle class="node-circle multimarker-circle" r="5.0" transform="translate(765.76,509.4)"/>
+</g>
+</g>
+<g id="text-labels">
+</g>
+<g id="member-boxes">
+<rect class="member-box" data-key="r0" data-reaction="r0" fill="#2a78d6" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="129.840" x="680.840" y="902.700"/>
+<g class="reaction-label-group" data-key="r0" data-reaction="r0" transform="translate(692.840,939.690)">
+<text class="reaction-label label" style="fill:#ffffff;stroke:none">Btheta</text>
+</g>
+<rect class="member-box" data-key="r1" data-reaction="r1" fill="#eb6834" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="147.480" x="672.020" y="62.700"/>
+<g class="reaction-label-group" data-key="r1" data-reaction="r1" transform="translate(684.020,99.690)">
+<text class="reaction-label label" style="fill:#222222;stroke:none">Dvulgar</text>
+</g>
+<rect class="member-box" data-key="r2" data-reaction="r2" fill="#1baf7a" height="53.400" rx="8" stroke="#ffffff" stroke-width="3" width="112.200" x="689.660" y="482.700"/>
+<g class="reaction-label-group" data-key="r2" data-reaction="r2" transform="translate(701.660,519.690)">
+<text class="reaction-label label" style="fill:#222222;stroke:none">Ecoli</text>
+</g>
+</g>
+</svg>
+<div id="escher-controls">
+<span>Hover or tap to highlight &middot; scroll to zoom &middot; drag to pan</span>
+<button type="button" id="escher-zoom-in" aria-label="Zoom in">+</button>
+<button type="button" id="escher-zoom-out" aria-label="Zoom out">&minus;</button>
+<button type="button" id="escher-fit">Fit</button>
+</div>
+<div id="escher-tip" role="status" hidden></div>
+<script type="application/json" id="escher-names">{"r0": "Btheta", "r1": "Dvulgar", "r2": "Ecoli", "n0": "D-Glucose (cpd00027)", "n1": "Sulfate (cpd00048)", "n2": "O2 (cpd00007)", "n3": "H2S (cpd00239)", "n4": "CO2 (cpd00011)", "n5": "Acetate (cpd00029)", "n6": "Formate (cpd00047)"}</script>
+<script>
+(function () {
+  "use strict";
+  var svg = document.querySelector("svg.escher-svg");
+  var names = JSON.parse(document.getElementById("escher-names").textContent);
+  var tip = document.getElementById("escher-tip");
+  var reactionsLayer = svg.querySelector("#reactions");
+  var nodesLayer = svg.querySelector("#nodes");
+  var boxesLayer = svg.querySelector("#member-boxes");
+
+  // On-screen floors, in CSS pixels, for what a highlight enlarges. Labels
+  // are brought up to a readable size only while few are lit — a compound
+  // fifty members eat would otherwise pile fifty enlarged boxes on each other;
+  // the tooltip names them instead.
+  var MIN_EDGE_PX = 4, MIN_RADIUS_PX = 6, MIN_LABEL_PX = 14;
+  var READABLE_NODES = 12, READABLE_MEMBERS = 1;
+
+  var edges = {}, byNode = {}, byMember = {};
+  svg.querySelectorAll(".segment-group[data-member]").forEach(function (g) {
+    var edge = {
+      id: g.id, g: g, member: g.dataset.member,
+      nodes: g.dataset.node ? g.dataset.node.split(" ") : [],
+      flux: g.dataset.flux === undefined ? null : parseFloat(g.dataset.flux)
+    };
+    edges[edge.id] = edge;
+    (byMember[edge.member] = byMember[edge.member] || []).push(edge);
+    edge.nodes.forEach(function (n) { (byNode[n] = byNode[n] || []).push(edge); });
+  });
+
+  // What is pointed at is a fixed, invisible area per compound (circle and
+  // label) and per member (box and label), laid over the drawing: the drawn
+  // things grow when lit, and pointing at them directly would let a label
+  // grow out from under the pointer and flicker. Compounds go under members,
+  // as they are drawn; edges' own hit paths lie under both.
+  (function () {
+    var areas = {}, toUser = svg.getScreenCTM().inverse();
+    svg.querySelectorAll("[data-key]:not(.segment-hit)").forEach(function (el) {
+      var key = el.getAttribute("data-key"), matrix = el.getScreenCTM(), bbox;
+      if (!matrix) return;
+      try { bbox = el.getBBox(); } catch (err) { return; }
+      matrix = toUser.multiply(matrix);
+      [[bbox.x, bbox.y], [bbox.x + bbox.width, bbox.y],
+       [bbox.x, bbox.y + bbox.height], [bbox.x + bbox.width, bbox.y + bbox.height]].forEach(function (corner) {
+        var point = svg.createSVGPoint();
+        point.x = corner[0]; point.y = corner[1];
+        point = point.matrixTransform(matrix);
+        var area = areas[key] || (areas[key] = [point.x, point.y, point.x, point.y]);
+        area[0] = Math.min(area[0], point.x); area[1] = Math.min(area[1], point.y);
+        area[2] = Math.max(area[2], point.x); area[3] = Math.max(area[3], point.y);
+      });
+    });
+    var layer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    layer.setAttribute("id", "hover-targets");
+    Object.keys(areas).sort(function (a, b) {
+      return (a.charAt(0) === "r") - (b.charAt(0) === "r");
+    }).forEach(function (key) {
+      var area = areas[key], rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("class", "hover-target");
+      rect.setAttribute("data-key", key);
+      rect.setAttribute("x", area[0]); rect.setAttribute("y", area[1]);
+      rect.setAttribute("width", area[2] - area[0]); rect.setAttribute("height", area[3] - area[1]);
+      layer.appendChild(rect);
+    });
+    svg.appendChild(layer);
+  })();
+
+  function unique(list) { return list.filter(function (x, i) { return list.indexOf(x) === i; }); }
+
+  function targets(key) {
+    if (!key) return null;
+    var kind = key.charAt(0), list;
+    if (kind === "s" && edges[key]) {
+      var edge = edges[key];
+      return { edges: [edge], nodes: edge.nodes, members: [edge.member] };
+    }
+    if (kind === "n" && names[key] !== undefined) {
+      list = byNode[key] || [];
+      return { edges: list, nodes: [key], members: unique(list.map(function (e) { return e.member; })) };
+    }
+    if (kind === "r" && names[key] !== undefined) {
+      list = byMember[key] || [];
+      return { edges: list, members: [key],
+               nodes: unique([].concat.apply([], list.map(function (e) { return e.nodes; }))) };
+    }
+    return null;
+  }
+
+  // Every change a highlight makes is recorded with how to undo it.
+  var undo = [];
+  function setStyle(el, prop, value) {
+    // the attribute is restored verbatim, not re-serialised by the browser
+    var had = el.hasAttribute("style"), old = el.getAttribute("style");
+    el.style.setProperty(prop, value);
+    undo.push(function () { if (had) el.setAttribute("style", old); else el.removeAttribute("style"); });
+  }
+  function setAttr(el, name, value) {
+    var had = el.hasAttribute(name), old = el.getAttribute(name);
+    el.setAttribute(name, value);
+    undo.push(function () { if (had) el.setAttribute(name, old); else el.removeAttribute(name); });
+  }
+  function mark(el) {
+    el.classList.add("hl");
+    undo.push(function () { el.classList.remove("hl"); });
+  }
+  function lift(el, layer) {
+    if (!layer || !el.parentNode) return;
+    var placeholder = document.createComment("");
+    el.parentNode.insertBefore(placeholder, el);
+    layer.appendChild(el);
+    undo.push(function () { placeholder.parentNode.insertBefore(el, placeholder); placeholder.remove(); });
+  }
+  function translateOf(el) {
+    var found = /translate\(\s*([-\d.eE+]+)[\s,]+([-\d.eE+]+)/.exec(el.getAttribute("transform") || "");
+    return found ? [parseFloat(found[1]), parseFloat(found[2])] : null;
+  }
+
+  function emphasizeEdge(edge, perUnit) {
+    mark(edge.g);
+    lift(edge.g, reactionsLayer);
+    var factor = 1;
+    edge.g.querySelectorAll("path").forEach(function (path) {
+      if (path.closest(".arrowheads")) return;
+      var computed = getComputedStyle(path);
+      var width = parseFloat(computed.strokeWidth) || 1;
+      var wider = Math.max(width * 2, MIN_EDGE_PX / perUnit);
+      factor = wider / width;
+      setStyle(path, "stroke-width", wider + "px");
+      if (computed.strokeDasharray && computed.strokeDasharray !== "none") {
+        setStyle(path, "stroke-dasharray", computed.strokeDasharray.split(/[\s,]+/)
+          .map(function (d) { return parseFloat(d) * factor; }).join(" "));
+      }
+    });
+    edge.g.querySelectorAll(".arrowhead").forEach(function (head) {
+      setAttr(head, "transform", (head.getAttribute("transform") || "") + " scale(" + factor + ")");
+    });
+  }
+
+  function emphasizeNode(id, perUnit, readable) {
+    var g = document.getElementById(id);
+    if (!g) return;
+    mark(g);
+    lift(g, nodesLayer);
+    var circle = g.querySelector("circle"), label = g.querySelector("text");
+    var radius = circle ? parseFloat(circle.getAttribute("r")) : 0, grown = radius;
+    if (circle) {
+      grown = Math.max(radius * 1.6, MIN_RADIUS_PX / perUnit);
+      setAttr(circle, "r", grown);
+    }
+    if (label) {
+      var size = parseFloat(getComputedStyle(label).fontSize) || 10;
+      var larger = readable ? Math.max(size * 1.4, MIN_LABEL_PX / perUnit) : size * 1.4;
+      setStyle(label, "font-size", larger + "px");
+      var at = translateOf(label), centre = circle && translateOf(circle);
+      if (at) {
+        // out past the grown circle, and still centred on the same line
+        var dx = centre ? Math.sign(at[0] - centre[0]) * (grown - radius) : 0;
+        setAttr(label, "transform", "translate(" + (at[0] + dx) + "," + (at[1] + 0.35 * (larger - size)) + ")");
+      }
+    }
+  }
+
+  function emphasizeMember(id, perUnit, readable) {
+    var parts = svg.querySelectorAll('[data-key="' + id + '"]');
+    var rect = null, label = null;
+    parts.forEach(function (el) {
+      mark(el);
+      if (el.tagName.toLowerCase() === "rect") rect = el;
+      else if (!label) label = el.querySelector("text") || el;
+    });
+    if (!rect) return;              // a member without a box: its label stays lit
+    var x = parseFloat(rect.getAttribute("x")), y = parseFloat(rect.getAttribute("y"));
+    var cx = x + parseFloat(rect.getAttribute("width")) / 2;
+    var cy = y + parseFloat(rect.getAttribute("height")) / 2;
+    var size = label ? parseFloat(getComputedStyle(label).fontSize) || 10 : 10;
+    var scale = readable ? Math.min(Math.max(1.2, MIN_LABEL_PX / (size * perUnit)), 5) : 1.15;
+    var about = "translate(" + cx + "," + cy + ") scale(" + scale + ") translate(" + (-cx) + "," + (-cy) + ") ";
+    parts.forEach(function (el) {
+      setAttr(el, "transform", about + (el.getAttribute("transform") || ""));
+      lift(el, boxesLayer);
+    });
+    setStyle(rect, "stroke", "#222222");
+    setStyle(rect, "stroke-width", "2px");
+    setStyle(rect, "vector-effect", "non-scaling-stroke");
+  }
+
+  function fmt(value) {
+    var size = Math.abs(value);
+    return size !== 0 && (size >= 1000 || size < 0.001) ? value.toExponential(2) : String(+value.toPrecision(3));
+  }
+  function listing(members) {
+    var shown = unique(members).map(function (m) { return names[m]; });
+    return shown.length > 6 ? shown.slice(0, 6).join(", ") + " and " + (shown.length - 6) + " more" : shown.join(", ");
+  }
+  function line(parts) {
+    var div = document.createElement("div");
+    parts.forEach(function (part) {
+      var el = document.createElement(part[1] === "b" ? "b" : "span");
+      if (part[1] === "muted") el.className = "muted";
+      el.textContent = part[0];
+      div.appendChild(el);
+    });
+    tip.appendChild(div);
+  }
+  function describe(key, found) {
+    tip.textContent = "";
+    var kind = key.charAt(0);
+    if (kind === "s") {
+      var edge = found.edges[0];
+      var verb = edge.flux === null ? "exchanges" : edge.flux < 0 ? "consumes" : "produces";
+      line([[names[edge.member], "b"], [" " + verb + " "], [edge.nodes.length ? names[edge.nodes[0]] : "", "b"]]);
+      if (edge.flux !== null) line([["flux ", "muted"], [fmt(edge.flux)]]);
+    } else if (kind === "n") {
+      line([[names[key], "b"]]);
+      var eaten = found.edges.filter(function (e) { return e.flux < 0; }).map(function (e) { return e.member; });
+      var made = found.edges.filter(function (e) { return e.flux > 0; }).map(function (e) { return e.member; });
+      if (made.length) line([["produced by ", "muted"], [listing(made)]]);
+      if (eaten.length) line([["consumed by ", "muted"], [listing(eaten)]]);
+    } else {
+      line([[names[key], "b"]]);
+      var consumes = found.edges.filter(function (e) { return e.flux < 0; }).length;
+      var produces = found.edges.filter(function (e) { return e.flux > 0; }).length;
+      line([["consumes ", "muted"], [String(consumes)], [" \u00b7 produces ", "muted"], [String(produces)]]);
+    }
+  }
+  function placeTip(clientX, clientY) {
+    if (tip.hidden) return;
+    var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    var left = clientX + pad, top = clientY + pad;
+    if (left + w > window.innerWidth - 4) left = Math.max(4, clientX - pad - w);
+    if (top + h > window.innerHeight - 4) top = Math.max(4, clientY - pad - h);
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+
+  var current = null, pinned = false, lastPointer = null;
+  function show(key) {
+    while (undo.length) undo.pop()();
+    var found = targets(key);
+    current = found ? key : null;
+    svg.classList.toggle("dimmed", !!current);
+    if (!current) { tip.hidden = true; return; }
+    var perUnit = svg.getScreenCTM().a;
+    found.edges.forEach(function (e) { emphasizeEdge(e, perUnit); });
+    var readableNodes = found.nodes.length <= READABLE_NODES;
+    var readableMembers = found.members.length <= READABLE_MEMBERS;
+    found.nodes.forEach(function (n) { emphasizeNode(n, perUnit, readableNodes); });
+    found.members.forEach(function (m) { emphasizeMember(m, perUnit, readableMembers); });
+    describe(key, found);
+    tip.hidden = false;
+    if (lastPointer) placeTip(lastPointer[0], lastPointer[1]);
+    else { tip.style.left = "10px"; tip.style.top = "10px"; }
+  }
+  function keyOf(target) {
+    var el = target && target.closest ? target.closest(".segment-hit, .hover-target") : null;
+    return el ? el.getAttribute("data-key") : null;
+  }
+  function pin(key) {
+    pinned = !!targets(key);
+    show(pinned ? key : null);
+    try {
+      history.replaceState(null, "", pinned ? "#" + key : location.pathname + location.search);
+    } catch (err) { /* some viewers refuse history changes; the pin still holds */ }
+  }
+
+  // hover
+  svg.addEventListener("mouseover", function (ev) {
+    if (pinned || (drag && drag.moved)) return;
+    var key = keyOf(ev.target);
+    if (key !== current) show(key);
+  });
+  svg.addEventListener("mouseleave", function () { if (!pinned) show(null); });
+
+  // pan, zoom, click to pin
+  var initial = svg.getAttribute("viewBox").trim().split(/[\s,]+/).map(parseFloat);
+  var home = { x: initial[0], y: initial[1], w: initial[2], h: initial[3] };
+  var view = { x: home.x, y: home.y, w: home.w, h: home.h };
+  var drag = null, refresh = 0;
+  function applyView(rescale) {
+    svg.setAttribute("viewBox", [view.x, view.y, view.w, view.h].join(" "));
+    if (rescale && current && !refresh) {
+      refresh = requestAnimationFrame(function () { refresh = 0; show(current); });
+    }
+  }
+  function zoomAt(clientX, clientY, factor) {
+    var point = svg.createSVGPoint();
+    point.x = clientX; point.y = clientY;
+    point = point.matrixTransform(svg.getScreenCTM().inverse());
+    var width = Math.min(Math.max(view.w * factor, home.w / 400), home.w * 4);
+    factor = width / view.w;
+    view.x = point.x - (point.x - view.x) * factor;
+    view.y = point.y - (point.y - view.y) * factor;
+    view.w *= factor; view.h *= factor;
+    applyView(true);
+  }
+  svg.addEventListener("wheel", function (ev) {
+    ev.preventDefault();
+    var step = ev.deltaMode === 1 ? 0.05 : ev.deltaMode === 2 ? 1 : 0.0015;
+    zoomAt(ev.clientX, ev.clientY, Math.exp(ev.deltaY * step));
+  }, { passive: false });
+  svg.addEventListener("pointerdown", function (ev) {
+    if (ev.button !== 0) return;
+    drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, moved: false,
+             key: keyOf(ev.target), perUnit: svg.getScreenCTM().a,
+             from: { x: view.x, y: view.y } };
+  });
+  window.addEventListener("pointermove", function (ev) {
+    lastPointer = [ev.clientX, ev.clientY];
+    if (drag && ev.pointerId === drag.id) {
+      var dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+      if (!drag.moved && Math.sqrt(dx * dx + dy * dy) > 4) {
+        drag.moved = true;
+        svg.classList.add("panning");
+      }
+      if (drag.moved) {
+        view.x = drag.from.x - dx / drag.perUnit;
+        view.y = drag.from.y - dy / drag.perUnit;
+        applyView(false);
+        return;
+      }
+    }
+    if (!pinned) placeTip(ev.clientX, ev.clientY);
+  });
+  window.addEventListener("pointerup", function (ev) {
+    if (!drag || ev.pointerId !== drag.id) return;
+    var ended = drag;
+    drag = null;
+    svg.classList.remove("panning");
+    if (ended.moved) return;
+    lastPointer = [ev.clientX, ev.clientY];
+    if (pinned && ended.key === current) {
+      pin(null);
+      // a mouse is still over it, so it stays lit as a hover
+      if (ev.pointerType === "mouse") show(ended.key);
+    } else {
+      pin(ended.key);
+    }
+  });
+  window.addEventListener("keydown", function (ev) { if (ev.key === "Escape") pin(null); });
+
+  document.getElementById("escher-zoom-in").addEventListener("click", function () {
+    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.5);
+  });
+  document.getElementById("escher-zoom-out").addEventListener("click", function () {
+    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.5);
+  });
+  document.getElementById("escher-fit").addEventListener("click", function () {
+    view = { x: home.x, y: home.y, w: home.w, h: home.h };
+    applyView(true);
+  });
+
+  function followHash() {
+    var linked = decodeURIComponent(location.hash.slice(1));
+    if (linked !== (pinned ? current : null)) {
+      pinned = !!targets(linked);
+      show(pinned ? linked : null);
+    }
+  }
+  window.addEventListener("hashchange", followHash);
+  if (location.hash.length > 1) followHash();
+  svg.setAttribute("data-ready", "true");
+})();
+</script>
+</body>
+</html>

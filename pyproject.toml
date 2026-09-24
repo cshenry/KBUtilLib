@@ -235,6 +235,7 @@ markers = [
     "kbu_model: mark test as requiring the kbu modeling stack (cobra/modelseedpy); skipped when unavailable",
     "kind_install: mark test as covering the `kbu kind` KIND self-install verb group",
     "prott5_model: mark test as loading the real ProtT5 model (slow, GPU-hungry; skipped unless PROTT5_LIVE_TESTS=1)",
+    "not_applicable_for_fake: koros_arc_store contract assertion that concerns real-store-only DDL; skipped for the fake with reason 'not_applicable_for_fake'",
 ]
 
 [tool.mypy]

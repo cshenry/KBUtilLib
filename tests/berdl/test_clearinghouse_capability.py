@@ -366,7 +366,9 @@ def test_explicit_engine_passes_through_unchanged():
     # And overrides promotion the other way too.
     fake2 = _FakeCapability()
     cap2 = ClearinghouseCapability(fake2)
-    cap2.known("gene", [_hash(i) for i in range(SPARK_PROMOTION_THRESHOLD)], engine="trino")
+    cap2.known(
+        "gene", [_hash(i) for i in range(SPARK_PROMOTION_THRESHOLD)], engine="trino"
+    )
     assert all(c.engine == "trino" for c in fake2.calls)
 
 
@@ -461,9 +463,7 @@ def test_tables_lists_all_fifteen_with_partition_spec():
     assert len(listing) == 15
     names = {t["name"] for t in listing}
     assert names == {
-        table_name(e, k)
-        for k in ("entity", "content", "result")
-        for e in ENTITY_TYPES
+        table_name(e, k) for k in ("entity", "content", "result") for e in ENTITY_TYPES
     }
     # result tables partition by source per the config.
     result_entries = [t for t in listing if t["kind"] == "result"]
@@ -663,9 +663,7 @@ def _read_ledger(tmp_path):
     if not ledger.exists():
         return []
     return [
-        json.loads(line)
-        for line in ledger.read_text().splitlines()
-        if line.strip()
+        json.loads(line) for line in ledger.read_text().splitlines() if line.strip()
     ]
 
 
@@ -677,9 +675,7 @@ def _read_ledger(tmp_path):
 def test_write_criterion_a_namespace_mismatch_raises_and_never_loads(tmp_path):
     # Probe reads "default"; the write goes to tenant.dataset -- the exact
     # dev 1206 shape. ingest_shards() must FAIL CLOSED.
-    fake = _FakeWriteCapability(
-        probe_ns="default", write_ns=f"{TENANT}.{NAMESPACE}"
-    )
+    fake = _FakeWriteCapability(probe_ns="default", write_ns=f"{TENANT}.{NAMESPACE}")
     _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
     cap = ClearinghouseCapability(fake)
     with pytest.raises(ClearinghouseWriteTargetMismatchError):
@@ -952,3 +948,135 @@ def test_ingest_shards_ignores_ledger_file_and_unknown_dirs(tmp_path):
     result = cap.ingest_shards(tmp_path, run_id="r1")
     names = {t["name"] for t in result["tables"]}
     assert names == {"gene_entity"}
+
+
+# --------------------------------------------------------------------------
+# verify_run(): re-check a completed run's row counts + snapshots vs the ledger.
+# --------------------------------------------------------------------------
+
+
+class _FakeVerifyCapability:
+    """Fake driving :meth:`ClearinghouseCapability.verify_run`.
+
+    Routes ``query()`` by SQL: a ``COUNT(*)`` returns ``count_rows``; a
+    ``.snapshots`` read returns one row per id in ``snapshot_ids``. Exposes the
+    dev 1206 resolvers so verify's write-target guard resolves cleanly.
+    """
+
+    def __init__(self, *, locus="in_pod", count_rows=6, snapshot_ids=(123456,)):
+        self._locus = locus
+        self._count_rows = count_rows
+        self._snapshot_ids = list(snapshot_ids)
+        self.queries: list[str] = []
+
+    def locus(self):
+        return self._locus
+
+    def resolve_write_namespace(self, *, dataset, tenant):
+        return f"{TENANT}.{NAMESPACE}"
+
+    def resolve_probe_namespace(self, *, dataset, tenant):
+        return f"{TENANT}.{NAMESPACE}"
+
+    def query(self, sql, *, params=None, engine=None, **kwargs):
+        self.queries.append(sql)
+        if "snapshots" in sql:
+            return [{"snapshot_id": sid} for sid in self._snapshot_ids]
+        if "COUNT(*)" in sql:
+            return [{"row_count": self._count_rows}]
+        return []  # pragma: no cover - verify issues only the two above
+
+
+def _write_verify_ledger(tmp_path, run_id, lines):
+    """Write ledger JSON-lines with explicit rows/snapshot_id per (table,batch)."""
+    import json
+
+    ledger = tmp_path / LEDGER_FILENAME
+    with ledger.open("w", encoding="utf-8") as handle:
+        for table, batch, state, rows, snap in lines:
+            handle.write(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "table": table,
+                        "batch": batch,
+                        "shard_path": f"{table}/{batch}.parquet",
+                        "rows": rows,
+                        "state": state,
+                        "snapshot_id": snap,
+                        "at": "2026-09-24T00:00:00+00:00",
+                    }
+                )
+                + "\n"
+            )
+    return ledger
+
+
+def test_verify_run_off_pod_refuses_before_any_query(tmp_path):
+    fake = _FakeVerifyCapability(locus="off_pod")
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(BerdlLoadRefusedError):
+        cap.verify_run(tmp_path, run_id="r1")
+    assert fake.queries == []  # no transport call was made
+
+
+def test_verify_run_reconciles_matching_counts_and_snapshots(tmp_path):
+    _write_verify_ledger(
+        tmp_path,
+        "r1",
+        [("gene_entity", "0000", "ingested", 6, 123456)],
+    )
+    fake = _FakeVerifyCapability(count_rows=6, snapshot_ids=(123456,))
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    assert result["discrepancies"] == []
+    report = result["tables"][0]
+    assert report["name"] == "gene_entity"
+    assert report["ledger_rows"] == 6
+    assert report["live_rows"] == 6
+    assert report["ok"] is True
+
+
+def test_verify_run_flags_missing_rows(tmp_path):
+    _write_verify_ledger(
+        tmp_path,
+        "r1",
+        [("gene_entity", "0000", "ingested", 6, 123456)],
+    )
+    # Live table has fewer rows than the ledger says landed -> discrepancy.
+    fake = _FakeVerifyCapability(count_rows=2, snapshot_ids=(123456,))
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    assert result["discrepancies"], "a missing-rows discrepancy must be reported"
+    assert result["tables"][0]["ok"] is False
+
+
+def test_verify_run_flags_missing_snapshot(tmp_path):
+    _write_verify_ledger(
+        tmp_path,
+        "r1",
+        [("gene_entity", "0000", "ingested", 6, 999999)],
+    )
+    # The ledger's recorded snapshot id is absent from the table's history.
+    fake = _FakeVerifyCapability(count_rows=6, snapshot_ids=(123456,))
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    assert any("snapshot" in d for d in result["discrepancies"])
+    assert result["tables"][0]["missing_snapshots"] == ["999999"]
+
+
+def test_verify_run_ignores_non_ingested_ledger_lines(tmp_path):
+    _write_verify_ledger(
+        tmp_path,
+        "r1",
+        [
+            ("gene_entity", "0000", "started", None, None),
+            ("gene_entity", "0000", "ingested", 6, 123456),
+            ("gene_content", "0000", "failed", None, None),
+        ],
+    )
+    fake = _FakeVerifyCapability(count_rows=6, snapshot_ids=(123456,))
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    # Only the ingested gene_entity is verified; the failed gene_content is not.
+    assert {t["name"] for t in result["tables"]} == {"gene_entity"}

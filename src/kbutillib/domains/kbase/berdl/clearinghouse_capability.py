@@ -382,7 +382,9 @@ class ClearinghouseCapability:
             result = capability.query(final_sql, limit=limit, offset=offset)
             return self._normalize_offpod_rows(result)
         # In-pod: bind server-side; paging is unnecessary (no REST cap).
-        rows = capability.query(sql, params=list(params) if params else None, engine=engine)
+        rows = capability.query(
+            sql, params=list(params) if params else None, engine=engine
+        )
         return self._normalize_inpod_rows(rows)
 
     @staticmethod
@@ -442,8 +444,7 @@ class ClearinghouseCapability:
         if isinstance(result, dict):
             if result.get("success") is False:
                 raise RuntimeError(
-                    "clearinghouse read failed off-pod: "
-                    f"{result.get('error')!r}"
+                    f"clearinghouse read failed off-pod: {result.get('error')!r}"
                 )
             data = result.get("data", [])
             return list(data)
@@ -860,9 +861,7 @@ class ClearinghouseCapability:
                     "row_count": _scalar(rows, "row_count"),
                 }
                 if want_files:
-                    files_table = _quote_fqn(
-                        f"{self._fqn(etype, kind)}.files"
-                    )
+                    files_table = _quote_fqn(f"{self._fqn(etype, kind)}.files")
                     files_sql = (
                         "SELECT COUNT(*) AS data_file_count, "
                         "AVG(file_size_in_bytes) AS avg_file_size_bytes "
@@ -1226,9 +1225,7 @@ class ClearinghouseCapability:
             state = ledger_states.get(key)
 
             if state == _LEDGER_INGESTED:
-                reports.append(
-                    {"name": name, "batch": batch, "action": "skip"}
-                )
+                reports.append({"name": name, "batch": batch, "action": "skip"})
                 continue
 
             if state == _LEDGER_STARTED:
@@ -1245,9 +1242,7 @@ class ClearinghouseCapability:
                         "cannot be assumed safe. Re-run with reconcile=True to "
                         "decide against the table's Iceberg snapshot history."
                     )
-                landed = self._reconcile_started_batch(
-                    name, batch, write_ns=write_ns
-                )
+                landed = self._reconcile_started_batch(name, batch, write_ns=write_ns)
                 if landed:
                     _append_ledger_line(
                         ledger_path,
@@ -1268,9 +1263,7 @@ class ClearinghouseCapability:
                 # ingest it as a fresh batch below.
 
             if dry_run:
-                reports.append(
-                    {"name": name, "batch": batch, "action": "would_ingest"}
-                )
+                reports.append({"name": name, "batch": batch, "action": "would_ingest"})
                 continue
 
             # Real ingest: write a non-terminal 'started' line BEFORE the
@@ -1346,9 +1339,7 @@ class ClearinghouseCapability:
             "tables": reports,
         }
 
-    def _reconcile_started_batch(
-        self, name: str, batch: str, *, write_ns: str
-    ) -> bool:
+    def _reconcile_started_batch(self, name: str, batch: str, *, write_ns: str) -> bool:
         """Decide whether an ambiguous ``"started"`` shard actually landed.
 
         Reads the table's Iceberg snapshot history and returns whether a
@@ -1375,6 +1366,154 @@ class ClearinghouseCapability:
             engine="spark",
         )
         return bool(rows)
+
+    def _live_snapshot_ids(self, name: str) -> set[str]:
+        """Return the set of snapshot ids currently present on ``<ns>.<name>``.
+
+        A single read-only ``query(..., engine="spark")`` against the table's
+        Iceberg ``.snapshots`` metadata table. Used by :meth:`verify_run` to
+        confirm the snapshot a ledger line recorded for an ingested shard still
+        exists in the table's history. Ids are stringified so a ledger's
+        JSON-decoded (often string) snapshot value compares cleanly against the
+        metadata table's (often numeric) column.
+        """
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}.snapshots")
+        rows = self._run(
+            f"SELECT snapshot_id FROM {fqn}",
+            params=None,
+            engine="spark",
+        )
+        ids: set[str] = set()
+        for row in rows:
+            value = row.get("snapshot_id") if isinstance(row, dict) else None
+            if value is None and row:
+                value = next(iter(row.values()), None)
+            if value is not None:
+                ids.add(str(value))
+        return ids
+
+    def verify_run(
+        self,
+        shard_dir: str | Path,
+        *,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Re-check a completed run's row counts and snapshots against the ledger.
+
+        IN-POD ONLY. Refuses off-pod (:class:`BerdlLoadRefusedError`) before any
+        transport call. This is the POST-INGEST audit half of the ingest
+        contract: :meth:`ingest_shards` wrote a run ledger recording, per
+        ``(table, batch)``, the row count and Iceberg snapshot id it observed at
+        ingest time. This verb reads that ledger back and, for every table that
+        the run marked ``"ingested"``, confirms two things against the LIVE
+        table:
+
+        - the table's current ``COUNT(*)`` is at least the sum of the ledger's
+          recorded per-batch row counts for this run (a live count BELOW the
+          ledger sum means rows the ledger says landed are missing -- a real
+          discrepancy), and
+        - every snapshot id the ledger recorded for an ingested batch still
+          exists in the table's Iceberg snapshot history.
+
+        It performs the same explicit ``COUNT(*)`` discipline as :meth:`stats`
+        (never a transport ``row_count`` field), and it WRITES NOTHING -- no
+        ``load()``, no ledger line. A discrepancy is REPORTED, not raised: the
+        correct operator response to a load reported FAILED on a null postflight
+        (dev 1194) is precisely to run ``verify`` and reconcile, so this verb
+        must be able to tell the operator what it found without itself failing.
+
+        Args:
+            shard_dir: The shard directory whose ``ingest_ledger.jsonl`` this run
+                wrote (same directory :meth:`ingest_shards` used).
+            run_id: The run whose ledger lines to verify.
+
+        Returns:
+            A dict with ``'run_id'``, ``'namespace'`` (the confirmed write-target
+            namespace, resolved through the dev 1206 guard so verify reads the
+            same namespace the ingest wrote), a ``'tables'`` list (one report per
+            verified table with its ``'name'``, ``'ledger_rows'``, ``'live_rows'``,
+            ``'ok'`` and, when a snapshot is missing, ``'missing_snapshots'``),
+            and a ``'discrepancies'`` list of human-readable strings (empty when
+            everything reconciles).
+
+        Raises:
+            BerdlLoadRefusedError: Off-pod (before any transport call).
+            ClearinghouseWriteTargetMismatchError: Namespace unconfirmed
+                (dev 1206) -- no read is attempted against an unconfirmed target.
+        """
+        self._require_in_pod("verify_run")
+        write_ns = self._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
+        shard_root = Path(shard_dir)
+        ledger_path = shard_root / LEDGER_FILENAME
+        records = _read_ledger_records(ledger_path, run_id=run_id)
+
+        # Collapse the ingested ledger lines per table: sum recorded rows, and
+        # collect every recorded snapshot id.
+        per_table_rows: dict[str, int] = {}
+        per_table_snaps: dict[str, set[str]] = {}
+        for (table, _batch), record in records.items():
+            if record.get("state") != _LEDGER_INGESTED:
+                continue
+            rows = record.get("rows")
+            if isinstance(rows, int):
+                per_table_rows[table] = per_table_rows.get(table, 0) + rows
+            per_table_snaps.setdefault(table, set())
+            snap = record.get("snapshot_id")
+            if snap is not None:
+                per_table_snaps[table].add(str(snap))
+
+        reports: list[dict[str, Any]] = []
+        discrepancies: list[str] = []
+        for table in sorted(set(per_table_rows) | set(per_table_snaps)):
+            fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}")
+            live_rows = _scalar(
+                self._run(
+                    f"SELECT COUNT(*) AS row_count FROM {fqn}",
+                    params=None,
+                    engine="trino",
+                ),
+                "row_count",
+            )
+            ledger_rows = per_table_rows.get(table)
+            live_snaps = self._live_snapshot_ids(table)
+            missing = sorted(per_table_snaps.get(table, set()) - live_snaps)
+
+            ok = True
+            if (
+                ledger_rows is not None
+                and isinstance(live_rows, int)
+                and live_rows < ledger_rows
+            ):
+                ok = False
+                discrepancies.append(
+                    f"{table}: live COUNT(*)={live_rows} is below the ledger's "
+                    f"recorded {ledger_rows} ingested rows for run {run_id!r} -- "
+                    "rows the ledger says landed appear to be missing."
+                )
+            if missing:
+                ok = False
+                discrepancies.append(
+                    f"{table}: {len(missing)} snapshot id(s) the ledger recorded "
+                    f"for run {run_id!r} are absent from the table's Iceberg "
+                    f"snapshot history: {', '.join(missing)}."
+                )
+
+            report: dict[str, Any] = {
+                "name": table,
+                "ledger_rows": ledger_rows,
+                "live_rows": live_rows,
+                "ok": ok,
+            }
+            if missing:
+                report["missing_snapshots"] = missing
+            reports.append(report)
+
+        return {
+            "run_id": run_id,
+            "namespace": write_ns,
+            "tables": reports,
+            "discrepancies": discrepancies,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -1490,6 +1629,38 @@ def _read_ledger_states(
     return states
 
 
+def _read_ledger_records(
+    ledger_path: Path, *, run_id: str
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read the run ledger and return the LAST full record per ``(table, batch)``.
+
+    Like :func:`_read_ledger_states` but keeps the whole record (rows,
+    snapshot_id, state, ...) of each key's final line, which
+    :meth:`ClearinghouseCapability.verify_run` needs to sum recorded rows and
+    collect recorded snapshot ids. Only lines matching ``run_id`` are kept; a
+    missing ledger is an empty mapping and malformed lines are skipped.
+    """
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    if not ledger_path.exists():
+        return records
+    for line in ledger_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(record, dict) or record.get("run_id") != run_id:
+            continue
+        table = record.get("table")
+        batch = record.get("batch")
+        if table is None or batch is None:
+            continue
+        records[(str(table), str(batch))] = record
+    return records
+
+
 def _append_ledger_line(
     ledger_path: Path,
     *,
@@ -1544,9 +1715,7 @@ def _discover_shards(shard_root: Path) -> list[tuple[str, str, Path]]:
     beside the shards are ignored. The result is sorted by ``(table, batch)``
     for a deterministic, resumable ingest order.
     """
-    known = {
-        table_name(etype, kind) for kind in _KINDS for etype in ENTITY_TYPES
-    }
+    known = {table_name(etype, kind) for kind in _KINDS for etype in ENTITY_TYPES}
     discovered: list[tuple[str, str, Path]] = []
     if not shard_root.exists():
         return discovered

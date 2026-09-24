@@ -1,4 +1,4 @@
-# `kbu clearinghouse` — read verbs
+# `kbu clearinghouse` — read and operator verbs
 
 Read verbs over the fifteen-table BERDL clearinghouse
 (`kbaseincubator.clearinghouse`). Every verb is a thin facade over
@@ -89,3 +89,157 @@ A degraded read still emits a well-formed envelope and exits `0`; callers detect
 degradation from `warnings` (and stderr), not the exit code. Only a malformed
 `kbu` invocation (click's own parse errors, e.g. `content` without `--type` and
 without `--all-types`) exits non-zero.
+
+---
+
+# `kbu clearinghouse` — operator verbs
+
+Four verbs drive the ingest pipeline. They are thin facades over the SAME
+capability layer as the read verbs — the CLI holds **no ingest logic of its
+own**. `plan`/`shard` call the shard-stage module functions
+(`clearinghouse_manifest.load_manifest` / `shard_plan`,
+`clearinghouse_shard.shard_manifest`); `load`/`verify` call
+`ClearinghouseCapability.ingest_shards` / `verify_run`. All four emit the same
+one-object JSON envelope (`schema_version`, `verb`, `generated_at`, `locus`,
+`data`, `warnings`) and honour the same stdout discipline: under `--json`,
+stdout is the envelope and nothing else; every warning also lands in
+`warnings`.
+
+## Locus — the two-stage split
+
+The pipeline is deliberately split into a **shard stage** (anywhere, no pod, no
+credentials — just CPU and disk) and an **ingest stage** (in-pod only).
+
+| Verb     | Where           | Writes?                          | Notes |
+|----------|-----------------|----------------------------------|-------|
+| `plan`   | anywhere        | **nothing**                      | Resolves the manifest, reports per-table row counts and target shard sizes. |
+| `shard`  | anywhere        | bronze parquet under `--out`     | Builds the shards. No pod, no credentials. |
+| `load`   | **in-pod only** | tables + run ledger              | Ingests shards, verifies postflight, writes the run ledger. Foreground, **not** a daemon. |
+| `verify` | **in-pod only** | **nothing**                      | Re-checks a completed run's row counts + snapshots against the ledger. |
+
+`load` and `verify` **refuse early off-pod**, before any transport call, with a
+message that **names the locus as the reason** (not a bare
+`BerdlLoadRefusedError` from deep in a transport, and not a missing-flag
+message). There is **no force flag** — the locus is the reason, not a switch you
+can flip.
+
+## `load` is a foreground run, resumable from the ledger
+
+`load` runs in the **foreground**. It is not a daemon and takes no `--daemon`
+flag. Resumability comes from the **run ledger** (`ingest_ledger.jsonl`, written
+beside the shards): each `(table, batch)` records `started` → `ingested`/`failed`
+with its row count and Iceberg snapshot id. A re-run reads the ledger and skips
+what already landed.
+
+- `load --dry-run` is **the operator's last gate**. It resolves namespaces, runs
+  the pre-write assertion (the dev 1206 write-target guard), reports the write
+  mode — and **writes nothing**. Use it before every real load.
+- `load --reconcile` reconciles a `started`-but-not-terminal batch left by an
+  interrupted run.
+
+## The dev 1206 guard fails closed
+
+Any operator verb that reaches `ingest_shards()` **raises** if the
+existence-probe namespace differs from the ingest-target namespace, and calls
+`load()` **exactly zero times**. This is the dev 1206 regression (a probe
+against `default` while the write went to `tenant.dataset`, silently turning an
+append into a destructive overwrite). It is a guard, not a preference: there is
+no flag to override it. If it fires, resolve the namespace mismatch — do not
+retry.
+
+## Operator walkthrough
+
+The shard stage needs CPU and disk; the ingest stage needs the pod. So the
+normal flow builds shards on a capable machine, moves them into the pod, and
+ingests there.
+
+1. **Plan (anywhere).** Confirm the manifest resolves and see the row counts and
+   how many shards each table will split into:
+
+   ```bash
+   kbu clearinghouse plan ./manifest.toml --json
+   ```
+
+   An invalid manifest exits non-zero and **names the offending key** (e.g.
+   `sequence` is not a legal genome content column, or `entity_type = "plasmid"`
+   is not a known entity type). Nothing is written.
+
+2. **Shard (on a CPU machine).** Build the bronze parquet shards:
+
+   ```bash
+   kbu clearinghouse shard ./manifest.toml --out ./bronze --target-bytes 536870912
+   ```
+
+   `--target-bytes` defaults to ~512 MiB. The output is one directory per target
+   table of sorted bronze parquet, plus a `shard`-envelope report (one row per
+   shard: table, batch, path, rows, hash range).
+
+3. **Move the shards into the pod.** Copy `./bronze` to a path visible inside the
+   BERDL JupyterHub pod. (`plan`/`shard` never needed credentials; from here on
+   you must be in-pod.)
+
+4. **Dry-run — the last gate (in-pod).** Prove the write target before writing:
+
+   ```bash
+   kbu clearinghouse load ./bronze --dry-run --json
+   ```
+
+   This resolves namespaces, runs the dev 1206 pre-write assertion, reports the
+   write mode, and writes nothing. The envelope's `warnings` says it was a
+   dry run.
+
+5. **Load (in-pod).** Ingest for real:
+
+   ```bash
+   kbu clearinghouse load ./bronze --json
+   ```
+
+   Foreground; resumable from the ledger if interrupted.
+
+6. **Verify (in-pod).** Re-check the completed run against its ledger:
+
+   ```bash
+   kbu clearinghouse verify ./bronze --json
+   ```
+
+   `verify` does its own explicit `COUNT(*)` per table and confirms every
+   snapshot the ledger recorded still exists in the table's Iceberg history. It
+   **reports** discrepancies (in `data.discrepancies` **and** `warnings`); it
+   does not raise on a discrepancy, precisely so you can inspect a run that a
+   load flagged as failed.
+
+## A load reported FAILED may still have landed rows — `verify`, don't blindly re-run
+
+`load()` can return `success=true` with a **null postflight** row count when it
+could not read the table back to confirm the write (dev 1194). This CLI treats a
+null postflight as a **FAILED load** — but the rows may have landed anyway; only
+the *verification* failed. So the correct response to a FAILED-on-null-postflight
+load is:
+
+```bash
+kbu clearinghouse verify ./bronze          # what actually landed?
+kbu clearinghouse load ./bronze --reconcile # only if verify shows a gap
+```
+
+**Never blindly re-run a plain `load`** after a null-postflight FAILED. Use
+`verify` to see the ground truth, then `--reconcile` to close any real gap.
+
+### The one case duplicates are not harmless: re-ingested CONTENT shards
+
+For `<type>_entity` and `<type>_result`, current state is derived (dedup by hash
+/ current-state selection), so a duplicate ingest is absorbed by the derivation.
+`<type>_content` has **no current-state derivation** — it is append-only content
+keyed by hash with no "latest wins" collapse. Re-ingesting a **content** shard
+therefore **duplicates content rows** with no downstream layer to remove them.
+This is the one case where blindly re-running an ingest is genuinely harmful, and
+the reason the null-postflight response above is `verify` + `--reconcile`, never
+a blind re-run.
+
+## Exit codes
+
+`plan` on an invalid manifest exits **non-zero** with the offending key named,
+having written nothing. `load`/`verify` off-pod exit non-zero (locus refusal,
+message naming the locus). A successful verb — including a `load` whose ledger
+recorded a `failed` table, or a `verify` that reported discrepancies — emits a
+well-formed envelope and exits `0`; the operator reads `data`/`warnings` for the
+outcome, exactly as with the read verbs.

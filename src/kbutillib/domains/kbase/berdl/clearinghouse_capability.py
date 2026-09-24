@@ -103,10 +103,12 @@ module scope, and is safe to import in ordinary CI -- the collaborating
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Sequence
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
-from .capability import BerdlCapability
+from .capability import BerdlCapability, BerdlLoadRefusedError
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_schema import (
     _KINDS,
@@ -117,7 +119,12 @@ from .clearinghouse_schema import (
     table_name,
 )
 
-__all__ = ["ClearinghouseCapability"]
+__all__ = [
+    "ClearinghouseCapability",
+    "ClearinghouseWriteTargetMismatchError",
+    "ClearinghouseLoadPostflightError",
+    "ClearinghouseLedgerAmbiguousError",
+]
 
 #: Fully-qualified namespace prefix the fifteen tables live under, e.g.
 #: ``"kbaseincubator.clearinghouse"``. Every FQN this module builds is
@@ -192,6 +199,85 @@ SPARK_PROMOTION_THRESHOLD = 4000
 #: "already-known" set would fail open into recomputing done work, the same
 #: failure mode as the uppercase-hash trap (Rule 4).
 OFFPOD_PAGE_CAP = 5000
+
+#: Name of the JSON-lines run ledger :meth:`ClearinghouseCapability.ingest_shards`
+#: writes beside the shards. One line per ``(table, batch)`` records the
+#: outcome of that shard's ingest, so a killed run can resume against the same
+#: ``run_id`` without re-ingesting a shard already at ``"ingested"`` (see the
+#: ``ingest_shards`` docstring's resumability contract).
+LEDGER_FILENAME = "ingest_ledger.jsonl"
+
+#: The three ledger states a ``(table, batch)`` line can carry.
+#: ``"started"`` is written BEFORE the ingest call and is deliberately
+#: non-terminal: a ``"started"`` line with no matching ``"ingested"``/``"failed"``
+#: line means the process died mid-ingest, which is AMBIGUOUS and refused
+#: (unless ``reconcile=True``). ``"ingested"`` is the only skip-on-resume state.
+_LEDGER_STARTED = "started"
+_LEDGER_INGESTED = "ingested"
+_LEDGER_FAILED = "failed"
+
+
+class ClearinghouseWriteTargetMismatchError(RuntimeError):
+    """Raised when the write-target namespace cannot be SHOWN to match the probe.
+
+    This is the dev 1206 guard, and it FAILS CLOSED. Dev 1206 measured, on-pod,
+    that ``BerdlCapability.load()`` resolved table existence against namespace
+    ``"default"`` (its parameter default) while ``data_lakehouse_ingest``
+    derived its own target as ``tenant.dataset`` and ignored the parameter --
+    so the existence probe read a namespace the write never touched, always
+    found nothing, and ``select_write_mode("append", table_exists=False)``
+    returned ``"overwrite"``. Three rows were destroyed with ``success=true``
+    and no warning.
+
+    Before any :meth:`ClearinghouseCapability.register` or
+    :meth:`ClearinghouseCapability.ingest_shards` call reaches ``load()``,
+    the write-target namespace and the existence-probe namespace are resolved
+    EXPLICITLY and compared. If the two cannot be SHOWN to agree -- either
+    resolves to a falsy value, or they differ -- this is raised and NO write
+    is attempted (``load()`` is called exactly zero times). It is a refusal,
+    never a warning and never a fall-back-to-a-mode, because the verb runs
+    unattended for days and a silent ``append`` -> ``overwrite`` over a
+    populated corpus is unrecoverable short of a multi-terabyte replay.
+
+    It is a distinct type (not a generic transport error) so a caller can
+    distinguish "the write target is unsafe, do not retry blindly" from a
+    transient transport failure.
+    """
+
+
+class ClearinghouseLoadPostflightError(RuntimeError):
+    """Raised when a ``load()`` reported success but its postflight is null.
+
+    Dev 1194: ``BerdlCapability.load()`` returns ``success=true`` with
+    ``row_count`` and ``new_snapshot_id`` set to ``None`` when postflight
+    cannot read the table back -- the real error is buried in the report's
+    ``row_count_error``. A null postflight is therefore treated as a FAILED
+    load, not a successful one.
+
+    IMPORTANT DIRECTION-OF-ERROR: because the rows may have ALREADY LANDED
+    before the postflight read failed, a load can be reported failed AFTER the
+    data is actually in the table. That is the correct direction to be wrong
+    in -- reporting a real write as failed is recoverable (reconcile), while
+    reporting a failed/destructive write as successful (the dev 1206 failure)
+    is not. The operator must therefore RECONCILE against the table's Iceberg
+    snapshot history rather than blindly re-running, since a blind re-run of a
+    ``<type>_content`` shard leaves two rows for one ``entity_hash`` with no
+    derivation rule to collapse them (see :meth:`ClearinghouseCapability.ingest_shards`).
+    """
+
+
+class ClearinghouseLedgerAmbiguousError(RuntimeError):
+    """Raised when a ledger has a ``"started"`` batch with no terminal line.
+
+    A ``(table, batch)`` at state ``"started"`` with no subsequent
+    ``"ingested"`` or ``"failed"`` line means the process died mid-ingest: the
+    shard may have landed fully, partially, or not at all, and the ledger
+    cannot say which. Continuing past it blindly risks a duplicate
+    ``<type>_content`` row (which has no current-state derivation to collapse
+    it -- see :meth:`ClearinghouseCapability.ingest_shards`). So resume
+    REFUSES at the first such batch unless ``reconcile=True``, which reads the
+    table's Iceberg snapshot history and decides whether the shard landed.
+    """
 
 
 class ClearinghouseCapability:
@@ -838,6 +924,458 @@ class ClearinghouseCapability:
                 )
         return out
 
+    # -- write surface ----------------------------------------------------
+
+    def _require_in_pod(self, verb: str) -> None:
+        """Refuse a write verb off-pod BEFORE any transport call is made.
+
+        Every write verb on this class is in-pod only: ``load()`` needs a
+        Spark session, which exists only inside the BERDL pod. This resolves
+        the locus and raises :class:`BerdlLoadRefusedError` off-pod -- the same
+        exception ``BerdlCapability.load()`` itself raises -- but does so at
+        THIS boundary, before ``register`` or ``ingest_shards`` touches the
+        collaborator's ``load()`` (or, in ``ingest_shards``, before it even
+        resolves namespaces or opens the ledger). So an off-pod write refuses
+        with nothing staged and no transport call attempted (success criterion
+        (d)).
+        """
+        if self._locus() != "in_pod":
+            raise BerdlLoadRefusedError(
+                f"ClearinghouseCapability.{verb}() is in-pod only: it writes "
+                "through BerdlCapability.load(), which requires a Spark session "
+                "that exists only inside the BERDL JupyterHub pod. This process "
+                "is off-pod, so nothing has been staged and no transport call "
+                "has been made. Run this write from inside the pod."
+            )
+
+    def _assert_write_target(self, *, dataset: str, tenant: str) -> str:
+        """Resolve and CONFIRM the write-target namespace before any load().
+
+        This is the dev 1206 guard, and it fails closed. It asks the wrapped
+        capability for two namespaces:
+
+        - the namespace ``data_lakehouse_ingest`` will actually WRITE to
+          (``resolve_write_namespace``), and
+        - the namespace the pre-write existence PROBE reads
+          (``resolve_probe_namespace``).
+
+        and refuses unless the two can be SHOWN to be the same non-empty
+        value. If they differ -- exactly the dev 1206 regression, where the
+        probe read ``"default"`` while the write went to ``tenant.dataset`` --
+        or if either resolves to a falsy value (so agreement cannot be shown),
+        it raises :class:`ClearinghouseWriteTargetMismatchError` and returns
+        without the caller ever reaching ``load()``.
+
+        Both resolvers are read-only and must not themselves write or probe
+        table existence; they only compute the namespace strings. The real
+        ``BerdlCapability`` does not expose them today (mirroring how
+        ``bootstrap()`` requires ``table_exists``/``table_partition_spec`` that
+        only the adapter provides); a real adapter must implement them so that
+        the probe and the write provably read/write the identical namespace.
+
+        Returns:
+            The single confirmed write-target namespace, for the caller to pass
+            through to ``load()`` so the write lands exactly where the guard
+            confirmed.
+
+        Raises:
+            ClearinghouseWriteTargetMismatchError: The two namespaces cannot be
+                shown to agree (they differ, or either is falsy). A guard that
+                cannot confirm it probed the same name it is about to write to
+                has established nothing, and writing anyway is the failure this
+                exists to prevent -- so it refuses rather than proceeding.
+        """
+        capability = self._get_capability()
+        resolve_write = getattr(capability, "resolve_write_namespace", None)
+        resolve_probe = getattr(capability, "resolve_probe_namespace", None)
+        if resolve_write is None or resolve_probe is None:
+            raise ClearinghouseWriteTargetMismatchError(
+                "ClearinghouseCapability cannot confirm the write target: the "
+                "wrapped capability does not expose both "
+                "'resolve_write_namespace' and 'resolve_probe_namespace', so "
+                "the namespace the ingest writes to cannot be SHOWN to match "
+                "the namespace the existence probe reads (dev 1206). Refusing "
+                "rather than writing blind; no load() has been called."
+            )
+        write_ns = resolve_write(dataset=dataset, tenant=tenant)
+        probe_ns = resolve_probe(dataset=dataset, tenant=tenant)
+        if not write_ns or not probe_ns or write_ns != probe_ns:
+            raise ClearinghouseWriteTargetMismatchError(
+                "ClearinghouseCapability refuses to write: the existence-probe "
+                f"namespace ({probe_ns!r}) and the ingest write-target "
+                f"namespace ({write_ns!r}) could not be shown to agree for "
+                f"dataset={dataset!r} tenant={tenant!r}. This is the dev 1206 "
+                "regression -- a probe against a namespace the write does not "
+                "touch always finds nothing, so an 'append' silently becomes a "
+                "destructive 'overwrite'. No load() has been called and nothing "
+                "has been staged. Fail closed: resolve the namespace mismatch "
+                "before retrying."
+            )
+        return write_ns
+
+    @staticmethod
+    def _check_postflight(load_result: dict[str, Any]) -> dict[str, Any]:
+        """Treat a null postflight row_count as a FAILED load (dev 1194).
+
+        ``BerdlCapability.load()`` returns ``success=true`` with per-table
+        ``row_count``/``new_snapshot_id`` set to ``None`` when postflight
+        cannot read the table back; the real error is buried in the table
+        report's ``row_count_error``. This inspects every per-table report and
+        raises :class:`ClearinghouseLoadPostflightError` if any table's
+        ``row_count`` is ``None`` -- because a load that could not verify its
+        rows landed is a failed load, regardless of the transport's
+        ``success`` flag.
+
+        Returns:
+            ``load_result`` unchanged when every table postflight is non-null.
+
+        Raises:
+            ClearinghouseLoadPostflightError: Any table reports a ``None``
+                ``row_count``. NOTE this may fire AFTER the rows actually
+                landed -- the correct direction to be wrong in (reconcile, do
+                not blindly re-run).
+        """
+        bad: list[str] = []
+        for report in load_result.get("tables", []):
+            if report.get("row_count") is None:
+                detail = report.get("row_count_error") or "no row_count reported"
+                bad.append(f"{report.get('name')!r} ({detail})")
+        if bad:
+            raise ClearinghouseLoadPostflightError(
+                "ClearinghouseCapability treats a null postflight as a FAILED "
+                "load (dev 1194): load() reported success but could not read "
+                "back a row count for: " + ", ".join(bad) + ". The rows may "
+                "nonetheless have landed -- reconcile against the table's "
+                "Iceberg snapshot history rather than blindly re-running."
+            )
+        return load_result
+
+    def register(
+        self,
+        entity_type: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        kind: str,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Append ``rows`` to ``<type>_<kind>`` through ``BerdlCapability.load()``.
+
+        IN-POD ONLY. Refuses off-pod (:class:`BerdlLoadRefusedError`) before any
+        transport call. The table is selected by ``(entity_type, kind)`` through
+        :func:`clearinghouse_schema.table_name` (Rule 2 -- the ONLY table-name
+        constructor; raises ``ValueError`` on an unknown type or kind), never
+        concatenated and never taken as a caller-supplied name.
+
+        Before ``load()`` is reached, the dev 1206 pre-write assertion runs
+        (:meth:`_assert_write_target`): the write-target namespace and the
+        existence-probe namespace are resolved explicitly and must be SHOWN to
+        agree, or this raises :class:`ClearinghouseWriteTargetMismatchError`
+        with ``load()`` uncalled. After ``load()`` returns, its postflight is
+        checked (:meth:`_check_postflight`): a null ``row_count`` is treated as
+        a FAILED load (dev 1194), which may fire after the rows landed -- the
+        correct direction to be wrong in.
+
+        Args:
+            entity_type: One of :data:`ENTITY_TYPES`.
+            rows: The DataFrame-mode rows for this one table.
+            kind: One of ``"entity"``, ``"content"``, ``"result"``.
+            tenant: Target tenant for the membership check and write target
+                (default :data:`TENANT`).
+            dataset: The ``load()`` dataset / namespace (default
+                :data:`NAMESPACE`).
+
+        Returns:
+            The wrapped ``load()`` result (postflight-verified).
+
+        Raises:
+            ValueError: Unknown ``entity_type`` or ``kind``.
+            BerdlLoadRefusedError: Off-pod.
+            ClearinghouseWriteTargetMismatchError: Write target could not be
+                confirmed (dev 1206).
+            ClearinghouseLoadPostflightError: Null postflight (dev 1194).
+        """
+        self._require_in_pod("register")
+        name = table_name(entity_type, kind)  # Rule 2: raises on bad type/kind
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        capability = self._get_capability()
+        result = capability.load(
+            dataset=dataset,
+            tables=[{"name": name, "mode": "append"}],
+            tenant=tenant,
+            namespace=write_ns,
+            dataframes={name: list(rows)},
+        )
+        return self._check_postflight(result)
+
+    def ingest_shards(
+        self,
+        shard_dir: str | Path,
+        *,
+        run_id: str,
+        dry_run: bool = False,
+        reconcile: bool = False,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Ingest a directory of bronze parquet shards, table by table, resumably.
+
+        IN-POD ONLY. Refuses off-pod (:class:`BerdlLoadRefusedError`) before it
+        resolves any namespace, opens the ledger, or makes any transport call
+        (success criterion (d)). Each shard is ingested through
+        ``BerdlCapability.load()`` in BRONZE mode (``paths={'bronze_base': ...}``
+        plus each table's own ``bronze_path``/``format``); every table's
+        postflight is verified (:meth:`_check_postflight`) and every outcome is
+        recorded in a JSON-lines run ledger.
+
+        THE PRE-WRITE ASSERTION (dev 1206), fail-closed. Before ANY ``load()``
+        call, :meth:`_assert_write_target` resolves the write-target namespace
+        and the existence-probe namespace and refuses unless they can be SHOWN
+        to be the same non-empty value -- raising
+        :class:`ClearinghouseWriteTargetMismatchError` with ``load()`` called
+        exactly zero times. A guard that cannot confirm it probed the same name
+        it is about to write to has established nothing, and writing anyway is
+        the failure.
+
+        THE RUN LEDGER (resumability). A bootstrap load takes days and the pod
+        (a rootless JupyterHub container with no init system) restarts
+        routinely, so this verb must survive being killed and resumed. The
+        ledger lives beside the shards at :data:`LEDGER_FILENAME`, one line per
+        ``(table, batch)``::
+
+            {"run_id":..., "table":"gene_entity", "batch":"0007",
+             "shard_path":..., "rows":4821003, "state":"ingested",
+             "snapshot_id":..., "at":...}
+
+        Resume is simply calling ``ingest_shards()`` again with the same
+        ``run_id`` -- there is NO separate resume code path:
+
+        - A ``(table, batch)`` already at state ``"ingested"`` is SKIPPED.
+        - A ``(table, batch)`` at state ``"started"`` with no terminal
+          (``"ingested"``/``"failed"``) line is AMBIGUOUS -- the process died
+          mid-ingest. This REFUSES (:class:`ClearinghouseLedgerAmbiguousError`)
+          unless ``reconcile=True``, which reads the table's Iceberg snapshot
+          history and decides whether the shard landed.
+
+        WHY THIS IS SAFE, AND EXACTLY HOW FAR. The clearinghouse schema is
+        APPEND-ONLY, so a crash BETWEEN the ingest and the ledger-write costs at
+        worst a duplicate row -- and the current-state derivation collapses that
+        harmlessly (same hash for ``<type>_entity``; latest-per-slot for
+        ``<type>_result``). BUT ``<type>_content`` HAS NO SUCH DERIVATION: a
+        re-ingested content shard leaves two rows for one ``entity_hash`` with no
+        rule saying which wins, and a reader joining content by hash gets a
+        fan-out. The ledger is precisely what prevents that -- and it is why
+        ``reconcile`` exists rather than a blanket "re-running is safe".
+
+        ``dry_run=True`` is genuinely read-only (matching
+        :func:`clearinghouse_schema.bootstrap`'s dry-run guarantee): it resolves
+        namespaces, runs the pre-write assertion, reports the write mode each
+        table WOULD take, and writes nothing -- no ``load()`` call, no ledger
+        line.
+
+        Args:
+            shard_dir: Directory holding the bronze parquet shards and the run
+                ledger. Each table's shards are expected under a per-table
+                subdirectory named for the table (``<shard_dir>/<table>/``),
+                with each shard a file whose stem is the batch id.
+            run_id: The run this call belongs to. Resuming is the same call with
+                the same ``run_id``; ledger lines from other ``run_id`` values
+                are ignored when deciding skip/refuse.
+            dry_run: When ``True``, performs the pre-write assertion and reports
+                the per-table plan but writes nothing.
+            reconcile: When ``True``, an ambiguous ``"started"`` batch is
+                resolved against the table's Iceberg snapshot history instead of
+                refused.
+            tenant: Target tenant (default :data:`TENANT`).
+            dataset: The ``load()`` dataset / namespace (default
+                :data:`NAMESPACE`).
+
+        Returns:
+            A dict with ``'run_id'``, ``'namespace'``, ``'dry_run'``, and a
+            ``'tables'`` list -- one report per ``(table, batch)`` with its
+            ``'name'``, ``'batch'``, resolved ``'action'`` (``'ingest'``,
+            ``'skip'``, ``'reconcile'`` or -- dry-run only -- ``'would_ingest'``),
+            and, for a real ingest, its postflight ``'row_count'``/``'snapshot_id'``.
+
+        Raises:
+            BerdlLoadRefusedError: Off-pod (before any transport call).
+            ClearinghouseWriteTargetMismatchError: Write target unconfirmed
+                (dev 1206) -- ``load()`` called zero times.
+            ClearinghouseLedgerAmbiguousError: A ``"started"`` batch with no
+                terminal line and ``reconcile=False``.
+            ClearinghouseLoadPostflightError: A null postflight on a real
+                ingest (dev 1194).
+        """
+        self._require_in_pod("ingest_shards")
+        shard_root = Path(shard_dir)
+
+        # Pre-write assertion FIRST, before opening the ledger or reading any
+        # shard -- so a mismatch refuses with load() called zero times, in
+        # dry_run as well as a real run.
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+
+        ledger_path = shard_root / LEDGER_FILENAME
+        ledger_states = _read_ledger_states(ledger_path, run_id=run_id)
+        discovered = _discover_shards(shard_root)
+
+        capability = self._get_capability()
+        reports: list[dict[str, Any]] = []
+
+        for name, batch, shard_path in discovered:
+            key = (name, batch)
+            state = ledger_states.get(key)
+
+            if state == _LEDGER_INGESTED:
+                reports.append(
+                    {"name": name, "batch": batch, "action": "skip"}
+                )
+                continue
+
+            if state == _LEDGER_STARTED:
+                # Ambiguous: died mid-ingest, no terminal line. Refuse unless
+                # reconcile decides against snapshot history.
+                if not reconcile:
+                    raise ClearinghouseLedgerAmbiguousError(
+                        f"ingest_shards: ledger has {name!r} batch {batch!r} at "
+                        f"state {_LEDGER_STARTED!r} with no terminal line for "
+                        f"run_id {run_id!r} -- the process died mid-ingest and "
+                        "whether the shard landed is unknown. Refusing to "
+                        "continue past it. A duplicate <type>_content shard has "
+                        "no current-state derivation to collapse it, so this "
+                        "cannot be assumed safe. Re-run with reconcile=True to "
+                        "decide against the table's Iceberg snapshot history."
+                    )
+                landed = self._reconcile_started_batch(
+                    name, batch, write_ns=write_ns
+                )
+                if landed:
+                    _append_ledger_line(
+                        ledger_path,
+                        run_id=run_id,
+                        table=name,
+                        batch=batch,
+                        shard_path=str(shard_path),
+                        rows=None,
+                        state=_LEDGER_INGESTED,
+                        snapshot_id=None,
+                        extra={"reconciled": True},
+                    )
+                    reports.append(
+                        {"name": name, "batch": batch, "action": "reconcile"}
+                    )
+                    continue
+                # Reconcile decided the shard did NOT land -- fall through and
+                # ingest it as a fresh batch below.
+
+            if dry_run:
+                reports.append(
+                    {"name": name, "batch": batch, "action": "would_ingest"}
+                )
+                continue
+
+            # Real ingest: write a non-terminal 'started' line BEFORE the
+            # load(), so a crash mid-ingest leaves the ambiguous marker the
+            # resume path refuses on.
+            _append_ledger_line(
+                ledger_path,
+                run_id=run_id,
+                table=name,
+                batch=batch,
+                shard_path=str(shard_path),
+                rows=None,
+                state=_LEDGER_STARTED,
+                snapshot_id=None,
+            )
+            try:
+                result = capability.load(
+                    dataset=dataset,
+                    tables=[
+                        {
+                            "name": name,
+                            "mode": "append",
+                            "bronze_path": str(shard_path),
+                            "format": _shard_format(shard_path),
+                        }
+                    ],
+                    tenant=tenant,
+                    namespace=write_ns,
+                    paths={"bronze_base": str(shard_root)},
+                )
+                result = self._check_postflight(result)
+            except Exception as exc:
+                _append_ledger_line(
+                    ledger_path,
+                    run_id=run_id,
+                    table=name,
+                    batch=batch,
+                    shard_path=str(shard_path),
+                    rows=None,
+                    state=_LEDGER_FAILED,
+                    snapshot_id=None,
+                    extra={"error": f"{type(exc).__name__}: {exc}"},
+                )
+                raise
+
+            table_report = _first_table_report(result, name)
+            row_count = table_report.get("row_count")
+            snapshot_id = table_report.get("new_snapshot_id")
+            _append_ledger_line(
+                ledger_path,
+                run_id=run_id,
+                table=name,
+                batch=batch,
+                shard_path=str(shard_path),
+                rows=row_count,
+                state=_LEDGER_INGESTED,
+                snapshot_id=snapshot_id,
+            )
+            reports.append(
+                {
+                    "name": name,
+                    "batch": batch,
+                    "action": "ingest",
+                    "row_count": row_count,
+                    "snapshot_id": snapshot_id,
+                }
+            )
+
+        return {
+            "run_id": run_id,
+            "namespace": write_ns,
+            "dry_run": dry_run,
+            "tables": reports,
+        }
+
+    def _reconcile_started_batch(
+        self, name: str, batch: str, *, write_ns: str
+    ) -> bool:
+        """Decide whether an ambiguous ``"started"`` shard actually landed.
+
+        Reads the table's Iceberg snapshot history and returns whether a
+        snapshot exists that could correspond to this batch's append. This
+        deliberately makes a single, read-only ``query(..., engine="spark")``
+        call against ``<ns>.<table>.snapshots`` -- the Iceberg metadata table --
+        and reports whether the table has ANY snapshot at all. A more precise
+        per-batch attribution would require a batch marker in the snapshot
+        summary that the write path does not currently record; absent that, the
+        conservative reading is "if the table shows no snapshots the shard
+        cannot have landed, so re-ingest is safe; otherwise treat it as landed
+        and skip". This mirrors the append-only reasoning in the ``ingest_shards``
+        docstring and is intentionally the read-only half of reconcile.
+
+        Returns:
+            ``True`` if the table shows at least one snapshot (treat the shard
+            as landed -- skip re-ingest), ``False`` if it shows none (safe to
+            re-ingest).
+        """
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}.snapshots")
+        rows = self._run(
+            f"SELECT snapshot_id FROM {fqn} ORDER BY committed_at DESC LIMIT 1",
+            params=None,
+            engine="spark",
+        )
+        return bool(rows)
+
 
 # --------------------------------------------------------------------------
 # Module-level pure helpers
@@ -914,3 +1452,137 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(key)
             out.append(row)
     return out
+
+
+def _read_ledger_states(
+    ledger_path: Path, *, run_id: str
+) -> dict[tuple[str, str], str]:
+    """Read the run ledger and return the LAST state per ``(table, batch)``.
+
+    The ledger is JSON-lines, appended to; a ``(table, batch)`` may have
+    several lines (a ``"started"`` then an ``"ingested"``/``"failed"``). The
+    LAST line for a key is its current state, so a ``"started"`` followed by
+    ``"ingested"`` reads as ingested, while a lone ``"started"`` (the process
+    died before writing a terminal line) reads as ``"started"`` -- the
+    ambiguous state resume refuses on. Only lines matching ``run_id`` are
+    considered; a missing ledger file is an empty set of states. Malformed
+    lines are skipped rather than crashing a days-long resume.
+    """
+    states: dict[tuple[str, str], str] = {}
+    if not ledger_path.exists():
+        return states
+    for line in ledger_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if record.get("run_id") != run_id:
+            continue
+        table = record.get("table")
+        batch = record.get("batch")
+        state = record.get("state")
+        if table is None or batch is None or state is None:
+            continue
+        states[(str(table), str(batch))] = str(state)
+    return states
+
+
+def _append_ledger_line(
+    ledger_path: Path,
+    *,
+    run_id: str,
+    table: str,
+    batch: str,
+    shard_path: str,
+    rows: int | None,
+    state: str,
+    snapshot_id: Any,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """Append one JSON-lines record to the run ledger, flushed to disk.
+
+    One append per ``(table, batch)`` state transition. The file is opened in
+    append mode and each line is a complete JSON object followed by a newline,
+    so a crash mid-write leaves at most one truncated trailing line (which
+    :func:`_read_ledger_states` skips) rather than a corrupted earlier record.
+    """
+    record: dict[str, Any] = {
+        "run_id": run_id,
+        "table": table,
+        "batch": batch,
+        "shard_path": shard_path,
+        "rows": rows,
+        "state": state,
+        "snapshot_id": snapshot_id,
+        "at": _now_iso(),
+    }
+    if extra:
+        record.update(extra)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with ledger_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string (ledger ``at`` field)."""
+    from datetime import datetime, timezone  # local: keep module import-cheap
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _discover_shards(shard_root: Path) -> list[tuple[str, str, Path]]:
+    """Discover ``(table, batch, shard_path)`` triples under ``shard_root``.
+
+    Shards are laid out one subdirectory per table (named for the table), each
+    holding one file per batch whose stem is the batch id -- e.g.
+    ``<shard_root>/gene_entity/0007.parquet``. Only subdirectories named for a
+    known clearinghouse table (:func:`clearinghouse_schema.table_name` over
+    every type/kind) are considered, so the ledger file and any stray directory
+    beside the shards are ignored. The result is sorted by ``(table, batch)``
+    for a deterministic, resumable ingest order.
+    """
+    known = {
+        table_name(etype, kind) for kind in _KINDS for etype in ENTITY_TYPES
+    }
+    discovered: list[tuple[str, str, Path]] = []
+    if not shard_root.exists():
+        return discovered
+    for table_dir in sorted(p for p in shard_root.iterdir() if p.is_dir()):
+        name = table_dir.name
+        if name not in known:
+            continue
+        for shard in sorted(p for p in table_dir.iterdir() if p.is_file()):
+            discovered.append((name, shard.stem, shard))
+    discovered.sort(key=lambda triple: (triple[0], triple[1]))
+    return discovered
+
+
+def _shard_format(shard_path: Path) -> str:
+    """Infer a bronze ``format`` from a shard file's suffix.
+
+    Bronze-mode ``load()`` needs each table's ``format``; it is taken from the
+    shard file's extension (``.parquet`` -> ``"parquet"``, ``.csv`` -> ``"csv"``,
+    etc.), defaulting to ``"parquet"`` for an extensionless shard, since the
+    bootstrap corpus is parquet.
+    """
+    suffix = shard_path.suffix.lstrip(".").lower()
+    return suffix or "parquet"
+
+
+def _first_table_report(load_result: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return the per-table report for ``name`` from a ``load()`` result.
+
+    ``BerdlCapability.load()`` returns ``{'ingest_result', 'tables': [...]}``;
+    each ingest_shards() call loads exactly one table, so this returns the
+    report whose ``name`` matches (falling back to the first report, or an empty
+    dict, so a fake with a differently-shaped result never crashes the ledger
+    write).
+    """
+    tables = load_result.get("tables") or []
+    for report in tables:
+        if report.get("name") == name:
+            return report
+    return tables[0] if tables else {}

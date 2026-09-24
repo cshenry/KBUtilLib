@@ -35,14 +35,21 @@ import re
 
 import pytest
 
+from kbutillib.domains.kbase.berdl.capability import BerdlLoadRefusedError
 from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
     _HEX_RUN_RE,
+    LEDGER_FILENAME,
     OFFPOD_PAGE_CAP,
     SPARK_PROMOTION_THRESHOLD,
     ClearinghouseCapability,
+    ClearinghouseLedgerAmbiguousError,
+    ClearinghouseLoadPostflightError,
+    ClearinghouseWriteTargetMismatchError,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     ENTITY_TYPES,
+    NAMESPACE,
+    TENANT,
     table_name,
 )
 
@@ -520,3 +527,428 @@ def test_empty_hashes_short_circuits_without_query():
     assert cap.content_all_types([]) == []
     assert cap.results("gene", []) == []
     assert fake.calls == []
+
+
+# ==========================================================================
+# WRITE HALF -- register() and ingest_shards()
+# ==========================================================================
+#
+# The write verbs are proven against a second fake (``_FakeWriteCapability``)
+# that stands in for the whole lakehouse write boundary. It records every
+# ``load()`` call, exposes the two namespace resolvers the dev 1206 pre-write
+# assertion consults (independently settable so a test can make the probe and
+# write namespaces DISAGREE), returns a configurable postflight (so a null
+# ``row_count`` can be simulated -- dev 1194), and answers the reconcile
+# snapshot-history ``query()``. No test requires a pod.
+#
+# The success criteria these map to (from the task):
+#   (a) a probe/write namespace mismatch causes ingest_shards() to RAISE and
+#       call load() EXACTLY ZERO times -- ``test_write_criterion_a_*``
+#   (b) a null postflight row_count is a FAILED load -- ``test_write_criterion_b_*``
+#   (c) a ledger with 0-3 ingested + 4 started skips 0-3, refuses at 4 without
+#       reconcile, and proceeds with it -- ``test_write_criterion_c_*``
+#   (d) off-pod register()/ingest_shards() raise before any transport call --
+#       ``test_write_criterion_d_*``
+
+
+class _FakeWriteCapability:
+    """Records ``load()`` calls; drives the write-half pre/post-flight guards.
+
+    Args:
+        locus: ``"in_pod"`` or ``"off_pod"``.
+        write_ns / probe_ns: What the two dev 1206 resolvers return. When they
+            differ (or either is falsy) the pre-write assertion must refuse.
+            Default: both equal ``TENANT.NAMESPACE`` (the agreeing case).
+        postflight_row_count: The ``row_count`` every per-table load report
+            carries. ``None`` simulates the dev 1194 null-postflight failure.
+        snapshot_rows: Rows the reconcile snapshot-history ``query()`` returns.
+    """
+
+    def __init__(
+        self,
+        *,
+        locus="in_pod",
+        write_ns=f"{TENANT}.{NAMESPACE}",
+        probe_ns=f"{TENANT}.{NAMESPACE}",
+        postflight_row_count=1,
+        snapshot_rows=None,
+    ):
+        self._locus = locus
+        self._write_ns = write_ns
+        self._probe_ns = probe_ns
+        self._postflight_row_count = postflight_row_count
+        self._snapshot_rows = snapshot_rows if snapshot_rows is not None else []
+        self.load_calls: list[dict] = []
+        self.queries: list[str] = []
+
+    def locus(self):
+        return self._locus
+
+    def resolve_write_namespace(self, *, dataset, tenant):
+        return self._write_ns
+
+    def resolve_probe_namespace(self, *, dataset, tenant):
+        return self._probe_ns
+
+    def load(self, **kwargs):
+        self.load_calls.append(kwargs)
+        return {
+            "ingest_result": {"success": True},
+            "tables": [
+                {
+                    "name": t["name"],
+                    "row_count": self._postflight_row_count,
+                    "new_snapshot_id": None
+                    if self._postflight_row_count is None
+                    else 123456,
+                    **(
+                        {"row_count_error": "postflight could not read table"}
+                        if self._postflight_row_count is None
+                        else {}
+                    ),
+                }
+                for t in kwargs["tables"]
+            ],
+        }
+
+    def query(self, sql, *, params=None, engine=None, **kwargs):
+        self.queries.append(sql)
+        return list(self._snapshot_rows)
+
+
+def _write_shard_tree(tmp_path, table_batches):
+    """Lay out ``<tmp_path>/<table>/<batch>.parquet`` shard files.
+
+    ``table_batches`` maps a table name to a list of batch ids. Returns the
+    shard-root path.
+    """
+    for name, batches in table_batches.items():
+        table_dir = tmp_path / name
+        table_dir.mkdir(parents=True, exist_ok=True)
+        for batch in batches:
+            (table_dir / f"{batch}.parquet").write_bytes(b"")
+    return tmp_path
+
+
+def _write_ledger(tmp_path, run_id, lines):
+    """Write ledger JSON-lines. ``lines`` is a list of (table, batch, state)."""
+    import json
+
+    ledger = tmp_path / LEDGER_FILENAME
+    with ledger.open("w", encoding="utf-8") as handle:
+        for table, batch, state in lines:
+            handle.write(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "table": table,
+                        "batch": batch,
+                        "shard_path": f"{table}/{batch}.parquet",
+                        "rows": None,
+                        "state": state,
+                        "snapshot_id": None,
+                        "at": "2026-09-24T00:00:00+00:00",
+                    }
+                )
+                + "\n"
+            )
+    return ledger
+
+
+def _read_ledger(tmp_path):
+    """Return the parsed ledger records as a list of dicts."""
+    import json
+
+    ledger = tmp_path / LEDGER_FILENAME
+    if not ledger.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in ledger.read_text().splitlines()
+        if line.strip()
+    ]
+
+
+# --------------------------------------------------------------------------
+# Write criterion (a): probe/write namespace mismatch -> RAISE, zero load()s.
+# --------------------------------------------------------------------------
+
+
+def test_write_criterion_a_namespace_mismatch_raises_and_never_loads(tmp_path):
+    # Probe reads "default"; the write goes to tenant.dataset -- the exact
+    # dev 1206 shape. ingest_shards() must FAIL CLOSED.
+    fake = _FakeWriteCapability(
+        probe_ns="default", write_ns=f"{TENANT}.{NAMESPACE}"
+    )
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseWriteTargetMismatchError):
+        cap.ingest_shards(tmp_path, run_id="r1")
+    assert fake.load_calls == []  # load() called EXACTLY zero times
+
+
+def test_write_criterion_a_mismatch_raises_even_in_dry_run(tmp_path):
+    fake = _FakeWriteCapability(probe_ns="default")
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseWriteTargetMismatchError):
+        cap.ingest_shards(tmp_path, run_id="r1", dry_run=True)
+    assert fake.load_calls == []
+    # And no ledger was written -- the refusal precedes opening it.
+    assert _read_ledger(tmp_path) == []
+
+
+def test_write_criterion_a_register_mismatch_raises_and_never_loads():
+    fake = _FakeWriteCapability(probe_ns="default")
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseWriteTargetMismatchError):
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+    assert fake.load_calls == []
+
+
+def test_write_criterion_a_falsy_namespace_refuses():
+    # A resolver returning "" means agreement cannot be SHOWN -> refuse.
+    fake = _FakeWriteCapability(write_ns="", probe_ns="")
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseWriteTargetMismatchError):
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+    assert fake.load_calls == []
+
+
+def test_write_criterion_a_missing_resolvers_refuses():
+    """A capability lacking the resolvers cannot show agreement -> refuse."""
+
+    class _NoResolvers:
+        def locus(self):
+            return "in_pod"
+
+        def load(self, **kwargs):  # pragma: no cover - must never be reached
+            raise AssertionError("load() must not be called")
+
+    cap = ClearinghouseCapability(_NoResolvers())
+    with pytest.raises(ClearinghouseWriteTargetMismatchError):
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+
+
+# --------------------------------------------------------------------------
+# Write criterion (b): a null postflight row_count is a FAILED load.
+# --------------------------------------------------------------------------
+
+
+def test_write_criterion_b_null_postflight_is_failed_load():
+    fake = _FakeWriteCapability(postflight_row_count=None)
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseLoadPostflightError):
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+    # load() WAS called (the rows may have landed) -- the failure is postflight.
+    assert len(fake.load_calls) == 1
+
+
+def test_write_criterion_b_null_postflight_in_ingest_marks_failed(tmp_path):
+    fake = _FakeWriteCapability(postflight_row_count=None)
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseLoadPostflightError):
+        cap.ingest_shards(tmp_path, run_id="r1")
+    # The ledger records the attempt: a 'started' then a 'failed' line, never
+    # an 'ingested' one, so a resume treats it correctly.
+    records = _read_ledger(tmp_path)
+    states = [r["state"] for r in records if r["table"] == "gene_entity"]
+    assert "started" in states
+    assert "failed" in states
+    assert "ingested" not in states
+
+
+def test_write_criterion_b_nonnull_postflight_succeeds():
+    fake = _FakeWriteCapability(postflight_row_count=42)
+    cap = ClearinghouseCapability(fake)
+    result = cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+    assert result["tables"][0]["row_count"] == 42
+
+
+# --------------------------------------------------------------------------
+# Write criterion (c): ledger 0-3 ingested + 4 started -> skip, refuse, proceed.
+# --------------------------------------------------------------------------
+
+
+def _five_batch_tree(tmp_path):
+    return _write_shard_tree(
+        tmp_path, {"gene_entity": ["0000", "0001", "0002", "0003", "0004"]}
+    )
+
+
+def test_write_criterion_c_started_batch_refuses_without_reconcile(tmp_path):
+    _five_batch_tree(tmp_path)
+    _write_ledger(
+        tmp_path,
+        "r1",
+        [
+            ("gene_entity", "0000", "ingested"),
+            ("gene_entity", "0001", "ingested"),
+            ("gene_entity", "0002", "ingested"),
+            ("gene_entity", "0003", "ingested"),
+            ("gene_entity", "0004", "started"),
+        ],
+    )
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseLedgerAmbiguousError):
+        cap.ingest_shards(tmp_path, run_id="r1")
+    # Refused at batch 4 -- and crucially never re-ingested batches 0-3.
+    assert fake.load_calls == []
+
+
+def test_write_criterion_c_skips_ingested_and_proceeds_with_reconcile(tmp_path):
+    _five_batch_tree(tmp_path)
+    _write_ledger(
+        tmp_path,
+        "r1",
+        [
+            ("gene_entity", "0000", "ingested"),
+            ("gene_entity", "0001", "ingested"),
+            ("gene_entity", "0002", "ingested"),
+            ("gene_entity", "0003", "ingested"),
+            ("gene_entity", "0004", "started"),
+        ],
+    )
+    # Reconcile: snapshot history shows the batch-4 shard did NOT land (no
+    # snapshots), so it is safe to re-ingest it.
+    fake = _FakeWriteCapability(snapshot_rows=[])
+    cap = ClearinghouseCapability(fake)
+    result = cap.ingest_shards(tmp_path, run_id="r1", reconcile=True)
+
+    actions = {(r["batch"]): r["action"] for r in result["tables"]}
+    # 0-3 skipped (already ingested), 4 ingested now.
+    assert actions["0000"] == "skip"
+    assert actions["0003"] == "skip"
+    assert actions["0004"] == "ingest"
+    # Exactly ONE load() -- for batch 4 only; 0-3 were not re-ingested.
+    assert len(fake.load_calls) == 1
+    assert fake.load_calls[0]["tables"][0]["name"] == "gene_entity"
+
+
+def test_write_criterion_c_reconcile_treats_landed_shard_as_skip(tmp_path):
+    _five_batch_tree(tmp_path)
+    _write_ledger(
+        tmp_path,
+        "r1",
+        [("gene_entity", f"{i:04d}", "ingested") for i in range(4)]
+        + [("gene_entity", "0004", "started")],
+    )
+    # Snapshot history shows a snapshot -> treat the started shard as landed.
+    fake = _FakeWriteCapability(snapshot_rows=[{"snapshot_id": 999}])
+    cap = ClearinghouseCapability(fake)
+    result = cap.ingest_shards(tmp_path, run_id="r1", reconcile=True)
+    actions = {r["batch"]: r["action"] for r in result["tables"]}
+    assert actions["0004"] == "reconcile"
+    # Reconcile decided landed -> no re-ingest of batch 4 either.
+    assert fake.load_calls == []
+    # The ledger now carries a terminal 'ingested' line for batch 4.
+    records = _read_ledger(tmp_path)
+    batch4 = [r for r in records if r["batch"] == "0004"]
+    assert batch4[-1]["state"] == "ingested"
+
+
+def test_write_criterion_c_other_run_id_started_line_is_ignored(tmp_path):
+    """A 'started' line from a DIFFERENT run_id must not block this run."""
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    _write_ledger(tmp_path, "OTHER", [("gene_entity", "0000", "started")])
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    result = cap.ingest_shards(tmp_path, run_id="r1")
+    assert result["tables"][0]["action"] == "ingest"
+    assert len(fake.load_calls) == 1
+
+
+# --------------------------------------------------------------------------
+# Write criterion (d): off-pod register()/ingest_shards() raise before any
+#                      transport call.
+# --------------------------------------------------------------------------
+
+
+def test_write_criterion_d_offpod_register_refuses_before_transport():
+    fake = _FakeWriteCapability(locus="off_pod")
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(BerdlLoadRefusedError):
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind="entity")
+    assert fake.load_calls == []
+    assert fake.queries == []
+
+
+def test_write_criterion_d_offpod_ingest_shards_refuses_before_transport(tmp_path):
+    fake = _FakeWriteCapability(locus="off_pod")
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(BerdlLoadRefusedError):
+        cap.ingest_shards(tmp_path, run_id="r1")
+    assert fake.load_calls == []
+    assert fake.queries == []
+    # Off-pod refusal precedes opening the ledger.
+    assert _read_ledger(tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# register(): table selection + dry-run/ingest general behaviour
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entity_type", ENTITY_TYPES)
+@pytest.mark.parametrize("kind", ["entity", "content", "result"])
+def test_register_selects_the_type_kind_table(entity_type, kind):
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(entity_type, [{"entity_hash": _hash(1)}], kind=kind)
+    assert fake.load_calls[0]["tables"][0]["name"] == table_name(entity_type, kind)
+    # Always requested as an append -- never overwrite from this layer.
+    assert fake.load_calls[0]["tables"][0]["mode"] == "append"
+
+
+def test_register_unknown_type_or_kind_raises_before_load():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ValueError):
+        cap.register("polypeptide", [{"x": 1}], kind="entity")
+    with pytest.raises(ValueError):
+        cap.register("gene", [{"x": 1}], kind="snapshot")
+    assert fake.load_calls == []
+
+
+def test_ingest_shards_dry_run_writes_nothing(tmp_path):
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000", "0001"]})
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    result = cap.ingest_shards(tmp_path, run_id="r1", dry_run=True)
+    assert result["dry_run"] is True
+    assert all(t["action"] == "would_ingest" for t in result["tables"])
+    # Genuinely read-only: no load(), no ledger lines.
+    assert fake.load_calls == []
+    assert _read_ledger(tmp_path) == []
+
+
+def test_ingest_shards_ledger_records_ingested_and_resume_skips(tmp_path):
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000", "0001"]})
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    first = cap.ingest_shards(tmp_path, run_id="r1")
+    assert all(t["action"] == "ingest" for t in first["tables"])
+    assert len(fake.load_calls) == 2
+
+    # Resume against the SAME run_id: every batch is now 'ingested' -> skipped,
+    # with no separate resume code path and no re-ingest.
+    fake2 = _FakeWriteCapability()
+    cap2 = ClearinghouseCapability(fake2)
+    second = cap2.ingest_shards(tmp_path, run_id="r1")
+    assert all(t["action"] == "skip" for t in second["tables"])
+    assert fake2.load_calls == []
+
+
+def test_ingest_shards_ignores_ledger_file_and_unknown_dirs(tmp_path):
+    _write_shard_tree(tmp_path, {"gene_entity": ["0000"]})
+    # A stray non-table directory must not be treated as a shard table.
+    (tmp_path / "not_a_table").mkdir()
+    (tmp_path / "not_a_table" / "0000.parquet").write_bytes(b"")
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    result = cap.ingest_shards(tmp_path, run_id="r1")
+    names = {t["name"] for t in result["tables"]}
+    assert names == {"gene_entity"}

@@ -7,7 +7,7 @@
   ],
   "status": "draft",
   "review_rounds": 1,
-  "confront_rounds": 1,
+  "confront_rounds": 2,
   "source_prompt": "Chris, 2026-09-24, /ai-jane d \u2014 'Extract koros-arc-store-v1 from the two KIND app PRDs and reconcile both against it'. This answers the STRUCTURAL question both app-design sessions put to him on 2026-09-23: extract the shared scaffold into its own PRD, or merge the two app PRDs. He chose extract.",
   "review_protocol": "Written in Draft Mode on 2026-09-24 as an EXTRACTION, not a fresh design. Chris edits fullprompt.md in place with (CSH ...) markers; /ai-design --review koros-arc-store-v1 diffs the working tree against draft_commit, classifies every hunk, propagates through body, stories, testing decisions and taskplan, re-derives Gotchas, and recommits with a fresh baseline. The ready gate refuses advance while review_rounds is 0.",
   "provenance_of_content": {
@@ -70,7 +70,7 @@
     "MEDIUM": 3,
     "LOW": 2,
     "terminal": "Q9 - what I could not decide and did not guess, now down to one item",
-    "highest_risk_entry": "Q10 - the split identity and delete, added by Chris's review round 1. IRREVERSIBLE, and the newest decision in the document, so the least tested. Confront round 2 (task-94a4bb21) attacks it.",
+    "highest_risk_entry": "Q10 - the split identity and delete, added by Chris's review round 1. IRREVERSIBLE and the newest decision in the document. Confront round 2 attacked it directly and returned precision gaps rather than design objections, which raises confidence in the shape without making it old.",
     "previous_highest": "Q4, the reference test double - still MEDIUM and still the only entry at medium confidence among the pre-review set.",
     "ordering_rule": "blast radius descending; Q-numbers are stable ids, not positions; Q9 (terminal) always sorts last"
   },
@@ -133,7 +133,29 @@
       "acceptance_criteria_count": 42,
       "adjudication_note": "Chris was not asked for a drop-list. Draft Mode does not block on an answer, every disposition is recorded above with its reasoning, and dropping any folded item is a one-line edit."
     },
-    "cap_note": "1 of 3 rounds used."
+    "cap_note": "2 of 3 rounds used. The third is held for a review round that changes an IRREVERSIBLE or MEDIUM decision.",
+    "round_2": {
+      "maestro_task_id": "task-94a4bb21",
+      "backend": "codex",
+      "machine": "h100",
+      "repo": "KBUtilLib",
+      "branch": "maestro/researcher/task-task-94a4bb21",
+      "artifact": "agent-io/confront/stall-report.md on that branch, 17868 bytes, well-formed. Copied to research/confront-round-2-stall-report.md.",
+      "attacked": "the POST-REVIEW document, including Chris's Q10 identity split and delete, which nothing had attacked before.",
+      "outcome": "30 binding stalls, 27 folded as S15-S44, 3 rejected.",
+      "character": "Almost none were design objections; they were PRECISION gaps -- exactly what a module whose guarantee is 'two implementations and two producers agree exactly' should be attacked for. Round 1 found holes; round 2 found imprecision. Both were worth the round trip.",
+      "two_folds_that_improved_the_design_rather_than_pinning_it": [
+        "S18: FLOATS ARE NOW REJECTED in significant_params. The adversary recommended specifying a float FORMAT. Pinning one does not stop 0.1+0.2, a JSON round-trip and another language's parser differing in the last bit while every producer believes it complies. Rejecting floats forces a producer with a float parameter to format it to a string itself, which is the precision decision that should not be made silently inside a hash function.",
+        "S43: unknown_kind became a SMALL INTEGER (0 known, 1 well-formed but unregistered, 2 malformed) rather than a boolean. Non-zero still means unknown so no existing rule changes, but a consumer can now tell a peer app's new kind from a producer bug. Round 1's S5 had conflated them."
+      ],
+      "rejected_on_evidence": [
+        "S31 constraining status transitions -- it would forbid the failed-to-ok retry the whole retry guarantee exists for.",
+        "S44 validating producer_version -- producers ship git SHAs and dates; a version this module cannot parse is still a version.",
+        "S29 rejecting payloads over 64KB -- THE REJECTION MATTERS: the write path fails soft, so a rejected write is logged and DROPPED, and a producer whose payload innocently grew would lose records silently. It warns and stores instead. A hard limit on a fail-soft path is a silent-data-loss generator."
+      ],
+      "acceptance_criteria_after": 76,
+      "adjudication_note": "Chris was not asked for a drop-list; he had already said to submit for review and then set ready, and Draft/Review Mode does not block on an answer. Every disposition is recorded here and in the S15-S44 block with its reasoning, and dropping any folded item is a one-line edit."
+    }
   },
   "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
   "review_history": [
@@ -180,5 +202,5 @@
       "propagated_to_other_prds": "NONE this round. H3's app-side consequence (both apps must offer a delete affordance and group/date re-runs) is recorded here and routed, not written into their documents -- Chris dispatches this PRD first and submits those separately, and their sessions are live."
     }
   ],
-  "acceptance_criteria_count": 51
+  "acceptance_criteria_count": 76
 }

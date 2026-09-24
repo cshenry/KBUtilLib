@@ -122,6 +122,20 @@ test double -- because those are new and have not been attacked.
 
 ## Revision Log
 
+**Round 1 (cont.) -- 2026-09-24 -- confront round 2 folded.** `task-94a4bb21`
+returned thirty stalls against the post-review document. Almost none were design
+objections; they were precision gaps, which is what a module whose guarantee is
+"two implementations agree exactly" should be attacked for. Twenty-seven folded
+as S15-S44, three rejected: constraining `status` transitions (it would forbid
+the `failed`-to-`ok` retry the guarantee exists for), validating
+`producer_version` (producers ship git SHAs and dates), and rejecting oversized
+payloads (a reject on a fail-soft write path is silent data loss -- it warns and
+stores instead). Two folds improved the design rather than pinning it:
+**floats are now rejected in `significant_params`**, because specifying a float
+format does not stop two producers disagreeing in the last bit while both
+believe they comply; and **`unknown_kind` became a small integer**, so a peer
+app's new kind is distinguishable from a producer bug.
+
 **Round 1 -- 2026-09-24 -- Chris's review. Three edits, one of which changed the
 identity model.** He answered all three items round 0 left in the
 could-not-decide list. Two closed cleanly: the KBDL object store IS reachable
@@ -723,6 +737,182 @@ speculative), and a hard performance budget on blob-opening (the contract suite
 asserts the count directly, which is stronger than a budget and does not need
 a threshold chosen without measurement).
 
+### Specifications forced by confront round 2 (S15-S44)
+
+Round 2 (`task-94a4bb21`) attacked the document Chris's review produced and
+returned **thirty** stalls. Almost none are design objections; they are
+**precision** gaps, which is the right thing to find in a module whose whole
+job is that two implementations and two producers agree exactly. Where an
+implementation could diverge and still pass its own tests, it is pinned here.
+Twenty-seven are folded; three are rejected with reasons.
+
+**S15 (error types).** One hierarchy, all in this module:
+`KorosArcStoreError` (base); `RunsRootResolutionError` (no runs root resolved);
+`RecordValidationError` (any rejected write, carrying a stable `code`);
+`RecordNotFound`; `ContractVersionMismatch(expected: int, found: int)`. Consumers
+catch these by name, so they are part of the interface, not an implementation
+detail.
+
+**S16 (`ArcProvenance` exact shape).** `run_id: str` and `created_at: str`
+required; `inputs: list`, `tool_versions: dict`, `compute_targets: list`
+required-but-may-be-empty; `run_name`, `created_by`, `init_provenance`,
+`fair_inputs_ref`, `offlimits_list_ref`, `non_overlap_statement`,
+`frame_novelty`, `trace_file`, `trace_format`, `project`, `role`, `leg_of`,
+`parent` all optional, `None` when absent; `raw: dict` for every key outside
+that set. `invalid_reason` is a **stable code**, not prose:
+`missing_run_id`, `missing_created_at`, `json_parse_error`, `file_absent`,
+`not_an_object`.
+
+**S17 (`AnalysisRecord` is frozen, with types).** `record_id: str`,
+`analysis_id: str`, `run_uid: str`, `kind: str`, `created_at: str`,
+`producer: str`, `producer_version: str`, `subject: str`,
+`status: Literal['ok','failed','partial']`, `artifacts: dict[str, str]`,
+`payload: dict | None`, `trust_tier: Literal['verified','homology','hypothesis','opinion']`,
+`provenance: dict`, `contract_version: int`, and the optional summary fields
+`subject_feature_count: int | None`, `method_count: int | None`,
+`consistency_overall: float | None`, `consistency_metric_version: str | None`,
+`ic_corpus_version: str | None`.
+
+**S18 (`canonical_json`, and this one is load-bearing).** The whole identity
+model rests on two producers deriving byte-identical input to one hash, so:
+RFC 8259, UTF-8, keys sorted lexicographically by code point,
+`separators=(',', ':')`, no whitespace, strings NFC-normalised, `NUL` is
+`U+0000`.
+
+**FLOAT VALUES IN `significant_params` ARE REJECTED**, which is a correction to
+the adversary's recommendation rather than an adoption of it. It proposed
+specifying a float format. Pinning one does not make the problem go away --
+`0.1 + 0.2`, a value that crossed a JSON round-trip, and a value read from a
+different language's parser can all differ in the last bit while every producer
+believes it is complying. Permitted value types are `str`, `int`, `bool`, `None`,
+and lists or dicts of those. A producer with a float parameter formats it to a
+string itself and is thereby forced to choose the precision that matters, which
+is the decision that should not be made silently in a hash function.
+
+**S19 (artifact URI forms, pinned).** Absolute POSIX path `^/`; `file://`
+accepted as `file://` or `file:///` on read and normalised to `file://` plus an
+absolute path on write; `obj://<object_id>` with `object_id` matching
+`^[A-Za-z0-9._-]+$`. Anything else raises `RecordValidationError` with code
+`bad_artifact_uri`.
+
+**S20 (where contract gating applies).** At `record_analysis`, on write. An app
+that wants to gate its own startup calls the helper directly -- that is the
+consumer's decision and this module does not make it for them.
+
+**S21 (fail-soft instrumentation, named so it can be asserted).** Logger
+`kbutillib.koros_arc_store`; every soft-failed write logs at WARNING with the
+prefix `koros_arc_store_write_soft_fail:`; the count is readable as
+`KorosArcStore.failed_write_count`. Without concrete names, G12's "somebody
+would have to look" is not even possible.
+
+**S22 (database path precedence).** Constructor `db_path`, else `$KBDL_RUN_DB`
+when set and non-empty, else `~/.kbdl/runs.sqlite`. A failure to create the
+parent directory is a WRITE failure and takes the soft-fail path; a read against
+an unopenable database still raises (S10).
+
+**S23 (`known_kinds`).** Constructor argument, `set[str] | None`, immutable for
+the store's lifetime, checked at `record_analysis` only.
+
+**S24 (delete is one transaction).** `BEGIN IMMEDIATE`; delete from
+`subject_detail` by `record_id`; delete from `runs` by `record_id`; `COMMIT`.
+Return `True` when the `runs` delete affected a row. Manual cascade rather than
+an FK pragma, so behaviour does not depend on a `PRAGMA foreign_keys` setting a
+caller might not have applied.
+
+**S25 (`latest_only` tie-break).** `created_at DESC`, then `updated_at DESC`,
+then `record_id DESC`. Two runs can share a timestamp and the answer must still
+be deterministic.
+
+**S26 (`provenance` value types).** `bridge_kind: str` required and drawn from
+the five permitted values; `metric: {name: str, value: int | float | str,
+units: str | None}`; `source: {db: str, accession: str} | None`.
+
+**S27 (contract-suite markers).** `@pytest.mark.not_applicable_for_fake`, and
+the parameterisation skips with the reason string `not_applicable_for_fake`. A
+bare `skip` is what "skipped silently" meant in S14.
+
+**S28 (slug case).** The slug is a case-**sensitive** string. On a
+case-insensitive filesystem, enumeration returns whatever directory names exist
+and no synthetic normalisation is applied. The module does not try to repair a
+filesystem's behaviour.
+
+**S29 (`payload` size) -- FOLDED WITH A CORRECTION that matters.** The
+adversary proposed rejecting a payload over 64KB. **Rejecting is wrong here:**
+the write path fails soft, so a rejected write is logged and dropped, and a
+producer that innocently grew its payload would lose records silently -- the
+exact failure G12 already warns about, newly triggerable by a size the producer
+cannot see. So: a payload over **64KB logs a WARNING naming the record and its
+size and is stored anyway.** The limit is a smell to surface, not a gate. The
+same reasoning applies to S30 (detail blobs): no cap, because the blob tier
+exists precisely to hold things that are large.
+
+**S31 (status transitions) -- REJECTED.** The adversary wanted to constrain
+which `status` values may replace which. A retry exists to turn a `failed` run
+into an `ok` one; constraining the transition would forbid the case the retry
+guarantee is for. Any status may replace any status on the same `record_id`.
+
+**S32 (timestamps).** ISO 8601 UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ` -- microsecond
+precision, literal `Z`, never an offset. The store generates `updated_at`;
+`created_at` comes from the producer and is validated against that format.
+
+**S33 (zero-arc projects).** A project with no `arcs/` directory and a project
+with an empty `arcs/` directory both enumerate as `arc_count == 0` and are
+deliberately indistinguishable -- nothing downstream has a reason to tell them
+apart, and inventing a flag would invite somebody to branch on it.
+
+**S34 (filter precedence).** `kind` and `analysis_id` combine conjunctively;
+`latest_only` applies **after** filtering; ordering as in S25.
+
+**S35 (`subject` is stored verbatim).** `lower(subject)` appears **only inside
+the hash derivation**. The stored value keeps its original case. A builder who
+lowercases the stored subject hands every consumer mangled identifiers, and the
+tests must catch it.
+
+**S36 (SQLite pragmas).** `journal_mode=WAL` at initialisation. The stated
+access pattern is a KBDL client writing while a dashboard reads, and the
+rollback journal blocks exactly that. The index from Q10 is created at
+initialisation too.
+
+**S37 (validation error codes).** Every rejection raises `RecordValidationError`
+with a stable `code`: `bad_status`, `bad_artifact_uri`, `missing_provenance`,
+`bad_bridge_kind`, `missing_run_uid`, `immutable_field_changed`,
+`bad_float_param`, `bad_timestamp`. Tests assert the code, never the message.
+
+**S38 (`read_detail` when there is no blob).** Returns `None` for a record that
+exists but has no detail -- a legitimate state, since `detail` is optional on
+write. Raises `RecordNotFound` when the `record_id` itself is unknown. The two
+cases are different and collapsing them hides a bug.
+
+**S39 (enumeration order).** Projects by `name`, arcs by `slug`, both
+lexicographic ascending. UI stability is worth one `ORDER BY`.
+
+**S40 (`read_arc` on invalid provenance).** Returns an `ArcRecord` with
+`valid=False` and an `invalid_reason`. Never `None`, never raises. This is the
+same rule enumeration already follows and there is no reason for the single-arc
+call to differ.
+
+**S41 (id-normalisation entry points).** The helper is applied to the app id
+where it becomes a Python module name or a SQL identifier. It is NOT applied to
+manifest filenames, CLI tokens or any record field -- see S12, which is the
+rejection this restates at the call site.
+
+**S42 (fixture filenames).** Under `tests/fixtures/koros_arc_store/`:
+`runs_tree/<project>/arcs/<arc>/PROVENANCE.json` for the valid, leg, and
+unparseable cases plus a project directory with no `arcs/`; `runs_db/` holding a
+seeded SQLite file; `subject_blobs/` holding at least one detail JSON.
+
+**S43 (malformed vs merely unregistered) -- ADOPTED, and it improves the
+design.** `unknown_kind` becomes a small integer rather than a boolean:
+`0` known, `1` well-formed but outside a supplied `known_kinds`, `2` malformed.
+Non-zero still means "unknown" for every existing rule, so nothing that was
+written against the flag changes, and a consumer can now tell a peer app's new
+kind from a producer bug. Round 1's S5 conflated them.
+
+**S44 (`producer_version`) -- REJECTED as a constraint.** Free-form string, no
+format validation. The adversary worried about rejecting a non-semver version;
+the answer is not to pick a format but to validate none. Producers include git
+SHAs and dates, and a version this module cannot parse is still a version.
+
 ## Testing Decisions
 
 A good test here tests **externally visible behaviour of the contract**, not the
@@ -1271,4 +1461,28 @@ tooling and it is why this PRD says so in three places rather than one.
 48. `delete_record` on an id that does not exist returns `False` and does not raise.
 49. Deleting one run of an analysis leaves the other run and its blob intact.
 50. `run_uid` is required: constructing or recording an `AnalysisRecord` without one is rejected rather than defaulted.
-51. The tests this plan adds pass, and no test that passed on the base commit fails on the branch.
+52. Exceptions are the named hierarchy: `KorosArcStoreError`, `RunsRootResolutionError`, `RecordValidationError` (carrying a stable `code`), `RecordNotFound`, `ContractVersionMismatch(expected, found)`.
+53. `invalid_reason` is one of the stable codes, not free prose.
+54. `canonical_json` sorts keys by code point, uses `(',', ':')`, emits no whitespace, and NFC-normalises strings.
+55. A float in `significant_params` is REJECTED with code `bad_float_param`; `str`, `int`, `bool`, `None` and containers of those are accepted.
+56. `file:///` and `file://` are both accepted and normalise to one stored form; an `obj://` id outside `^[A-Za-z0-9._-]+$` is rejected.
+57. Contract-version gating fires at `record_analysis`, not at read.
+58. A soft-failed write logs at WARNING on logger `kbutillib.koros_arc_store` with prefix `koros_arc_store_write_soft_fail:` and increments `failed_write_count`.
+59. `db_path` resolution order is constructor, then `$KBDL_RUN_DB` when non-empty, then `~/.kbdl/runs.sqlite`.
+60. `known_kinds` is a constructor argument, immutable for the store's lifetime, checked only at write.
+61. `delete_record` runs both deletes in one `BEGIN IMMEDIATE` transaction and does not depend on a foreign-key pragma.
+62. `latest_only` breaks ties by `updated_at DESC` then `record_id DESC`, deterministically.
+63. A payload over 64KB is STORED and logs a warning naming the record and its size; it is not rejected.
+64. Any `status` may replace any other on the same `record_id`, including `failed` to `ok`.
+65. Timestamps are `YYYY-MM-DDTHH:MM:SS.ffffffZ`; a `created_at` in another format is rejected with `bad_timestamp`.
+66. A project with no `arcs/` directory and one with an empty `arcs/` are both `arc_count == 0`.
+67. `kind` and `analysis_id` filters combine conjunctively and `latest_only` applies after them.
+68. `subject` is stored with its original case; only the hash derivation lowercases it.
+69. `journal_mode` is WAL after initialisation, and the `(analysis_id, created_at)` index is created at initialisation.
+70. Every rejection carries a stable `code` and the tests assert the code rather than the message.
+71. `read_detail` returns `None` for a record with no blob and raises `RecordNotFound` for an unknown `record_id`.
+72. `list_projects` orders by name and `list_arcs` by slug, lexicographic ascending.
+73. `read_arc` on an arc with unparseable provenance returns an `ArcRecord` with `valid=False`, never `None` and never raising.
+74. `unknown_kind` is `0` known, `1` well-formed but unregistered, `2` malformed, and every rule keyed on "unknown" treats non-zero as unknown.
+75. `producer_version` accepts any non-empty string with no format validation.
+76. The tests this plan adds pass, and no test that passed on the base commit fails on the branch.

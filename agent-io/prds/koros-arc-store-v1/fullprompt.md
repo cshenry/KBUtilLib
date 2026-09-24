@@ -122,6 +122,23 @@ test double -- because those are new and have not been attacked.
 
 ## Revision Log
 
+**Round 1 -- 2026-09-24 -- Chris's review. Three edits, one of which changed the
+identity model.** He answered all three items round 0 left in the
+could-not-decide list. Two closed cleanly: the KBDL object store IS reachable
+from the pod and always will be, and "official app in KOROS" means the apps
+show up **in** KIND rather than being contributed upstream. The third did not
+close -- it reversed a design property. **Re-runs must NOT collapse to one row;
+they must be dated, groupable, and deletable.** That made the single derived
+`record_id` untenable, so identity is now SPLIT: `analysis_id` (round 0's
+derivation, unchanged, now the grouping key) and `record_id` (per run, from
+`analysis_id` + a required `run_uid`). `delete_record` is added, the DDL gains
+two columns and an index, and the retry guarantee survives intact. See Q10.
+
+Also repaired two pieces of markdown-formatter corruption introduced on save,
+one of which had deleted the quotation marks from a quoted CAC line and thereby
+inverted its meaning. The document was rebuilt from `draft_commit` and the three
+edits reapplied, which is why this round's diff is readable.
+
 **Round 0 -- 2026-09-24 -- extraction.** Created by lifting the `p0a` / `p0b` /
 `p0c` tasks and their supporting design text out of
 `kind-annotation-results-explorer-v1`, at Chris's decision to extract rather
@@ -193,8 +210,10 @@ detail as a JSON blob, one per subject, opened by exactly one call.
 ### The `KorosArcStore` interface
 
 The single API both apps use. Its shape was negotiated between the two design
-sessions and is adopted here unchanged -- **the names are an agreement with a
-live PRD, not a preference.**
+sessions and is adopted here -- **the names are an agreement with a live PRD,
+not a preference.** Chris's round-1 review added to it, additively: re-runs of
+one analysis are distinct dated rows grouped by a shared `analysis_id`, and a
+run can be deleted. See Q10.
 
 ### The CAC helpers
 
@@ -222,6 +241,9 @@ the code may NOT do:
 - **An unknown record kind is stored, flagged and counted -- never refused, and
   never silently dropped.** Two apps write into one database; one app's new kind
   must not be able to stall the other's reader.
+- **A re-run never overwrites its predecessor.** History is kept by default and
+  removed only when somebody asks for it by `record_id`. The store forgets on
+  instruction, never as a side effect of somebody doing their work twice.
 
 ## User Stories
 
@@ -235,9 +257,18 @@ the code may NOT do:
 4. As that same client running outside any arc, I want to record the analysis
    anyway with a null project and arc, so that unattributed work is still
    captured rather than lost.
-5. As a producer re-running the same analysis, I want the second write to replace
-   the first rather than duplicate it, so that the database holds one row per
-   logical analysis.
+5. As a producer RETRYING a failed run, I want the second write to replace the
+   first rather than duplicate it, so that one run is one row however many
+   attempts it took.
+5a. As a scientist re-running an analysis a month later, I want the new run kept
+   ALONGSIDE the old one and dated, so that I can see what changed instead of
+   losing the earlier result.
+5b. As an app, I want every run of one logical analysis to share a stable
+   `analysis_id`, so that I can group re-runs in the interface without
+   re-deriving what "the same analysis" means.
+5c. As a scientist who has decided an old run is not useful, I want to delete it
+   from the database and have its detail blob go with it, so that curation is a
+   supported operation rather than something I do with sqlite3.
 6. As two different producers computing the same logical analysis, I want to
    derive the same `record_id` from a shared helper, so that "replace, never
    duplicate" is a real guarantee rather than a hope.
@@ -317,24 +348,37 @@ class KorosArcStore:
     list_projects() -> list[ProjectRecord]
     list_arcs(project: str) -> list[ArcRecord]
     read_arc(project: str, arc: str) -> ArcRecord
-    record_analysis(project, arc, record: AnalysisRecord) -> None
-    list_analyses(project, arc, kind: str | None = None) -> list[AnalysisRecord]
+    record_analysis(project, arc, record: AnalysisRecord,
+                    detail: dict | None = None) -> None
+    list_analyses(project, arc, kind: str | None = None,
+                  analysis_id: str | None = None,
+                  latest_only: bool = False) -> list[AnalysisRecord]
     read_detail(record_id: str) -> dict
+    delete_record(record_id: str) -> bool
 ```
 
-`AnalysisRecord` carries `record_id`, `kind` (namespaced, e.g.
-`kbdl.annotation`, `kbutillib.fba`), `created_at` (ISO8601 UTC), `producer`
-(tool + version), `subject`, `status` (`ok|failed|partial`), `artifacts` (named
-refs, never inlined data), `payload` (**the seam -- opaque here, never
-interpreted**), `trust_tier`, `provenance`, `contract_version`.
+`AnalysisRecord` carries `record_id` (this RUN), `analysis_id` (this ANALYSIS,
+shared by every re-run of it), `run_uid` (required, identifies one execution),
+`kind` (namespaced, e.g. `kbdl.annotation`, `kbutillib.fba`), `created_at`
+(ISO8601 UTC -- the run's date), `producer` (tool + version), `subject`,
+`status` (`ok|failed|partial`), `artifacts` (named refs, never inlined data),
+`payload` (**the seam -- opaque here, never interpreted**), `trust_tier`,
+`provenance`, `contract_version`, and the optional producer-supplied summary
+fields.
 
-These names were settled between the two design sessions on 2026-09-23. **A
-builder may not rename or restructure them**: a live PRD is written against
-them, and renaming breaks an agreement rather than a preference.
+The original six names were settled between the two design sessions on
+2026-09-23. **A builder may not rename or restructure them**: a live PRD is
+written against them, and renaming breaks an agreement rather than a preference.
+`delete_record`, the `detail` argument, and the two `list_analyses` filters are
+**additive** -- every call site written against the agreed interface stays
+correct -- and they exist because Chris's round-1 review required re-runs to
+survive and to be deletable (Q10).
 
 ### The two-tier schema
 
-`TABLE runs`: `record_id TEXT PRIMARY KEY`, `project TEXT NULL`,
+`TABLE runs`: `record_id TEXT PRIMARY KEY` (one row per RUN),
+`analysis_id TEXT NOT NULL` (shared by every re-run of one analysis),
+`run_uid TEXT NOT NULL`, `project TEXT NULL`,
 `arc_slug TEXT NULL` (both null means unattributed), `subject TEXT NOT NULL`,
 `kind TEXT NOT NULL`, `producer TEXT NOT NULL`, `producer_version TEXT NOT
 NULL`, `status TEXT NOT NULL`, `trust_tier TEXT NOT NULL`, `provenance TEXT NOT
@@ -344,29 +388,71 @@ NULL DEFAULT 0`, `created_at TEXT NOT NULL`, `updated_at TEXT NOT NULL`,
 `consistency_overall REAL NULL`, `consistency_metric_version TEXT NULL`,
 `ic_corpus_version TEXT NULL`.
 
+`INDEX` on `(analysis_id, created_at DESC)` -- "the runs of this analysis,
+newest first" is the query the grouped interface issues, and without the index
+it is a scan of the whole table.
+
 `TABLE subject_detail`: `record_id TEXT PRIMARY KEY`, `detail_json TEXT NOT
-NULL`. One row per subject. **This is the only place gene-level or
-reaction-level data lives**, and `read_detail` is the only call that opens it.
+NULL`. One row per RUN's subject detail, keyed by `record_id`, so two runs of
+one analysis hold two blobs and deleting one leaves the other. **This is the
+only place gene-level or reaction-level data lives**, and `read_detail` is the
+only call that opens it.
 `list_analyses` and every summary query must open none -- that boundary is
 visible in the API deliberately, rather than hidden inside an implementation.
 
 Engine: SQLite, path resolved from `KBDL_RUN_DB` if set, else
 `~/.kbdl/runs.sqlite`.
 
-### `record_id` derivation -- one helper, in this module
+### Identity: `analysis_id` groups, `record_id` is the run -- both from one helper here
 
 ```
-record_id = sha256( lower(kind) + NUL + lower(subject) + NUL
-                    + canonical_json(significant_params) ).hexdigest()
+analysis_id = sha256( lower(kind) + NUL + lower(subject) + NUL
+                      + canonical_json(significant_params) ).hexdigest()
+
+record_id   = sha256( analysis_id + NUL + run_uid ).hexdigest()
 ```
 
 `canonical_json` sorts keys and uses compact separators. Truncation to 32
 characters is **for display only, never for identity**. `significant_params` is
 supplied by the caller per kind, and each consumer PRD specifies its own.
 
-The helper lives here and nowhere else. Putting it in each producer reproduces
-the problem one level down: "re-recording the same id replaces" is a guarantee
-about nothing if two producers derive different ids for one logical analysis.
+**`analysis_id` is what round 0 called `record_id`** -- the derivation is
+unchanged. What changed is its job: it now **groups** every run of one logical
+analysis instead of collapsing them into a single row (Q10). `record_id` is the
+per-run primary key, and `run_uid` is required rather than defaulted, so that a
+producer has to decide what one of its runs is instead of discovering the answer
+from a row count.
+
+The consequence for idempotency is worth stating exactly, because it is easy to
+read the change as weakening the guarantee and it does not:
+
+- **A retry** of one run reuses its `run_uid`, derives the same `record_id`, and
+  **replaces** -- exactly as before.
+- **A re-run** is a new `run_uid`, a new `record_id`, and a new dated row that
+  shares an `analysis_id` with its predecessors.
+
+Both helpers live here and nowhere else. Putting either in each producer
+reproduces the problem one level down: "re-recording the same id replaces" is a
+guarantee about nothing if two producers derive different ids for one logical
+analysis, and "group the re-runs" is impossible if two producers group by
+different keys.
+
+### Deleting a run
+
+```
+delete_record(record_id) -> bool      # True when a row was removed
+```
+
+A **hard** delete of the `runs` row, cascading to its `subject_detail` blob. No
+tombstone. Chris's case is curation -- *"if you decide for example that an older
+run isn't useful"* -- not falsification, this is a per-user store, and a
+tombstone nobody reads is complexity in a store whose discipline is that it
+holds only what somebody will look at. The independent evidence that the work
+happened is the runs tree and `trace.jsonl`, neither of which this module can
+touch.
+
+Deleting a `record_id` that does not exist returns `False` and is not an error;
+a delete is a thing a person does twice by accident.
 
 ### `artifacts` URI vocabulary
 
@@ -374,6 +460,15 @@ Exactly three forms, and anything else is rejected: a bare absolute path,
 `file://`, or `obj://<object_id>` for the KBDL object store. Without a fixed
 vocabulary, the first arc carrying both apps' kinds leaves each holding refs it
 cannot resolve.
+
+**The KBDL object store IS reachable from the pod.** Chris, 2026-09-24:
+*"YES - it is and it always will be, so if that helps the design use it."* Round
+0 carried this as an open item and it is now closed. It changes nothing in THIS
+module -- the store validates the SHAPE of a ref and never resolves one, so
+`obj://` was always storable -- but it removes the reason both consumer apps
+were treating object-store artifacts as a degrade path. They can rely on it,
+and the "always will be" is what makes that safe to build on rather than a
+condition to re-check.
 
 ### `provenance` schema
 
@@ -520,12 +615,17 @@ registry of kinds inside this module is exactly the domain knowledge the
 module is forbidden to hold -- the same reason `significant_params` is
 caller-supplied.
 
-**S6 -- upsert semantics on `record_id`.** Overwrite every mutable field
+**S6 -- upsert semantics on `record_id`.** Note what an upsert now MEANS: after
+Q10 a matching `record_id` is a **retry of one run**, not a second run of the
+same analysis, because a re-run carries a different `run_uid` and lands as its
+own row. Overwrite every mutable field
 (`status`, `producer`, `producer_version`, `trust_tier`, `provenance`,
 `contract_version`, `artifacts`, `payload`, the summary columns, and the detail
 blob when one is supplied); **preserve the original `created_at`**; set
 `updated_at` to now, UTC. A re-record that supplies no `detail` leaves the
-existing blob in place rather than deleting it.
+existing blob in place rather than deleting it. `analysis_id` and `run_uid` are
+**immutable** -- they are what the id was derived from, so a write that changes
+either is a different record and must be rejected rather than silently applied.
 
 **S8 -- `artifacts` is `dict[str, str]`**, mapping a caller-chosen name to a
 URI. *The adversary's list-of-`{name, uri}`-pairs proposal is rejected:* the
@@ -659,6 +759,15 @@ The behaviours that must be covered, in both implementations where applicable:
   while `read_detail` opens exactly one.** This is the assertion most worth
   writing well, because violating it is invisible until the corpus is large.
 - A database that cannot be written not raising into the caller.
+- **Re-runs, grouping and delete (Q10), which is where a regression would be
+  quietest:** a second run of the same analysis with a new `run_uid` producing a
+  SECOND row rather than replacing the first; both rows sharing one
+  `analysis_id`; a retry with the SAME `run_uid` still replacing; `latest_only`
+  returning exactly one row per `analysis_id` and it being the newest by
+  `created_at`; `delete_record` removing the row AND its blob; `delete_record`
+  on an absent id returning `False` without raising; deleting one run of two
+  leaving the other and its blob intact; and a write attempting to change
+  `analysis_id` or `run_uid` on an existing `record_id` being rejected.
 - The underscore id form derived mechanically, never looked up.
 - A differing major `contract_version` hard-failing; a compatible difference
   warning and proceeding.
@@ -729,6 +838,63 @@ defensive.
 summary statistics are precomputed is the part most likely to need a second
 pass, and it is why the version-stamp columns exist.
 
+### Q10. Do re-runs of the same analysis collapse to one row? -- DECIDED: NO. Re-runs are distinct, dated rows, grouped by a stable `analysis_id`, and a run can be DELETED. Chris, 2026-09-24.
+
+**Blast radius:** IRREVERSIBLE
+**Why:** Chris, reviewing round 0, verbatim: *"No - it should not, so runs should
+be dated and ideally grouped in the interace, and critically you should be able
+to 'delete' a run from the database if you decide for example that an older run
+isn't useful. The apps should offer this kind of delete interface and the
+underlying data API should support it."*
+
+Round 0 carried this as an unresolved item and it is now the design's identity
+model, so it is an Open Question rather than a note. **The single derived
+`record_id` could not satisfy it:** it hashed kind + subject +
+`significant_params`, so a second run of an identical analysis produced the same
+id and replaced its predecessor. That is precisely the collapse Chris rejects.
+
+**The identity is therefore SPLIT, and the split is the whole of this entry:**
+
+- **`analysis_id`** -- `sha256(lower(kind) + NUL + lower(subject) + NUL +
+  canonical_json(significant_params))`. This is round 0's derivation, unchanged
+  and still produced by ONE shared helper. It is now the **grouping** key: every
+  run of the same logical analysis shares it, which is what lets an app group
+  re-runs in the interface.
+- **`record_id`** -- `sha256(analysis_id + NUL + run_uid)`, the primary key, one
+  row per RUN. `run_uid` is **required** and identifies one execution.
+
+This preserves every guarantee that was negotiated with the twin session while
+delivering what Chris asked for. Re-recording the same `record_id` still
+replaces rather than duplicates -- that is now a **retry** of one run, which is
+what the guarantee was always for. A producer that mints `run_uid` once at run
+start and reuses it on retry gets idempotency; one that mints a fresh id per
+attempt gets a row per attempt, visibly and by its own choice.
+
+Runs are dated by the `created_at` column that already existed, and an index on
+`(analysis_id, created_at DESC)` makes "the runs of this analysis, newest first"
+one query.
+
+**Delete is a first-class operation, not a cleanup script.** `delete_record`
+removes the row and cascades to its detail blob. It is a **hard** delete with no
+tombstone: this is a per-user curation store, Chris's case is "an older run
+isn't useful", and a tombstone nobody reads would be complexity added to a store
+whose whole discipline is that it holds only what somebody will look at. The
+independent evidence that work happened is the runs tree and `trace.jsonl`,
+neither of which this module can touch.
+
+**If you disagree:** reverting to collapse-on-rerun means dropping `run_uid` and
+`analysis_id` from the DDL and the record, removing `delete_record` from the
+interface, the fake and the contract suite, and deleting acceptance criteria
+43-49. It also means telling both consumer apps that the delete affordance Chris
+asked them for has no API under it. The grouping half could be kept without the
+delete half; the reverse is not true, because deleting one of two identical rows
+is meaningless when there is only ever one.
+**Confidence:** high on the decision, which is Chris's own words. Medium on
+making `run_uid` **required** rather than defaulting to a fresh UUID: required
+forces every producer to decide what a run is, and a default would quietly make
+every retry a new row. Required is the noisier and more honest choice, and it is
+cheap to relax.
+
 ### Q4. Should this PRD ship a reference test double, or should each app write its own fake? -- DECIDED: ship one, from this module, with a contract suite both implementations must pass. NEW IN THIS EXTRACTION.
 
 **Blast radius:** MEDIUM
@@ -764,7 +930,7 @@ in the same repo.
 continuation and saying so in both PRDs) is the part that depends on somebody
 reading it.
 
-### Q6. Should this PRD be registered `ready` on the strength of the review its content already carries? -- DECIDED: register at `draft` and recommend `ready` to Chris; do not self-advance.
+### Q6. Should this PRD be registered `ready` on the strength of the review its content already carries? -- DECIDED: no; held at `draft` until Chris pressed. RESOLVED 2026-09-24: he reviewed, edited, and pressed.
 
 **Blast radius:** MEDIUM
 **Why:** The material is unusually well-reviewed for a new document -- it has
@@ -774,12 +940,13 @@ fixed all three, and one Chris review round in its parent. But `review_rounds`
 is a property of a document, and this document is new. The gate exists so that
 nobody dispatches a PRD Chris has not read, and self-advancing on inherited
 provenance is precisely the reasoning that makes a gate stop meaning anything.
-**If you disagree:** the consequence of holding at `draft` is real and worth
-naming -- work that was dispatchable yesterday is not dispatchable today, and
-stays that way until Chris presses. That is a cost this decision accepts, not
-one it hides.
-**Confidence:** high on the process; the cost is the uncomfortable part, not
-the reasoning.
+**If you disagree:** the consequence of holding at `draft` was real and is worth
+keeping on the record -- work that was dispatchable on the 23rd was not
+dispatchable on the 24th, and stayed that way until Chris read the document.
+The wait cost about eleven hours and bought a review that reversed the identity
+model (Q10), which is a defect that would otherwise have been found by a builder
+or, worse, by a scientist who lost a re-run.
+**Confidence:** high, and now evidenced rather than argued.
 
 ### Q7. Do the CAC conformance helpers belong in this module at all, or in each app? -- DECIDED: here.
 
@@ -807,27 +974,16 @@ prompt.
 
 ### Q9. What I could not decide and did not guess.
 
-- **Whether the KBDL object store is reachable from the kbhub pod.** The runs
-  tree is (Chris, 2026-09-23, directly asserted). The object store was never
-  checked. It matters here only through the `obj://<object_id>` artifact form:
-  the vocabulary is fixed regardless, but whether such a ref resolves on a pod
-  is unknown, and artifact resolution keeps a degrade path in both consumers.
 - **The CAC's own unfilled `<fill:>` seams** in the id-normalisation helper and
   the contract-version gate mechanics. `p0c` implements the documented
   behaviour; the remaining detail will be settled by reading FJ's or genKnown's
-  `interop.py`, not by reading the CAC.
-- **Whether "official app in KOROS" means code contributed upstream into
-  `koros`/`king`, or our repo conforming to the CAC.** This is open for both
-  consumer apps and Chris has not answered it. It does not bind THIS module --
-  the consume-only interlock means this module never contributes upstream under
-  either reading -- but if the answer is "upstream", both apps' final tasks are
-  replaced by a cross-team contribution process, and this module would become
-  the thing offered rather than the thing conformed with.
-- **Whether re-runs should collapse to one row.** `record_id` is derived from
-  the kind, subject and significant params, so a re-run of an identical analysis
-  replaces its predecessor and the history is lost. The parent PRD flagged the
-  counter-argument (re-runs are themselves interesting) and did not resolve it.
-  Carried forward unresolved rather than quietly settled by extraction.
+  `interop.py`, not by reading the CAC. Tracked as dev 1275 -- see S11, where
+  this stopped being abstract.
+- **Nothing else.** The two items round 0 listed here were both answered by
+  Chris on 2026-09-24 and have moved into the body: the KBDL object store IS
+  reachable from the pod and always will be (his words), and "official app in
+  KOROS" means it shows up as an app **in** KIND, not contributed upstream --
+  see Q3 and the note below it.
 
 ## Gotchas and Unintuitive Consequences
 
@@ -860,7 +1016,10 @@ and also means the file outlives the session that created it. Nobody will be
 told this is happening.
 
 **G5. Changing the `significant_params` list for a kind silently re-ids every
-future run of it.** Old rows keep their old ids, new rows get new ones, and the
+future run of it** -- and after Q10 it does something worse than fork identity:
+it forks the GROUPING. Old runs keep the old `analysis_id`, new ones get
+another, and the interface shows what is really one analysis as two unrelated
+groups with no error anywhere. Old rows keep their old ids, new rows get new ones, and the
 two populations coexist as different analyses with no error anywhere. Adding
 `bakta_db` to the annotation params was correct; doing it *after* records exist
 would fork the identity space.
@@ -902,6 +1061,23 @@ The dashboard is simply empty, which is indistinguishable from "no work has been
 done" -- the same confusion the runs-root rule refuses to create. The warning log
 and the in-process counter (S-free) are the only signal, and nothing reads them
 today.
+
+**G13. Deleting a run can leave a precomputed summary stale, and nothing
+recomputes it.** The summary columns and any stored trust floor were computed
+when the record was written, from a population that included the deleted run. An
+arc-level figure that summarised three runs still says so after one is deleted.
+This is the cost of precomputing (G6) meeting the cost of deleting, and neither
+feature can see the other: the store computes no summaries, so it cannot
+recompute them either. A consumer that shows an aggregate after a delete must
+either recompute it itself or say when it was computed.
+
+**G14. A delete is unrecoverable and leaves no trace in this store.** No
+tombstone, by decision (Q10). The runs tree and `trace.jsonl` remain independent
+evidence that the work happened, but nothing in the run database will say a row
+was ever there -- so "the dashboard used to show four runs and now shows three"
+has no explanation inside the system. That is the right trade for a per-user
+curation store and the wrong one to inherit silently if this database ever
+becomes shared.
 
 **G11. `list_analyses` opening a blob would be invisible until the corpus is
 large.** Nothing fails; the query simply gets slower in proportion to data
@@ -976,7 +1152,24 @@ is attributed above rather than presented as fresh work.
 - **Backfilling the 26 existing arcs.** Not deferred -- not possible. See G10.
 - **Contributing anything upstream into the five KING/KOROS repos.** The
   consume-only interlock holds by construction: this module imports nothing from
-  them and writes nothing to them.
+  them and writes nothing to them. **Chris settled the reading on 2026-09-24:**
+  *"I want it to show up as an app in KIND."* That is registration, not
+  contribution -- the apps conform to the CAC and declare themselves; no code of
+  ours lands in `king`, `koros`, `semcat`, `lakehouse-explorer` or
+  `narrative-connector`. This closes the question for all three PRDs.
+- **Registering anything with KIND.** He asked, in the same edit, whether this
+  involves a deploy step. It does, and it is one file: KING loads `*.json` from
+  its plugins directory **at request time**, so a manifest with `"type":"app"`
+  dropped there registers an app with no KING restart and no KING code change
+  (`king_backend/plugins.py`; `docs/APP_INTEGRATION.md:91`; the directory
+  resolves `$KING_PLUGINS_DIR` -> `<king checkout>/plugins/` -> the bundled
+  `_plugins`, at `king_backend/config.py:117-127`). **That step belongs to the
+  two consumer apps, not to this module** -- a library registers nothing. Two
+  things found while checking it are recorded as **dev 1294** rather than fixed
+  here, because they are defects in the app PRDs: both of them write the
+  manifest to `~/kind-apps/plugins/`, a path that appears NOWHERE in the stack,
+  and `plugins.py::_load()` swallows every error, so a misplaced or malformed
+  manifest means the app simply never appears, with no message anywhere.
 
 ## Further Notes
 
@@ -1045,8 +1238,8 @@ tooling and it is why this PRD says so in three places rather than one.
 15. `runs` carries a nullable `payload` column holding the record's own opaque payload; the module never interprets it.
 16. The summary columns are populated only from optional fields supplied on `AnalysisRecord`; the module computes none of them, and a record omitting them stores NULL.
 17. `list_analyses` and every summary query open NO detail blob; `read_detail` opens exactly one. Asserted directly, against both implementations.
-18. `record_id` is derived by one shared helper such that two producers recording the same logical analysis produce the same id.
-19. Truncation of `record_id` is available for display and is never used for identity.
+18. `analysis_id` is derived by one shared helper such that two producers recording the same logical analysis produce the same `analysis_id`.
+19. Truncation of either id is available for display and is never used for identity.
 20. `artifacts` is a mapping of name to URI; a value outside {absolute path, `file://`, `obj://<object_id>`} is rejected; `file:///` is accepted on read and normalised on write.
 21. `status` outside {`ok`, `failed`, `partial`} is rejected, including case variants.
 22. A record at a tier other than `verified` with an empty `provenance` is rejected.
@@ -1057,7 +1250,7 @@ tooling and it is why this PRD says so in three places rather than one.
 27. When `known_kinds` is supplied, a well-formed kind outside it also sets `unknown_kind = 1` and is still stored and counted.
 28. The module contains no hardcoded list of record kinds -- verifiable by grep for `kbdl.` and `kbutillib.` literals outside tests and docstrings.
 29. A record with null `project` and `arc_slug` is stored and reads back as unattributed.
-30. Re-recording an existing `record_id` replaces rather than duplicates, preserves the original `created_at`, and advances `updated_at`.
+30. Re-recording an existing `record_id` (a RETRY -- same `run_uid`) replaces rather than duplicates, preserves the original `created_at`, and advances `updated_at`.
 31. A re-record supplying no `detail` leaves the existing blob in place.
 32. `contract_version` is handled as an integer everywhere; no semver string appears in the code or its tests.
 33. A differing `contract_version` hard-fails with an error naming both versions, and no minor/warn-and-proceed branch is implemented.
@@ -1069,4 +1262,13 @@ tooling and it is why this PRD says so in three places rather than one.
 39. The fake enforces the same validation rules as the real store and derives `record_id` by importing the shared helper, not by reimplementing it.
 40. The contract suite runs parameterised over both the real store and the fake in one run; assertions that apply only to the real store are marked not-applicable for the fake explicitly rather than skipped silently.
 41. Fixtures live under `tests/fixtures/koros_arc_store/` in `runs_tree/`, `runs_db/` and `subject_blobs/`, and no test makes a network call.
-42. The tests this plan adds pass, and no test that passed on the base commit fails on the branch.
+42. A write that changes `analysis_id` or `run_uid` on an existing `record_id` is rejected rather than applied.
+43. A second run of the same analysis with a new `run_uid` produces a SECOND row; the first is not replaced.
+44. Both rows share one `analysis_id`, and `list_analyses(analysis_id=...)` returns both.
+45. `list_analyses(latest_only=True)` returns exactly one row per `analysis_id`, and it is the newest by `created_at`.
+46. An index on `(analysis_id, created_at)` exists, verifiable in the schema.
+47. `delete_record` removes the `runs` row AND its `subject_detail` blob, and returns `True`.
+48. `delete_record` on an id that does not exist returns `False` and does not raise.
+49. Deleting one run of an analysis leaves the other run and its blob intact.
+50. `run_uid` is required: constructing or recording an `AnalysisRecord` without one is rejected rather than defaulted.
+51. The tests this plan adds pass, and no test that passed on the base commit fails on the branch.

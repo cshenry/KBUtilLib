@@ -6,7 +6,7 @@
     "KBUtilLib"
   ],
   "status": "draft",
-  "review_rounds": 0,
+  "review_rounds": 1,
   "confront_rounds": 1,
   "source_prompt": "Chris, 2026-09-24, /ai-jane d \u2014 'Extract koros-arc-store-v1 from the two KIND app PRDs and reconcile both against it'. This answers the STRUCTURAL question both app-design sessions put to him on 2026-09-23: extract the shared scaffold into its own PRD, or merge the two app PRDs. He chose extract.",
   "review_protocol": "Written in Draft Mode on 2026-09-24 as an EXTRACTION, not a fresh design. Chris edits fullprompt.md in place with (CSH ...) markers; /ai-design --review koros-arc-store-v1 diffs the working tree against draft_commit, classifies every hunk, propagates through body, stories, testing decisions and taskplan, re-derives Gotchas, and recommits with a fresh baseline. The ready gate refuses advance while review_rounds is 0.",
@@ -66,12 +66,13 @@
   },
   "build_order": "koros-arc-store-v1 (p0a -> p0b -> p0c -> p0d, strictly sequential, all KBUtilLib) lands on main FIRST. Then the two apps are independent of each other, with two caveats: KBUtilLib is both this module's repo and the model-analysis app's repo, so that app cannot start while this builds (dev 1032 one-branch-per-repo); and both apps touch KBDLJobRunningPrototype, needing separate repo slots.",
   "open_questions_summary": {
-    "IRREVERSIBLE": 3,
+    "IRREVERSIBLE": 4,
     "MEDIUM": 3,
     "LOW": 2,
-    "terminal": "Q9 \u2014 what I could not decide and did not guess",
-    "highest_risk_entry": "Q4 \u2014 the reference test double. It is the only genuinely NEW decision in the document, it is at MEDIUM blast radius, and it is the only entry at medium confidence. Everything at IRREVERSIBLE is inherited and has been attacked; this has not.",
-    "ordering_rule": "blast radius descending; Q-numbers are stable ids, not positions"
+    "terminal": "Q9 - what I could not decide and did not guess, now down to one item",
+    "highest_risk_entry": "Q10 - the split identity and delete, added by Chris's review round 1. IRREVERSIBLE, and the newest decision in the document, so the least tested. Confront round 2 (task-94a4bb21) attacks it.",
+    "previous_highest": "Q4, the reference test double - still MEDIUM and still the only entry at medium confidence among the pre-review set.",
+    "ordering_rule": "blast radius descending; Q-numbers are stable ids, not positions; Q9 (terminal) always sorts last"
   },
   "could_not_decide": [
     "Whether the KBDL object store is reachable from the kbhub pod. Bears on this module only through the obj://<object_id> artifact form: the vocabulary is fixed regardless, but whether such a ref resolves on a pod is unverified.",
@@ -134,5 +135,50 @@
     },
     "cap_note": "1 of 3 rounds used."
   },
-  "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e"
+  "draft_commit": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
+  "review_history": [
+    {
+      "round": 1,
+      "date": "2026-09-24",
+      "reviewer": "chris",
+      "instruction": "I reviewed the extraction PRD and it looks good. I made minor edits. Integrate those, submit for review, create a task plan, then set this PRD to ready. I will dispatch this PRD FIRST, THEN I will submit the two specific APP PRDs.",
+      "raw_diff": "369 changed lines across fullprompt.md -- but normalising away markdown-formatter reflow reduced that to 3 substantive edits and 2 corruptions. All three edits are CSH-marked and all three are in the terminal could-not-decide list (Q9).",
+      "method": "Rebuilt fullprompt.md from draft_commit 0f6d3889 and reapplied the three edits, rather than editing the reflowed file. That restores the semantic line breaks the formatter destroyed AND repairs both corruptions for free. Same approach the annotation PRD took after the formatter damaged it twice.",
+      "hunks": [
+        {
+          "id": "H1",
+          "location": "Q9 bullet 1 -- KBDL object store reachability",
+          "category": "question-answered",
+          "chris": "YES - it is and it always will be, so if that helps the design use it.",
+          "disposition": "Folded into the artifacts URI vocabulary section and removed from could-not-decide. Changes NOTHING in this module -- the store validates the SHAPE of a ref and never resolves one -- but it removes the reason both consumer apps treated object-store artifacts as a degrade path. Said so plainly rather than manufacturing a change here to look responsive."
+        },
+        {
+          "id": "H2",
+          "location": "Q9 bullet 3 -- official app in KOROS",
+          "category": "question-answered",
+          "chris": "I want it to show up as an app in KIND. I assume this involves some kind of deploy step that registers the apps in KIND?",
+          "disposition": "Folded into Out of Scope: registration, not upstream contribution, which confirms the design as built and CLOSES this question for all three PRDs. His return question answered from source, not asserted: KING loads *.json from its plugins dir AT REQUEST TIME, so a manifest with type app registers with no restart and no KING code change (king_backend/plugins.py; APP_INTEGRATION.md:91; config.py:117-127). That step belongs to the two apps, not to this library.",
+          "side_finding": "Checking it surfaced dev 1294: BOTH app PRDs write their manifest to ~/kind-apps/plugins/, which appears NOWHERE in the king stack, and plugins.py _load() swallows every error so the failure is silent. Filed, not fixed -- it belongs to two PRDs Chris submits after this one."
+        },
+        {
+          "id": "H3",
+          "location": "Q9 bullet 4 -- whether re-runs collapse to one row",
+          "category": "question-answered escalating to decision-changed",
+          "blast_radius": "IRREVERSIBLE",
+          "chris": "No - it should not, so runs should be dated and ideally grouped in the interace, and critically you should be able to delete a run from the database if you decide for example that an older run isn't useful. The apps should offer this kind of delete interface and the underlying data API should support it.",
+          "disposition": "THE ROUND'S REAL WORK. Identity SPLIT into analysis_id (round 0's derivation, unchanged, now the GROUPING key) and record_id (per run, sha256(analysis_id + NUL + run_uid), run_uid required). delete_record(record_id) -> bool added, hard, cascading to the blob. DDL gains analysis_id, run_uid and an index on (analysis_id, created_at DESC). Propagated through: the Solution interface and honesty spine, user stories 5/5a/5b/5c, Implementation Decisions (interface, DDL, a rewritten identity section, a new delete section), S6 (an upsert is now a RETRY, and the two ids are immutable), Testing Decisions, gotchas G5/G13/G14, acceptance criteria 42-51, and the p0b and p0d task prompts and success criteria. New entry Q10, IRREVERSIBLE, sorted up with Q1-Q3.",
+          "why_the_retry_guarantee_survives": "Re-recording the same record_id still replaces -- that is now a RETRY of one run, which is what the guarantee was always for. A RE-RUN is a different run_uid, hence a different record_id, hence a new dated row. Nothing negotiated with the twin session was broken; every addition is additive and existing call sites stay correct."
+        }
+      ],
+      "corruption_repaired": [
+        "Research Report finding 6: the spaces around 'contains' were eaten, welding two code spans together.",
+        "TWO sites quoting the CAC: the quotation marks around the string zero were deleted. THAT ONE INVERTS THE MEANING -- the CAC's point is that genKnown emits the STRING and must change to the INTEGER. Uncaught, the S11 evidence would have read as already-correct. Third time this formatter has damaged a PRD on save."
+      ],
+      "not_acted_on": [
+        "The CAC fill-seam item in Q9 -- Chris did not touch it and it remains genuinely open. Kept, now cross-referenced to dev 1275."
+      ],
+      "propagated_to_other_prds": "NONE this round. H3's app-side consequence (both apps must offer a delete affordance and group/date re-runs) is recorded here and routed, not written into their documents -- Chris dispatches this PRD first and submits those separately, and their sessions are live."
+    }
+  ],
+  "acceptance_criteria_count": 51
 }

@@ -14,8 +14,9 @@ is how a parser becomes the reason a future feature is impossible.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 # ── Stable invalid-reason codes (never prose) ──────────────────────────────
 MISSING_RUN_ID = "missing_run_id"
@@ -163,3 +164,127 @@ def parse_provenance(data: Any) -> tuple[Optional[ArcProvenance], Optional[str]]
         raw=raw,
     )
     return provenance, None
+
+
+# ── Run-database record types (Responsibility 2) ───────────────────────────────
+
+# The four trust tiers, DECREASING in trust. The enum value orders them so a
+# caller can ask for "homology-or-better" by comparison. Lower value == MORE
+# trusted. These four are the only tiers; the schema stores the string form.
+VERIFIED = "verified"
+HOMOLOGY = "homology"
+HYPOTHESIS = "hypothesis"
+OPINION = "opinion"
+
+
+class TrustTier(IntEnum):
+    """The four trust tiers, ordered so a lower value is MORE trusted.
+
+    The ordering exists so callers can ask for "homology-or-better": a record
+    at ``TrustTier.VERIFIED`` or ``TrustTier.HOMOLOGY`` is homology-or-better
+    because their integer values are ``<= TrustTier.HOMOLOGY``. Do NOT confuse
+    the integer with a quality score — it is a rank, most-trusted first.
+    """
+
+    VERIFIED = 0
+    HOMOLOGY = 1
+    HYPOTHESIS = 2
+    OPINION = 3
+
+    @classmethod
+    def from_str(cls, value: str) -> "TrustTier":
+        """Parse a tier string to a :class:`TrustTier` or raise ``ValueError``."""
+        try:
+            return _TIER_BY_NAME[value]
+        except KeyError as exc:
+            raise ValueError(f"unknown trust tier: {value!r}") from exc
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.name.lower()
+
+
+_TIER_BY_NAME: Dict[str, TrustTier] = {t.name.lower(): t for t in TrustTier}
+
+# The set of valid tier strings, for structural validation.
+TRUST_TIERS = frozenset(_TIER_BY_NAME)
+
+# The valid status values (S9): lower-case, exact.
+STATUS_VALUES = frozenset({"ok", "failed", "partial"})
+
+# The five permitted bridge kinds (S26). These name the BRIDGE, not the tier.
+BRIDGE_KINDS = frozenset(
+    {
+        "id_join",
+        "sequence_homolog",
+        "profile_hmm",
+        "model_prediction",
+        "user_assertion",
+    }
+)
+
+
+def floor_tier(tiers: Iterable[str]) -> str:
+    """Return the FLOOR — the least-trusted — of the contributing tiers.
+
+    A record summarising several findings carries the floor: the least-trusted
+    contributing tier. Adding a lower-tier finding LOWERS the floor; adding a
+    higher-tier one NEVER raises it. This is the ONLY way a summary tier is
+    produced — there is deliberately no API that raises a tier (anti-laundering).
+
+    Raises ``ValueError`` on an empty input (a summary of nothing has no floor)
+    or on an unrecognised tier string.
+    """
+    ranks = [TrustTier.from_str(t) for t in tiers]
+    if not ranks:
+        raise ValueError("floor_tier requires at least one contributing tier")
+    # Least trusted == highest integer rank.
+    return str(max(ranks))
+
+
+@dataclass
+class AnalysisRecord:
+    """One run of one analysis, as stored in the run database.
+
+    The shape is FROZEN and shared with the peer app being written against this
+    module (S17); do not add, remove or retype fields casually.
+
+    ``record_id``, ``analysis_id`` and ``run_uid`` are the split identity:
+    ``analysis_id`` groups every run of one logical analysis, ``record_id`` is
+    the per-run primary key, and ``run_uid`` distinguishes a re-run (new uid →
+    new row) from a retry (same uid → replace). All three are producer-supplied;
+    the module's shared helpers derive ``analysis_id`` and ``record_id`` so two
+    producers agree.
+
+    ``payload`` is the record's own OPAQUE payload — small, never interpreted
+    here. The large gene-/reaction-level detail goes to the separate blob tier
+    via the ``detail`` argument of :meth:`record_analysis`, never onto this
+    record.
+
+    The summary columns (``subject_feature_count`` … ``ic_corpus_version``) are
+    OPTIONAL and PRODUCER-SUPPLIED; this module computes none of them.
+    """
+
+    record_id: str
+    analysis_id: str
+    run_uid: str
+    kind: str
+    created_at: str
+    producer: str
+    producer_version: str
+    subject: str
+    status: str
+    artifacts: Dict[str, str]
+    payload: Optional[Dict[str, Any]]
+    trust_tier: str
+    provenance: Dict[str, Any]
+    contract_version: int
+    project: Optional[str] = None
+    arc: Optional[str] = None
+    subject_feature_count: Optional[int] = None
+    method_count: Optional[int] = None
+    consistency_overall: Optional[float] = None
+    consistency_metric_version: Optional[str] = None
+    ic_corpus_version: Optional[str] = None
+    # 0 known, 1 well-formed but outside a supplied known_kinds, 2 malformed
+    # (S43). Populated by the store on write and on read-back.
+    unknown_kind: int = 0

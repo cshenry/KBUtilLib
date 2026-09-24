@@ -13,16 +13,18 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .exceptions import RecordNotFound, RunsRootResolutionError
 from .records import (
     FILE_ABSENT,
     JSON_PARSE_ERROR,
+    AnalysisRecord,
     ArcRecord,
     ProjectRecord,
     parse_provenance,
 )
+from .run_db import RunDatabase
 
 PROVENANCE_FILENAME = "PROVENANCE.json"
 
@@ -70,17 +72,42 @@ def resolve_runs_root(runs_root: Union[str, Path, None] = None) -> Path:
 
 
 class KorosArcStore:
-    """Read-only enumeration of the KOROS runs tree.
+    """Read-only enumeration of the KOROS runs tree AND the run database.
 
-    Projects are immediate subdirectories of the runs root. Arcs are the
-    subdirectories of ``<project>/arcs/``. Enumeration is defensive: a project
-    with no ``arcs/`` directory reports zero arcs, and an arc with an absent or
-    unparseable ``PROVENANCE.json`` yields a record marked invalid — never a
-    raise. One bad arc must not break the listing.
+    Two responsibilities live behind one class because both consumer apps hold a
+    single ``KorosArcStore`` and reach both surfaces through it:
+
+      * **Runs-tree enumeration** (read-only): projects are immediate
+        subdirectories of the runs root; arcs are the subdirectories of
+        ``<project>/arcs/``. Enumeration is defensive — a project with no
+        ``arcs/`` directory reports zero arcs, and an arc with an absent or
+        unparseable ``PROVENANCE.json`` yields a record marked invalid rather
+        than raising. One bad arc must not break the listing.
+      * **The run database** (read + write): a per-user SQLite store both apps
+        share. Its record methods (:meth:`record_analysis`, :meth:`list_analyses`,
+        :meth:`read_detail`, :meth:`delete_record`) are delegated to a
+        :class:`~kbutillib.koros_arc_store.run_db.RunDatabase` so the two-tier
+        schema and the fail-soft write path stay in one place.
+
+    ``runs_root`` is resolved eagerly, so a caller in an environment with no KOROS
+    workspace gets a :class:`RunsRootResolutionError` from the constructor — the
+    honest "misconfigured" signal, distinct from "empty". The run database is a
+    separate resource resolved from ``db_path``/``$KBDL_RUN_DB``; it is not
+    touched until a record method is called.
     """
 
-    def __init__(self, runs_root: Union[str, Path, None] = None) -> None:
+    def __init__(
+        self,
+        runs_root: Union[str, Path, None] = None,
+        *,
+        db_path: Union[str, Path, None] = None,
+        known_kinds: Optional[set] = None,
+        db_enabled: Optional[bool] = None,
+    ) -> None:
         self.runs_root: Path = resolve_runs_root(runs_root)
+        self._db = RunDatabase(
+            db_path=db_path, known_kinds=known_kinds, enabled=db_enabled
+        )
 
     # ── projects ───────────────────────────────────────────────────────────
 
@@ -202,3 +229,46 @@ class KorosArcStore:
             valid=True,
             invalid_reason=None,
         )
+
+    # ── run database (delegated to RunDatabase) ────────────────────────────────
+
+    @property
+    def db(self) -> RunDatabase:
+        """The underlying run database, exposed for path/counter introspection."""
+        return self._db
+
+    @property
+    def failed_write_count(self) -> int:
+        """Count of soft-failed writes on the run database (S21)."""
+        return self._db.failed_write_count
+
+    def record_analysis(
+        self,
+        project: Optional[str],
+        arc: Optional[str],
+        record: AnalysisRecord,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record one run into the run database — see :meth:`RunDatabase.record_analysis`."""
+        self._db.record_analysis(project, arc, record, detail)
+
+    def list_analyses(
+        self,
+        project: Optional[str],
+        arc: Optional[str],
+        kind: Optional[str] = None,
+        analysis_id: Optional[str] = None,
+        latest_only: bool = False,
+    ) -> List[AnalysisRecord]:
+        """List run records — see :meth:`RunDatabase.list_analyses`. Opens no blob."""
+        return self._db.list_analyses(
+            project, arc, kind=kind, analysis_id=analysis_id, latest_only=latest_only
+        )
+
+    def read_detail(self, record_id: str) -> Optional[Dict[str, Any]]:
+        """Open the one detail blob for *record_id* — see :meth:`RunDatabase.read_detail`."""
+        return self._db.read_detail(record_id)
+
+    def delete_record(self, record_id: str) -> bool:
+        """Hard-delete a run and its blob — see :meth:`RunDatabase.delete_record`."""
+        return self._db.delete_record(record_id)

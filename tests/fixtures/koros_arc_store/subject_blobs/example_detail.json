@@ -1,0 +1,8 @@
+{
+  "schema": "example.detail.v1",
+  "subject": "subject-A",
+  "items": [
+    {"id": "item-1", "value": "alpha"},
+    {"id": "item-2", "value": "beta"}
+  ]
+}

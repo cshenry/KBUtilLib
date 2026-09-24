@@ -9,7 +9,7 @@
   "status": "ready",
   "review_rounds": 2,
   "confront_rounds": 3,
-  "draft_commit": "fb9556d3d707f39b57f6956c27cf35627313ba17",
+  "draft_commit": "7ab3a934ced1e26b3827185c7d92318d91ee48cd",
   "review_protocol": "Written single-pass in Draft Mode on 2026-09-23. Chris edits fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; /ai-design --review kind-model-analysis-explorer-v1 diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through body, stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to ready until review_rounds >= 1.",
   "hard_external_dependency": {
     "module": "kbutillib.koros_arc_store, plus kbutillib.koros_arc_store_testing (FakeKorosArcStore) and the CAC helpers",
@@ -306,6 +306,10 @@
     {
       "superseded": "a758fb19d7a839e1b9a30c70ed0eed5b94ea2d44",
       "reason": "review round 2 folded (run_uid/analysis_id contract break, p6 delete affordance, manifest path fix) -- baseline advanced so the next --review does not read my propagation as Chris edits"
+    },
+    {
+      "superseded": "fb9556d3d707f39b57f6956c27cf35627313ba17",
+      "reason": "confront round 3 folded (S16-S22, T1-T4) -- baseline advanced so the next --review does not read my propagation as Chris edits"
     }
   ],
   "reconciliation_discharged_2026_09_24": {

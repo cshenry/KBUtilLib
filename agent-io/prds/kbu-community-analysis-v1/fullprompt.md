@@ -23,13 +23,42 @@ What changed, and why each matters here:
 - **`57e1504` added `close_member_drains`**, and it is the one that changes results rather
   than merely unbreaking them. See Q5 — it is a new decision this PRD now has to make.
 
-**There is no community Escher visualization in MSCommunity.** This was checked directly
-rather than assumed: `mscommviz.py` is byte-identical between `b5f37c4b` and `2dcff16`;
-`grep -ri escher` over the whole repository returns nothing on `main`, nothing on the only
-other branch (`gpu`, last touched 2026-06-11 and eleven commits behind), and nothing on
-`freiburgermsu/MSCommunity`, whose only two branches are `main` and the already-merged
-`fix/member-biomass-drains`. Q4's per-member projection therefore stands unchanged, not
-because it was re-argued but because the alternative does not exist to adopt.
+**The community Escher map exists, in a separate repository, and it is what this PRD's
+visualization half should be built on.** `ModelSEED/editEscher` (package `escher_edit`, tip
+`6474698`, 2026-09-23 09:20) *generates* an Escher map from per-member exchange fluxes rather
+than editing a hand-drawn one. Its `build_map.py` is explicit that it "closes the gap the
+notebook left open".
+
+The layout it produces is the community figure: member reactions stacked in one central
+column with their midmarkers on a single axis; compounds only ever consumed in a left input
+column; compounds only ever produced in a right output column; and compounds consumed by one
+member and produced by another in two exchange lanes between them, placed level with the
+members that trade them. Members are ordered by connectivity — busiest in the middle of the
+column, quietest at the ends — every compound is collapsed to one node per block, and the
+canvas is aspect-capped so the figure keeps a usable shape however large the community gets.
+
+**The input format matches MSCommunity's cross-feeding output exactly, and this was checked
+rather than hoped.** `build_member_reactions` takes
+`{member: {compound: flux}}` documented as "negative = consumed, positive = excreted".
+MSCommunity's `interactions()` fills each member column of `cross_feeding_df` from that
+member's net flux on the metabolite and branches on `< Zero` for "metabolic consumption of a
+species from the environment" and `> Zero` for "metabolic donations" (`mscommviz.py:130-215`).
+Same convention, no sign flip. The adapter is a dict comprehension over the DataFrame's
+member columns.
+
+**`render_map_svg(..., html=True)` is a single call that writes both the finished SVG and an
+interactive HTML figure**, and it needs neither graphviz, nor a browser, nor the network.
+`escher_edit` depends on `beautifulsoup4` and `lxml`, with `shapely` and `pandas` as extras.
+That is a strictly lighter dependency footprint than the graphviz path this PRD had
+specified, which needed a Python package *and* a `dot` system binary *and* the ModelSEED
+biochemistry database — see Q7, where the graphviz renderer is now dropped.
+
+**There is no Escher code in MSCommunity itself** — checked on 2026-09-23 and worth recording
+so nobody looks there again: `mscommviz.py` is byte-identical between `b5f37c4b` and
+`2dcff16`, and `grep -ri escher` returns nothing on `main`, nothing on `gpu` (2026-06-11,
+eleven commits behind, no commits of its own), and nothing on `freiburgermsu/MSCommunity`.
+The two packages are complementary, not overlapping: MSCommunity computes the fluxes,
+`escher_edit` draws them.
 
 **MSCommunity has been extracted out of ModelSEEDpy, and the two copies have diverged.**
 `modelseedpy/community/mscommunity.py` (718 lines) still ships a class called `MSCommunity`
@@ -154,6 +183,17 @@ this design invents rather than follows.
 
 ## Revision Log
 
+- **Round 0.2 — 2026-09-24 (editEscher folded, NOT a review round).**
+  Chris supplied `ModelSEED/editEscher`, which is where the community Escher viz actually
+  lives. This rewrites the visualization half:
+  Q4 now generates a **community exchange map** through `escher_edit` as the primary view,
+  keeping the per-member pathway projection as the complementary second view; the
+  flag-not-question from round 0 is answered — he wanted the whole community at once.
+  Q7 changes from "what happens when graphviz is missing" to **dropping the graphviz
+  renderer entirely**, because `escher_edit` draws the same relationships better with no
+  system binary. Q6 now carries two GitHub-only dependencies.
+  `review_rounds` still **0**.
+
 - **Round 0.1 — 2026-09-23 (upstream refresh, NOT a review round).**
   Re-pinned MSCommunity from `b5f37c4b` to `2dcff16` after five commits landed the same day.
   Three fixed defects this design would have hit (float abundances raised `TypeError`;
@@ -236,20 +276,45 @@ result.trustworthy               # False when the LP was sub-optimal
 pred = kbu.community.predict_abundances(comm, media=media)   # does NOT mutate comm
 solo = kbu.community.test_member_growth(comm, media=media)   # solo vs interacting
 
-# DISPLAY
-table, exchanged = kbu.community.cross_feeding_table(comm, result)   # DataFrames, no graphviz
+# DISPLAY -- data, then the two figures
+table, exchanged = kbu.community.cross_feeding_table(comm, result)   # DataFrames
 g = kbu.community.cross_feeding_graph(comm, result)                  # networkx.DiGraph
-kbu.community.render_cross_feeding(comm, result, output_path="xfeed.svg")
+
+# the community exchange map: who trades what with whom, whole community at once
+kbu.community.render_community_map(comm, result, output_path="community.json")
+#   -> community.json  (portable Escher map)
+#      community.svg   (finished figure: member boxes, member colours, dashed cross-feeding)
+#      community.html  (interactive: hover an edge/compound/member to follow its exchanges)
+
+# several media as captioned blocks in ONE map, members keeping their colours across blocks
+kbu.community.render_community_map(comm, {"glucose": r1, "acetate": r2},
+                                   output_path="both_media.json")
+
+# the per-member pathway view: what one member's internal metabolism is doing in context
 kbu.community.render_member_map(comm, "iML1515", map="core", result=result,
                                 output_path="iML1515_in_community.html")
 ```
+
+**Two figures, answering two different questions.** This is the shape of the display half
+and it is worth stating plainly, because the two are easy to confuse:
+
+- `render_community_map` draws the **exchange** level — every member as a box, every
+  metabolite it consumes or excretes as a node, cross-feeding edges dashed, the whole
+  community in one picture. This is what you reach for first, and what you put in a paper.
+  It is *generated*: there is no map to find or draw by hand.
+- `render_member_map` draws the **pathway** level for one member — its internal fluxes, as
+  realized inside the community, projected onto an ordinary single-organism Escher map you
+  already have. This answers "what is member X actually doing", which the exchange map
+  cannot show because it carries no intracellular reactions at all.
 
 The module is a **deep module**: a short interface over a large amount of behavior.
 Behind `build_community` sits compartment renaming, biomass-reaction renumbering, abundance
 normalization and kinetic-package construction; behind `run_community_fba` sits solver
 selection, sub-optimality detection and per-member flux attribution; behind
-`render_member_map` sits the compartment-index projection that makes a community flux
-vector legible to a single-organism Escher map.
+`render_community_map` sits the DataFrame-to-`fluxes_by_member` adapter, compound-name
+resolution, member-colour stability across blocks, and a three-stage
+build/assemble/render pipeline; behind `render_member_map` sits the compartment-index
+projection that makes a community flux vector legible to a single-organism map.
 
 Three properties hold throughout:
 
@@ -300,10 +365,11 @@ is `False` with a `unavailable_reason` naming what is missing, exactly as
   cannot grow can be made to grow and I can see what was added.
 16. As a modeler, I want the cross-feeding exchange table as a DataFrame, so that I can
   filter, join and export it like any other result.
-17. As a modeler, I want a rendered cross-feeding network diagram, so that I can see at a
-  glance who feeds whom.
-18. As a modeler, I want the cross-feeding table even when graphviz is not installed, so
-  that a missing system binary costs me the picture and not the analysis.
+17. As a modeler, I want a generated community exchange map — every member as a box, every
+  compound it consumes or excretes as a node, cross-feeding edges dashed — so that I can see
+  the whole community's trade at a glance without drawing a map by hand.
+18. As a modeler, I want that map as an interactive page as well as a static figure, so that
+  I can hover a compound and follow which members produce and consume it.
 19. As a modeler, I want to view one member's fluxes *as realized inside the community* on
   a standard Escher map, so that I can use the maps I already have.
 20. As a modeler, I want that member view to be visibly labelled as a projection, so that I
@@ -331,7 +397,20 @@ is `False` with a `unavailable_reason` naming what is missing, exactly as
 29. As a modeler, I want solo member growth to be measured correctly even on an
     abundance-bound community, so that "grows alone" and "grows in the community" remain
     comparable instead of one of them silently reading zero.
-30. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
+30. As a modeler, I want to draw several media as captioned blocks in one map, so that I can
+  compare conditions side by side in a single figure.
+31. As a modeler, I want each member to keep the same colour across every block and every
+  map in a series, so that I can read one member across conditions.
+32. As a modeler, I want to colour members by taxonomic group with a legend, so that a
+  forty-member community reads as phyla rather than as forty indistinguishable boxes.
+33. As a modeler, I want compound nodes labelled with real names rather than ModelSEED ids,
+  so that the figure is readable by someone who does not know the database.
+34. As a modeler, I want the adapter between the community fluxes and the map builder to be
+  a public method I can inspect, so that when a figure looks wrong I can check the numbers
+  going into it rather than guessing.
+35. As a modeler, I want to be warned rather than silently given an unreadable figure when
+  the community is too large for the layout to stay legible.
+36. As a maintainer, I want the MSCommunity dependency pinned to a tested commit SHA and
   drift reported as a warning, so that a divergent local checkout is visible without
     blocking anyone who is deliberately working ahead of the pin.
 
@@ -382,7 +461,21 @@ MSCommunity is declared in `dependencies.yaml`:
     path: "../MSCommunity"
     git: "https://github.com/ModelSEED/MSCommunity.git"
     commit: "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc"
+  escher_edit:
+    path: "../editEscher"
+    git: "https://github.com/ModelSEED/editEscher.git"
+    commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"
 ```
+
+Note the **directory and import names differ**: the repository is `editEscher`, the
+distribution is `escher-edit`, and the import is `escher_edit` under a `src/` layout. So
+`_import_escher_edit()` must add `<path>/src` to `sys.path`, not `<path>` — the one detail
+most likely to produce a confusing `ModuleNotFoundError` on a checkout that is present and
+correct. `_import_mscommunity()` adds the repo root, because MSCommunity is a flat layout.
+Both follow the same shape otherwise: try a plain import, fall back to the declared path,
+return `None` rather than raising, and warn on a commit mismatch without refusing.
+`escher_edit` needs **no provenance gate** — nothing else in the ecosystem exports that name,
+so the hazard Q3 guards against does not exist here.
 
 **The pin is a FLOOR, not a preference.** Three defects fixed on 2026-09-23 sit directly
 under this design: before `b14f50f`, `abundances={model_id: float}` raised `TypeError` in
@@ -426,7 +519,7 @@ ahead of the pin is never blocked.
 to patch `sys.modules` to simulate both the missing and the wrong-package cases.
 
 All MSCommunity symbols are imported **inside** `_import_mscommunity()`, never at module
-scope, so `import kbutillib` never requires MSCommunity, cobra or graphviz.
+scope, so `import kbutillib` never requires MSCommunity, cobra, networkx or `escher_edit`.
 
 ### The community handle
 
@@ -613,66 +706,114 @@ uses to pick a backend.
 cross_feeding_table(comm, result=None, media=None, flux_threshold=1.0,
                     ignore_mets=None) -> tuple[DataFrame, DataFrame]
 cross_feeding_graph(comm, result=None, min_abs_flux=1e-4) -> networkx.DiGraph
-render_cross_feeding(comm, result=None, output_path=..., export_format="svg",
-                     node_metabolites=True) -> Path
+fluxes_by_member(comm, result=None, min_abs_flux=0.0) -> dict[str, dict[str, float]]
+render_community_map(comm, result_or_results, output_path, *, min_abs_flux=0.0,
+                     skip_amino_acids=False, member_groups=None,
+                     member_legend=None, style=None, svg=True, html=True,
+                     map_name=None) -> CommunityMapArtifacts
 render_member_map(comm, member_id, map, output_path, result=None,
                   **escher_kwargs) -> Path
 ```
 
+#### The data methods
+
 `cross_feeding_table` returns MSCommunity's `(cross_feeding_df, exchanged_mets_df)` pair
-with `visualize=False`, so **the table is always obtainable without graphviz**.
-`msdb` is passed to upstream as the keyword `msdb_path=` (or `msdb=` for an already-loaded
-object) on the `interactions` call, alongside `visualize=False` — bound explicitly here
-because a positional call would break the moment upstream's signature moves. The confront
-round proposed an `MSCOMMUNITY_MSDB_PATH` environment-variable fallback for the case where
-the keyword is unsupported; that is **declined**, because upstream takes the keyword today
-and a speculative env-var path is untestable dead code that would hide a real signature
-break behind a silent fallback.
+with `visualize=False`. `msdb` is passed to upstream as the keyword `msdb_path=` (or `msdb=`
+for an already-loaded object), never positionally — a positional call breaks the moment
+upstream's signature moves. It is **not needed for the table**: upstream touches `msdb` only
+inside its `if visualize:` branch (`mscommviz.py:99-252`). The confront round proposed an
+`MSCOMMUNITY_MSDB_PATH` environment-variable fallback; **declined**, as untestable dead code
+that would hide a real signature break behind a silent fallback.
 
-`msdb` is threaded through but **not needed for the table**: upstream uses it only inside
-its `if visualize:` branch (`mscommviz.py:99-252`), so a caller with no ModelSEED
-biochemistry checkout can still get the DataFrames. It is resolved from
-`get_dependency_path("ModelSEEDDatabase")` when absent so that `render_cross_feeding`,
-which does need it, works without an argument.
+`cross_feeding_graph` builds a `networkx.DiGraph` from the cross-feeding DataFrame, one node
+per member plus an `Environment` node, one edge per donor→recipient metabolite carrying
+`metabolite`, `flux` and `abs_flux`. Edges below `min_abs_flux` are dropped. It exists
+because the external scan's clearest visualization finding is that a layer should emit a
+graph object and not only rendered files: a caller who wants Plotly, Cytoscape, their own
+layout, or simply an edge count should not have to go through a renderer to get one.
 
-`cross_feeding_graph` builds a `networkx.DiGraph` **from the cross-feeding DataFrame**,
-with one node per member plus one `Environment` node, and one edge per donor→recipient
-metabolite carrying `metabolite`, `flux` and `abs_flux` attributes. Edges below
-`min_abs_flux` are dropped.
-It exists because the external scan's clearest visualization finding is that a layer should
-emit a graph object and not only rendered files: a caller who wants Plotly, Cytoscape, their
-own layout, or simply to count edges should not have to go through graphviz to get one.
-It is about fifteen lines over data the table already produced, and it makes the
-graph-shaped question answerable with no system binary at all.
+`fluxes_by_member` is the **adapter**, and it is public because it is the seam between the
+two packages and the thing most likely to need inspecting when a figure looks wrong. It
+converts the cross-feeding DataFrame into `escher_edit`'s input shape,
+`{member: {compound_id: flux}}`. No sign flip is applied, and that is a checked fact rather
+than an assumption: `escher_edit.build_member_reactions` documents "negative = consumed,
+positive = excreted", and MSCommunity fills each member column from that member's net flux,
+branching on `< Zero` for consumption and `> Zero` for donation. The `Environment` column is
+dropped — `escher_edit` derives its own input and output columns from which members consume
+and produce each compound, so passing `Environment` as a member would draw the medium as an
+organism.
 
-`render_cross_feeding` is the graphviz path. When the `graphviz` Python package or the
-`dot` system binary is missing it raises `CommunityVisualizationError` naming which of the
-two is absent and how to install it — it does not silently produce nothing.
-The scan reports these layouts become unreadable past roughly 30–50 nodes; the method
-therefore emits a `logger.warning` naming the node count when the graph exceeds **40 nodes**
-— a fixed threshold, not a tunable — and points at `cross_feeding_graph` for a filterable
-alternative. It does not refuse to render, because 40 is guidance and the caller may know
-better than the guidance.
+#### `render_community_map` — the community exchange map
 
-`render_member_map` is the projection, and it is the one genuinely new piece of logic:
+This is the primary community figure and the one new integration in the PRD. It is a
+three-stage pipeline over `escher_edit`:
+
+1. **Per-condition member reactions.** For each result, `fluxes_by_member` then
+   `escher_edit.build_member_reactions(fbm, model_id=<condition label>,
+   compound_names=..., min_abs_flux=..., skip_names=..., skip_ids=...)`. Each member becomes
+   one net organism reaction: consumed compounds as reactants, excreted as products.
+2. **Assemble.** `escher_edit.build_escher_map(blocks, compound_names=..., map_name=...,
+   style=...)` returns the `[header, body]` Escher map. Passing `{label: result}` instead of
+   a single result produces **one captioned block per condition in one map** — which is how
+   a media comparison is drawn, and compounds are collapsed within a block and never across
+   blocks, so each condition keeps its own node set.
+3. **Render.** `escher_edit.render_map_svg(escher_map, out_path, dashed=True, layout=style,
+   html=html, member_colors=..., member_groups=..., member_legend=...)` writes the finished
+   SVG — member boxes, member colours, cross-feeding edges dashed — and, with `html=True`,
+   the interactive page beside it in the same call.
+
+**Compound display names come from `self.biochem`, not from the DataFrame.** This is a real
+gap rather than a preference: `interactions()` builds a `"Metabolites/Donor"` name column and
+then **drops it** before returning, so `cross_feeding_df` carries bare ModelSEED ids only.
+`escher_edit` wants `{compound_id: display_name}` for node labels and for matching
+`skip_names`. The module resolves them through the biochemistry sibling already on the
+`Impl`, and falls back to using the ids as their own names when biochem is unavailable — a
+map with `cpd00027` on it is worse than one saying `D-Glucose` and far better than no map.
+
+**Member colours are built once, across every condition, and reused.** `escher_edit`'s own
+documentation is explicit that a per-map default assigns palette slots from that map's own
+members, so a member missing from one condition would change every other member's colour.
+`render_community_map` therefore builds `escher_edit.palette.member_colors(all_member_ids,
+groups=member_groups)` once from `comm.member_ids` and passes the mapping to every render.
+
+`member_groups` accepts `{member: group}` or a callable, colours members by group with a
+legend, and is how a community is coloured by phylum. `escher_edit.palette.taxon_groups`
+reads groups off a taxonomy mapping or GTDB strings; this module forwards rather than
+wrapping it.
+
+`skip_amino_acids=True` forwards `escher_edit.filter_map.DEFAULT_SKIP_NAMES` to
+`build_member_reactions`, reproducing the reference figure's compound selection. It is off by
+default because silently hiding metabolites from a figure someone will interpret is not a
+default anyone should get without asking.
+
+Returns a `CommunityMapArtifacts` dataclass carrying `map_json`, `svg` and `html` paths (the
+last two `None` when not requested) plus `n_members`, `n_compounds` and `n_blocks` — counts
+a caller needs to judge whether the figure is readable, and which the acceptance criteria
+assert on.
+
+#### `render_member_map` — the per-member pathway view
+
+Unchanged from round 0, and retained deliberately: the community map carries no intracellular
+reactions at all, so it cannot answer "what is this member's metabolism doing". The
+projection:
 
 1. Take `member_id`, look up its community index `i` (1-based, from `member_ids`).
-2. From the result's flux series, select reactions whose compartment suffix is `c{i}` or
-  the shared `e0`, plus the member's `bio{n}` reaction.
+2. From the result's flux series, select reactions whose compartment suffix is `c{i}` or the
+   shared `e0`, plus the member's `bio{n}` reaction.
 3. Rewrite `_c{i}` → `_c0` in those reaction IDs, and map `bio{n}` → `bio1`.
 4. Hand the rewritten flux dict and the *member's source model* to
-  `self.escher.create_map_html2(model, map, output_path, flux=...)`.
+   `self.escher.create_map_html2(model, map, output_path, flux=...)`.
 
-Step 4 uses the **source single-species model**, not the community model, precisely because
-the Escher map was drawn against single-organism IDs. The community supplies the fluxes;
-the source model supplies the geometry.
-The generated HTML carries a banner naming the member, the community, the medium and the
-community growth rate, so a projection is never mistaken for a standalone simulation.
+Step 4 uses the **source single-species model**, not the community model, because the Escher
+map was drawn against single-organism IDs. The community supplies the fluxes; the source
+model supplies the geometry. The generated HTML carries a banner naming the member, the
+community, the medium and the community growth rate, so a projection is never mistaken for a
+standalone simulation.
 
-Exchange reactions are a deliberate edge case: `EX_` reactions live in the shared `e0`
-compartment and are **community-level**, not member-level. They are included in the
-projection with an explicit note in the banner, because a member's uptake is not separable
-from the community's on a shared extracellular compartment.
+`EX_` reactions are a deliberate edge case: they live in the shared `e0` compartment and are
+**community-level**, not member-level. They are included with an explicit note in the banner,
+because a member's uptake is not separable from the community's on a shared extracellular
+compartment.
 
 ### Calling into `mscommviz` safely
 
@@ -701,7 +842,8 @@ CLI and HTTP caller: `community.build_community`, `community.load_community`,
 `community.run_community_fba`, `community.predict_abundances`, `community.run_micom`,
 `community.test_member_growth`, `community.gapfill_community`,
 `community.cross_feeding_table`, `community.cross_feeding_graph`,
-`community.render_cross_feeding`, `community.render_member_map`.
+`community.fluxes_by_member`, `community.render_community_map`,
+`community.render_member_map`.
 These are `@capability`'s default `"<domain>.<fn.__name__>"`, so they follow from the method
 names rather than being a second thing to keep in sync.
 
@@ -716,7 +858,9 @@ resolved. `BackendUnavailableError` already subclasses `KBUtilLibError` and is t
 cheminformatics and thermo backends raise for exactly this condition.
 - `CommunitySolverError(KBUtilLibError)` — no QP solver for MICOM; the over-specification
 refusal; infeasibility where a solution was required.
-- `CommunityVisualizationError(KBUtilLibError)` — graphviz package or `dot` binary missing.
+- `CommunityVisualizationError(KBUtilLibError)` — a rendering dependency is missing
+  (`escher_edit` itself, or its `beautifulsoup4` / `lxml` requirements), or a map was built
+  with no drawable members.
 
 
 
@@ -751,6 +895,23 @@ cobra, and is required.
 - The facade property exists, is lazy, and is idempotent — extend the existing
 `tests/core/test_composition_smoke.py` rather than writing a new smoke test.
 
+**The adapter and the map assembly are the new testable surface, and both are testable
+without either package installed.** `fluxes_by_member` is a pure transformation of a
+DataFrame, so it is tested against a hand-written cross-feeding frame: member columns become
+`{compound: flux}` dicts with signs unchanged, the `Environment` column is dropped, zero
+entries are omitted, and a frame whose only non-zero column is `Environment` yields `{}`
+rather than a spurious member. That last case is the one that would otherwise draw the medium
+as an organism.
+
+`render_community_map` is tested by **faking `escher_edit`** rather than by rendering: a stub
+module records the calls, and the assertions are that `build_member_reactions` was called once
+per condition with the right `model_id`, that `build_escher_map` received blocks in
+`[(label, members), ...]` form when several results were passed and a bare member list when
+one was, that `member_colors` was built **once** from `comm.member_ids` and the same mapping
+was handed to every render, and that `render_map_svg` received `dashed=True` and the `html`
+flag as given. The colour-stability assertion is the one that catches a real, silent defect
+(see Gotchas) and cannot be caught by looking at a single figure.
+
 **Tier 2 — MSCommunity present (marked, skipped by default).** Guarded by a
 `pytest.mark.skipif` on `_import_mscommunity() is None`, following the existing
 `tests/modeling/test_predictive_thermo.py` pattern for dependency-gated tests.
@@ -765,6 +926,13 @@ This is the non-mutation guarantee and it is worth a real model to test.
 rather than raising.
 - `run_micom` on a GLPK-only environment raises `CommunitySolverError` naming the QP
 solvers.
+- **With `escher_edit` also present:** `render_community_map` on the two-member fixture writes
+a `map_json` that parses as a two-element `[header, body]` list whose `reactions` hold one entry
+per member, and — when `svg` / `html` are requested — produces files that exist and are
+non-empty. Assert on structure and on the returned `n_members` / `n_compounds` / `n_blocks`
+counts, **not on pixels**: a rendering test that asserts on SVG text breaks every time the
+upstream layout is tuned, and the layout is upstream's to tune.
+- Passing two results produces `n_blocks == 2` and a `text_labels` entry per condition label.
 
 **Prior art in the codebase.** `tests/modeling/test_ms_remote_solver_utils.py` for
 dependency-gated modeling tests, `tests/core/test_composition_smoke.py` for facade
@@ -832,28 +1000,37 @@ provenance test is inverted.
 **Confidence:** high on which is current; medium on whether ModelSEEDpy will eventually
 re-absorb it, which would make the gate wrong rather than merely unnecessary.
 
-### Q4. How is a community model displayed on an Escher map? — DECIDED: Per-member projection onto the member's own source model and an ordinary single-organism map.
-
+### Q4. How is a community model displayed on an Escher map? — DECIDED: Generate a community exchange map with `escher_edit`, and keep the per-member pathway projection as a second, complementary view.
 **Blast radius:** MEDIUM
-**Why:** Escher maps are keyed on reaction ID and every map KBUtilLib can reach is drawn
-against `_c0`/`_e0`. A community model uses `_c1.._cN` with a shared `_e0`. The three
-options were: project per member (chosen), generate a synthetic community map, or skip
-Escher and offer only the cross-feeding graph. Generating a community map means laying out
-N copies of a metabolic network and there is no existing map to build from; skipping Escher
-throws away the toolkit's main visualization asset for the one analysis that most needs it.
-The scan supports the choice on its own terms: it reports that layering members onto one
-Escher map "becomes confusing beyond two or three members" and that community models need
-per-member overlays. What it added, and what is now folded in, is that the layer should also
-emit a `networkx.DiGraph` (`cross_feeding_graph`) rather than only rendered files, and that
-cross-feeding layouts go unreadable past roughly 30–50 nodes.
-**If you disagree:** `render_member_map` and its pure-function projection helper are
-removed or replaced; user stories 19 and 20 go; the Tier-1 projection test — the only test
-that covers genuinely new logic — has nothing to test; and `kbu.escher` stops being a
-dependency of the new module, simplifying the facade property.
-`cross_feeding_graph` is separable and survives either way.
-**Confidence:** medium, raised from low by the scan on the *mechanism* (per-member overlay
-is what the field does) but unchanged on the *usability* — nobody has looked at one of
-these projections yet, which is what would settle it.
+**Why:** Round 0 decided per-member projection only, on the stated premise that no
+community-wide map existed to build from. **That premise was wrong** — it was true of
+MSCommunity, which was the only place checked, and false of the ModelSEED ecosystem:
+`ModelSEED/editEscher` generates exactly such a map from per-member exchange fluxes. Round 0
+flagged this as its one flag-not-question ("no artifact states what a modeler wants to SEE");
+Chris answered it by naming the repository, and the answer was the whole community at once.
+
+The two views are kept because they answer different questions and neither substitutes for
+the other. The community map is an **exchange** map: it has one net organism reaction per
+member and carries no intracellular reactions at all, so it cannot show what a member's
+metabolism is doing. The per-member projection is a **pathway** view on an ordinary
+single-organism map, and cannot show the community. Dropping either would leave a real
+question unanswerable.
+
+Ordering matters and is part of the decision: `render_community_map` is the primary view —
+the one a notebook reaches for first and the one that goes in a paper — and
+`render_member_map` is the follow-up once a member looks interesting.
+**If you disagree** and want only the community map: `render_member_map`, the
+`project_member_fluxes` pure function and its Tier-1 test go, `kbu.escher` stops being a
+constructor dependency of this module, and acceptance criteria 23-25 are removed — that is
+the cheaper half to cut, because the projection is the part nobody has yet looked at.
+If you want only the projection: `escher_edit` leaves `dependencies.yaml`, `render_community_map`
+and `fluxes_by_member` go with it, taskplan task `t3` shrinks to its round-0 form, and the
+PRD returns to having no answer for "show me the community".
+**Confidence:** high on the community map, which is now a concrete artifact with a documented
+API and a verified input match rather than a design guess. Medium on retaining the
+projection — it is cheap and complementary, but it remains the piece nobody has seen output
+from, and if it turns out to duplicate what the community map already tells people it is the
+first thing to cut.
 
 ### Q5. Do we close the member biomass drains? — DECIDED: Yes, exactly when the caller supplied abundances; `close_member_drains = comm.abundances_were_supplied`.
 **Blast radius:** MEDIUM
@@ -880,12 +1057,17 @@ satisfies it exactly. Medium on the *default* for a community built without abun
 where `False` is chosen only because there is no declared vector to bind and upstream's own
 default agrees.
 
-### Q6. Where does MSCommunity get declared as a dependency? — DECIDED: `dependencies.yaml`, not `pyproject.toml`.
+### Q6. Where do MSCommunity and editEscher get declared as dependencies? — DECIDED: `dependencies.yaml` for both, not `pyproject.toml`.
 
 **Blast radius:** LOW
-**Why:** MSCommunity has no PyPI release (`setup.py`, version 0.0.1). A `pyproject.toml`
-entry would have to be a git URL, which breaks `pip install KBUtilLib` for anyone without
-git credentials and pins a moving target. `dependencies.yaml` is the mechanism KBUtilLib
+**Why:** Neither has a PyPI release — MSCommunity is `setup.py` at 0.0.1, `escher_edit` is
+hatchling at 0.1.0 — so a `pyproject.toml` entry would have to be a git URL, which breaks
+`pip install KBUtilLib` for anyone without git credentials and pins a moving target.
+`escher_edit` is the easier of the two: it is a `src/`-layout package whose only required
+dependencies, `beautifulsoup4` and `lxml`, ARE on PyPI, so those two go in a normal
+`pyproject.toml` extra (`community`) while the package itself resolves through
+`dependencies.yaml`. Its `shapely` (labels) and `pandas` (mapping) extras are not needed by
+anything this module calls and are left out. `dependencies.yaml` is the mechanism KBUtilLib
 already uses for exactly this class of dependency — `modelseedpy`, `ModelSEEDDatabase`,
 `cobrakbase`, `cb_annotation_ontology_api` — and `get_dependency_path` already returns
 `None` rather than raising when the checkout is absent.
@@ -895,24 +1077,39 @@ a **tested commit SHA rather than a branch**. `dependencies.yaml` as used today 
 `_import_mscommunity()` logs a warning (never raises) when the resolved checkout's HEAD does
 not match it. Pinning without enforcing keeps a developer working on a newer MSCommunity from
 being blocked, while still making the drift visible.
-**If you disagree:** `pyproject.toml` gains an optional-extra group; `_import_mscommunity()`
-loses its `get_dependency_path` fallback branch and its Tier-1 test; and CI must install
-from git to exercise Tier 2.
+**If you disagree:** `pyproject.toml` gains git-URL entries; `_import_mscommunity()` and
+`_import_escher_edit()` lose their `get_dependency_path` fallback branches and their Tier-1
+tests; and CI must install from git to exercise Tier 2.
 **Confidence:** high — this follows an established repo pattern with a worked example in
 `domains/thermo/thermo_predictors/base.py`. The `commit` key is new to `dependencies.yaml`
 and no other entry carries one, so it must be additive: `DependencyManager._load_config`
 ignores unknown keys, which was checked, but nothing else in the repo reads it yet.
 
-### Q7. What happens when graphviz is missing? — DECIDED: The cross-feeding *table* still works; only rendering raises, and the error names which of package-or-binary is missing.
-
+### Q7. Do we keep MSCommunity's graphviz cross-feeding renderer? — DECIDED: No. `escher_edit` replaces it; `render_cross_feeding` is removed from the design.
 **Blast radius:** LOW
-**Why:** `graphviz` needs both a Python package and a `dot` system binary, and the binary is
-the one that is usually absent on a cluster. Splitting `cross_feeding_table` from
-`render_cross_feeding` means a missing system binary costs the picture and not the analysis.
-Upstream couples them: `interactions(visualize=True)` is the default path.
-**If you disagree:** the two methods merge back into one; user story 18 goes; and
-`CommunityVisualizationError` loses its reason to exist as a separate type.
-**Confidence:** high.
+**Why:** This entry previously asked what should happen when graphviz was missing. With
+`escher_edit` in the design that is the wrong question, because the graphviz renderer no
+longer earns its place: it draws *the same relationships* — who feeds whom, through which
+metabolites — in a worse layout, and it is the heaviest dependency in the PRD. It needs the
+`graphviz` Python package, the `dot` system binary, **and** a ModelSEED biochemistry checkout
+(`visual_interactions` asserts on `msdb or msdb_path`). `escher_edit` needs `beautifulsoup4`
+and `lxml`, no binary and no network, and produces a member-box figure plus an interactive
+page. Keeping both would mean maintaining two renderers of one question and specifying a
+fallback between them.
+Note this is a **removal Chris did not ask for** — he asked to add the Escher viz, not to
+drop the other one — so it is flagged here rather than made quietly. The data is unaffected:
+`cross_feeding_table` and `cross_feeding_graph` still return everything the graphviz figure
+was drawn from, and `comm.mscomm.interactions(visualize=True, msdb_path=...)` still works
+through the escape hatch for anyone who wants MSCommunity's native picture.
+**If you disagree:** `render_cross_feeding` comes back with its two-branch dependency probe
+(`graphviz` package vs `dot` binary) and its 40-node warning; `CommunityVisualizationError`
+regains its graphviz meaning alongside the `escher_edit` one; user stories 17 and 18 return;
+and the acceptance criteria covering both renderers are restored. One line in `taskplan.json`
+task `t3` and roughly thirty lines of module code.
+**Confidence:** high that `escher_edit` is the better figure and the lighter dependency.
+Medium on the removal being *wanted* — there may be existing MSCommunity-drawn figures in
+published or in-flight work that a reader expects to match, and that is a fact about Chris's
+own work rather than about the code, so it is his to correct.
 
 ### Q8. Which module does the community code live in? — DECIDED: `domains/modeling/ms_community_utils.py`, not a new `domains/community/`.
 
@@ -975,29 +1172,40 @@ science question this design does not answer.
 
 ### Q12. What I could not decide and did not guess
 
-- **Whether a projected member Escher view is useful in practice.** The mechanism is
-verified; the usability is asserted. Nobody has looked at one. This is the
-flag-not-question: no artifact I can read says what a modeler wants to see when they ask
-to "display a community model", and I assumed the answer is "one member at a time, on the
-map they already use". If the answer is "the whole community at once", Q4 is wrong and so
-is a third of the visualization work.
-- **Whether** `modelseedpy.community` **will be retired.** If ModelSEEDpy drops its copy, Q3's
-provenance gate becomes dead code; if ModelSEEDpy instead re-absorbs the standalone
-package, the gate becomes actively wrong. I have no artifact stating either intention —
-the two repos' git histories do not reference each other.
-- **Whether the scan's stripped API names hid a contradiction.** The returned file has
-every inline code span empty, so wherever it named a class or method the name is gone. Its
-*arguments* are followable and were folded; its *citations of specific APIs* could not be
-checked. I did not re-run the scan to recover them, because the findings that mattered —
-typed results, per-member overlays, validate-incompatible-combinations, pin a SHA — are
-carried by prose that survived intact.
-- **Whether** `load_community` **can recover** `member_ids` **from a saved community model in
-general.** It works when `model.notes["member_biomass_cpds"]` survives the save/load
-round trip through the KBase workspace. I could not verify that it does, because it
-depends on the workspace model serializer's treatment of `notes`, and I did not run one.
-The design raises rather than guessing when the key is absent, which makes the failure
-visible instead of wrong.
-
+- **Round 0's flag-not-question is ANSWERED and is recorded here so the answer is not lost.**
+  It read: no artifact I can read says what a modeler wants to SEE when they ask to display a
+  community model, and I assumed one member at a time. Chris answered on 2026-09-24 by naming
+  `ModelSEED/editEscher`, and the answer was the whole community at once. The assumption was
+  wrong, Q4 changed, and the visualization half was rewritten. Worth keeping visible: the
+  premise that made it wrong was searching only MSCommunity and concluding about the
+  ecosystem.
+- **Whether `render_member_map` still earns its place.** Now that the community map exists,
+  the per-member projection is retained on the argument that exchange-level and pathway-level
+  are different questions. That argument is mine, not anyone's stated need, and nobody has
+  looked at a projected member view yet. If it turns out to tell people nothing the community
+  map does not, it is the first thing to cut.
+- **What the figures actually look like.** No map has been generated. `escher_edit` claims it
+  reproduces its reference figure's 115 reactions with identical ids, metabolite sets and
+  coefficients on a generated layout, and the input-shape match to MSCommunity was verified by
+  reading both sides — but I ran nothing. Whether a KBase community's compound set produces a
+  legible figure at its own scale is unmeasured.
+- **Whether `escher_edit` has been used on a ModelSEED-id community.** Its reference data is an
+  ASV/metagenomic study keyed by its own compound ids with a names CSV beside it. Nothing says
+  it has been run against `cpd#####` ids with names from the ModelSEED biochemistry database.
+  The adapter makes that a naming question rather than a structural one, but it is untested.
+- **Whether `modelseedpy.community` will be retired.** If ModelSEEDpy drops its copy, Q3's
+  provenance gate becomes dead code; if ModelSEEDpy re-absorbs the standalone package, the gate
+  becomes actively wrong. No artifact states either intention and the two repos' histories do
+  not reference each other.
+- **Whether the external scan's stripped API names hid a contradiction.** Every inline code
+  span in `research/external-scan.md` is empty, so wherever it named a class or method the name
+  is gone. Its arguments are followable and were folded; its citations of specific APIs could
+  not be checked, and I did not re-run it.
+- **Whether `load_community` can recover `member_ids` in general.** The design now persists its
+  own `kbutil.community` notes key, which removes the dependence on upstream's
+  `member_biomass_cpds` — but whether either survives a round trip through the KBase workspace
+  serializer is unverified, because I did not run one. The design raises rather than guessing
+  when all three routes are absent, which makes the failure visible instead of wrong.
 
 
 ## Gotchas and Unintuitive Consequences
@@ -1056,14 +1264,47 @@ quadratic objective cannot be cloned into a non-QP interface. If an exception es
 between those two steps the model is left on the QP backend. Rare, but the model object is
 shared state.
 
-**The ModelSEED biochemistry database is needed to DRAW the cross-feeding graph, not to
-compute it.** `visual_interactions` asserts on `msdb or msdb_path` and then calls
-`msdb.compounds.get_by_id` for every cross-fed metabolite; `interactions()` touches `msdb`
-only inside its `if visualize:` branch. So the failure lands *after* the simulation has been
-paid for and *after* the table is already in hand — which is precisely why
-`cross_feeding_table` and `render_cross_feeding` are separate methods rather than one call
-with a flag. A reader who assumed the biochem DB was needed throughout would over-constrain
-every community workflow.
+**Nothing in this module calls MSCommunity's own rendering path, and that is deliberate.**
+`visual_interactions` asserts on `msdb or msdb_path` and calls `msdb.compounds.get_by_id` for
+every cross-fed metabolite, so a missing biochemistry checkout would fail *after* the
+simulation had been paid for and *after* the table was already in hand.
+`cross_feeding_table` passes `visualize=False`; the figures come from `escher_edit` instead
+(Q7). The biochemistry database is still used — for compound display names — but only where
+its absence degrades a label rather than losing a figure.
+
+**A re-save from Escher's own editor silently destroys the member boxes.** The builder records
+the fitted box geometry on each member reaction as `reaction["member_box"]`, which is not part
+of Escher's JSON schema. Escher ignores the extra key on load and **drops it when the map is
+saved back out of its editor**. A round-tripped map still renders, but every member box is
+re-sized to its label on the point where its two marker segments meet — so a figure
+regenerated after an editing session does not match the one before it, with nothing indicating
+why. Escher's schema has no per-segment style and no box node at all, which is why boxes,
+member colours and cross-feeding dashes live on the rendered SVG rather than in the map.
+
+**The map JSON alone is not the figure.** Following from the above: `map_json` is portable and
+loadable in Escher and carries none of the member identity. Anyone handed only the JSON sees
+an unstyled exchange network. The SVG and the HTML are the deliverables; the JSON is their
+input.
+
+**Past eight members the colour palette stops being categorical.** `escher_edit`'s first eight
+slots are a validated categorical palette; beyond that each further member takes the in-band
+colour furthest from those already used, and the package warns that "the labels have to carry
+identity". A twelve-member community therefore produces a figure where colour is suggestive
+rather than definitive. Grouping by taxon is the real answer at that size, because it
+collapses forty members onto a handful of slots — which is why `member_groups` is forwarded
+rather than hidden.
+
+**A member missing from one condition changes every other member's colour, unless the mapping
+is built once.** `escher_edit` assigns palette slots from the members present in the map it is
+drawing, so two per-condition maps drawn independently disagree about which member is blue.
+`render_community_map` builds the mapping once from `comm.member_ids` and reuses it — invisible
+when it works, and a subtly wrong figure series when it is forgotten.
+
+**The cross-feeding DataFrame has no compound names in it.** `interactions()` assembles a
+`"Metabolites/Donor"` display-name column and then drops it before returning, so anything
+drawing from `cross_feeding_df` gets bare `cpd#####` ids. A reader would reasonably assume the
+names travel with the table. They do not, which is why names are resolved separately through
+the biochemistry sibling.
 
 **MSCommunity prints. A lot.** It uses `icecream` with `includeContext=True` configured at
 import, plus bare `print()` calls in `build_from_species_models`, `set_abundance`,
@@ -1096,7 +1337,7 @@ burst of warnings about `modelseedpy`, `cobrakbase` and `ModelSEEDDatabase` as w
 Verified by reading `core/dependency_manager.py:111-141` and by constructing the facade
 locally, which printed only the existing optional-import summary line.
 
-**A** `render_member_map` **projection is not a simulation of that member.** It is the member's
+**A `render_member_map` projection is not a simulation of that member.** It is the member's
 slice of a community solution, which includes fluxes that only balance because *another*
 member is consuming or producing something. Running the source model alone on the same
 medium will generally give a different answer, and that difference is the interesting
@@ -1169,6 +1410,37 @@ the module-table convention the new module must join.
 - `src/kbutillib/domains/thermo/thermo_predictors/base.py` — `dependency_repo_path`, the
 worked example of best-effort `get_dependency_path` resolution.
 
+**editEscher / `escher_edit`** (github.com/ModelSEED/editEscher, tip `6474698`,
+2026-09-23 09:20; sole branch `main`):
+
+- `src/escher_edit/__init__.py` — the declared public surface, read as the contract.
+- `src/escher_edit/build_map.py` — `build_member_reactions` (the `{member: {compound: flux}}`
+  input shape and its "negative = consumed, positive = excreted" convention, the `model_id`
+  suffix, `min_abs_flux` / `skip_names` / `skip_ids` filtering, the returned
+  `{"name","bigg_id","fluxes"}` records); `build_escher_map` (blocks as
+  `[(label, members), ...]` or a bare member list, per-block compound collapsing, the
+  `[header, body]` return); `MapStyle` (the input/output column and two-lane geometry,
+  connectivity ordering, aspect capping, label and radius sizing);
+  `classify_compounds`, `cross_feeding_segments`, `member_box_rects`;
+  `parse_interaction_matrix` and `build_map_from_interactions` — read and found study-specific
+  (a wide `ASVMetaboliteInteractions.csv` with `<diet>-ABX_<day>` ids), hence the decision to
+  build on the lower-level pair instead.
+- `src/escher_edit/render.py` — `render_map_svg` (the one call that produces the finished SVG
+  and, with `html=True`, the interactive page) and `write_escher_svg`.
+- `src/escher_edit/interactive.py` — `write_interactive_html`; what the page does (hover
+  highlighting, tooltips, zoom/pan, pinned links) and that it fetches no scripts or fonts.
+- `src/escher_edit/palette.py` — `member_colors`, `group_palette`, `taxon_groups`, `UNGROUPED`;
+  the eight validated categorical slots and the documented degradation past them, and the
+  instruction to build one mapping for a whole series.
+- `src/escher_edit/svg_editor.py` — `EscherSVG_processing`, `EscherStyle`, `draw_member_boxes`,
+  `color_member_edges`, `dash_segments`, `draw_member_legend`.
+- `pyproject.toml` — hatchling, 0.1.0, no PyPI release, `src/` layout (hence the `sys.path`
+  detail in Q6); required `beautifulsoup4` + `lxml`; `shapely` / `pandas` extras not needed
+  here.
+- `EXTRACTION_NOTES.md` — "Map generation" and "What only the SVG can carry" read in full;
+  the source of the `member_box` round-trip hazard, the SVG-only styling constraint, and the
+  reproduction claim against the reference figure.
+
 **External scan** (`research/external-scan.md`, Maestro `task-c1a370b4`, h100/codex,
 verified from the task branch):
 
@@ -1202,10 +1474,14 @@ this repo.
 ## Out of Scope
 
 - **Dynamic / kinetic community FBA** (`MSKineticsFBA`) — deferred per Q9.
-- **Generating a community-wide Escher map.** No such map exists to build from, and laying
-one out is a project, not a task. Re-checked 2026-09-23 against MSCommunity tip `2dcff16`:
-the package ships no Escher code of any kind on any branch, so there is nothing upstream to
-adopt here either.
+- **Drawing Escher map LAYOUTS by hand, or writing a map builder of our own.** Generating the
+community exchange map is now IN scope (Q4) and is done by calling `escher_edit`; what stays
+out is reimplementing any part of it. `escher_edit`'s layout engine — connectivity ordering,
+arc geometry, aspect fitting, the SVG post-processing — is ~5,000 lines and is not ours to
+duplicate or fork. If it needs to change, it changes there.
+- **Editing existing hand-drawn Escher maps.** `escher_edit`'s other modules
+(`filter_map`, `clean_json`, `layout`, `reverse_reactions`, `svg_editor` used directly) exist
+for that and are not wrapped here; this PRD uses only the build + render path.
 - **Community model reconstruction from metagenomes.** Members come in as models; producing
 them is `kbu.recon`'s job.
 - **A KBase SDK app or narrative report.** This is a library module.
@@ -1268,8 +1544,8 @@ should fold it and revisit Q2 and Q4 specifically.
 18. `cross_feeding_table` calls `mscommviz.interactions` through `_unwrap` with `visualize=False`, passes the biochemistry database as the `msdb_path=` / `msdb=` keyword, and succeeds with no graphviz package and no `dot` binary present.
 19. No `MSCOMMUNITY_MSDB_PATH` environment-variable fallback exists.
 20. `cross_feeding_graph` returns a `networkx.DiGraph` with one node per member plus an `Environment` node, edges carrying `metabolite`, `flux` and `abs_flux`, a default `min_abs_flux` of 1e-4, and no dependency on graphviz.
-21. `render_cross_feeding` raises `CommunityVisualizationError` naming the graphviz PACKAGE when the import fails and naming the `dot` BINARY when `shutil.which("dot")` returns None, as two distinguishable messages.
-22. `render_cross_feeding` emits a `logger.warning` naming the node count when the graph exceeds 40 nodes, and still renders.
+21. No `render_cross_feeding` method exists and nothing in the module imports `graphviz` or calls `shutil.which("dot")`.
+22. `fluxes_by_member` converts a hand-written cross-feeding DataFrame to `{member: {compound: flux}}` with signs unchanged, drops the `Environment` column, omits zero entries, and returns `{}` for a member whose only non-zero value is in `Environment`.
 23. `project_member_fluxes(fluxes, member_index, member_biomass_id)` is a module-level pure function requiring no cobra import, and maps `{"rxn00001_c2": 5.0, "rxn00002_c1": 1.0, "EX_cpd00027_e0": -3.0, "bio3": 0.4}` with `member_index=2` and `member_biomass_id="bio3"` to exactly `{"rxn00001_c0": 5.0, "EX_cpd00027_e0": -3.0, "bio1": 0.4}`.
 24. `render_member_map` renders against the member's SOURCE single-species model, not the community model, and raises a named `ValueError` when `source_model_ids` has no entry for the member.
 25. The injected banner names the member id, the community id, the media id and the community growth rate, and contains the sentence stating that `EX_` exchange reactions are community-level and cannot be attributed to one member; `EX_` fluxes are included unmodified at community totals with no per-member attribution attempted.
@@ -1280,7 +1556,13 @@ should fold it and revisit Q2 and Q4 specifically.
 30. `domains/modeling/README.md` lists `ms_community_utils.py` in its module table and canonical imports.
 31. All Tier-1 tests pass with MSCommunity, cobra, graphviz and every solver absent; the Tier-2 file collects and skips cleanly in the same environment.
 32. `build_community` passes `close_member_drains=True` to `MSCommunity` exactly when `abundances` is not None, records it on the handle, and forwards `build_solver` / `final_solver` with upstream's defaults.
-33. `test_member_growth(interacting=False)` on a community built WITH abundances reopens every member's drain from `member.biomass_drain_bounds` inside the model context manager before delegating, and records in the returned DataFrame's `.attrs` that it did so.
-34. A test proves that solo growth measured through `test_member_growth` on an abundance-bound community is non-zero where the same call against `comm.mscomm.test_individual_species(interacting=False)` returns zero — the false-zero this guard exists to prevent.
-35. No test that passed on the base commit fails on the branch.
+33. `render_community_map` calls `escher_edit.build_member_reactions` once per condition with that condition's label as `model_id`, passes blocks to `build_escher_map` as `[(label, members), ...]` for several results and as a bare member list for one, and forwards `dashed=True` plus the requested `html` flag to `render_map_svg`.
+34. `render_community_map` builds `escher_edit.palette.member_colors` EXACTLY ONCE from `comm.member_ids` and passes the identical mapping to every render call, verified against a fake `escher_edit` that records its calls.
+35. `render_community_map` resolves compound display names through the biochemistry sibling and falls back to using compound ids as their own names when biochem is unavailable, without raising.
+36. `render_community_map` returns a `CommunityMapArtifacts` carrying `map_json`, `svg`, `html`, `n_members`, `n_compounds` and `n_blocks`, with `svg` / `html` set to None when not requested.
+37. `_import_escher_edit()` adds `<declared path>/src` to `sys.path` — not the repo root — and returns None rather than raising when the package is absent; it applies NO provenance gate.
+38. `dependencies.yaml` declares `escher_edit` with `path: "../editEscher"`, its git URL, and `commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"`; `pyproject.toml` gains a `community` extra carrying `beautifulsoup4` and `lxml` only.
+39. `test_member_growth(interacting=False)` on a community built WITH abundances reopens every member's drain from `member.biomass_drain_bounds` inside the model context manager before delegating, and records in the returned DataFrame's `.attrs` that it did so.
+40. A test proves that solo growth measured through `test_member_growth` on an abundance-bound community is non-zero where the same call against `comm.mscomm.test_individual_species(interacting=False)` returns zero — the false-zero this guard exists to prevent.
+41. No test that passed on the base commit fails on the branch.
 

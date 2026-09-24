@@ -30,10 +30,10 @@
     "MEDIUM": 4,
     "LOW": 6,
     "NONE": 0,
-    "terminal_could_not_decide": 4
+    "terminal_could_not_decide": 7
   },
-  "highest_risk_entry": "Q4 \u2014 how a community model is displayed on an Escher map. MEDIUM blast radius at medium confidence: the projection mechanism is verified from source, but nobody has ever looked at one of these member views, so whether it is what a modeler wants when they ask to 'display a community model' is answered by assertion.",
-  "flag_not_question": "No artifact states what a modeler wants to SEE when they ask to display a community model. Assumed: one member at a time, projected onto the single-organism Escher map they already use. If the answer is 'the whole community at once', Q4 is wrong and about a third of the visualization work changes.",
+  "highest_risk_entry": "Q7 -- dropping MSCommunity's graphviz cross-feeding renderer. LOW blast radius but it is a REMOVAL Chris did not ask for: he asked to add the Escher viz, not to drop the other one. High confidence that escher_edit is the better figure and lighter dependency; medium confidence the removal is WANTED, because existing or in-flight figures drawn with MSCommunity's renderer are a fact about his own work rather than about the code.",
+  "flag_not_question": "ANSWERED 2026-09-24. Round 0's flag was that no artifact said what a modeler wants to see when asked to display a community model; Chris answered by naming ModelSEED/editEscher and the answer was the whole community at once. The open unknown that replaces it is narrower: no map has actually been GENERATED, and escher_edit has no evidence of ever being run against ModelSEED cpd##### ids with names from the ModelSEED biochemistry database.",
   "external_research_task": "task-c1a370b4",
   "confront_task": "task-63133ccb",
   "out_of_scope": [
@@ -70,14 +70,7 @@
     "corrected_while_folding": "S6 recommended detecting QP capability via comm.mscomm._QP_CAPABLE. That attribute does not exist -- _QP_CAPABLE and _pick_qp_backend are MODULE-level names in mscommunity.mscommsim. Folded in the corrected form.",
     "free_critique_folded": "Capture upstream's stdout during delegate calls so the silent kinetic-constraint removal becomes CommunityFBAResult.kinetics_relaxed and .notes, and the print noise stops reaching the notebook."
   },
-  "acceptance_criteria_count": 35,
-  "upstream_pin": {
-    "repo": "https://github.com/ModelSEED/MSCommunity",
-    "commit": "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc",
-    "date": "2026-09-23",
-    "is_floor": true,
-    "why_floor": "Before b14f50f a float abundance raised TypeError in MSCommunity.__init__, and gapfill's solver string landed on MSGapfill's atp_gapfilling positional so any truthy value silently ran an ATP gapfill. Both are code paths this module uses."
-  },
+  "acceptance_criteria_count": 41,
   "upstream_refresh_2026_09_23": {
     "previous_pin": "b5f37c4b1a42175503cf52aebc5ab9c4cc330b1e",
     "commits": 5,
@@ -89,5 +82,49 @@
     "new_gotcha": "With close_member_drains=True, test_individual_species(interacting=False) reads zero growth for every member -- it disables the other members, zeroing bio1, and bio1 is then the only outlet for the tested member's biomass. Upstream fixed this for _solo_max_batch (mscommsim.py:886-888) and NOT for test_individual_species (mscommsim.py:387-400). test_member_growth therefore reopens the drains inside the model context manager.",
     "escher_finding": "NO community Escher visualization exists in MSCommunity. mscommviz.py is byte-identical across b5f37c4b..2dcff16; grep -ri escher returns nothing on main, nothing on the gpu branch (bb26f99, 2026-06-11, 11 commits behind, no commits of its own), and nothing on freiburgermsu/MSCommunity (branches: main bdc5316 and fix/member-biomass-drains 57e1504, both already merged). Q4's per-member projection is therefore unchanged.",
     "review_rounds_unchanged": "0 -- this refresh came from upstream, not from Chris. Counting it as a review round would open the ready gate on a document he has not read."
-  }
+  },
+  "upstream_pins": {
+    "mscommunity": {
+      "repo": "https://github.com/ModelSEED/MSCommunity",
+      "commit": "2dcff16f8e20a5b2a2acbb28b60a8ad38ec924fc",
+      "date": "2026-09-23",
+      "is_floor": true,
+      "why_floor": "Before b14f50f a float abundance raised TypeError in MSCommunity.__init__, and gapfill's solver string landed on MSGapfill's atp_gapfilling positional so any truthy value silently ran an ATP gapfill. Both are code paths this module uses."
+    },
+    "escher_edit": {
+      "repo": "https://github.com/ModelSEED/editEscher",
+      "commit": "6474698c67e8b9a1e8ab44c38686b27821d20389",
+      "date": "2026-09-23",
+      "import_name": "escher_edit",
+      "distribution": "escher-edit",
+      "layout": "src/",
+      "note": "Directory, distribution and import names all differ. _import_escher_edit must add <path>/src to sys.path, not the repo root. No provenance gate needed -- nothing else exports the name. Required deps beautifulsoup4 + lxml are on PyPI and go in a `community` pyproject extra; shapely/pandas extras are not needed."
+    }
+  },
+  "editescher_fold_2026_09_24": {
+    "why": "Chris supplied https://github.com/ModelSEED/editEscher after round 0 reported (correctly) that MSCommunity contains no Escher code. The viz lives in a separate repo.",
+    "answers": "Round 0's flag-not-question -- what a modeler wants to SEE when asked to display a community model. The answer is the whole community at once. Round 0 assumed one member at a time and was wrong; the premise that made it wrong was searching only MSCommunity and concluding about the ecosystem.",
+    "design_changes": [
+      "Q4 REWRITTEN: generate a community exchange map via escher_edit as the PRIMARY view, keeping the per-member pathway projection as the complementary second view. Two views, two questions -- the community map has one net organism reaction per member and no intracellular reactions.",
+      "Q7 REWRITTEN from 'what happens when graphviz is missing' to 'do we keep the graphviz renderer at all' -- DECIDED no. render_cross_feeding is REMOVED. escher_edit draws the same relationships better and needs no dot binary and no biochem checkout. THIS IS A REMOVAL CHRIS DID NOT ASK FOR and is flagged as such in the entry.",
+      "Q6 now covers two GitHub-only dependencies.",
+      "NEW public method fluxes_by_member -- the adapter, public because it is the seam between the packages.",
+      "NEW render_community_map returning CommunityMapArtifacts(map_json, svg, html, n_members, n_compounds, n_blocks)."
+    ],
+    "verified_not_assumed": [
+      "Input shape match: escher_edit.build_member_reactions takes {member: {compound: flux}} documented 'negative = consumed, positive = excreted'; MSCommunity fills each member column of cross_feeding_df from that member's net flux, branching on < Zero for consumption and > Zero for donation (mscommviz.py:130-215). Same convention, NO sign flip.",
+      "render_map_svg(..., html=True) writes BOTH the finished SVG and the interactive page in one call, with no graphviz, no browser and no network.",
+      "escher_edit's only required deps are beautifulsoup4 and lxml."
+    ],
+    "new_gotchas": [
+      "A re-save from Escher's own web editor DROPS reaction['member_box'], so a regenerated figure silently stops matching -- Escher's schema has no box node or per-segment style, which is why boxes/colours/dashes live on the SVG.",
+      "The map JSON alone is not the figure; it carries none of the member identity.",
+      "Past eight members the categorical palette degrades with a warning; member_groups (taxon colouring) is the real answer at that size.",
+      "A member missing from one condition changes every other member's colour unless the mapping is built once from comm.member_ids.",
+      "cross_feeding_df has NO compound names -- interactions() builds a 'Metabolites/Donor' column and drops it before returning."
+    ],
+    "not_wrapped": "build_map_from_interactions and parse_interaction_matrix are study-specific (a wide ASVMetaboliteInteractions.csv with <diet>-ABX_<day> ids); the design builds on build_member_reactions + build_escher_map instead. escher_edit's map-EDITING modules (filter_map, clean_json, layout, reverse_reactions) are out of scope.",
+    "review_rounds_unchanged": "0 -- this fold came from Chris naming a repository, not from him editing the PRD. The ready gate still wants a review round over the document."
+  },
+  "user_story_count": 36
 }

@@ -2,8 +2,8 @@
 
 The KBDL job service (see the ``KBDLJobRunningPrototype`` repo, PRD
 ``kbdl-job-service-v0``) runs longer genome-annotation / model-reconstruction
-/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app, reached
-through a loopback-only SSH tunnel. This module is the KBUtilLib-side
+/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app on poplar,
+reachable directly on the ANL network (no SSH tunnel). This module is the KBUtilLib-side
 client for that service's HTTP contract, so agents that already reach for
 KBUtilLib's other external-service clients (:mod:`bvbrc_utils`,
 :mod:`kb_uniprot_utils`, :mod:`patric_ws_utils`, :mod:`rcsb_pdb_utils`) find
@@ -19,7 +19,7 @@ directly in this module rather than imported.
 
 Endpoint & auth
 ----------------
-Targets the tunnelled loopback endpoint, default ``http://127.0.0.1:8791``,
+Targets the deployed KBDL service, default ``http://poplar.cels.anl.gov:8791``,
 overridable via the ``KBDL_SERVICE_URL`` environment variable or the
 ``base_url`` constructor argument. The KBase auth token is taken from the
 environment the same way :class:`~kbutillib.domains.external.patric_ws_utils.PatricWSUtils`
@@ -153,11 +153,15 @@ __all__ = [
     "KBDLJobFailedError",
 ]
 
-#: Environment variable overriding the default loopback endpoint.
+#: Environment variable overriding the default service endpoint.
 KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 
-#: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
-DEFAULT_BASE_URL = "http://127.0.0.1:8791"
+#: Default endpoint: the DEPLOYED KBDL service on poplar, reachable directly from
+#: ANL-networked hosts with NO SSH tunnel. Port 8791 matches the deployed service
+#: (its systemd drop-in overrides the service KBDL_PORT default of 8790, which
+#: collides with sessionctl). Set KBDL_SERVICE_URL to point elsewhere, e.g.
+#: http://127.0.0.1:8791 when working over a tunnel.
+DEFAULT_BASE_URL = "http://poplar.cels.anl.gov:8791"
 
 #: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
@@ -283,9 +287,9 @@ class KBDLServiceUtils(SharedEnvUtils):
         """Initialize the KBDL service client.
 
         Args:
-            base_url: Override for the tunnelled loopback endpoint. If
+            base_url: Override for the deployed service endpoint. If
                 None, uses the ``KBDL_SERVICE_URL`` environment variable,
-                falling back to ``http://127.0.0.1:8791``.
+                falling back to ``http://poplar.cels.anl.gov:8791``.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built ``requests.Session`` (or a
                 stand-in with a compatible ``.request()``), so tests can

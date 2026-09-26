@@ -57,6 +57,12 @@ class _AliasedGroup(AliasedGroup):
 @click.version_option()
 def main() -> None:
     """kbu -- KBUtilLib developer CLI."""
+    # Mint the ONE run_uid for this CLI process here, in the entry point, so
+    # every analysis a single invocation performs shares it and any subprocess
+    # inherits it via the environment (one CLI process invocation is one run).
+    from .model_recording import mint_run_uid
+
+    mint_run_uid()
 
 
 main.add_command(beril_cmd, name="beril")

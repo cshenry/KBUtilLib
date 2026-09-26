@@ -198,6 +198,10 @@ package = true
 kbu = "kbutillib.__main__:main"
 kbu-mcp = "kbutillib.interfaces.mcp.server:main"
 kbu-api = "kbutillib.interfaces.api.app:main"
+# The Models and Analyses web app. A public on-PATH console script with no cwd
+# assumption and no venv-relative path, so KIND's _resolve_exe finds it whether
+# KBUtilLib is a checkout, an editable install or a pipx install.
+models-and-analyses = "kbutillib.models_and_analyses.app:main"
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]

@@ -328,6 +328,43 @@ class TestRecordingMechanics:
             "fraction_of_optimum",
         }
 
+    def test_payload_with_unlisted_or_missing_key_fails_validation(
+        self, arc_env: dict
+    ) -> None:
+        # The normative per-kind payload schema is enforced by the writer: an
+        # unlisted key OR a missing key is rejected before any record is written,
+        # and nothing lands in the database.
+        with pytest.raises(ValueError):
+            model_recording.record_model_analysis(
+                kind="kbutillib.fba",
+                subject="/abs/m.json",
+                significant_params={"media": "glucose", "objective": "MAX{bio1}"},
+                payload={"media": "glucose", "objective": "MAX{bio1}"},  # missing objective_value
+                artifacts={"model_id": "/abs/m.json", "model_path": "/abs/m.json"},
+                provenance_evidence={"media": "glucose"},
+                bridge_metric={"name": "objective_value", "value": "1"},
+                status="ok",
+                arc_explicit=None,
+            )
+        with pytest.raises(ValueError):
+            model_recording.record_model_analysis(
+                kind="kbutillib.fba",
+                subject="/abs/m.json",
+                significant_params={"media": "glucose", "objective": "MAX{bio1}"},
+                payload={  # unlisted key
+                    "media": "glucose",
+                    "objective": "MAX{bio1}",
+                    "objective_value": 1.0,
+                    "surprise": True,
+                },
+                artifacts={"model_id": "/abs/m.json", "model_path": "/abs/m.json"},
+                provenance_evidence={"media": "glucose"},
+                bridge_metric={"name": "objective_value", "value": "1"},
+                status="ok",
+                arc_explicit=None,
+            )
+        assert _all_records(arc_env["db_path"]) == []
+
     def test_artifact_keys_per_kind_are_exact(self, arc_env: dict) -> None:
         from kbutillib.interfaces.cli.model import (
             _record_fba,

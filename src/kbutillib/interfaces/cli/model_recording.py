@@ -56,7 +56,41 @@ _MODEL_TRUST_TIER = "hypothesis"
 # ``bridge_kind`` and ``metric`` (S26).
 _MODEL_BRIDGE_KIND = "model_prediction"
 
+# Normative per-kind payload schema (confront round 2). A writer emitting an
+# unlisted key or omitting a listed one must FAIL rather than write a record the
+# reader cannot interpret. The shared store is domain-agnostic and holds no
+# per-kind map (identity.py:103), so this contract is enforced here, in the
+# writer, which is where the task body assigns it.
+_PAYLOAD_SCHEMA: Dict[str, frozenset] = {
+    "kbutillib.reconstruct": frozenset(
+        {"template", "n_reactions", "n_genes", "atp_safe"}
+    ),
+    "kbutillib.gapfill": frozenset({"media", "objective", "reactions_added"}),
+    "kbutillib.fba": frozenset({"media", "objective", "objective_value"}),
+    "kbutillib.fva": frozenset({"media", "fraction_of_optimum"}),
+}
+
 _PRODUCER = arc_context.APP_ID
+
+
+def _validate_payload_schema(kind: str, payload: Dict[str, Any]) -> None:
+    """Reject a payload whose keys do not match the normative per-kind schema.
+
+    Raises :class:`ValueError` when *kind* is one of the four modeling kinds and
+    *payload* has an unlisted or missing key. A kind not in the schema map is not
+    this writer's concern and is left alone.
+    """
+    expected = _PAYLOAD_SCHEMA.get(kind)
+    if expected is None:
+        return
+    actual = frozenset(payload)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(
+            f"payload for {kind} violates the normative schema: "
+            f"missing={missing} unlisted={extra}"
+        )
 
 
 def mint_run_uid() -> str:
@@ -143,6 +177,14 @@ def record_model_analysis(
     surface, and they cannot arise from these four callers because the record
     shape is fixed here.
     """
+    # A payload-schema violation is a CALLER BUG, not a runtime/environment
+    # failure, so it raises rather than degrading to a warning — the same posture
+    # the store takes for its own structural validation. It cannot arise from the
+    # four real callers (their payloads are shaped to the schema); the gate exists
+    # so a future edit that drifts the payload fails loudly instead of writing a
+    # record the reader cannot interpret.
+    _validate_payload_schema(kind, payload)
+
     resolved = arc_context.resolve_current_arc(arc_explicit)
     if resolved is None:
         arc_context.warn_not_indexed(

@@ -52,6 +52,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+from kbutillib.domains.identity.standardizers import genome_hash_from_fasta
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import ENTITY_TYPES
 
 #: Prefix every parity-check fixture row's ``source`` carries. See the
@@ -350,9 +351,103 @@ RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY = ParityCase(
     ),
 )
 
-#: All six properties, in the order stated by the PRD/task: duplicate
+# --------------------------------------------------------------------------
+# Property 8 -- FASTA rendering invariance for genome identity. The four
+# common renderings of ONE assembly -- plain (single-line contigs), 60-column
+# wrapped, trailing newline, and header-bearing -- all canonicalise to a
+# single identical genome digest. The wrapped-equals-unwrapped equality is
+# the property this PRD exists to guarantee: line wrapping is a display
+# choice a source may make freely, and it must never fork a genome's
+# identity. Every row below shares one entity_hash (the digest of the
+# assembly), so a parity/derivation reader treats the four renderings as the
+# same entity -- which is exactly the invariant under test.
+# --------------------------------------------------------------------------
+
+#: The one assembly, as two contigs, that all four renderings encode.
+_GENOME_CONTIG_A = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTGCA"
+_GENOME_CONTIG_B = "TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAAACGT"
+
+
+def _wrap(seq: str, width: int = 60) -> str:
+    """Break ``seq`` into ``width``-column lines (FASTA sequence wrapping)."""
+    return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
+
+
+#: The four renderings of the SAME assembly. Each is a FASTA source string;
+#: :func:`genome_hash_from_fasta` must map all four to one identical digest.
+#:
+#: A two-contig assembly is inherently a two-record FASTA, so every rendering
+#: carries the two ``>`` headers that delimit the records -- without them the
+#: two contigs would be a single concatenated record and a DIFFERENT entity,
+#: which is a distinct assembly, not a different rendering of this one. What
+#: varies across the four is what a source may legitimately vary while
+#: encoding the same assembly: sequence-line wrapping, a trailing newline,
+#: and how verbose the header description lines are. The identity rule strips
+#: every ``>`` line and all whitespace, so none of these may move the digest.
+GENOME_RENDERINGS: dict[str, str] = {
+    # plain: one unwrapped sequence line per contig, minimal headers,
+    # no trailing newline
+    "plain": f">c1\n{_GENOME_CONTIG_A}\n>c2\n{_GENOME_CONTIG_B}",
+    # 60-column wrapped: each contig's sequence broken every 60 chars
+    "wrapped_60": (
+        f">c1\n{_wrap(_GENOME_CONTIG_A)}\n>c2\n{_wrap(_GENOME_CONTIG_B)}"
+    ),
+    # trailing newline: the plain rendering with a final newline appended
+    "trailing_newline": f">c1\n{_GENOME_CONTIG_A}\n>c2\n{_GENOME_CONTIG_B}\n",
+    # header-bearing: verbose '>' description lines carrying extra free text
+    "header_bearing": (
+        f">contig_1 length={len(_GENOME_CONTIG_A)} first record\n"
+        f"{_GENOME_CONTIG_A}\n"
+        f">contig_2 length={len(_GENOME_CONTIG_B)} second record\n"
+        f"{_GENOME_CONTIG_B}"
+    ),
+}
+
+#: The single digest all four renderings must produce. Computed at import
+#: time from the canonical genome rule so the fixture cannot drift from the
+#: rule it asserts. If any rendering disagrees, this construction raises and
+#: the fixture fails to import -- a loud, immediate failure, not a silent one.
+GENOME_ASSEMBLY_HASH = genome_hash_from_fasta(GENOME_RENDERINGS["plain"])
+for _label, _rendering in GENOME_RENDERINGS.items():
+    _digest = genome_hash_from_fasta(_rendering)
+    if _digest != GENOME_ASSEMBLY_HASH:
+        raise AssertionError(
+            "genome parity fixture is inconsistent: rendering "
+            f"{_label!r} hashes to {_digest} but the plain rendering hashes "
+            f"to {GENOME_ASSEMBLY_HASH}; the canonical rule must map every "
+            "rendering of one assembly to one digest."
+        )
+del _label, _rendering, _digest
+
+_GENOME_FASTA_INVARIANCE_SOURCE = fixture_source("genome_fasta_invariance", "toolA")
+GENOME_FASTA_INVARIANCE = ParityCase(
+    property_key="genome_fasta_invariance",
+    description=(
+        "plain, 60-column-wrapped, trailing-newline and header-bearing "
+        "renderings of one assembly share one genome entity_hash"
+    ),
+    entity_hash=GENOME_ASSEMBLY_HASH,
+    result_type=_RESULT_TYPE,
+    sources=(_GENOME_FASTA_INVARIANCE_SOURCE,),
+    rows=tuple(
+        {
+            "entity_hash": GENOME_ASSEMBLY_HASH,
+            "entity_type": "genome",
+            "result_type": _RESULT_TYPE,
+            "source": _GENOME_FASTA_INVARIANCE_SOURCE,
+            "result_type_version": "v1",
+            "payload": {"rendering": label},
+            "observed_at": f"2026-01-01 00:0{i}:00",
+            "ingest_batch_id": f"01HPARITYGENOME000000000{i}",
+        }
+        for i, label in enumerate(GENOME_RENDERINGS)
+    ),
+)
+
+#: All parity properties, in the order stated by the PRD/task: duplicate
 #: collapse, newest-wins, ingest_batch_id tie-break, term removal, source
-#: isolation, result_type_version outside the slot key.
+#: isolation, result_type_version outside the slot key, and genome FASTA
+#: rendering invariance.
 PARITY_CASES: tuple[ParityCase, ...] = (
     DUPLICATE_COLLAPSE,
     NEWEST_WINS,
@@ -360,6 +455,7 @@ PARITY_CASES: tuple[ParityCase, ...] = (
     TERM_REMOVAL,
     SOURCE_ISOLATION,
     RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY,
+    GENOME_FASTA_INVARIANCE,
 )
 
 #: Every ``source`` value used by any fixture row, in case a caller wants

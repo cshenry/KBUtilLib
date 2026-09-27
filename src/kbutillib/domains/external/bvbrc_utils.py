@@ -236,8 +236,10 @@ class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
             contig_sequences.append(sequence)
             total_dna_size += length
 
-        # Calculate genome MD5
-        genome_md5 = hashlib.md5("".join(contig_sequences).encode()).hexdigest()
+        # Foreign-system interop value: this md5 is what BV-BRC genome records
+        # carry and is NOT a clearinghouse entity hash. For platform genome
+        # identity use kbutillib.domains.identity.standardizers.entity_hash.
+        bvbrc_genome_md5 = hashlib.md5("".join(contig_sequences).encode()).hexdigest()
 
         # Create contig ID mapping
         contig_map = {c.get('sequence_id', ''): c.get('accession', c.get('sequence_id', ''))
@@ -303,7 +305,7 @@ class BVBRCUtils(KBGenomeUtils,KBAnnotationUtils):
             'contig_ids': contig_ids,
             'contig_lengths': contig_lengths,
             'gc_content': float(genome_meta.get('gc_content', 0.5)),
-            'md5': genome_md5,
+            'md5': bvbrc_genome_md5,
             'molecule_type': 'DNA',
             'source': 'PATRIC',
             'source_id': genome_id,

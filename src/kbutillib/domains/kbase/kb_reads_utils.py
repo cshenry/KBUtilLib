@@ -1250,8 +1250,12 @@ class KBReadsUtils(KBWSUtils):
 
             num_contigs = len(contigs)
             gc_content = (gc_count / dna_size) if dna_size > 0 else 0.0
+            # Foreign-system interop value: this md5 is REQUIRED by the KBase
+            # Assembly object and is NOT a clearinghouse entity hash. For
+            # platform genome identity use
+            # kbutillib.domains.identity.standardizers.entity_hash.
             # Assembly md5: md5 over the comma-joined sorted per-contig md5s.
-            assembly_md5 = hashlib.md5(
+            kbase_assembly_md5 = hashlib.md5(
                 ",".join(sorted(c["md5"] for c in contigs.values())).encode()
             ).hexdigest()
 
@@ -1260,7 +1264,7 @@ class KBReadsUtils(KBWSUtils):
                 "assembly_id": assembly_id,
                 "name": assembly_id,
                 "fasta_handle_ref": handle_id,
-                "md5": assembly_md5,
+                "md5": kbase_assembly_md5,
                 "num_contigs": num_contigs,
                 "dna_size": dna_size,
                 "gc_content": gc_content,

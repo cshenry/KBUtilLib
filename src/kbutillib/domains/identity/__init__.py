@@ -7,6 +7,7 @@ under ``kbutillib.domains.identity`` rather than under either
 
 Sub-modules:
     standardizers — STANDARDIZER_VERSION, standardize, entity_hash,
+                     parse_fasta_contigs, genome_hash_from_fasta,
                      canonical_payload, content_hash
 
 Pure standard library — safe to import eagerly (no lazy-loading needed).
@@ -17,6 +18,8 @@ from .standardizers import (
     canonical_payload,
     content_hash,
     entity_hash,
+    genome_hash_from_fasta,
+    parse_fasta_contigs,
     standardize,
 )
 
@@ -24,6 +27,8 @@ __all__ = [
     "STANDARDIZER_VERSION",
     "standardize",
     "entity_hash",
+    "parse_fasta_contigs",
+    "genome_hash_from_fasta",
     "canonical_payload",
     "content_hash",
 ]

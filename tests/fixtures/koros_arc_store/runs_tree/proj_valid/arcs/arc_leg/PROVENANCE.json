@@ -1,0 +1,9 @@
+{
+  "run_id": "run-leg-0002",
+  "created_at": "2026-01-03T04:05:06.789012Z",
+  "inputs": [],
+  "tool_versions": {},
+  "compute_targets": [],
+  "role": "leg",
+  "leg_of": "run-ok-0001"
+}

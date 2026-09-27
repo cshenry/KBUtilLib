@@ -587,7 +587,7 @@ class BerdlCapability:
 
         return {"ingest_result": result, "tables": table_reports}
 
-    def query(self, sql: str, **kwargs: Any) -> Any:
+    def query(self, sql: str, *, params: Sequence[Any] | None = None, **kwargs: Any) -> Any:
         """Run a SQL query, routed by locus.
 
         In-pod: routed to Trino by default (interactive reads,
@@ -601,27 +601,79 @@ class BerdlCapability:
         Off-pod: routed to :meth:`~.transports.OffPodTransport.query`
         (REST), which is read-only by construction.
 
+        Parameter binding: ``params`` is a sequence of positional bind
+        values for placeholders in ``sql``. It is honoured ONLY on the
+        in-pod Trino path, where it is passed straight to the DB-API
+        cursor's ``execute(sql, params)`` for true server-side binding --
+        this method never interpolates a bind value into ``sql`` text
+        itself. There is deliberately no fallback that does: server-side
+        binding is the guarantee ``params`` exists to provide, so on the
+        two paths that cannot honour it -- in-pod Spark (whose
+        parameterised ``sql(..., args=...)`` support is Spark-version
+        dependent and is not relied on here) and off-pod (whose REST query
+        endpoint carries no bind-parameter channel at all) -- passing
+        ``params`` raises rather than silently formatting the values into
+        the SQL string. A caller that must run against those loci is
+        responsible for binding safely at its own layer before calling this
+        one (see
+        :class:`~kbutillib.domains.kbase.berdl.clearinghouse_capability.ClearinghouseCapability`,
+        which validates every hash to ``^[0-9a-f]{64}$`` before it does so).
+
         Args:
             sql: The SQL text to run.
-            **kwargs: In-pod with the default Trino engine: forwarded to
-                the DB-API cursor's ``execute``/fetch is not applicable
-                here -- unused. In-pod with ``engine='spark'``: unused.
-                Off-pod: forwarded to
+            params: Positional bind values for placeholders in ``sql``.
+                In-pod/Trino only; ``None`` (the default) runs ``sql``
+                with no bound parameters. Passing a non-``None`` value on
+                the in-pod Spark path or off-pod raises ``ValueError``.
+            **kwargs: In-pod with the default Trino engine: unused. In-pod
+                with ``engine='spark'``: unused. Off-pod: forwarded to
                 :meth:`~.transports.OffPodTransport.query` (``limit``,
                 ``offset``, ``timeout``).
 
         Returns:
-            In-pod/Trino: a list of result rows. In-pod/Spark: the
-            collected Spark ``Row`` list. Off-pod: the REST client's
-            result dict.
+            In-pod/Trino: a list of dict rows keyed by column name (or a
+            list of empty-column rows when the cursor reports no
+            description). In-pod/Spark: the collected Spark ``Row`` list.
+            Off-pod: the REST client's result dict.
+
+        Raises:
+            ValueError: ``params`` is given (non-``None``) on a path that
+                cannot bind it server-side (in-pod Spark, or off-pod).
         """
         transport = self._get_transport()
         if isinstance(transport, InPodTransport):
             engine = kwargs.pop("engine", "trino")
             if engine == "spark":
+                if params is not None:
+                    raise ValueError(
+                        "BerdlCapability.query: 'params' is not supported on "
+                        "the in-pod Spark path (parameterised spark.sql is "
+                        "Spark-version dependent and not relied on here). Route "
+                        "parameterised reads through the default Trino engine."
+                    )
                 return transport.spark_session().sql(sql).collect()
             connection = transport.trino_connection(connector="iceberg")
             cursor = connection.cursor()
-            cursor.execute(sql)
-            return cursor.fetchall()
+            if params is not None:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            rows = cursor.fetchall()
+            # Return dict rows keyed by column name (from the DB-API
+            # ``cursor.description``) rather than bare positional tuples, so
+            # callers select columns by name -- the shape both the off-pod
+            # REST result (``{'data': [dict, ...]}``) and the in-pod Spark
+            # ``Row.asDict()`` already use, letting a caller normalise the
+            # three loci uniformly.
+            description = cursor.description or []
+            columns = [col[0] for col in description]
+            if columns:
+                return [dict(zip(columns, row)) for row in rows]
+            return list(rows)
+        if params is not None:
+            raise ValueError(
+                "BerdlCapability.query: 'params' cannot be bound off-pod -- "
+                "the REST query endpoint carries no bind-parameter channel. "
+                "Bind safely at the calling layer before invoking query()."
+            )
         return transport.query(sql, **kwargs)

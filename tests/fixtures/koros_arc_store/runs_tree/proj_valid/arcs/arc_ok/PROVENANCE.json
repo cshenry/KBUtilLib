@@ -1,0 +1,9 @@
+{
+  "run_id": "run-ok-0001",
+  "created_at": "2026-01-02T03:04:05.678901Z",
+  "inputs": [],
+  "tool_versions": {},
+  "compute_targets": [],
+  "run_name": "valid arc with empty inputs and tool_versions",
+  "extra_upstream_key": "preserved verbatim in raw"
+}

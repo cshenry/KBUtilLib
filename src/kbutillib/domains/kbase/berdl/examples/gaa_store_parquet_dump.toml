@@ -1,0 +1,88 @@
+# Worked-example bootstrap-load manifest -- DOCUMENTATION of the format.
+#
+# Source: GenomeAnnotationAggregator/gaa_store_parquet_dump
+# (V2_Genes, V2_Gene_annotations, V2_Functions, V2_Genomes).
+#
+# This file exists to SHOW the manifest shape end to end; it is not run in CI
+# and the paths below are illustrative placeholders. Every [[source]] uses the
+# `file` adapter (the only adapter built in this stage); the MAPPING half --
+# entity_type, kinds, [source.hash], [source.content], [source.result] -- is
+# identical in shape across all three planned adapters (file, mongo,
+# lakehouse), so re-pointing a source at Mongo or the lakehouse changes only
+# the source-locating keys (path/format), never the mapping.
+#
+# Note @lower on the result `source` column: `source` is the partition column
+# on every <type>_result table, so BAKTA/1.9 and bakta/1.9 would otherwise be
+# two permanent partitions holding the same tool's output.
+
+# ---- Genes: identity + content (protein/DNA sequence) -------------------
+[[source]]
+name        = "gaa-v2-genes"
+adapter     = "file"
+path        = "gaa_store_parquet_dump/V2_Genes.parquet"
+format      = "parquet"
+entity_type = "gene"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  raw_column = "dna_sequence"
+
+  [source.content]
+  sequence            = "dna_sequence"
+  seq_length          = "@len(dna_sequence)"
+  protein_entity_hash = "@hash(protein, protein_sequence)"
+
+# ---- Gene annotations: functional-annotation results --------------------
+[[source]]
+name        = "gaa-v2-gene-annotations"
+adapter     = "file"
+path        = "gaa_store_parquet_dump/V2_Gene_annotations.parquet"
+format      = "parquet"
+entity_type = "gene"
+kinds       = ["result"]
+
+  [source.hash]
+  raw_column = "dna_sequence"
+
+  [source.result]
+  result_type         = "@const(functional_annotation)"
+  source              = "@lower(algorithm)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(function_id, score, evidence)"
+
+# ---- Functions: identity + content (definition text) --------------------
+[[source]]
+name        = "gaa-v2-functions"
+adapter     = "file"
+path        = "gaa_store_parquet_dump/V2_Functions.parquet"
+format      = "parquet"
+entity_type = "function"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  raw_column = "definition"
+
+  [source.content]
+  definition = "definition"
+
+# ---- Genomes: identity + content (assembly metadata) --------------------
+[[source]]
+name        = "gaa-v2-genomes"
+adapter     = "file"
+path        = "gaa_store_parquet_dump/V2_Genomes.parquet"
+format      = "parquet"
+entity_type = "genome"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  # The dump already carries a genome digest; it is RE-CANONICALISED through
+  # encode_entity_hash and never trusted raw.
+  precomputed = "genome_hash"
+
+  [source.content]
+  fasta_reference    = "fasta_path"
+  taxon_id           = "taxon_id"
+  assembly_accession = "assembly_accession"
+  n_contigs          = "@len(contig_ids)"
+  total_length       = "total_length"
+  is_closed          = "is_closed"

@@ -89,6 +89,7 @@ from typing import Any, Optional
 import click
 
 from .manifest import now_utc_iso, sha256_file
+from .model_recording import file_uri, model_id_for_path, record_model_analysis
 from .session import _route_save_local
 from .subproject import _find_project_root
 
@@ -272,6 +273,181 @@ def _save_model(mdlutl: Any, out_path: str) -> None:
     cobra.io.save_json_model(mdlutl.model, str(out_path))
 
 
+# ── analysis-record stamping (per-verb payload/artifact/provenance shaping) ──
+#
+# Identity is derived by the shared helpers inside record_model_analysis; these
+# functions only shape the per-kind payload, artifacts and provenance to the
+# normative schema and hand them off.  Each is called AFTER the verb's --json
+# stdout is flushed (or on the failure path), so recording never perturbs stdout.
+#
+# Payload floats are FINE (payload is never hashed); significant_params must
+# carry NO floats (they feed analysis_id), so any float parameter (media is a
+# path/name, fraction_of_optimum a number) is formatted to a string there.
+
+
+def _record_reconstruct(
+    *,
+    subject: str,
+    template: str,
+    out: str,
+    mdlutl: Any,
+    atp_safe: bool,
+    status: str,
+    arc_slug: Optional[str],
+) -> None:
+    """Stamp a kbutillib.reconstruct record (payload schema: template, counts, atp_safe)."""
+    artifacts = {
+        "model_id": model_id_for_path(out),
+        "model_path": file_uri(out),
+    }
+    if mdlutl is not None and getattr(mdlutl, "model", None) is not None:
+        n_reactions = len(mdlutl.model.reactions)
+        n_genes = len(mdlutl.model.genes)
+    else:
+        n_reactions = 0
+        n_genes = 0
+    payload = {
+        "template": template,
+        "n_reactions": n_reactions,
+        "n_genes": n_genes,
+        "atp_safe": bool(atp_safe),
+    }
+    record_model_analysis(
+        kind="kbutillib.reconstruct",
+        subject=subject,
+        significant_params={"template": template},
+        payload=payload,
+        artifacts=artifacts,
+        provenance_evidence={"template": template, "arc": arc_slug},
+        bridge_metric={"name": "reconstruction", "value": "draft"},
+        status=status,
+        arc_explicit=arc_slug,
+    )
+
+
+def _record_gapfill(
+    *,
+    subject: str,
+    media_arg: str,
+    objective: str,
+    out: str,
+    reactions_added: list,
+    status: str,
+    arc_slug: Optional[str],
+) -> None:
+    """Stamp a kbutillib.gapfill record (payload schema: media, objective, reactions_added)."""
+    artifacts = {
+        "model_id": model_id_for_path(out),
+        "model_path": file_uri(out),
+    }
+    payload = {
+        "media": media_arg,
+        "objective": objective,
+        "reactions_added": list(reactions_added),
+    }
+    record_model_analysis(
+        kind="kbutillib.gapfill",
+        subject=subject,
+        significant_params={"media": media_arg},
+        payload=payload,
+        artifacts=artifacts,
+        provenance_evidence={"media": media_arg, "gapfill_objective": objective},
+        bridge_metric={"name": "reactions_added", "value": len(reactions_added)},
+        status=status,
+        arc_explicit=arc_slug,
+    )
+
+
+def _record_fba(
+    *,
+    subject: str,
+    media_arg: str,
+    objective: str,
+    objective_value: Optional[float],
+    model_path: str,
+    flux_path: Optional[str],
+    status: str,
+    arc_slug: Optional[str],
+) -> None:
+    """Stamp a kbutillib.fba record (payload schema: media, objective, objective_value)."""
+    artifacts = {
+        "model_id": model_id_for_path(model_path),
+        "model_path": file_uri(model_path),
+    }
+    if flux_path is not None:
+        artifacts["flux_path"] = file_uri(flux_path)
+    payload = {
+        "media": media_arg,
+        "objective": objective,
+        "objective_value": (
+            float(objective_value) if objective_value is not None else 0.0
+        ),
+    }
+    record_model_analysis(
+        kind="kbutillib.fba",
+        subject=subject,
+        # objective_value is a float and must NOT enter significant_params; the
+        # media+objective identify the analysis (S: significant params for fba).
+        significant_params={"media": media_arg, "objective": objective},
+        payload=payload,
+        artifacts=artifacts,
+        provenance_evidence={
+            "media": media_arg,
+            "objective": objective,
+            "model_id": model_id_for_path(model_path),
+        },
+        bridge_metric={
+            "name": "objective_value",
+            "value": (
+                f"{float(objective_value):.6g}" if objective_value is not None else "0"
+            ),
+        },
+        status=status,
+        arc_explicit=arc_slug,
+    )
+
+
+def _record_fva(
+    *,
+    subject: str,
+    media_arg: str,
+    fraction_of_optimum: float,
+    model_path: str,
+    fva_path: Optional[str],
+    status: str,
+    arc_slug: Optional[str],
+) -> None:
+    """Stamp a kbutillib.fva record (payload schema: media, fraction_of_optimum)."""
+    artifacts = {
+        "model_id": model_id_for_path(model_path),
+        "model_path": file_uri(model_path),
+    }
+    if fva_path is not None:
+        artifacts["fva_path"] = file_uri(fva_path)
+    # fraction_of_optimum is a float in payload (FINE) but is formatted to a
+    # string in significant_params (floats are rejected there).
+    foo_str = f"{float(fraction_of_optimum):.6g}"
+    payload = {
+        "media": media_arg,
+        "fraction_of_optimum": float(fraction_of_optimum),
+    }
+    record_model_analysis(
+        kind="kbutillib.fva",
+        subject=subject,
+        significant_params={"media": media_arg, "fraction_of_optimum": foo_str},
+        payload=payload,
+        artifacts=artifacts,
+        provenance_evidence={
+            "media": media_arg,
+            "fraction_of_optimum": foo_str,
+            "model_id": model_id_for_path(model_path),
+        },
+        bridge_metric={"name": "fraction_of_optimum", "value": foo_str},
+        status=status,
+        arc_explicit=arc_slug,
+    )
+
+
 # ── kbu model group ─────────────────────────────────────────────────────────
 
 
@@ -326,6 +502,15 @@ def model_cmd() -> None:
     "~/Dropbox/Projects/ModelSEEDDatabase); off by default for offline "
     "determinism.",
 )
+@click.option(
+    "--arc",
+    "arc_slug",
+    default=None,
+    metavar="SLUG",
+    help="KOROS arc to attribute this analysis to (bare SLUG or PROJECT/SLUG); "
+    "passed straight to resolve_current_arc(). Recording is a side effect on "
+    "the run database and stderr, never on --json stdout.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def reconstruct_cmd(
     genome: str,
@@ -333,10 +518,14 @@ def reconstruct_cmd(
     template: str,
     model_id: Optional[str],
     atp_safe: bool,
+    arc_slug: Optional[str],
     as_json: bool,
 ) -> None:
     """Build a draft metabolic model from a genome (build_metabolic_model facade)."""
     genome_path = Path(genome)
+    # subject is the genome path/id even on early failure, so a failed run still
+    # attributes to the right subject.
+    subject = model_id or genome_path.stem
     if not genome_path.is_file():
         raise click.ClickException(f"--genome file not found: {genome}")
 
@@ -348,6 +537,18 @@ def reconstruct_cmd(
     recon = _recon_utils()
     _, gs_template_obj, core_template_obj = _resolve_template(recon, template)
 
+    def _stamp(status: str) -> None:
+        _record_reconstruct(
+            subject=subject,
+            template=template,
+            out=out,
+            mdlutl=locals_mdlutl.get("mdlutl"),
+            atp_safe=atp_safe,
+            status=status,
+            arc_slug=arc_slug,
+        )
+
+    locals_mdlutl: dict = {}
     try:
         current_output, mdlutl = recon.build_metabolic_model(
             ms_genome,
@@ -358,15 +559,17 @@ def reconstruct_cmd(
             gs_template_obj=gs_template_obj,
             atp_safe=atp_safe,
         )
+        if mdlutl is None:
+            raise click.ClickException(
+                f"reconstruct failed: {current_output.get('Comments')}"
+            )
+        locals_mdlutl["mdlutl"] = mdlutl
+        _save_model(mdlutl, out)
     except Exception as exc:
+        _stamp("failed")
+        if isinstance(exc, click.ClickException):
+            raise
         raise click.ClickException(f"reconstruct failed: {exc}") from exc
-
-    if mdlutl is None:
-        raise click.ClickException(
-            f"reconstruct failed: {current_output.get('Comments')}"
-        )
-
-    _save_model(mdlutl, out)
 
     result = {
         "model_path": str(Path(out).resolve()),
@@ -383,6 +586,9 @@ def reconstruct_cmd(
             f"({result['reactions']} reactions, {result['metabolites']} metabolites, "
             f"{result['genes']} genes)"
         )
+
+    # Stamp AFTER stdout is flushed so --json stays byte-identical (S17).
+    _stamp("ok")
 
 
 # ── gapfill ──────────────────────────────────────────────────────────────
@@ -413,6 +619,14 @@ def reconstruct_cmd(
     help="Include ATP-safe gapfill tests (requires a local ModelSEED "
     "biochemistry database); off by default.",
 )
+@click.option(
+    "--arc",
+    "arc_slug",
+    default=None,
+    metavar="SLUG",
+    help="KOROS arc to attribute this analysis to (bare SLUG or PROJECT/SLUG). "
+    "Recording is a side effect, never on --json stdout.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def gapfill_cmd(
     model_path: str,
@@ -420,9 +634,12 @@ def gapfill_cmd(
     out_path: Optional[str],
     objective: str,
     atp_safe: bool,
+    arc_slug: Optional[str],
     as_json: bool,
 ) -> None:
     """Gapfill a model to feasibility on a media (gapfill_metabolic_model facade)."""
+    subject = str(Path(model_path).resolve())
+    resolved_out = out_path or model_path
     mdlutl = _load_model(model_path)
     recon = _recon_utils()
     media = _load_media(recon, media_arg)
@@ -430,6 +647,7 @@ def gapfill_cmd(
     core_t = _load_local_template("core")
     gn_t = _load_local_template("gn")
 
+    reactions_added: list = []
     try:
         _current_output, solutions, _sol, _sol_media = recon.gapfill_metabolic_model(
             mdlutl,
@@ -440,18 +658,23 @@ def gapfill_cmd(
             atp_safe=atp_safe,
             objective=objective,
         )
+        if solutions and media in solutions:
+            gfsolution = solutions[media]
+            reactions_added = sorted(gfsolution.get("new", {})) + sorted(
+                gfsolution.get("reversed", {})
+            )
+        _save_model(mdlutl, resolved_out)
     except Exception as exc:
-        raise click.ClickException(f"gapfill failed: {exc}") from exc
-
-    reactions_added: list = []
-    if solutions and media in solutions:
-        gfsolution = solutions[media]
-        reactions_added = sorted(gfsolution.get("new", {})) + sorted(
-            gfsolution.get("reversed", {})
+        _record_gapfill(
+            subject=subject,
+            media_arg=media_arg,
+            objective=objective,
+            out=resolved_out,
+            reactions_added=reactions_added,
+            status="failed",
+            arc_slug=arc_slug,
         )
-
-    resolved_out = out_path or model_path
-    _save_model(mdlutl, resolved_out)
+        raise click.ClickException(f"gapfill failed: {exc}") from exc
 
     result = {
         "model_in": str(Path(model_path).resolve()),
@@ -467,6 +690,16 @@ def gapfill_cmd(
             f"Gapfilled model written to {result['model_out']} "
             f"({len(reactions_added)} reactions added)"
         )
+
+    _record_gapfill(
+        subject=subject,
+        media_arg=media_arg,
+        objective=objective,
+        out=resolved_out,
+        reactions_added=reactions_added,
+        status="ok",
+        arc_slug=arc_slug,
+    )
 
 
 # ── fba ──────────────────────────────────────────────────────────────────
@@ -488,15 +721,25 @@ def gapfill_cmd(
     show_default=True,
     help="Max number of fluxes to include, sorted by |flux| descending.",
 )
+@click.option(
+    "--arc",
+    "arc_slug",
+    default=None,
+    metavar="SLUG",
+    help="KOROS arc to attribute this analysis to (bare SLUG or PROJECT/SLUG). "
+    "Recording is a side effect, never on --json stdout.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def fba_cmd(
     model_path: str,
     media_arg: str,
     objective: str,
     top: int,
+    arc_slug: Optional[str],
     as_json: bool,
 ) -> None:
     """Run FBA (pFBA) on a model+media (MSFBAUtils.run_fba facade)."""
+    subject = str(Path(model_path).resolve())
     mdlutl = _load_model(model_path)
     recon = _recon_utils()
     media = _load_media(recon, media_arg)
@@ -505,6 +748,16 @@ def fba_cmd(
     try:
         solution = fba.run_fba(mdlutl, media=media, objective=objective, run_pfba=True)
     except Exception as exc:
+        _record_fba(
+            subject=subject,
+            media_arg=media_arg,
+            objective=objective,
+            objective_value=None,
+            model_path=model_path,
+            flux_path=None,
+            status="failed",
+            arc_slug=arc_slug,
+        )
         raise click.ClickException(f"fba failed: {exc}") from exc
 
     flux_items = sorted(
@@ -527,6 +780,18 @@ def fba_cmd(
         for f in result["fluxes"][:10]:
             click.echo(f"  {f['id']}\t{f['value']:.6g}")
 
+    # This facade does not write a flux file, so no flux_path artifact.
+    _record_fba(
+        subject=subject,
+        media_arg=media_arg,
+        objective=objective,
+        objective_value=result["objective_value"],
+        model_path=model_path,
+        flux_path=None,
+        status="ok",
+        arc_slug=arc_slug,
+    )
+
 
 # ── fva ──────────────────────────────────────────────────────────────────
 
@@ -548,15 +813,25 @@ def fba_cmd(
     show_default=True,
     type=float,
 )
+@click.option(
+    "--arc",
+    "arc_slug",
+    default=None,
+    metavar="SLUG",
+    help="KOROS arc to attribute this analysis to (bare SLUG or PROJECT/SLUG). "
+    "Recording is a side effect, never on --json stdout.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def fva_cmd(
     model_path: str,
     media_arg: str,
     reactions_arg: Optional[str],
     fraction_of_optimum: float,
+    arc_slug: Optional[str],
     as_json: bool,
 ) -> None:
     """Run FVA via ms_fba_utils.run_fva (NOT cobra.flux_variability_analysis)."""
+    subject = str(Path(model_path).resolve())
     mdlutl = _load_model(model_path)
     recon = _recon_utils()
     media = _load_media(recon, media_arg)
@@ -566,17 +841,27 @@ def fva_cmd(
         fva_raw = fba.run_fva(
             mdlutl, media=media, fraction_of_optimum=fraction_of_optimum
         )
+        wanted_ids = None
+        if reactions_arg:
+            wanted_ids = {r.strip() for r in reactions_arg.split(",") if r.strip()}
+            missing = wanted_ids - set(fva_raw)
+            if missing:
+                raise click.ClickException(
+                    f"--reactions not found in model: {sorted(missing)}"
+                )
     except Exception as exc:
+        _record_fva(
+            subject=subject,
+            media_arg=media_arg,
+            fraction_of_optimum=fraction_of_optimum,
+            model_path=model_path,
+            fva_path=None,
+            status="failed",
+            arc_slug=arc_slug,
+        )
+        if isinstance(exc, click.ClickException):
+            raise
         raise click.ClickException(f"fva failed: {exc}") from exc
-
-    wanted_ids = None
-    if reactions_arg:
-        wanted_ids = {r.strip() for r in reactions_arg.split(",") if r.strip()}
-        missing = wanted_ids - set(fva_raw)
-        if missing:
-            raise click.ClickException(
-                f"--reactions not found in model: {sorted(missing)}"
-            )
 
     reactions = [
         {"id": rid, "min": float(vals["MIN"]), "max": float(vals["MAX"])}
@@ -593,6 +878,17 @@ def fva_cmd(
             click.echo(f"  {r['id']}\tmin={r['min']:.6g}\tmax={r['max']:.6g}")
         if len(reactions) > 20:
             click.echo(f"  ... +{len(reactions) - 20} more (use --json)")
+
+    # This facade does not write an FVA result file, so no fva_path artifact.
+    _record_fva(
+        subject=subject,
+        media_arg=media_arg,
+        fraction_of_optimum=fraction_of_optimum,
+        model_path=model_path,
+        fva_path=None,
+        status="ok",
+        arc_slug=arc_slug,
+    )
 
 
 # ── exec (provenance-preserving escape hatch) ───────────────────────────────

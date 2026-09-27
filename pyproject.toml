@@ -78,6 +78,39 @@ apidocs = [
   "mkdocs-material >=9.5",
   "mkdocstrings[python] >=0.24",
 ]
+# Heavy, GPU-oriented dependencies of ProtT5Utils (domains.ai.prott5_utils),
+# kept optional so `import kbutillib` and a core install never require torch.
+# prott5_utils imports torch/transformers lazily inside _load() and raises a
+# clean ImportError with an install hint when they are absent; this extra is the
+# supported way to satisfy that hint.
+#
+# sentencepiece is listed explicitly because ProtT5's T5Tokenizer requires it;
+# without it the failure surfaces as a confusing tokenizer error rather than a
+# clean ImportError, so it must be pulled in alongside torch/transformers.
+#
+# All three are intentionally UNPINNED (no lower bound). The sibling extras
+# carry floors (mcp >=1.27,<2; fastapi >=0.110; httpx[socks] >=0.28) because
+# those versions are exercised in CI; this extra is NEVER installed in CI, so
+# any floor written here would be invented rather than tested. torch also has a
+# version/build matrix (CUDA vs CPU, platform wheels) that a single floor cannot
+# express correctly. An unpinned extra installs the current release and fails
+# visibly if incompatible; an invented floor fails obscurely and constrains
+# users for years.
+#
+# CPU-only note: `pip install kbutillib[prott5]` pulls a CUDA-enabled torch on
+# Linux (several GB, pointless on a CPU-only box). CPU-only users should install
+# torch first from the PyTorch CPU index --
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# -- and then install the extra, which will find the torch requirement already
+# satisfied.
+prott5 = ["torch", "transformers", "sentencepiece"]
+# Community modeling stack (domains.modeling.ms_community_utils). The community
+# analysis + Escher-map rendering surface depends on the GitHub-only MSCommunity
+# and editEscher packages, which are resolved through dependencies.yaml rather
+# than PyPI. The only PyPI-installable pieces are editEscher's two required
+# runtime deps (beautifulsoup4, lxml); shapely/pandas are editEscher extras and
+# nothing this module calls needs them, so they are intentionally omitted.
+community = ["beautifulsoup4", "lxml"]
 # Everything needed to run all transports + build docs.
 all = [
   "mcp >=1.27,<2 ; python_version >= '3.10'",
@@ -165,6 +198,10 @@ package = true
 kbu = "kbutillib.__main__:main"
 kbu-mcp = "kbutillib.interfaces.mcp.server:main"
 kbu-api = "kbutillib.interfaces.api.app:main"
+# The Models and Analyses web app. A public on-PATH console script with no cwd
+# assumption and no venv-relative path, so KIND's _resolve_exe finds it whether
+# KBUtilLib is a checkout, an editable install or a pipx install.
+models-and-analyses = "kbutillib.models_and_analyses.app:main"
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]
@@ -202,6 +239,7 @@ markers = [
     "kbu_model: mark test as requiring the kbu modeling stack (cobra/modelseedpy); skipped when unavailable",
     "kind_install: mark test as covering the `kbu kind` KIND self-install verb group",
     "prott5_model: mark test as loading the real ProtT5 model (slow, GPU-hungry; skipped unless PROTT5_LIVE_TESTS=1)",
+    "not_applicable_for_fake: koros_arc_store contract assertion that concerns real-store-only DDL; skipped for the fake with reason 'not_applicable_for_fake'",
 ]
 
 [tool.mypy]

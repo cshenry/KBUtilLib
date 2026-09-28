@@ -44,11 +44,19 @@ Two things are deliberate and must never be "fixed":
   slot in the corpus and nothing would ever supersede its predecessor
   again.
 
-DIALECT AUTHORITY IS SPARK SQL, compatible with Iceberg-on-Spark -- Trino
-is a read client only and is not authoritative here. Table identifiers
-are backtick-quoted per dot-separated segment, matching the existing
-convention in :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
-(e.g. ```` `namespace`.`table` ````). The emitted SQL stays inside the
+DIALECT AUTHORITY IS SPARK SQL, compatible with Iceberg-on-Spark. Trino
+is a read client only and is not authoritative for SEMANTICS -- but it is
+authoritative for its own SYNTAX, and that distinction was missed once
+already at real cost. Table identifiers are quoted per dot-separated
+segment, and the quote CHARACTER follows the ``engine`` argument: Spark
+gets backticks (matching
+:meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`,
+e.g. ```` `namespace`.`table` ````), Trino gets double quotes. Emitting
+backticks to Trino is not a dialect preference, it is a hard error
+(``SYNTAX_ERROR: backquoted identifiers are not supported``), and because
+this module hardcoded backticks until 2026-09-28 every Trino-routed read
+verb built on it failed on the pod. Callers MUST pass the same engine they
+execute under. The emitted SQL stays inside the
 DuckDB/Spark syntax intersection deliberately: plain ``ROW_NUMBER() OVER
 (...)``, ordinary ``WHERE``/``IN``, no ``NULLS FIRST``/``NULLS LAST`` (both
 ordering columns are non-null by construction -- a row missing either is

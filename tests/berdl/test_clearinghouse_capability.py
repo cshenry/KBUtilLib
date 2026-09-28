@@ -38,6 +38,7 @@ import pytest
 from kbutillib.domains.kbase.berdl.capability import BerdlLoadRefusedError
 from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
     _HEX_RUN_RE,
+    _quote_fqn,
     LEDGER_FILENAME,
     OFFPOD_PAGE_CAP,
     SPARK_PROMOTION_THRESHOLD,
@@ -1080,3 +1081,73 @@ def test_verify_run_ignores_non_ingested_ledger_lines(tmp_path):
     result = cap.verify_run(tmp_path, run_id="r1")
     # Only the ingested gene_entity is verified; the failed gene_content is not.
     assert {t["name"] for t in result["tables"]} == {"gene_entity"}
+
+
+# --- criterion (h): identifier quoting matches the executing dialect --------
+#
+# Regression guard for the 2026-09-28 defect. `_quote_fqn` hardcoded
+# backticks; Trino rejects them outright ("backquoted identifiers are not
+# supported; use double quotes to quote identifiers"). Every Trino-routed
+# read verb therefore failed on the pod -- `stats` DEGRADED SILENTLY to
+# em-dash row counts, `sources`/`results` raised -- while all 360 tests in
+# this directory passed, because none of them executes SQL against a real
+# engine. These tests close that specific hole at the SQL-TEXT level, which
+# is the layer a fake CAN police.
+
+
+def test_criterion_h_quote_fqn_is_dialect_correct():
+    """Trino gets double quotes; Spark gets backticks; neither leaks."""
+    fqn = "kbaseincubator.clearinghouse.protein_result"
+
+    trino = _quote_fqn(fqn, "trino")
+    assert trino == '"kbaseincubator"."clearinghouse"."protein_result"'
+    assert "`" not in trino, "backtick leaked into Trino SQL -- Trino rejects it"
+
+    spark = _quote_fqn(fqn, "spark")
+    assert spark == "`kbaseincubator`.`clearinghouse`.`protein_result`"
+    assert '"' not in spark
+
+    # Default stays Spark, so Spark-only callers keep working untouched.
+    assert _quote_fqn(fqn) == spark
+
+    # Re-quoting is idempotent in BOTH directions -- a segment arriving in
+    # the other dialect's quotes must not end up double-quoted.
+    assert _quote_fqn(trino, "trino") == trino
+    assert _quote_fqn(spark, "spark") == spark
+    assert _quote_fqn(spark, "trino") == trino
+    assert _quote_fqn(trino, "spark") == spark
+
+
+def test_criterion_h_no_backticks_in_any_trino_sql():
+    """The integration-level guard: nothing Trino-routed may contain a backtick.
+
+    This is the assertion whose absence let the defect ship. It walks the
+    read verbs, forces the Trino engine, and inspects every emitted SQL
+    string -- so a future caller that forgets to thread ``engine`` through
+    a new ``_quote_fqn`` call site fails HERE rather than on the pod.
+    """
+    hexes = ["a" * 64, "b" * 64]
+
+    for verb, args, kwargs in [
+        ("known", ("protein", hexes), {}),
+        ("content", ("protein", hexes), {}),
+        ("results", ("protein", hexes), {}),
+        ("sources", ("protein",), {}),
+        ("stats", (), {}),
+        ("tables", (), {}),
+    ]:
+        fake = _FakeCapability(
+            locus="in_pod", responder=lambda call: [{"row_count": 0}]
+        )
+        cap = ClearinghouseCapability(fake)
+        method = getattr(cap, verb)
+        method(*args, engine="trino", **kwargs)
+
+        assert fake.calls, f"{verb} issued no query to inspect"
+        for call in fake.calls:
+            if call.engine != "trino":
+                continue
+            assert "`" not in call.sql, (
+                f"{verb} emitted a backquoted identifier on the Trino path -- "
+                f"Trino rejects these outright:\n{call.sql}"
+            )

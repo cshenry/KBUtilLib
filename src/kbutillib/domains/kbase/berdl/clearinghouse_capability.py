@@ -597,7 +597,7 @@ class ClearinghouseCapability:
         resolved_engine = self._resolve_engine(
             engine, default="trino", hash_count=len(encoded)
         )
-        table = _quote_fqn(self._fqn(entity_type, "entity"))
+        table = _quote_fqn(self._fqn(entity_type, "entity"), resolved_engine)
 
         def sql_for(n: int) -> str:
             return (
@@ -634,7 +634,7 @@ class ClearinghouseCapability:
         resolved_engine = self._resolve_engine(
             engine, default="trino", hash_count=len(encoded)
         )
-        table = _quote_fqn(self._fqn(entity_type, "content"))
+        table = _quote_fqn(self._fqn(entity_type, "content"), resolved_engine)
 
         def sql_for(n: int) -> str:
             return (
@@ -673,7 +673,7 @@ class ClearinghouseCapability:
         resolved_engine = self._resolve_engine(
             engine, default="trino", hash_count=len(encoded)
         )
-        view = _quote_fqn(f"{_FQN_PREFIX}.{_ALL_CONTENT_VIEW}")
+        view = _quote_fqn(f"{_FQN_PREFIX}.{_ALL_CONTENT_VIEW}", resolved_engine)
 
         def sql_for(n: int) -> str:
             return (
@@ -715,7 +715,11 @@ class ClearinghouseCapability:
         resolved_engine = self._resolve_engine(
             engine, default="trino", hash_count=len(encoded)
         )
-        inner = current_state_sql(self._fqn(entity_type, "result"), sources=sources)
+        inner = current_state_sql(
+            self._fqn(entity_type, "result"),
+            sources=sources,
+            engine=resolved_engine,
+        )
 
         def sql_for(n: int) -> str:
             predicates = [f"entity_hash IN ({self._in_placeholders(n)})"]
@@ -751,7 +755,11 @@ class ClearinghouseCapability:
         transport and pages to completion.
         """
         resolved_engine = self._resolve_engine(engine, default="spark")
-        inner = current_state_sql(self._fqn(entity_type, "result"), sources=sources)
+        inner = current_state_sql(
+            self._fqn(entity_type, "result"),
+            sources=sources,
+            engine=resolved_engine,
+        )
         if result_types is not None:
             sql = (
                 f"SELECT * FROM (\n{inner}\n) AS current_state\n"
@@ -787,7 +795,7 @@ class ClearinghouseCapability:
         types = ENTITY_TYPES if entity_type is None else (entity_type,)
         out: list[dict[str, Any]] = []
         for etype in types:
-            table = _quote_fqn(self._fqn(etype, "result"))
+            table = _quote_fqn(self._fqn(etype, "result"), resolved_engine)
             sql = (
                 f"SELECT '{etype}' AS entity_type, source, COUNT(*) AS row_count "
                 f"FROM {table} GROUP BY source"
@@ -851,7 +859,7 @@ class ClearinghouseCapability:
         table_reports: list[dict[str, Any]] = []
         for kind in _KINDS:
             for etype in ENTITY_TYPES:
-                table = _quote_fqn(self._fqn(etype, kind))
+                table = _quote_fqn(self._fqn(etype, kind), resolved_engine)
                 count_sql = f"SELECT COUNT(*) AS row_count FROM {table}"
                 rows = self._run(count_sql, params=None, engine=resolved_engine)
                 report: dict[str, Any] = {
@@ -861,7 +869,7 @@ class ClearinghouseCapability:
                     "row_count": _scalar(rows, "row_count"),
                 }
                 if want_files:
-                    files_table = _quote_fqn(f"{self._fqn(etype, kind)}.files")
+                    files_table = _quote_fqn(f"{self._fqn(etype, kind)}.files", resolved_engine)
                     files_sql = (
                         "SELECT COUNT(*) AS data_file_count, "
                         "AVG(file_size_in_bytes) AS avg_file_size_bytes "
@@ -906,7 +914,7 @@ class ClearinghouseCapability:
                     partition_spec = [partition_by]
                 else:
                     partition_spec = list(partition_by)
-                table = _quote_fqn(self._fqn(etype, kind))
+                table = _quote_fqn(self._fqn(etype, kind), resolved_engine)
                 rows = self._run(
                     f"SELECT COUNT(*) AS row_count FROM {table}",
                     params=None,
@@ -1465,7 +1473,7 @@ class ClearinghouseCapability:
         reports: list[dict[str, Any]] = []
         discrepancies: list[str] = []
         for table in sorted(set(per_table_rows) | set(per_table_snaps)):
-            fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}")
+            fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "trino")
             live_rows = _scalar(
                 self._run(
                     f"SELECT COUNT(*) AS row_count FROM {fqn}",
@@ -1521,19 +1529,36 @@ class ClearinghouseCapability:
 # --------------------------------------------------------------------------
 
 
-def _quote_fqn(fqn: str) -> str:
-    """Backtick-quote each dot-separated segment of an identifier.
+def _quote_fqn(fqn: str, engine: str = "spark") -> str:
+    """Quote each dot-separated segment of an identifier, per ENGINE.
 
     Mirrors ``clearinghouse_derivation._quote_fqn`` /
     ``clearinghouse_schema._quote_fqn``: every segment between dots gets its
-    own pair of backticks, so a dotted namespace such as
+    own pair of quotes, so a dotted namespace such as
     ``kbaseincubator.clearinghouse`` is never misread as a single identifier
     containing a dot (measured failing in-pod -- see
     ``clearinghouse_bootstrap_adapter._quote_fqn``). A table-metadata suffix
     such as ``...gene_entity.files`` is quoted per segment the same way. A
-    segment already backtick-quoted is not double-quoted.
+    segment already quoted is not double-quoted.
+
+    The quote CHARACTER is dialect-specific. Trino rejects backquoted
+    identifiers outright (``SYNTAX_ERROR: backquoted identifiers are not
+    supported; use double quotes to quote identifiers``); Spark/Hive
+    require backticks. This hardcoded backticks until 2026-09-28, which
+    broke every Trino-routed read verb on the pod -- ``stats`` degraded
+    silently to em-dash row counts, ``sources`` and ``results`` raised.
+
+    Args:
+        fqn: A dot-separated identifier. Segments may already be quoted.
+        engine: ``"trino"`` selects double quotes; anything else
+            (``"spark"``, the default) selects backticks. Pass the SAME
+            resolved engine handed to :meth:`ClearinghouseCapability._run`,
+            so quoting cannot disagree with the executing dialect.
     """
-    return ".".join(f"`{segment.strip('`')}`" for segment in fqn.split("."))
+    quote = '"' if engine == "trino" else "`"
+    return ".".join(
+        f"{quote}{segment.strip('`\"')}{quote}" for segment in fqn.split(".")
+    )
 
 
 def _in_literal(column: str, values: list[str]) -> str:

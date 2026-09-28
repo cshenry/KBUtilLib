@@ -91,3 +91,4 @@ ko_description_map*.tsv
 ec_description_map*.tsv
 go_description_map*.tsv
 cog_description_map*.tsv
+agent-io/verdict.json

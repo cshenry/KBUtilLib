@@ -1,9 +1,0 @@
-{
-  "verdict": "pass",
-  "reason": "load() postflight now builds a per-segment quoted fqn via _quote_fqn, byte-identical to clearinghouse_bootstrap_adapter's helper and kept local to avoid inverting the module dependency; grep confirms it was the only whole-namespace-backtick site in capability.py; new tests assert exact strings for two-segment and one-segment namespaces; ingest namespace derivation untouched (D1 out of scope, correctly noted). 195/195 berdl tests pass (one pre-existing collection error in unchanged test_clearinghouse_derivation.py from missing duckdb dep, fails identically on main).",
-  "stamp": {
-    "task_id": "task-fbe776d7",
-    "branch": "maestro/reviewer/dispatch-dev-1194-berdlcapabilit-task-fbe776d7",
-    "commit": "907ae056a214bffb2652c7d9b35f148d4ba34527"
-  }
-}

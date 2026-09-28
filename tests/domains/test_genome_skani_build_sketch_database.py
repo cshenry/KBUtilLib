@@ -240,6 +240,144 @@ def test_success_result_shape(skani_utils, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# inputs go through -l, never argv (E2BIG regression guard)
+# ---------------------------------------------------------------------------
+
+
+def _fake_run_capturing_list_file(captured):
+    """Like ``_fake_run_success``, but also snapshots the -l file's CONTENT.
+
+    The file is unlinked in ``build_sketch_database``'s ``finally``, so the
+    only moment it can be read is while the fake subprocess is "running" --
+    which is exactly the moment real skani would read it.
+    """
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        list_path = Path(cmd[cmd.index("-l") + 1])
+        captured["list_path"] = list_path
+        captured["list_existed_during_run"] = list_path.exists()
+        captured["list_content"] = list_path.read_text()
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Result()
+
+    return fake_run
+
+
+def test_fasta_paths_are_not_positional_arguments(skani_utils, tmp_path, monkeypatch):
+    """The defect that produced 'Argument list too long' on a 163,536-genome build."""
+    captured = {}
+    monkeypatch.setattr(subprocess, "run", _fake_run_capturing_list_file(captured))
+
+    fastas = ["/data/a.fasta", "/data/b.fasta", "/data/c.fasta"]
+    skani_utils.build_sketch_database(fastas, str(tmp_path / "out"))
+
+    cmd = captured["cmd"]
+    assert "-l" in cmd
+    for fasta in fastas:
+        assert fasta not in cmd
+
+
+def test_list_file_holds_one_path_per_line_in_order(skani_utils, tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(subprocess, "run", _fake_run_capturing_list_file(captured))
+
+    fastas = ["/data/a.fasta", "/data/b.fasta", "/data/c.fasta"]
+    skani_utils.build_sketch_database(fastas, str(tmp_path / "out"))
+
+    assert captured["list_existed_during_run"] is True
+    assert captured["list_content"] == "/data/a.fasta\n/data/b.fasta\n/data/c.fasta\n"
+
+
+def test_argv_size_is_independent_of_genome_count(skani_utils, tmp_path, monkeypatch):
+    """163,536 paths must not grow argv -- that is the whole point of -l.
+
+    The failing build's argv was ~13 MB. Anything of that order here means
+    the paths are back on the command line.
+    """
+    captured = {}
+    monkeypatch.setattr(subprocess, "run", _fake_run_capturing_list_file(captured))
+
+    fastas = [f"/scratch/kbdl/jobs/deadbeef/inputs/genome_{i:06d}.fasta" for i in range(163_536)]
+    result = skani_utils.build_sketch_database(fastas, str(tmp_path / "out"))
+
+    assert result["success"] is True
+    assert result["genome_count"] == 163_536
+    assert sum(len(arg) for arg in captured["cmd"]) < 4096
+    assert len(captured["list_content"].splitlines()) == 163_536
+
+
+def test_list_file_is_removed_after_success(skani_utils, tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(subprocess, "run", _fake_run_capturing_list_file(captured))
+
+    skani_utils.build_sketch_database(["a.fasta"], str(tmp_path / "out"))
+
+    assert not captured["list_path"].exists()
+
+
+def test_list_file_is_removed_after_failure(skani_utils, tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        captured["list_path"] = Path(cmd[cmd.index("-l") + 1])
+
+        class _Result:
+            returncode = 1
+            stdout = ""
+            stderr = "skani: bad input"
+
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = skani_utils.build_sketch_database(["a.fasta"], str(tmp_path / "out"))
+
+    assert result["success"] is False
+    assert not captured["list_path"].exists()
+
+
+def test_list_file_is_removed_after_timeout(skani_utils, tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        captured["list_path"] = Path(cmd[cmd.index("-l") + 1])
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = skani_utils.build_sketch_database(["a.fasta"], str(tmp_path / "out"), timeout=5)
+
+    assert result["success"] is False
+    assert not captured["list_path"].exists()
+
+
+def test_path_containing_newline_is_rejected_without_invoking_skani(
+    skani_utils, tmp_path, monkeypatch
+):
+    """A line-delimited list file cannot carry such a path -- fail, never truncate."""
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        raise AssertionError("skani must not be invoked with an unrepresentable path")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = skani_utils.build_sketch_database(
+        ["/data/ok.fasta", "/data/ev\nil.fasta"], str(tmp_path / "out")
+    )
+
+    assert result["success"] is False
+    assert result["genome_count"] == 0
+    assert "newline" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # sketch_genome_directory is unmodified
 # ---------------------------------------------------------------------------
 

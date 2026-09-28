@@ -2,8 +2,10 @@
 
 The KBDL job service (see the ``KBDLJobRunningPrototype`` repo, PRD
 ``kbdl-job-service-v0``) runs longer genome-annotation / model-reconstruction
-/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app, reached
-through a loopback-only SSH tunnel. This module is the KBUtilLib-side
+/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app. The
+service binds an ANL-internal interface and is reached directly from any
+host inside the ANL perimeter (including KBase JupyterHub pods); no SSH
+tunnel is involved. This module is the KBUtilLib-side
 client for that service's HTTP contract, so agents that already reach for
 KBUtilLib's other external-service clients (:mod:`bvbrc_utils`,
 :mod:`kb_uniprot_utils`, :mod:`patric_ws_utils`, :mod:`rcsb_pdb_utils`) find
@@ -19,9 +21,13 @@ directly in this module rather than imported.
 
 Endpoint & auth
 ----------------
-Targets the tunnelled loopback endpoint, default ``http://127.0.0.1:8791``,
-overridable via the ``KBDL_SERVICE_URL`` environment variable or the
-``base_url`` constructor argument. The KBase auth token is taken from the
+The service endpoint is required and has no default: supply it via the
+``KBDL_SERVICE_URL`` environment variable or the ``base_url`` constructor
+argument. KBDL is reached directly over the ANL-internal network (currently
+``http://poplar.cels.anl.gov:8791``, though it is expected to move into
+KBase infrastructure); no SSH tunnel is used. Constructing the client with
+neither ``base_url`` nor ``KBDL_SERVICE_URL`` set raises ``ValueError``. The
+KBase auth token is taken from the
 environment the same way :class:`~kbutillib.domains.external.patric_ws_utils.PatricWSUtils`
 and friends take theirs -- via :meth:`SharedEnvUtils.get_token` (namespace
 ``"kbase"``, populated from ``KB_AUTH_TOKEN``/``KBASE_AUTH_TOKEN``,
@@ -153,11 +159,18 @@ __all__ = [
     "KBDLJobFailedError",
 ]
 
-#: Environment variable overriding the default loopback endpoint.
+#: Environment variable supplying the KBDL service endpoint (no default;
+#: KBDL is reached directly over the ANL-internal network).
 KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 
-#: Default tunnelled loopback endpoint (matches the service's KBDL_PORT default).
-DEFAULT_BASE_URL = "http://127.0.0.1:8791"
+#: There is deliberately no built-in default endpoint. KBDL used to be reached
+#: through a loopback SSH tunnel (``http://127.0.0.1:8791``), but that posture
+#: was abandoned 2026-08-24; the service now binds an ANL-internal interface and
+#: is reached directly, so a silent loopback default would only ever produce a
+#: connection-refused against a dead address. The name is retained (set to
+#: ``None``) because it is part of the module's historical public surface;
+#: callers must supply the endpoint via ``base_url`` or ``KBDL_SERVICE_URL``.
+DEFAULT_BASE_URL = None
 
 #: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
@@ -283,9 +296,10 @@ class KBDLServiceUtils(SharedEnvUtils):
         """Initialize the KBDL service client.
 
         Args:
-            base_url: Override for the tunnelled loopback endpoint. If
-                None, uses the ``KBDL_SERVICE_URL`` environment variable,
-                falling back to ``http://127.0.0.1:8791``.
+            base_url: The KBDL service endpoint (direct ANL-internal URL).
+                If None, the ``KBDL_SERVICE_URL`` environment variable is
+                used. There is no default: if neither is set, a
+                ``ValueError`` is raised. No SSH tunnel is involved.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built ``requests.Session`` (or a
                 stand-in with a compatible ``.request()``), so tests can
@@ -295,9 +309,15 @@ class KBDLServiceUtils(SharedEnvUtils):
                 (e.g. ``token="..."`` to set the KBase token directly).
         """
         super().__init__(**kwargs)
-        self.base_url = (
-            base_url or os.environ.get(KBDL_SERVICE_URL_ENV_VAR) or DEFAULT_BASE_URL
-        ).rstrip("/")
+        resolved = base_url or os.environ.get(KBDL_SERVICE_URL_ENV_VAR)
+        if not resolved:
+            raise ValueError(
+                "KBDL service endpoint is not configured: set KBDL_SERVICE_URL "
+                "or pass base_url. KBDL is currently served at "
+                "http://poplar.cels.anl.gov:8791 inside the ANL network; "
+                "no tunnel is needed."
+            )
+        self.base_url = resolved.rstrip("/")
         self.timeout = timeout
         self.session = session if session is not None else requests.Session()
 
@@ -779,7 +799,20 @@ class KBDLServiceUtilsImpl:
         except Exception:
             pass
         _kwargs.update(kwargs)
-        self._delegate = KBDLServiceUtils(**_kwargs)
+        self._delegate_kwargs = _kwargs
+        # Delegate construction is deferred: KBDLServiceUtils now requires an
+        # endpoint (via base_url or KBDL_SERVICE_URL) and raises if none is
+        # configured. Building it lazily means merely registering / holding this
+        # wrapper (e.g. the toolkit's lazy ``kbdl_service`` property) does not
+        # force endpoint resolution -- the clear ValueError surfaces on first
+        # real use instead of at wrapper-construction time.
+        self._delegate_instance: Optional[KBDLServiceUtils] = None
+
+    @property
+    def _delegate(self) -> "KBDLServiceUtils":
+        if self._delegate_instance is None:
+            self._delegate_instance = KBDLServiceUtils(**self._delegate_kwargs)
+        return self._delegate_instance
 
     @property
     def env(self):

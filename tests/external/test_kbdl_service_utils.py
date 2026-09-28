@@ -81,7 +81,14 @@ class FakeSession:
         return self._responses.pop(0)
 
 
+#: Endpoint the offline tests point the client at. KBDL no longer has a
+#: built-in default (the loopback/tunnel posture was retired), so every
+#: constructed client must be given one explicitly.
+TEST_BASE_URL = "http://127.0.0.1:8791"
+
+
 def make_client(session, **kwargs):
+    kwargs.setdefault("base_url", TEST_BASE_URL)
     return KBDLServiceUtils(
         session=session,
         config_file=False,
@@ -138,17 +145,29 @@ def test_importing_module_does_not_import_kbdl_service():
 # ---------------------------------------------------------------------------
 
 
-def test_default_base_url_is_the_tunnelled_loopback_endpoint():
-    client = KBDLServiceUtils(
-        session=FakeSession([]),
-        config_file=False,
-        token_file=None,
-        kbase_token_file=None,
-    )
-    assert client.base_url == "http://127.0.0.1:8791"
+def test_no_base_url_and_no_env_var_raises(monkeypatch):
+    """With neither ``base_url`` nor ``KBDL_SERVICE_URL`` set there is no
+    default: the client must refuse to construct rather than silently point
+    at a dead loopback address (the SSH-tunnel posture was retired)."""
+    monkeypatch.delenv("KBDL_SERVICE_URL", raising=False)
+    with pytest.raises(ValueError) as excinfo:
+        KBDLServiceUtils(
+            session=FakeSession([]),
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        )
+    message = str(excinfo.value)
+    assert "KBDL_SERVICE_URL" in message
+    assert "base_url" in message
 
 
-def test_base_url_overridable_by_environment_variable(monkeypatch):
+def test_no_default_base_url_constant():
+    """The retired loopback default must no longer be a live value."""
+    assert kbdl_client_module.DEFAULT_BASE_URL is None
+
+
+def test_base_url_from_environment_variable(monkeypatch):
     monkeypatch.setenv("KBDL_SERVICE_URL", "http://127.0.0.1:9999")
     client = KBDLServiceUtils(
         session=FakeSession([]),

@@ -111,26 +111,40 @@ _SLOT_KEY_COLUMNS = ("entity_hash", "entity_type", "result_type", "source")
 _ORDER_COLUMNS = ("observed_at", "ingest_batch_id")
 
 
-def _quote_fqn(fqn: str) -> str:
-    """Backtick-quote each dot-separated segment of a table name.
+def _quote_fqn(fqn: str, engine: str = "spark") -> str:
+    """Quote each dot-separated segment of a table name, per ENGINE.
 
-    Matches the convention already used in ``BerdlCapability.load()``
-    (``f"\\`{namespace}\\`.\\`{report['name']}\\`"``): every segment
-    between dots gets its own pair of backticks, so a multi-part
-    identifier such as ``tenant.namespace.table`` is never misread with a
-    dot inside a segment as a qualifier boundary. A segment that already
-    arrives backtick-quoted is not double-quoted.
+    Every segment between dots gets its own pair of quotes, so a
+    multi-part identifier such as ``tenant.namespace.table`` is never
+    misread with a dot inside a segment as a qualifier boundary. A
+    segment that already arrives quoted is not double-quoted.
+
+    The quote CHARACTER is dialect-specific, and getting it wrong is not
+    cosmetic: Trino rejects backquoted identifiers outright
+    (``SYNTAX_ERROR: backquoted identifiers are not supported; use double
+    quotes to quote identifiers``), while Spark/Hive require backticks.
+    This function hardcoded backticks until 2026-09-28, which made every
+    Trino-routed read verb fail -- silently in ``stats`` (row counts
+    rendered as em-dashes) and loudly in ``results``.
 
     Args:
         fqn: A dot-separated table name, e.g.
             ``"kbaseincubator.clearinghouse.result"``. Segments may
-            already be backtick-quoted.
+            already be quoted.
+        engine: ``"trino"`` selects double quotes; anything else
+            (``"spark"``, the default) selects backticks. Callers pass
+            the SAME resolved engine they hand to the query seam, so the
+            quoting cannot disagree with the dialect the SQL runs under.
 
     Returns:
-        The fully backtick-quoted identifier, e.g.
-        ```` `kbaseincubator`.`clearinghouse`.`result` ````.
+        The fully quoted identifier -- e.g. under ``"spark"``
+        ```` `kbaseincubator`.`clearinghouse`.`result` ````, and under
+        ``"trino"`` ``"kbaseincubator"."clearinghouse"."result"``.
     """
-    return ".".join(f"`{segment.strip('`')}`" for segment in fqn.split("."))
+    quote = '"' if engine == "trino" else "`"
+    return ".".join(
+        f"{quote}{segment.strip('`\"')}{quote}" for segment in fqn.split(".")
+    )
 
 
 def _result_columns() -> list[str]:
@@ -184,8 +198,14 @@ def current_state_sql(
     *,
     sources: list[str] | None = None,
     entity_types: list[str] | None = None,
+    engine: str = "spark",
 ) -> str:
-    """Build the Spark SQL that derives clearinghouse current state.
+    """Build the SQL that derives clearinghouse current state.
+
+    The body is dialect-neutral (a plain ``ROW_NUMBER()`` window); only
+    identifier quoting differs, which is what ``engine`` selects. Callers
+    that route this to Trino MUST pass ``engine="trino"`` -- see
+    :func:`_quote_fqn`.
 
     Selects, from the append-only ``result`` table, exactly one row per
     ``(entity_hash, entity_type, result_type, source)`` slot: the row
@@ -225,7 +245,7 @@ def current_state_sql(
     select_list = ",\n        ".join(columns)
     partition_by = ", ".join(_SLOT_KEY_COLUMNS)
     order_by = ", ".join(f"{col} DESC" for col in _ORDER_COLUMNS)
-    table = _quote_fqn(result_table_fqn)
+    table = _quote_fqn(result_table_fqn, engine)
 
     matches_nothing = (sources is not None and len(sources) == 0) or (
         entity_types is not None and len(entity_types) == 0

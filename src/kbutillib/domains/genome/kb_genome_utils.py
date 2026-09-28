@@ -419,11 +419,13 @@ class KBGenomeUtils(KBWSUtils):
             if total > 0:
                 gc_content = (g_count + c_count) / total
 
-        # Calculate genome MD5
-        genome_md5 = ''
+        # Foreign-system interop value: this md5 is REQUIRED by KBase Assembly
+        # objects and is NOT a clearinghouse entity hash. For platform genome
+        # identity use kbutillib.domains.identity.standardizers.entity_hash.
+        kbase_assembly_md5 = ''
         if sequences:
             sorted_seqs = [sequences[cid] for cid in contig_ids]
-            genome_md5 = hashlib.md5(''.join(sorted_seqs).encode()).hexdigest()
+            kbase_assembly_md5 = hashlib.md5(''.join(sorted_seqs).encode()).hexdigest()
 
         # Build taxonomy
         if not taxonomy and metadata:
@@ -475,7 +477,7 @@ class KBGenomeUtils(KBWSUtils):
             'contig_ids': contig_ids,
             'contig_lengths': contig_lengths,
             'gc_content': gc_content,
-            'md5': genome_md5,
+            'md5': kbase_assembly_md5,
             'molecule_type': 'DNA',
             'source': 'PATRIC',
             'source_id': genome_id,

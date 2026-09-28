@@ -13,6 +13,8 @@ Public interface (kept intentionally small and stable):
     STANDARDIZER_VERSION   — version tag for the rules encoded here.
     standardize(entity_type, raw) -> str
     entity_hash(entity_type, raw) -> str
+    parse_fasta_contigs(source) -> list[str]
+    genome_hash_from_fasta(source) -> str
     canonical_payload(obj) -> bytes
     content_hash(obj) -> str
 
@@ -31,6 +33,8 @@ __all__ = [
     "STANDARDIZER_VERSION",
     "standardize",
     "entity_hash",
+    "parse_fasta_contigs",
+    "genome_hash_from_fasta",
     "canonical_payload",
     "content_hash",
 ]
@@ -41,7 +45,7 @@ import re
 import unicodedata
 from typing import Any, Iterable
 
-STANDARDIZER_VERSION = "1.0"
+STANDARDIZER_VERSION = "1.1"
 
 _SUPPORTED_ENTITY_TYPES = (
     "function",
@@ -122,14 +126,75 @@ def _standardize_gene(raw: str) -> str:
 def _standardize_genome(raw: Iterable[str]) -> str:
     """Standardize a genome assembly given as an iterable of contig strings.
 
-    Each contig is canonicalized with the DNA rule, the canonical contigs
-    are then SORTED, and joined with the ASCII pipe character ``|``. The
-    canonical form for a genome may be large; callers are not required to
-    store it — only ``entity_hash`` of it need be kept.
+    Each contig is canonicalized with the DNA rule; contigs that are EMPTY
+    after cleaning are DROPPED (a zero-length record cannot contribute to a
+    genome's identity, and dropping it makes an assembly's hash independent
+    of stray empty records); the remaining canonical contigs are then
+    SORTED, and joined with the ASCII pipe character ``|``. The canonical
+    form for a genome may be large; callers are not required to store it —
+    only ``entity_hash`` of it need be kept.
     """
     canonical_contigs = [_standardize_gene(contig) for contig in raw]
+    canonical_contigs = [contig for contig in canonical_contigs if contig]
     canonical_contigs.sort()
     return "|".join(canonical_contigs)
+
+
+def parse_fasta_contigs(source: Any) -> list[str]:
+    """Parse FASTA into a list of RAW contig sequence strings, in file order.
+
+    This does NOT standardize and does NOT sort — that stays the job of
+    ``standardize("genome", ...)``. It only splits a FASTA source into one
+    string per ``>`` record, in the order the records appear.
+
+    Args:
+        source: A ``str``, ``bytes``, or a readable text or binary stream
+            (anything with a ``.read()``). Bytes are decoded as UTF-8.
+
+    Returns:
+        A list of raw contig sequence strings, one element per ``>`` record.
+        Header lines (``>``) are stripped from each record; the sequence
+        lines of a record are joined with newlines preserved so downstream
+        cleaning (which strips all whitespace) is unaffected. Text before
+        the first ``>`` is not a record and is ignored. A source containing
+        no ``>`` at all is treated as a single headerless record (one
+        element), so a bare contig file keeps working.
+    """
+    if hasattr(source, "read"):
+        source = source.read()
+    if isinstance(source, (bytes, bytearray)):
+        source = bytes(source).decode("utf-8")
+
+    lines = source.splitlines()
+
+    if not any(line.startswith(">") for line in lines):
+        # No header anywhere: the whole thing is one headerless record.
+        return ["\n".join(lines)]
+
+    contigs: list[str] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith(">"):
+            if current is not None:
+                contigs.append("\n".join(current))
+            current = []
+        elif current is not None:
+            # Sequence line belonging to the current record; text before the
+            # first '>' has current is None and is ignored.
+            current.append(line)
+    if current is not None:
+        contigs.append("\n".join(current))
+    return contigs
+
+
+def genome_hash_from_fasta(source: Any) -> str:
+    """Return the genome ``entity_hash`` for a FASTA ``source``.
+
+    Composition of :func:`parse_fasta_contigs` and
+    ``entity_hash("genome", ...)``. This is the function an archive reader
+    calls when it has a FASTA blob rather than a pre-split list of contigs.
+    """
+    return entity_hash("genome", parse_fasta_contigs(source))
 
 
 def _standardize_ontology_term(raw: str) -> str:
@@ -156,6 +221,43 @@ _STANDARDIZERS = {
 }
 
 
+def _guard_genome_raw(raw: Any) -> None:
+    """Reject genome raw forms that would silently produce a wrong hash.
+
+    Two failure modes, both measured in shipped code:
+
+    1. A bare ``str`` or ``bytes``. A ``str`` is iterable, so the genome
+       rule would iterate it CHARACTER BY CHARACTER — e.g.
+       ``standardize("genome", "ACGTTTGCA")`` would return
+       ``"A|A|C|C|G|G|T|T|T"`` instead of the intended single-contig form.
+       A genome's raw form is an iterable of contigs; a single sequence
+       must be passed as a one-element list.
+
+    2. An element containing a ``>`` header line AFTER its first line. That
+       means two or more FASTA records were packed into one string, which
+       would be cleaned into a single concatenated contig — a different
+       hash from passing the records as separate list elements, with no
+       error. An element whose FIRST line is a ``>`` header is a single
+       record with its header attached and is left alone.
+    """
+    if isinstance(raw, (str, bytes, bytearray)):
+        raise ValueError(
+            "A genome's raw form is an iterable of contigs, not a bare "
+            "str/bytes; a str would be iterated character by character and "
+            "produce a wrong hash. Pass a single sequence as a one-element "
+            "list, e.g. standardize('genome', ['ACGT'])."
+        )
+    for index, element in enumerate(raw):
+        lines = element.splitlines()
+        if any(line.startswith(">") for line in lines[1:]):
+            raise ValueError(
+                f"genome contig element at index {index} contains a '>' "
+                "header line after its first line: a multi-record FASTA was "
+                "passed where a single contig was expected. Use "
+                "genome_hash_from_fasta(source) to hash a multi-record FASTA."
+            )
+
+
 def standardize(entity_type: str, raw: Any) -> str:
     """Return the canonical string form of ``raw`` for the given entity type.
 
@@ -180,6 +282,8 @@ def standardize(entity_type: str, raw: Any) -> str:
             f"Unsupported entity_type {entity_type!r}; "
             f"supported types are: {supported}"
         ) from None
+    if entity_type == "genome":
+        _guard_genome_raw(raw)
     return fn(raw)
 
 

@@ -29,7 +29,7 @@ def test_public_names_importable_from_canonical_path() -> None:
         standardize,
     )
 
-    assert STANDARDIZER_VERSION == "1.0"
+    assert STANDARDIZER_VERSION == "1.1"
     assert callable(standardize)
     assert callable(entity_hash)
     assert callable(canonical_payload)
@@ -202,6 +202,150 @@ def test_genome_contigs_canonicalized_with_dna_rule_before_sorting() -> None:
 
     contigs = [">c2\nttt\n", ">c1\naaaa\n"]
     assert standardize("genome", contigs) == "AAAA|TTT"
+
+
+# ---------------------------------------------------------------------------
+# genome — canonical FASTA identity: file-shape invariance and the guards
+# ---------------------------------------------------------------------------
+
+
+def _wrap_fasta(contigs: list[str], width: int = 60, header: bool = True) -> str:
+    """Render contigs as a multi-record FASTA, wrapping sequence at ``width``."""
+    parts: list[str] = []
+    for i, seq in enumerate(contigs):
+        if header:
+            parts.append(f">contig{i}")
+        for start in range(0, len(seq), width):
+            parts.append(seq[start : start + width])
+    return "\n".join(parts) + "\n"
+
+
+def test_genome_hash_invariant_across_file_shapes() -> None:
+    """Plain, 60-col-wrapped, trailing-newline and header-bearing renderings
+    of one assembly all produce one identical digest."""
+    from kbutillib.domains.identity import entity_hash, genome_hash_from_fasta  # noqa: PLC0415
+
+    # Two contigs long enough to actually wrap at 60 columns.
+    contig_a = "ACGT" * 20  # 80 chars
+    contig_b = "TTGCA" * 15  # 75 chars
+    contigs = [contig_a, contig_b]
+
+    plain = entity_hash("genome", contigs)
+    wrapped = genome_hash_from_fasta(_wrap_fasta(contigs, width=60, header=True))
+    trailing = entity_hash("genome", [c + "\n" for c in contigs])
+    header_bearing = entity_hash(
+        "genome", [f">c{i}\n{c}\n" for i, c in enumerate(contigs)]
+    )
+
+    assert plain == wrapped == trailing == header_bearing
+
+
+def test_genome_hash_independent_of_contig_order() -> None:
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    assert entity_hash("genome", ["ACGT", "TTTT", "GG"]) == entity_hash(
+        "genome", ["GG", "ACGT", "TTTT"]
+    )
+
+
+def test_genome_extra_zero_length_record_does_not_change_hash() -> None:
+    """An assembly with an extra empty record hashes the same as without it."""
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    with_empty = entity_hash("genome", ["ACGT", "", "TTTT"])
+    without = entity_hash("genome", ["ACGT", "TTTT"])
+    assert with_empty == without
+
+    # An empty FASTA record (header, no sequence) is likewise dropped.
+    with_empty_fasta = entity_hash("genome", ["ACGT", ">empty\n", "TTTT"])
+    assert with_empty_fasta == without
+
+
+def test_genome_duplicate_contigs_are_not_deduplicated() -> None:
+    """Duplicate identical contigs must change the hash — no dedup."""
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    assert entity_hash("genome", ["A", "A"]) != entity_hash("genome", ["A"])
+
+
+def test_genome_rejects_bare_str() -> None:
+    """A bare str must RAISE, not be iterated character by character."""
+    from kbutillib.domains.identity import standardize  # noqa: PLC0415
+
+    with pytest.raises(ValueError):
+        standardize("genome", "ACGT")
+
+
+def test_genome_rejects_bare_bytes() -> None:
+    from kbutillib.domains.identity import standardize  # noqa: PLC0415
+
+    with pytest.raises(ValueError):
+        standardize("genome", b"ACGT")
+
+
+def test_genome_multi_record_element_raises() -> None:
+    """A '>' header on a LATER line of one element means multiple records."""
+    from kbutillib.domains.identity import standardize  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="index 0"):
+        standardize("genome", [">c1\nACGT\n>c2\nTTTT\n"])
+
+
+def test_genome_single_record_with_own_header_does_not_raise() -> None:
+    """A single record whose FIRST line is a '>' header must NOT raise and
+    must hash the same as the same contig without its header."""
+    from kbutillib.domains.identity import entity_hash, standardize  # noqa: PLC0415
+
+    # Must not raise.
+    assert standardize("genome", [">contig1\nACGT\n"]) == "ACGT"
+    # And hashes identically to the headerless contig.
+    assert entity_hash("genome", [">contig1\nACGT\n"]) == entity_hash(
+        "genome", ["ACGT"]
+    )
+
+
+def test_parse_fasta_contigs_accepts_str_bytes_and_stream() -> None:
+    """str, bytes and a stream of equivalent input return identical lists."""
+    import io  # noqa: PLC0415
+
+    from kbutillib.domains.identity import parse_fasta_contigs  # noqa: PLC0415
+
+    fasta = ">c1\nACGT\n>c2\nTTTT\n"
+    from_str = parse_fasta_contigs(fasta)
+    from_bytes = parse_fasta_contigs(fasta.encode("utf-8"))
+    from_text_stream = parse_fasta_contigs(io.StringIO(fasta))
+    from_binary_stream = parse_fasta_contigs(io.BytesIO(fasta.encode("utf-8")))
+
+    assert from_str == from_bytes == from_text_stream == from_binary_stream
+    assert len(from_str) == 2
+
+
+def test_parse_fasta_contigs_bare_contig_is_single_headerless_record() -> None:
+    """A source with no '>' at all is one headerless record."""
+    from kbutillib.domains.identity import parse_fasta_contigs  # noqa: PLC0415
+
+    assert parse_fasta_contigs("ACGT\nTTTT\n") == ["ACGT\nTTTT"]
+
+
+def test_parse_fasta_contigs_ignores_text_before_first_header() -> None:
+    from kbutillib.domains.identity import parse_fasta_contigs  # noqa: PLC0415
+
+    contigs = parse_fasta_contigs("; a comment\n>c1\nACGT\n")
+    assert contigs == ["ACGT"]
+
+
+def test_genome_hash_from_fasta_matches_entity_hash_of_parsed_contigs() -> None:
+    """genome_hash_from_fasta(text) == entity_hash('genome', parsed contigs)."""
+    from kbutillib.domains.identity import (  # noqa: PLC0415
+        entity_hash,
+        genome_hash_from_fasta,
+        parse_fasta_contigs,
+    )
+
+    fasta = ">c1\nACGTACGT\n>c2\nTTTTGGGG\n"
+    assert genome_hash_from_fasta(fasta) == entity_hash(
+        "genome", parse_fasta_contigs(fasta)
+    )
 
 
 # ---------------------------------------------------------------------------

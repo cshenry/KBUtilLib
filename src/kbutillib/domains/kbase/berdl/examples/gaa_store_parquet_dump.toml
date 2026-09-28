@@ -75,8 +75,11 @@ entity_type = "genome"
 kinds       = ["entity", "content"]
 
   [source.hash]
-  # The dump already carries a genome digest; it is RE-CANONICALISED through
-  # encode_entity_hash and never trusted raw.
+  # The dump already carries a genome digest. `precomputed` accepts the
+  # source's hash RULE on trust: encode_entity_hash checks only the digest
+  # FORMAT (64 lowercase hex chars) and cannot verify WHICH rule produced it.
+  # A digest whose rule is unknown should be spot-checked against a
+  # re-derivation from sequence before a bulk load depends on it.
   precomputed = "genome_hash"
 
   [source.content]

@@ -138,6 +138,56 @@ def test_reject_unknown_derivation():
     assert "@len" in message and "@hash" in message
 
 
+def test_reject_raw_column_for_genome():
+    """A genome source declaring raw_column is rejected at plan time.
+
+    A genome's identity comes from its contig SET; handing one column value to
+    the genome standardizer iterates it character by character into a wrong
+    hash (see clearinghouse_manifest._plan_hash). The message must name the
+    offending key and point at the precomputed / KBDLHashGenomes routes.
+    """
+    toml_text = """
+    [[source]]
+    name = "bad-genome-raw"
+    adapter = "file"
+    path = "x.parquet"
+    entity_type = "genome"
+    kinds = ["entity"]
+    [source.hash]
+    raw_column = "dna_sequence"
+    """
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(toml_text)
+    message = str(exc.value)
+    assert "bad-genome-raw" in message  # names the offending key
+    assert "raw_column" in message
+    assert "genome" in message
+    # names the sanctioned routes
+    assert "precomputed" in message
+    assert "KBDLHashGenomes" in message
+
+
+def test_accept_precomputed_for_genome():
+    """The other side of the gate: a genome source declaring precomputed PASSES
+    shard_plan(). precomputed stays legal for genome -- it is the sanctioned
+    route the shipped example uses -- so the gate must not block it."""
+    toml_text = """
+    [[source]]
+    name = "good-genome-precomputed"
+    adapter = "file"
+    path = "x.parquet"
+    entity_type = "genome"
+    kinds = ["entity"]
+    [source.hash]
+    precomputed = "genome_hash"
+    """
+    plans = _plan(toml_text)
+    assert plans, "a precomputed genome source must produce a plan"
+    assert all(p.entity_type == "genome" for p in plans)
+    # the hash mode planned is precomputed, on the named column
+    assert all(p.hash_source == ("precomputed", "genome_hash", "genome") for p in plans)
+
+
 # --------------------------------------------------------------------------
 # The mapping half is adapter-independent
 # --------------------------------------------------------------------------

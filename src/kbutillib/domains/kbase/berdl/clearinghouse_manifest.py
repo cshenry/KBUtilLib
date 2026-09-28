@@ -463,10 +463,23 @@ def _plan_source(source: Source) -> list[TablePlan]:
 def _plan_hash(source: Source) -> tuple[str, str, str]:
     """Validate ``[source.hash]`` -> ``(mode, column, entity_type)``.
 
-    Exactly one of ``raw_column`` / ``precomputed`` must be present. A
-    ``precomputed`` digest is RE-CANONICALISED through
-    :func:`clearinghouse_schema.encode_entity_hash` by the sharder and never
-    trusted raw; this only records which column carries it.
+    Exactly one of ``raw_column`` / ``precomputed`` must be present.
+
+    ``precomputed`` accepts the source's hash RULE on trust: the sharder
+    passes the digest through
+    :func:`clearinghouse_schema.encode_entity_hash`, which validates only the
+    digest FORMAT (64 lowercase hex characters) and cannot check WHICH rule
+    produced it. A digest whose rule is unknown should be spot-checked against
+    a re-derivation from sequence before a bulk load depends on it.
+
+    ``raw_column`` is REJECTED for ``entity_type == "genome"``. A genome's
+    identity comes from its contig SET, which no single column can carry;
+    routing a genome through ``raw_column`` would hand a single string to the
+    genome standardizer, which iterates it character by character and produces
+    a wrong hash silently. Genomes route via ``precomputed`` or the
+    ``KBDLHashGenomes`` job instead. This keeps the module's contract: a
+    manifest that passes ``shard_plan()`` must be shardable, and a plan
+    failure is always cheaper than an ingest failure.
     """
     name = source.name
     spec = source.hash_spec
@@ -486,6 +499,15 @@ def _plan_hash(source: Source) -> tuple[str, str, str]:
         if not isinstance(raw_column, str):
             raise ManifestError(
                 f"source {name!r} [source.hash].raw_column must be a string."
+            )
+        if source.entity_type == "genome":
+            raise ManifestError(
+                f"source {name!r} [source.hash]: raw_column is not allowed for "
+                "entity_type 'genome'. A genome's identity comes from its "
+                "contig SET, which no single column can carry; a raw_column "
+                "would pass one string to the genome standardizer and be "
+                "iterated character by character into a wrong hash. Route a "
+                "genome through precomputed or the KBDLHashGenomes job."
             )
         return ("raw", raw_column, source.entity_type)
     if not isinstance(precomputed, str):

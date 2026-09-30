@@ -670,6 +670,23 @@ class MSCommunityUtils(KBModelUtils):
             raise CommunityDependencyError(_mscommunity_unavailable_reason())
         return module
 
+    def _require_escher_edit(self) -> Any:
+        """Return the resolved ``escher_edit`` module, or raise if unavailable.
+
+        Raises:
+            CommunityVisualizationError: naming ``escher_edit`` and its
+                ``dependencies.yaml`` entry when the package cannot be resolved.
+        """
+        module = _import_escher_edit()
+        if module is None:
+            raise CommunityVisualizationError(
+                "escher_edit is not available; the community figure cannot be "
+                "rendered. Install it or declare its checkout under the "
+                "'escher_edit' entry in dependencies.yaml. "
+                f"({_escher_edit_unavailable_reason()})"
+            )
+        return module
+
     def _resolve_member_model(self, member):
         """Resolve one community-member input into a cobra model in COMMUNITY order.
 
@@ -1500,6 +1517,642 @@ class MSCommunityUtils(KBModelUtils):
             solver=solver,
         )
 
+    # ── Visualization ──────────────────────────────────────────────────────
+
+    @capability(
+        domain="community",
+        summary="Compute cross-feeding / exchanged-metabolite tables for a community.",
+        tags=("community", "visualization", "cross-feeding"),
+        visibility="public",
+    )
+    def cross_feeding_table(
+        self,
+        comm: "CommunityModel",
+        result=None,
+        media=None,
+        flux_threshold=1.0,
+        msdb=None,
+        msdb_path=None,
+        ignore_mets=None,
+    ):
+        """Return upstream's ``(cross_feeding_df, exchanged_mets_df)`` pair.
+
+        Delegates to ``mscommunity.mscommviz.interactions`` THROUGH
+        :func:`_unwrap` (the function is wrongly ``@staticmethod``-decorated and
+        would not be directly callable on Python 3.9).  ``visualize`` and
+        ``show_figure`` are forced ``False`` -- this computes the tables only, no
+        figure.  The biochemistry database is passed by the KEYWORD ``msdb_path=``
+        (or ``msdb=``), never positionally: upstream touches ``msdb`` only inside
+        its ``if visualize:`` branch, so the table itself does not need it, but it
+        is forwarded anyway for symmetry with the figure path.
+
+        Args:
+            comm: The :class:`CommunityModel`.
+            result: An optional :class:`CommunityFBAResult` whose ``solution`` /
+                fluxes seed the interaction analysis; ``None`` lets upstream solve.
+            media: A media object, id/name, or ``None``.
+            flux_threshold: Minimum absolute flux for a metabolite to count as
+                exchanged (upstream default 1).
+            msdb: Optional biochemistry database object (forwarded as ``msdb=``).
+            msdb_path: Optional biochemistry database path (forwarded as
+                ``msdb_path=``).
+            ignore_mets: Optional iterable of metabolite ids to ignore.
+
+        Returns:
+            The upstream ``(cross_feeding_df, exchanged_mets_df)`` tuple of
+            ``pandas.DataFrame`` objects, unchanged.
+
+        Raises:
+            CommunityDependencyError: If ``mscommunity`` is unavailable.
+        """
+        module = self._require_mscommunity()
+        from mscommunity import mscommviz  # noqa: WPS433
+
+        media_obj = self._resolve_media(media)
+        solution = getattr(result, "solution", None) if result is not None else None
+        interactions = _unwrap(mscommviz.interactions)
+        return interactions(
+            comm.mscomm,
+            solution=solution,
+            media=media_obj,
+            flux_threshold=flux_threshold,
+            msdb=msdb,
+            msdb_path=msdb_path,
+            visualize=False,
+            show_figure=False,
+            ignore_mets=ignore_mets,
+        )
+
+    @capability(
+        domain="community",
+        summary="Adapt a community cross-feeding table into per-member flux dicts.",
+        tags=("community", "visualization", "cross-feeding"),
+        visibility="public",
+    )
+    def fluxes_by_member(
+        self,
+        comm: "CommunityModel",
+        result=None,
+        min_abs_flux=0.0,
+    ) -> dict[str, dict[str, float]]:
+        """Adapt the cross-feeding table into ``{member: {compound: flux}}``.
+
+        This is THE ADAPTER between the two upstream packages and is PUBLIC on
+        purpose: it is the seam, and the first thing to inspect when a figure
+        looks wrong.
+
+        The cross-feeding DataFrame's index is compound ids (upstream has already
+        stripped the trailing ``_e0``); its columns are the member ids PLUS a
+        column literally named ``"Environment"``.  No sign flip is applied:
+        ``escher_edit`` documents "negative = consumed, positive = excreted" and
+        MSCommunity fills each member column from that member's net flux with the
+        same convention, so the conventions already agree.
+
+        Compounds carried ONLY by the ``"Environment"`` column -- no member has a
+        non-zero flux for them -- are excluded entirely (from the result and from
+        the downstream compound-name / count derivations).  The ``"Environment"``
+        column itself is dropped: passing it through as a member would draw the
+        medium as an organism.
+
+        Args:
+            comm: The :class:`CommunityModel`.
+            result: Optional :class:`CommunityFBAResult` forwarded to
+                :meth:`cross_feeding_table`.
+            min_abs_flux: Drop cells whose absolute flux is below this.
+
+        Returns:
+            ``{member_id: {compound_id: flux}}``.  A member with no surviving
+            compounds maps to ``{}``.
+
+        Raises:
+            CommunityDependencyError: If ``mscommunity`` is unavailable.
+        """
+        cross_feeding_df, _ = self.cross_feeding_table(comm, result=result)
+
+        columns = list(cross_feeding_df.columns)
+        member_cols = [c for c in columns if c != "Environment"]
+
+        result_map: dict[str, dict[str, float]] = {c: {} for c in member_cols}
+        for compound_id in cross_feeding_df.index:
+            row = cross_feeding_df.loc[compound_id]
+            # Only MEMBER columns are consulted.  A compound carried solely by the
+            # Environment column contributes to no member here and so is dropped
+            # from the result entirely -- which is exactly the intent (drawing the
+            # medium as an organism is the failure this prevents).
+            for col in member_cols:
+                val = row[col]
+                if val is None:
+                    continue
+                fval = float(val)
+                if fval == 0.0 or abs(fval) < min_abs_flux:
+                    continue
+                result_map[col][str(compound_id)] = fval
+        return result_map
+
+    @capability(
+        domain="community",
+        summary="Render the primary community cross-feeding Escher figure.",
+        tags=("community", "visualization", "escher"),
+        visibility="public",
+    )
+    def render_community_map(
+        self,
+        comm: "CommunityModel",
+        result_or_results,
+        output_path,
+        *,
+        min_abs_flux=0.0,
+        skip_amino_acids=False,
+        label_compounds="id",
+        member_groups=None,
+        member_legend=None,
+        style=None,
+        svg=True,
+        html=True,
+        map_name=None,
+    ) -> "CommunityMapArtifacts":
+        """Render the primary community cross-feeding figure via ``escher_edit``.
+
+        Args:
+            comm: The :class:`CommunityModel`.
+            result_or_results: Either one :class:`CommunityFBAResult` or a
+                ``{label: result}`` mapping.  A mapping produces one captioned
+                block per label, assembled in SORTED LABEL ORDER (labels must be
+                unique, non-empty strings); a single result produces one
+                unlabelled block.
+            output_path: Destination for the Escher map JSON.
+            min_abs_flux: Minimum absolute flux for a member exchange to be drawn.
+            skip_amino_acids: When ``True``, hide the amino-acid / common-metabolite
+                skip list (``escher_edit.filter_map.DEFAULT_SKIP_NAMES``).  Defaults
+                ``False`` -- silently hiding metabolites is not a default anyone
+                should get without asking.
+            label_compounds: What the STATIC figure calls each compound.  ``"id"``
+                (default) keeps upstream's ModelSEED ids; ``"name"`` rewrites node
+                labels to display names (widening the columns first so the layout
+                reserves room); ``"name_id"`` uses ``"<name> (<id>)"``.
+            member_groups: Optional ``{member: group}`` for palette grouping.
+            member_legend: Optional legend spec forwarded to the SVG processing.
+            style: An ``escher_edit.MapStyle`` instance.  Defaults to
+                ``MapStyle()``.  The SAME instance is passed to
+                ``build_escher_map(style=)`` and ``render_map_svg(layout=)``.  A
+                caller-supplied style is never mutated.
+            svg: Whether to render the SVG (and, with ``html``, the HTML page).
+            html: Whether to also emit the interactive HTML page beside the SVG.
+            map_name: Optional map name forwarded to ``build_escher_map``.
+
+        Returns:
+            A :class:`CommunityMapArtifacts` (``svg`` / ``html`` are ``None`` when
+            not requested).
+
+        Raises:
+            CommunityVisualizationError: If ``escher_edit`` is unavailable, or if
+                the community produced no above-threshold exchanges at the given
+                ``min_abs_flux`` (no drawable members).
+            CommunityDependencyError: If ``mscommunity`` is unavailable.
+        """
+        escher_edit = self._require_escher_edit()
+
+        if style is None:
+            style = escher_edit.MapStyle()
+
+        skip_names = (
+            escher_edit.filter_map.DEFAULT_SKIP_NAMES if skip_amino_acids else None
+        )
+
+        # ── Stage 1: build one block of member reactions per condition. ──────
+        # Normalize to an ordered list of (label, result); a bare result yields
+        # a single ("", result) pair rendered as an UNLABELLED block.
+        multi = isinstance(result_or_results, Mapping)
+        if multi:
+            labels = list(result_or_results.keys())
+            for label in labels:
+                if not isinstance(label, str) or not label:
+                    raise ValueError(
+                        "render_community_map: multi-condition block labels must "
+                        f"be unique non-empty strings; got {label!r}"
+                    )
+            if len(set(labels)) != len(labels):
+                raise ValueError(
+                    "render_community_map: multi-condition block labels must be "
+                    f"unique; got {labels!r}"
+                )
+            # SORTED LABEL ORDER: a figure must not depend on dict insertion order.
+            ordered = sorted(labels)
+            conditions = [(label, result_or_results[label]) for label in ordered]
+        else:
+            conditions = [("", result_or_results)]
+
+        # Compound-name map is resolved over the UNION of member-carried compounds
+        # across all conditions, once, and reused for every block.
+        per_condition_fbm: list[tuple[str, dict[str, dict[str, float]]]] = []
+        union_compounds: set[str] = set()
+        for label, result in conditions:
+            fbm = self.fluxes_by_member(comm, result=result, min_abs_flux=min_abs_flux)
+            per_condition_fbm.append((label, fbm))
+            for compounds in fbm.values():
+                union_compounds.update(compounds.keys())
+
+        compound_names = self._resolve_compound_names(union_compounds)
+
+        blocks = []
+        for label, fbm in per_condition_fbm:
+            members = escher_edit.build_member_reactions(
+                fbm,
+                model_id=label,
+                compound_names=compound_names,
+                min_abs_flux=min_abs_flux,
+                skip_names=skip_names,
+            )
+            blocks.append((label, members))
+
+        # ── label_compounds="name"/"name_id": widen columns BEFORE layout. ───
+        # escher_edit draws node labels from bigg_id, so display names need extra
+        # horizontal room reserved from the NAMES (ids are ~8 chars, names ~2.9x
+        # wider).  Never mutate the caller-supplied style; derive a new one.
+        display_names = None
+        if label_compounds in ("name", "name_id"):
+            display_names = self._compound_display_names(
+                union_compounds, compound_names, label_compounds
+            )
+            w = style.fitted_column_dx(display_names.values())
+            style = escher_edit.MapStyle(input_column_dx=-w, output_column_dx=w)
+
+        # ── Stage 2: build the Escher map. ───────────────────────────────────
+        # blocks as [(label, members), ...] for several conditions; a BARE member
+        # list for one.
+        if multi:
+            map_input = blocks
+        else:
+            map_input = blocks[0][1]
+
+        try:
+            escher_map = escher_edit.build_escher_map(
+                map_input,
+                compound_names=compound_names,
+                map_name=map_name or "community_exchange_map",
+                style=style,
+            )
+        except ValueError as exc:
+            raise CommunityVisualizationError(
+                "render_community_map: the community produced no above-threshold "
+                f"exchanges at min_abs_flux={min_abs_flux}, so the map has no "
+                f"drawable members. ({exc})"
+            ) from exc
+
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(escher_map))
+
+        n_members = len(comm.member_ids)
+        n_compounds = len(union_compounds)
+        n_blocks = len(blocks)
+
+        svg_path: Optional[Path] = None
+        html_path: Optional[Path] = None
+        if svg:
+            svg_path = out_path.with_suffix(".svg")
+            # BUILD THE COLOUR MAPPING EXACTLY ONCE, from comm.member_ids, and
+            # pass the SAME mapping to every render.
+            colors = escher_edit.palette.member_colors(
+                comm.member_ids, groups=member_groups
+            )
+            escher_edit.render_map_svg(
+                escher_map,
+                out_path=str(svg_path),
+                dashed=True,
+                layout=style,
+                html=html,
+                member_colors=colors,
+                member_groups=member_groups,
+                member_legend=member_legend,
+            )
+            if html:
+                html_path = svg_path.with_suffix(".html")
+            # label_compounds != "id": rewrite the static <text> labels post-render.
+            if display_names is not None:
+                self._rewrite_node_labels(svg_path, display_names)
+
+        return CommunityMapArtifacts(
+            map_json=out_path,
+            svg=svg_path,
+            html=html_path,
+            n_members=n_members,
+            n_compounds=n_compounds,
+            n_blocks=n_blocks,
+        )
+
+    def _resolve_compound_names(self, compound_ids) -> dict[str, str]:
+        """Resolve ``{compound_id: name}`` through the biochem sibling.
+
+        Falls back to using each id as its own name when the biochem sibling is
+        unavailable or raises -- a map reading ``cpd00027`` is worse than one
+        reading ``D-Glucose`` and far better than no map.  NEVER raises.
+
+        Args:
+            compound_ids: Iterable of compound ids to resolve.
+
+        Returns:
+            ``{compound_id: display_name}`` for every input id.
+        """
+        names: dict[str, str] = {}
+        biochem = getattr(self, "biochem", None)
+        for cid in compound_ids:
+            cid = str(cid)
+            resolved = None
+            if biochem is not None:
+                try:
+                    cpd = biochem.get_compound_by_id(cid)
+                    resolved = getattr(cpd, "name", None) if cpd is not None else None
+                except Exception:
+                    resolved = None
+            names[cid] = resolved or cid
+        return names
+
+    @staticmethod
+    def _compound_display_names(
+        compound_ids, compound_names: dict[str, str], label_compounds: str
+    ) -> dict[str, str]:
+        """Build ``{compound_id: label}`` for the static-figure rewrite.
+
+        Args:
+            compound_ids: Iterable of compound ids.
+            compound_names: ``{compound_id: name}`` from
+                :meth:`_resolve_compound_names`.
+            label_compounds: ``"name"`` -> the name; ``"name_id"`` ->
+                ``"<name> (<id>)"``.
+
+        Returns:
+            ``{compound_id: display_label}``.
+        """
+        out: dict[str, str] = {}
+        for cid in compound_ids:
+            cid = str(cid)
+            name = compound_names.get(cid, cid)
+            if label_compounds == "name_id":
+                out[cid] = f"{name} ({cid})"
+            else:
+                out[cid] = name
+        return out
+
+    @staticmethod
+    def _rewrite_node_labels(svg_path: Path, display_names: dict[str, str]) -> None:
+        """Rewrite ``<text class="node-label label">`` contents in a rendered SVG.
+
+        escher_edit draws node labels from ``bigg_id`` (the compound id), so a map
+        rendered with ``label_compounds="name"`` still reads ``cpd00027`` in the
+        static SVG until the text is rewritten here.  Uses BeautifulSoup (already
+        an ``escher_edit`` dependency).  Best-effort: a missing bs4 or an
+        unreadable file leaves the SVG untouched rather than failing the render.
+
+        Args:
+            svg_path: Path to the rendered SVG.
+            display_names: ``{compound_id: display_label}`` to substitute.
+        """
+        try:
+            from bs4 import BeautifulSoup  # noqa: WPS433
+        except Exception:
+            logger.debug("bs4 unavailable; leaving node labels as ids")
+            return
+        try:
+            markup = svg_path.read_text()
+        except Exception:
+            return
+        soup = BeautifulSoup(markup, "xml")
+        for text_el in soup.find_all("text", class_="node-label label"):
+            current = text_el.get_text()
+            if current in display_names:
+                text_el.string = display_names[current]
+        svg_path.write_text(str(soup))
+
+    @capability(
+        domain="community",
+        summary="Render a single member's projected metabolism on an Escher map.",
+        tags=("community", "visualization", "escher"),
+        visibility="public",
+    )
+    def render_member_map(
+        self,
+        comm: "CommunityModel",
+        member_id,
+        map,
+        output_path,
+        result=None,
+        media=None,
+        **escher_kwargs,
+    ) -> Path:
+        """Render one member's projected metabolism on a single-organism map.
+
+        The community map has one net organism reaction per member and NO
+        intracellular reactions, so it cannot answer "what is this member's
+        metabolism doing".  This projects the community solution onto the member's
+        own single-organism namespace and renders it on the member's SOURCE model
+        (Escher maps are keyed on single-organism ids, ``_c0`` / ``_e0``, which is
+        what :func:`project_member_fluxes` produces).
+
+        Args:
+            comm: The :class:`CommunityModel`.
+            member_id: The member to render.
+            map: The Escher map spec passed through to the escher renderer.
+            output_path: Destination HTML path.
+            result: Optional :class:`CommunityFBAResult`; when ``None`` a community
+                FBA is run to obtain fluxes.
+            media: A media object, id/name, or ``None`` (used only when ``result``
+                is ``None``).
+            **escher_kwargs: Forwarded to ``escher.create_map_html2``.
+
+        Returns:
+            The ``output_path`` as a :class:`~pathlib.Path`.
+
+        Raises:
+            KeyError: If ``member_id`` is not a known member.
+            ValueError: If ``comm.source_model_ids`` has no entry for the member
+                (a community rebuilt by ``load_community``'s fallback routes).
+            CommunityDependencyError: If ``mscommunity`` is unavailable.
+        """
+        self._require_mscommunity()
+
+        # KeyError for an unknown member (member_index raises KeyError).
+        i = comm.member_index(member_id)
+
+        if member_id not in comm.source_model_ids:
+            raise ValueError(
+                f"No source model id recorded for member {member_id}; cannot "
+                "render member projection."
+            )
+
+        if result is not None:
+            fluxes = result.fluxes
+            media_id = getattr(result, "media_id", None)
+            community_growth = getattr(result, "community_growth", float("nan"))
+        else:
+            result = self.run_community_fba(comm, media=media)
+            fluxes = result.fluxes
+            media_id = result.media_id
+            community_growth = result.community_growth
+
+        # pandas.Series -> plain dict for project_member_fluxes.
+        flux_map = dict(fluxes.items()) if hasattr(fluxes, "items") else dict(fluxes)
+
+        member = comm.mscomm.members.get_by_id(member_id)
+        member_biomass_id = member.primary_biomass.id
+        projected = project_member_fluxes(
+            flux_map, i, member_biomass_id=member_biomass_id
+        )
+
+        source_model = self.get_model(comm.source_model_ids[member_id])
+
+        self.escher.create_map_html2(
+            source_model, map, output_path, flux=projected, **escher_kwargs
+        )
+
+        out_path = Path(output_path)
+        self._inject_member_banner(
+            out_path,
+            member_id=member_id,
+            community_id=getattr(comm.mscomm, "id", "?"),
+            media_id=media_id if media_id is not None else "<model-default>",
+            community_growth=community_growth,
+        )
+        return out_path
+
+    @staticmethod
+    def _inject_member_banner(
+        html_path: Path,
+        *,
+        member_id: str,
+        community_id: str,
+        media_id: str,
+        community_growth: float,
+    ) -> None:
+        """Inject the projected-member banner into a rendered map HTML.
+
+        The banner is inserted after the opening ``<body>`` tag, or PREPENDED to
+        the document when no ``<body>`` is found (rather than failing).
+
+        Args:
+            html_path: Path to the rendered HTML.
+            member_id: The rendered member's id.
+            community_id: The community model id.
+            media_id: The media id used for the solution.
+            community_growth: The community growth rate (1/hr).
+        """
+        try:
+            growth_str = f"{float(community_growth):.4f}"
+        except (TypeError, ValueError):
+            growth_str = "nan"
+        banner = (
+            f'<div class="kbutil-member-banner">Member {member_id} projected from '
+            f"community {community_id} on medium {media_id} (community growth "
+            f"{growth_str}/hr). Projected member view: fluxes are this member's "
+            "slice of a community solution. EX_ exchange reactions are "
+            "community-level and cannot be attributed to one member.</div>"
+        )
+        try:
+            markup = html_path.read_text()
+        except Exception:
+            return
+        lower = markup.lower()
+        idx = lower.find("<body")
+        if idx != -1:
+            # Insert after the end of the opening <body ...> tag.
+            close = markup.find(">", idx)
+            if close != -1:
+                markup = markup[: close + 1] + banner + markup[close + 1 :]
+            else:
+                markup = banner + markup
+        else:
+            markup = banner + markup
+        html_path.write_text(markup)
+
+    @capability(
+        domain="community",
+        summary="Build a cross-feeding MultiDiGraph keyed on metabolite id.",
+        tags=("community", "visualization", "cross-feeding", "graph"),
+        visibility="public",
+    )
+    def cross_feeding_graph(
+        self,
+        comm: "CommunityModel",
+        result=None,
+        min_abs_flux=1e-4,
+        **table_kwargs,
+    ):
+        """Build a cross-feeding ``networkx.MultiDiGraph`` from the table.
+
+        It MUST be a ``MultiDiGraph``, not a ``DiGraph``: two members commonly
+        trade several metabolites, and a ``DiGraph`` holds at most one edge per
+        ordered pair, so every exchange after the first would be silently
+        overwritten.  Each edge is KEYED ON THE METABOLITE ID so a specific
+        transfer is addressable.
+
+        Nodes: one per member plus a node literally named ``"Environment"`` (kept
+        here -- this is a graph of exchange, not a drawing).  Edges: one directed
+        edge per donor -> consumer -> metabolite triple, keyed on the metabolite
+        id, with attributes ``metabolite``, ``flux`` (signed) and ``abs_flux``.
+        Edges below ``min_abs_flux`` are dropped.
+
+        Args:
+            comm: The :class:`CommunityModel`.
+            result: Optional :class:`CommunityFBAResult` forwarded to
+                :meth:`cross_feeding_table`.
+            min_abs_flux: Drop edges whose absolute flux is below this.
+            **table_kwargs: Forwarded to :meth:`cross_feeding_table`
+                (``media``, ``flux_threshold``, ``msdb``, ``msdb_path``,
+                ``ignore_mets``).
+
+        Returns:
+            A ``networkx.MultiDiGraph``.
+
+        Raises:
+            CommunityDependencyError: If ``networkx`` (or ``mscommunity``) is
+                unavailable.
+        """
+        try:
+            import networkx as nx  # noqa: WPS433
+        except Exception as exc:
+            raise CommunityDependencyError(
+                "networkx is required to build a cross-feeding graph but is not "
+                "importable."
+            ) from exc
+
+        cross_feeding_df, _ = self.cross_feeding_table(
+            comm, result=result, **table_kwargs
+        )
+
+        graph = nx.MultiDiGraph()
+        columns = list(cross_feeding_df.columns)
+        for col in columns:
+            graph.add_node(col)
+
+        # For each metabolite, a producer (positive/excreted) donates to every
+        # consumer (negative/consumed) of the same metabolite.
+        for compound_id in cross_feeding_df.index:
+            row = cross_feeding_df.loc[compound_id]
+            producers: list[tuple[str, float]] = []
+            consumers: list[str] = []
+            for col in columns:
+                val = row[col]
+                if val is None:
+                    continue
+                fval = float(val)
+                if abs(fval) < min_abs_flux:
+                    continue
+                if fval > 0:
+                    producers.append((col, fval))
+                elif fval < 0:
+                    consumers.append(col)
+            for donor, flux in producers:
+                for consumer in consumers:
+                    graph.add_edge(
+                        donor,
+                        consumer,
+                        key=str(compound_id),
+                        metabolite=str(compound_id),
+                        flux=flux,
+                        abs_flux=abs(flux),
+                    )
+        return graph
+
 
 class MSCommunityUtilsImpl:
     """Composition-based community modeling utilities.
@@ -1530,6 +2183,14 @@ class MSCommunityUtilsImpl:
             self._delegate = MSCommunityUtils(**_kwargs)
         except Exception:
             self._delegate = None
+        # Inject the sibling Impls the visualization methods reach via ``self``
+        # (``self.escher.create_map_html2`` and ``self.biochem.get_compound_by_id``).
+        # The delegate is a plain KBModelUtils and does not otherwise know its
+        # siblings; wiring them here keeps render_member_map / render_community_map
+        # working without a facade change.
+        if self._delegate is not None:
+            self._delegate.escher = escher
+            self._delegate.biochem = biochem
 
     @property
     def env(self):

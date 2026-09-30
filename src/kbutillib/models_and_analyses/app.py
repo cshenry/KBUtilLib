@@ -52,7 +52,9 @@ from .render import (
     find_paired_model_build,
     find_record,
     gc_poll_tokens,
+    invalidate_record_cache,
     list_maps_for_record,
+    locate_analysis,
     new_poll_token,
     read_or_generate_dashboard,
     read_or_generate_escher,
@@ -330,6 +332,108 @@ def build_app(
         except RunsRootResolutionError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return build_arc_models(store, project, arc)
+
+    # ── run history + delete (dated re-runs grouped by analysis_id) ─────────────
+
+    @app.get("/api/analyses/{analysis_id}/runs")
+    def analysis_runs(analysis_id: str) -> dict:
+        """Every run of one analysis, newest first — the expanded grouped-row view.
+
+        Re-runs of one analysis are kept as distinct dated rows sharing an
+        ``analysis_id``. This is the view behind a collapsed arc-table row: it
+        returns every run of exactly this analysis and no run of any other,
+        newest-first (the store's S25 tie-break), each carrying the fields the UI
+        dates and identifies a run by.
+
+        ``list_analyses`` is keyed on ``(project, arc)`` (there is no
+        ``analysis_id``-only query on the store), so this first LOCATES the
+        analysis by finding any one of its runs across the portfolio, then filters
+        that run's ``(project, arc)`` bucket by ``analysis_id``. An analysis_id
+        with no runs anywhere is 404 — not an empty 200 that would hide a typo.
+        """
+        try:
+            store = factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        located = locate_analysis(store, analysis_id)
+        if located is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no analysis with id {analysis_id!r}",
+            )
+        project, arc = located
+        runs = store.list_analyses(project, arc, analysis_id=analysis_id)
+        return {
+            "analysis_id": analysis_id,
+            "run_count": len(runs),
+            "runs": [
+                {
+                    "record_id": run.record_id,
+                    "run_uid": run.run_uid,
+                    "created_at": run.created_at,
+                    "status": run.status,
+                    "trust_tier": getattr(run, "trust_tier", None) or "hypothesis",
+                }
+                for run in runs
+            ],
+        }
+
+    @app.delete("/api/runs/{record_id}")
+    def delete_run(record_id: str) -> dict:
+        """Delete exactly one run, invalidate its cache, and report runs remaining.
+
+        Protocol (binding):
+          * The run is located by ``record_id`` FIRST. If it does not resolve, 404
+            — delete never falls back to "the newest" run of anything.
+          * Its ``analysis_id`` is captured BEFORE the delete so the response can
+            report how many runs of that analysis remain afterwards. Deleting the
+            LAST run of an analysis removes the analysis from every table and
+            count; the ``remaining_run_count`` of 0 is what lets the UI warn before
+            that happens.
+          * ``store.delete_record`` returns ``False`` (never raises) for an unknown
+            id; that maps to 404, NOT 500.
+          * The deleted record_id's generated-HTML cache entry is invalidated
+            INSIDE this path — a re-created record_id must never be served a stale
+            page. Cache invalidation does not raise and never blocks the delete.
+        """
+        try:
+            store = factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        # Resolve the run first — the analysis it belongs to must be known BEFORE
+        # the row is gone, both to report the remaining count and to refuse to
+        # delete a run the app cannot identify.
+        try:
+            record, project, arc = find_record(store, record_id)
+        except RecordUnknown as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        analysis_id = record.analysis_id
+
+        deleted = store.delete_record(record_id)
+        if not deleted:
+            # The row vanished between resolve and delete (a concurrent delete).
+            # False is not an error condition on the store — surface it as 404,
+            # never a 500.
+            raise HTTPException(
+                status_code=404,
+                detail=f"no run record with id {record_id!r}",
+            )
+
+        # Cache invalidation is part of the delete, not a follow-up. A record_id
+        # with no generated page invalidates zero entries — that is fine.
+        invalidate_record_cache(record_id)
+
+        # How many runs of this analysis remain? Zero means the analysis itself is
+        # now gone from every table and count (there is no delete_analysis; the
+        # last run going is how an analysis disappears). The UI warns on zero.
+        remaining = store.list_analyses(project, arc, analysis_id=analysis_id)
+        return {
+            "deleted": record_id,
+            "analysis_id": analysis_id,
+            "remaining_run_count": len(remaining),
+        }
 
     # ── render endpoints (levels 2 and 3) ──────────────────────────────────────
 

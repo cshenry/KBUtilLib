@@ -56,11 +56,13 @@ __all__ = [
     "POLL_TOKEN_RE",
     "resolve_artifact",
     "find_record",
+    "locate_analysis",
     "find_paired_model_build",
     "select_default_map",
     "list_maps_for_record",
     "cache_key",
     "cached_html_path",
+    "invalidate_record_cache",
     "dashboard_cache_lookup",
     "escher_cache_lookup",
     "read_or_generate_dashboard",
@@ -258,6 +260,34 @@ def find_record(store: Any, record_id: str) -> Tuple[AnalysisRecord, Optional[st
     raise RecordUnknown(f"no run record with id {record_id!r}")
 
 
+def locate_analysis(
+    store: Any, analysis_id: str
+) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """Return the ``(project, arc)`` bucket holding ``analysis_id``, or None.
+
+    The stores key :meth:`list_analyses` on ``(project, arc)`` — there is no
+    ``analysis_id``-only query — so to expand or count the runs of one analysis the
+    app must first learn which bucket it lives in. Every run of one analysis_id
+    lives in the SAME bucket (analysis_id is derived from kind+subject+params, all
+    fixed within an arc), so the first bucket containing any matching run is THE
+    bucket. Returns None when no run of that analysis_id exists anywhere (the
+    endpoint maps that to 404, never an empty 200).
+
+    Walks the store, not the filesystem — the store stays the only door — and
+    scans the same order as :func:`find_record` (unattributed first, then every
+    project's arcs).
+    """
+    for rec in store.list_analyses(None, None):
+        if rec.analysis_id == analysis_id:
+            return None, None
+    for project in store.list_projects():
+        for arc in store.list_arcs(project.name):
+            for rec in store.list_analyses(project.name, arc.slug):
+                if rec.analysis_id == analysis_id:
+                    return project.name, arc.slug
+    return None
+
+
 def _model_uri_of(record: AnalysisRecord) -> Optional[str]:
     """Return a record's ``artifacts.model_id`` value, or None."""
     uri = (record.artifacts or {}).get("model_id")
@@ -356,6 +386,90 @@ def cached_html_path(key: str) -> Path:
     return _cache_dir() / f"{key}.html"
 
 
+# ── cache index (record_id → cache keys) for delete-time invalidation ────────────
+#
+# A cache key is a hash of ``record_id`` plus input mtimes plus a variant suffix,
+# so a record_id maps to MANY keys over its life (a moved mtime, two maps). At
+# delete time all the app holds is the record_id, and it CANNOT recompute those
+# hashes (it no longer has the artifacts) nor walk the cache directory to find them
+# (the app package is forbidden the directory-traversal verbs — see
+# ``tests/models_and_analyses/test_layering.py``). So, exactly as the poll tokens
+# do with their name index, every generated page records its key against its
+# record_id here, and invalidation reads this index to know which files to unlink.
+
+
+def _cache_index_path() -> Path:
+    """Return the cache index file mapping ``record_id`` → the keys it produced."""
+    return _cache_dir() / "_index.json"
+
+
+def _read_cache_index() -> Dict[str, List[str]]:
+    """Return the record_id→keys map from the index, or {} when absent/corrupt."""
+    path = _cache_index_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        rid: [k for k in keys if isinstance(k, str)]
+        for rid, keys in data.items()
+        if isinstance(rid, str) and isinstance(keys, list)
+    }
+
+
+def _write_cache_index(index: Dict[str, List[str]]) -> None:
+    """Persist the record_id→keys map atomically (sorted for determinism)."""
+    path = _cache_index_path()
+    tmp = path.with_suffix(".json.tmp")
+    ordered = {rid: sorted(set(index[rid])) for rid in sorted(index)}
+    tmp.write_text(json.dumps(ordered), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _record_cache_key(record_id: str, key: str) -> None:
+    """Note that ``key`` is a cache file belonging to ``record_id`` (idempotent)."""
+    index = _read_cache_index()
+    keys = index.setdefault(record_id, [])
+    if key not in keys:
+        keys.append(key)
+        _write_cache_index(index)
+
+
+def invalidate_record_cache(record_id: str) -> int:
+    """Unlink every generated-HTML cache file for ``record_id``; return the count.
+
+    Part of the delete path (binding): deleting a run leaves a cache entry no row
+    points at, and the next request for a re-created record_id could serve it. This
+    reads the cache index (populated as pages are generated), unlinks each named
+    file, and drops the record_id from the index. Missing files are treated as
+    already-gone (counted, then pruned) rather than an error. Nothing here raises
+    if the cache or index is absent — a delete must not fail because a run was
+    never rendered.
+    """
+    index = _read_cache_index()
+    keys = index.pop(record_id, None)
+    if keys is None:
+        return 0
+    d = _cache_dir()
+    removed = 0
+    for key in keys:
+        path = d / f"{key}.html"
+        try:
+            if path.exists():
+                path.unlink()
+            removed += 1
+        except OSError:
+            # Leave the entry out of the index regardless — a file we cannot
+            # unlink is not worth keeping the record_id alive for.
+            continue
+    _write_cache_index(index)
+    return removed
+
+
 def dashboard_cache_lookup(
     *,
     record_id: str,
@@ -423,6 +537,8 @@ def read_or_generate_dashboard(
     key = cache_key(record_id, inputs, suffix=f"dashboard:{map_name}")
     out = cached_html_path(key)
     if out.exists() and out.stat().st_size > 0:
+        # Ensure the index knows this key even on a hit — a delete must find it.
+        _record_cache_key(record_id, key)
         return out
 
     try:
@@ -452,6 +568,7 @@ def read_or_generate_dashboard(
             f"{record_id!r} (model={model_artifact.value}, "
             f"fitness={fitness_artifact.value})"
         )
+    _record_cache_key(record_id, key)
     return out
 
 
@@ -478,6 +595,7 @@ def read_or_generate_escher(
     key = cache_key(record_id, inputs, suffix=f"escher:{map_name}")
     out = cached_html_path(key)
     if out.exists() and out.stat().st_size > 0:
+        _record_cache_key(record_id, key)
         return out
 
     try:
@@ -502,6 +620,7 @@ def read_or_generate_escher(
             f"escher map generation produced an empty page for record "
             f"{record_id!r} (model={model_artifact.value}, map={map_name})"
         )
+    _record_cache_key(record_id, key)
     return out
 
 

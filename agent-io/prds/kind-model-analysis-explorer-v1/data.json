@@ -6,7 +6,7 @@
     "KBUtilLib",
     "KBDLJobRunningPrototype"
   ],
-  "status": "ready",
+  "status": "done",
   "review_rounds": 2,
   "confront_rounds": 3,
   "draft_commit": "7ab3a934ced1e26b3827185c7d92318d91ee48cd",
@@ -362,5 +362,12 @@
     "T4_shipped_fake": "Already landed in review round 2. Added an acceptance criterion forbidding any local class implementing the interface, which was the part that was missing.",
     "T5_ready_probe": "REAL here too. The manifest pointed at '/' and /health appeared ZERO times in the bundle. Moved to /health, and p3-app-skeleton now serves it without touching the run database."
   },
-  "operational_note_maestro_status": "During round 3, `maestro status` returned DIFFERENT status values on consecutive reads of the same task from primary-laptop (published/submitted flapping), with published_at null, retry_count 0 and terminal_at null throughout. The artifact landed 5 minutes after dispatch while the status field still showed nothing terminal. Watch the BRANCH, not the status field, from a non-hub machine. Seen once; not committed as durable memory."
+  "operational_note_maestro_status": "During round 3, `maestro status` returned DIFFERENT status values on consecutive reads of the same task from primary-laptop (published/submitted flapping), with published_at null, retry_count 0 and terminal_at null throughout. The artifact landed 5 minutes after dispatch while the status field still showed nothing terminal. Watch the BRANCH, not the status field, from a non-hub machine. Seen once; not committed as durable memory.",
+  "registry_mirror": {
+    "status": "done",
+    "updated_at": "2026-09-30T09:34:01",
+    "notes": "dev 1318 landed ca87a6c on KBUtilLib main",
+    "notes_updated_at": "2026-09-30T09:34:01",
+    "mirrored_at": "2026-09-30T09:34:01"
+  }
 }

@@ -1015,7 +1015,7 @@ passed:
 
 | Date | Operator | Result |
 |---|---|---|
-| _(fill in)_ | _(fill in)_ | _(fill in: ALL PASS / n FAILED, which)_ |
+| 2026-09-21 | Albert (kbhub), Chris present | OP2R rebuilt all fifteen as STRING (no BINARY), R.4 append-ready + partitions matched; OP3 ALL SIX PASS, exit 0. Write appended (existed_before=True, effective_mode=append) — D1 did not fire. Three-part FQN `kbaseincubator.clearinghouse.protein_result` resolved for the write; postflight row_count null (dev 1194, expected). |
 
 If a per-type table FQN does not resolve, see the docstring of
 `_result_table_fqn` in `scripts/clearinghouse_parity_check.py` -- it builds

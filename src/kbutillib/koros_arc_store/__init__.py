@@ -31,6 +31,7 @@ from .identity import (
 )
 from .records import (
     AnalysisRecord,
+    ArcArtifact,
     ArcProvenance,
     ArcRecord,
     ProjectRecord,
@@ -45,6 +46,7 @@ __all__ = [
     # Records
     "ProjectRecord",
     "ArcRecord",
+    "ArcArtifact",
     "ArcProvenance",
     "AnalysisRecord",
     "parse_provenance",

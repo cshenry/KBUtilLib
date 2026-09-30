@@ -68,7 +68,6 @@ from .service import (
     build_arc_models,
     build_portfolio,
     check_startup_contract_version,
-    resolve_app_state_dir,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -736,19 +735,28 @@ def build_app(
 
 
 def _register_manifest() -> None:
-    """Self-register this app's KIND manifest (task p5 owns writing it).
+    """Self-register this app's KIND manifest (CAC invariant I1).
 
-    In the full build ``serve`` (without ``--no-king``) would write/refresh the
-    KIND manifest into the app state directory so KIND can discover the app. That
-    manifest content is task p5's responsibility; this skeleton only ensures the
-    state directory exists and logs the intent, so ``--no-king`` has an observable
-    thing to skip. It performs NO privileged action and needs no KING at runtime.
+    ``serve`` (without ``--no-king``) writes/refreshes this app's KIND manifest
+    into the plugin-union directory — ``$KING_PLUGINS_DIR`` when set, else
+    ``~/kind-apps/plugins`` — and refreshes the union symlink farm so KIND's own
+    shipped plugins are not hidden (``_resolve_plugins`` REPLACES rather than
+    unions). The manifest path is NEVER derived from ``$KING_STATE`` (that
+    formula doubled the path on the pod), so this does NOT reuse the app's
+    ``$KING_STATE``-derived state directory; see
+    :mod:`kbutillib.models_and_analyses.kind_manifest`. It performs no privileged
+    action and needs no running KING.
     """
-    state_dir = resolve_app_state_dir()
+    from .kind_manifest import register_manifest
+
+    result = register_manifest()
     logger.info(
-        "models_and_analyses: manifest self-registration point (state_dir=%s); "
-        "manifest content is owned by task p5",
-        state_dir,
+        "models_and_analyses: registered KIND manifest at %s "
+        "(plugins_dir=%s, king_root=%s, linked_upstream=%d)",
+        result["manifest_path"],
+        result["plugins_dir"],
+        result["king_root"],
+        len(result["linked_upstream"]),
     )
 
 

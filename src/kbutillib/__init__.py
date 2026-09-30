@@ -109,6 +109,12 @@ except ImportError as e:
     MSFBAUtils = None
 
 try:
+    from .domains.modeling.ms_community_utils import MSCommunityUtils
+except ImportError as e:
+    _import_error("ms_community_utils", e)
+    MSCommunityUtils = None
+
+try:
     from .domains.modeling.ms_template_utils import MSTemplateUtils
 except ImportError as e:
     _import_error("ms_template_utils", e)
@@ -538,6 +544,7 @@ __all__ = [
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSFBAUtils",
+    "MSCommunityUtils",
     "MSTemplateUtils",
     "MSReconstructionUtils",
     "MSRemoteSolverUtils",

@@ -229,8 +229,13 @@ def test_mapping_half_is_adapter_independent():
 
 
 def test_planned_adapters_are_declared_but_unbuilt():
-    """`mongo` and `lakehouse` are declared adapter names but not built here."""
-    for name in ("mongo", "lakehouse"):
+    """`mongo` is a declared adapter name not built yet.
+
+    `lakehouse` was in this list until it was built (see
+    tests/berdl/test_clearinghouse_lakehouse_adapter.py); only `mongo` remains
+    planned-but-unbuilt.
+    """
+    for name in ("mongo",):
         source = cm.Source(
             name="x",
             adapter=name,

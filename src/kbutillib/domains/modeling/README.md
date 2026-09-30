@@ -16,6 +16,7 @@ modelseedpy for heavy computation but construct gracefully without them.
 
 ```python
 from kbutillib.domains.modeling.ms_fba_utils import MSFBAUtils
+from kbutillib.domains.modeling.ms_community_utils import MSCommunityUtils
 from kbutillib.domains.modeling.ms_reconstruction_utils import MSReconstructionUtils
 from kbutillib.domains.modeling.kb_model_utils import KBModelUtils
 from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtils
@@ -28,6 +29,7 @@ from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtils
 | File | Class(es) | Purpose |
 |------|-----------|---------|
 | `ms_fba_utils.py` | `MSFBAUtils`, `MSFBAUtilsImpl` | FBA workflows: minimize active reactions, enumerate alternatives, detect flux loops |
+| `ms_community_utils.py` | `MSCommunityUtils`, `MSCommunityUtilsImpl` | Community model construction and simulation via MSCommunity; community exchange maps via escher_edit |
 | `ms_reconstruction_utils.py` | `MSReconstructionUtils`, `MSReconstructionUtilsImpl` | Draft model reconstruction from genome annotation |
 | `ms_template_utils.py` | `MSTemplateUtils`, `MSTemplateUtilsImpl` | Reaction template management (gram+/gram-/plant templates) |
 | `kb_model_utils.py` | `KBModelUtils`, `KBModelUtilsImpl` | KBase model object I/O: load, save, compare models in the workspace |
@@ -44,6 +46,8 @@ from kbutillib.domains.modeling.ms_template_utils import MSTemplateUtils
 |---------|---------|---------|
 | `cobra` | FBA solving, flux analysis | `pip install cobra` |
 | `modelseedpy` | Model reconstruction, templates | `pip install modelseedpy` |
+| `mscommunity` | Community construction and simulation (`MSCommunityUtils`) | Resolved through `dependencies.yaml` (GitHub-only), not pip |
+| `escher_edit` | Community exchange maps (`render_community_map` / `render_member_map`) | Resolved through `dependencies.yaml` (GitHub-only), not pip; additionally needs the `community` pyproject extra (`beautifulsoup4`, `lxml`), which IS on PyPI |
 | KBase auth token | `KBModelUtils` workspace calls | `export KB_AUTH_TOKEN=...` |
 
 `MSFBAUtils.available` returns `False` and describes what is missing; operations raise

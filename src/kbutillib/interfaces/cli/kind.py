@@ -111,13 +111,27 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
     instead.
     """
     resolved = _apps_dir_opt(apps_dir)
+
+    # Self-register the Models and Analyses KIND app manifest (CAC I1) FIRST, so
+    # it happens independently of the older context-injection bundle install.
+    # The two are unrelated concerns — the manifest registers this repo's KIND
+    # *app*, while the bundle install wires the context-injection *skill* — and
+    # the bundle step can hard-fail on a machine with no KING launcher. Doing the
+    # manifest first means an install-time registration path always exists (the
+    # same file the app writes on `serve`), written to $KING_PLUGINS_DIR (else
+    # ~/kind-apps/plugins), NEVER to king/plugins/, with the union symlink farm
+    # refreshed so KIND's own shipped plugins are not hidden.
+    from ...models_and_analyses.kind_manifest import register_manifest
+
+    manifest_result = register_manifest()
+
     results = [
         kind_install.install(bundle_dir, apps_dir=resolved)
         for bundle_dir in _bundle_dirs(app)
     ]
 
     if as_json:
-        click.echo(json.dumps(results))
+        click.echo(json.dumps({"apps": results, "manifest": manifest_result}))
         return
 
     for result in results:
@@ -140,6 +154,12 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
         click.echo(f"  changed: {result['changed']}")
     click.echo(f"  CONTEXT.md: {results[-1]['context_md']}")
     click.echo(f"  serve-kind.sh: {results[-1]['serve_script']}")
+    click.echo(f"  KIND manifest: {manifest_result['manifest_path']}")
+    click.echo(
+        f"  plugin-union: {len(manifest_result['linked_upstream'])} upstream "
+        f"manifest(s) linked into {manifest_result['plugins_dir']} "
+        f"(king_root={manifest_result['king_root']})"
+    )
 
 
 @kind_cmd.command("uninstall")

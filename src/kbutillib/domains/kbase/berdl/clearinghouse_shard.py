@@ -26,8 +26,8 @@ lakehouse. A file-reading verb cannot reach either. The fix is an adapter layer
 BENEATH the manifest, not a wider manifest: an adapter yields records; the
 sharder standardizes, hashes, sorts and writes them the SAME way regardless of
 source. Three implementations are PLANNED -- ``file``, ``mongo``, ``lakehouse``
--- and only ``file`` is built here (``mongo`` and ``lakehouse`` are separate,
-later tasks; this module defines the interface they will implement). An adapter
+-- and ``file`` and ``lakehouse`` are built here (``mongo`` is a separate,
+later task; this module defines the interface it will implement). An adapter
 NEVER writes to Iceberg itself -- there is exactly one write path and it is the
 ``load`` verb on
 :class:`~kbutillib.domains.kbase.berdl.clearinghouse_capability.ClearinghouseCapability`.
@@ -139,7 +139,8 @@ _HASH_HEX_CHARS = 64
 
 
 class SourceAdapter(ABC):
-    """The interface every source adapter implements. Only ``file`` is built.
+    """The interface every source adapter implements. ``file`` and ``lakehouse``
+    are built; ``mongo`` is planned.
 
     An adapter's ONLY job is to yield the raw records of a source as plain
     ``dict`` rows keyed by source column name. It NEVER hashes, sorts, writes
@@ -176,10 +177,11 @@ class SourceAdapter(ABC):
 
 #: Registry of adapter implementations by manifest ``adapter`` name. All three
 #: names are DECLARED here so a manifest can be validated against the full set
-#: of adapter names (the mapping half must be adapter-independent), but only
-#: ``file`` is registered with a real class. ``mongo`` and ``lakehouse`` map to
-#: ``None`` -- known-but-unbuilt -- so :func:`get_adapter` distinguishes "not a
-#: real adapter name" from "planned but not implemented yet".
+#: of adapter names (the mapping half must be adapter-independent). ``file``
+#: and ``lakehouse`` are registered with real classes; ``mongo`` is not yet
+#: built and maps to no class -- known-but-unbuilt -- so :func:`get_adapter`
+#: distinguishes "not a real adapter name" from "planned but not implemented
+#: yet".
 ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse")
 
 
@@ -266,10 +268,266 @@ class FileSourceAdapter(SourceAdapter):
                 yield dict(row)
 
 
-#: Concrete adapter classes, by name. ``mongo``/``lakehouse`` are absent (built
-#: in later tasks); :func:`get_adapter` reports them as planned-but-unbuilt.
+#: A conservative per-row byte estimate used only by
+#: :meth:`LakehouseSourceAdapter.estimate_bytes` to turn a cheap ``COUNT(*)``
+#: into a shard COUNT. The estimate need not be exact -- equal-width hash
+#: ranges self-balance and the skew guard splits any range that still runs
+#: large (see the module docstring's range-cutting section), so an over- or
+#: under-estimate at worst changes how many equal-width ranges are cut, never
+#: correctness. A genome source row (a handful of short identifier/metric
+#: columns; NO inlined sequence -- genome content stores a POINTER, and this
+#: source carries none) is well under this figure, so it is an UPPER-ish
+#: estimate, which is the side to err on for a count-only sizing.
+LAKEHOUSE_BYTES_PER_ROW = 1024
+
+
+class LakehouseSourceAdapter(SourceAdapter):
+    """The ``lakehouse`` adapter: reads a lake table through ``query()``.
+
+    Reads the raw records of ONE Iceberg table in the BER Data Lakehouse via
+    :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.query` --
+    a READ, never a write. It yields each row as a plain ``dict`` keyed by
+    source column name and does nothing else: it does not hash, sort, write
+    parquet, or emit any ``INSERT``/``MERGE``. All of that is the sharder's
+    job (and the sanctioned in-pod ``load`` verb's), identically for whatever
+    an adapter yields -- which is the seam that makes ``file``, ``mongo`` and
+    ``lakehouse`` interchangeable (see the module docstring's adapter
+    contract).
+
+    Why a READ adapter and not a one-line in-lake ``INSERT ... SELECT``. The
+    genome source (``kbaseincubator.genome_clearhouse``) sits in the SAME
+    tenant and catalog as the write target
+    (:data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.CLEARINGHOUSE_NAMESPACE`),
+    so ``INSERT INTO ...clearinghouse.genome_entity SELECT ... FROM
+    ...genome_clearhouse.<t>`` looks obviously correct and is about one line.
+    It is forbidden: an ``INSERT``/``MERGE`` on the Spark path BYPASSES
+    ``data_lakehouse_ingest.ingest``, which is what applies schema enforcement
+    on every sanctioned write -- the very enforcement whose absence let
+    ``BINARY`` break this corpus once (dev 1219), a failure that only surfaced
+    at a real write. So the adapter READS, the sharder writes BRONZE, and the
+    ``load`` verb ingests through the sanctioned path exactly as for a file
+    source. This class contains no ``INSERT`` and no ``MERGE``.
+
+    Locator keys (the mapping half of the manifest is adapter-independent --
+    only these source-locating keys differ; see
+    :mod:`clearinghouse_manifest`):
+
+    - ``table`` (required) -- the source table name within the namespace, e.g.
+      ``"genome_quality"``.
+    - ``namespace`` (optional) -- the fully-qualified source namespace.
+      Defaults to
+      :data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE`
+      (``kbaseincubator.genome_clearhouse``), the genome source Chris named.
+      Taken from that NAMED CONSTANT, never a string literal here, because it
+      differs from the write-target namespace by five characters and one
+      missing ``in`` (see the constant's adjacency warning).
+
+    Where it runs: reading a lake table needs the read transport
+    ``BerdlCapability.query`` resolves by locus -- Trino in-pod, the read-only
+    REST transport off-pod. It never needs the write path, so it can run
+    wherever ``query()`` can reach the lake (unlike the ``load`` verb, which
+    is in-pod only). Tests inject a fake capability and require no pod.
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        capability: The object exposing ``query(sql, ...)`` /
+            ``locus()`` -- a real
+            :class:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability`
+            in production, a fake in tests. Constructed lazily (deferred
+            import) on first use when not given, so simply building the
+            adapter -- as :func:`get_adapter` does -- needs no pod package
+            and makes no network call.
+    """
+
+    adapter_name = "lakehouse"
+
+    def __init__(self, source: cm.Source, *, capability: Any = None):
+        super().__init__(source)
+        self._capability = capability
+
+    def _get_capability(self) -> Any:
+        """Return the capability, deferring the import until first use.
+
+        The import is deferred (not at module scope) so this module stays
+        pod-free and importable off-pod exactly like the rest of the shard
+        stage -- ``BerdlCapability`` itself defers every pod dependency to
+        first use, so importing it here is safe, but keeping the import inside
+        the method costs nothing and keeps the module-scope import list free
+        of anything a caller who never touches the lakehouse adapter pays for.
+        """
+        if self._capability is None:
+            from .capability import BerdlCapability  # noqa: PLC0415
+
+            self._capability = BerdlCapability()
+        return self._capability
+
+    def _namespace(self) -> str:
+        """Resolve the source namespace from the locator or the named default.
+
+        Never a string literal here -- an explicit ``namespace`` locator key
+        is honoured; otherwise the default is the NAMED constant
+        :data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE`.
+        """
+        namespace = self.source.locator.get("namespace")
+        if namespace is None:
+            return schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: lakehouse adapter 'namespace', "
+                "when given, must be a non-empty string (the fully-qualified "
+                "source namespace, e.g. 'kbaseincubator.genome_clearhouse')."
+            )
+        return namespace
+
+    def _table(self) -> str:
+        """Return the required source table name from the locator."""
+        table = self.source.locator.get("table")
+        if not table or not isinstance(table, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: lakehouse adapter requires a "
+                "non-empty string 'table' (the source table name within the "
+                "namespace, e.g. 'genome_quality')."
+            )
+        return table
+
+    def _fqn(self) -> str:
+        """Build the double-quoted, per-segment FQN of the source table.
+
+        Quoted with ANSI double quotes, one pair per dot-separated namespace
+        segment plus the table -- NOT backticks. The read routes through
+        ``BerdlCapability.query()``, which defaults to Trino in-pod (and REST
+        -> Trino off-pod), and Trino REJECTS backticks (a real defect this
+        repo already paid for -- see 5fc10ba / 95eac55 and the docstring
+        correction dab0fcc). A dotted namespace quoted as a single identifier
+        does not resolve, so each segment gets its own quote pair.
+        """
+        namespace = self._namespace()
+        segments = [seg for seg in namespace.split(".") if seg]
+        return ".".join(f'"{seg}"' for seg in [*segments, self._table()])
+
+    def estimate_bytes(self) -> int:
+        """Estimate the source's total size via ``COUNT(*)`` x a per-row figure.
+
+        Used only to pick the shard COUNT (see :meth:`SourceAdapter.estimate_bytes`);
+        it need not be exact. A cheap ``SELECT COUNT(*)`` is far cheaper than
+        streaming the table, and equal-width hash ranges self-balance around
+        whatever count it yields. Returns at least 1 so
+        ``ceil(total / target_bytes)`` is always >= 1.
+        """
+        sql = f"SELECT COUNT(*) AS n FROM {self._fqn()}"
+        rows = self._query(sql)
+        count = 0
+        if rows:
+            row = rows[0]
+            value = row.get("n") if isinstance(row, dict) else None
+            if value is None and isinstance(row, dict) and row:
+                # A cursor without a column alias may key the single column
+                # differently; fall back to the first value.
+                value = next(iter(row.values()))
+            count = int(value or 0)
+        return max(1, count * LAKEHOUSE_BYTES_PER_ROW)
+
+    def iter_records(self) -> Iterator[Mapping[str, Any]]:
+        """Yield every source row as a dict, paging off-pod so nothing truncates.
+
+        In-pod ``query()`` (Trino) returns the full result, so one statement
+        suffices. Off-pod the read-only REST transport caps each page, so this
+        pages with an explicit ``limit``/``offset`` and KEEPS PAGING while a
+        page comes back EXACTLY :data:`OFF_POD_PAGE_SIZE` rows long -- a full
+        page is evidence of nothing, and stopping on it would silently
+        truncate a source (see :data:`OFF_POD_PAGE_SIZE`). It stops only on a
+        page shorter than the cap. The ``ORDER BY`` on paging is what makes
+        ``limit``/``offset`` a STABLE window across pages rather than a
+        possibly-overlapping-or-gapping one.
+        """
+        base_sql = f"SELECT * FROM {self._fqn()}"
+        if self._get_capability().locus() == "in_pod":
+            for row in self._query(base_sql):
+                yield dict(row)
+            return
+        # Off-pod: page a stable window until a short page arrives.
+        paged_sql = base_sql + f" ORDER BY {self._order_key()}"
+        offset = 0
+        while True:
+            page = self._query(paged_sql, limit=OFF_POD_PAGE_SIZE, offset=offset)
+            for row in page:
+                yield dict(row)
+            if len(page) < OFF_POD_PAGE_SIZE:
+                break
+            offset += OFF_POD_PAGE_SIZE
+
+    def _order_key(self) -> str:
+        """The ORDER BY expression that makes off-pod paging a stable window.
+
+        Uses the hash column the plan hashes on when it is a ``precomputed``
+        digest already present in the source, else the raw hash column -- a
+        column guaranteed to exist on every row -- so the paging window is
+        deterministic and reproducible. The column name is drawn from the
+        parsed hash spec, not hardcoded, so it follows whatever the manifest
+        names.
+        """
+        column = self.source.hash_spec.get("precomputed") or self.source.hash_spec.get(
+            "raw_column"
+        )
+        if not column or not isinstance(column, str):
+            # No hash column to order on (e.g. an entity-only source with a
+            # hash rule this adapter cannot see); order by the first source
+            # column is not knowable here, so fall back to the table's own
+            # implicit order via a constant -- a single-column ORDER BY 1 keeps
+            # the window stable enough for paging.
+            return "1"
+        return f'"{column}"'
+
+    def _query(
+        self, sql: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[Mapping[str, Any]]:
+        """Run one read through the capability and normalise its rows to dicts.
+
+        In-pod: ``query(sql)`` (default Trino engine) already returns dict
+        rows. Off-pod: ``query(sql, limit=, offset=)`` returns the REST
+        result dict ``{'success', 'data', ...}``; a failed read raises here so
+        it never masquerades as an empty one. Spark ``Row`` (if a fake yields
+        one) is coerced via ``asDict()``.
+        """
+        capability = self._get_capability()
+        if capability.locus() == "in_pod":
+            rows = capability.query(sql)
+        else:
+            rows = capability.query(sql, limit=limit, offset=offset)
+        return _normalize_rows(rows)
+
+
+def _normalize_rows(rows: Any) -> list[Mapping[str, Any]]:
+    """Normalise a capability's result to a list of dict rows across loci.
+
+    Off-pod ``OffPodTransport.query`` returns ``{'success', 'data', ...}``; an
+    unsuccessful result raises rather than being read as empty. In-pod Trino
+    returns dict rows already; Spark ``Row`` exposes ``asDict()``. A bare
+    tuple is wrapped positionally as a last resort so nothing is dropped.
+    """
+    if isinstance(rows, dict):
+        if rows.get("success") is False:
+            raise ManifestSourceError(
+                f"lakehouse read failed: {rows.get('error')!r}"
+            )
+        rows = rows.get("data", [])
+    out: list[Mapping[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            out.append(row)
+        elif hasattr(row, "asDict"):
+            out.append(row.asDict())
+        else:
+            out.append({str(i): value for i, value in enumerate(row)})
+    return out
+
+
+#: Concrete adapter classes, by name. ``mongo`` is absent (built in a later
+#: task); :func:`get_adapter` reports it as planned-but-unbuilt. ``lakehouse``
+#: is now built (this stage).
 _ADAPTER_CLASSES: dict[str, type[SourceAdapter]] = {
     "file": FileSourceAdapter,
+    "lakehouse": LakehouseSourceAdapter,
 }
 
 
@@ -296,8 +554,8 @@ def get_adapter(source: cm.Source) -> SourceAdapter:
     Raises:
         cm.ManifestError: The ``adapter`` name is not one of
             :data:`ADAPTER_NAMES` at all.
-        AdapterNotImplementedError: The name is a PLANNED adapter
-            (``mongo``/``lakehouse``) not built yet.
+        AdapterNotImplementedError: The name is a PLANNED adapter (``mongo``)
+            not built yet.
     """
     name = source.adapter
     if name not in ADAPTER_NAMES:

@@ -212,9 +212,18 @@ d. **What `berdl_notebook_utils.table_exists` returns for a namespace
 **One live fact did land from the 2026-09-12 attempt**, independent of the
 four questions above: `kbaseincubator.clearinghouse` is **absent** from
 the live namespace listing, and a same-tenant sibling,
-`kbaseincubator.genome_clearhouse`, **exists** and is unrelated (see OP2's
-precondition list below -- that absence is perishable and must be
-re-checked at OP2 run time, not assumed from this section).
+`kbaseincubator.genome_clearhouse`, **exists**. That sibling is now a
+**SOURCE** the `lakehouse` adapter reads from (~5.8M genomes in
+`genome_quality`; it also holds `skani_distances`), not an unrelated
+namespace -- so a clearinghouse bootstrap that seeds genomes READS
+`kbaseincubator.genome_clearhouse` and WRITES `kbaseincubator.clearinghouse`
+**in the same run**. The two namespaces differ by only five characters and a
+missing `in`; **never spell either at a call site -- take both from the
+named constants `SOURCE_GENOME_CLEARHOUSE_NAMESPACE` and
+`CLEARINGHOUSE_NAMESPACE` in `clearinghouse_schema.py`.** Reading the wrong
+one returns the wrong table; writing the wrong one corrupts the source. (The
+`clearinghouse` absence is perishable and must be re-checked at OP2 run time,
+not assumed from this section.)
 
 ---
 
@@ -328,9 +337,18 @@ once all three lines print.
    it costs a **multi-terabyte replay** (rebuilding the table from source
    under the corrected spec, see 2.2's partition-spec-refusal guidance),
    not a five-minute fix. **Do not confuse this with
-   `kbaseincubator.genome_clearhouse`, which EXISTS, is unrelated, and
-   holds `genome_quality` and `skani_distances`** -- a near-miss an
-   operator skimming namespace names could land on by mistake.
+   `kbaseincubator.genome_clearhouse`, which EXISTS, is the genome SOURCE
+   the `lakehouse` adapter reads (holding `genome_quality` and
+   `skani_distances`), and is NOT the write target** -- a near-miss an
+   operator skimming namespace names could land on by mistake. The two
+   names differ by five characters and one missing `in`, and a genome
+   bootstrap touches BOTH in the same run: it reads `genome_clearhouse`
+   and writes `clearinghouse`. That adjacency makes the confusion *more*
+   dangerous now than when the source was unrelated, not less -- reading
+   the wrong namespace returns the wrong table, and writing the wrong one
+   corrupts a populated source. **Take both from the named constants
+   (`SOURCE_GENOME_CLEARHOUSE_NAMESPACE`, `CLEARINGHOUSE_NAMESPACE` in
+   `clearinghouse_schema.py`); never type either at a call site.**
 
 ### The fifteen tables this creates, and their partition specs
 

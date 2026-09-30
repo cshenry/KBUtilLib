@@ -117,6 +117,30 @@ TENANT = "kbaseincubator"
 #: The Iceberg namespace within the tenant.
 NAMESPACE = "clearinghouse"
 
+#: The fully-qualified WRITE-TARGET namespace of the clearinghouse corpus,
+#: ``kbaseincubator.clearinghouse`` -- the fifteen ``<type>_<kind>`` tables
+#: this module configures. Named here (rather than concatenated at a call
+#: site) so nothing in the read/shard/ingest path has to spell it out, and
+#: so it can never be confused with the SOURCE namespace it differs from by
+#: five characters -- see :data:`SOURCE_GENOME_CLEARHOUSE_NAMESPACE` and its
+#: adjacency warning.
+CLEARINGHOUSE_NAMESPACE = f"{TENANT}.{NAMESPACE}"
+
+#: The fully-qualified namespace of the genome SOURCE the ``lakehouse``
+#: adapter reads: ``kbaseincubator.genome_clearhouse``. This is a REAL,
+#: populated namespace in the same tenant and catalog as the write target
+#: (~5.8M genomes in ``genome_quality``; see the operator runbook).
+#:
+#: It differs from :data:`CLEARINGHOUSE_NAMESPACE` by only five characters,
+#: and the difference is a missing ``in`` (genome_clear**in**ghouse would be
+#: the target's word; the source is genome_clear*house*). A clearinghouse
+#: bootstrap that seeds from this source READS ``genome_clearhouse`` and
+#: WRITES ``clearinghouse`` in the same run, so a one-word slip at a call
+#: site would read the wrong table or -- far worse -- write the source. Both
+#: namespaces are therefore taken from these named constants, never from a
+#: string literal at a call site.
+SOURCE_GENOME_CLEARHOUSE_NAMESPACE = f"{TENANT}.genome_clearhouse"
+
 #: The only ``entity_type`` values the clearinghouse recognizes -- matches
 #: the ``entity_type`` values :mod:`kbutillib.domains.identity.standardizers`
 #: standardizes. This is also the order in which per-kind configs are

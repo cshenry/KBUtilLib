@@ -416,6 +416,34 @@ class SKANIUtils(SharedEnvUtils):
         validating the output (e.g. for ``markers.bin``) finds it there
         without any parent/child path translation.
 
+        Inputs go through skani's ``-l`` list file, never argv
+        -----------------------------------------------------------
+        ``fasta_files`` is written one path per line to a temporary file
+        and handed to skani as ``-l <FASTA_LIST>``; not one path is placed
+        on the command line. Passing them positionally -- what this method
+        did until 2026-09-27 -- makes argv grow with the genome count and
+        eventually exceed the kernel's ``MAX_ARG_STRLEN``/``ARG_MAX``
+        ceiling, at which point ``execve`` fails with ``E2BIG`` and skani
+        NEVER STARTS. That is not hypothetical: a 163,536-genome KBDL
+        build produced a ~13 MB argv and died with ``Argument list too
+        long`` after 3.7 hours of input preparation, while a
+        7,443-genome build on the same code path had succeeded.
+
+        The list file makes the input count irrelevant to argv size, so
+        there is no ceiling left to raise and no threshold to tune -- which
+        is why it is used UNCONDITIONALLY rather than only for large lists:
+        a size-triggered second code path would be exercised only by the
+        runs too expensive to test. ``-l`` is accepted by both skani
+        versions this library is used with (verified against 0.2.2 and
+        0.3.1) and is mutually exclusive with positional FASTA arguments,
+        so the two forms are never mixed.
+
+        The one property the list file gives up is newline-transparency: it
+        is line-delimited, so a FASTA path containing ``\\n`` or ``\\r``
+        cannot be expressed in it and would silently sketch a different set
+        of files. Such a path is rejected up front with ``success=False``
+        rather than truncated.
+
         Args:
             fasta_files: List of paths to FASTA files to sketch
             out_dir: Directory skani should write the sketch database into.
@@ -432,8 +460,33 @@ class SKANIUtils(SharedEnvUtils):
                 - genome_count: int
                 - error: str | None (skani's stderr, or the timeout message)
         """
-        cmd = [self.skani_executable, "sketch"]
-        cmd.extend(str(f) for f in fasta_files)
+        # The list file is line-delimited, so a path carrying a newline
+        # cannot be represented in it -- see the docstring. Reject rather
+        # than write a file that would sketch a different set of genomes.
+        for path in fasta_files:
+            if "\n" in str(path) or "\r" in str(path):
+                message = (
+                    "skani's -l list file is line-delimited, so a FASTA path "
+                    f"containing a newline cannot be passed: {str(path)!r}"
+                )
+                self.log_error(message)
+                return {
+                    "success": False,
+                    "database_path": out_dir,
+                    "genome_count": 0,
+                    "error": message
+                }
+
+        # Inputs are handed to skani via -l, never on the command line --
+        # see the docstring's "Inputs go through skani's -l list file"
+        # section for why this is unconditional.
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.txt', prefix='skani_sketch_inputs_', delete=False
+        ) as handle:
+            list_file = handle.name
+            handle.writelines(f"{path}\n" for path in fasta_files)
+
+        cmd = [self.skani_executable, "sketch", "-l", list_file]
         cmd.extend(["-o", out_dir])
 
         if threads > 1:
@@ -471,6 +524,13 @@ class SKANIUtils(SharedEnvUtils):
                 "genome_count": 0,
                 "error": str(e)
             }
+        finally:
+            # Clean up the list file -- matches query_genomes' handling of
+            # its own temporary output file.
+            try:
+                os.unlink(list_file)
+            except OSError:
+                pass
 
     def add_skani_database(
         self,

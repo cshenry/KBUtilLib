@@ -365,9 +365,9 @@
   "operational_note_maestro_status": "During round 3, `maestro status` returned DIFFERENT status values on consecutive reads of the same task from primary-laptop (published/submitted flapping), with published_at null, retry_count 0 and terminal_at null throughout. The artifact landed 5 minutes after dispatch while the status field still showed nothing terminal. Watch the BRANCH, not the status field, from a non-hub machine. Seen once; not committed as durable memory.",
   "registry_mirror": {
     "status": "done",
-    "updated_at": "2026-09-30T09:34:01",
-    "notes": "dev 1318 landed ca87a6c on KBUtilLib main",
-    "notes_updated_at": "2026-09-30T09:34:01",
-    "mirrored_at": "2026-09-30T09:34:01"
+    "updated_at": "2026-09-30T13:23:01",
+    "notes": "Build finished and verified on main by the 2026-09-30 triage pass: the conduct row's landed_commit is an ancestor of main. Deploy is still OWED and stays tracked by that dev row sitting at status=landed, not done.",
+    "notes_updated_at": "2026-09-30T13:23:01",
+    "mirrored_at": "2026-09-30T13:23:01"
   }
 }

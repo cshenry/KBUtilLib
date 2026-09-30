@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from ..arc_context import APP_ID, app_us
@@ -38,7 +39,30 @@ from ..koros_arc_store.exceptions import (
     ContractVersionMismatch,
     RunsRootResolutionError,
 )
+from .render import (
+    DEFAULT_INLINE_ESCHER,
+    ArtifactUnavailable,
+    GenerationFailed,
+    MapUnavailable,
+    ModelNotFound,
+    RecordUnknown,
+    ResolvedArtifact,
+    dashboard_cache_lookup,
+    escher_cache_lookup,
+    find_paired_model_build,
+    find_record,
+    gc_poll_tokens,
+    list_maps_for_record,
+    new_poll_token,
+    read_or_generate_dashboard,
+    read_or_generate_escher,
+    read_poll_token,
+    resolve_artifact,
+    select_default_map,
+    write_poll_token,
+)
 from .service import (
+    FITNESS_ANALYSIS_KIND,
     build_arc_models,
     build_portfolio,
     check_startup_contract_version,
@@ -152,10 +176,82 @@ load();
 # ── FastAPI app ──────────────────────────────────────────────────────────────────
 
 
+def _default_escher_factory() -> Any:
+    """Construct the real :class:`EscherUtils` (imported lazily).
+
+    Imported inside the function so importing this module never drags in the
+    heavy scientific stack. Tests inject a fake factory returning a mock with
+    ``create_fitness_dashboard`` / ``create_map_html2`` / ``list_available_maps``.
+    """
+    from ..domains.notebook.escher_utils import EscherUtils
+
+    return EscherUtils()
+
+
+def _render_title_subtitle(
+    record: Any,
+    project: Optional[str],
+    arc: Optional[str],
+) -> "tuple[str, str]":
+    """Build dashboard header text carrying trust tier and arc provenance.
+
+    Binding: the record's ``trust_tier`` and arc provenance must reach the
+    rendered view's surrounding chrome so a reader can see everything in it is
+    model-generated hypothesis-tier output and which arc it came from. This does
+    NOT touch the dashboard internals — ``create_fitness_dashboard`` already takes
+    ``title`` and ``subtitle`` arguments, so tier/provenance ride in through them.
+    """
+    tier = getattr(record, "trust_tier", None) or "hypothesis"
+    subject = getattr(record, "subject", "") or ""
+    title = f"Fitness · Model dashboard — {subject}".rstrip(" —")
+    where = f"{project}/{arc}" if project and arc else "unattributed"
+    subtitle = (
+        f"trust tier: {tier} (model-generated) · arc: {where} · "
+        f"record {getattr(record, 'record_id', '')}"
+    )
+    return title, subtitle
+
+
+def _resolve_dashboard_inputs(
+    store: Any,
+    record_id: str,
+) -> "tuple[Any, Any, ResolvedArtifact, ResolvedArtifact, Optional[str], Optional[str]]":
+    """Resolve a dashboard request to its records and readable artifacts.
+
+    ``record_id`` names a ``kbdl.fitness_analysis`` record (binding). Returns the
+    fitness record, the paired model_build record, the resolved model and fitness
+    artifacts, and the ``(project, arc)`` the record was found under. Raises the
+    render layer's typed errors (:class:`RecordUnknown`, :class:`ModelNotFound`,
+    :class:`ArtifactUnavailable`) which the endpoint maps to status codes.
+
+    This is the ONLY level allowed to read record artifacts for rendering (blob
+    discipline). It uses ``list_analyses`` to LOCATE the record; artifact URIs
+    live on the record's summary columns.
+    """
+    fitness_rec, project, arc = find_record(store, record_id)
+    model_rec = find_paired_model_build(store, fitness_rec, project, arc)
+
+    model_uri = (model_rec.artifacts or {}).get("model_id")
+    fitness_uri = (fitness_rec.artifacts or {}).get("model_id")
+    if not model_uri:
+        raise ArtifactUnavailable(
+            f"model record {model_rec.record_id!r} has no model_id artifact"
+        )
+    if not fitness_uri:
+        raise ArtifactUnavailable(
+            f"fitness record {record_id!r} has no model_id artifact"
+        )
+    model_art = resolve_artifact("model", model_uri)
+    fitness_art = resolve_artifact("fitness", fitness_uri)
+    return fitness_rec, model_rec, model_art, fitness_art, project, arc
+
+
 def build_app(
     store_factory: Optional[Callable[[], Any]] = None,
     *,
     root_path: str = "",
+    escher_factory: Optional[Callable[[], Any]] = None,
+    inline_escher: bool = DEFAULT_INLINE_ESCHER,
 ) -> "FastAPI":
     """Build the FastAPI application (requires ``fastapi`` at call time).
 
@@ -177,15 +273,25 @@ def build_app(
        and every URL constructed downstream preserves its trailing slash (the
        trailing slash is load-bearing).
     """
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse
+    import threading
+
+    from fastapi import FastAPI, HTTPException, Query
+    from fastapi.responses import HTMLResponse, JSONResponse
 
     factory = store_factory or make_store
+    make_escher = escher_factory or _default_escher_factory
 
     app = FastAPI(
         title="Models and Analyses",
         root_path=root_path,
     )
+
+    # GC stale poll tokens at startup (binding S18: tokens older than 24h removed).
+    try:
+        gc_poll_tokens()
+    except OSError:
+        # A missing/unwritable state dir must not stop the app from starting.
+        logger.warning("models_and_analyses: could not GC poll tokens at startup")
 
     @app.get("/health")
     def health() -> dict:
@@ -224,6 +330,300 @@ def build_app(
         except RunsRootResolutionError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return build_arc_models(store, project, arc)
+
+    # ── render endpoints (levels 2 and 3) ──────────────────────────────────────
+
+    @app.get("/api/maps")
+    def maps(record_id: str = Query(...)) -> dict:
+        """List the maps usable for a record's model (delegates to list_available_maps).
+
+        Resolves the record's paired model build, loads the model artifact and
+        surfaces :meth:`EscherUtils.list_available_maps`. Degrades: an
+        unresolvable artifact returns a clear ``inputs unavailable`` response
+        (409), not a stack trace.
+        """
+        try:
+            store = factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            fitness_rec, project, arc = find_record(store, record_id)
+        except RecordUnknown as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # A record that is itself a model build can list maps directly; a fitness
+        # record resolves to its paired build.
+        try:
+            if fitness_rec.kind == FITNESS_ANALYSIS_KIND:
+                model_rec = find_paired_model_build(store, fitness_rec, project, arc)
+            else:
+                model_rec = fitness_rec
+        except ModelNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "model-not-found", "message": str(exc)},
+            ) from exc
+        model_uri = (model_rec.artifacts or {}).get("model_id")
+        if not model_uri:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "inputs-unavailable",
+                    "message": f"model record {model_rec.record_id!r} has no model_id",
+                },
+            )
+        try:
+            model_art = resolve_artifact("model", model_uri)
+        except ArtifactUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "inputs-unavailable", "message": str(exc)},
+            ) from exc
+        escher = make_escher()
+        available = list_maps_for_record(escher, model_art.value)
+        return {"record_id": record_id, "maps": available}
+
+    def _start_generation(
+        token: str,
+        record_id: str,
+        map_name: Optional[str],
+        work: Callable[[], Any],
+    ) -> None:
+        """Run a generation callable on a background thread, updating the token.
+
+        Generation takes seconds; holding the request open would time out against
+        the 45s ready probe (binding). So the request writes a ``pending`` token
+        and returns 202; this thread does the work and flips the token to
+        ``ready`` or ``error`` (naming the artifact on failure).
+        """
+        write_poll_token(
+            token, status="pending", record_id=record_id, map_name=map_name
+        )
+
+        def _run() -> None:
+            try:
+                html_path = work()
+            except GenerationFailed as exc:
+                write_poll_token(
+                    token, status="error", record_id=record_id,
+                    map_name=map_name, error=str(exc),
+                )
+            except Exception as exc:  # noqa: BLE001 - record, never crash the thread
+                write_poll_token(
+                    token, status="error", record_id=record_id,
+                    map_name=map_name, error=repr(exc),
+                )
+            else:
+                write_poll_token(
+                    token, status="ready", record_id=record_id,
+                    map_name=map_name, html_path=str(html_path),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    @app.get("/api/models/{record_id}/dashboard")
+    def dashboard(record_id: str) -> Any:
+        """Render (or serve cached) the fitness/model dashboard for a fitness record.
+
+        Delegates ALL rendering to :meth:`EscherUtils.create_fitness_dashboard`.
+        Protocol (binding): 200-with-HTML when cached/ready, 202-with-token while
+        generating, 404 model-not-found when no paired build exists, 409
+        inputs-unavailable when artifacts do not resolve. Never returns an empty
+        200 — an empty page is indistinguishable from a model with no results.
+        """
+        try:
+            store = factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            (
+                fitness_rec, _model_rec, model_art, fitness_art, project, arc
+            ) = _resolve_dashboard_inputs(store, record_id)
+        except RecordUnknown as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ModelNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "model-not-found", "message": str(exc)},
+            ) from exc
+        except ArtifactUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "inputs-unavailable", "message": str(exc)},
+            ) from exc
+
+        escher = make_escher()
+        try:
+            available = list_maps_for_record(escher, model_art.value)
+            map_name = select_default_map(available)
+        except MapUnavailable as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no-map", "message": str(exc)},
+            ) from exc
+
+        title, subtitle = _render_title_subtitle(fitness_rec, project, arc)
+
+        # Fast path: already cached → serve 200 immediately, no thread, no token.
+        cached = dashboard_cache_lookup(
+            record_id=record_id,
+            model_artifact=model_art,
+            fitness_artifact=fitness_art,
+            map_name=map_name,
+        )
+        if cached is not None:
+            return HTMLResponse(cached.read_text(encoding="utf-8"))
+
+        # Cache miss: generation takes seconds. Do NOT hold the request through it
+        # (binding: the iframe must not time out against the 45s ready probe).
+        # Hand it to a background thread and return a 202 poll token.
+        def work() -> Path:
+            return read_or_generate_dashboard(
+                escher,
+                record_id=record_id,
+                model_artifact=model_art,
+                fitness_artifact=fitness_art,
+                map_name=map_name,
+                title=title,
+                subtitle=subtitle,
+                inline_escher=inline_escher,
+            )
+
+        token = new_poll_token()
+        _start_generation(token, record_id, map_name, work)
+        return JSONResponse(
+            status_code=202,
+            content={"status": "pending", "poll_token": token, "map": map_name},
+        )
+
+    @app.get("/api/models/{record_id}/escher")
+    def escher_map(
+        record_id: str,
+        map: Optional[str] = Query(default=None),
+    ) -> Any:
+        """Render (or serve cached) a single Escher map with flux for a record.
+
+        Delegates to :meth:`EscherUtils.create_map_html2` with flux from the
+        selected FBA/FVA record. Same 200/202/404/409 protocol as the dashboard.
+        """
+        try:
+            store = factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            rec, project, arc = find_record(store, record_id)
+        except RecordUnknown as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        # Resolve the model: an FBA/FVA/fitness record carries its model_id; a
+        # build record is its own model.
+        model_uri = (rec.artifacts or {}).get("model_id")
+        if not model_uri:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "inputs-unavailable",
+                    "message": f"record {record_id!r} has no model_id artifact",
+                },
+            )
+        try:
+            model_art = resolve_artifact("model", model_uri)
+        except ArtifactUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "inputs-unavailable", "message": str(exc)},
+            ) from exc
+
+        escher = make_escher()
+        try:
+            if map:
+                map_name = map
+            else:
+                available = list_maps_for_record(escher, model_art.value)
+                map_name = select_default_map(available)
+        except MapUnavailable as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no-map", "message": str(exc)},
+            ) from exc
+
+        # Flux comes from the selected record's detail blob (the render endpoints
+        # are the ONLY levels permitted to call read_detail — blob discipline).
+        flux = None
+        try:
+            detail = store.read_detail(record_id)
+        except Exception:  # noqa: BLE001 - a missing/unreadable blob just means no flux
+            detail = None
+        if isinstance(detail, dict):
+            candidate = detail.get("flux")
+            if isinstance(candidate, dict):
+                flux = candidate
+
+        cached = escher_cache_lookup(
+            record_id=record_id,
+            model_artifact=model_art,
+            map_name=map_name,
+        )
+        if cached is not None:
+            return HTMLResponse(cached.read_text(encoding="utf-8"))
+
+        def work() -> Path:
+            return read_or_generate_escher(
+                escher,
+                record_id=record_id,
+                model_artifact=model_art,
+                map_name=map_name,
+                flux=flux,
+            )
+
+        token = new_poll_token()
+        _start_generation(token, record_id, map_name, work)
+        return JSONResponse(
+            status_code=202,
+            content={"status": "pending", "poll_token": token, "map": map_name},
+        )
+
+    @app.get("/api/render/poll/{token}")
+    def poll(token: str) -> Any:
+        """Poll a generation token (binding protocol S18).
+
+        200-with-HTML when ready, 202 while pending, 404 on an unknown token, 500
+        naming the failing artifact on error. Never an empty 200.
+        """
+        state = read_poll_token(token)
+        if state is None:
+            raise HTTPException(status_code=404, detail="unknown poll token")
+        status = state.get("status")
+        if status == "pending":
+            return JSONResponse(status_code=202, content=state)
+        if status == "error":
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "generation-failed", "message": state.get("error")},
+            )
+        # ready → serve the cached HTML the generation thread recorded on the token.
+        html_path = state.get("html_path")
+        if not html_path or not Path(html_path).exists():
+            # The cache entry vanished (evicted / state dir wiped). Treat as gone
+            # rather than serving an empty 200.
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "generation-failed",
+                    "message": (
+                        f"cached HTML for token {token!r} is missing at {html_path!r}"
+                    ),
+                },
+            )
+        text = Path(html_path).read_text(encoding="utf-8")
+        if not text:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "generation-failed",
+                    "message": f"cached HTML for token {token!r} is empty",
+                },
+            )
+        return HTMLResponse(text)
 
     return app
 

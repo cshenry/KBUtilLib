@@ -5,7 +5,7 @@
   "repos": [
     "KBUtilLib"
   ],
-  "status": "draft",
+  "status": "done",
   "review_rounds": 1,
   "confront_rounds": 2,
   "source_prompt": "Chris, 2026-09-24, /ai-jane d \u2014 'Extract koros-arc-store-v1 from the two KIND app PRDs and reconcile both against it'. This answers the STRUCTURAL question both app-design sessions put to him on 2026-09-23: extract the shared scaffold into its own PRD, or merge the two app PRDs. He chose extract.",
@@ -208,5 +208,12 @@
       "superseded": "0f6d388912a1bb939c4e3b8ddcce7123be2ac30e",
       "reason": "review round 1 + confront round 2, 2026-09-24"
     }
-  ]
+  ],
+  "registry_mirror": {
+    "status": "done",
+    "updated_at": "2026-09-29T23:16:21",
+    "notes": "FINISHED 2026-09-29, set by t session 98298e9f. Registry said ready; that was a stale CLAIM. Evidence: conduct row dev 1299 closed done 2026-09-26 on Albert's VERIFIED kbhub deploy (kbutillib installed editable into KIND's venv /home/chenry/king/backend/.venv with PIP_USER=0; all four import probes -- koros_arc_store, koros_arc_store_testing, arc_context, arc_context_testing -- resolve under KIND's own interpreter; KIND restarted PID 574 -> 4172786). All four taskplan tasks on KBUtilLib main: e409d79 runs-tree access, de2af95 run database + KorosArcStore record API, d22d728 CAC conformance helpers, 6689ddd reference fake + contract suite + import boundary. Tests present at tests/koros_arc_store/. ACCEPTANCE, which dev 1299 defined as the two consumer apps actually importing the module, is MET and was checked in the code rather than assumed: kbutillib/models_and_analyses/app.py:36-38 imports arc_context APP_ID/app_us and koros_arc_store CONTRACT_VERSION, metrics.py:48 imports floor_tier, render.py:43 imports AnalysisRecord; and GenomeAnnotationAggregator annotation_explorer/app.py:108,142,166 imports koros_arc_store on main. Done AND deployed AND tested on all three counts.",
+    "notes_updated_at": "2026-09-29T23:16:21",
+    "mirrored_at": "2026-09-29T23:16:21"
+  }
 }

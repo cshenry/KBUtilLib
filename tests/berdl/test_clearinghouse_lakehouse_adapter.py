@@ -91,20 +91,22 @@ def test_lakehouse_is_registered_and_constructible():
     assert adapter.adapter_name == "lakehouse"
 
 
-def test_only_mongo_remains_planned_but_unbuilt():
-    """After this task, only `mongo` is planned-but-unbuilt; `lakehouse` is built."""
-    source = cm.Source(
-        name="x",
-        adapter="mongo",
-        entity_type="gene",
-        kinds=("entity",),
-        locator={},
-        hash_spec={"raw_column": "seq"},
-        content={},
-        result={},
-    )
-    with pytest.raises(cs.AdapterNotImplementedError):
-        cs.get_adapter(source)
+def test_mongo_and_lakehouse_are_both_built():
+    """`lakehouse` was built in this stage; `mongo` has since been built too (see
+    tests/berdl/test_clearinghouse_mongo_adapter.py), so neither remains
+    planned-but-unbuilt -- get_adapter constructs a real adapter for each."""
+    for name in ("lakehouse", "mongo"):
+        source = cm.Source(
+            name="x",
+            adapter=name,
+            entity_type="gene",
+            kinds=("entity",),
+            locator={},
+            hash_spec={"raw_column": "seq"},
+            content={},
+            result={},
+        )
+        assert isinstance(cs.get_adapter(source), cs.SourceAdapter)
 
 
 def test_missing_table_locator_is_rejected():

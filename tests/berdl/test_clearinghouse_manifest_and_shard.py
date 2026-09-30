@@ -228,14 +228,17 @@ def test_mapping_half_is_adapter_independent():
         assert [p.hash_source for p in plans] == [p.hash_source for p in reference]
 
 
-def test_planned_adapters_are_declared_but_unbuilt():
-    """`mongo` is a declared adapter name not built yet.
+def test_all_declared_adapters_are_built():
+    """Every declared adapter name now maps to a real class.
 
-    `lakehouse` was in this list until it was built (see
-    tests/berdl/test_clearinghouse_lakehouse_adapter.py); only `mongo` remains
-    planned-but-unbuilt.
+    `lakehouse` was built first, then `mongo` (see
+    tests/berdl/test_clearinghouse_lakehouse_adapter.py and
+    tests/berdl/test_clearinghouse_mongo_adapter.py); no declared name remains
+    planned-but-unbuilt, so get_adapter constructs one for each rather than
+    raising AdapterNotImplementedError.
     """
-    for name in ("mongo",):
+    for name in cs.ADAPTER_NAMES:
+        assert name in cs._ADAPTER_CLASSES
         source = cm.Source(
             name="x",
             adapter=name,
@@ -246,8 +249,7 @@ def test_planned_adapters_are_declared_but_unbuilt():
             content={},
             result={},
         )
-        with pytest.raises(cs.AdapterNotImplementedError):
-            cs.get_adapter(source)
+        assert isinstance(cs.get_adapter(source), cs.SourceAdapter)
 
 
 def test_unknown_adapter_name_rejected():

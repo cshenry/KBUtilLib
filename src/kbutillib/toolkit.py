@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from .domains.modeling.model_standardization_utils import (
         ModelStandardizationUtilsImpl,
     )
+    from .domains.modeling.ms_community_utils import MSCommunityUtilsImpl
     from .domains.modeling.ms_fba_utils import MSFBAUtilsImpl
     from .domains.modeling.ms_reconstruction_utils import MSReconstructionUtilsImpl
     from .domains.modeling.ms_remote_solve_utils import RemoteSolveResult
@@ -96,6 +97,7 @@ class KBUtilLib:
         self._fba = None
         self._recon = None
         self._template = None
+        self._community = None
         self._escher = None
         self._standardize = None
         self._genome = None
@@ -181,6 +183,15 @@ class KBUtilLib:
             from .domains.modeling.ms_template_utils import MSTemplateUtilsImpl
             self._template = MSTemplateUtilsImpl(self.env, self.model)
         return self._template
+
+    @property
+    def community(self) -> MSCommunityUtilsImpl:
+        if self._community is None:
+            from .domains.modeling.ms_community_utils import MSCommunityUtilsImpl
+            self._community = MSCommunityUtilsImpl(
+                self.env, self.model, self.fba, self.escher, self.biochem
+            )
+        return self._community
 
     @property
     def escher(self) -> EscherUtilsImpl:

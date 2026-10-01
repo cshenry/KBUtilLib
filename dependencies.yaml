@@ -40,3 +40,7 @@ dependencies:
     path: "../editEscher"
     git: "https://github.com/ModelSEED/editEscher.git"
     commit: "6474698c67e8b9a1e8ab44c38686b27821d20389"
+
+  MINE-Database:
+    path: "../MINE-Database"
+    git: "https://github.com/tyo-nu/MINE-Database.git"

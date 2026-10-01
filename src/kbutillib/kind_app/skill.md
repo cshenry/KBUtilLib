@@ -6,9 +6,15 @@ genome-scale metabolic reconstruction, gapfilling, FBA, and FVA, plus an
 is injected into your orientation because your session has no `Skill` tool
 — treat it as your onboarding for this capability. `kbu model` requires no
 extra setup: the standard `kbu` interpreter already has kbutillib, cobra,
-and modelseedpy importable, and every verb below runs fully offline (no
-KBase token, no network) unless you explicitly pass a KBase workspace
-reference.
+and modelseedpy importable, and every verb below runs with no KBase token
+unless you explicitly pass a KBase workspace reference.
+
+**One network call is not optional: `reconstruct` annotates.** If the genome
+you hand it carries no functional roles — which is the case for every plain
+protein FASTA — `reconstruct` calls the **RAST** service to annotate it
+before building, so it is *not* offline for unannotated input. A genome that
+already carries roles skips RAST and stays offline. `gapfill`, `fba` and
+`fva` are always fully offline.
 
 ## The canonical arc
 
@@ -38,6 +44,22 @@ Builds a draft model from a local protein FASTA (`.faa`/`.fasta`) via
 ```
 kbu model reconstruct --genome demo_genome.faa --out draft.json --json
 ```
+
+**It annotates first when it has to.** `MSGenome.from_fasta` leaves every
+feature's roles empty, and the builder maps reactions *from roles only* — so
+an unannotated FASTA is auto-annotated via RAST before building. You will see
+`[annotate] …` on stderr when this happens. Measured on E. coli K-12
+(4285 proteins): RAST assigned roles to 4163 of them in ~18s, giving
+**1740 reactions / 1451 metabolites / 1307 genes**.
+
+**Sanity-check the numbers, not the exit code.** A real bacterial draft has
+on the order of 1000+ reactions and 1000+ genes. **If you ever see a model
+with ~5 reactions and 0 genes, the reconstruction did not work** — that is
+the bare template biomass scaffold (`bio1` plus DNA/protein/mRNA synthesis
+and a biomass sink), which is what the builder emits when it has no roles to
+map. `reconstruct` now refuses rather than returning that, but check
+`genes > 0` anyway before you build on a model. Reconstruct exiting `0` is
+not by itself evidence of a usable model.
 
 ### `gapfill` — make the model feasible on a media
 
@@ -116,7 +138,11 @@ kbu model exec analysis.py --json -- --some-arg value
    whose contents are a dict accepted by
    `modelseedpy.core.msmedia.MSMedia.from_dict`:
    - Minimal: `{"cpd00027": 10}` (uptake bound only).
-   - Bounds: `{"cpd00027": [-10, 1000]}` (explicit lower/upper).
+   - Bounds: **do NOT use `{"cpd00027": [-10, 1000]}` from a JSON file** — it
+     raises `TypeError: bad operand type for unary -: 'list'`.
+     `MSMedia.from_dict` accepts that form only as a Python *tuple*, and JSON
+     parses `[...]` to a `list`, so it can never match from a media file. Use
+     the Complete form below for explicit bounds.
    - Complete: `{"cpd00027": {"lower_bound": -10, "upper_bound": 1000,
      "concentration": 5.0, "name": "D-Glucose"}}`.
 2. **KBase workspace reference** — any value containing `/` that is not an
@@ -150,13 +176,31 @@ workspace reference (containing `/`) is also accepted but requires auth —
 avoid it in a local-only session. There is no offline `auto` template in
 this environment.
 
+## The LP solver — GLPK by default, and why you should leave it alone
+
+Every `kbu model` verb pins cobra's solver to **GLPK** before running.
+Override with `kbu model --solver NAME ...`, the `KBU_SOLVER` env var, or the
+`modeling.solver` config key; hosts holding an unrestricted commercial
+licence (h100/poplar) default to `gurobi` instead.
+
+GLPK is not a fallback — it is measured sufficient. On an E. coli-sized
+genome against a 9434-reaction candidate set, GLPK gapfilled in 28.1s
+(437 reactions added) versus 27.4s for an *unrestricted* gurobi. **If you
+ever see `Model too large for size-limited license`, that is a licence
+ceiling and not a large problem** — `optlang` prefers gurobi whenever it is
+merely importable, so a size-capped licence silently captures the solver and
+then fails with a message that misdescribes its own cause. The fix is to
+select GLPK, never to go looking for a bigger solver.
+
 ## Local/offline construction
 
-`kbu model` verbs work with no KBase token and no network by bypassing
+`kbu model` verbs work with no KBase token by bypassing
 `KBModelUtils.__init__`'s cobrakbase-dependent setup (see
 `kbu model --help` and the `model.py` module docstring for the mechanism
 if you're curious) — you do not need to do anything special; this is
-handled for you. `--atp-safe` (off by default on `reconstruct`/`gapfill`)
+handled for you. The one exception to "no network" is RAST annotation inside
+`reconstruct`, described above. `--atp-safe` (off by default on
+`reconstruct`/`gapfill`)
 is the one option that needs a local ModelSEED biochemistry database
 checkout; leave it off unless you know one is configured
 (`KBU_MODELSEED_DB_PATH`).

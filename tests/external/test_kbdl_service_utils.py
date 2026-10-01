@@ -891,3 +891,176 @@ def test_toolkit_registers_kbdl_service_alongside_its_siblings():
     assert isinstance(kbu.kbdl_service, KBDLServiceUtilsImpl)
     # Lazy singleton, same as every other domain property on the facade.
     assert kbu.kbdl_service is kbu.kbdl_service
+
+
+# ---------------------------------------------------------------------------
+# Transient connection failures while polling — a lost connection is not a
+# lost job
+# ---------------------------------------------------------------------------
+
+
+class RaisingSession(FakeSession):
+    """A :class:`FakeSession` whose canned entries may be EXCEPTIONS.
+
+    An entry that is an exception instance is raised instead of returned, which
+    is how a transport-level failure (a reset keep-alive connection) is
+    reproduced without a network.
+    """
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        if not self._responses:
+            raise AssertionError("RaisingSession ran out of canned entries")
+        nxt = self._responses.pop(0)
+        if isinstance(nxt, BaseException):
+            raise nxt
+        return nxt
+
+
+def test_poll_survives_a_transient_connection_reset_and_still_returns_the_result():
+    """The regression this guards is a real incident, 2026-10-01.
+
+    Ten KBDLHorizyn jobs were running normally and the API was serving 200 OK
+    when ``poll_until_terminal`` raised ``ConnectionResetError(104)`` and the
+    caller abandoned the wait. The job state lives on the service; an
+    interrupted GET carries no information about it, so the only correct
+    response is to poll again.
+    """
+    session = RaisingSession(
+        [
+            FakeResponse(200, {"job_id": "j1", "state": "running"}),
+            requests.exceptions.ConnectionError(
+                "('Connection aborted.', ConnectionResetError(104, "
+                "'Connection reset by peer'))"
+            ),
+            FakeResponse(200, {"job_id": "j1", "state": "completed"}),
+        ]
+    )
+    client = make_client(session)
+    sleep_calls = []
+
+    status = client.poll_until_terminal(
+        "j1", interval=1.0, sleep_fn=sleep_calls.append, time_fn=lambda: 0.0
+    )
+
+    assert status["state"] == "completed"
+    # Three transport calls: the reset one was retried, not fatal.
+    assert len(session.calls) == 3
+    assert sleep_calls == [1.0, 1.0]
+
+
+def test_poll_survives_a_transient_timeout_too():
+    session = RaisingSession(
+        [
+            requests.exceptions.Timeout("read timed out"),
+            FakeResponse(200, {"job_id": "j1", "state": "completed"}),
+        ]
+    )
+    client = make_client(session)
+
+    status = client.poll_until_terminal(
+        "j1", interval=0.0, sleep_fn=lambda _: None, time_fn=lambda: 0.0
+    )
+
+    assert status["state"] == "completed"
+
+
+def test_poll_gives_up_after_too_many_CONSECUTIVE_connection_errors():
+    """Tolerance is bounded, so a genuinely unreachable service still surfaces."""
+    n = kbdl_client_module._POLL_MAX_CONNECTION_ERRORS + 1
+    session = RaisingSession(
+        [requests.exceptions.ConnectionError("down") for _ in range(n)]
+    )
+    client = make_client(session)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        client.poll_until_terminal(
+            "j1", interval=0.0, sleep_fn=lambda _: None, time_fn=lambda: 0.0
+        )
+
+
+def test_a_successful_poll_resets_the_connection_error_streak():
+    """The bound is on CONSECUTIVE failures, not on failures in total.
+
+    A job that runs for hours may accumulate more than the bound in total
+    while never failing twice in a row; that must not end the wait.
+    """
+    bound = kbdl_client_module._POLL_MAX_CONNECTION_ERRORS
+    entries = []
+    for _ in range(bound + 2):
+        entries.append(requests.exceptions.ConnectionError("blip"))
+        entries.append(FakeResponse(200, {"job_id": "j1", "state": "running"}))
+    entries.append(FakeResponse(200, {"job_id": "j1", "state": "completed"}))
+    client = make_client(RaisingSession(entries))
+
+    status = client.poll_until_terminal(
+        "j1", interval=0.0, sleep_fn=lambda _: None, time_fn=lambda: 0.0
+    )
+
+    assert status["state"] == "completed"
+
+
+def test_poll_still_honours_its_timeout_budget_while_tolerating_errors():
+    """Tolerating resets must not let a wait outlive its timeout."""
+    session = RaisingSession(
+        [requests.exceptions.ConnectionError("blip") for _ in range(3)]
+    )
+    client = make_client(session)
+    clock = iter([0.0, 100.0, 200.0, 300.0])
+
+    with pytest.raises(TimeoutError):
+        client.poll_until_terminal(
+            "j1",
+            interval=0.0,
+            timeout=50.0,
+            sleep_fn=lambda _: None,
+            time_fn=lambda: next(clock),
+        )
+
+
+# ---------------------------------------------------------------------------
+# The default session retries connections — but never a POST
+# ---------------------------------------------------------------------------
+
+
+def test_default_session_mounts_a_connection_retry_on_both_schemes():
+    session = KBDLServiceUtils._build_retrying_session()
+    for scheme in ("http://", "https://"):
+        adapter = session.get_adapter(scheme)
+        retry = adapter.max_retries
+        assert retry.connect >= 1, f"{scheme} adapter does not retry connections"
+        assert retry.read >= 1
+
+
+def test_default_session_does_NOT_retry_post():
+    """A retried submission would create a SECOND job.
+
+    ``_submit`` is a POST, so POST must stay out of the retried set. This is
+    asserted rather than left to urllib3's default because the default is the
+    only thing standing between a flaky network and duplicate jobs.
+    """
+    session = KBDLServiceUtils._build_retrying_session()
+    retry = session.get_adapter("http://").max_retries
+    allowed = {m.upper() for m in retry.allowed_methods}
+    assert "POST" not in allowed
+    assert "GET" in allowed
+
+
+def test_default_session_does_not_retry_http_status_codes():
+    """A 4xx/5xx is mapped to a typed exception and is meaningful.
+
+    Retrying statuses would swallow and repeat it, so ``status`` is 0 and
+    ``raise_on_status`` is off -- ``_raise_for_status`` owns that mapping.
+    """
+    retry = KBDLServiceUtils._build_retrying_session().get_adapter(
+        "http://"
+    ).max_retries
+    assert not retry.status
+    assert retry.raise_on_status is False
+
+
+def test_an_injected_session_is_used_verbatim_and_not_wrapped():
+    """Tests and callers that inject a transport must keep getting theirs."""
+    session = FakeSession([])
+    client = make_client(session)
+    assert client.session is session

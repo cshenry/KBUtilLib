@@ -140,6 +140,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ...core.shared_env_utils import SharedEnvUtils
 
@@ -189,6 +191,15 @@ SCHEMA_VERSION = "1"
 
 #: Job states at which ``poll_until_terminal`` stops polling.
 _TERMINAL_STATES = frozenset({"completed", "failed"})
+
+#: How many CONSECUTIVE connection-level failures
+#: :meth:`KBDLServiceUtils.poll_until_terminal` tolerates before giving up and
+#: re-raising. Bounded rather than infinite so a service that is genuinely
+#: unreachable still surfaces as an error; reset by any successful poll, so a
+#: long job that hits an occasional keep-alive reset is unaffected. Five at the
+#: default two-second interval is roughly ten seconds of grace, which covers a
+#: connection reset and a worker restart without masking an outage.
+_POLL_MAX_CONNECTION_ERRORS = 5
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────
@@ -319,7 +330,44 @@ class KBDLServiceUtils(SharedEnvUtils):
             )
         self.base_url = resolved.rstrip("/")
         self.timeout = timeout
-        self.session = session if session is not None else requests.Session()
+        self.session = (
+            session if session is not None else self._build_retrying_session()
+        )
+
+    @staticmethod
+    def _build_retrying_session() -> requests.Session:
+        """A ``requests.Session`` that retries CONNECTION-level failures.
+
+        The KBDL API is uvicorn, whose ``--timeout-keep-alive`` defaults to 5
+        seconds. A pooled keep-alive connection can therefore be closed by the
+        server at the same moment this client reuses it, which surfaces as
+        ``ConnectionResetError(104)`` on a request that was never served. That
+        is not a service failure and must not be reported as one: on
+        2026-10-01 it killed a wait over ten KBDLHorizyn jobs that all
+        completed normally, while the API logged 200 OK throughout.
+
+        **``POST`` is deliberately NOT retried.** ``urllib3``'s default
+        ``allowed_methods`` covers only the idempotent verbs, and that is the
+        behaviour wanted here rather than an accident: ``_submit`` is a POST,
+        and a blind retry of a submission that did reach the server would
+        create a SECOND job. Status codes are not retried either -- a 4xx/5xx
+        is mapped to a typed exception by :meth:`_raise_for_status` and is
+        meaningful, so swallowing and repeating it would hide it.
+        """
+        retry = Retry(
+            total=5,
+            connect=5,
+            read=5,
+            status=0,
+            backoff_factor=0.5,
+            allowed_methods=Retry.DEFAULT_ALLOWED_METHODS,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        built = requests.Session()
+        built.mount("http://", adapter)
+        built.mount("https://", adapter)
+        return built
 
     # ── internal HTTP plumbing ──────────────────────────────────────────
 
@@ -612,10 +660,36 @@ class KBDLServiceUtils(SharedEnvUtils):
             The final status record (same shape as :meth:`check_job`).
         """
         start = time_fn()
+        consecutive_connection_errors = 0
         while True:
-            status = self.check_job(job_id)
-            if status.get("state") in _TERMINAL_STATES:
-                return status
+            try:
+                status = self.check_job(job_id)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                # A LOST CONNECTION IS NOT A LOST JOB. The job runs on the
+                # service, not here; an interrupted GET says nothing about it.
+                # Reporting failure here is strictly worse than waiting --
+                # the caller abandons work that is still progressing. See
+                # `_build_retrying_session` for the uvicorn keep-alive race
+                # that makes this reachable even against a healthy API.
+                consecutive_connection_errors += 1
+                if consecutive_connection_errors > _POLL_MAX_CONNECTION_ERRORS:
+                    raise
+                self.log_warning(
+                    f"transient connection error polling job {job_id} "
+                    f"({consecutive_connection_errors} of "
+                    f"{_POLL_MAX_CONNECTION_ERRORS} tolerated): {exc}"
+                )
+            else:
+                # Only a successful poll clears the streak: the bound is on
+                # CONSECUTIVE failures, so a genuinely unreachable service
+                # still surfaces instead of being retried forever, while an
+                # occasional reset over a long job costs nothing.
+                consecutive_connection_errors = 0
+                if status.get("state") in _TERMINAL_STATES:
+                    return status
             if timeout is not None and (time_fn() - start) >= timeout:
                 raise TimeoutError(
                     f"job {job_id} did not reach a terminal state within {timeout}s"

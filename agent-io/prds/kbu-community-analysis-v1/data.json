@@ -5,7 +5,7 @@
   "repos": [
     "KBUtilLib"
   ],
-  "status": "ready",
+  "status": "done",
   "review_rounds": 0,
   "confront_rounds": 2,
   "draft_commit": "12f407e43bf8408e97680ec06d16e30950d71382",
@@ -205,5 +205,12 @@
     "parallel": "t3 and t4 are the only genuine parallel pair -- different files, both depending on t2"
   },
   "status_note": "THE REGISTRY IS AUTHORITATIVE for status, not this file. Both now say ready (advanced 2026-09-24). This field is kept in sync deliberately because the mismatch has misled a dispatch before: on 2026-09-22 meeting-action-item-single-producer-v1 was ready in the registry while its data.json still said draft.",
-  "branch_note": "The bundle is committed on wip only. main is 1 commit ahead of wip and wip is 18 ahead of main as of 2026-09-24 04:5xZ. h100 cuts developer worktrees off MAIN, so this bundle is NOT reachable from a worktree -- which is expected and handled: every taskplan task prompt is self-contained and carries its own spec, and any PRD path in a prompt is marked background-only. The conductor reads the PRD from its own wip checkout."
+  "branch_note": "The bundle is committed on wip only. main is 1 commit ahead of wip and wip is 18 ahead of main as of 2026-09-24 04:5xZ. h100 cuts developer worktrees off MAIN, so this bundle is NOT reachable from a worktree -- which is expected and handled: every taskplan task prompt is self-contained and carries its own spec, and any PRD path in a prompt is marked background-only. The conductor reads the PRD from its own wip checkout.",
+  "registry_mirror": {
+    "status": "done",
+    "updated_at": "2026-09-30T13:23:02",
+    "notes": "Build finished and verified on main by the 2026-09-30 triage pass: the conduct row's landed_commit is an ancestor of main. Deploy is still OWED and stays tracked by that dev row sitting at status=landed, not done.",
+    "notes_updated_at": "2026-09-30T13:23:02",
+    "mirrored_at": "2026-09-30T13:23:02"
+  }
 }

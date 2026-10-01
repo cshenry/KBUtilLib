@@ -32,32 +32,32 @@
     {
       "task_id": "kbdl-callsite-fix",
       "description": "KBDLJobRunningPrototype: in job_types/horizyn.py::_embed_proteins, construct ProtT5Utils with model_path= (not model_name=) and pass max_residues= from settings.prot_t5_max_residues; add a test using a recording double that asserts both keywords",
-      "status": "planned",
-      "notes": "The regression test for the actual bug. Existing adapter tests stub _embed_proteins itself as a seam, which is exactly why the constructor mismatch shipped unnoticed."
+      "status": "done",
+      "notes": "LANDED c068a7b on KBDLJobRunningPrototype main (verified by reading origin/main: line 452 now reads ProtT5Utils(model_path=model_name, max_residues=max_residues)). NOT YET LIVE: the deployed tree ~/H100Projects/KBDLJobRunningPrototype is pinned at 86ea830 and still carries the old model_name= call."
     },
     {
       "task_id": "kbu-model-name-guard",
       "description": "KBUtilLib: add an explicit keyword-only model_name=None to ProtT5Utils.__init__ that raises TypeError naming model_path when supplied; model_path stays canonical (no alias, no warning); two tests, neither requiring torch",
-      "status": "planned",
-      "notes": "Loud by design -- the failure mode being prevented is silence. Guards one name only; BaseUtils' repo-wide setattr-swallow is out of scope (G6)."
+      "status": "done",
+      "notes": "LANDED f6757dc on KBUtilLib main. LIVE: the deployed KBUtilLib (~/H100Projects/KBUtilLib, HEAD 7b53ecb = main) carries the guard."
     },
     {
       "task_id": "kbu-submit-horizyn",
       "description": "KBUtilLib: add JOB_TYPE_HORIZYN = 'KBDLHorizyn' and submit_horizyn(**params) to domains/external/kbdl_service_utils.py, mirroring submit_skani; copy the submit_skani test",
-      "status": "planned",
-      "notes": "Explicit non-goal: do NOT chase the draft's 'five -> six job types' docstring edits. No such text exists; the module docstring enumerates endpoints and submit_and_wait says 'JOB_TYPE_GENOME_ANNOTATION, etc.'"
+      "status": "done",
+      "notes": "LANDED 882f945 on KBUtilLib main (task-916c82c2, reviewer df26f868 PASS). LIVE in the deployed tree."
     },
     {
       "task_id": "kbu-prott5-extra",
       "description": "KBUtilLib: add prott5 = [torch, transformers, sentencepiece] to [project.optional-dependencies]; NOT folded into the ai extra (httpx-only, Argo/lp-solver client) and NOT added to all (docs build must not pull CUDA torch)",
-      "status": "planned",
-      "notes": "sentencepiece is listed explicitly because ProtT5's T5Tokenizer needs it and its absence surfaces as a confusing tokenizer error, not a clean ImportError."
+      "status": "done",
+      "notes": "LANDED c28282e on KBUtilLib main. LIVE in the deployed tree."
     },
     {
       "task_id": "numeric-acceptance",
       "description": "Re-run the 2026-09-21 eval with the embedding step routed through ProtT5Utils (model_path=, max_residues=1000); require recall@1/@5/@10 within +/-2pp of 44.6/64.0/66.3; commit a report at agent-io/research/prott5-utils-numeric-acceptance.md",
-      "status": "planned",
-      "notes": "maestro lane, h100 -- GPU work loading a 3B-param encoder. Runs at LIBRARY level, not through the KBDL service, so it does not depend on the out-of-scope ops wiring. Tolerance not exact equality: fp16 accumulation is non-associative and batch composition differs from the reference."
+      "status": "done",
+      "notes": "PASS. Run 2026-09-24 by Maestro task-e5b3a15f; report committed at KBDLJobRunningPrototype agent-io/research/prott5-utils-numeric-acceptance.md (14adfd2, corrected cbbd414) with the variant script run_eval_prott5utils.py beside run_eval.py. recall@1/@5/@10 = 0.4457/0.6400/0.6629 (78/112/116 of 175) vs baseline 0.446/0.640/0.663; abs deltas 0.0003/0.0000/0.0001, all <= 0.02. KEY NUANCE from cbbd414: the paths are CLOSE, NOT equivalent -- all 175 top-1 scores differ (4.17e-07..4.10e-04) and 17 proteins flipped rank, but every flip is in the deep tail (min rank 191) so zero crossed the k=1/5/10 boundaries. Recall reproduces exactly because no drift landed near a decision boundary, not because nothing moved -- a future eval set with a protein at rank 10/11 could flip a figure with neither path being wrong. Independently re-run 2026-09-26 by miles session 0fb3ff0e, which reproduced the same three figures and hit counts."
     }
   ],
   "out_of_scope": [
@@ -69,5 +69,8 @@
     "Renaming ProtT5Utils' public parameter -- settled as model_path (Q1)",
     "End-to-end validation through the running service -- available later as an ops-gated check"
   ],
-  "confront": "round 1 ran 2026-09-22 via maestro task-9a3f8d46 (codex backend, h100); 6 stall points returned, 5 kept and folded, 1 partially dropped as already answered in taskplan.json which the confront could not see; 2 free-critique items adopted"
+  "confront": "round 1 ran 2026-09-22 via maestro task-9a3f8d46 (codex backend, h100); 6 stall points returned, 5 kept and folded, 1 partially dropped as already answered in taskplan.json which the confront could not see; 2 free-critique items adopted",
+  "status_reconciled_on": "2026-09-26",
+  "status_reconciled_by": "miles session 0fb3ff0e",
+  "all_code_tasks_complete": true
 }

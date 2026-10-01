@@ -1,0 +1,66 @@
+{
+  "prd_name": "kbu-model-annotate-and-solver-v1",
+  "title": "kbu model: RAST auto-annotation on reconstruct, and GLPK as the configurable default solver",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "priority": "high",
+  "created": "2026-09-30",
+  "design_sessions": [
+    "ai-albert d 2026-09-30 (session a81ef7c4)"
+  ],
+  "confront_rounds": 0,
+  "confront": "skipped: no maestro client on kbhub (not a Maestro/AgentForge worker), so the cross-family adversary rail is unreachable from this machine. Never fell back to a Claude-run attack. Worth confronting from primary-laptop or h100 before build.",
+  "review_rounds": 0,
+  "review_protocol": "Written single-pass in Draft Mode on kbhub by Albert, 2026-09-30. Every judgement call is already decided and applied in the body; Open Questions Q1-Q11 is a manifest of choices, not a queue of holes. Chris edits the committed fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-model-annotate-and-solver-v1` diffs those edits against draft_commit, classifies each hunk, propagates decision changes through body + stories + testing + taskplan, and re-derives the Gotchas section. Held at draft until at least one review round completes.",
+  "summary": "Fixes two measured defects in the kbu model arc. (1) reconstruct returns a 5-reaction template scaffold at exit 0 from a 4,285-protein E. coli FASTA because MSGenome.from_fasta leaves MSFeature.ontology_terms empty and MSBuilder maps genes only via ontology_terms['RAST'] -- fixed by a new annotate_msgenome adapter over the existing RastUtils AnnotatorUtils, driven by a tri-state --annotate auto|always|never, with a HARD ERROR (never a silent scaffold) when annotation is needed and unreachable. (2) gapfill dies with 'Model too large for size-limited license' because nothing in KBUtilLib ever sets a cobra solver, so optlang picks a restricted commercial licence ahead of GLPK -- fixed by --solver on all four verbs resolving explicit > KBU_SOLVER > modeling.solver in ~/.kbutillib/config.yaml > glpk, with h100 overriding via its own per-machine config file and no hostname detection anywhere.",
+  "key_decisions": {
+    "annotation_trigger": "measured absence (is_annotated() False), never inferred from file type/extension; --annotate auto|always|never, default auto",
+    "annotation_failure": "HARD ERROR -- reconstruct fails and names the missing annotation; the scaffold is reachable only via explicit --annotate never. The replaced behaviour was exit 0 on a broken result, which is why it survived",
+    "annotator_choice": "KBUtilLib RastUtils (AnnotatorUtils) via a thin adapter, NOT modelseedpy's one-line RastClient.annotate_genome -- buys structured RastServiceError, configurable timeout, chunking, protein guard, and lets bakta/prokka drop in later",
+    "no_sso_translation": "MSBuilder consumes raw RAST role strings directly via normalize_role; translate_rast_function_to_sso / convert_role_to_searchrole are NOT on this path. An entire subsystem the prior session expected is unnecessary",
+    "solver_default": "glpk, in code as DEFAULT_SOLVER -- not in the repo's root config.yaml, which _find_config_file resolves at priority 3 and would leak to every machine",
+    "solver_precedence": "explicit --solver > KBU_SOLVER env > modeling.solver from ~/.kbutillib/config.yaml > glpk; one resolve_solver() shared by the CLI and the library constructors",
+    "solver_config_trap": "get_config_value is INERT on the kbu model CLI path -- _construct_offline passes config_file=False, _config_hash is {}, and get_config_value has no env fallback. So the CLI reads ~/.kbutillib/config.yaml DIRECTLY via a helper shaped like the existing _resolve_modelseed_db_path(). Pinned by a regression test",
+    "h100_override": "h100's own ~/.kbutillib/config.yaml sets modeling.solver: gurobi. Per-machine by construction; no hostname detection, no fleet topology in the library",
+    "solver_application": "apply_solver sets BOTH cobra.Configuration().solver (before any model is built or loaded) and model.solver on the held model. Neither is redundant: cobra resolves global config at model-construction time",
+    "no_solver_fallback": "an unavailable solver raises, naming the resolved name and its precedence source. Silent cross-solver fallback is how the original defect stayed invisible",
+    "no_import_side_effect": "library default is set in MSReconstructionUtils/MSFBAUtils __init__, not at module import. An import that silently changes a caller's solver is a worse surprise",
+    "remote_lp_solver": "NOT the answer -- ms_remote_solver_utils is an LP-text-in/solution-out HTTP client, not an optlang interface, so it cannot be assigned to cobra.Configuration().solver. And GLPK is measured-sufficient, so the poplar tunnel stays out of the modelling arc's default path",
+    "json_schema": "additive only -- solver and annotation keys added; model_path/reactions/metabolites/genes unchanged",
+    "privacy": "auto-annotation makes third-party transmission to tutorial.theseed.org the DEFAULT of the most-run verb on a Berkeley-operated pod. Mitigated by a mandatory stderr disclosure on every annotating run plus --annotate never; NO sensitive-data guard was built (named, not silently omitted)",
+    "kbhub_validation": "kbhub is not a Maestro worker and has no maestro client, so NO taskplan task can run there. The plan carries tests that pass anywhere; the pod end-to-end run is an Albert acceptance step OUTSIDE the plan, asserting numbers (reconstruct >500 reactions AND >500 genes; gapfill non-empty reactions_added; FBA objective_value > 0) -- never exit codes",
+    "taskplan_shape": "5 sequential single-task phases, not parallel groups: load_taskplan rejects a parallel_group whose tasks share a repo, because concurrent branches in one repo collide"
+  },
+  "modules": [
+    "src/kbutillib/domains/modeling/ms_genome_annotation.py (new)",
+    "src/kbutillib/domains/modeling/ms_solver_config.py (new)",
+    "src/kbutillib/interfaces/cli/model.py (modify)",
+    "src/kbutillib/domains/modeling/ms_reconstruction_utils.py (modify: __init__ only)",
+    "src/kbutillib/domains/modeling/ms_fba_utils.py (modify: __init__ only)",
+    "src/kbutillib/kind_app/skill.md (prose)",
+    "agent-io/docs/kbu-model-cli.md (prose)"
+  ],
+  "test_targets": [
+    "ms_genome_annotation (stub annotator; coverage accounting; namespace isolation; error propagation)",
+    "ms_solver_config (precedence table; empty-value fallthrough; apply to global and to model)",
+    "kbu model CLI (CliRunner: --annotate never/auto/failure non-zero exit; --solver in --json)",
+    "config inertness regression guard (get_config_value returns None under config_file=False)",
+    "modeling constructors (solver_name default; bad value leaves class constructable)"
+  ],
+  "measured_evidence": {
+    "machine": "kbhub (BERDL JupyterHub pod)",
+    "date": "2026-09-30",
+    "annotation_defect": "GCF_000005845.2_ASM584v2_protein.faa via MSGenome.from_fasta: 4285 features, 0 with any ontology_terms, 0 with RAST; msbuilder._aaaa -> search_name_to_genes size 0",
+    "solver_defect": "cobra.Configuration().solver resolves to optlang.gurobi_interface; optlang.available_solvers = {GUROBI: True, GLPK: True, SCIPY: True}; zero solver assignments anywhere in src/kbutillib/",
+    "rast_reachability": "tutorial.theseed.org resolves (8 addresses) and completes TLS in 0.02s from inside the pod; a live annotation RPC was NOT attempted",
+    "glpk_sufficiency_source": "h100, measured by Miles, trigger reply 0c210a2a-abb5-42ef-9a0c-c0e4009b42e2 answered 2026-09-28 19:52 UTC: glpk 28.1s / reactions_added=437 / FBA objective 1.168 vs unrestricted gurobi 27.4s / 438 / 1.168 on a 9434-candidate-reaction gapfill",
+    "not_verified": [
+      "wall-clock cost of a ~4300-protein RAST RPC from the kbhub pod (may make chunk_size operationally necessary)",
+      "that GLPK completes the gapfill on kbhub specifically (measured on h100 with an identical optlang solver set; strong inference, not a measurement)"
+    ]
+  },
+  "external_surface_not_in_repo": "/home/chenry/albert/agent-io/docs/kind-apikey-and-kbutillib-skills.md -- Step 4 and the troubleshooting table currently document the broken behaviour as expected. Not a git repo, so not a taskplan target; Albert updates it after the acceptance run.",
+  "draft_commit": "6646b91104b8bbde1247c5020f84a22f14e1eeaa"
+}

@@ -21,12 +21,14 @@ directly in this module rather than imported.
 
 Endpoint & auth
 ----------------
-The service endpoint is required and has no default: supply it via the
-``KBDL_SERVICE_URL`` environment variable or the ``base_url`` constructor
-argument. KBDL is reached directly over the ANL-internal network (currently
-``http://poplar.cels.anl.gov:8791``, though it is expected to move into
-KBase infrastructure); no SSH tunnel is used. Constructing the client with
-neither ``base_url`` nor ``KBDL_SERVICE_URL`` set raises ``ValueError``. The
+**The endpoint needs no configuration and no SSH tunnel.** It defaults to the
+deployed service, ``http://poplar.cels.anl.gov:8791``, which is reached
+*directly* over the ANL-internal network from any ANL-networked host --
+including BERDL JupyterHub pods. Override with the ``KBDL_SERVICE_URL``
+environment variable or the ``base_url`` constructor argument (e.g.
+``http://127.0.0.1:8791`` if you are deliberately working over a tunnel).
+The endpoint is expected to move into KBase infrastructure eventually, at
+which point only :data:`DEFAULT_BASE_URL` changes. The
 KBase auth token is taken from the
 environment the same way :class:`~kbutillib.domains.external.patric_ws_utils.PatricWSUtils`
 and friends take theirs -- via :meth:`SharedEnvUtils.get_token` (namespace
@@ -165,14 +167,26 @@ __all__ = [
 #: KBDL is reached directly over the ANL-internal network).
 KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 
-#: There is deliberately no built-in default endpoint. KBDL used to be reached
-#: through a loopback SSH tunnel (``http://127.0.0.1:8791``), but that posture
-#: was abandoned 2026-08-24; the service now binds an ANL-internal interface and
-#: is reached directly, so a silent loopback default would only ever produce a
-#: connection-refused against a dead address. The name is retained (set to
-#: ``None``) because it is part of the module's historical public surface;
-#: callers must supply the endpoint via ``base_url`` or ``KBDL_SERVICE_URL``.
-DEFAULT_BASE_URL = None
+#: Default endpoint: the DEPLOYED KBDL service on poplar, reached **directly**
+#: from any ANL-networked host (including BERDL JupyterHub pods) with **no SSH
+#: tunnel**. Port 8791 matches the deployed service (its systemd drop-in
+#: overrides the service ``KBDL_PORT`` default of 8790, which collides with
+#: sessionctl). Set ``KBDL_SERVICE_URL`` to point elsewhere, e.g.
+#: ``http://127.0.0.1:8791`` when deliberately working over a tunnel.
+#:
+#: This was ``None`` until 2026-10-01, on the reasoning that a *loopback*
+#: default could only ever produce connection-refused against a dead address.
+#: That reasoning was right about loopback and wrong about having no default:
+#: requiring every caller to supply an endpoint meant the common path raised
+#: ``ValueError``, and the first thing a reader reaches for on being told to set
+#: ``KBDL_SERVICE_URL`` is the old tunnel address -- so "no default" actively
+#: propagated the tunnel folklore it was meant to end. Defaulting to the real
+#: deployed endpoint makes the zero-config path the correct one. Verified from
+#: the kbhub pod 2026-10-01: ``poplar.cels.anl.gov:8791`` answers in ~20ms
+#: (401 ``invalid_token`` unauthenticated, i.e. live and gating on the bearer
+#: token) while ``127.0.0.1:8791`` is connection-refused. Matches
+#: ``e5ab88e`` in the global_share deploy.
+DEFAULT_BASE_URL = "http://poplar.cels.anl.gov:8791"
 
 #: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
@@ -309,8 +323,9 @@ class KBDLServiceUtils(SharedEnvUtils):
         Args:
             base_url: The KBDL service endpoint (direct ANL-internal URL).
                 If None, the ``KBDL_SERVICE_URL`` environment variable is
-                used. There is no default: if neither is set, a
-                ``ValueError`` is raised. No SSH tunnel is involved.
+                used, then :data:`DEFAULT_BASE_URL` -- the deployed poplar
+                endpoint. **No SSH tunnel is involved and none is needed**;
+                the zero-config path already points at the live service.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built ``requests.Session`` (or a
                 stand-in with a compatible ``.request()``), so tests can
@@ -320,11 +335,15 @@ class KBDLServiceUtils(SharedEnvUtils):
                 (e.g. ``token="..."`` to set the KBase token directly).
         """
         super().__init__(**kwargs)
-        resolved = base_url or os.environ.get(KBDL_SERVICE_URL_ENV_VAR)
-        if not resolved:
+        resolved = (
+            base_url
+            or os.environ.get(KBDL_SERVICE_URL_ENV_VAR)
+            or DEFAULT_BASE_URL
+        )
+        if not resolved:  # pragma: no cover -- DEFAULT_BASE_URL is always set
             raise ValueError(
                 "KBDL service endpoint is not configured: set KBDL_SERVICE_URL "
-                "or pass base_url. KBDL is currently served at "
+                "or pass base_url. KBDL is served at "
                 "http://poplar.cels.anl.gov:8791 inside the ANL network; "
                 "no tunnel is needed."
             )

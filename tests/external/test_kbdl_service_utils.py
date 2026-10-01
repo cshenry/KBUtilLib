@@ -145,26 +145,32 @@ def test_importing_module_does_not_import_kbdl_service():
 # ---------------------------------------------------------------------------
 
 
-def test_no_base_url_and_no_env_var_raises(monkeypatch):
-    """With neither ``base_url`` nor ``KBDL_SERVICE_URL`` set there is no
-    default: the client must refuse to construct rather than silently point
-    at a dead loopback address (the SSH-tunnel posture was retired)."""
+def test_zero_config_resolves_to_the_deployed_poplar_endpoint(monkeypatch):
+    """With nothing configured the client must point at the DEPLOYED service.
+
+    Changed 2026-10-01. This previously asserted a ``ValueError``, on the
+    reasoning that no default beat a dead loopback default. That was right
+    about loopback and wrong about having no default: the zero-config path is
+    the one agents and notebooks actually take, and telling them to "set
+    ``KBDL_SERVICE_URL``" is what sent them hunting for the retired tunnel
+    address. The deployed endpoint is directly reachable from any
+    ANL-networked host, so zero-config now succeeds.
+    """
     monkeypatch.delenv("KBDL_SERVICE_URL", raising=False)
-    with pytest.raises(ValueError) as excinfo:
-        KBDLServiceUtils(
-            session=FakeSession([]),
-            config_file=False,
-            token_file=None,
-            kbase_token_file=None,
-        )
-    message = str(excinfo.value)
-    assert "KBDL_SERVICE_URL" in message
-    assert "base_url" in message
+    client = KBDLServiceUtils(
+        session=FakeSession([]),
+        config_file=False,
+        token_file=None,
+        kbase_token_file=None,
+    )
+    assert client.base_url == "http://poplar.cels.anl.gov:8791"
 
 
-def test_no_default_base_url_constant():
-    """The retired loopback default must no longer be a live value."""
-    assert kbdl_client_module.DEFAULT_BASE_URL is None
+def test_default_base_url_is_the_deployed_endpoint_not_loopback():
+    """The default must be the real service, and must never be loopback."""
+    assert kbdl_client_module.DEFAULT_BASE_URL == "http://poplar.cels.anl.gov:8791"
+    assert "127.0.0.1" not in kbdl_client_module.DEFAULT_BASE_URL
+    assert "localhost" not in kbdl_client_module.DEFAULT_BASE_URL
 
 
 def test_base_url_from_environment_variable(monkeypatch):

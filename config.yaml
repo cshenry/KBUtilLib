@@ -78,7 +78,31 @@ remote_solver:
   default_time_limit: 3600  # service: applied when a solve omits time_limit
   max_time_limit: 7200  # service: ceiling caller time_limit values are clamped to
 
-# Highest-priority MINE-Database reaction-rule TSV location; empty falls back to $KBUTILLIB_PICKAXE_DATA_DIR, installed minedatabase data, or the MINE-Database checkout in dependencies.yaml.
+# Predictive thermodynamics backends (kbu.predictive_thermo / PredictiveThermoUtils).
+# dgpredictor and molgpk are subprocess-isolated wrappers around research repos.
+# repo_path resolution: this key, then the env var (DGPREDICTOR_REPO /
+# MOLGPK_REPO|OPAM2_REPO), then the dGPredictor / OPAM2 checkout in
+# dependencies.yaml. When none resolves the backend reports unavailable.
+thermo:
+  dgpredictor:
+    repo_path: ""  # e.g. "/path/to/dGPredictor"; needs model/modelseed_M12_model_BR.pkl
+    python: ""  # interpreter with rdkit + openbabel + scikit-learn + scipy + pandas + joblib
+  molgpk:
+    repo_path: ""  # e.g. "/path/to/OPAM2"
+    python: ""  # interpreter with rdkit + torch + torch-geometric
+
+# Cheminformatics network expansion (kbu.network_expansion / NetworkExpansionUtils)
 cheminformatics:
   pickaxe:
+    # Highest-priority MINE-Database reaction-rule TSV location; empty falls back to $KBUTILLIB_PICKAXE_DATA_DIR, installed minedatabase data, or the MINE-Database checkout in dependencies.yaml.
     data_dir: ""
+    rule_set: "metacyc_generalized"  # or metacyc_intermediate / bnice / enzymatic / chemical_damage
+  retrorules:
+    rules_tsv: ""  # optional: path to retrorules_rr02_flat_all.tsv
+  # verAB methoxy-aromatic rule discovery (kbu.verab / VerabUtils); all optional.
+  verab:
+    # Mechanism-informed rule TSV; null falls back to $KBUTILLIB_VERAB_OPERATOR_TSV,
+    # then data/processed/rules/mechinferred_dt_019_rules_w_coreactants.tsv in the
+    # coarse-grain-rxns checkout from dependencies.yaml.
+    operator_rule_tsv: null
+    operator_coreactant_tsv: null  # null -> $KBUTILLIB_VERAB_COREACTANT_TSV, else synthesized

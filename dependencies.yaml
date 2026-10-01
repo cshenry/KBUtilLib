@@ -44,3 +44,21 @@ dependencies:
   MINE-Database:
     path: "../MINE-Database"
     git: "https://github.com/tyo-nu/MINE-Database.git"
+
+  # Research-repo backends for thermo and cheminformatics, consumed as source
+  # checkouts (not cleanly pip-installable). Resolved by name in
+  # domains/thermo/thermo_predictors/*_backend.py and
+  # domains/cheminformatics/pickaxe_backend.py.
+  dGPredictor:
+    path: "../dGPredictor"
+    git: "https://github.com/freiburgermsu/dGPredictor.git"
+
+  OPAM2:
+    path: "../OPAM2"
+    git: "https://github.com/freiburgermsu/OPAM2.git"
+
+  # Pate et al. 2026 mechanism-informed reaction operators. No LICENSE upstream,
+  # so the rule TSV is never vendored; it is resolved from this checkout.
+  coarse-grain-rxns:
+    path: "../coarse-grain-rxns"
+    git: "https://github.com/stefanpate/coarse-grain-rxns.git"

@@ -61,5 +61,6 @@
       "that GLPK completes the gapfill on kbhub specifically (measured on h100 with an identical optlang solver set; strong inference, not a measurement)"
     ]
   },
-  "external_surface_not_in_repo": "/home/chenry/albert/agent-io/docs/kind-apikey-and-kbutillib-skills.md -- Step 4 and the troubleshooting table currently document the broken behaviour as expected. Not a git repo, so not a taskplan target; Albert updates it after the acceptance run."
+  "external_surface_not_in_repo": "/home/chenry/albert/agent-io/docs/kind-apikey-and-kbutillib-skills.md -- Step 4 and the troubleshooting table currently document the broken behaviour as expected. Not a git repo, so not a taskplan target; Albert updates it after the acceptance run.",
+  "draft_commit": "6646b91104b8bbde1247c5020f84a22f14e1eeaa"
 }

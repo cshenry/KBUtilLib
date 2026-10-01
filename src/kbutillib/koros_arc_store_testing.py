@@ -32,16 +32,19 @@ store never drags a test double into production code.
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from .koros_arc_store import (
     AnalysisRecord,
+    ArcArtifact,
     ArcRecord,
     ProjectRecord,
     RecordNotFound,
     RunDatabase,
     check_contract_version,
 )
+from .koros_arc_store.store import KorosArcStore
 
 
 class FakeKorosArcStore:
@@ -66,6 +69,7 @@ class FakeKorosArcStore:
         *,
         known_kinds: Optional[set] = None,
         enabled: bool = True,
+        runs_root: Union[str, Path, None] = None,
     ) -> None:
         # A disabled RunDatabase held ONLY for its validators and its kind
         # classifier — it never connects to SQLite (enabled=False and no method
@@ -82,6 +86,15 @@ class FakeKorosArcStore:
         # Runs-tree seed data: {project_name: (ProjectRecord, {slug: ArcRecord})}.
         self._projects: Dict[str, ProjectRecord] = {}
         self._arcs: Dict[str, Dict[str, ArcRecord]] = {}
+
+        # Optional real runs tree. When set, the runs-tree enumeration methods
+        # (list_projects / list_arcs / read_arc / list_arc_artifacts) delegate to
+        # a real KorosArcStore over this tree, so a consumer that reaches on-disk
+        # artifacts ONLY through the store (never walking the tree itself) can be
+        # tested against a filesystem-backed fake without a permissive divergence.
+        self._fs: Optional[KorosArcStore] = None
+        if runs_root is not None:
+            self._fs = KorosArcStore(runs_root, db_enabled=False)
 
         # Run-database seed data, keyed by record_id.
         #   _rows[record_id]       -> AnalysisRecord (a deep copy, verbatim subject)
@@ -120,11 +133,20 @@ class FakeKorosArcStore:
             )
 
     def list_projects(self) -> List[ProjectRecord]:
-        """Return every seeded project, ordered by name ascending (real-store order)."""
+        """Return every project, ordered by name ascending (real-store order).
+
+        When the fake is backed by a real runs tree (constructor ``runs_root``),
+        enumeration delegates to a real store over that tree; otherwise it returns
+        the seeded :class:`ProjectRecord` set.
+        """
+        if self._fs is not None:
+            return self._fs.list_projects()
         return sorted(self._projects.values(), key=lambda p: p.name)
 
     def get_project(self, name: str) -> ProjectRecord:
         """Return the project named *name* or raise :class:`RecordNotFound`."""
+        if self._fs is not None:
+            return self._fs.get_project(name)
         try:
             return self._projects[name]
         except KeyError as exc:
@@ -136,6 +158,8 @@ class FakeKorosArcStore:
         A known project with no arcs yields an empty list; an unknown project
         raises :class:`RecordNotFound`, matching the real store.
         """
+        if self._fs is not None:
+            return self._fs.list_arcs(project)
         if project not in self._projects:
             raise RecordNotFound(f"no project named {project!r}")
         arcs = self._arcs.get(project, {})
@@ -148,10 +172,22 @@ class FakeKorosArcStore:
         ``ArcRecord`` with ``valid=False`` and read back as-is — never a raise,
         matching the real store's fail-soft enumeration.
         """
+        if self._fs is not None:
+            return self._fs.read_arc(project, slug)
         arcs = self._arcs.get(project)
         if arcs is None or slug not in arcs:
             raise RecordNotFound(f"no arc {slug!r} in project {project!r}")
         return arcs[slug]
+
+    def list_arc_artifacts(self, project: str, slug: str) -> List[ArcArtifact]:
+        """Return the recoverable file artifacts under one arc (real-store parity).
+
+        Only meaningful when the fake is backed by a real runs tree; without one
+        there is no filesystem to enumerate, so it returns an empty list.
+        """
+        if self._fs is not None:
+            return self._fs.list_arc_artifacts(project, slug)
+        return []
 
     # ── run-database write path (validating, fail-soft AFTER validation) ────────
 

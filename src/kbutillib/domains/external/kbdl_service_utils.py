@@ -2,8 +2,10 @@
 
 The KBDL job service (see the ``KBDLJobRunningPrototype`` repo, PRD
 ``kbdl-job-service-v0``) runs longer genome-annotation / model-reconstruction
-/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app on poplar,
-reachable directly on the ANL network (no SSH tunnel). This module is the KBUtilLib-side
+/ fitness-analysis / SKANI / upload jobs behind a small FastAPI app. The
+service binds an ANL-internal interface and is reached directly from any
+host inside the ANL perimeter (including KBase JupyterHub pods); no SSH
+tunnel is involved. This module is the KBUtilLib-side
 client for that service's HTTP contract, so agents that already reach for
 KBUtilLib's other external-service clients (:mod:`bvbrc_utils`,
 :mod:`kb_uniprot_utils`, :mod:`patric_ws_utils`, :mod:`rcsb_pdb_utils`) find
@@ -19,9 +21,15 @@ directly in this module rather than imported.
 
 Endpoint & auth
 ----------------
-Targets the deployed KBDL service, default ``http://poplar.cels.anl.gov:8791``,
-overridable via the ``KBDL_SERVICE_URL`` environment variable or the
-``base_url`` constructor argument. The KBase auth token is taken from the
+**The endpoint needs no configuration and no SSH tunnel.** It defaults to the
+deployed service, ``http://poplar.cels.anl.gov:8791``, which is reached
+*directly* over the ANL-internal network from any ANL-networked host --
+including BERDL JupyterHub pods. Override with the ``KBDL_SERVICE_URL``
+environment variable or the ``base_url`` constructor argument (e.g.
+``http://127.0.0.1:8791`` if you are deliberately working over a tunnel).
+The endpoint is expected to move into KBase infrastructure eventually, at
+which point only :data:`DEFAULT_BASE_URL` changes. The
+KBase auth token is taken from the
 environment the same way :class:`~kbutillib.domains.external.patric_ws_utils.PatricWSUtils`
 and friends take theirs -- via :meth:`SharedEnvUtils.get_token` (namespace
 ``"kbase"``, populated from ``KB_AUTH_TOKEN``/``KBASE_AUTH_TOKEN``,
@@ -134,6 +142,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ...core.shared_env_utils import SharedEnvUtils
 
@@ -153,14 +163,29 @@ __all__ = [
     "KBDLJobFailedError",
 ]
 
-#: Environment variable overriding the default service endpoint.
+#: Environment variable supplying the KBDL service endpoint (no default;
+#: KBDL is reached directly over the ANL-internal network).
 KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 
-#: Default endpoint: the DEPLOYED KBDL service on poplar, reachable directly from
-#: ANL-networked hosts with NO SSH tunnel. Port 8791 matches the deployed service
-#: (its systemd drop-in overrides the service KBDL_PORT default of 8790, which
-#: collides with sessionctl). Set KBDL_SERVICE_URL to point elsewhere, e.g.
-#: http://127.0.0.1:8791 when working over a tunnel.
+#: Default endpoint: the DEPLOYED KBDL service on poplar, reached **directly**
+#: from any ANL-networked host (including BERDL JupyterHub pods) with **no SSH
+#: tunnel**. Port 8791 matches the deployed service (its systemd drop-in
+#: overrides the service ``KBDL_PORT`` default of 8790, which collides with
+#: sessionctl). Set ``KBDL_SERVICE_URL`` to point elsewhere, e.g.
+#: ``http://127.0.0.1:8791`` when deliberately working over a tunnel.
+#:
+#: This was ``None`` until 2026-10-01, on the reasoning that a *loopback*
+#: default could only ever produce connection-refused against a dead address.
+#: That reasoning was right about loopback and wrong about having no default:
+#: requiring every caller to supply an endpoint meant the common path raised
+#: ``ValueError``, and the first thing a reader reaches for on being told to set
+#: ``KBDL_SERVICE_URL`` is the old tunnel address -- so "no default" actively
+#: propagated the tunnel folklore it was meant to end. Defaulting to the real
+#: deployed endpoint makes the zero-config path the correct one. Verified from
+#: the kbhub pod 2026-10-01: ``poplar.cels.anl.gov:8791`` answers in ~20ms
+#: (401 ``invalid_token`` unauthenticated, i.e. live and gating on the bearer
+#: token) while ``127.0.0.1:8791`` is connection-refused. Matches
+#: ``e5ab88e`` in the global_share deploy.
 DEFAULT_BASE_URL = "http://poplar.cels.anl.gov:8791"
 
 #: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
@@ -180,6 +205,15 @@ SCHEMA_VERSION = "1"
 
 #: Job states at which ``poll_until_terminal`` stops polling.
 _TERMINAL_STATES = frozenset({"completed", "failed"})
+
+#: How many CONSECUTIVE connection-level failures
+#: :meth:`KBDLServiceUtils.poll_until_terminal` tolerates before giving up and
+#: re-raising. Bounded rather than infinite so a service that is genuinely
+#: unreachable still surfaces as an error; reset by any successful poll, so a
+#: long job that hits an occasional keep-alive reset is unaffected. Five at the
+#: default two-second interval is roughly ten seconds of grace, which covers a
+#: connection reset and a worker restart without masking an outage.
+_POLL_MAX_CONNECTION_ERRORS = 5
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────
@@ -287,9 +321,11 @@ class KBDLServiceUtils(SharedEnvUtils):
         """Initialize the KBDL service client.
 
         Args:
-            base_url: Override for the deployed service endpoint. If
-                None, uses the ``KBDL_SERVICE_URL`` environment variable,
-                falling back to ``http://poplar.cels.anl.gov:8791``.
+            base_url: The KBDL service endpoint (direct ANL-internal URL).
+                If None, the ``KBDL_SERVICE_URL`` environment variable is
+                used, then :data:`DEFAULT_BASE_URL` -- the deployed poplar
+                endpoint. **No SSH tunnel is involved and none is needed**;
+                the zero-config path already points at the live service.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built ``requests.Session`` (or a
                 stand-in with a compatible ``.request()``), so tests can
@@ -299,11 +335,58 @@ class KBDLServiceUtils(SharedEnvUtils):
                 (e.g. ``token="..."`` to set the KBase token directly).
         """
         super().__init__(**kwargs)
-        self.base_url = (
-            base_url or os.environ.get(KBDL_SERVICE_URL_ENV_VAR) or DEFAULT_BASE_URL
-        ).rstrip("/")
+        resolved = (
+            base_url
+            or os.environ.get(KBDL_SERVICE_URL_ENV_VAR)
+            or DEFAULT_BASE_URL
+        )
+        if not resolved:  # pragma: no cover -- DEFAULT_BASE_URL is always set
+            raise ValueError(
+                "KBDL service endpoint is not configured: set KBDL_SERVICE_URL "
+                "or pass base_url. KBDL is served at "
+                "http://poplar.cels.anl.gov:8791 inside the ANL network; "
+                "no tunnel is needed."
+            )
+        self.base_url = resolved.rstrip("/")
         self.timeout = timeout
-        self.session = session if session is not None else requests.Session()
+        self.session = (
+            session if session is not None else self._build_retrying_session()
+        )
+
+    @staticmethod
+    def _build_retrying_session() -> requests.Session:
+        """A ``requests.Session`` that retries CONNECTION-level failures.
+
+        The KBDL API is uvicorn, whose ``--timeout-keep-alive`` defaults to 5
+        seconds. A pooled keep-alive connection can therefore be closed by the
+        server at the same moment this client reuses it, which surfaces as
+        ``ConnectionResetError(104)`` on a request that was never served. That
+        is not a service failure and must not be reported as one: on
+        2026-10-01 it killed a wait over ten KBDLHorizyn jobs that all
+        completed normally, while the API logged 200 OK throughout.
+
+        **``POST`` is deliberately NOT retried.** ``urllib3``'s default
+        ``allowed_methods`` covers only the idempotent verbs, and that is the
+        behaviour wanted here rather than an accident: ``_submit`` is a POST,
+        and a blind retry of a submission that did reach the server would
+        create a SECOND job. Status codes are not retried either -- a 4xx/5xx
+        is mapped to a typed exception by :meth:`_raise_for_status` and is
+        meaningful, so swallowing and repeating it would hide it.
+        """
+        retry = Retry(
+            total=5,
+            connect=5,
+            read=5,
+            status=0,
+            backoff_factor=0.5,
+            allowed_methods=Retry.DEFAULT_ALLOWED_METHODS,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        built = requests.Session()
+        built.mount("http://", adapter)
+        built.mount("https://", adapter)
+        return built
 
     # ── internal HTTP plumbing ──────────────────────────────────────────
 
@@ -596,10 +679,36 @@ class KBDLServiceUtils(SharedEnvUtils):
             The final status record (same shape as :meth:`check_job`).
         """
         start = time_fn()
+        consecutive_connection_errors = 0
         while True:
-            status = self.check_job(job_id)
-            if status.get("state") in _TERMINAL_STATES:
-                return status
+            try:
+                status = self.check_job(job_id)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                # A LOST CONNECTION IS NOT A LOST JOB. The job runs on the
+                # service, not here; an interrupted GET says nothing about it.
+                # Reporting failure here is strictly worse than waiting --
+                # the caller abandons work that is still progressing. See
+                # `_build_retrying_session` for the uvicorn keep-alive race
+                # that makes this reachable even against a healthy API.
+                consecutive_connection_errors += 1
+                if consecutive_connection_errors > _POLL_MAX_CONNECTION_ERRORS:
+                    raise
+                self.log_warning(
+                    f"transient connection error polling job {job_id} "
+                    f"({consecutive_connection_errors} of "
+                    f"{_POLL_MAX_CONNECTION_ERRORS} tolerated): {exc}"
+                )
+            else:
+                # Only a successful poll clears the streak: the bound is on
+                # CONSECUTIVE failures, so a genuinely unreachable service
+                # still surfaces instead of being retried forever, while an
+                # occasional reset over a long job costs nothing.
+                consecutive_connection_errors = 0
+                if status.get("state") in _TERMINAL_STATES:
+                    return status
             if timeout is not None and (time_fn() - start) >= timeout:
                 raise TimeoutError(
                     f"job {job_id} did not reach a terminal state within {timeout}s"
@@ -783,7 +892,20 @@ class KBDLServiceUtilsImpl:
         except Exception:
             pass
         _kwargs.update(kwargs)
-        self._delegate = KBDLServiceUtils(**_kwargs)
+        self._delegate_kwargs = _kwargs
+        # Delegate construction is deferred: KBDLServiceUtils now requires an
+        # endpoint (via base_url or KBDL_SERVICE_URL) and raises if none is
+        # configured. Building it lazily means merely registering / holding this
+        # wrapper (e.g. the toolkit's lazy ``kbdl_service`` property) does not
+        # force endpoint resolution -- the clear ValueError surfaces on first
+        # real use instead of at wrapper-construction time.
+        self._delegate_instance: Optional[KBDLServiceUtils] = None
+
+    @property
+    def _delegate(self) -> "KBDLServiceUtils":
+        if self._delegate_instance is None:
+            self._delegate_instance = KBDLServiceUtils(**self._delegate_kwargs)
+        return self._delegate_instance
 
     @property
     def env(self):

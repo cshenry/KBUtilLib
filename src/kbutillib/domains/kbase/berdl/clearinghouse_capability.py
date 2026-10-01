@@ -1556,8 +1556,16 @@ def _quote_fqn(fqn: str, engine: str = "spark") -> str:
             so quoting cannot disagree with the executing dialect.
     """
     quote = '"' if engine == "trino" else "`"
+    # Both quote styles are stripped whatever the engine. Held in a local
+    # rather than written inline as segment.strip('`\"'): a backslash inside
+    # an f-string EXPRESSION is a SyntaxError before Python 3.12 (PEP 701
+    # relaxed it), and this package declares requires-python >= 3.9. Inlined,
+    # it makes the whole berdl package unimportable on 3.9-3.11 -- which on a
+    # 3.11 pod reads as "capability unavailable", i.e. silently off-pod, to
+    # any caller catching Exception. Do not fold this back into the f-string.
+    existing_quotes = '`"'
     return ".".join(
-        f"{quote}{segment.strip('`\"')}{quote}" for segment in fqn.split(".")
+        f"{quote}{segment.strip(existing_quotes)}{quote}" for segment in fqn.split(".")
     )
 
 

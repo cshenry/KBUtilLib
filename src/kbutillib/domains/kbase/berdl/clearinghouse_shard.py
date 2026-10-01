@@ -26,8 +26,7 @@ lakehouse. A file-reading verb cannot reach either. The fix is an adapter layer
 BENEATH the manifest, not a wider manifest: an adapter yields records; the
 sharder standardizes, hashes, sorts and writes them the SAME way regardless of
 source. Three implementations are PLANNED -- ``file``, ``mongo``, ``lakehouse``
--- and only ``file`` is built here (``mongo`` and ``lakehouse`` are separate,
-later tasks; this module defines the interface they will implement). An adapter
+-- and all three are now built here. An adapter
 NEVER writes to Iceberg itself -- there is exactly one write path and it is the
 ``load`` verb on
 :class:`~kbutillib.domains.kbase.berdl.clearinghouse_capability.ClearinghouseCapability`.
@@ -139,7 +138,8 @@ _HASH_HEX_CHARS = 64
 
 
 class SourceAdapter(ABC):
-    """The interface every source adapter implements. Only ``file`` is built.
+    """The interface every source adapter implements. ``file``, ``lakehouse``
+    and ``mongo`` are all built.
 
     An adapter's ONLY job is to yield the raw records of a source as plain
     ``dict`` rows keyed by source column name. It NEVER hashes, sorts, writes
@@ -176,10 +176,11 @@ class SourceAdapter(ABC):
 
 #: Registry of adapter implementations by manifest ``adapter`` name. All three
 #: names are DECLARED here so a manifest can be validated against the full set
-#: of adapter names (the mapping half must be adapter-independent), but only
-#: ``file`` is registered with a real class. ``mongo`` and ``lakehouse`` map to
-#: ``None`` -- known-but-unbuilt -- so :func:`get_adapter` distinguishes "not a
-#: real adapter name" from "planned but not implemented yet".
+#: of adapter names (the mapping half must be adapter-independent). All three
+#: are now registered with real classes (see :data:`_ADAPTER_CLASSES`);
+#: :func:`get_adapter` still distinguishes "not a real adapter name" from a
+#: declared name with no class, but the latter no longer occurs for any of
+#: these three.
 ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse")
 
 
@@ -266,10 +267,580 @@ class FileSourceAdapter(SourceAdapter):
                 yield dict(row)
 
 
-#: Concrete adapter classes, by name. ``mongo``/``lakehouse`` are absent (built
-#: in later tasks); :func:`get_adapter` reports them as planned-but-unbuilt.
+#: A conservative per-row byte estimate used only by
+#: :meth:`LakehouseSourceAdapter.estimate_bytes` to turn a cheap ``COUNT(*)``
+#: into a shard COUNT. The estimate need not be exact -- equal-width hash
+#: ranges self-balance and the skew guard splits any range that still runs
+#: large (see the module docstring's range-cutting section), so an over- or
+#: under-estimate at worst changes how many equal-width ranges are cut, never
+#: correctness. A genome source row (a handful of short identifier/metric
+#: columns; NO inlined sequence -- genome content stores a POINTER, and this
+#: source carries none) is well under this figure, so it is an UPPER-ish
+#: estimate, which is the side to err on for a count-only sizing.
+LAKEHOUSE_BYTES_PER_ROW = 1024
+
+
+class LakehouseSourceAdapter(SourceAdapter):
+    """The ``lakehouse`` adapter: reads a lake table through ``query()``.
+
+    Reads the raw records of ONE Iceberg table in the BER Data Lakehouse via
+    :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.query` --
+    a READ, never a write. It yields each row as a plain ``dict`` keyed by
+    source column name and does nothing else: it does not hash, sort, write
+    parquet, or emit any ``INSERT``/``MERGE``. All of that is the sharder's
+    job (and the sanctioned in-pod ``load`` verb's), identically for whatever
+    an adapter yields -- which is the seam that makes ``file``, ``mongo`` and
+    ``lakehouse`` interchangeable (see the module docstring's adapter
+    contract).
+
+    Why a READ adapter and not a one-line in-lake ``INSERT ... SELECT``. The
+    genome source (``kbaseincubator.genome_clearhouse``) sits in the SAME
+    tenant and catalog as the write target
+    (:data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.CLEARINGHOUSE_NAMESPACE`),
+    so ``INSERT INTO ...clearinghouse.genome_entity SELECT ... FROM
+    ...genome_clearhouse.<t>`` looks obviously correct and is about one line.
+    It is forbidden: an ``INSERT``/``MERGE`` on the Spark path BYPASSES
+    ``data_lakehouse_ingest.ingest``, which is what applies schema enforcement
+    on every sanctioned write -- the very enforcement whose absence let
+    ``BINARY`` break this corpus once (dev 1219), a failure that only surfaced
+    at a real write. So the adapter READS, the sharder writes BRONZE, and the
+    ``load`` verb ingests through the sanctioned path exactly as for a file
+    source. This class contains no ``INSERT`` and no ``MERGE``.
+
+    Locator keys (the mapping half of the manifest is adapter-independent --
+    only these source-locating keys differ; see
+    :mod:`clearinghouse_manifest`):
+
+    - ``table`` (required) -- the source table name within the namespace, e.g.
+      ``"genome_quality"``.
+    - ``namespace`` (optional) -- the fully-qualified source namespace.
+      Defaults to
+      :data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE`
+      (``kbaseincubator.genome_clearhouse``), the genome source Chris named.
+      Taken from that NAMED CONSTANT, never a string literal here, because it
+      differs from the write-target namespace by five characters and one
+      missing ``in`` (see the constant's adjacency warning).
+
+    Where it runs: reading a lake table needs the read transport
+    ``BerdlCapability.query`` resolves by locus -- Trino in-pod, the read-only
+    REST transport off-pod. It never needs the write path, so it can run
+    wherever ``query()`` can reach the lake (unlike the ``load`` verb, which
+    is in-pod only). Tests inject a fake capability and require no pod.
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        capability: The object exposing ``query(sql, ...)`` /
+            ``locus()`` -- a real
+            :class:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability`
+            in production, a fake in tests. Constructed lazily (deferred
+            import) on first use when not given, so simply building the
+            adapter -- as :func:`get_adapter` does -- needs no pod package
+            and makes no network call.
+    """
+
+    adapter_name = "lakehouse"
+
+    def __init__(self, source: cm.Source, *, capability: Any = None):
+        super().__init__(source)
+        self._capability = capability
+
+    def _get_capability(self) -> Any:
+        """Return the capability, deferring the import until first use.
+
+        The import is deferred (not at module scope) so this module stays
+        pod-free and importable off-pod exactly like the rest of the shard
+        stage -- ``BerdlCapability`` itself defers every pod dependency to
+        first use, so importing it here is safe, but keeping the import inside
+        the method costs nothing and keeps the module-scope import list free
+        of anything a caller who never touches the lakehouse adapter pays for.
+        """
+        if self._capability is None:
+            from .capability import BerdlCapability  # noqa: PLC0415
+
+            self._capability = BerdlCapability()
+        return self._capability
+
+    def _namespace(self) -> str:
+        """Resolve the source namespace from the locator or the named default.
+
+        Never a string literal here -- an explicit ``namespace`` locator key
+        is honoured; otherwise the default is the NAMED constant
+        :data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE`.
+        """
+        namespace = self.source.locator.get("namespace")
+        if namespace is None:
+            return schema.SOURCE_GENOME_CLEARHOUSE_NAMESPACE
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: lakehouse adapter 'namespace', "
+                "when given, must be a non-empty string (the fully-qualified "
+                "source namespace, e.g. 'kbaseincubator.genome_clearhouse')."
+            )
+        return namespace
+
+    def _table(self) -> str:
+        """Return the required source table name from the locator."""
+        table = self.source.locator.get("table")
+        if not table or not isinstance(table, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: lakehouse adapter requires a "
+                "non-empty string 'table' (the source table name within the "
+                "namespace, e.g. 'genome_quality')."
+            )
+        return table
+
+    def _fqn(self) -> str:
+        """Build the double-quoted, per-segment FQN of the source table.
+
+        Quoted with ANSI double quotes, one pair per dot-separated namespace
+        segment plus the table -- NOT backticks. The read routes through
+        ``BerdlCapability.query()``, which defaults to Trino in-pod (and REST
+        -> Trino off-pod), and Trino REJECTS backticks (a real defect this
+        repo already paid for -- see 5fc10ba / 95eac55 and the docstring
+        correction dab0fcc). A dotted namespace quoted as a single identifier
+        does not resolve, so each segment gets its own quote pair.
+        """
+        namespace = self._namespace()
+        segments = [seg for seg in namespace.split(".") if seg]
+        return ".".join(f'"{seg}"' for seg in [*segments, self._table()])
+
+    def estimate_bytes(self) -> int:
+        """Estimate the source's total size via ``COUNT(*)`` x a per-row figure.
+
+        Used only to pick the shard COUNT (see :meth:`SourceAdapter.estimate_bytes`);
+        it need not be exact. A cheap ``SELECT COUNT(*)`` is far cheaper than
+        streaming the table, and equal-width hash ranges self-balance around
+        whatever count it yields. Returns at least 1 so
+        ``ceil(total / target_bytes)`` is always >= 1.
+        """
+        sql = f"SELECT COUNT(*) AS n FROM {self._fqn()}"
+        rows = self._query(sql)
+        count = 0
+        if rows:
+            row = rows[0]
+            value = row.get("n") if isinstance(row, dict) else None
+            if value is None and isinstance(row, dict) and row:
+                # A cursor without a column alias may key the single column
+                # differently; fall back to the first value.
+                value = next(iter(row.values()))
+            count = int(value or 0)
+        return max(1, count * LAKEHOUSE_BYTES_PER_ROW)
+
+    def iter_records(self) -> Iterator[Mapping[str, Any]]:
+        """Yield every source row as a dict, paging off-pod so nothing truncates.
+
+        In-pod ``query()`` (Trino) returns the full result, so one statement
+        suffices. Off-pod the read-only REST transport caps each page, so this
+        pages with an explicit ``limit``/``offset`` and KEEPS PAGING while a
+        page comes back EXACTLY :data:`OFF_POD_PAGE_SIZE` rows long -- a full
+        page is evidence of nothing, and stopping on it would silently
+        truncate a source (see :data:`OFF_POD_PAGE_SIZE`). It stops only on a
+        page shorter than the cap. The ``ORDER BY`` on paging is what makes
+        ``limit``/``offset`` a STABLE window across pages rather than a
+        possibly-overlapping-or-gapping one.
+        """
+        base_sql = f"SELECT * FROM {self._fqn()}"
+        if self._get_capability().locus() == "in_pod":
+            for row in self._query(base_sql):
+                yield dict(row)
+            return
+        # Off-pod: page a stable window until a short page arrives.
+        paged_sql = base_sql + f" ORDER BY {self._order_key()}"
+        offset = 0
+        while True:
+            page = self._query(paged_sql, limit=OFF_POD_PAGE_SIZE, offset=offset)
+            for row in page:
+                yield dict(row)
+            if len(page) < OFF_POD_PAGE_SIZE:
+                break
+            offset += OFF_POD_PAGE_SIZE
+
+    def _order_key(self) -> str:
+        """The ORDER BY expression that makes off-pod paging a stable window.
+
+        Uses the hash column the plan hashes on when it is a ``precomputed``
+        digest already present in the source, else the raw hash column -- a
+        column guaranteed to exist on every row -- so the paging window is
+        deterministic and reproducible. The column name is drawn from the
+        parsed hash spec, not hardcoded, so it follows whatever the manifest
+        names.
+        """
+        column = self.source.hash_spec.get("precomputed") or self.source.hash_spec.get(
+            "raw_column"
+        )
+        if not column or not isinstance(column, str):
+            # No hash column to order on (e.g. an entity-only source with a
+            # hash rule this adapter cannot see); order by the first source
+            # column is not knowable here, so fall back to the table's own
+            # implicit order via a constant -- a single-column ORDER BY 1 keeps
+            # the window stable enough for paging.
+            return "1"
+        return f'"{column}"'
+
+    def _query(
+        self, sql: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[Mapping[str, Any]]:
+        """Run one read through the capability and normalise its rows to dicts.
+
+        In-pod: ``query(sql)`` (default Trino engine) already returns dict
+        rows. Off-pod: ``query(sql, limit=, offset=)`` returns the REST
+        result dict ``{'success', 'data', ...}``; a failed read raises here so
+        it never masquerades as an empty one. Spark ``Row`` (if a fake yields
+        one) is coerced via ``asDict()``.
+        """
+        capability = self._get_capability()
+        if capability.locus() == "in_pod":
+            rows = capability.query(sql)
+        else:
+            rows = capability.query(sql, limit=limit, offset=offset)
+        return _normalize_rows(rows)
+
+
+def _normalize_rows(rows: Any) -> list[Mapping[str, Any]]:
+    """Normalise a capability's result to a list of dict rows across loci.
+
+    Off-pod ``OffPodTransport.query`` returns ``{'success', 'data', ...}``; an
+    unsuccessful result raises rather than being read as empty. In-pod Trino
+    returns dict rows already; Spark ``Row`` exposes ``asDict()``. A bare
+    tuple is wrapped positionally as a last resort so nothing is dropped.
+    """
+    if isinstance(rows, dict):
+        if rows.get("success") is False:
+            raise ManifestSourceError(
+                f"lakehouse read failed: {rows.get('error')!r}"
+            )
+        rows = rows.get("data", [])
+    out: list[Mapping[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            out.append(row)
+        elif hasattr(row, "asDict"):
+            out.append(row.asDict())
+        else:
+            out.append({str(i): value for i, value in enumerate(row)})
+    return out
+
+
+#: Default batch size for the Mongo cursor. A large batch amortises round-trips
+#: over a 400M+ document read without materialising the collection; it is
+#: overridable per source via the ``batch_size`` locator key.
+MONGO_BATCH_SIZE = 5000
+
+#: A conservative per-document byte estimate used only by
+#: :meth:`MongoSourceAdapter.estimate_bytes` to turn a cheap
+#: ``estimated_document_count()`` into a shard COUNT. As with the lakehouse
+#: figure, it need not be exact -- equal-width hash ranges self-balance and the
+#: skew guard splits any range that still runs large (see the module docstring),
+#: so an over- or under-estimate at worst changes how many ranges are cut, never
+#: correctness. A ``seq_protein`` document is ``_id`` (64 hex chars) plus a
+#: ~200-300 byte compressed blob that decompresses to a few hundred residues; an
+#: annotation document is a functional-role string and a small array. This
+#: figure is an UPPER-ish per-row estimate against the decompressed sequence
+#: size, which is the side to err on for a count-only sizing.
+MONGO_BYTES_PER_DOC = 1024
+
+
+class MongoSourceAdapter(SourceAdapter):
+    """The ``mongo`` adapter: reads a MongoDB collection with a batched cursor.
+
+    Reads the documents of ONE MongoDB collection and yields each as a plain
+    ``dict`` row keyed by field name. Like every adapter it does NOTHING else --
+    no hashing, no sorting, no parquet, no Iceberg. The sharder standardizes,
+    hashes, sorts and writes whatever this yields, identically to what the
+    ``file`` and ``lakehouse`` adapters yield (see the module docstring's
+    adapter contract). This is the seam that makes the three interchangeable:
+    the MAPPING half of the manifest is adapter-independent; only the
+    source-locating keys below differ.
+
+    THE SOURCE, from the OP-B survey (2026-09-30, live on ``bioseed_mongo`` on
+    poplar). An "annotated protein set" is a JOIN across collections in one
+    database, all keyed by ``_id`` = a 64-character lowercase-hex sha256:
+
+    - ``seq_protein`` carries the SEQUENCE only, as ``z_seq`` -- a
+      zlib-compressed amino-acid blob (magic ``0x789c``), no other fields. It
+      feeds ``protein_content`` (sequence, seq_length) and, via the sequence
+      hash, ``protein_entity``.
+    - ``protein_to_rast2`` (and the other per-tool collections) carry
+      ANNOTATIONS only. Its annotation fields are OPTIONAL (~28% of documents
+      are ``_id``-only stubs), and its ``quality`` sub-fields are stored as
+      STRINGS, not numbers. It feeds ``protein_result``.
+
+    A single manifest source names ONE collection. The join across collections
+    is expressed as SEVERAL sources in one manifest -- one per collection, each
+    hashing on the same protein identity -- not as a join inside this adapter,
+    which keeps the adapter a pure per-collection reader and the sharder's
+    range-cutting untouched. The ``protein_content`` source reads
+    ``seq_protein`` and DECOMPRESSES ``z_seq`` (see ``decompress`` below); the
+    ``protein_result`` source reads ``protein_to_rast2``.
+
+    IMPORTANT -- the Mongo ``_id`` is NOT trusted as the clearinghouse
+    ``entity_hash``. Both are 64-hex sha256, but whether Mongo's ``_id`` equals
+    the value :mod:`kbutillib.domains.identity.standardizers` computes from the
+    sequence is unverified. A ``seq_protein`` manifest therefore hashes on the
+    DECOMPRESSED SEQUENCE (``raw_column``), letting the standardizer recompute
+    the identity, rather than trusting ``_id`` via ``precomputed``. Whether the
+    two agree is a spot-check for the manifest's derivation, deliberately NOT
+    hardcoded here.
+
+    Locator keys (only these source-locating keys differ from ``file`` /
+    ``lakehouse``; the mapping half is adapter-independent):
+
+    - ``uri`` (optional) -- a full ``mongodb://...`` connection string. If
+      omitted, ``host`` (default ``"localhost"``) and ``port`` (default
+      ``27017``) are used. No machine is hardcoded: the connection comes
+      entirely from the manifest, so the same adapter runs wherever the store
+      is reachable (for this source, poplar localhost). AUTH IS DISABLED on the
+      surveyed store; no credential key exists or is read.
+    - ``database`` (required) -- the database name (the survey's is literally
+      ``"database"``).
+    - ``collection`` (required) -- the collection name, e.g. ``"seq_protein"``
+      or ``"protein_to_rast2"``.
+    - ``batch_size`` (optional) -- cursor batch size; defaults to
+      :data:`MONGO_BATCH_SIZE`. The read is a batched cursor, never a
+      collection-into-memory load.
+    - ``decompress`` (optional) -- a mapping ``{output_field: input_field}``
+      (e.g. ``{"sequence": "z_seq"}``). For each named ``input_field`` carrying
+      a zlib blob (or ``bytes``-like value), the adapter zlib-decompresses it,
+      decodes it as UTF-8, and exposes the result under ``output_field`` so the
+      manifest's ``[source.content]`` can map a plain ``sequence`` column. The
+      raw compressed field is dropped from the yielded row. A stub document
+      missing the input field yields the row unchanged (no output field), so a
+      manifest that requires the sequence naturally fails that record rather
+      than fabricating one.
+    - ``sort_key`` (optional) -- the field the cursor sorts and pages on;
+      defaults to ``"_id"``. Sorting on a stable key is what makes the read
+      RESUMABLE (via ``start_after``) and PARALLELISABLE across disjoint key
+      ranges (via ``min_key`` / ``max_key``): the sharder runs shards in
+      parallel over disjoint slices of this key.
+    - ``min_key`` / ``max_key`` (optional) -- restrict the read to the
+      half-open ``[min_key, max_key)`` range of ``sort_key``. A parallel run
+      cuts the ``_id`` space into disjoint ranges and hands one to each adapter
+      instance; the ranges never overlap, so no document is read twice.
+    - ``start_after`` (optional) -- resume a killed read strictly AFTER this
+      ``sort_key`` value, so a restart does not replay the whole collection.
+
+    Where it runs: wherever it can reach the Mongo store. No machine is
+    hardcoded; the connection is taken entirely from the manifest. ``pymongo``
+    is imported lazily on first read (deferred, exactly like the lakehouse
+    adapter defers its pod import) so simply CONSTRUCTING the adapter -- as
+    :func:`get_adapter` does during manifest validation -- needs no driver and
+    makes no connection. Tests inject a fake collection and never touch a live
+    database.
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        collection: An object exposing ``find(...)`` /
+            ``estimated_document_count()`` -- a real pymongo ``Collection`` in
+            production, a fake in tests. When ``None`` (the default) a client
+            is connected lazily on first use from the locator keys.
+    """
+
+    adapter_name = "mongo"
+
+    def __init__(self, source: cm.Source, *, collection: Any = None):
+        super().__init__(source)
+        self._collection = collection
+        self._client = None
+
+    # -- locator resolution --------------------------------------------------
+
+    def _database_name(self) -> str:
+        database = self.source.locator.get("database")
+        if not database or not isinstance(database, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter requires a "
+                "non-empty string 'database'."
+            )
+        return database
+
+    def _collection_name(self) -> str:
+        collection = self.source.locator.get("collection")
+        if not collection or not isinstance(collection, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter requires a "
+                "non-empty string 'collection'."
+            )
+        return collection
+
+    def _batch_size(self) -> int:
+        raw = self.source.locator.get("batch_size", MONGO_BATCH_SIZE)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'batch_size' must "
+                f"be an integer, got {raw!r}."
+            )
+        if value <= 0:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'batch_size' must "
+                f"be a positive integer, got {value}."
+            )
+        return value
+
+    def _sort_key(self) -> str:
+        key = self.source.locator.get("sort_key", "_id")
+        if not key or not isinstance(key, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'sort_key', when "
+                "given, must be a non-empty string."
+            )
+        return key
+
+    def _decompress_spec(self) -> Mapping[str, str]:
+        spec = self.source.locator.get("decompress")
+        if spec is None:
+            return {}
+        if not isinstance(spec, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in spec.items()
+        ):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'decompress' must "
+                "be a mapping of {output_field: input_field} strings, e.g. "
+                '{"sequence": "z_seq"}.'
+            )
+        return dict(spec)
+
+    def _query_filter(self) -> dict[str, Any]:
+        """Build the ``find`` filter from min_key / max_key / start_after.
+
+        The ``sort_key`` range is half-open ``[min_key, max_key)`` so adjacent
+        parallel slices never overlap on a boundary value; ``start_after`` is a
+        strict ``$gt`` resume point. All three are optional; with none set the
+        filter is empty and the whole collection is read.
+        """
+        sort_key = self._sort_key()
+        conditions: dict[str, Any] = {}
+        min_key = self.source.locator.get("min_key")
+        max_key = self.source.locator.get("max_key")
+        start_after = self.source.locator.get("start_after")
+        if start_after is not None:
+            conditions["$gt"] = start_after
+        elif min_key is not None:
+            conditions["$gte"] = min_key
+        if max_key is not None:
+            conditions["$lt"] = max_key
+        return {sort_key: conditions} if conditions else {}
+
+    # -- connection ----------------------------------------------------------
+
+    def _get_collection(self) -> Any:
+        """Return the collection, connecting lazily on first use.
+
+        The ``pymongo`` import is deferred here (never at module scope) so this
+        module stays driver-free and importable anywhere the shard stage runs,
+        and merely building the adapter -- as :func:`get_adapter` does during
+        validation -- neither imports pymongo nor opens a connection. AUTH is
+        disabled on the surveyed store, so no credential is assembled; the
+        connection is entirely from the locator.
+        """
+        if self._collection is not None:
+            return self._collection
+        from pymongo import MongoClient  # noqa: PLC0415
+
+        uri = self.source.locator.get("uri")
+        if uri:
+            if not isinstance(uri, str):
+                raise ManifestSourceError(
+                    f"source {self.source.name!r}: mongo adapter 'uri', when "
+                    "given, must be a string."
+                )
+            self._client = MongoClient(uri)
+        else:
+            host = self.source.locator.get("host", "localhost")
+            port = int(self.source.locator.get("port", 27017))
+            self._client = MongoClient(host, port)
+        self._collection = self._client[self._database_name()][
+            self._collection_name()
+        ]
+        return self._collection
+
+    # -- SourceAdapter interface --------------------------------------------
+
+    def estimate_bytes(self) -> int:
+        """Estimate the source size via ``estimated_document_count()``.
+
+        Used only to pick the shard COUNT (see
+        :meth:`SourceAdapter.estimate_bytes`); it need not be exact.
+        ``estimated_document_count()`` reads collection metadata rather than
+        scanning, so it is cheap even at 400M+ documents. When a ``min_key`` /
+        ``max_key`` slice is set the metadata count over-estimates that slice,
+        which only cuts more (smaller) ranges -- never a correctness problem.
+        Returns at least 1 so ``ceil(total / target_bytes)`` is always >= 1.
+        """
+        collection = self._get_collection()
+        count = int(collection.estimated_document_count())
+        return max(1, count * MONGO_BYTES_PER_DOC)
+
+    def iter_records(self) -> Iterator[Mapping[str, Any]]:
+        """Yield each document as a dict row, batched, sorted and resumable.
+
+        Streams a batched cursor -- NEVER loading the collection into memory --
+        sorted ascending on ``sort_key`` so the read is a STABLE window that a
+        killed run can resume (``start_after``) and a parallel run can slice
+        (``min_key`` / ``max_key``) without overlap. Each document is copied to
+        a plain dict, ``decompress`` fields are zlib-decoded (see
+        ``decompress`` in the class docstring), and the row is yielded keyed by
+        field name for the sharder to map.
+        """
+        collection = self._get_collection()
+        cursor = collection.find(
+            self._query_filter(), batch_size=self._batch_size()
+        ).sort(self._sort_key(), 1)
+        decompress = self._decompress_spec()
+        for document in cursor:
+            yield self._prepare_row(document, decompress)
+
+    def _prepare_row(
+        self, document: Mapping[str, Any], decompress: Mapping[str, str]
+    ) -> dict[str, Any]:
+        """Copy a Mongo document to a plain dict, decoding compressed fields.
+
+        For each ``output_field: input_field`` in ``decompress``, the raw
+        (compressed) input field is replaced by its zlib-decompressed,
+        UTF-8-decoded value under ``output_field``. A document missing the
+        input field is yielded unchanged (no output field added) -- a stub row,
+        which a manifest requiring the decoded column naturally rejects rather
+        than the adapter fabricating a value.
+        """
+        row = dict(document)
+        for output_field, input_field in decompress.items():
+            if input_field not in row:
+                continue
+            row[output_field] = _zlib_decode(row.pop(input_field))
+        return row
+
+
+def _zlib_decode(value: Any) -> str:
+    """Decode a zlib-compressed ``bytes``-like value to a UTF-8 string.
+
+    Accepts ``bytes`` / ``bytearray`` / ``memoryview`` (a pymongo ``Binary`` is
+    a ``bytes`` subclass, so it passes through). The blob is the amino-acid
+    sequence compressed with zlib (magic ``0x789c``); decompression yields a
+    plain uppercase amino-acid string. A value that is already a plain ``str``
+    is returned as-is, so a fake double may yield an uncompressed sequence
+    without special-casing.
+    """
+    import zlib  # noqa: PLC0415
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return zlib.decompress(bytes(value)).decode("utf-8")
+    raise ManifestSourceError(
+        f"mongo adapter: cannot zlib-decode a value of type "
+        f"{type(value).__name__}; expected bytes-like or str."
+    )
+
+
+#: Concrete adapter classes, by name. All three planned adapters are now built:
+#: ``file`` (CPU/disk only), ``lakehouse`` (in-pod / off-pod read), and
+#: ``mongo`` (a batched collection read). :func:`get_adapter` no longer reports
+#: any planned name as unbuilt.
 _ADAPTER_CLASSES: dict[str, type[SourceAdapter]] = {
     "file": FileSourceAdapter,
+    "lakehouse": LakehouseSourceAdapter,
+    "mongo": MongoSourceAdapter,
 }
 
 
@@ -278,7 +849,13 @@ class ManifestSourceError(RuntimeError):
 
 
 class AdapterNotImplementedError(NotImplementedError):
-    """A manifest named a planned-but-unbuilt adapter (``mongo``/``lakehouse``)."""
+    """A manifest named a planned adapter with no class registered.
+
+    All three planned adapters (``file``, ``lakehouse``, ``mongo``) are now
+    built, so this cannot fire for any of them in practice; it remains the
+    distinct signal for a name that is in :data:`ADAPTER_NAMES` but maps to no
+    class, versus a name that is not a known adapter at all.
+    """
 
 
 class ShardOrderError(RuntimeError):
@@ -296,8 +873,9 @@ def get_adapter(source: cm.Source) -> SourceAdapter:
     Raises:
         cm.ManifestError: The ``adapter`` name is not one of
             :data:`ADAPTER_NAMES` at all.
-        AdapterNotImplementedError: The name is a PLANNED adapter
-            (``mongo``/``lakehouse``) not built yet.
+        AdapterNotImplementedError: The name is in :data:`ADAPTER_NAMES` but
+            maps to no registered class. With ``file``, ``lakehouse`` and
+            ``mongo`` all built, this no longer fires for any planned name.
     """
     name = source.adapter
     if name not in ADAPTER_NAMES:
@@ -309,7 +887,7 @@ def get_adapter(source: cm.Source) -> SourceAdapter:
     if cls is None:
         raise AdapterNotImplementedError(
             f"source {source.name!r}: adapter {name!r} is planned but not "
-            "implemented yet (only 'file' is built in this stage)."
+            "implemented yet."
         )
     return cls(source)
 

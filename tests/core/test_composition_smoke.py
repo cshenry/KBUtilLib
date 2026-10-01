@@ -402,6 +402,26 @@ class TestKBUtilLibFacade:
         second = kbu.biochem
         assert first is second
 
+    def test_facade_community_lazy_idempotent_and_available_attrs(self):
+        """kbu.community is lazy, idempotent, and exposes availability attrs.
+
+        Passes whether or not the optional ``mscommunity`` package is
+        installed — it asserts on the presence of ``available`` /
+        ``unavailable_reason``, not on availability being ``True``.
+        """
+        from kbutillib import KBUtilLib
+
+        kbu = KBUtilLib()
+        # Lazy: backing field is None before first access.
+        assert kbu._community is None
+        first = kbu.community
+        # Idempotent: two accesses return the same object.
+        second = kbu.community
+        assert first is second
+        # Exposes the availability contract shared by every *Impl wrapper.
+        assert hasattr(first, "available")
+        assert hasattr(first, "unavailable_reason")
+
 
 # ── Clean-room construction and integration tests ──────────────────────
 

@@ -47,7 +47,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # ── paths ────────────────────────────────────────────────────────────────
 
@@ -128,6 +128,21 @@ def now_utc_iso() -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def list_plugin_manifests(plugins_dir: Path) -> List[Path]:
+    """List the ``*.json`` plugin manifests in a KING plugins directory.
+
+    The KIND plugins directory (``$KING_ROOT/king/plugins``) is enumerated here,
+    in the KIND-install module, rather than in the Models-and-Analyses app: the
+    app data layer must never walk a directory itself (its runs-tree layering
+    invariant, ``tests/models_and_analyses/test_layering.py``), so the plugin-
+    union symlink farm reaches KIND's own plugins through this helper. Returns a
+    sorted list of paths; an absent or non-directory input yields an empty list.
+    """
+    if not plugins_dir.is_dir():
+        return []
+    return sorted(plugins_dir.glob("*.json"))
 
 
 # ── bundle loading (package data shipped inside this repo) ─────────────────

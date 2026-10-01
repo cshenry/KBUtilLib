@@ -115,6 +115,21 @@ class ArcRecord:
     invalid_reason: Optional[str]
 
 
+@dataclass
+class ArcArtifact:
+    """A recoverable file artifact under one arc, as enumerated by the store.
+
+    ``family`` is one of ``"model"``, ``"fba"`` or ``"fva"`` — the artifact
+    kind by the backfill scan contract. ``subject`` is the model/output stem
+    (a ``*.model.json`` file yields the name with the suffix stripped; an
+    ``fba``/``fva`` output yields the file stem). ``path`` is absolute.
+    """
+
+    family: str
+    subject: str
+    path: Path
+
+
 def parse_provenance(data: Any) -> tuple[Optional[ArcProvenance], Optional[str]]:
     """Turn a decoded ``PROVENANCE.json`` payload into an ``ArcProvenance``.
 

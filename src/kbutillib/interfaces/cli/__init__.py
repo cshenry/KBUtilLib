@@ -21,6 +21,7 @@ from .bootstrap import bootstrap_command
 from .buildplan import buildplan_cmd
 
 # WP6: capability registry introspection + scaffolder
+from .arc import arc_cmd
 from .capabilities import cap_cmd
 from .clearinghouse import clearinghouse_cmd
 from .harness import harness_cmd
@@ -65,6 +66,7 @@ def main() -> None:
     mint_run_uid()
 
 
+main.add_command(arc_cmd, name="arc")
 main.add_command(beril_cmd, name="beril")
 main.add_command(harness_cmd, name="harness")
 main.add_command(bootstrap_command, name="bootstrap")

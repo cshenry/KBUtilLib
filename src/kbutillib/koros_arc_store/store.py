@@ -20,6 +20,7 @@ from .records import (
     FILE_ABSENT,
     JSON_PARSE_ERROR,
     AnalysisRecord,
+    ArcArtifact,
     ArcRecord,
     ProjectRecord,
     parse_provenance,
@@ -168,6 +169,58 @@ class KorosArcStore:
                 f"no arc {slug!r} in project {project!r} under {self.runs_root}"
             )
         return self._read_arc_dir(project, arc_dir)
+
+    # ── arc artifacts ──────────────────────────────────────────────────────────
+
+    #: The recoverable artifact families under an arc and how to find them,
+    #: exactly as the backfill scan contract lists them: a top-level
+    #: ``*.model.json`` model file, and ``fba/*.json`` / ``fva/*.json`` outputs.
+    _ARTIFACT_FAMILIES = (
+        ("model", "", "*.model.json"),
+        ("fba", "fba", "*.json"),
+        ("fva", "fva", "*.json"),
+    )
+
+    def list_arc_artifacts(self, project: str, slug: str) -> List["ArcArtifact"]:
+        """Return the recoverable file artifacts under one arc.
+
+        This is the sanctioned door to an arc's on-disk artifacts: the store is
+        the only module that walks the runs tree, so a consumer (e.g. backfill)
+        enumerates artifacts through here rather than globbing the tree itself.
+
+        Each :class:`ArcArtifact` carries the ``family`` (``model``/``fba``/
+        ``fva``), the ``subject`` (the model/output stem), and the absolute
+        ``path``. Families and globs are the backfill scan contract:
+        ``*.model.json`` at the arc root and ``fba/*.json`` / ``fva/*.json`` in
+        the two subdirectories. A missing subdirectory yields no artifacts for
+        that family; it never raises.
+
+        Raises :class:`RecordNotFound` if the arc directory does not exist.
+        """
+        arc_dir = self.runs_root / project / "arcs" / slug
+        if not arc_dir.is_dir():
+            raise RecordNotFound(
+                f"no arc {slug!r} in project {project!r} under {self.runs_root}"
+            )
+        return self._arc_artifacts(arc_dir)
+
+    @classmethod
+    def _arc_artifacts(cls, arc_dir: Path) -> List["ArcArtifact"]:
+        """Return ``ArcArtifact`` entries under a known-existing arc directory."""
+        found: List[ArcArtifact] = []
+        for family, subdir, pattern in cls._ARTIFACT_FAMILIES:
+            base = arc_dir / subdir if subdir else arc_dir
+            if not base.is_dir():
+                continue
+            for path in sorted(base.glob(pattern)):
+                if not path.is_file():
+                    continue
+                if family == "model":
+                    subject = path.name[: -len(".model.json")]
+                else:
+                    subject = path.stem
+                found.append(ArcArtifact(family=family, subject=subject, path=path))
+        return found
 
     # ── internals ────────────────────────────────────────────────────────────
 

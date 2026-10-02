@@ -470,7 +470,9 @@ def _invoke(root: Path, *args: str) -> Any:
 
     from kbutillib.cli import main
 
-    runner = CliRunner(mix_stderr=False)
+    # Click >=8.2 removed `mix_stderr`; stdout/stderr are separate by default
+    # (result.stderr always works), so the kwarg is both unnecessary and a TypeError.
+    runner = CliRunner()
     saved = os.getcwd()
     try:
         os.chdir(root)
@@ -563,6 +565,7 @@ class TestVerbStamping:
         r3 = run(True, "model", "fba", "--model", str(gapfilled),
                  "--media", str(MEDIA), "--json")
         assert r3.exit_code == 0, r3.output
+        fba_run_uid = os.environ[model_recording.RUN_UID_ENV]
         r4 = run(True, "model", "fva", "--model", str(gapfilled),
                  "--media", str(MEDIA), "--json")
         assert r4.exit_code == 0, r4.output
@@ -576,7 +579,12 @@ class TestVerbStamping:
         ):
             assert len(db.list_analyses("proj", "arc", kind=kind)) == 1, kind
 
-        # Re-run fba in the SAME process (run_uid cached) → upsert, still one row.
+        # Re-run fba under the SAME run_uid the fba above used → upsert, one row.
+        # The uid must be restored explicitly: r4 (fva) reset it, so a bare
+        # run(False, ...) here would inherit *fva's* uid, and (analysis_id,
+        # run_uid) would differ from r3's -- a genuinely distinct run, correctly
+        # stored as a second row. Upsert is keyed on that pair, not on the verb.
+        monkeypatch.setenv(model_recording.RUN_UID_ENV, fba_run_uid)
         r5 = run(False, "model", "fba", "--model", str(gapfilled),
                  "--media", str(MEDIA), "--json")
         assert r5.exit_code == 0, r5.output

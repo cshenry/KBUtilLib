@@ -33,7 +33,9 @@ from kbutillib.interfaces.cli.new_project import (
 
 
 def _invoke(*args: str, env: dict | None = None) -> Any:
-    runner = CliRunner(mix_stderr=False)
+    # Click >=8.2 removed `mix_stderr`; stdout/stderr are separate by default
+    # (result.stderr always works), so the kwarg is both unnecessary and a TypeError.
+    runner = CliRunner()
     return runner.invoke(main, list(args), catch_exceptions=False, env=env)
 
 

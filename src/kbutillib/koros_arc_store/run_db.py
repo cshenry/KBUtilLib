@@ -96,19 +96,35 @@ def _utc_now() -> str:
 
 
 def _default_pod_enabled() -> bool:
-    """Whether the database is enabled by default in this environment.
+    """Whether the run database is enabled by default. **It is: ON everywhere.**
 
-    Enabled by default on pods; configurable elsewhere. A pod is detected via
-    ``KB_POD`` / ``KBDL_POD`` being truthy, and the explicit ``KBDL_RUN_DB_ENABLED``
-    override wins over both.
+    ``KBDL_RUN_DB_ENABLED`` still wins when set, so a caller can turn the index
+    off deliberately (``0``/``false``/``no``/``off``); ``KB_POD`` / ``KBDL_POD``
+    are still honoured as truthy hints and are now redundant.
+
+    This defaulted to OFF-unless-a-pod-was-detected until 2026-10-02, and the
+    pod detection was the problem: it keyed on ``KB_POD``/``KBDL_POD``, **neither
+    of which is set on the BERDL JupyterHub pod** this code was written for. So
+    the intended "on for pods" never fired, and because a disabled database makes
+    :meth:`RunDatabase.record_analysis` validate the record, return normally and
+    write NOTHING -- no exception, no warning, ``failed_write_count`` untouched --
+    every ``kbu model`` run and every KIND app read an empty index while looking
+    healthy. Measured 2026-10-01 on kbhub: 31 arcs, 0 records, nothing ever
+    written.
+
+    Detection cannot fix it either, which is why this is a flat default rather
+    than a better probe. The KIND server inherits ``KUBERNETES_SERVICE_HOST`` /
+    ``JUPYTERHUB_USER`` from the Jupyter boot path, but a plain login shell does
+    not -- and the *writer* (``kbu model``) runs from shells while the *reader*
+    (the apps) runs from the server. Any env-sniffing default is therefore
+    guaranteed to disagree between the two halves of the same system. Indexing is
+    cheap, local, and soft-fails on every error path, so ON is the safe default
+    and OFF is the deliberate choice.
     """
     override = os.environ.get("KBDL_RUN_DB_ENABLED")
     if override is not None:
         return override.strip().lower() in {"1", "true", "yes", "on"}
-    for var in ("KB_POD", "KBDL_POD"):
-        if os.environ.get(var, "").strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    return True
 
 
 class RunDatabase:

@@ -35,17 +35,21 @@ _BUNDLE_DIR = _SRC_DIR / "kbutillib" / "kind_app"
 
 
 def _json_one(result: Any) -> Any:
-    """Sole element of a ``--json`` payload, which is always a LIST.
+    """Sole app entry of a ``--json`` payload.
 
-    ``kbu kind`` emits one object per app acted on -- a list even for a
-    single ``--app``, and a list even now that only ``kbutillib-modeling``
-    remains. Asserting the length here also proves the ``--app`` selector
-    really narrowed the run rather than silently acting on everything.
+    ``kbu kind`` emits one object per app acted on. The payload was a bare LIST
+    of those until the KIND plugin-manifest step landed; it is now a dict,
+    ``{"apps": [...], "manifest": {...}}``, because the manifest write is a
+    per-run fact and not a per-app one. Both shapes are accepted here so the
+    helper pins the app entry rather than the envelope. Asserting the length
+    still proves the ``--app`` selector really narrowed the run rather than
+    silently acting on everything.
     """
     data = json.loads(result.output)
-    assert isinstance(data, list), data
-    assert len(data) == 1, data
-    return data[0]
+    apps = data["apps"] if isinstance(data, dict) else data
+    assert isinstance(apps, list), data
+    assert len(apps) == 1, data
+    return apps[0]
 
 
 def _invoke(*args: str) -> Any:
@@ -396,7 +400,10 @@ class TestBareInstall:
         r = _invoke("king", "install", "--apps-dir", str(apps_dir), "--json")
         assert r.exit_code == 0, r.output
         data = json.loads(r.output)
-        assert {entry["id"] for entry in data} == {"kbutillib-modeling"}
+        # Envelope is {"apps": [...], "manifest": {...}} since the plugin-manifest
+        # step landed; tolerate the older bare-list shape too.
+        entries = data["apps"] if isinstance(data, dict) else data
+        assert {entry["id"] for entry in entries} == {"kbutillib-modeling"}
 
         registry = json.loads((apps_dir / "registry.json").read_text())
         assert set(registry) == {"kbutillib-modeling"}

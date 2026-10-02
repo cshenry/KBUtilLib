@@ -192,6 +192,49 @@ merely importable, so a size-capped licence silently captures the solver and
 then fails with a message that misdescribes its own cause. The fix is to
 select GLPK, never to go looking for a bigger solver.
 
+## Your runs are indexed — and they show up in the Models and Analyses app
+
+Every `reconstruct` / `gapfill` / `fba` / `fva` run writes one **AnalysisRecord**
+into the KOROS run index (`~/.kbdl/runs.sqlite` by default), and the
+**Models and Analyses** KIND app reads that index. So the work you do here is
+what populates that app — nothing else does.
+
+**You do not need to pass anything for this to happen.** Your session has an arc,
+and KING exports `KOROS_ARC` for you, so the index resolves automatically.
+Verified 2026-10-02: a bare arc slug in `KOROS_ARC` resolves, and
+reconstruct/gapfill/fba each wrote exactly one record with no extra flags.
+
+The arc is resolved from, in order: `--arc PROJECT/SLUG` (or a bare `SLUG`),
+`$KOROS_ARC`, or a cwd inside an arc directory. **If none of those resolve you
+will see this on stderr:**
+
+```
+warning: analysis result was not indexed: no KOROS arc resolved
+         (pass --arc, set KOROS_ARC, or run inside an arc directory)
+```
+
+That warning means the run happened but is invisible to the app. It is the only
+signal, so do not ignore it — and note that passing `--arc` SILENCES it, so
+never add `--arc` just to quiet the warning without checking a record appeared.
+A session with no arc gets no `KOROS_ARC`, which is the usual cause.
+
+Re-running the same analysis with the same inputs **upserts** rather than
+duplicating: the index is keyed on `(analysis_id, run_uid)`, so one logical
+analysis re-run six times is one row with the latest payload.
+
+The index is ON by default as of 2026-10-02. It was OFF before that, and a
+disabled index is silent — `record_analysis` validates, returns normally and
+writes nothing — so if you are on an older build, every verb will look like it
+stamped while the app reads empty. `KBDL_RUN_DB_ENABLED=0` turns it off
+deliberately.
+
+**What is NOT indexed:** jobs submitted through the KBDL client
+(`submit_genome_annotation`, `submit_build_genome`,
+`submit_model_reconstruction`, …) write no record — that client has no arc-store
+wiring. Historical KBDL jobs were backfilled from the job API on 2026-10-02
+(429 records, unattributed), but new KBDL jobs still will not appear. Only the
+`kbu model` verbs above self-index.
+
 ## Local/offline construction
 
 `kbu model` verbs work with no KBase token by bypassing

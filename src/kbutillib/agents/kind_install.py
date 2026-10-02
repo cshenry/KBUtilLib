@@ -322,7 +322,21 @@ def generate_serve_script(
     """
     king_stack_dir = king_stack_dir or resolve_king_stack_dir()
     registry = read_registry(apps_dir)
-    has_manifests = any(entry.get("manifests") for entry in registry.values())
+    # Export KING_PLUGINS_DIR when the registry declares manifests OR when any
+    # manifest actually EXISTS on disk. The disk check is not redundant: the
+    # manifest write and the registry's ``manifests`` field are separate code
+    # paths and have already drifted -- on kbhub 2026-10-02 the
+    # models-and-analyses manifest was present in ``plugins/`` while
+    # ``kbutillib-modeling`` carried ``manifests: None``, so this flag was False
+    # and the wrapper omitted the export. That is silently destructive: KING then
+    # falls back to ``KING_DIR/plugins`` (its OWN checkout), which does not hold
+    # our manifest, so the app simply disappears from a KIND relaunched via this
+    # wrapper -- with no error anywhere. The running server only had the variable
+    # because the Jupyter boot path happened to set it.
+    plugins_dir = apps_dir / "plugins"
+    has_manifests = any(entry.get("manifests") for entry in registry.values()) or (
+        plugins_dir.is_dir() and any(plugins_dir.glob("*.json"))
+    )
     context_path = _context_md_path(apps_dir)
     king_serve = king_stack_dir / "king" / "scripts" / "serve.sh"
 
@@ -352,6 +366,12 @@ def generate_serve_script(
         # KING_CONTEXT / KING_PLUGINS_DIR are read by Adam's backend --
         # never KIND_. See the "DO NOT RENAME" block above.
         f'export KING_CONTEXT="{context_path}"',
+        # Belt-and-braces: the run index defaults to ON in code as of
+        # 2026-10-02, but pin it at the launch point too so the server's
+        # behaviour does not silently change if that default is ever revisited.
+        # A disabled index makes record_analysis() validate, return normally and
+        # write NOTHING, so the apps would read empty while looking healthy.
+        'export KBDL_RUN_DB_ENABLED="${KBDL_RUN_DB_ENABLED:-1}"',
     ]
     if has_manifests:
         lines.append(f'export KING_PLUGINS_DIR="{apps_dir / "plugins"}"')

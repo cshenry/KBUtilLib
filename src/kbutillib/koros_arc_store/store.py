@@ -12,6 +12,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
+
+from .archive import ARTIFACT_KEY, archive_payload
+from .conformance import CONTRACT_VERSION
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -301,8 +308,27 @@ class KorosArcStore:
         arc: Optional[str],
         record: AnalysisRecord,
         detail: Optional[Dict[str, Any]] = None,
+        raw: Any = None,
     ) -> None:
-        """Record one run into the run database — see :meth:`RunDatabase.record_analysis`."""
+        """Record one run — see :meth:`RunDatabase.record_analysis`.
+
+        When *raw* is given it is gzip-archived under the archive root and the
+        record's ``artifacts["result"]`` is pointed at the file. **Pass it
+        whenever the payload exists nowhere else.** KBDL job results EXPIRE and
+        annotation/model results have no second copy anywhere (see
+        :mod:`kbutillib.koros_arc_store.archive`); a summary-only index entry
+        means the science is gone when the service forgets it.
+
+        Archiving is additive and soft-fails: if it cannot write, the record is
+        still stored, unchanged apart from carrying no pointer.
+        """
+        if raw is not None:
+            dest = archive_payload(record.kind, record.run_uid, raw)
+            if dest is not None:
+                record = replace(
+                    record,
+                    artifacts={**(record.artifacts or {}), ARTIFACT_KEY: str(dest)},
+                )
         self._db.record_analysis(project, arc, record, detail)
 
     def list_analyses(
@@ -325,3 +351,205 @@ class KorosArcStore:
     def delete_record(self, record_id: str) -> bool:
         """Hard-delete a run and its blob — see :meth:`RunDatabase.delete_record`."""
         return self._db.delete_record(record_id)
+
+    # ── arc data lifecycle (inventory / dump / purge / archive) ─────────────
+    #
+    # An arc's data lives in TWO places -- index rows in the run database, and
+    # gzip archives on disk that those rows point at. Anything that retires an
+    # arc has to move or remove BOTH, or it leaves either orphaned archives
+    # consuming disk with nothing referencing them, or rows pointing at files
+    # that are gone. These four methods are the sanctioned door; callers should
+    # not walk the archive tree themselves.
+    #
+    # Every destructive method defaults to ``dry_run=True``. Deleting an index
+    # row is irreversible and deleting an archive can destroy the ONLY copy of a
+    # result (a KBDL job result cannot be re-fetched once it has expired), so
+    # the caller has to ask for it twice.
+
+    def arc_data_inventory(
+        self, project: Optional[str], arc: Optional[str]
+    ) -> Dict[str, Any]:
+        """What data this arc holds: record counts by kind, and archive bytes.
+
+        Read-only, and the thing to call before any dump or purge. Pass
+        ``(None, None)`` for the unattributed index.
+        """
+        records = self._db.list_analyses(project, arc)
+        by_kind: Dict[str, int] = {}
+        archives: List[str] = []
+        missing: List[str] = []
+        total = 0
+        for r in records:
+            by_kind[r.kind] = by_kind.get(r.kind, 0) + 1
+            uri = (r.artifacts or {}).get(ARTIFACT_KEY)
+            if not uri:
+                continue
+            path = Path(str(uri).replace("file://", "", 1))
+            if path.is_file():
+                archives.append(str(path))
+                total += path.stat().st_size
+            else:
+                # A row pointing at a vanished archive. Reported rather than
+                # ignored: it means the only copy is already gone.
+                missing.append(str(path))
+        return {
+            "project": project,
+            "arc": arc,
+            "records": len(records),
+            "records_by_kind": by_kind,
+            "archives": len(archives),
+            "archive_bytes": total,
+            "archive_paths": archives,
+            "archives_missing": missing,
+        }
+
+    def dump_arc_data(
+        self,
+        project: Optional[str],
+        arc: Optional[str],
+        dest: Path | str,
+        *,
+        include_archives: bool = True,
+        move: bool = False,
+    ) -> Dict[str, Any]:
+        """Export this arc's records (and archives) to *dest*. Non-destructive.
+
+        Writes ``dest/manifest.json`` -- every record in full, so the dump is
+        self-describing and restorable without this database -- and, when
+        *include_archives*, the gzip payloads under ``dest/archives/``.
+
+        *move* RELOCATES the archives instead of copying (``os.replace`` where
+        possible, else copy-then-unlink) and is how "archive an arc" reclaims
+        live-store disk. It leaves the index rows alone: call :meth:`purge_arc_data`
+        for those, or use :meth:`archive_arc`, which sequences both correctly.
+        """
+        dest = Path(dest).expanduser()
+        records = self._db.list_analyses(project, arc)
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = moved = failed = 0
+
+        if include_archives:
+            adir = dest / "archives"
+            adir.mkdir(exist_ok=True)
+            for r in records:
+                uri = (r.artifacts or {}).get(ARTIFACT_KEY)
+                if not uri:
+                    continue
+                src = Path(str(uri).replace("file://", "", 1))
+                if not src.is_file():
+                    continue
+                target = adir / src.parent.name / src.name
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if move:
+                        try:
+                            os.replace(src, target)
+                        except OSError:
+                            # Different filesystem -- copy, then unlink only
+                            # after the copy is on disk, so an interrupted move
+                            # never loses the single surviving copy.
+                            shutil.copy2(src, target)
+                            src.unlink()
+                        moved += 1
+                    else:
+                        shutil.copy2(src, target)
+                        copied += 1
+                except Exception:  # noqa: BLE001 -- report, never abort the dump
+                    failed += 1
+
+        manifest = {
+            "contract_version": CONTRACT_VERSION,
+            "project": project,
+            "arc": arc,
+            "dumped_at": datetime.now(timezone.utc).isoformat(),
+            "archives_relocated": bool(move),
+            "records": [asdict(r) for r in records],
+        }
+        (dest / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return {
+            "dest": str(dest),
+            "records": len(records),
+            "archives_copied": copied,
+            "archives_moved": moved,
+            "archives_failed": failed,
+            "manifest": str(dest / "manifest.json"),
+        }
+
+    def purge_arc_data(
+        self,
+        project: Optional[str],
+        arc: Optional[str],
+        *,
+        delete_archives: bool = False,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Delete this arc's index rows, and optionally its archives.
+
+        IRREVERSIBLE once *dry_run* is False. ``delete_archives`` is a SECOND
+        opt-in because an archive is frequently the only surviving copy -- an
+        expired KBDL result cannot be re-fetched -- so dropping the index row
+        while keeping the payload is the recoverable choice and is the default.
+
+        Returns what was (or would be) removed.
+        """
+        records = self._db.list_analyses(project, arc)
+        paths = [
+            Path(str((r.artifacts or {}).get(ARTIFACT_KEY, "")).replace("file://", "", 1))
+            for r in records
+            if (r.artifacts or {}).get(ARTIFACT_KEY)
+        ]
+        freed = sum(p.stat().st_size for p in paths if p.is_file())
+        deleted_rows = deleted_files = 0
+        if not dry_run:
+            for r in records:
+                if self._db.delete_record(r.record_id):
+                    deleted_rows += 1
+            if delete_archives:
+                for p in paths:
+                    try:
+                        if p.is_file():
+                            p.unlink()
+                            deleted_files += 1
+                    except Exception:  # noqa: BLE001 -- best effort, keep going
+                        pass
+        return {
+            "project": project,
+            "arc": arc,
+            "dry_run": dry_run,
+            "records_matched": len(records),
+            "records_deleted": deleted_rows,
+            "archives_matched": len(paths),
+            "archives_deleted": deleted_files,
+            "bytes_freed": freed if (not dry_run and delete_archives) else 0,
+            "bytes_recoverable": freed,
+        }
+
+    def archive_arc(
+        self,
+        project: Optional[str],
+        arc: Optional[str],
+        dest: Path | str,
+        *,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Retire an arc: move its data out of the live store to *dest*.
+
+        This is the "user archived an arc" flow. Ordering is the whole point and
+        is not negotiable: **dump first, verify the manifest landed, only then
+        purge.** Purging first, or purging on a failed dump, destroys data that
+        in the KBDL case cannot be re-fetched. If the dump does not produce a
+        manifest, this refuses to purge and says so.
+        """
+        inv = self.arc_data_inventory(project, arc)
+        if dry_run:
+            return {"dry_run": True, "would_dump_to": str(Path(dest).expanduser()),
+                    "inventory": inv, "purged": False}
+        dumped = self.dump_arc_data(project, arc, dest, include_archives=True, move=True)
+        if not Path(dumped["manifest"]).is_file():
+            return {"dry_run": False, "dumped": dumped, "purged": False,
+                    "error": "dump produced no manifest; refusing to purge"}
+        purged = self.purge_arc_data(
+            project, arc, delete_archives=False, dry_run=False
+        )  # archives were MOVED by the dump, so nothing left to delete
+        return {"dry_run": False, "inventory": inv, "dumped": dumped,
+                "purged": purged}

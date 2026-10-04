@@ -203,10 +203,29 @@ class RunDatabase:
                 detail_json TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS scope_description (
+                project     TEXT NOT NULL,
+                arc_slug    TEXT NOT NULL,
+                description TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                updated_by  TEXT,
+                PRIMARY KEY (project, arc_slug)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_runs_analysis_created
                 ON runs (analysis_id, created_at DESC);
             """
         )
+        # `runs.description` and `scope_description` landed 2026-10-04, after
+        # real indexes already existed (430 rows on kbhub). CREATE TABLE IF NOT
+        # EXISTS does NOT add a column to a table that is already there, so an
+        # existing database needs an explicit ALTER -- without it every read of
+        # the new column raises `no such column` on exactly the installs that
+        # have data worth keeping. Guarded on the live column list so it is
+        # idempotent and needs no version counter.
+        have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        if "description" not in have:
+            conn.execute("ALTER TABLE runs ADD COLUMN description TEXT")
         conn.commit()
 
     def _ensure_initialized_for_write(self, conn: sqlite3.Connection) -> None:
@@ -428,8 +447,9 @@ class RunDatabase:
                     kind, producer, producer_version, status, trust_tier,
                     provenance, contract_version, unknown_kind, artifacts, payload,
                     created_at, updated_at, subject_feature_count, method_count,
-                    consistency_overall, consistency_metric_version, ic_corpus_version
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    consistency_overall, consistency_metric_version, ic_corpus_version,
+                    description
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(record_id) DO UPDATE SET
                     project=excluded.project,
                     arc_slug=excluded.arc_slug,
@@ -449,7 +469,12 @@ class RunDatabase:
                     method_count=excluded.method_count,
                     consistency_overall=excluded.consistency_overall,
                     consistency_metric_version=excluded.consistency_metric_version,
-                    ic_corpus_version=excluded.ic_corpus_version
+                    ic_corpus_version=excluded.ic_corpus_version,
+                    -- COALESCE, not overwrite: a producer re-running an analysis
+                    -- sends description=None, and a plain assignment would wipe a
+                    -- description a human had written via describe_record. The
+                    -- upsert must never destroy prose it cannot regenerate.
+                    description=COALESCE(excluded.description, runs.description)
                 """,
                 (
                     record.record_id,
@@ -475,6 +500,7 @@ class RunDatabase:
                     record.consistency_overall,
                     record.consistency_metric_version,
                     record.ic_corpus_version,
+                    record.description,
                 ),
             )
             # Detail blob only when supplied; else leave any existing one (S6).
@@ -506,6 +532,166 @@ class RunDatabase:
         finally:
             if conn is not None:
                 conn.close()
+
+    def describe_record(
+        self,
+        record_id: str,
+        description: Optional[str] = None,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Attach prose (and/or a detail blob) to an EXISTING record.
+
+        The gap this closes: until 2026-10-04 a description could only be set at
+        record time, via ``record_analysis``. Everything already in the index was
+        therefore undescribable -- including the 430 rows backfilled from the
+        KBDL job API, which is exactly the set most in need of a human saying
+        what they are. An arc cannot annotate its own past work without this.
+
+        Passing ``None`` for either argument LEAVES that side untouched, so a
+        caller can set a description without disturbing the blob, or vice versa.
+        To clear a description explicitly, pass the empty string.
+
+        Returns ``False`` when no such record exists, rather than silently
+        succeeding -- a typo'd record_id must not look like a successful write.
+        """
+        if not self.enabled:
+            return False
+        if description is None and detail is None:
+            return False
+        try:
+            conn = self._connect()
+        except Exception:  # noqa: BLE001 -- soft-fail, consistent with the writes
+            self._failed_writes += 1
+            return False
+        try:
+            self._ensure_initialized_for_write(conn)
+            row = conn.execute(
+                "SELECT 1 FROM runs WHERE record_id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if description is not None:
+                conn.execute(
+                    "UPDATE runs SET description=?, updated_at=? WHERE record_id=?",
+                    (description, _utc_now(), record_id),
+                )
+            if detail is not None:
+                conn.execute(
+                    """
+                    INSERT INTO subject_detail (record_id, detail_json)
+                    VALUES (?,?)
+                    ON CONFLICT(record_id) DO UPDATE SET detail_json=excluded.detail_json
+                    """,
+                    (record_id, self.canonical_json(detail)),
+                )
+            conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._failed_writes += 1
+            log.warning("describe_record failed for %s: %r", record_id, exc)
+            return False
+        finally:
+            conn.close()
+
+    # Project-level descriptions are stored with arc_slug='' rather than NULL.
+    # SQLite treats NULLs as DISTINCT in a PRIMARY KEY, so a NULL arc_slug would
+    # happily admit many rows for one project and the upsert below would never
+    # fire -- you would accumulate duplicate project descriptions with no error.
+    _PROJECT_SCOPE = ""
+
+    def set_scope_description(
+        self,
+        project: str,
+        arc: Optional[str],
+        description: str,
+        updated_by: Optional[str] = None,
+    ) -> bool:
+        """Describe a PROJECT (``arc=None``) or one ARC. Upserts; returns success.
+
+        This is the surface the run index was missing entirely: it could say
+        which arc a record belonged to, but nothing anywhere could say what that
+        arc or project WAS. Arc metadata on disk (``PROVENANCE.json``) has no
+        description field either.
+        """
+        if not self.enabled:
+            return False
+        try:
+            conn = self._connect()
+        except Exception:  # noqa: BLE001
+            self._failed_writes += 1
+            return False
+        try:
+            self._ensure_initialized_for_write(conn)
+            conn.execute(
+                """
+                INSERT INTO scope_description
+                    (project, arc_slug, description, updated_at, updated_by)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(project, arc_slug) DO UPDATE SET
+                    description=excluded.description,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+                """,
+                (project, arc if arc else self._PROJECT_SCOPE, description,
+                 _utc_now(), updated_by),
+            )
+            conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._failed_writes += 1
+            log.warning("set_scope_description failed for %s/%s: %r", project, arc, exc)
+            return False
+        finally:
+            conn.close()
+
+    def get_scope_description(
+        self, project: str, arc: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """The description for a project (``arc=None``) or arc, or ``None``."""
+        try:
+            conn = self._open_for_read()
+        except Exception:  # noqa: BLE001
+            return None
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                """SELECT description, updated_at, updated_by FROM scope_description
+                   WHERE project=? AND arc_slug=?""",
+                (project, arc if arc else self._PROJECT_SCOPE),
+            ).fetchone()
+            if row is None:
+                return None
+            return {"description": row["description"], "updated_at": row["updated_at"],
+                    "updated_by": row["updated_by"]}
+        except Exception:  # noqa: BLE001 -- a missing table on an old db is not fatal
+            return None
+        finally:
+            conn.close()
+
+    def list_scope_descriptions(self) -> List[Dict[str, Any]]:
+        """Every project/arc description, for a describe-coverage sweep."""
+        try:
+            conn = self._open_for_read()
+        except Exception:  # noqa: BLE001
+            return []
+        if conn is None:
+            return []
+        try:
+            return [
+                {"project": r["project"],
+                 "arc": r["arc_slug"] or None,
+                 "description": r["description"],
+                 "updated_at": r["updated_at"],
+                 "updated_by": r["updated_by"]}
+                for r in conn.execute(
+                    "SELECT * FROM scope_description ORDER BY project, arc_slug"
+                )
+            ]
+        except Exception:  # noqa: BLE001
+            return []
+        finally:
+            conn.close()
 
     def delete_record(self, record_id: str) -> bool:
         """Hard-delete a run row and its detail blob in one transaction (S24).
@@ -584,6 +770,9 @@ class RunDatabase:
             consistency_metric_version=row["consistency_metric_version"],
             ic_corpus_version=row["ic_corpus_version"],
             unknown_kind=row["unknown_kind"],
+            description=(
+                row["description"] if "description" in row.keys() else None
+            ),
         )
 
     def list_analyses(

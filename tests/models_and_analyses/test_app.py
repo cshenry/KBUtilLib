@@ -122,9 +122,12 @@ def test_portfolio_schema(seeded_store):
     assert set(portfolio) == {"app", "counts_are_distinct_on", "projects", "unattributed"}
     assert set(portfolio["app"]) == {"id", "module", "contract_version"}
     proj = portfolio["projects"][0]
-    assert set(proj) == {"name", "arc_count", "arcs"}
+    # `description` added 2026-10-04: a project can now say what it IS.
+    assert set(proj) == {"name", "description", "arc_count", "arcs"}
     arc = proj["arcs"][0]
     expected_arc_keys = {
+        # `description`/`described_at` added 2026-10-04.
+        "description", "described_at",
         "slug", "project", "title", "role", "leg_of", "parent", "created_at",
         "valid", "invalid_reason", "empty", "total_analyses",
         "most_recent_analysis_at", "counts", "counts_are_distinct_on",
@@ -154,8 +157,8 @@ def test_arc_models_schema(seeded_store):
     assert set(row) == expected_row_keys
     analysis = row["analyses"][0]
     assert set(analysis) == {
-        "analysis_id", "kind", "status", "created_at", "trust_tier",
-        "provenance", "inferred", "run_count", "runs",
+        "analysis_id", "kind", "description", "status", "created_at",
+        "trust_tier", "provenance", "inferred", "run_count", "runs",
     }
     run = analysis["runs"][0]
     assert set(run) == {"record_id", "run_uid", "created_at", "status"}

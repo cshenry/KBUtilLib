@@ -295,6 +295,14 @@ class AnalysisRecord:
     contract_version: int
     project: Optional[str] = None
     arc: Optional[str] = None
+    #: Free prose: what this analysis IS and how it fits the wider study.
+    #: First-class rather than buried in the detail blob because it is the one
+    #: field a human reads to recognise a row, and `list_analyses` must be able
+    #: to return it without opening a blob per record. Optional, and NULL on
+    #: every row written before 2026-10-04 -- including the 430 backfilled from
+    #: the KBDL job API, which carried no description to capture. Use
+    #: `describe_record` to fill one in after the fact.
+    description: Optional[str] = None
     subject_feature_count: Optional[int] = None
     method_count: Optional[int] = None
     consistency_overall: Optional[float] = None

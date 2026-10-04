@@ -323,6 +323,75 @@ def build_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return build_portfolio(store)
 
+    # ── descriptions ───────────────────────────────────────────────────────
+    # Read AND write, deliberately. A KOROS arc is expected to fill these in
+    # itself, and an arc session reaches this app over HTTP rather than by
+    # importing the store -- so a read-only surface would make the feature
+    # unusable from the one place the descriptions are supposed to come from.
+
+    def _store() -> Any:
+        """Resolve the store, or 503. A misconfigured runs tree is not a 404."""
+        try:
+            return factory()
+        except RunsRootResolutionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    def _require_description(body: Optional[dict]) -> str:
+        desc = (body or {}).get("description")
+        if not isinstance(desc, str) or not desc.strip():
+            raise HTTPException(status_code=400, detail="description is required")
+        return desc
+
+    @app.get("/api/describe/coverage")
+    def describe_coverage() -> dict:
+        """How much of the index is described — the GAP, not a total."""
+        return _store().describe_coverage()
+
+    @app.get("/api/describe")
+    def list_descriptions() -> dict:
+        """Every project/arc description on record."""
+        return {"descriptions": _store().list_descriptions()}
+
+    @app.post("/api/describe/project/{project}")
+    def describe_project(project: str, body: dict) -> dict:
+        """Describe a project. Body: ``{"description": str, "updated_by"?: str}``."""
+        store = _store()
+        desc = _require_description(body)
+        if not store.describe_project(project, desc, (body or {}).get("updated_by")):
+            raise HTTPException(status_code=503,
+                                detail="run index is disabled or unwritable")
+        return {"project": project, "ok": True}
+
+    @app.post("/api/describe/arc/{project}/{arc}")
+    def describe_arc(project: str, arc: str, body: dict) -> dict:
+        """Describe one arc. Body: ``{"description": str, "updated_by"?: str}``."""
+        store = _store()
+        desc = _require_description(body)
+        if not store.describe_arc(project, arc, desc, (body or {}).get("updated_by")):
+            raise HTTPException(status_code=503,
+                                detail="run index is disabled or unwritable")
+        return {"project": project, "arc": arc, "ok": True}
+
+    @app.post("/api/describe/record/{record_id}")
+    def describe_record(record_id: str, body: dict) -> dict:
+        """Describe an existing record. Body: ``{"description"?: str, "detail"?: dict}``.
+
+        404 when there is no such record — a typo'd record_id must not read as a
+        successful write.
+        """
+        store = _store()
+        desc = (body or {}).get("description")
+        detail = (body or {}).get("detail")
+        if desc is None and detail is None:
+            raise HTTPException(status_code=400,
+                                detail="description or detail is required")
+        if not store.describe_record(record_id, description=desc, detail=detail):
+            raise HTTPException(
+                status_code=404,
+                detail=f"no record {record_id!r} (or the run index is disabled)",
+            )
+        return {"record_id": record_id, "ok": True}
+
     @app.get("/api/arcs/{project}/{arc}/models")
     def arc_models(project: str, arc: str) -> dict:
         """One row per model in the arc, with analyses and the agreement matrix."""

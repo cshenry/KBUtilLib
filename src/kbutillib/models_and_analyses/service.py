@@ -165,9 +165,19 @@ def _arc_node(
     summary = _summarize_arc_records(latest)
     total_analyses = len(latest)
 
+    # The arc's own description, if a KOROS arc has filled one in. It is NOT in
+    # the arc's on-disk provenance -- there is no such field there -- so it comes
+    # from the run index's scope_description table via the store.
+    try:
+        desc = store.get_description(project, arc.slug)
+    except AttributeError:  # pragma: no cover - older store without descriptions
+        desc = None
+
     return {
         "slug": arc.slug,
         "project": project,
+        "description": (desc or {}).get("description"),
+        "described_at": (desc or {}).get("updated_at"),
         "title": (prov.run_name if prov else None),
         "role": (prov.role if prov else None),
         "leg_of": (prov.leg_of if prov else None),
@@ -247,9 +257,14 @@ def build_portfolio(store: Any) -> Dict[str, Any]:
             _arc_node(store, project.name, arc)
             for arc in store.list_arcs(project.name)
         ]
+        try:
+            pdesc = store.get_description(project.name)
+        except AttributeError:  # pragma: no cover - older store
+            pdesc = None
         projects_out.append(
             {
                 "name": project.name,
+                "description": (pdesc or {}).get("description"),
                 "arc_count": len(arc_nodes),
                 "arcs": _nest_legs(arc_nodes),
             }
@@ -407,6 +422,10 @@ def _model_row(
             {
                 "analysis_id": rec.analysis_id,
                 "kind": rec.kind,
+                # The human-written "what is this and how does it fit" string.
+                # NULL on everything written before 2026-10-04, including the
+                # 430 KBDL backfill rows; fill in with `describe_record`.
+                "description": rec.description,
                 "status": rec.status,
                 "created_at": rec.created_at,
                 "trust_tier": _tier_of(rec),

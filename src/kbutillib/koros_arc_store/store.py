@@ -352,6 +352,77 @@ class KorosArcStore:
         """Hard-delete a run and its blob — see :meth:`RunDatabase.delete_record`."""
         return self._db.delete_record(record_id)
 
+    # ── descriptions: what a record / arc / project actually IS ────────────
+    #
+    # The index could always say WHICH arc a record belonged to and never WHAT
+    # it was. These are the three surfaces that close that, added 2026-10-04.
+
+    def describe_record(
+        self,
+        record_id: str,
+        description: Optional[str] = None,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Attach prose/detail to an existing record — see
+        :meth:`RunDatabase.describe_record`. This is the only way to describe a
+        record that already exists, which is every record written before
+        2026-10-04."""
+        return self._db.describe_record(record_id, description=description, detail=detail)
+
+    def describe_arc(
+        self, project: str, arc: str, description: str, updated_by: Optional[str] = None
+    ) -> bool:
+        """Describe one arc: what it is and how it fits the wider study."""
+        return self._db.set_scope_description(project, arc, description, updated_by)
+
+    def describe_project(
+        self, project: str, description: str, updated_by: Optional[str] = None
+    ) -> bool:
+        """Describe a project."""
+        return self._db.set_scope_description(project, None, description, updated_by)
+
+    def get_description(
+        self, project: str, arc: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """The stored description for a project (``arc=None``) or an arc."""
+        return self._db.get_scope_description(project, arc)
+
+    def list_descriptions(self) -> List[Dict[str, Any]]:
+        """Every project/arc description — use for a describe-coverage sweep."""
+        return self._db.list_scope_descriptions()
+
+    def describe_coverage(self) -> Dict[str, Any]:
+        """How much of the index is actually described. The honest scorecard.
+
+        Asking arcs to fill descriptions in is only useful if you can see what
+        is still blank, so this reports the gap rather than a total: arcs and
+        projects present in the runs tree with no description, and records with
+        a NULL one.
+        """
+        described = {
+            (d["project"], d["arc"]) for d in self.list_descriptions()
+        }
+        arcs_total = arcs_described = 0
+        for proj in self.list_projects():
+            for a in self.list_arcs(proj.name):
+                arcs_total += 1
+                if (proj.name, a.slug) in described:
+                    arcs_described += 1
+        recs = self._db.list_analyses(None, None)
+        for proj in self.list_projects():
+            for a in self.list_arcs(proj.name):
+                recs.extend(self._db.list_analyses(proj.name, a.slug))
+        with_desc = sum(1 for r in recs if (r.description or "").strip())
+        return {
+            "arcs_total": arcs_total,
+            "arcs_described": arcs_described,
+            "arcs_undescribed": arcs_total - arcs_described,
+            "projects_described": sum(1 for p, a in described if a is None),
+            "records_total": len(recs),
+            "records_described": with_desc,
+            "records_undescribed": len(recs) - with_desc,
+        }
+
     # ── arc data lifecycle (inventory / dump / purge / archive) ─────────────
     #
     # An arc's data lives in TWO places -- index rows in the run database, and

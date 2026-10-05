@@ -310,7 +310,9 @@ def _serve_script_path(apps_dir: Path) -> Path:
 
 
 def generate_serve_script(
-    apps_dir: Path, king_stack_dir: Optional[Path] = None
+    apps_dir: Path,
+    king_stack_dir: Optional[Path] = None,
+    max_live_sessions: int = 8,
 ) -> bool:
     """Generate/update ``$KIND_APPS_DIR/serve-kind.sh`` (AC #13).
 
@@ -372,6 +374,20 @@ def generate_serve_script(
         # A disabled index makes record_analysis() validate, return normally and
         # write NOTHING, so the apps would read empty while looking healthy.
         'export KBDL_RUN_DB_ENABLED="${KBDL_RUN_DB_ENABLED:-1}"',
+        # Live-session cap. KING's own default is 4 (config.py MAX_LIVE_SESSIONS);
+        # Chris asked for 8 on 2026-10-05 and this is the sanctioned place to set
+        # it -- KING is a consume-only checkout here, so its config.py is NOT
+        # edited. Overridable, so a caller can still dial it down.
+        #
+        # MIND THE MEMORY. The cap exists because the BERDL pod is cgroup-capped
+        # at 24.0 GiB (/sys/fs/cgroup/memory/memory.limit_in_bytes =
+        # 25769803776), NOT at the ~1 TiB `free` reports for the host. Measured
+        # 2026-10-05: 21.5 GiB already in use, 2.5 GiB free, with each session's
+        # claude process at 0.29-0.43 GiB -- so eight concurrent sessions is
+        # close to the ceiling before the tools they spawn (Spark, modelling,
+        # Escher) are counted. If sessions start dying unexplained, suspect the
+        # cgroup OOM killer here first and lower this.
+        f'export KIND_MAX_LIVE_SESSIONS="${{KIND_MAX_LIVE_SESSIONS:-{max_live_sessions}}}"',
     ]
     if has_manifests:
         lines.append(f'export KING_PLUGINS_DIR="{apps_dir / "plugins"}"')
@@ -408,6 +424,22 @@ def _copy_bundle_files(bundle_dir: Path, app_dir: Path, bundle: dict) -> bool:
     return changed
 
 
+def _bundle_source_root(bundle_dir: Path) -> str:
+    """The checkout root a bundle was composed from, as a string.
+
+    Walks up from *bundle_dir* to the directory holding ``src/kbutillib`` (the
+    repo root) and falls back to the bundle's own resolved path when that is
+    not recognisable. Used only for provenance and drift reporting -- never to
+    locate anything -- so an unrecognised layout degrades to a still-useful
+    absolute path rather than failing.
+    """
+    resolved = bundle_dir.resolve()
+    for parent in resolved.parents:
+        if (parent / "src" / "kbutillib").is_dir():
+            return str(parent)
+    return str(resolved)
+
+
 def install(
     bundle_dir: Path,
     apps_dir: Optional[Path] = None,
@@ -435,6 +467,26 @@ def install(
     )
     existing = registry.get(app_id)
     registry_changed = False
+
+    # Which CHECKOUT composed this bundle. Recorded because more than one
+    # KBUtilLib checkout can be importable at once, and they drift. On the
+    # kbhub pod ``bin/kbu`` prepends the global_share checkout to
+    # ``PYTHONPATH``, while a bare ``python -m kbutillib`` in the same venv
+    # resolves kbutillib through an editable install pointing at a DIFFERENT
+    # clone. Measured 2026-10-05: installing via the bare form composed that
+    # clone's older ``kind_app/skill.md`` and silently dropped whole sections
+    # of guidance out of CONTEXT.md -- at exit 0, with ``kind status`` still
+    # green, because every check in this module asks whether the installed
+    # files agree with the bundle it was handed, never which bundle that was.
+    # Recording the source makes the swap visible in ``registry.json``, and
+    # ``source_changed`` lets the caller say so out loud.
+    source_root = _bundle_source_root(bundle_dir)
+    source_changed = bool(
+        existing
+        and existing.get("source_root")
+        and existing["source_root"] != source_root
+    )
+
     if not existing or existing.get("bundle_hash") != bundle_hash:
         now = now_utc_iso()
         registry[app_id] = {
@@ -445,6 +497,7 @@ def install(
             "verify": bundle.get("verify"),
             "manifests": bundle.get("manifests"),
             "bundle_hash": bundle_hash,
+            "source_root": source_root,
             "installed_at": existing["installed_at"] if existing else now,
             "updated_at": now,
         }
@@ -468,6 +521,11 @@ def install(
         "context_md": str(_context_md_path(apps_dir)),
         "serve_script": str(_serve_script_path(apps_dir)),
         "registry": str(_registry_path(apps_dir)),
+        "source_root": source_root,
+        "source_changed": source_changed,
+        "previous_source_root": (
+            existing.get("source_root") if source_changed and existing else None
+        ),
     }
 
 

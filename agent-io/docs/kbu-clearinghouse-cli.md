@@ -90,7 +90,10 @@ tables. The capability owns this discipline; the CLI just surfaces its numbers.
 A degraded read still emits a well-formed envelope and exits `0`; callers detect
 degradation from `warnings` (and stderr), not the exit code. Only a malformed
 `kbu` invocation (click's own parse errors, e.g. `content` without `--type` and
-without `--all-types`) exits non-zero.
+without `--all-types`) exits non-zero — **except** `health`, which exits
+non-zero when `data.parameter_set_integrity` carries a finding: that is a
+failure (stored data is wrong), not a degraded answer, so it is not folded
+into `warnings` or the `0` exit the rest of this section describes.
 
 ---
 
@@ -242,6 +245,9 @@ a blind re-run.
 `plan` on an invalid manifest exits **non-zero** with the offending key named,
 having written nothing. `load`/`verify` off-pod exit non-zero (locus refusal,
 message naming the locus). A successful verb — including a `load` whose ledger
-recorded a `failed` table, or a `verify` that reported discrepancies — emits a
-well-formed envelope and exits `0`; the operator reads `data`/`warnings` for the
-outcome, exactly as with the read verbs.
+recorded a `failed` table, or a `verify` that reported ledger discrepancies —
+emits a well-formed envelope and exits `0`; the operator reads `data`/`warnings`
+for the outcome, exactly as with the read verbs. The one exception is a
+parameter-set registry integrity finding: `verify` exits non-zero when
+`data.parameter_set_integrity` carries one, even if every ledger check
+reconciled, because that finding is a failure rather than a degraded answer.

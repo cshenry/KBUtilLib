@@ -27,6 +27,7 @@ THE SHAPE, per source::
     format      = "parquet"            # parquet | jsonl | tsv (file adapter)
     entity_type = "gene"
     kinds       = ["entity", "content"]
+    observed_at_column = "updated_at"  # OPTIONAL. See below.
 
       [source.hash]
       raw_column  = "dna_sequence"     # the column carrying the raw value the
@@ -46,9 +47,23 @@ THE SHAPE, per source::
       payload       = "@json(function_id, score)"
       parameter_set = {}                 # REQUIRED; {} declares a default run
 
-The MAPPING half -- ``entity_type``, ``kinds``, ``[source.hash]``,
-``[source.content]``, ``[source.result]`` -- is IDENTICAL across all three
-adapters. Only the source-locating keys differ (``path``/``format`` for
+``observed_at_column`` IS PART OF THE MAPPING HALF, NOT THE LOCATOR. It
+names a SOURCE column carrying each record's observation time (an ISO-8601
+string or a datetime, normalised to UTC by the sharder). It is OPTIONAL;
+omitted, the sharder stamps its own run start time on every row of the
+source. Either way ``observed_at`` is NEVER NULL on a bronze row -- it is one
+of the two columns
+:mod:`~kbutillib.domains.kbase.berdl.clearinghouse_derivation` orders the
+current-state window function by, so a null there makes "the current row"
+undefined for that slot. Because it is mapping, not locator, it is listed in
+:data:`_MAPPING_KEYS`: a top-level key this module does not claim falls
+through to the adapter's locator untouched, where a mongo or lakehouse
+adapter would ignore it and the sharder would never see it -- the declaration
+would be silently inert.
+
+The MAPPING half -- ``entity_type``, ``kinds``, ``observed_at_column``,
+``[source.hash]``, ``[source.content]``, ``[source.result]`` -- is IDENTICAL
+across all three adapters. Only the source-locating keys differ (``path``/``format`` for
 ``file``; a connection/collection for ``mongo``; a table FQN for
 ``lakehouse``). That is the seam that makes the adapters interchangeable: the
 sharder standardizes, hashes, sorts and writes the SAME way regardless of
@@ -221,6 +236,9 @@ class TablePlan:
     #: Its 64-char lowercase hex sha256 -- the ``parameter_set_hash`` the
     #: sharder stamps on every result row. Computed once, at plan time.
     parameter_set_hash: str | None = None
+    #: The source's optional ``observed_at_column``, carried through from
+    #: :class:`Source` so the sharder needs nothing but the plan.
+    observed_at_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +256,12 @@ class Source:
     hash_spec: Mapping[str, Any]
     content: Mapping[str, Any]
     result: Mapping[str, Any]
+    #: Optional top-level ``observed_at_column``: the name of a SOURCE column
+    #: carrying this record's observation time. ``None`` means the sharder
+    #: stamps its run start time on every row of this source instead. Either
+    #: way ``observed_at`` is never null -- see
+    #: :func:`clearinghouse_shard.resolve_observed_at`.
+    observed_at_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -255,7 +279,22 @@ class Manifest:
 #: here) rather than the adapter-specific locator. Everything else in the
 #: block is treated as a locator key and handed to the adapter untouched.
 _MAPPING_KEYS = frozenset(
-    {"name", "adapter", "entity_type", "kinds", "hash", "content", "result"}
+    {
+        "name",
+        "adapter",
+        "entity_type",
+        "kinds",
+        "hash",
+        "content",
+        "result",
+        # Not a locator key. ``observed_at_column`` names a SOURCE column the
+        # sharder reads per row for ``observed_at``; it is part of the mapping
+        # half (adapter-independent), so it must be listed here or it would
+        # fall through to the adapter's locator and be read as, say, a mongo
+        # connection key -- silently ignored by the adapter and silently
+        # unseen by the sharder.
+        "observed_at_column",
+    }
 )
 
 
@@ -342,6 +381,17 @@ def _parse_source(raw: Any, *, index: int) -> Source:
     if not all(isinstance(k, str) for k in kinds):
         raise ManifestError(f"source {name!r} 'kinds' must be strings.")
 
+    observed_at_column = raw.get("observed_at_column")
+    if observed_at_column is not None and (
+        not isinstance(observed_at_column, str) or not observed_at_column.strip()
+    ):
+        raise ManifestError(
+            f"source {name!r}: 'observed_at_column', when given, must be a "
+            "non-empty string naming a SOURCE column carrying each record's "
+            "observation time (an ISO-8601 string or a datetime). Omit it to "
+            "stamp the shard run's start time on every row."
+        )
+
     locator = {k: v for k, v in raw.items() if k not in _MAPPING_KEYS}
     return Source(
         name=name,
@@ -352,6 +402,9 @@ def _parse_source(raw: Any, *, index: int) -> Source:
         hash_spec=dict(raw.get("hash") or {}),
         content=dict(raw.get("content") or {}),
         result=dict(raw.get("result") or {}),
+        observed_at_column=(
+            observed_at_column.strip() if observed_at_column is not None else None
+        ),
     )
 
 
@@ -514,6 +567,7 @@ def _plan_source(source: Source) -> list[TablePlan]:
                 parameter_set=parameter_set,
                 parameter_set_json=parameter_set_json,
                 parameter_set_hash=parameter_set_hash,
+                observed_at_column=source.observed_at_column,
             )
         )
     return plans

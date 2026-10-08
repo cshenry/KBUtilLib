@@ -141,10 +141,26 @@ _SLOT_KEY_COLUMNS = (
     "parameter_set_hash",
 )
 
+#: PUBLIC alias of :data:`_SLOT_KEY_COLUMNS`, for writers that must key,
+#: sort or deduplicate result rows by the slot. It exists so the bronze
+#: sharder can IMPORT the tuple instead of restating it: a writer that
+#: deduplicates on its own copy of the slot key and a reader that supersedes
+#: on this one drift apart silently the moment the tuple changes, and the
+#: tuple has already changed once (``parameter_set_hash`` was added by
+#: clearinghouse-lake-5). There is exactly one definition and this names it.
+SLOT_KEY_COLUMNS = _SLOT_KEY_COLUMNS
+
+
 #: The columns that break ties within a slot, in ``ORDER BY`` precedence.
 #: Both are non-null by construction; see the module docstring for why
 #: this module never emits ``NULLS FIRST``/``NULLS LAST``.
 _ORDER_COLUMNS = ("observed_at", "ingest_batch_id")
+
+#: PUBLIC alias of :data:`_ORDER_COLUMNS` -- the within-slot tie-breakers in
+#: ``ORDER BY`` precedence, exported for the same reason as
+#: :data:`SLOT_KEY_COLUMNS`. A bronze writer picking the winner among rows
+#: sharing a slot must break the tie the way the current-state view will.
+ORDER_COLUMNS = _ORDER_COLUMNS
 
 
 def _quote_fqn(fqn: str, engine: str = "spark") -> str:

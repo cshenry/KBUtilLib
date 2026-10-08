@@ -1014,18 +1014,26 @@ def _default_run_id(shard_dir: str) -> str:
 
 
 def _build_plan(manifest_path: str) -> dict[str, Any]:
-    """Build the ``plan`` envelope: per-table row counts and target shard sizes.
+    """Build the ``plan`` envelope: per-table row ESTIMATES and target shard sizes.
 
     Resolves the manifest through
     :func:`clearinghouse_manifest.load_manifest` +
     :func:`~clearinghouse_manifest.shard_plan` (the single plan-time validator --
     an invalid manifest raises :class:`ManifestError` naming the offending key,
     which :func:`plan_cmd` turns into a non-zero exit) and reports, per target
-    table, the row count and the shard count/target size sharding WOULD produce.
-    It WRITES NOTHING: row counts come from streaming each source adapter's
-    records read-only (the sanctioned source read), and the shard count is the
-    same ``ceil(estimate_bytes / target_bytes)`` the sharder uses. ``plan`` runs
-    anywhere; it is not locus-gated.
+    table, the estimated row count and the shard count/target size sharding
+    WOULD produce. It WRITES NOTHING and runs anywhere; it is not locus-gated.
+
+    PLAN NEVER ITERATES SOURCE RECORDS. It used to count with
+    ``sum(1 for _ in adapter.iter_records())`` -- a FULL SCAN of the source to
+    print one number, which on the real 264M-document protein store costs the
+    same read as the sharding run it is meant to be a cheap preview of. The
+    count now comes from :meth:`SourceAdapter.estimate_rows`, which is
+    metadata-only by contract (parquet footer, ``estimated_document_count()``,
+    ``COUNT(*)``) and may legitimately be ``None``. ``estimate_method`` names
+    the mechanism beside the number, because an estimate whose provenance is
+    unstated cannot be judged -- and ``"unavailable"`` is a better answer than
+    an accurate number nobody can afford.
     """
     import math
 
@@ -1035,20 +1043,29 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
 
     target_bytes = shard_module.DEFAULT_TARGET_BYTES
     tables: list[dict[str, Any]] = []
-    # Count each source's records ONCE and reuse the count for every target
-    # table that source feeds (a source with kinds=[entity, content] shards the
-    # same records to two tables), and size the shards from the adapter estimate.
-    source_stats: dict[str, tuple[int, int]] = {}
+    warnings: list[str] = []
+    # Estimate each source ONCE and reuse it for every target table that source
+    # feeds (a source with kinds=[entity, content] shards the same records to
+    # two tables).
+    source_stats: dict[str, tuple[Optional[int], str, int]] = {}
     for plan in plans:
         stats = source_stats.get(plan.source_name)
         if stats is None:
             src = next(s for s in manifest.sources if s.name == plan.source_name)
             adapter = shard_module.get_adapter(src)
-            row_count = sum(1 for _ in adapter.iter_records())
+            row_count = adapter.estimate_rows()
+            estimate_method = adapter.estimate_rows_method()
             est_bytes = max(1, adapter.estimate_bytes())
-            source_stats[plan.source_name] = (row_count, est_bytes)
-            stats = source_stats[plan.source_name]
-        row_count, est_bytes = stats
+            if row_count is None:
+                warnings.append(
+                    f"source {plan.source_name!r}: no cheap row-count estimate "
+                    f"is available from the {src.adapter!r} adapter for this "
+                    "source; row_count is null. plan never scans a source to "
+                    "produce one."
+                )
+            stats = (row_count, estimate_method, est_bytes)
+            source_stats[plan.source_name] = stats
+        row_count, estimate_method, est_bytes = stats
         shard_count = max(1, math.ceil(est_bytes / target_bytes))
         tables.append(
             {
@@ -1057,6 +1074,7 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
                 "entity_type": plan.entity_type,
                 "kind": plan.kind,
                 "row_count": row_count,
+                "estimate_method": estimate_method,
                 "estimated_source_bytes": est_bytes,
                 "target_shard_bytes": target_bytes,
                 "estimated_shards": shard_count,
@@ -1066,7 +1084,7 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
         "plan",
         locus="anywhere",
         data={"manifest": manifest_path, "tables": tables},
-        warnings=[],
+        warnings=warnings,
     )
 
 
@@ -1099,7 +1117,14 @@ def _build_shard(
     manifest at plan time (so a bad manifest fails BEFORE any file is written)
     and writes one directory per target table of sorted bronze parquet. Runs
     anywhere -- sharding needs CPU and disk, no pod and no credentials. Reports
-    one row per written shard (table, batch, path, rows, hash range).
+    one row per written shard (table, batch, path, rows, hash range, sha256),
+    plus the run inventory's own ids and the per-source skip counts, so an
+    operator sees what was DROPPED without opening ``run.json``.
+
+    One invocation is one UNIT of a run and appends itself to
+    ``<out>/run.json`` atomically when it finishes. ``manifest_path`` is handed
+    down so the inventory's ``manifest_sha256`` is of the real file bytes
+    rather than of a re-rendering of the parsed object.
     """
     manifest_module, shard_module = _shard_stage()
     kwargs: dict[str, Any] = {}
@@ -1111,27 +1136,42 @@ def _build_shard(
     # validates the whole plan before writing, so a bad manifest fails with
     # nothing on disk.
     manifest = manifest_module.load_manifest(manifest_path)
-    reports = shard_module.shard_manifest(manifest, out_dir, **kwargs)
+    reports = shard_module.shard_manifest(
+        manifest, out_dir, manifest_path=manifest_path, **kwargs
+    )
     shards = [
         {
             "table": report.table,
             "batch": report.batch_id,
             "path": str(report.path),
             "rows": report.rows,
+            "rows_deduplicated": report.rows_deduplicated,
+            "key_column": report.key_column,
             "hash_min": report.hash_min,
             "hash_max": report.hash_max,
+            "sha256": report.sha256,
+            "source": list(report.sources),
+            "unit_id": report.unit_id,
+            "attempt_id": report.attempt_id,
+            "slice": report.slice,
             "split": report.split,
         }
         for report in reports
     ]
+    run = shard_module.read_run_manifest(out_dir)
     return _envelope(
         "shard",
         locus="anywhere",
         data={
             "manifest": manifest_path,
             "out_dir": out_dir,
+            "run_id": run.get("run_id"),
+            "unit_id": reports[0].unit_id if reports else None,
+            "run_manifest": str(shard_module.run_manifest_path(out_dir)),
             "shards": shards,
             "shard_count": len(shards),
+            "skipped": run.get("skipped", []),
+            "sources": run.get("sources", []),
         },
         warnings=[],
     )

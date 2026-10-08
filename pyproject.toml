@@ -202,6 +202,13 @@ kbutillib = [
     "kind_app/*.json", "kind_app/*.md",
     "kind_app/verab/*.json", "kind_app/verab/*.md",
     "kind_app_wake/*.json", "kind_app_wake/*.md",
+    # Clearinghouse manifests. clearinghouse_example_seed.toml is not
+    # documentation -- it is OPERATIONAL INPUT, the mapping the demo seed is
+    # loaded from (OP-C3), so it has to travel with an installed kbutillib
+    # rather than existing only in a source checkout. The glob also picks up
+    # the gaa_store_parquet_dump.toml worked example, which was likewise
+    # never shipped by a non-editable install.
+    "domains/kbase/berdl/examples/*.toml",
 ]
 
 [tool.uv]

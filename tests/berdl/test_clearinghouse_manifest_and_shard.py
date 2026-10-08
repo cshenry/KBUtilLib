@@ -468,6 +468,181 @@ def test_worked_example_manifest_validates():
 
 
 # ==========================================================================
+# THE DEMO SEED MANIFEST (examples/clearinghouse_example_seed.toml)
+# ==========================================================================
+#
+# Unlike the worked example above, this manifest describes a LIVE store and
+# is meant to be RUN -- by `kbu clearinghouse backfill run
+# mongo-protein-bakta --slice 00 --limit 12000`, against a scratch dataset
+# first and then production (OP-C3 in the operator runbook). A sibling PRD's
+# `mongo-protein-bakta` preset is tested to map this collection exactly as
+# this file does, so the two must agree.
+#
+# These tests PLAN it off-pod, with NO MONGO CONNECTION. That is possible
+# because planning is pure manifest work: `load_manifest` parses the TOML
+# and `shard_plan` validates columns, derivations and the parameter set
+# against the schema module, none of which opens a cursor (the `uri`,
+# `database` and `collection` keys are adapter locator values that only
+# `MongoSourceAdapter` ever dereferences, at shard time). So no skip is
+# needed here -- if these tests ever start requiring a driver, that is a
+# regression in the plan/read split, not an environment problem.
+#
+# Why this is worth testing at all: a seed manifest whose derivation is
+# misspelled or whose column is not in the schema fails at PLAN time, and
+# the cheapest place to learn that is here -- not against the live Mongo
+# store, and emphatically not after a partial write into the lake.
+
+
+def _seed_manifest_path():
+    from pathlib import Path
+
+    return (
+        Path(cm.__file__).parent / "examples" / "clearinghouse_example_seed.toml"
+    )
+
+
+def _seed_plans():
+    return cm.shard_plan(cm.load_manifest(_seed_manifest_path()))
+
+
+def test_demo_seed_manifest_exists_and_is_shipped():
+    """The seed mapping ships INSIDE the package, beside the worked example.
+
+    It is operational input to the backfill command, not documentation
+    parked in agent-io/, so it has to travel with an installed KBUtilLib.
+    """
+    assert _seed_manifest_path().is_file()
+
+
+def test_demo_seed_manifest_plans_off_pod():
+    """It parses and plans with no Mongo connection and no pod.
+
+    Five plans across three sources: protein entity+content, protein
+    result, function entity+content.
+    """
+    plans = _seed_plans()
+    assert {p.table for p in plans} == {
+        "protein_entity",
+        "protein_content",
+        "protein_result",
+        "function_entity",
+        "function_content",
+    }
+
+
+def test_demo_seed_has_exactly_the_three_declared_sources():
+    """Three sources over ONE collection -- the join is expressed as
+    several sources, not as a join inside the adapter."""
+    manifest = cm.load_manifest(_seed_manifest_path())
+    assert len(manifest.sources) == 3
+    for source in manifest.sources:
+        assert source.adapter == "mongo"
+        assert source.locator["collection"] == "seq_protein_bakta"
+        assert source.locator["database"] == "database"
+        assert source.locator["uri"] == "mongodb://poplar.cels.anl.gov:27017"
+
+
+def test_demo_seed_reads_slice_00_as_a_half_open_range():
+    """Slice 00 of 256: ``_id`` in ["00", "01").
+
+    A half-open range on the hex ``_id`` is a UNIFORM 1/256 sample, not a
+    first-N prefix -- which is what makes the seed representative. The keys
+    are MongoSourceAdapter's own ``sort_key``/``min_key``/``max_key``.
+    """
+    manifest = cm.load_manifest(_seed_manifest_path())
+    for source in manifest.sources:
+        assert source.locator["sort_key"] == "_id"
+        assert source.locator["min_key"] == "00"
+        assert source.locator["max_key"] == "01"
+
+
+def test_demo_seed_recomputes_identity_rather_than_trusting_mongo_id():
+    """Every hash spec uses ``raw_column``, never ``precomputed``.
+
+    Mongo's ``_id`` is also a 64-hex sha256, but whether it equals what the
+    standardizers compute from the sequence is unverified -- so the seed
+    recomputes it.
+    """
+    manifest = cm.load_manifest(_seed_manifest_path())
+    for source in manifest.sources:
+        assert "precomputed" not in source.hash_spec
+        assert source.hash_spec["raw_column"] in {"aa", "product"}
+
+
+def test_demo_seed_result_carries_the_provenance_source_label():
+    """The result source label, result_type and version are as specified.
+
+    ``bakta/mongo-seq_protein_bakta``'s second segment is a PROVENANCE
+    label, not a Bakta release: the store recorded no tool version, and
+    inventing one would be a fabricated fact in the partition column.
+    """
+    (result_plan,) = [p for p in _seed_plans() if p.kind == "result"]
+    assert (
+        cm.constant_result_source(result_plan.columns)
+        == "bakta/mongo-seq_protein_bakta"
+    )
+    assert result_plan.columns["result_type"].args[0] == "annotation"
+    assert result_plan.columns["result_type_version"].args[0] == "1.0"
+
+
+def test_demo_seed_result_payload_carries_the_bakta_annotation_fields():
+    """``@json(...)`` collects the annotation fields, in declared order."""
+    (result_plan,) = [p for p in _seed_plans() if p.kind == "result"]
+    payload = result_plan.columns["payload"]
+    assert payload.name == "json"
+    assert list(payload.args) == [
+        "product",
+        "gene",
+        "genes",
+        "db_xrefs",
+        "psc",
+        "pscc",
+        "type",
+    ]
+
+
+def test_demo_seed_result_declares_a_default_parameter_set():
+    """``parameter_set = {}`` -- a DEFAULT run, hashing to the default hash.
+
+    The store recorded no parameters, so nothing was overridden on top of
+    the tool's defaults. This is the exact value OP-C3's promotion gate
+    checks on every seeded result row, so it is pinned here against the
+    shipped constant rather than a retyped digest.
+    """
+    from kbutillib.domains.identity import DEFAULT_PARAMETER_SET_HASH
+
+    (result_plan,) = [p for p in _seed_plans() if p.kind == "result"]
+    assert result_plan.parameter_set == {}
+    assert result_plan.parameter_set_json == "{}"
+    assert result_plan.parameter_set_hash == DEFAULT_PARAMETER_SET_HASH
+
+
+def test_demo_seed_declares_no_resource_parameters():
+    """No resource parameter reaches the parameter set.
+
+    Threads, memory, paths, batch sizes and hostnames describe HOW a run
+    was executed, not WHAT was computed, so they must never key a result.
+    The seed's parameter set is empty, which satisfies this trivially --
+    asserted anyway so that a later edit adding `batch_size` or a host to
+    it fails here rather than silently forking every slot.
+    """
+    (result_plan,) = [p for p in _seed_plans() if p.kind == "result"]
+    forbidden = {
+        "threads",
+        "cpus",
+        "memory",
+        "mem",
+        "path",
+        "paths",
+        "batch_size",
+        "hostname",
+        "host",
+        "uri",
+    }
+    assert not (set(result_plan.parameter_set or {}) & forbidden)
+
+
+# ==========================================================================
 # THE PARAMETER SET on a [source.result] block
 # ==========================================================================
 #

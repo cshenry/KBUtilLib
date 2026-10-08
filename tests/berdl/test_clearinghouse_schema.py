@@ -1,7 +1,8 @@
 """Unit tests for kbutillib.domains.kbase.berdl.clearinghouse_schema.
 
 Pure logic, no network, no live BERDL pod: table config shape for
-``BerdlCapability.load`` (the fifteen ``<entity_type>_<kind>`` tables), and
+``BerdlCapability.load`` (the fifteen ``<entity_type>_<kind>`` tables plus
+the parameter-set registry), and
 the hex/binary ``entity_hash`` encoding round-trip. Per the module
 docstring, the encode/decode helpers exist to bridge
 :mod:`kbutillib.domains.identity.standardizers` (hex digests) to this
@@ -14,14 +15,22 @@ import re
 
 import pytest
 
-from kbutillib.domains.identity import standardizers
-from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import ALL_PARITY_ROWS
+from kbutillib.domains.identity import DEFAULT_PARAMETER_SET_HASH, standardizers
+from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
+    ALL_PARITY_ROWS,
+    PARITY_CASES,
+)
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     ENTITY_TYPES,
     NAMESPACE,
+    PARAMETER_SET_TABLE,
     TENANT,
+    column_names,
     decode_entity_hash,
     encode_entity_hash,
+    parameter_set_column_names,
+    parameter_set_columns,
+    table_columns,
     table_configs,
     table_name,
     union_view_sql,
@@ -37,13 +46,40 @@ _ENTITY_COLUMNS = {
 }
 
 #: Columns every ``<type>_result`` table declares (GENERIC across types).
+#: ``parameter_set_hash`` sits immediately after ``source``; see
+#: :data:`_RESULT_COLUMN_ORDER` for the order assertion.
 _RESULT_COLUMNS = {
     "entity_hash": "STRING",
     "entity_type": "STRING",
     "result_type": "STRING",
     "source": "STRING",
+    "parameter_set_hash": "STRING",
     "result_type_version": "STRING",
     "payload": "STRING",
+    "observed_at": "TIMESTAMP",
+    "ingest_batch_id": "STRING",
+}
+
+#: The DDL ORDER of the result columns, asserted separately from the
+#: name->type mapping above because ``parameter_set_hash``'s POSITION is
+#: part of the contract: it must come immediately after ``source``.
+_RESULT_COLUMN_ORDER = (
+    "entity_hash",
+    "entity_type",
+    "result_type",
+    "source",
+    "parameter_set_hash",
+    "result_type_version",
+    "payload",
+    "observed_at",
+    "ingest_batch_id",
+)
+
+#: Columns the parameter-set registry declares. The registry is the
+#: sixteenth table and the only one that is not entity-typed.
+_PARAMETER_SET_COLUMNS = {
+    "parameter_set_hash": "STRING",
+    "canonical_json": "STRING",
     "observed_at": "TIMESTAMP",
     "ingest_batch_id": "STRING",
 }
@@ -63,6 +99,11 @@ def _columns_from_schema_sql(schema_sql: str) -> dict[str, str]:
         name, sql_type = part.strip().split(" ", 1)
         columns[name] = sql_type
     return columns
+
+
+def _schema_sql_from_columns(columns) -> str:
+    """Render ``(name, sql_type)`` pairs the way ``table_configs`` does."""
+    return ", ".join(f"{name} {sql_type}" for name, sql_type in columns)
 
 
 def _configs_by_name() -> dict[str, dict]:
@@ -107,28 +148,37 @@ class TestTableName:
 
 
 class TestTableConfigs:
-    def test_returns_exactly_fifteen_configs_with_the_expected_names(self):
+    def test_returns_exactly_sixteen_configs_with_the_expected_names(self):
         configs = table_configs()
         names = [table["name"] for table in configs]
         expected = (
             [f"{t}_entity" for t in ENTITY_TYPES]
             + [f"{t}_content" for t in ENTITY_TYPES]
             + [f"{t}_result" for t in ENTITY_TYPES]
+            + [PARAMETER_SET_TABLE]
         )
         # Documented order: all five entity, then all five content, then all
-        # five result, each in ENTITY_TYPES order.
+        # five result, each in ENTITY_TYPES order, then the parameter-set
+        # registry last.
         assert names == expected
-        assert len(configs) == 15
-        assert len(set(names)) == 15
+        assert len(configs) == 16
+        assert len(set(names)) == 16
 
-    def test_every_name_equals_table_name_resolver(self):
-        # Generator and resolver must not drift: each config's name is
-        # exactly table_name(entity_type, kind) for its type and kind.
+    def test_every_per_type_name_equals_table_name_resolver(self):
+        # Generator and resolver must not drift: each per-entity-type
+        # config's name is exactly table_name(entity_type, kind) for its
+        # type and kind. The registry is excluded deliberately -- it is not
+        # entity-typed, so table_name() cannot and must not name it (see
+        # TestParameterSetRegistry).
         expected = set()
         for kind in ("entity", "content", "result"):
             for entity_type in ENTITY_TYPES:
                 expected.add(table_name(entity_type, kind))
-        actual = {table["name"] for table in table_configs()}
+        actual = {
+            table["name"]
+            for table in table_configs()
+            if table["name"] != PARAMETER_SET_TABLE
+        }
         assert actual == expected
 
     def test_entity_tables_have_the_generic_entity_columns(self):
@@ -146,6 +196,41 @@ class TestTableConfigs:
                 configs[f"{entity_type}_result"]["schema_sql"]
             )
             assert cols == _RESULT_COLUMNS
+
+    def test_result_columns_are_in_the_declared_ddl_order(self):
+        """The nine result columns, in order, with parameter_set_hash
+        immediately after source.
+
+        Asserted as an ORDERED sequence, separately from the name->type
+        mapping above: ``schema_sql`` is a positional DDL fragment, and the
+        parity script builds its Spark rows POSITIONALLY from it, so a
+        column landing in the wrong position is a real defect that a
+        dict-equality assertion cannot see.
+        """
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            order = tuple(
+                _columns_from_schema_sql(
+                    configs[f"{entity_type}_result"]["schema_sql"]
+                )
+            )
+            assert order == _RESULT_COLUMN_ORDER, entity_type
+            # Stated once more as the relationship that matters, so a
+            # failure reads as "the hash moved" and not just "a tuple
+            # differs".
+            assert order.index("parameter_set_hash") == order.index("source") + 1
+
+    def test_result_columns_match_the_table_columns_accessor(self):
+        # table_columns()/column_names() and the config generator must read
+        # the same declaration.
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            assert column_names(entity_type, "result") == _RESULT_COLUMN_ORDER
+            assert dict(table_columns(entity_type, "result")) == _RESULT_COLUMNS
+            assert (
+                _schema_sql_from_columns(table_columns(entity_type, "result"))
+                == configs[f"{entity_type}_result"]["schema_sql"]
+            )
 
     def test_all_entity_schemas_are_byte_identical(self):
         # "Generic schema, split physically": every <type>_entity table's
@@ -234,7 +319,30 @@ class TestTableConfigs:
         }
         assert partitioned == {f"{t}_result" for t in ENTITY_TYPES}
 
-    def test_the_six_unpartitioned_tables_omit_the_key_entirely(self):
+    def test_source_is_the_only_partition_column_of_the_result_tables(self):
+        """``parameter_set_hash`` joined the result schema but NOT the
+        partition spec.
+
+        It is a hash, so it falls under the same rule as ``entity_hash``: a
+        good hash scatters uniformly, so partitioning on it gives zero read
+        pruning while multiplying partition count. ``source`` stays the one
+        partition column.
+        """
+        configs = _configs_by_name()
+        for entity_type in ENTITY_TYPES:
+            assert configs[f"{entity_type}_result"]["partition_by"] == "source"
+
+    def test_parameter_set_hash_is_not_a_partition_key_on_any_table(self):
+        for config in table_configs():
+            partition_by = config.get("partition_by")
+            if partition_by is None:
+                continue
+            columns = (
+                [partition_by] if isinstance(partition_by, str) else list(partition_by)
+            )
+            assert "parameter_set_hash" not in columns, config["name"]
+
+    def test_the_unpartitioned_tables_omit_the_key_entirely(self):
         configs = _configs_by_name()
         unpartitioned = {
             "genome_entity",
@@ -243,7 +351,15 @@ class TestTableConfigs:
             "genome_content",
             "function_content",
             "ontology_term_content",
+            # The parameter-set registry: one row per DISTINCT parameter set
+            # ever used, so a partition key buys nothing.
+            PARAMETER_SET_TABLE,
         }
+        # Exhaustive: these are ALL of them, so a table silently losing its
+        # partition key fails here too.
+        assert {
+            name for name, cfg in configs.items() if "partition_by" not in cfg
+        } == unpartitioned
         for name in unpartitioned:
             # Assert key ABSENCE, not a falsy value: an absent key is the
             # unambiguous signal for "unpartitioned".
@@ -276,6 +392,94 @@ class TestTableConfigs:
         first[0]["name"] = "mutated"
         second = table_configs()
         assert second[0]["name"] == "genome_entity"
+
+
+class TestParameterSetRegistry:
+    """The sixteenth table: the parameter-set registry.
+
+    It exists so each distinct parameter set is stored ONCE -- with its
+    canonical-JSON pre-image, so the hash rule stays recomputable -- rather
+    than repeating the parameter text on every result row. It is the only
+    clearinghouse table that is NOT entity-typed, and that distinction is
+    load-bearing: it must not appear in ENTITY_TYPES, must not be built by
+    table_name(), and must not be unioned into any all_<kind> view, because
+    all three would put a parameter-set lookup table into the per-entity
+    query surface.
+    """
+
+    def test_table_name_constant_is_parameter_set(self):
+        assert PARAMETER_SET_TABLE == "parameter_set"
+
+    def test_registry_config_is_present_and_last(self):
+        configs = table_configs()
+        assert configs[-1]["name"] == PARAMETER_SET_TABLE
+
+    def test_registry_declares_exactly_the_four_columns_in_order(self):
+        config = _configs_by_name()[PARAMETER_SET_TABLE]
+        cols = _columns_from_schema_sql(config["schema_sql"])
+        assert cols == _PARAMETER_SET_COLUMNS
+        assert tuple(cols) == (
+            "parameter_set_hash",
+            "canonical_json",
+            "observed_at",
+            "ingest_batch_id",
+        )
+
+    def test_registry_is_unpartitioned_by_key_absence(self):
+        # Key ABSENCE, not a falsy value -- the same convention the six
+        # unpartitioned per-type tables follow.
+        config = _configs_by_name()[PARAMETER_SET_TABLE]
+        assert "partition_by" not in config
+
+    def test_registry_schema_sql_is_rendered_from_the_accessor(self):
+        config = _configs_by_name()[PARAMETER_SET_TABLE]
+        assert (
+            _schema_sql_from_columns(parameter_set_columns())
+            == config["schema_sql"]
+        )
+        assert parameter_set_column_names() == tuple(_PARAMETER_SET_COLUMNS)
+
+    def test_registry_is_not_an_entity_type(self):
+        assert PARAMETER_SET_TABLE not in ENTITY_TYPES
+        # And table_name() refuses to name it, in either argument position.
+        with pytest.raises(ValueError):
+            table_name(PARAMETER_SET_TABLE, "entity")
+        with pytest.raises(ValueError):
+            table_name("protein", PARAMETER_SET_TABLE)
+
+    def test_registry_appears_in_no_union_view(self):
+        for kind in ("all_entity", "all_content", "all_result"):
+            sql = union_view_sql(kind, fqn_prefix=f"{TENANT}.{NAMESPACE}")
+            assert PARAMETER_SET_TABLE not in sql, kind
+            assert "canonical_json" not in sql, kind
+
+    def test_registry_has_no_entity_hash_column(self):
+        # It is keyed by parameter_set_hash, not by an entity. A regression
+        # that gave it an entity_hash would mean it had been modelled as a
+        # per-entity table.
+        cols = _columns_from_schema_sql(
+            _configs_by_name()[PARAMETER_SET_TABLE]["schema_sql"]
+        )
+        assert "entity_hash" not in cols
+
+    def test_every_result_parameter_set_hash_has_a_registry_home(self):
+        """The registry's hash column matches the result tables' by name.
+
+        The orphan check an operator runs (distinct result
+        ``parameter_set_hash`` values absent from the registry) only works
+        if both tables spell the column the same way.
+        """
+        registry = _columns_from_schema_sql(
+            _configs_by_name()[PARAMETER_SET_TABLE]["schema_sql"]
+        )
+        for entity_type in ENTITY_TYPES:
+            result = _columns_from_schema_sql(
+                _configs_by_name()[f"{entity_type}_result"]["schema_sql"]
+            )
+            assert "parameter_set_hash" in result
+            assert (
+                registry["parameter_set_hash"] == result["parameter_set_hash"]
+            )
 
 
 class TestEntityHashRoundTrip:
@@ -409,6 +613,52 @@ class TestParityFixtureMatchesResultSchema:
         # regression on this specific column fails with an obvious name.
         assert "entity_type" in self._result_column_names()
         assert all("entity_type" in row for row in ALL_PARITY_ROWS)
+
+    def test_parameter_set_hash_is_declared_and_supplied_by_every_fixture_row(
+        self,
+    ):
+        # Same reasoning as entity_type above: named separately so a
+        # regression on this specific column fails with an obvious name.
+        assert "parameter_set_hash" in self._result_column_names()
+        for index, row in enumerate(ALL_PARITY_ROWS):
+            value = row.get("parameter_set_hash")
+            assert re.fullmatch(r"[0-9a-f]{64}", value or ""), (
+                f"ALL_PARITY_ROWS[{index}] carries a malformed "
+                f"parameter_set_hash {value!r}"
+            )
+
+    def test_the_six_original_properties_are_all_default_runs(self):
+        """Every row of the six pre-parameter-set properties carries
+        DEFAULT_PARAMETER_SET_HASH -- the hash of the empty parameter set.
+
+        Asserted against the IMPORTED constant, never a hardcoded digest,
+        so the fixture and the rule that produces it cannot drift.
+        """
+        for case in PARITY_CASES:
+            if case.property_key == "parameter_set_forks_slot":
+                continue
+            assert case.parameter_set_hashes == (DEFAULT_PARAMETER_SET_HASH,), (
+                f"{case.property_key} should be a pure default run, got "
+                f"{case.parameter_set_hashes!r}"
+            )
+
+    def test_the_parameter_set_property_carries_two_distinct_hashes(self):
+        """Guards the seventh property against going vacuous.
+
+        If both its rows ended up on one hash they would share a slot and
+        the property -- "two parameter sets are both current" -- could not
+        fail even if parameter_set_hash left the slot key entirely.
+        """
+        case = next(
+            c for c in PARITY_CASES if c.property_key == "parameter_set_forks_slot"
+        )
+        assert len(case.parameter_set_hashes) == 2
+        assert len(set(case.parameter_set_hashes)) == 2
+        assert DEFAULT_PARAMETER_SET_HASH in case.parameter_set_hashes
+        # The two rows differ ONLY in parameter_set_hash, which is what
+        # makes them a slot-key test rather than a filter test.
+        for column in ("entity_hash", "entity_type", "result_type", "source"):
+            assert len({row[column] for row in case.rows}) == 1, column
 
 
 class TestUnionViewSql:

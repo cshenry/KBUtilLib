@@ -166,7 +166,7 @@ class TestAdapterSatisfiesBootstrapContract:
         # is served by DDL here rather than forwarded to the wrapped
         # capability -- see TestSchemaOnlyCreatePath.
         assert underlying.load_calls == []
-        assert len(session.statements) == 15
+        assert len(session.statements) == len(table_configs())
 
     def test_bare_berdl_capability_still_fails_the_bootstrap_contract(self):
         """A bare ``BerdlCapability`` has no ``table_exists``/
@@ -593,7 +593,7 @@ class TestSchemaOnlyCreatePath:
 
         assert underlying.load_calls == []
         assert result["load_result"]["schema_only"] is True
-        assert len(session.statements) == 15
+        assert len(session.statements) == len(table_configs())
 
     def test_the_old_forwarding_behaviour_really_did_raise(self):
         """Guards the regression test above against passing vacuously.
@@ -624,7 +624,7 @@ class TestSchemaOnlyCreatePath:
         assert [report["name"] for report in result["tables"]] == [
             config["name"] for config in table_configs()
         ]
-        assert len(session.statements) == 15
+        assert len(session.statements) == len(table_configs())
         assert all(
             statement.startswith("CREATE TABLE IF NOT EXISTS")
             for statement in session.statements
@@ -675,11 +675,25 @@ class TestSchemaOnlyCreatePath:
         """entity_hash is declared STRING (hex) since dev 1219: ingest has
         no BINARY in its schema_sql type map, so a BINARY table accepts no
         writes through the sanctioned path.
+
+        The NO-BINARY half applies to every config without exception. The
+        ``entity_hash STRING`` half applies to every table that HAS an
+        ``entity_hash`` -- the fifteen per-entity-type tables, but not the
+        ``parameter_set`` registry, which is keyed by ``parameter_set_hash``
+        and declares no ``entity_hash`` at all by design (it maps a
+        parameter-set hash to its canonical JSON; it is not a per-entity
+        table). Asserting the column onto it would assert the registry is
+        something it is not.
         """
+        checked_entity_hash = 0
         for config in table_configs():
             sql = _create_table_sql(config, "kbaseincubator.clearinghouse")
-            assert "entity_hash STRING" in sql
-            assert "BINARY" not in sql
+            assert "BINARY" not in sql, config["name"]
+            if "entity_hash" in config["schema_sql"]:
+                assert "entity_hash STRING" in sql, config["name"]
+                checked_entity_hash += 1
+        # Not vacuous: every table but the registry declares one.
+        assert checked_entity_hash == len(table_configs()) - 1
 
     def test_a_config_without_schema_sql_raises_before_anything_runs(self):
         session = _FakeSpark()

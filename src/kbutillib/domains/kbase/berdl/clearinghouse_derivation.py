@@ -11,8 +11,24 @@ running that query does not get a stale answer, it gets a **wrong** one,
 because every superseded row is still sitting in the table.
 
 THE SEMANTICS. Current state for a slot -- a slot being one
-``(entity_hash, entity_type, result_type, source)`` 4-tuple -- is the row
-with the greatest ``(observed_at, ingest_batch_id)`` within that slot.
+``(entity_hash, entity_type, result_type, source, parameter_set_hash)``
+5-tuple -- is the row with the greatest ``(observed_at,
+ingest_batch_id)`` within that slot.
+
+``parameter_set_hash`` is part of the slot key because a result is keyed
+by tool, tool version AND the parameters the caller set: two parameter
+sets run through one tool version are two DISTINCT current results, both
+current at once, not one overwriting the other. ``source`` carries only
+``<tool>/<version>``, so without ``parameter_set_hash`` in the key the
+same protein run through the same tool version at a different threshold
+-- or with TRANSYT's required NCBI taxonomy id -- would land in the
+default run's slot and supersede it, silently destroying the default
+answer and returning a parameterised one in its place to every caller
+that never asked for it. A default run is the empty parameter set ``{}``,
+whose hash is
+:data:`~kbutillib.domains.identity.DEFAULT_PARAMETER_SET_HASH`, so
+default runs still share one slot with each other.
+
 ``entity_type`` is part of the slot key because ``_standardize_protein``
 and ``_standardize_gene`` are the same standardizer (a bare
 ``_clean_sequence_letters``), so a sequence over the alphabet
@@ -29,8 +45,8 @@ protein, because ``"|".join(["X"]) == "X"`` -- so ``entity_hash("genome",
 a lookup must never key on ``entity_hash`` alone. This module implements
 the derivation with a window
 function: ``ROW_NUMBER() OVER (PARTITION BY entity_hash, entity_type,
-result_type, source ORDER BY observed_at DESC, ingest_batch_id DESC)``,
-keeping only rows where that number is ``1``.
+result_type, source, parameter_set_hash ORDER BY observed_at DESC,
+ingest_batch_id DESC)``, keeping only rows where that number is ``1``.
 
 Two things are deliberate and must never be "fixed":
 
@@ -94,6 +110,8 @@ something provable off-pod.
 
 from __future__ import annotations
 
+import re
+
 from .clearinghouse_schema import ENTITY_TYPES, table_configs, table_name
 
 __all__ = ["current_state_sql"]
@@ -111,7 +129,17 @@ __all__ = ["current_state_sql"]
 #: table and stays correct if this derivation is ever pointed at a
 #: cross-type source (e.g. a UNION-ALL view). Do NOT "clean it up" by
 #: dropping it -- that would be a gratuitous change to merged, working code.
-_SLOT_KEY_COLUMNS = ("entity_hash", "entity_type", "result_type", "source")
+#:
+#: ``parameter_set_hash`` closes the tuple: two parameter sets run through
+#: one tool version are two DISTINCT current results, not one overwriting
+#: the other. See the module docstring's SEMANTICS paragraph.
+_SLOT_KEY_COLUMNS = (
+    "entity_hash",
+    "entity_type",
+    "result_type",
+    "source",
+    "parameter_set_hash",
+)
 
 #: The columns that break ties within a slot, in ``ORDER BY`` precedence.
 #: Both are non-null by construction; see the module docstring for why
@@ -184,16 +212,72 @@ def _result_columns() -> list[str]:
 def _quote_literal(value: str) -> str:
     """Single-quote a value for embedding in the ``WHERE`` clause.
 
-    Used for both ``source`` and ``entity_type`` filter values. Both are
-    internal, operator-controlled strings (``source`` is ``<tool>/<version>``
-    per ``clearinghouse_schema``'s partitioning note; ``entity_type`` is one
-    of the five stored, schema-recognized values) -- never end-user input
-    -- so literal embedding with the standard SQL single-quote escape
-    (``'`` -> ``''``) is the correct choice here: :func:`current_state_sql`
-    returns SQL *text* and nothing else, so there is no side channel through
-    which a separate bind-parameter list could travel back to the caller.
+    Used for the ``source``, ``entity_type`` and ``parameter_set_hash``
+    filter values. All are internal, operator-controlled strings
+    (``source`` is ``<tool>/<version>`` per ``clearinghouse_schema``'s
+    partitioning note; ``entity_type`` is one of the five stored,
+    schema-recognized values; ``parameter_set_hash`` is checked against the
+    64-lowercase-hex alphabet by :func:`_validated_parameter_set_hashes`
+    before it ever reaches here) -- never end-user input -- so literal
+    embedding with the standard SQL single-quote escape (``'`` -> ``''``) is
+    the correct choice here: :func:`current_state_sql` returns SQL *text*
+    and nothing else, so there is no side channel through which a separate
+    bind-parameter list could travel back to the caller.
     """
     return "'" + value.replace("'", "''") + "'"
+
+
+#: The stored form of a ``parameter_set_hash``: a 64-character LOWERCASE hex
+#: sha256 digest, exactly as
+#: :func:`kbutillib.domains.identity.parameter_set_hash` returns it.
+_PARAMETER_SET_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _validated_parameter_set_hashes(values: list[str]) -> list[str]:
+    """Check every ``parameter_set_hash`` filter value, or raise.
+
+    This function's whole output is SQL TEXT and it BINDS NOTHING (see
+    :func:`_quote_literal`), so a filter value is embedded into the
+    statement rather than parameterised. ``parameter_set_hash`` has one
+    legal form -- 64 lowercase hex characters -- so validating against it
+    here is both a correctness check and the thing that keeps literal
+    embedding safe: a value that passes contains no quote, no whitespace
+    and no SQL-significant character at all.
+
+    Rejecting an UPPERCASE digest is deliberate, not pedantry. STRING
+    equality is case-sensitive in both Spark and Trino, so an uppercase
+    digest is a syntactically fine predicate that silently matches zero
+    stored rows -- a reader would conclude the parameter set has no results
+    and fail open into recomputing work already done. Lowercasing it here
+    instead of raising would hide a caller that is not going through
+    :func:`kbutillib.domains.identity.parameter_set_hash`.
+
+    Args:
+        values: The caller's ``parameter_set_hashes`` list (non-empty; the
+            empty-list case is a whole-query short-circuit handled by
+            :func:`current_state_sql`).
+
+    Returns:
+        ``values`` unchanged, once every element has passed.
+
+    Raises:
+        ValueError: Any element is not a ``str``, or is not exactly 64
+            lowercase hex characters. The message names the offending
+            value and its position.
+    """
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not _PARAMETER_SET_HASH_RE.fullmatch(value):
+            raise ValueError(
+                f"current_state_sql: parameter_set_hashes[{index}] is not a "
+                f"valid parameter_set_hash: {value!r}. Expected exactly 64 "
+                "LOWERCASE hex characters, as returned by "
+                "kbutillib.domains.identity.parameter_set_hash(). An "
+                "uppercase digest is rejected rather than lowercased, "
+                "because STRING comparison is case-sensitive and an "
+                "uppercase value would match zero stored rows instead of "
+                "failing."
+            )
+    return values
 
 
 def _in_predicate(column: str, values: list[str]) -> str:
@@ -214,6 +298,7 @@ def current_state_sql(
     *,
     sources: list[str] | None = None,
     entity_types: list[str] | None = None,
+    parameter_set_hashes: list[str] | None = None,
     engine: str = "spark",
 ) -> str:
     """Build the SQL that derives clearinghouse current state.
@@ -224,10 +309,11 @@ def current_state_sql(
     :func:`_quote_fqn`.
 
     Selects, from the append-only ``result`` table, exactly one row per
-    ``(entity_hash, entity_type, result_type, source)`` slot: the row
-    with the greatest ``(observed_at, ingest_batch_id)`` in that slot.
-    See the module docstring for the full semantics and the deliberate
-    choices (``entity_type`` included in the slot key, ``ingest_batch_id``
+    ``(entity_hash, entity_type, result_type, source,
+    parameter_set_hash)`` slot: the row with the greatest ``(observed_at,
+    ingest_batch_id)`` in that slot. See the module docstring for the full
+    semantics and the deliberate choices (``entity_type`` and
+    ``parameter_set_hash`` included in the slot key, ``ingest_batch_id``
     as a mandatory tie-break, ``result_type_version`` excluded from the
     slot key) that must not be "fixed".
 
@@ -245,17 +331,35 @@ def current_state_sql(
             is also a partition column on ``result``). ``None`` (the
             default) applies no filter. An empty list is a request to
             match zero entity types.
+        parameter_set_hashes: If given, pre-filters the underlying rows to
+            only these ``parameter_set_hash`` values before windowing.
+            EXACTLY the same semantics as ``sources``: ``None`` (the
+            default) applies no filter, an empty list is a request to
+            match zero parameter sets, and a non-empty list becomes a
+            ``parameter_set_hash IN (...)`` predicate. Unlike ``source``
+            this is NOT a partition column (a hash prunes nothing; see
+            ``clearinghouse_schema``'s module docstring), so it is a
+            row-level filter rather than a pruning one -- which changes
+            its performance, never its meaning.
 
-        When both ``sources`` and ``entity_types`` are given, the two
-        filters compose with ``AND`` (never ``OR`` -- ``OR`` would
-        silently broaden the read and destroy the pruning both parameters
-        exist for). An empty list on *either* filter yields ``WHERE
-        1 = 0`` for the whole query, rather than combining an ``1 = 0``
-        guard with the other filter's ``IN`` predicate.
+        When more than one of ``sources``, ``entity_types`` and
+        ``parameter_set_hashes`` is given, the filters compose with
+        ``AND`` (never ``OR`` -- ``OR`` would silently broaden the read
+        and destroy the pruning these parameters exist for). An empty list
+        on *any* filter yields ``WHERE 1 = 0`` for the whole query, rather
+        than combining an ``1 = 0`` guard with another filter's ``IN``
+        predicate.
 
     Returns:
         SQL text implementing the derivation. Performs no I/O; holds no
         session; makes no network call.
+
+    Raises:
+        ValueError: Any ``parameter_set_hashes`` element is not exactly 64
+            lowercase hex characters -- see
+            :func:`_validated_parameter_set_hashes`. This function returns
+            SQL text and binds nothing, so filter values are embedded as
+            literals and are validated before embedding.
     """
     columns = _result_columns()
     select_list = ",\n        ".join(columns)
@@ -263,8 +367,17 @@ def current_state_sql(
     order_by = ", ".join(f"{col} DESC" for col in _ORDER_COLUMNS)
     table = _quote_fqn(result_table_fqn, engine)
 
-    matches_nothing = (sources is not None and len(sources) == 0) or (
-        entity_types is not None and len(entity_types) == 0
+    # Validated BEFORE the match-nothing short-circuit, so a malformed hash
+    # raises whether or not another filter would have emptied the query --
+    # a caller passing a bad digest alongside sources=[] still hears about
+    # the bad digest rather than silently getting a '1 = 0' query.
+    if parameter_set_hashes:
+        _validated_parameter_set_hashes(parameter_set_hashes)
+
+    matches_nothing = (
+        (sources is not None and len(sources) == 0)
+        or (entity_types is not None and len(entity_types) == 0)
+        or (parameter_set_hashes is not None and len(parameter_set_hashes) == 0)
     )
 
     if matches_nothing:
@@ -275,6 +388,10 @@ def current_state_sql(
             predicates.append(_in_predicate("source", sources))
         if entity_types is not None:
             predicates.append(_in_predicate("entity_type", entity_types))
+        if parameter_set_hashes is not None:
+            predicates.append(
+                _in_predicate("parameter_set_hash", parameter_set_hashes)
+            )
         if predicates:
             where_clause = "\n    WHERE " + " AND ".join(predicates)
         else:

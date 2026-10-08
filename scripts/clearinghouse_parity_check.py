@@ -30,7 +30,11 @@ its ``entity_type`` -- these protein fixture rows land in
 never a raw ``pyiceberg`` write; see the runbook's "if something goes
 wrong" section for why that shortcut is refused even under failure
 pressure), runs the real ``current_state_sql()`` SQL text against each via
-Spark, and asserts the SAME six properties the DuckDB tests assert.
+Spark, and asserts the SAME properties the DuckDB tests assert -- every
+case in ``clearinghouse_parity_fixture.PARITY_CASES``, including the
+``parameter_set_forks_slot`` property that proves two parameter sets for
+one tool version are both current and that a ``parameter_set_hashes``
+filter returns exactly its own row.
 
 THE FIXTURE IS SHARED, NOT RE-TYPED. Every row this script appends comes
 from :mod:`kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture` --
@@ -48,8 +52,8 @@ per-type ``<entity_type>_result`` tables forever -- re-running this script
 appends *more* rows to the same fixture slots, which changes nothing about
 the current-state
 answer for those slots (same ``entity_hash``/``entity_type``/
-``result_type``/``source``, so still the same slot; newest
-``(observed_at, ingest_batch_id)`` still wins). They can never shadow, or
+``result_type``/``source``/``parameter_set_hash``, so still the same
+slot; newest ``(observed_at, ingest_batch_id)`` still wins). They can never shadow, or
 be shadowed by, a real annotation's slot.
 
 Usage (from a kbhub notebook cell or terminal), after confirming OP1 and
@@ -58,7 +62,7 @@ OP2 in the runbook:
     python scripts/clearinghouse_parity_check.py
 
 Prints one PASS/FAIL line per property and a final summary line. Exits 0
-if all six pass, 1 if any fails, 2 if run off-pod.
+if every property passes, 1 if any fails, 2 if run off-pod.
 """
 
 from __future__ import annotations
@@ -71,13 +75,16 @@ from kbutillib.domains.kbase.berdl.capability import POD_MACHINE, BerdlCapabilit
 from kbutillib.domains.kbase.berdl.clearinghouse_derivation import current_state_sql
 from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     ALL_PARITY_ROWS,
+    PARAMETER_SET_EXPECTED_PAYLOADS,
     PARITY_CASES,
     ParityCase,
     rows_by_entity_type,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    ENTITY_TYPES,
     NAMESPACE,
     TENANT,
+    column_names,
     table_configs,
     table_name,
 )
@@ -110,17 +117,18 @@ def _result_table_fqn(entity_type: str) -> str:
     return f"{TENANT}.{NAMESPACE}.{table_name(entity_type, 'result')}"
 
 #: Column order for rows returned from the Spark query, matching
-#: ``clearinghouse_schema``'s ``result`` table declaration.
-_RESULT_COLUMNS = (
-    "entity_hash",
-    "entity_type",
-    "result_type",
-    "source",
-    "result_type_version",
-    "payload",
-    "observed_at",
-    "ingest_batch_id",
-)
+#: ``clearinghouse_schema``'s ``<type>_result`` table declaration.
+#:
+#: DERIVED from the schema module's own accessor rather than re-typed here.
+#: This constant WAS a hand-maintained tuple, which is the same failure
+#: shape as task 914 (recorded in :func:`_build_fixture_dataframe`'s
+#: docstring): a column added to the result schema did not reach the
+#: hand-maintained list, and an operator first met the mismatch at the live
+#: table. ``parameter_set_hash`` joining the schema is exactly that event,
+#: so the list is now derived and cannot miss the next one. The result
+#: schema is GENERIC across all five ``<type>_result`` tables, so the first
+#: entity type defines the column list for every one of them.
+_RESULT_COLUMNS = column_names(ENTITY_TYPES[0], "result")
 
 def _build_fixture_dataframe(
     spark: Any, entity_type: str, rows_for_type: tuple[dict[str, Any], ...]
@@ -256,15 +264,34 @@ def _append_fixture_rows(
 
 
 def _query_current_state(
-    capability: BerdlCapability, entity_type: str, sources: tuple[str, ...]
+    capability: BerdlCapability,
+    entity_type: str,
+    sources: tuple[str, ...],
+    parameter_set_hashes: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``current_state_sql()`` against one type's ``result`` table.
 
     The table is the ``<entity_type>_result`` table resolved via
     :func:`table_name` (never string-concatenated) and qualified by
     :func:`_result_table_fqn`.
+
+    Args:
+        capability: The in-pod capability to run the query through.
+        entity_type: Which ``<entity_type>_result`` table to read.
+        sources: Scopes the read to this case's ``source`` values.
+        parameter_set_hashes: When given, additionally scopes the read to
+            these ``parameter_set_hash`` values -- the filter the
+            ``parameter_set_forks_slot`` property exercises. ``None``
+            (the default) applies no parameter-set filter, matching every
+            other property's read.
     """
-    sql = current_state_sql(_result_table_fqn(entity_type), sources=list(sources))
+    sql = current_state_sql(
+        _result_table_fqn(entity_type),
+        sources=list(sources),
+        parameter_set_hashes=(
+            None if parameter_set_hashes is None else list(parameter_set_hashes)
+        ),
+    )
     spark_rows = capability.query(sql, engine="spark")
     return [
         {column: row[column] for column in _RESULT_COLUMNS} for row in spark_rows
@@ -340,6 +367,50 @@ def _check_property(
             assert rows_for_entity[0]["result_type_version"] == "v2"
             payload = json.loads(rows_for_entity[0]["payload"])
             assert payload == {"ns": {"k": "new_version"}}
+        elif case.property_key == "genome_fasta_invariance":
+            # All four renderings share one entity_hash, one source and one
+            # parameter set, so they are one slot: exactly one current row.
+            assert len(rows_for_entity) == 1, (
+                f"expected exactly 1 current row, got {len(rows_for_entity)}"
+            )
+        elif case.property_key == "parameter_set_forks_slot":
+            default_hash, evalue_hash = case.parameter_set_hashes
+            by_hash = {row["parameter_set_hash"]: row for row in rows_for_entity}
+            # Both parameter sets are current at once, even though the two
+            # rows share entity_hash/entity_type/result_type/source: the
+            # slot key carries parameter_set_hash.
+            assert set(by_hash) == {default_hash, evalue_hash}, (
+                "expected both parameter sets current, got "
+                f"{sorted(by_hash)!r}"
+            )
+            for hash_value, expected_payload in (
+                PARAMETER_SET_EXPECTED_PAYLOADS.items()
+            ):
+                actual = json.loads(by_hash[hash_value]["payload"])
+                assert actual == expected_payload, (
+                    f"parameter set {hash_value} carries payload {actual!r}, "
+                    f"expected {expected_payload!r}"
+                )
+            # Filtering current state by ONE parameter_set_hash returns
+            # exactly its row and not the other parameter set's.
+            filtered_rows = [
+                row
+                for row in _query_current_state(
+                    capability, case.entity_type, case.sources, (evalue_hash,)
+                )
+                if row["entity_hash"] == case.entity_hash
+            ]
+            filtered_hashes = {row["parameter_set_hash"] for row in filtered_rows}
+            assert filtered_hashes == {evalue_hash}, (
+                f"parameter_set_hashes filter should prune to "
+                f"{{{evalue_hash!r}}}, got {filtered_hashes!r}"
+            )
+            assert len(filtered_rows) == 1, (
+                f"expected exactly 1 filtered row, got {len(filtered_rows)}"
+            )
+            assert json.loads(filtered_rows[0]["payload"]) == (
+                PARAMETER_SET_EXPECTED_PAYLOADS[evalue_hash]
+            )
         else:  # pragma: no cover - exhaustive over PARITY_CASES
             raise AssertionError(f"unknown property_key {case.property_key!r}")
     except AssertionError as exc:
@@ -386,7 +457,7 @@ def main() -> int:
 
     print()
     if all_passed:
-        print("PARITY CHECK: ALL SIX PROPERTIES PASS")
+        print(f"PARITY CHECK: ALL {len(PARITY_CASES)} PROPERTIES PASS")
         return 0
     print("PARITY CHECK: AT LEAST ONE PROPERTY FAILED", file=sys.stderr)
     return 1

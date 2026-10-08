@@ -29,11 +29,18 @@ import random
 import duckdb
 import pytest
 
+from kbutillib.domains.identity import (
+    DEFAULT_PARAMETER_SET_HASH,
+    parameter_set_hash,
+)
 from kbutillib.domains.kbase.berdl.clearinghouse_derivation import current_state_sql
 from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     DUPLICATE_COLLAPSE,
     INGEST_BATCH_ID_TIE_BREAK,
     NEWEST_WINS,
+    PARAMETER_SET_EVALUE_HASH,
+    PARAMETER_SET_EXPECTED_PAYLOADS,
+    PARAMETER_SET_FORKS_SLOT,
     RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY,
     SOURCE_ISOLATION,
     TERM_REMOVAL,
@@ -42,12 +49,31 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
 
 _TABLE_FQN = "result"
 
+#: The nine declared result columns, in DDL order -- the same order
+#: ``clearinghouse_schema._RESULT_COLUMNS`` declares, with
+#: ``parameter_set_hash`` immediately after ``source``. The surrogate table
+#: below, its positional INSERT and the projection in
+#: :meth:`ResultFixture.current_state` are all built from this one list, so
+#: the next column added to the schema cannot silently misalign them.
+_RESULT_COLUMN_ORDER = (
+    "entity_hash",
+    "entity_type",
+    "result_type",
+    "source",
+    "parameter_set_hash",
+    "result_type_version",
+    "payload",
+    "observed_at",
+    "ingest_batch_id",
+)
+
 _CREATE_RESULT_TABLE = """
 CREATE TABLE result (
     entity_hash VARCHAR,
     entity_type VARCHAR,
     result_type VARCHAR,
     source VARCHAR,
+    parameter_set_hash VARCHAR,
     result_type_version VARCHAR,
     payload VARCHAR,
     observed_at TIMESTAMP,
@@ -55,7 +81,9 @@ CREATE TABLE result (
 )
 """
 
-_INSERT_ROW = "INSERT INTO result VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+_INSERT_ROW = "INSERT INTO result VALUES (" + ", ".join(
+    "?" for _ in _RESULT_COLUMN_ORDER
+) + ")"
 
 
 def _for_duckdb(sql: str) -> str:
@@ -85,26 +113,30 @@ class ResultFixture:
         payload: dict,
         observed_at: str,
         ingest_batch_id: str,
-        # Not yet part of the shared parity fixture rows (that is a
-        # separate, later task) -- default every row inserted through
-        # this harness to "protein" so this file's own tests keep
-        # exercising the pre-existing three-column slot key/derivation
-        # logic unchanged while the table's declared column set grows.
+        # Defaults so this file's own hand-built rows (the ones not coming
+        # from the shared parity fixture) stay terse while the table's
+        # declared column set grows. "protein" is the type every such row
+        # used before entity_type joined the slot key; the DEFAULT parameter
+        # set is likewise what every pre-parameter-set row means -- a run
+        # with nothing set on top of the tool version's defaults. Tests
+        # exercising the parameter-set slot key pass it explicitly.
         entity_type: str = "protein",
+        parameter_set_hash: str = DEFAULT_PARAMETER_SET_HASH,
     ) -> None:
         # Bind the hex entity_hash as a parameter -- never a literal.
+        values = {
+            "entity_hash": entity_hash,
+            "entity_type": entity_type,
+            "result_type": result_type,
+            "source": source,
+            "parameter_set_hash": parameter_set_hash,
+            "result_type_version": result_type_version,
+            "payload": json.dumps(payload),
+            "observed_at": observed_at,
+            "ingest_batch_id": ingest_batch_id,
+        }
         self.con.execute(
-            _INSERT_ROW,
-            [
-                entity_hash,
-                entity_type,
-                result_type,
-                source,
-                result_type_version,
-                json.dumps(payload),
-                observed_at,
-                ingest_batch_id,
-            ],
+            _INSERT_ROW, [values[name] for name in _RESULT_COLUMN_ORDER]
         )
 
     def current_state(
@@ -112,20 +144,18 @@ class ResultFixture:
         *,
         sources: list[str] | None = None,
         entity_types: list[str] | None = None,
+        parameter_set_hashes: list[str] | None = None,
     ) -> list[dict]:
-        sql = current_state_sql(_TABLE_FQN, sources=sources, entity_types=entity_types)
-        columns = [
-            "entity_hash",
-            "entity_type",
-            "result_type",
-            "source",
-            "result_type_version",
-            "payload",
-            "observed_at",
-            "ingest_batch_id",
-        ]
+        sql = current_state_sql(
+            _TABLE_FQN,
+            sources=sources,
+            entity_types=entity_types,
+            parameter_set_hashes=parameter_set_hashes,
+        )
         rows = self.con.execute(_for_duckdb(sql)).fetchall()
-        return [dict(zip(columns, row, strict=True)) for row in rows]
+        return [
+            dict(zip(_RESULT_COLUMN_ORDER, row, strict=True)) for row in rows
+        ]
 
 
 @pytest.fixture
@@ -420,6 +450,218 @@ class TestResultTypeVersionOutsideSlotKey:
         assert json.loads(rows[0]["payload"]) == {"ns": {"k": "new_version"}}
 
 
+class TestParameterSetHashInSlotKey:
+    """Property 9: ``parameter_set_hash`` is part of the slot key.
+
+    Two parameter sets run through ONE tool version at one
+    ``(entity_hash, entity_type, result_type, source)`` are two distinct
+    current results, both current at once. ``source`` carries only
+    ``<tool>/<version>``, so before the column joined the slot key the
+    parameterised run would have superseded the default one -- silently
+    destroying the default answer and serving a parameterised one to every
+    caller that never asked for it.
+
+    Rows come from the shared parity fixture, the same module the in-pod
+    OP3 check appends, so the two cannot drift.
+    """
+
+    def test_two_parameter_sets_for_one_tool_version_are_both_current(
+        self, fixture
+    ):
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        rows = {
+            row["parameter_set_hash"]: row
+            for row in fixture.current_state()
+            if row["entity_hash"] == case.entity_hash
+        }
+        default_hash, evalue_hash = case.parameter_set_hashes
+        assert set(rows) == {default_hash, evalue_hash}
+        for hash_value, expected in PARAMETER_SET_EXPECTED_PAYLOADS.items():
+            assert json.loads(rows[hash_value]["payload"]) == expected
+        # The two rows really do share every other slot-key column, so this
+        # is a slot-key test and not an incidental one.
+        assert len({row["source"] for row in rows.values()}) == 1
+
+    def test_the_default_row_survives_a_later_parameterised_append(
+        self, fixture
+    ):
+        """The regression this column exists to prevent, stated directly.
+
+        The parameterised row is the NEWER of the two, so under the old
+        4-tuple slot key it would have won the shared slot and the default
+        row would be absent from current state entirely.
+        """
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        rows = [
+            row
+            for row in fixture.current_state()
+            if row["entity_hash"] == case.entity_hash
+        ]
+        assert len(rows) == 2
+        default_rows = [
+            row
+            for row in rows
+            if row["parameter_set_hash"] == DEFAULT_PARAMETER_SET_HASH
+        ]
+        assert len(default_rows) == 1
+        assert json.loads(default_rows[0]["payload"]) == {
+            "ns": {"k": "default_params"}
+        }
+
+    def test_parameter_set_hashes_filter_returns_exactly_its_own_row(
+        self, fixture
+    ):
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        _default_hash, evalue_hash = case.parameter_set_hashes
+        rows = [
+            row
+            for row in fixture.current_state(
+                parameter_set_hashes=[evalue_hash]
+            )
+            if row["entity_hash"] == case.entity_hash
+        ]
+        assert len(rows) == 1
+        assert rows[0]["parameter_set_hash"] == evalue_hash
+        assert json.loads(rows[0]["payload"]) == (
+            PARAMETER_SET_EXPECTED_PAYLOADS[evalue_hash]
+        )
+
+    def test_filtering_by_the_default_hash_returns_the_default_row(
+        self, fixture
+    ):
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        rows = [
+            row
+            for row in fixture.current_state(
+                parameter_set_hashes=[DEFAULT_PARAMETER_SET_HASH]
+            )
+            if row["entity_hash"] == case.entity_hash
+        ]
+        assert len(rows) == 1
+        assert json.loads(rows[0]["payload"]) == {"ns": {"k": "default_params"}}
+
+    def test_empty_parameter_set_hashes_matches_nothing_on_execution(
+        self, fixture
+    ):
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        assert fixture.current_state(parameter_set_hashes=[]) == []
+
+    def test_newer_row_still_wins_within_one_parameter_set(self, fixture):
+        """Supersession is unchanged INSIDE a parameter set.
+
+        Widening the slot key must not stop a re-run of the SAME parameter
+        set from superseding its predecessor -- otherwise every re-run
+        would accumulate as a separate current row.
+        """
+        entity = fixture_entity_hash("param-set-supersede")
+        source = "parity-check/param_set_supersede/toolA"
+        for observed_at, batch, marker in (
+            ("2026-03-01 00:00:00", "01HPSUPERSEDE000000000AA", "old"),
+            ("2026-03-02 00:00:00", "01HPSUPERSEDE000000000AB", "new"),
+        ):
+            fixture.insert(
+                entity_hash=entity,
+                result_type="annotation",
+                source=source,
+                parameter_set_hash=PARAMETER_SET_EVALUE_HASH,
+                result_type_version="v1",
+                payload={"ns": {"k": marker}},
+                observed_at=observed_at,
+                ingest_batch_id=batch,
+            )
+        rows = [
+            row
+            for row in fixture.current_state()
+            if row["entity_hash"] == entity
+        ]
+        assert len(rows) == 1
+        assert json.loads(rows[0]["payload"]) == {"ns": {"k": "new"}}
+
+    def test_result_type_version_alone_still_never_forks_a_slot(self, fixture):
+        """Two rows on one parameter set differing ONLY in
+        ``result_type_version`` still collapse to one current row.
+
+        ``result_type_version`` stayed OUT of the slot key when
+        ``parameter_set_hash`` joined it; this asserts the widened key did
+        not drag it in.
+        """
+        entity = fixture_entity_hash("param-set-version")
+        source = "parity-check/param_set_version/toolA"
+        for version, observed_at, batch in (
+            ("v1", "2026-04-01 00:00:00", "01HPSVERSION0000000000AA"),
+            ("v2", "2026-04-02 00:00:00", "01HPSVERSION0000000000AB"),
+        ):
+            fixture.insert(
+                entity_hash=entity,
+                result_type="annotation",
+                source=source,
+                parameter_set_hash=PARAMETER_SET_EVALUE_HASH,
+                result_type_version=version,
+                payload={"ns": {"v": version}},
+                observed_at=observed_at,
+                ingest_batch_id=batch,
+            )
+        rows = [
+            row
+            for row in fixture.current_state()
+            if row["entity_hash"] == entity
+        ]
+        assert len(rows) == 1
+        assert rows[0]["result_type_version"] == "v2"
+
+    def test_one_parameter_set_per_slot_is_unaffected_by_another_entity(
+        self, fixture
+    ):
+        """Two parameter sets stay scoped to their own entity.
+
+        A parameter_set_hashes filter is a row filter, not a slot filter,
+        so this guards against it accidentally pulling in another entity's
+        row for the same hash.
+        """
+        case = PARAMETER_SET_FORKS_SLOT
+        for row in case.rows:
+            fixture.insert(**row)
+        other_entity = fixture_entity_hash("param-set-other-entity")
+        fixture.insert(
+            entity_hash=other_entity,
+            result_type="annotation",
+            source=case.rows[0]["source"],
+            parameter_set_hash=PARAMETER_SET_EVALUE_HASH,
+            result_type_version="v1",
+            payload={"ns": {"k": "other_entity"}},
+            observed_at="2026-05-01 00:00:00",
+            ingest_batch_id="01HPSOTHER00000000000AA",
+        )
+        rows = fixture.current_state(
+            parameter_set_hashes=[PARAMETER_SET_EVALUE_HASH]
+        )
+        by_entity = {row["entity_hash"]: row for row in rows}
+        assert set(by_entity) == {case.entity_hash, other_entity}
+        assert all(
+            row["parameter_set_hash"] == PARAMETER_SET_EVALUE_HASH
+            for row in rows
+        )
+
+    def test_the_fixture_hashes_come_from_the_identity_rule(self):
+        """Not hardcoded hex: the fixture's hashes are what
+        ``parameter_set_hash`` actually returns for those sets.
+        """
+        assert parameter_set_hash({}) == DEFAULT_PARAMETER_SET_HASH
+        assert parameter_set_hash({"evalue": "1e-10"}) == (
+            PARAMETER_SET_EVALUE_HASH
+        )
+
+
 class TestDialectConformance:
     """String-shape checks on the emitted SQL text for the dialect
     constraints that DuckDB execution alone cannot prove (DuckDB accepts
@@ -462,11 +704,90 @@ class TestDialectConformance:
         sql = current_state_sql("ns.result")
         assert "NULLS" not in sql.upper()
 
-    def test_partition_by_names_all_four_slot_key_columns_in_order(self):
+    def test_partition_by_names_all_five_slot_key_columns_in_order(self):
         sql = current_state_sql("ns.result")
         assert (
-            "PARTITION BY entity_hash, entity_type, result_type, source" in sql
+            "PARTITION BY entity_hash, entity_type, result_type, source, "
+            "parameter_set_hash" in sql
         )
+
+    def test_result_type_version_is_not_in_the_window_key(self):
+        """Still deliberately OUT of the slot key, even now the key grew.
+
+        If it were in, bumping a result-type schema would fork every slot
+        in the corpus and nothing would ever supersede its predecessor
+        again -- see the module docstring.
+        """
+        sql = current_state_sql("ns.result")
+        partition_line = next(
+            line for line in sql.splitlines() if "PARTITION BY" in line
+        )
+        assert "result_type_version" not in partition_line
+
+    def test_parameter_set_hashes_filter_renders_as_where_in(self):
+        sql = current_state_sql(
+            "ns.result", parameter_set_hashes=[DEFAULT_PARAMETER_SET_HASH]
+        )
+        assert (
+            f"WHERE parameter_set_hash IN ('{DEFAULT_PARAMETER_SET_HASH}')" in sql
+        )
+
+    def test_empty_parameter_set_hashes_list_filters_out_everything(self):
+        sql = current_state_sql("ns.result", parameter_set_hashes=[])
+        assert "WHERE 1 = 0" in sql
+        assert "parameter_set_hash IN" not in sql
+
+    def test_no_parameter_set_hashes_filter_when_none(self):
+        sql = current_state_sql("ns.result")
+        assert "parameter_set_hash IN" not in sql
+        assert "1 = 0" not in sql
+
+    def test_parameter_set_hashes_combines_with_the_other_filters_by_and(self):
+        sql = current_state_sql(
+            "ns.result",
+            sources=["toolA/1"],
+            entity_types=["protein"],
+            parameter_set_hashes=[DEFAULT_PARAMETER_SET_HASH],
+        )
+        assert (
+            "WHERE source IN ('toolA/1') AND entity_type IN ('protein') AND "
+            f"parameter_set_hash IN ('{DEFAULT_PARAMETER_SET_HASH}')" in sql
+        )
+        assert " OR " not in sql
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            DEFAULT_PARAMETER_SET_HASH.upper(),  # uppercase matches no row
+            "a" * 63,  # too short
+            "a" * 65,  # too long
+            "g" * 64,  # not hex
+            "",
+            "' OR 1=1 --",  # the injection shape literal embedding exposes
+            DEFAULT_PARAMETER_SET_HASH + " ",
+        ],
+    )
+    def test_non_hex_parameter_set_hash_raises_value_error(self, bad_value):
+        with pytest.raises(ValueError, match="parameter_set_hashes"):
+            current_state_sql("ns.result", parameter_set_hashes=[bad_value])
+
+    def test_bad_hash_raises_even_alongside_a_match_nothing_filter(self):
+        """A malformed digest is reported, not swallowed by ``sources=[]``.
+
+        Were validation ordered after the match-nothing short-circuit, a
+        caller passing both would get a silent ``WHERE 1 = 0`` query and
+        never learn its digest was wrong.
+        """
+        with pytest.raises(ValueError, match="parameter_set_hashes"):
+            current_state_sql(
+                "ns.result", sources=[], parameter_set_hashes=["NOTAHASH"]
+            )
+
+    def test_a_valid_hash_is_never_rewritten_in_the_emitted_sql(self):
+        sql = current_state_sql(
+            "ns.result", parameter_set_hashes=[PARAMETER_SET_EVALUE_HASH]
+        )
+        assert PARAMETER_SET_EVALUE_HASH in sql
 
     def test_entity_types_filter_renders_as_where_in(self):
         sql = current_state_sql("ns.result", entity_types=["protein", "gene"])

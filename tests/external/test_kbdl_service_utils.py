@@ -81,10 +81,19 @@ class FakeSession:
         return self._responses.pop(0)
 
 
-#: Endpoint the offline tests point the client at. KBDL no longer has a
-#: built-in default (the loopback/tunnel posture was retired), so every
-#: constructed client must be given one explicitly.
-TEST_BASE_URL = "http://127.0.0.1:8791"
+#: Endpoint the offline tests point the client at. Must equal the host the URL
+#: assertions in this module expect.
+#:
+#: Corrected 2026-10-05. The comment here used to say KBDL "no longer has a
+#: built-in default (the loopback/tunnel posture was retired)" -- that was true
+#: of one branch, but the posture landed the other way: the default is now the
+#: deployed ``http://poplar.cels.anl.gov:8791``, precisely so no caller has to
+#: know an env var and go hunting for a tunnel. The ``140c808`` merge took the
+#: newer assertions (13 of them, expecting the deployed host) against this
+#: older loopback constant, and 20 tests failed on that mismatch alone.
+#: Keeping this equal to the real default also means these tests now catch a
+#: silent revert of ``DEFAULT_BASE_URL`` back to a tunnelled address.
+TEST_BASE_URL = "http://poplar.cels.anl.gov:8791"
 
 
 def make_client(session, **kwargs):

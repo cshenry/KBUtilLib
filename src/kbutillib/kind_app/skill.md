@@ -132,6 +132,143 @@ kbu model exec analysis.py --json -- --some-arg value
   construction workaround (see "Local/offline construction" below) that
   makes reconstruction and gapfilling work without a KBase token.
 
+## Going bigger: KBDL, the at-scale job service
+
+Everything above runs **in this process, on this host**, and is sized for one
+genome at a time. When the work is bigger than that, there is a deployed
+asynchronous job service — **KBDL**, on poplar — that runs the same class of
+work on real compute, plus tools that are not installed here at all.
+
+**It needs no setup and NO SSH TUNNEL.** `KBDLServiceUtils` defaults to
+`http://poplar.cels.anl.gov:8791` and is reached *directly* over the
+ANL-internal network from this pod. You do not need to set `KBDL_SERVICE_URL`,
+and you should not go looking for a tunnel — that posture was retired. Auth
+reuses the same KBase token the rest of `kbu` uses, so a zero-argument
+constructor is the normal case:
+
+```python
+from kbutillib.domains.external.kbdl_service_utils import KBDLServiceUtils
+kbdl = KBDLServiceUtils(config_file=False)       # endpoint + token resolved for you
+```
+
+### Decision rule: local verb vs. KBDL
+
+| Use the local `kbu model` verb | Hand it to KBDL |
+|---|---|
+| One genome / one model, now | Many genomes, or a batch |
+| Seconds to a couple of minutes | Long jobs you should not hold a session open for |
+| You want the cobra JSON on this disk | You want it run on poplar's compute |
+| Annotation via RAST is enough | You need bakta, kofamscan, CheckM2, SKANI — **not installed here** |
+
+If the local verb can do it, use the local verb — it is simpler, synchronous,
+and you get a file. Reach for KBDL when the job is genuinely bigger than this
+host, not as a default.
+
+### There is no `kbu kbdl` CLI — go through `exec`
+
+This is the part worth knowing up front: KBDL is a **Python API only**. There
+is no CLI verb for it, so do not go hunting for `kbu kbdl ...`. Call it from a
+script run through `kbu model exec`, which gives you the right interpreter and
+the durable provenance directory:
+
+```python
+# kbdl_job.py  →  kbu model exec kbdl_job.py
+from kbutillib.domains.external.kbdl_service_utils import (
+    KBDLServiceUtils, JOB_TYPE_MODEL_RECONSTRUCTION,
+)
+
+kbdl = KBDLServiceUtils(config_file=False)
+result = kbdl.submit_and_wait(
+    JOB_TYPE_MODEL_RECONSTRUCTION,
+    {"mapping": ..., "annotations": ..., "tools": ..., "gapfill_media": ...},
+    interval=5.0, timeout=3600,
+)
+```
+
+### The ten job types
+
+`KBDLGenomeAnnotation`, **`KBDLModelReconstruction`**,
+**`KBDLFitnessModelAnalysis`**, `KBDLSKANI`, `KBDLCheckM2`,
+`KBDLBuildGenome`, `KBDLBuildSKANIDB`, `KBDLStoreLoad`, `KBDLUploadObject`,
+`KBDLHorizyn` — importable as `JOB_TYPE_*` constants. The two in bold are the
+modelling ones and the reason this section exists; each has a thin
+`submit_<name>(**params)` helper returning a job id.
+
+Two ways to run one:
+
+- **`submit_and_wait(job_type, params, interval=, timeout=)`** — submit, poll,
+  return the result. Raises `KBDLJobFailedError` on a failed terminal state.
+  Use this unless you have a reason not to.
+- **`submit_*(...)` → `poll_until_terminal(job_id)` → `get_job_result(job_id)`**
+  — when you want to hold the id, report progress, or submit a batch and
+  collect later. `check_job(job_id)` for a single status, `list_jobs()` for all,
+  `clear_job(job_id)` to discard.
+
+### The two SKANI databases that cover the Clearinghouse
+
+For an ANI / genome-similarity search (`KBDLSKANI`, via `submit_skani`), **use
+one of these two unless you have a specific reason not to.** Together they
+capture the full diversity in our Clearinghouse — the novel genomes we have
+assembled, and the reference tree:
+
+| `skani_db` | What it covers | `object_id` |
+|---|---|---|
+| `novel_all_representatives` | Representatives across all our **novel** Clearinghouse genomes | `ref:1be8415b2a773d2632949cc46f1b68d3956c4ce67eab4088a9446fadf5157404` |
+| `gtdb_r220_consolidated` | **GTDB r220**, consolidated layout — the reference side | `ref:cee67d7f33f57c07d569f9fb0a0537a0263094f380fa0b10faa56aafdfcc56ae` |
+
+Both are `visibility: "public"`, so no upload or setup is needed — pass the
+name as `skani_db`. Querying both and merging is the normal way to ask "is this
+genome novel, and if not what is it closest to": a hit in
+`gtdb_r220_consolidated` places it against the published reference tree, while
+a hit only in `novel_all_representatives` means its nearest relative is
+something *we* assembled.
+
+> **Do not confuse `novel_all_representatives` with `novel_all_consolidated`.**
+> Both exist in the object store and the names differ by one word. The
+> representatives DB is the curated, de-replicated one and is what you want
+> for a diversity-spanning search. `list_objects()` shows 14 `SKANIDB` objects
+> in total; most of the rest are small test or legacy builds (`DB_022`,
+> `DB_031`, `subset_test`, `some_old_lib`, …) and are **not** what you want.
+> Verified against the live service 2026-10-05.
+
+### The object store, and one category error to avoid
+
+`upload_object(file, object_type, name, visibility)` uploads inputs;
+`list_objects()`, `get_object_metadata(id)`, `list_archive_files(id)` and
+`delete_object(id)` manage them.
+
+- **You may upload:** `SKANIDB`, `ModelMapping`, `Media`, `GenomeArchive`.
+- **You may NOT upload:** `BaktaDB`, `KofamProfiles`, `CheckM2DB`. These are
+  large operator-curated reference databases seeded on the host. They appear in
+  `list_objects()` like anything else, but the service exposes **no upload
+  route by design** — calling `upload_object(object_type="CheckM2DB")` is a
+  category error, not a permissions problem. Do not retry it or look for a
+  flag.
+
+### Failures are typed — read the exception, don't retry blindly
+
+`KBDLServiceError` is the base, with specific subclasses that tell you whether
+retrying could ever help: `KBDLBadRequestError`, `KBDLInvalidInputError`,
+`KBDLUnsupportedSchemaVersionError`, `KBDLAuthenticationError`,
+`KBDLNotAuthorizedError`, `KBDLUpstreamAuthUnavailableError`,
+`KBDLNotFoundError`, `KBDLConflictError`, `KBDLPayloadTooLargeError`,
+`KBDLJobFailedError`. An input or schema error will fail identically forever;
+an auth or upstream-auth error is about the token, not your params.
+
+> **Service health is a separate question from your code.** If calls **hang**
+> rather than erroring, that is the service, not your parameters — the client
+> resolves its endpoint with no I/O, so a hang is never a misconfiguration on
+> your side. **Say so and stop, rather than retrying or concluding your call
+> was wrong.** poplar is not yours to restart; report it.
+>
+> Expected healthy behaviour, verified 2026-10-05: every route answers in
+> ~5ms, unauthenticated requests get `401 invalid_token` (that *is* the healthy
+> answer — the service gates on the bearer token), and a zero-config
+> `list_jobs()` returns its full record count in a few seconds. A transient
+> hang was observed once on 2026-10-04 and had cleared by the next day, so
+> **re-probe before declaring the service down** — one bad reading is not an
+> outage.
+
 ## Media vocabulary (`--media`)
 
 1. **Local JSON file** (default, fully offline) — a path to a JSON file
@@ -277,12 +414,19 @@ PY
 
 ## Boundaries
 
-- This skill covers `kbu model` only. It does not describe the rest of the
-  `kbu` CLI (projects, sessions, notebooks) — those are out of scope here.
+- This skill covers `kbu model` and the KBDL job service it hands large work
+  off to. It does not describe the rest of the `kbu` CLI (projects, sessions,
+  notebooks) — those are out of scope here.
 - This text is injected via `KING_CONTEXT` only; it is **not** registered
   as a Claude Code skill (no `~/.claude/skills/` entry), because this
   session has no `Skill` tool to invoke one with.
-- These modeling verbs are intended **local-only**. If `kbu kind status`
-  (or the orientation you were given) warns that KIND's LLM route is
-  non-local, treat any model/genome data you handle as something you
-  should not casually paste into that route.
+- The four `kbu model` verbs are **local** — your data stays on this host
+  (the one exception is RAST annotation inside `reconstruct`, which sends
+  protein sequences to the RAST service). If `kbu kind status` (or the
+  orientation you were given) warns that KIND's LLM route is non-local, treat
+  any model/genome data you handle as something you should not casually paste
+  into that route.
+- **KBDL is deliberately not local**: submitting a job or uploading an object
+  sends that data to poplar. That is the point of it, but it is a real
+  boundary crossing — apply the same judgement you would to any other
+  off-host destination, and prefer the local verbs when they suffice.

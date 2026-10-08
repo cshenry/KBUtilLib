@@ -21,7 +21,8 @@ proves the derivation's *logic* (which row wins a slot, which scope
 excludes which), never the Spark-on-Iceberg dialect the query actually
 runs under in production. This script is the one thing in the whole
 change that exercises the real dependency: it appends a small, clearly
-marked fixture to the REAL, live per-type ``<entity_type>_result`` tables
+marked fixture to the live per-type ``<entity_type>_result`` tables of the
+namespace named by ``--namespace`` -- never production's
 (after the fifteen-table split there is no single ``result`` table; each
 row lands in the table resolved by ``clearinghouse_schema.table_name`` for
 its ``entity_type`` -- these protein fixture rows land in
@@ -43,30 +44,45 @@ imports its rows from. A parity check run against a hand-retyped lookalike
 fixture would prove nothing the moment the two fixtures drifted apart;
 importing one shared module is what keeps that impossible.
 
-THE FIXTURE IS PERMANENT AND HARMLESS. Every fixture row's ``source``
+THE FIXTURE NEVER GOES TO PRODUCTION. Every fixture row's ``source``
 carries the ``parity-check/`` prefix (see that module's
 ``PARITY_SOURCE_PREFIX``), so these rows can never be mistaken for real
 tool output and can be found again later with a simple ``source LIKE
-'parity-check/%'`` filter. They are expected to remain in the append-only
-per-type ``<entity_type>_result`` tables forever -- re-running this script
-appends *more* rows to the same fixture slots, which changes nothing about
-the current-state
-answer for those slots (same ``entity_hash``/``entity_type``/
-``result_type``/``source``/``parameter_set_hash``, so still the same
-slot; newest ``(observed_at, ingest_batch_id)`` still wins). They can never shadow, or
-be shadowed by, a real annotation's slot.
+'parity-check/%'`` filter. But that prefix is a LABEL, not an isolation
+mechanism, and labelling turned out not to be enough: the demo readers
+treat every row in ``kbaseincubator.clearinghouse`` as real data, so a
+fixture row in a table a demo reads from is a fixture row somebody will
+eventually quote back as a result. The namespace this script writes to is
+therefore an explicit, REQUIRED ``--namespace`` argument, and
+:func:`check_target_namespace` REFUSES the production namespace outright
+-- before a Spark session is opened, let alone before any write. Parity
+fixtures belong in a namespace of their own
+(``kbaseincubator.clearinghouse_parity``), which is why OP-C2 in the
+runbook creates one and bootstraps only the five ``<type>_result``
+configs into it.
+
+WITHIN its own namespace the fixture is permanent and harmless:
+re-running this script appends *more* rows to the same fixture slots,
+which changes nothing about the current-state answer for those slots
+(same ``entity_hash``/``entity_type``/``result_type``/``source``/
+``parameter_set_hash``, so still the same slot; newest
+``(observed_at, ingest_batch_id)`` still wins).
 
 Usage (from a kbhub notebook cell or terminal), after confirming OP1 and
-OP2 in the runbook:
+OP2 in the runbook and after OP-C2 has created and bootstrapped the
+parity namespace:
 
-    python scripts/clearinghouse_parity_check.py
+    python scripts/clearinghouse_parity_check.py \
+        --namespace kbaseincubator.clearinghouse_parity
 
 Prints one PASS/FAIL line per property and a final summary line. Exits 0
-if every property passes, 1 if any fails, 2 if run off-pod.
+if every property passes, 1 if any fails, 2 if run off-pod, and 3 if
+``--namespace`` is the production namespace or is otherwise malformed.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from typing import Any
@@ -81,16 +97,94 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     rows_by_entity_type,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    CLEARINGHOUSE_NAMESPACE,
     ENTITY_TYPES,
-    NAMESPACE,
-    TENANT,
     column_names,
     table_configs,
     table_name,
 )
 
 
-def _result_table_fqn(entity_type: str) -> str:
+class ParityNamespaceError(ValueError):
+    """``--namespace`` is the production namespace, or is malformed.
+
+    Its own exception type so :func:`main` can map it to a distinct exit
+    code (3) and the off-pod test can assert the refusal by type rather
+    than by matching message text.
+    """
+
+
+def check_target_namespace(namespace: str) -> tuple[str, str]:
+    """Validate ``--namespace`` and split it into ``(tenant, dataset)``.
+
+    THE REFUSAL THIS EXISTS FOR. Parity fixtures must never be written to
+    ``kbaseincubator.clearinghouse``
+    (:data:`clearinghouse_schema.CLEARINGHOUSE_NAMESPACE`). The
+    ``parity-check/`` source prefix labels the rows but does not isolate
+    them, and the demo readers treat every row in the production namespace
+    as real data -- so a fixture row landing there is a fixture row that
+    will eventually be quoted back as a genuine annotation result. The
+    tables are append-only and Iceberg offers no supported un-append, so
+    the only place to stop it is before the write.
+
+    FACTORED OUT, AND CALLED BEFORE ANY SPARK CALL, deliberately. The
+    comparison is pure string work against a module constant: no Spark
+    session, no ``berdl_notebook_utils``, no pod. That is what lets
+    ``tests/berdl/test_clearinghouse_parity_script.py`` prove the refusal
+    off-pod, in CI, instead of discovering in the pod that it does not
+    fire. Keeping it a plain function rather than inline argparse logic is
+    the whole reason the guarantee is testable.
+
+    Args:
+        namespace: The dotted namespace, e.g.
+            ``"kbaseincubator.clearinghouse_parity"``. Exactly two
+            segments: the tenant (Iceberg catalog) and the dataset.
+
+    Returns:
+        ``(tenant, dataset)`` -- the two forms the write path needs.
+        ``BerdlCapability.load()`` wants the dataset bare and the
+        namespace tenant-qualified, and both are derived from this one
+        argument so they cannot disagree with each other or with the FQN
+        the queries read from.
+
+    Raises:
+        ParityNamespaceError: ``namespace`` is the production namespace,
+            or is not a two-segment dotted name with non-empty segments.
+    """
+    if namespace.strip() != namespace or not namespace:
+        raise ParityNamespaceError(
+            f"--namespace {namespace!r} has leading or trailing whitespace, "
+            "or is empty. Pass a dotted two-segment name, e.g. "
+            "kbaseincubator.clearinghouse_parity."
+        )
+    if namespace == CLEARINGHOUSE_NAMESPACE:
+        raise ParityNamespaceError(
+            f"REFUSED: --namespace {namespace!r} is the PRODUCTION "
+            "clearinghouse namespace. Parity fixtures must never be written "
+            "to production: the demo readers treat its rows as real data, so "
+            "a 'parity-check/' fixture row in a production <type>_result "
+            "table is a fabricated annotation that somebody will eventually "
+            "quote back as a real result -- and the tables are append-only, "
+            "so there is no supported way to take it back out. Run this "
+            "against a namespace of its own, e.g. "
+            "kbaseincubator.clearinghouse_parity (see OP-C2 in "
+            "agent-io/docs/clearinghouse-schema-operator-runbook.md, which "
+            "creates it and bootstraps the five <type>_result configs into "
+            "it)."
+        )
+    segments = namespace.split(".")
+    if len(segments) != 2 or not all(segment for segment in segments):
+        raise ParityNamespaceError(
+            f"--namespace {namespace!r} must be a dotted two-segment name "
+            "'<tenant>.<dataset>' with both segments non-empty, e.g. "
+            f"kbaseincubator.clearinghouse_parity (got {len(segments)} "
+            "segment(s))."
+        )
+    tenant, dataset = segments
+    return tenant, dataset
+
+
+def _result_table_fqn(entity_type: str, namespace: str) -> str:
     """The per-type ``<entity_type>_result`` table's fully qualified name.
 
     Under the fifteen-table split there is no single ``result`` table to
@@ -98,10 +192,23 @@ def _result_table_fqn(entity_type: str) -> str:
     whose bare name is resolved through
     :func:`kbutillib.domains.kbase.berdl.clearinghouse_schema.table_name`
     (the ONLY sanctioned name builder -- never string-concatenated here) and
-    qualified with the tenant and namespace. :mod:`clearinghouse_derivation`
-    documents this three-part, tenant-qualified form
-    (e.g. ``"kbaseincubator.clearinghouse.protein_result"``) as its worked
+    qualified with the dotted ``namespace`` the caller was given on the
+    command line. :mod:`clearinghouse_derivation` documents this three-part,
+    tenant-qualified form (e.g.
+    ``"kbaseincubator.clearinghouse_parity.protein_result"``) as its worked
     example, so that is what this script passes to :func:`current_state_sql`.
+
+    THE NAMESPACE IS A PARAMETER, NOT A CONSTANT. It used to be built from
+    the schema module's ``TENANT``/``NAMESPACE`` constants, which meant
+    every read and write went to production with no way to say otherwise.
+    It is now threaded from ``--namespace`` through every call site, so
+    there is exactly one place the target is decided and
+    :func:`check_target_namespace` guards it.
+
+    Args:
+        entity_type: Which ``<entity_type>_result`` table to name.
+        namespace: The dotted ``<tenant>.<dataset>`` namespace, already
+            validated by :func:`check_target_namespace`.
 
     NOTE, per the runbook's OP2 namespace-resolution warning:
     ``BerdlCapability.load()``'s own postflight row-count/history queries
@@ -109,12 +216,13 @@ def _result_table_fqn(entity_type: str) -> str:
     segment -- see ``capability.py``, ``load()``'s postflight block). Which
     form actually resolves against the live Iceberg catalog is not
     verifiable off-pod. If this script's query step fails to find the table
-    under the three-part form, retry with the two-part form
-    (``f"{NAMESPACE}.{table_name(entity_type, 'result')}"``) before assuming
-    anything else is wrong -- and note in your parity-check record which
-    form worked, since the next operator will hit the same fork.
+    under the three-part form, retry with the two-part form (the dataset
+    segment of ``--namespace`` plus
+    ``table_name(entity_type, 'result')``) before assuming anything else is
+    wrong -- and note in your parity-check record which form worked, since
+    the next operator will hit the same fork.
     """
-    return f"{TENANT}.{NAMESPACE}.{table_name(entity_type, 'result')}"
+    return f"{namespace}.{table_name(entity_type, 'result')}"
 
 #: Column order for rows returned from the Spark query, matching
 #: ``clearinghouse_schema``'s ``<type>_result`` table declaration.
@@ -211,9 +319,12 @@ def _build_fixture_dataframe(
 
 
 def _append_fixture_rows(
-    capability: BerdlCapability, spark: Any
+    capability: BerdlCapability, spark: Any, namespace: str
 ) -> dict[str, dict[str, Any]]:
     """Append the parity fixture rows to each per-type ``<type>_result`` table.
+
+    Writes into the namespace named by ``--namespace``, never production --
+    see :func:`check_target_namespace`, which the caller has already run.
 
     Under the fifteen-table split the fixture no longer targets a single
     ``result`` table: each row belongs in its own ``<entity_type>_result``
@@ -229,10 +340,20 @@ def _append_fixture_rows(
     enforcement that makes a write through ``load()`` sanctioned. See the
     runbook's "if something goes wrong" section.
 
+    Args:
+        capability: The in-pod capability whose ``load()`` performs the write.
+        spark: The live Spark session the DataFrames are built against.
+        namespace: The dotted ``<tenant>.<dataset>`` target, already
+            validated by :func:`check_target_namespace`. Both the bare
+            ``dataset`` and the tenant-qualified ``namespace`` that
+            ``load()`` wants are derived from it here, so they cannot drift
+            apart or point at different namespaces.
+
     Returns:
         A dict mapping each per-type ``result`` table name to that table's
         ``load()`` return value.
     """
+    tenant, dataset = check_target_namespace(namespace)
     load_results: dict[str, dict[str, Any]] = {}
     for entity_type, rows_for_type in rows_by_entity_type().items():
         result_table = table_name(entity_type, "result")
@@ -241,7 +362,7 @@ def _append_fixture_rows(
         )
         df = _build_fixture_dataframe(spark, entity_type, rows_for_type)
         load_results[result_table] = capability.load(
-            dataset=NAMESPACE,
+            dataset=dataset,
             tables=[{**result_config, "mode": "append"}],
             # TENANT-QUALIFIED, not bare NAMESPACE. load() probes existence
             # under this value, while data_lakehouse_ingest derives its own
@@ -255,8 +376,8 @@ def _append_fixture_rows(
             # corpus lands, so it is a data-loss path the moment they are
             # not. This makes the probe read where the write actually goes;
             # it does NOT fix D1 itself, which is capability-level.
-            namespace=f"{TENANT}.{NAMESPACE}",
-            tenant=TENANT,
+            namespace=namespace,
+            tenant=tenant,
             dataframes={result_table: df},
             spark=spark,
         )
@@ -268,6 +389,8 @@ def _query_current_state(
     entity_type: str,
     sources: tuple[str, ...],
     parameter_set_hashes: tuple[str, ...] | None = None,
+    *,
+    namespace: str,
 ) -> list[dict[str, Any]]:
     """Run ``current_state_sql()`` against one type's ``result`` table.
 
@@ -284,9 +407,15 @@ def _query_current_state(
             ``parameter_set_forks_slot`` property exercises. ``None``
             (the default) applies no parameter-set filter, matching every
             other property's read.
+        namespace: The dotted namespace to read from. KEYWORD-ONLY and
+            REQUIRED, with no default: a default would have to be some
+            namespace, and the only obvious candidate is production --
+            exactly the value this change exists to stop reaching. An
+            omitted argument is a ``TypeError`` at the call site rather
+            than a silent read of the wrong namespace.
     """
     sql = current_state_sql(
-        _result_table_fqn(entity_type),
+        _result_table_fqn(entity_type, namespace),
         sources=list(sources),
         parameter_set_hashes=(
             None if parameter_set_hashes is None else list(parameter_set_hashes)
@@ -302,6 +431,8 @@ def _check_property(
     capability: BerdlCapability,
     case: ParityCase,
     current_rows: list[dict[str, Any]],
+    *,
+    namespace: str,
 ) -> tuple[bool, str]:
     """Assert one property, mirroring the equivalent DuckDB test's assertion.
 
@@ -309,6 +440,12 @@ def _check_property(
     explanatory message on failure. Never raises: a failed property is
     reported as a FAIL line, not a crashed script, so every property gets
     evaluated and printed even if an earlier one fails.
+
+    ``namespace`` is keyword-only and required for the same reason as in
+    :func:`_query_current_state`: two properties (``source_isolation`` and
+    ``parameter_set_forks_slot``) issue their OWN follow-up reads to prove
+    a filter prunes, and those must hit the same namespace as the read
+    that produced ``current_rows``.
     """
     rows_for_entity = [
         row for row in current_rows if row["entity_hash"] == case.entity_hash
@@ -353,7 +490,7 @@ def _check_property(
             filtered_rows = [
                 row
                 for row in _query_current_state(
-                    capability, case.entity_type, (source_a,)
+                    capability, case.entity_type, (source_a,), namespace=namespace
                 )
                 if row["entity_hash"] == case.entity_hash
             ]
@@ -396,7 +533,11 @@ def _check_property(
             filtered_rows = [
                 row
                 for row in _query_current_state(
-                    capability, case.entity_type, case.sources, (evalue_hash,)
+                    capability,
+                    case.entity_type,
+                    case.sources,
+                    (evalue_hash,),
+                    namespace=namespace,
                 )
                 if row["entity_hash"] == case.entity_hash
             ]
@@ -418,7 +559,53 @@ def _check_property(
     return True, ""
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """The CLI. ``--namespace`` is REQUIRED and has no default.
+
+    No default is the point. A default would be a namespace this script
+    writes fixture rows into whenever an operator forgets the flag, and the
+    only namespace anyone would think to default to is production -- which
+    is the one namespace it must never touch. Requiring the flag makes the
+    target an explicit decision on every run.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prove current_state_sql() against the real Spark/Iceberg "
+            "engine by appending the shared parity fixture to a "
+            "NON-PRODUCTION namespace's <type>_result tables. Run from "
+            "inside the BERDL JupyterHub pod. See OP-C2 in "
+            "agent-io/docs/clearinghouse-schema-operator-runbook.md."
+        )
+    )
+    parser.add_argument(
+        "--namespace",
+        required=True,
+        metavar="TENANT.DATASET",
+        help=(
+            "REQUIRED dotted namespace to write and read the parity fixture "
+            "in, e.g. kbaseincubator.clearinghouse_parity. The production "
+            f"namespace ({CLEARINGHOUSE_NAMESPACE}) is REFUSED: demo "
+            "readers treat its rows as real data."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+
+    # THE REFUSAL COMES FIRST -- before BerdlCapability(), before the locus
+    # check, before any Spark session exists. A guard that runs after a
+    # session is opened is a guard that has already paid for the thing it
+    # was meant to prevent, and in an append-only lake "we noticed late" is
+    # indistinguishable from "we wrote it".
+    try:
+        check_target_namespace(args.namespace)
+    except ParityNamespaceError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 3
+    namespace = args.namespace
+
     capability = BerdlCapability()
     if capability.locus() != "in_pod":
         print(
@@ -436,20 +623,23 @@ def main() -> int:
     spark = transport.spark_session()
 
     target_tables = ", ".join(
-        _result_table_fqn(entity_type) for entity_type in rows_by_entity_type()
+        _result_table_fqn(entity_type, namespace)
+        for entity_type in rows_by_entity_type()
     )
     print(
         f"Appending {len(ALL_PARITY_ROWS)} parity-check fixture rows to "
         f"{target_tables} ..."
     )
-    _append_fixture_rows(capability, spark)
+    _append_fixture_rows(capability, spark, namespace)
 
     all_passed = True
     for case in PARITY_CASES:
         current_rows = _query_current_state(
-            capability, case.entity_type, case.sources
+            capability, case.entity_type, case.sources, namespace=namespace
         )
-        passed, reason = _check_property(capability, case, current_rows)
+        passed, reason = _check_property(
+            capability, case, current_rows, namespace=namespace
+        )
         status = "PASS" if passed else "FAIL"
         suffix = f" ({reason})" if reason else ""
         print(f"{status}: {case.property_key} -- {case.description}{suffix}")

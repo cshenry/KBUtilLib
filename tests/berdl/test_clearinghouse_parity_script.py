@@ -40,10 +40,18 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     rows_by_entity_type,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    CLEARINGHOUSE_NAMESPACE,
     ENTITY_TYPES,
     column_names,
     table_name,
 )
+
+#: The namespace these tests read and write through -- the SAME
+#: non-production namespace OP-C2 creates for the real in-pod run. Using the
+#: parity namespace here rather than production is not cosmetic: it means no
+#: test in this module can pass while the script still points at
+#: ``kbaseincubator.clearinghouse``.
+_PARITY_NAMESPACE = "kbaseincubator.clearinghouse_parity"
 
 #: Repo root, from this file: tests/berdl/<this> -> repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -77,11 +85,15 @@ class _DuckDbCapability:
     Implements only ``query(sql, engine=...)``, which is the entire surface
     :func:`_query_current_state` uses. The script emits Spark-dialect SQL
     naming a three-part, tenant-qualified table
-    (``kbaseincubator.clearinghouse.protein_result``); DuckDB has neither
-    backtick quoting nor that catalog, so this translates exactly those two
-    things -- the quote character, and the qualified name down to the bare
-    table -- and nothing else. The window function, the slot key, the
-    ``WHERE`` predicates and the column list all execute verbatim.
+    (``kbaseincubator.clearinghouse_parity.protein_result``); DuckDB has
+    neither backtick quoting nor that catalog, so this translates exactly
+    those two things -- the quote character, and the qualified name down to
+    the bare table -- and nothing else. The window function, the slot key,
+    the ``WHERE`` predicates and the column list all execute verbatim.
+
+    The qualified prefix it strips is built from :data:`_PARITY_NAMESPACE`
+    rather than hardcoded, so the translation follows the namespace the
+    tests actually pass instead of silently failing to match if it changes.
     """
 
     def __init__(self) -> None:
@@ -117,11 +129,12 @@ class _DuckDbCapability:
                 )
 
     def _for_duckdb(self, sql: str) -> str:
+        prefix = ".".join(
+            f"`{segment}`" for segment in _PARITY_NAMESPACE.split(".")
+        )
         for entity_type in ENTITY_TYPES:
             bare = table_name(entity_type, "result")
-            sql = sql.replace(
-                f"`kbaseincubator`.`clearinghouse`.`{bare}`", f'"{bare}"'
-            )
+            sql = sql.replace(f"{prefix}.`{bare}`", f'"{bare}"')
         return sql.replace("`", '"')
 
     def query(self, sql: str, engine: str = "spark") -> list[dict[str, Any]]:
@@ -148,10 +161,10 @@ def test_every_parity_property_passes_on_the_surrogate(capability, case):
     _check_property" defect this file found unrepeatable.
     """
     current_rows = parity_script._query_current_state(
-        capability, case.entity_type, case.sources
+        capability, case.entity_type, case.sources, namespace=_PARITY_NAMESPACE
     )
     passed, reason = parity_script._check_property(
-        capability, case, current_rows
+        capability, case, current_rows, namespace=_PARITY_NAMESPACE
     )
     assert passed, f"{case.property_key}: {reason}"
 
@@ -181,8 +194,12 @@ def test_every_case_has_a_real_branch_in_check_property(capability):
             capability,
             case,
             parity_script._query_current_state(
-                capability, case.entity_type, case.sources
+                capability,
+                case.entity_type,
+                case.sources,
+                namespace=_PARITY_NAMESPACE,
             ),
+            namespace=_PARITY_NAMESPACE,
         )
         assert "unknown property_key" not in reason, case.property_key
 
@@ -208,7 +225,7 @@ def test_parameter_set_filter_round_trips_through_the_script_query(capability):
     unfiltered = [
         row
         for row in parity_script._query_current_state(
-            capability, case.entity_type, case.sources
+            capability, case.entity_type, case.sources, namespace=_PARITY_NAMESPACE
         )
         if row["entity_hash"] == case.entity_hash
     ]
@@ -218,9 +235,136 @@ def test_parameter_set_filter_round_trips_through_the_script_query(capability):
     filtered = [
         row
         for row in parity_script._query_current_state(
-            capability, case.entity_type, case.sources, (evalue_hash,)
+            capability,
+            case.entity_type,
+            case.sources,
+            (evalue_hash,),
+            namespace=_PARITY_NAMESPACE,
         )
         if row["entity_hash"] == case.entity_hash
     ]
     assert len(filtered) == 1
     assert filtered[0]["parameter_set_hash"] == evalue_hash
+
+
+# ==========================================================================
+# --namespace IS REQUIRED, AND PRODUCTION IS REFUSED
+# ==========================================================================
+#
+# The parity fixture used to be written straight into
+# kbaseincubator.clearinghouse, on the theory that the `parity-check/`
+# source prefix made the rows self-evidently fake. It does label them, but
+# it does not isolate them: the demo readers treat every row in the
+# production namespace as real data, and the <type>_result tables are
+# append-only with no supported un-append. So the target namespace is now a
+# required argument and production is refused OUTRIGHT.
+#
+# These tests exist because that guarantee is otherwise only observable
+# inside the pod, against the live lake -- the single most expensive place
+# to find out the guard does not fire. `check_target_namespace` is factored
+# out as a pure string check against a module constant precisely so the
+# refusal can be proven here, off-pod, with no Spark session and no pod.
+
+
+def test_namespace_is_a_required_argument():
+    """Omitting ``--namespace`` is an argparse error, not a default.
+
+    A default would have to name some namespace, and the only one anybody
+    would default to is production -- the one namespace this must never
+    touch. SystemExit(2) is argparse's own "bad usage" exit.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        parity_script.build_arg_parser().parse_args([])
+    assert excinfo.value.code == 2
+
+
+def test_production_namespace_is_refused():
+    """The production namespace raises, rather than being written to."""
+    with pytest.raises(parity_script.ParityNamespaceError) as excinfo:
+        parity_script.check_target_namespace(CLEARINGHOUSE_NAMESPACE)
+    message = str(excinfo.value)
+    assert "REFUSED" in message
+    assert CLEARINGHOUSE_NAMESPACE in message
+    # The message must say WHY, not just "no": the next operator under
+    # pressure needs to know this is a data-integrity rule and not a
+    # configuration nit they can edit around.
+    assert "real data" in message
+
+
+def test_the_refused_value_is_the_real_production_constant():
+    """The guard compares against the schema module's own constant.
+
+    Not a retyped literal: a retyped "kbaseincubator.clearinghouse" would
+    keep passing this suite after the real namespace moved, which is
+    exactly when the guard would need to still work.
+    """
+    assert CLEARINGHOUSE_NAMESPACE == "kbaseincubator.clearinghouse"
+    with pytest.raises(parity_script.ParityNamespaceError):
+        parity_script.check_target_namespace("kbaseincubator.clearinghouse")
+
+
+def test_the_parity_namespace_is_accepted_and_split():
+    """A non-production namespace passes and yields (tenant, dataset).
+
+    Both forms the write path needs come from this one argument, so they
+    cannot disagree about where the rows go.
+    """
+    tenant, dataset = parity_script.check_target_namespace(_PARITY_NAMESPACE)
+    assert (tenant, dataset) == ("kbaseincubator", "clearinghouse_parity")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "clearinghouse_parity",  # one segment -- no tenant
+        "a.b.c",  # three segments
+        "kbaseincubator.",  # empty dataset
+        ".clearinghouse_parity",  # empty tenant
+        "",  # empty
+        " kbaseincubator.clearinghouse_parity",  # stray whitespace
+    ],
+)
+def test_malformed_namespaces_are_refused(bad):
+    """A malformed namespace is refused too, not half-resolved.
+
+    ``kbaseincubator.`` in particular would otherwise produce an empty
+    dataset segment and an FQN like ``kbaseincubator..protein_result``.
+    """
+    with pytest.raises(parity_script.ParityNamespaceError):
+        parity_script.check_target_namespace(bad)
+
+
+def test_main_refuses_production_before_any_spark_call(monkeypatch):
+    """``main()`` exits 3 on production WITHOUT constructing a capability.
+
+    This is the test that actually pins "before any Spark call". It makes
+    ``BerdlCapability`` explode if touched: the guard must return first, so
+    an implementation that validated after opening a session -- or after
+    the locus check -- fails here instead of in the pod. Exit 3 is distinct
+    from 1 (a property failed) and 2 (run off-pod) so an operator can tell
+    a refusal from a failure.
+    """
+
+    def _exploding_capability(*_args, **_kwargs):
+        raise AssertionError(
+            "BerdlCapability was constructed before the namespace was "
+            "checked -- the refusal must come first."
+        )
+
+    monkeypatch.setattr(
+        parity_script, "BerdlCapability", _exploding_capability
+    )
+    assert parity_script.main(["--namespace", CLEARINGHOUSE_NAMESPACE]) == 3
+
+
+def test_result_table_fqn_follows_the_given_namespace():
+    """The read/write FQN is built from the argument, not a constant.
+
+    Production must not appear in the FQN when the parity namespace was
+    asked for -- the bug this whole change closes.
+    """
+    fqn = parity_script._result_table_fqn("protein", _PARITY_NAMESPACE)
+    assert fqn == "kbaseincubator.clearinghouse_parity.protein_result"
+    assert "kbaseincubator.clearinghouse." not in fqn
+    # Built through table_name(), never string-concatenated by hand.
+    assert fqn.endswith(table_name("protein", "result"))

@@ -32,6 +32,7 @@ The success criteria these map to (from the module docstring):
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,7 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     NAMESPACE,
     PARAMETER_SET_TABLE,
     TENANT,
+    table_configs,
     table_name,
 )
 
@@ -1012,10 +1014,23 @@ class _FakeVerifyCapability:
     dev 1206 resolvers so verify's write-target guard resolves cleanly.
     """
 
-    def __init__(self, *, locus="in_pod", count_rows=6, snapshot_ids=(123456,)):
+    def __init__(
+        self,
+        *,
+        locus="in_pod",
+        count_rows=6,
+        snapshot_ids=(123456,),
+        result_parameter_sets=(),
+        registry_pairs=(),
+    ):
         self._locus = locus
         self._count_rows = count_rows
         self._snapshot_ids = list(snapshot_ids)
+        #: What the parameter-set integrity check sees. Both default to EMPTY,
+        #: so every test written before that check existed still reconciles
+        #: cleanly (no result hashes means nothing can be orphaned).
+        self._result_parameter_sets = list(result_parameter_sets)
+        self._registry_pairs = list(registry_pairs)
         self.queries: list[str] = []
 
     def locus(self):
@@ -1033,7 +1048,20 @@ class _FakeVerifyCapability:
             return [{"snapshot_id": sid} for sid in self._snapshot_ids]
         if "COUNT(*)" in sql:
             return [{"row_count": self._count_rows}]
-        return []  # pragma: no cover - verify issues only the two above
+        # The registry probe must be matched BEFORE the result-table one: both
+        # start "SELECT DISTINCT parameter_set_hash" and only the registry's
+        # also selects canonical_json.
+        if "canonical_json" in sql:
+            return [
+                {"parameter_set_hash": digest, "canonical_json": text}
+                for digest, text in self._registry_pairs
+            ]
+        if "DISTINCT parameter_set_hash" in sql:
+            return [
+                {"parameter_set_hash": digest}
+                for digest in self._result_parameter_sets
+            ]
+        return []  # pragma: no cover
 
 
 def _write_verify_ledger(tmp_path, run_id, lines):
@@ -1631,3 +1659,680 @@ def test_register_failure_with_no_registry_write_is_not_called_partial():
         cap.register("gene", [_result_row(parameter_set={})], kind="result")
     assert not isinstance(exc.value, ClearinghousePartialWriteError)
     assert _loads_of(fake, PARAMETER_SET_TABLE) == []
+
+
+# ==========================================================================
+# PARAMETER SETS ON THE READ VERBS
+#
+# results()/current_state() pre-filter, sources()'s two grains, the registry
+# verb, and the registry-integrity check.
+#
+# WHY THESE TESTS EXECUTE SQL INSTEAD OF ASSERTING ON CANNED ROWS. Every
+# claim in this section is a claim about AGGREGATION -- "row_count keeps its
+# existing population", "a duplicated registry row does not multiply the
+# counts", "one row per hash even when the registry holds three rows". A fake
+# that returns canned rows cannot test any of them: it would pin what the
+# fake was told to say, and the SQL could be wrong in exactly the way the
+# test claims it is not. So :class:`_SqlExecutor` below runs the reader's
+# REAL generated SQL on in-memory SQLite, with the tables created from
+# ``table_configs()``'s own DDL, and the expected-output fixture asserts on
+# what that SQL actually computes.
+# ==========================================================================
+
+#: The one non-default parameter set the fixture uses: a tuned threshold,
+#: passed as a STRING because floats are rejected by the parameter-set rule.
+_TUNED_PARAMS = {"threshold": "1e-5"}
+_TUNED_HASH = parameter_set_hash(_TUNED_PARAMS)
+_TUNED_JSON = canonical_parameter_set(_TUNED_PARAMS)
+
+#: Collapses the three-part clearinghouse FQN to a bare table name, in either
+#: engine's quoting style, so the reader's SQL runs against SQLite (which has
+#: no tenant/namespace qualifiers). This is the ONLY edit made to the SQL
+#: under test -- no clause is rewritten, nothing is simplified, and the
+#: window functions, COUNT(DISTINCT ...) and LEFT JOIN all execute as emitted.
+_FQN_RE = re.compile(r'(["`])kbaseincubator\1\.\1clearinghouse\1\.\1(\w+)\1')
+
+
+#: Maps the schema module's SQL types to SQLite ones. This is NOT cosmetic.
+#: SQLite assigns a column whose declared type is ``STRING`` NUMERIC
+#: affinity (the name contains none of INT/CHAR/CLOB/TEXT/BLOB/REAL), so a
+#: stored ``entity_hash`` of "0000...0001" is silently coerced to the INTEGER
+#: 1 and every assertion about hash values quietly tests the wrong thing.
+#: Declaring TEXT keeps the fixture's values byte-identical to what the
+#: lakehouse stores. A type not in this map raises KeyError rather than
+#: defaulting, so a new column type cannot reintroduce the coercion silently.
+_SQLITE_TYPES = {
+    "STRING": "TEXT",
+    "TIMESTAMP": "TEXT",
+    "INT": "INTEGER",
+    "BIGINT": "INTEGER",
+    "BOOLEAN": "INTEGER",
+}
+
+
+def _sqlite_ddl(schema_sql):
+    """Re-type a ``schema_sql`` fragment for SQLite, keeping names and order.
+
+    The column list still comes from :func:`table_configs`, so the fixture
+    cannot drift from the shipped schema -- only the declared types are
+    mapped (see :data:`_SQLITE_TYPES`).
+    """
+    columns = []
+    for part in schema_sql.split(","):
+        name, _, sql_type = part.strip().partition(" ")
+        columns.append(f'"{name}" {_SQLITE_TYPES[sql_type.strip()]}')
+    return ", ".join(columns)
+
+
+class _SqlExecutor:
+    """Executes the reader's real SQL on in-memory SQLite. IN-POD only.
+
+    Stands in at the SAME seam :class:`_FakeCapability` does -- ``locus()``
+    plus ``query()`` -- but instead of canned rows it runs the SQL. Tables are
+    created from :func:`table_configs`'s own ``schema_sql``, so the fixture
+    cannot drift from the shipped schema: add a result column and these
+    tables gain it automatically.
+
+    In-pod only, deliberately. In-pod is the locus where ``params`` bind
+    through a real ``?`` channel (which SQLite shares), and off-pod paging is
+    already covered by the criterion (f) tests; re-implementing
+    ``limit``/``offset`` here would test this fake rather than the reader.
+    """
+
+    def __init__(self, *, result_rows=(), registry_rows=(), entity_type="protein"):
+        self.sql: list[str] = []
+        self._db = sqlite3.connect(":memory:")
+        for config in table_configs():
+            self._db.execute(
+                f'CREATE TABLE "{config["name"]}" '
+                f"({_sqlite_ddl(config['schema_sql'])})"
+            )
+        for row in result_rows:
+            self._db.execute(
+                f'INSERT INTO "{table_name(entity_type, "result")}" '
+                "(entity_hash, entity_type, result_type, source, "
+                "parameter_set_hash, result_type_version, payload, "
+                "observed_at, ingest_batch_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+        for row in registry_rows:
+            self._db.execute(
+                f'INSERT INTO "{PARAMETER_SET_TABLE}" '
+                "(parameter_set_hash, canonical_json, observed_at, "
+                "ingest_batch_id) VALUES (?, ?, ?, ?)",
+                row,
+            )
+        self._db.commit()
+
+    def locus(self):
+        return "in_pod"
+
+    def query(self, sql, *, params=None, engine=None, limit=None, offset=0):
+        self.sql.append(sql)
+        cursor = self._db.execute(
+            _FQN_RE.sub(r'"\2"', sql), tuple(params or ())
+        )
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _fixture_result_row(
+    entity_hash,
+    digest,
+    source,
+    observed_at,
+    batch,
+    *,
+    entity_type="protein",
+    result_type="annotation",
+):
+    """One ``<type>_result`` row in ``_SqlExecutor``'s insert order."""
+    return (
+        entity_hash,
+        entity_type,
+        result_type,
+        source,
+        digest,
+        "v1",
+        "{}",
+        observed_at,
+        batch,
+    )
+
+
+#: THE EXPECTED-OUTPUT FIXTURE. Two parameter sets, a superseded result row,
+#: two sources, and a DUPLICATED registry row -- every condition the count
+#: semantics have to survive, in one table.
+#:
+#:   - entity 1 / DEFAULT set: TWO rows in one slot (b1 superseded by b2).
+#:     Both are stored, so both count toward row_count; only b2 is current.
+#:   - entity 1 / TUNED set: a DIFFERENT slot, not a supersede -- this is the
+#:     whole point of parameter_set_hash being in the slot key.
+#:   - entity 2 / DEFAULT set, under each of two sources.
+_FIXTURE_RESULT_ROWS = (
+    _fixture_result_row(_hash(1), DEFAULT_PARAMETER_SET_HASH, "blastp/2.14", "2026-01-01", "b1"),
+    _fixture_result_row(_hash(1), DEFAULT_PARAMETER_SET_HASH, "blastp/2.14", "2026-01-02", "b2"),
+    _fixture_result_row(_hash(1), _TUNED_HASH, "blastp/2.14", "2026-01-01", "b1"),
+    _fixture_result_row(_hash(2), DEFAULT_PARAMETER_SET_HASH, "blastp/2.14", "2026-01-01", "b1"),
+    _fixture_result_row(_hash(2), DEFAULT_PARAMETER_SET_HASH, "diamond/2.1", "2026-01-01", "b1"),
+)
+
+#: The registry: one row for the default set and TWO for the tuned set (a
+#: retry appended the second), both carrying the SAME canonical_json. The
+#: duplicate is the trap: a naive join would double the tuned set's counts.
+_FIXTURE_REGISTRY_ROWS = (
+    (DEFAULT_PARAMETER_SET_HASH, "{}", "2026-01-01", "b1"),
+    (_TUNED_HASH, _TUNED_JSON, "2026-01-01", "b1"),
+    (_TUNED_HASH, _TUNED_JSON, "2026-01-03", "b3"),
+)
+
+
+def _fixture_cap():
+    """A capability over the expected-output fixture."""
+    return ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=_FIXTURE_RESULT_ROWS,
+            registry_rows=_FIXTURE_REGISTRY_ROWS,
+        )
+    )
+
+
+# -- results()/current_state(): the parameter-set PRE-filter ---------------
+
+
+def test_results_narrows_by_parameter_set_hash():
+    """results() returns only the requested parameter set's current-state row."""
+    cap = _fixture_cap()
+    rows = cap.results(
+        "protein", [_hash(1)], parameter_set_hashes=[_TUNED_HASH]
+    )
+    assert [row["parameter_set_hash"] for row in rows] == [_TUNED_HASH]
+
+
+def test_results_parameter_set_filter_is_a_pre_filter_not_a_post_filter():
+    """The filter is applied BEFORE the window, so a slot wins its own window.
+
+    Entity 1 carries a LATER default-set row (b2) than its tuned-set row, so
+    a filter applied AFTER the window would rank all three rows together,
+    pick b2, and then discard it for not matching the tuned hash -- returning
+    NOTHING. Pre-filtering returns the tuned slot's own current-state row.
+    """
+    cap = _fixture_cap()
+    rows = cap.results(
+        "protein", [_hash(1)], parameter_set_hashes=[_TUNED_HASH]
+    )
+    assert len(rows) == 1, "a post-filter would have returned zero rows here"
+    assert rows[0]["ingest_batch_id"] == "b1"
+    # And the predicate really is inside the windowed CTE rather than applied
+    # to its output: it appears BEFORE the "WHERE rn = 1" that reads the
+    # window's result.
+    sql = cap._capability.sql[-1]
+    assert sql.index(_TUNED_HASH) < sql.index("WHERE rn = 1")
+
+
+def test_results_default_parameter_set_returns_the_superseding_row():
+    """Within one (entity, ..., parameter_set) slot the latest row still wins."""
+    cap = _fixture_cap()
+    rows = cap.results(
+        "protein", [_hash(1)], parameter_set_hashes=[DEFAULT_PARAMETER_SET_HASH]
+    )
+    assert [row["ingest_batch_id"] for row in rows] == ["b2"]
+
+
+def test_results_empty_parameter_set_list_returns_nothing():
+    """``[]`` is a request to match nothing, not a request for no filter."""
+    cap = _fixture_cap()
+    assert cap.results("protein", [_hash(1)], parameter_set_hashes=[]) == []
+    assert "1 = 0" in cap._capability.sql[-1]
+
+
+def test_current_state_narrows_by_parameter_set_hash():
+    cap = _fixture_cap()
+    rows = cap.current_state("protein", parameter_set_hashes=[_TUNED_HASH])
+    assert [row["parameter_set_hash"] for row in rows] == [_TUNED_HASH]
+
+
+def test_current_state_unfiltered_keeps_one_row_per_parameter_set_slot():
+    """parameter_set_hash is in the slot key, so the two sets do not collide."""
+    cap = _fixture_cap()
+    rows = cap.current_state("protein")
+    slots = {
+        (row["entity_hash"], row["source"], row["parameter_set_hash"])
+        for row in rows
+    }
+    assert len(rows) == 4 and len(slots) == 4
+    assert (_hash(1), "blastp/2.14", _TUNED_HASH) in slots
+    assert (_hash(1), "blastp/2.14", DEFAULT_PARAMETER_SET_HASH) in slots
+
+
+def test_current_state_empty_parameter_set_list_returns_nothing():
+    cap = _fixture_cap()
+    assert cap.current_state("protein", parameter_set_hashes=[]) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "nothex" * 10 + "abcd",
+        DEFAULT_PARAMETER_SET_HASH.upper(),
+        "abc",
+        None,
+        1234,
+    ],
+)
+@pytest.mark.parametrize("verb", ["results", "current_state"])
+def test_non_hex_parameter_set_hash_raises_before_any_query(bad, verb):
+    """A malformed filter value raises at the boundary, before any query."""
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ValueError, match="parameter_set_hashes"):
+        if verb == "results":
+            cap.results("protein", [_hash(1)], parameter_set_hashes=[bad])
+        else:
+            cap.current_state("protein", parameter_set_hashes=[bad])
+    assert fake.calls == []
+
+
+def test_malformed_parameter_set_hash_raises_even_with_an_empty_hash_list():
+    """The digest is validated BEFORE the empty-``hashes`` short-circuit.
+
+    Otherwise ``results(t, [], parameter_set_hashes=["BAD"])`` would return
+    ``[]`` and the caller would never learn its digest was unusable.
+    """
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ValueError, match="parameter_set_hashes"):
+        cap.results("protein", [], parameter_set_hashes=["not-a-hash"])
+    assert fake.calls == []
+
+
+# -- sources(): the frozen default grain, and the opt-in finer grain -------
+
+
+def test_sources_keeps_one_row_per_source_and_adds_parameter_set_count():
+    """THE DEFAULT GRAIN AND THE EXISTING COUNT ARE PINNED HERE.
+
+    ``row_count`` keeps exactly its existing population: COUNT(*) over every
+    STORED row in the group, superseded rows included (sources() does not
+    apply the current-state derivation and must not start). blastp/2.14 holds
+    four stored rows across two parameter sets; only three of them are
+    current, and the answer is still 4.
+    """
+    cap = _fixture_cap()
+    rows = cap.sources("protein")
+    assert rows == [
+        {
+            "entity_type": "protein",
+            "source": "blastp/2.14",
+            "row_count": 4,
+            "parameter_set_count": 2,
+        },
+        {
+            "entity_type": "protein",
+            "source": "diamond/2.1",
+            "row_count": 1,
+            "parameter_set_count": 1,
+        },
+    ]
+
+
+def test_sources_by_parameter_set_switches_grain_and_adds_canonical_json():
+    """One row per (source, hash), with the registry text, counts unmultiplied.
+
+    The tuned set has TWO registry rows. Its row_count must be 1 -- the count
+    of its RESULT rows -- not 2. A LEFT JOIN against the raw registry would
+    report 2 here and look entirely plausible doing it.
+    """
+    cap = _fixture_cap()
+    rows = sorted(
+        cap.sources("protein", by_parameter_set=True),
+        key=lambda row: (row["source"], row["parameter_set_hash"]),
+    )
+    assert rows == sorted(
+        [
+            {
+                "entity_type": "protein",
+                "source": "blastp/2.14",
+                "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
+                "row_count": 3,
+                "parameter_set_count": 1,
+                "canonical_json": "{}",
+            },
+            {
+                "entity_type": "protein",
+                "source": "blastp/2.14",
+                "parameter_set_hash": _TUNED_HASH,
+                "row_count": 1,
+                "parameter_set_count": 1,
+                "canonical_json": _TUNED_JSON,
+            },
+            {
+                "entity_type": "protein",
+                "source": "diamond/2.1",
+                "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
+                "row_count": 1,
+                "parameter_set_count": 1,
+                "canonical_json": "{}",
+            },
+        ],
+        key=lambda row: (row["source"], row["parameter_set_hash"]),
+    )
+
+
+def test_sources_grains_agree_on_the_total():
+    """The finer grain partitions the coarser one -- it does not re-count."""
+    cap = _fixture_cap()
+    coarse = sum(row["row_count"] for row in cap.sources("protein"))
+    fine = sum(
+        row["row_count"] for row in cap.sources("protein", by_parameter_set=True)
+    )
+    assert coarse == fine == len(_FIXTURE_RESULT_ROWS)
+
+
+def test_sources_by_parameter_set_reports_null_canonical_json_for_an_orphan():
+    """A result hash with no registry row still gets a row, with no text."""
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(
+                _fixture_result_row(_hash(1), _TUNED_HASH, "blastp/2.14", "2026-01-01", "b1"),
+            ),
+            registry_rows=(),
+        )
+    )
+    rows = cap.sources("protein", by_parameter_set=True)
+    assert len(rows) == 1
+    assert rows[0]["parameter_set_hash"] == _TUNED_HASH
+    assert rows[0]["canonical_json"] is None
+
+
+def test_sources_default_grain_is_unchanged_when_the_registry_is_empty():
+    """The default grain never touches the registry, so it cannot be affected."""
+    cap = ClearinghouseCapability(
+        _SqlExecutor(result_rows=_FIXTURE_RESULT_ROWS, registry_rows=())
+    )
+    assert cap.sources("protein") == _fixture_cap().sources("protein")
+
+
+# -- parameter_sets(): one row per hash ------------------------------------
+
+
+def test_parameter_sets_returns_one_row_per_hash_despite_duplicates():
+    """The registry holds THREE rows for two hashes; the verb returns two.
+
+    A ``SELECT DISTINCT`` over all four columns would return three rows here,
+    because the two tuned rows differ in observed_at/ingest_batch_id. This is
+    distinct ON the hash, and the representative is the latest row.
+    """
+    cap = _fixture_cap()
+    rows = cap.parameter_sets()
+    assert len(rows) == 2
+    by_hash = {row["parameter_set_hash"]: row for row in rows}
+    assert set(by_hash) == {DEFAULT_PARAMETER_SET_HASH, _TUNED_HASH}
+    assert by_hash[_TUNED_HASH]["canonical_json"] == _TUNED_JSON
+    # Deterministic representative: the LATEST row for that hash, not an
+    # arbitrary one.
+    assert by_hash[_TUNED_HASH]["ingest_batch_id"] == "b3"
+
+
+def test_parameter_sets_filters_to_the_requested_hashes():
+    cap = _fixture_cap()
+    rows = cap.parameter_sets([_TUNED_HASH])
+    assert [row["parameter_set_hash"] for row in rows] == [_TUNED_HASH]
+
+
+def test_parameter_sets_empty_list_matches_nothing_without_querying():
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    assert cap.parameter_sets([]) == []
+    assert fake.calls == []
+
+
+def test_parameter_sets_rejects_a_malformed_hash():
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ValueError, match="parameter_set_hashes"):
+        cap.parameter_sets(["nope"])
+    assert fake.calls == []
+
+
+def test_default_parameter_set_hash_is_registered_in_the_fixture():
+    """Guards the constant against drift from parameter_set_hash({})."""
+    assert DEFAULT_PARAMETER_SET_HASH == parameter_set_hash({})
+    cap = _fixture_cap()
+    rows = cap.parameter_sets([DEFAULT_PARAMETER_SET_HASH])
+    assert rows[0]["canonical_json"] == "{}"
+
+
+# -- parameter_set_orphans(): the four integrity conditions ----------------
+
+
+def test_parameter_set_orphans_is_clean_on_a_sound_registry():
+    report = _fixture_cap().parameter_set_orphans()
+    assert report["ok"] is True
+    assert report["failures"] == []
+    assert report["registry_hashes"] == 2
+    assert report["result_hashes"] == 2
+
+
+def test_parameter_set_orphans_reports_a_result_hash_missing_from_the_registry():
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(
+                _fixture_result_row(_hash(1), _TUNED_HASH, "blastp/2.14", "2026-01-01", "b1"),
+            ),
+            registry_rows=(),
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    assert report["missing_from_registry"] == [
+        {"parameter_set_hash": _TUNED_HASH, "entity_types": ["protein"]}
+    ]
+    assert any(_TUNED_HASH in line for line in report["failures"])
+
+
+def test_parameter_set_orphans_names_every_entity_type_an_orphan_appears_in():
+    executor = _SqlExecutor(
+        result_rows=(
+            _fixture_result_row(_hash(1), _TUNED_HASH, "blastp/2.14", "2026-01-01", "b1"),
+        ),
+        registry_rows=(),
+    )
+    executor._db.execute(
+        f'INSERT INTO "{table_name("gene", "result")}" '
+        "(entity_hash, entity_type, result_type, source, parameter_set_hash, "
+        "result_type_version, payload, observed_at, ingest_batch_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        _fixture_result_row(
+            _hash(1), _TUNED_HASH, "blastp/2.14", "2026-01-01", "b1",
+            entity_type="gene",
+        ),
+    )
+    executor._db.commit()
+    report = ClearinghouseCapability(executor).parameter_set_orphans()
+    assert report["missing_from_registry"][0]["entity_types"] == ["gene", "protein"]
+
+
+@pytest.mark.parametrize("bad", ["not-64-hex", DEFAULT_PARAMETER_SET_HASH.upper(), None])
+def test_parameter_set_orphans_reports_a_malformed_result_hash(bad):
+    """A stored hash that is not 64 lowercase hex -- NULL included.
+
+    The column is required and non-null by a Python check at the WRITE
+    boundary and never by the DDL, so a NULL that got in is exactly the
+    violation only a read can catch.
+    """
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(
+                _fixture_result_row(_hash(1), bad, "blastp/2.14", "2026-01-01", "b1"),
+            ),
+            registry_rows=_FIXTURE_REGISTRY_ROWS,
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    assert report["malformed_result_hashes"] == [
+        {"parameter_set_hash": bad, "entity_types": ["protein"]}
+    ]
+    assert any("malformed" in line for line in report["failures"])
+    # A malformed hash is reported as malformed, NOT also as missing: an
+    # operator must not be sent looking for a registry row for 'None'.
+    assert report["missing_from_registry"] == []
+
+
+def test_parameter_set_orphans_reports_conflicting_canonical_json():
+    """Two registry rows for one hash carrying DIFFERENT text."""
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(),
+            registry_rows=(
+                (_TUNED_HASH, _TUNED_JSON, "2026-01-01", "b1"),
+                (_TUNED_HASH, '{"threshold":"1e-9"}', "2026-01-02", "b2"),
+            ),
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    conflict = report["conflicting_canonical_json"]
+    assert len(conflict) == 1
+    assert conflict[0]["parameter_set_hash"] == _TUNED_HASH
+    assert len(conflict[0]["canonical_json"]) == 2
+    assert any("DIFFERENT canonical_json" in line for line in report["failures"])
+
+
+def test_parameter_set_orphans_tolerates_duplicate_but_identical_registry_rows():
+    """A retry's duplicate row is harmless and must NOT be a conflict."""
+    cap = _fixture_cap()
+    report = cap.parameter_set_orphans()
+    assert report["conflicting_canonical_json"] == []
+    assert report["ok"] is True
+
+
+def test_parameter_set_orphans_reports_canonical_json_that_misses_its_key():
+    """Text that parses perfectly but keys the wrong row -- the dangerous one."""
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(),
+            registry_rows=(
+                # Valid, canonical text filed under the DEFAULT hash.
+                (DEFAULT_PARAMETER_SET_HASH, _TUNED_JSON, "2026-01-01", "b1"),
+            ),
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    assert len(report["mishashed_registry_rows"]) == 1
+    entry = report["mishashed_registry_rows"][0]
+    assert entry["parameter_set_hash"] == DEFAULT_PARAMETER_SET_HASH
+    assert entry["computed_parameter_set_hash"] == _TUNED_HASH
+    assert any("mis-hashed" in line for line in report["failures"])
+
+
+@pytest.mark.parametrize(
+    "text", ["{not json", '{"Bad Key": 1}', '{"a": 1.5}', "[]", None]
+)
+def test_parameter_set_orphans_reports_unhashable_canonical_json(text):
+    """Text that cannot be parsed or fails the parameter-set rule counts too.
+
+    It cannot be SHOWN to hash to its key, which is the same finding: a float,
+    an uppercase key, a non-object and a NULL are all registry rows that
+    cannot explain the hash they are filed under.
+    """
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(),
+            registry_rows=((DEFAULT_PARAMETER_SET_HASH, text, "2026-01-01", "b1"),),
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    assert len(report["mishashed_registry_rows"]) == 1
+    assert report["mishashed_registry_rows"][0][
+        "computed_parameter_set_hash"
+    ] is None
+
+
+def test_parameter_set_orphans_finds_all_four_conditions_at_once():
+    """One broken registry, four findings -- the check does not stop at the first."""
+    cap = ClearinghouseCapability(
+        _SqlExecutor(
+            result_rows=(
+                # (1) missing from the registry
+                _fixture_result_row(_hash(3), _hash(9), "blastp/2.14", "2026-01-01", "b1"),
+                # (2) malformed
+                _fixture_result_row(_hash(4), "SHORT", "blastp/2.14", "2026-01-01", "b1"),
+            ),
+            registry_rows=(
+                # (3) conflicting text for one hash
+                (_TUNED_HASH, _TUNED_JSON, "2026-01-01", "b1"),
+                (_TUNED_HASH, '{"threshold":"1e-9"}', "2026-01-02", "b2"),
+                # (4) text that does not hash to its key
+                (DEFAULT_PARAMETER_SET_HASH, _TUNED_JSON, "2026-01-01", "b1"),
+            ),
+        )
+    )
+    report = cap.parameter_set_orphans()
+    assert report["ok"] is False
+    assert len(report["missing_from_registry"]) == 1
+    assert len(report["malformed_result_hashes"]) == 1
+    assert len(report["conflicting_canonical_json"]) == 1
+    # Both conflicting rows are checked against the key, and one of them
+    # happens to be the tuned text under the tuned key (sound), so the
+    # mis-hashed findings are the 1e-9 row and the default-key row.
+    assert len(report["mishashed_registry_rows"]) == 2
+    assert len(report["failures"]) >= 4
+
+
+def test_parameter_set_orphans_writes_nothing():
+    """An integrity check is a READ. It must never load or mutate."""
+    cap = _fixture_cap()
+    cap.parameter_set_orphans()
+    assert all(
+        sql.lstrip().upper().startswith("SELECT") for sql in cap._capability.sql
+    )
+
+
+# -- verify_run(): a registry finding is a DISCREPANCY ---------------------
+
+
+def test_verify_run_reports_a_parameter_set_orphan_as_a_discrepancy(tmp_path):
+    """A registry finding fails verify, exactly as a missing row does.
+
+    An orphaned registry entry means a stored result cannot be attributed to
+    the parameters that produced it, which is the same class of problem as
+    rows the ledger says landed being absent -- so it lands in the same
+    ``discrepancies`` list, not in a softer channel.
+    """
+    _write_verify_ledger(
+        tmp_path, "r1", [("gene_entity", "0000", "ingested", 6, 123456)]
+    )
+    fake = _FakeVerifyCapability(
+        count_rows=6,
+        snapshot_ids=(123456,),
+        result_parameter_sets=(_TUNED_HASH,),
+        registry_pairs=(),  # the hash is used but never registered
+    )
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    assert result["parameter_set_integrity"]["ok"] is False
+    assert any(_TUNED_HASH in line for line in result["discrepancies"])
+    # The ledger leg itself reconciled -- the discrepancy is purely the
+    # registry's, so a clean ledger no longer means a clean verify.
+    assert result["tables"][0]["ok"] is True
+
+
+def test_verify_run_is_clean_when_the_registry_is_sound(tmp_path):
+    _write_verify_ledger(
+        tmp_path, "r1", [("gene_entity", "0000", "ingested", 6, 123456)]
+    )
+    fake = _FakeVerifyCapability(
+        count_rows=6,
+        snapshot_ids=(123456,),
+        result_parameter_sets=(_TUNED_HASH,),
+        registry_pairs=((_TUNED_HASH, _TUNED_JSON),),
+    )
+    cap = ClearinghouseCapability(fake)
+    result = cap.verify_run(tmp_path, run_id="r1")
+    assert result["parameter_set_integrity"]["ok"] is True
+    assert result["discrepancies"] == []

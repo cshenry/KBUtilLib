@@ -22,9 +22,10 @@ in-pod-only field is omitted and the omission is reported in `warnings`.
 | `known`    | ✅ works | Which supplied hashes are present in `<type>_entity`.                  |
 | `show`     | ✅ works | One entity: presence + type-specialized content + current-state results.|
 | `content`  | ✅ works | Content rows; `--all-types` reads the lossy `all_content` view.        |
-| `results`  | ✅ works | Current-state results for `<type>_result`.                            |
-| `sources`  | ✅ works | Distinct `source` values with row counts.                            |
-| `health`   | ✅ works\* | Data-file fragmentation. \*Needs file metadata (in-pod); off-pod it reports it cannot evaluate, in `warnings`. |
+| `results`  | ✅ works | Current-state results for `<type>_result`. Narrowable by parameter set. |
+| `sources`  | ✅ works | Distinct `source` values with row counts and a `parameter_set_count`. |
+| `parameter-sets` | ✅ works | The parameter-set registry: what each `parameter_set_hash` means. |
+| `health`   | ✅ works\* | Data-file fragmentation **and** parameter-set registry integrity. \*Fragmentation needs file metadata (in-pod); off-pod it reports it cannot evaluate, in `warnings`. An integrity finding is a **failure**: it is reported in `data.parameter_set_integrity` (never in `warnings`) and the verb exits non-zero. |
 | `stats --include-files` | ⚠️ degrades | File counts/sizes read Iceberg `.files` metadata via Spark — **in-pod only**. Off-pod the file fields are **omitted** and a non-empty `warnings` list says so. |
 
 > Off-pod access is **unproven end to end**. At the time this was written no
@@ -79,8 +80,9 @@ tables. The capability owns this discipline; the CLI just surfaces its numbers.
 - `known --type T (--hash H | --hashes-file F)` — which supplied hashes are present in `<T>_entity`.
 - `show --type T --hash H` — one entity: presence + type-specialized content + current-state results, in one output.
 - `content --type T (--hash H | --hashes-file F) [--all-types]` — content rows; `--all-types` is the explicitly lossy `all_content` view (shared columns only) and requires no `--type`.
-- `results --type T [--hash H] [--source S] [--result-type R]` — current-state results (whole-table via `current_state`, or hash-filtered via `results`).
-- `sources [--type T]` — distinct `source` values with row counts.
+- `results --type T [--hash H] [--source S] [--result-type R] [--parameter-set-hash HASH ...] [--default-parameters]` — current-state results (whole-table via `current_state`, or hash-filtered via `results`). `--parameter-set-hash` is repeatable and `--default-parameters` is shorthand for the default (empty) parameter set; given together they are **unioned**. The filter is pushed down as a pre-filter, so each parameter set wins its own current-state window. Every row carries the registry's text for its hash beside it.
+- `sources [--type T] [--by-parameter-set]` — distinct `source` values with row counts and a `parameter_set_count`. The default grain is **one row per source** and does not change; `--by-parameter-set` opts into one row per `(source, parameter_set_hash)`, with the registry's `canonical_json`.
+- `parameter-sets [--hash HASH ...]` — the parameter-set registry, one row per `parameter_set_hash` even when the append-only registry holds several rows for it.
 - `health` — flags tables whose average data-file size is below ~8 MiB. It **reports** the fragmentation condition only; **compaction is owned elsewhere.** The pathology it catches is real on this platform (a table observed at 2.76M rows across 139 files averaging 288 KiB).
 
 ## Exit codes
@@ -115,7 +117,7 @@ credentials — just CPU and disk) and an **ingest stage** (in-pod only).
 | `plan`   | anywhere        | **nothing**                      | Resolves the manifest, reports per-table row counts and target shard sizes. |
 | `shard`  | anywhere        | bronze parquet under `--out`     | Builds the shards. No pod, no credentials. |
 | `load`   | **in-pod only** | tables + run ledger              | Ingests shards, verifies postflight, writes the run ledger. Foreground, **not** a daemon. |
-| `verify` | **in-pod only** | **nothing**                      | Re-checks a completed run's row counts + snapshots against the ledger. |
+| `verify` | **in-pod only** | **nothing**                      | Re-checks a completed run's row counts + snapshots against the ledger, **and** parameter-set registry integrity. A ledger discrepancy is reported in `warnings`; a registry finding is a **failure** (in `data.parameter_set_integrity`, excluded from `warnings`) and exits non-zero. |
 
 `load` and `verify` **refuse early off-pod**, before any transport call, with a
 message that **names the locus as the reason** (not a bare

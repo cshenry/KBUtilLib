@@ -105,10 +105,11 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ...identity import ParameterSetError, canonical_parameter_set
+from ...identity import ParameterSetError, canonical_parameter_set, parameter_set_hash
 from .capability import BerdlCapability, BerdlLoadRefusedError
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_parameters import result_parameter_set_identity
@@ -592,6 +593,50 @@ class ClearinghouseCapability:
         """Return ``"?, ?, ..."`` with ``n`` positional placeholders."""
         return ", ".join(["?"] * n)
 
+    @staticmethod
+    def _validate_parameter_set_hashes(
+        hashes: Sequence[str] | None, *, verb: str
+    ) -> list[str] | None:
+        """Check every ``parameter_set_hash`` FILTER value at the boundary, or raise.
+
+        Returns ``None`` unchanged (no filter at all) and ``[]`` unchanged (a
+        request to match nothing); otherwise returns the values as a list,
+        once every element has passed :data:`_HEX64_RE`.
+
+        Unlike :meth:`_encode_hashes`, which accepts an UPPERCASE entity
+        digest and lowercases it, an uppercase parameter-set digest is
+        REJECTED rather than normalised. That is the same deliberate choice
+        :func:`clearinghouse_derivation._validated_parameter_set_hashes`
+        makes, for the same reason: ``parameter_set_hash()`` only ever
+        returns lowercase, so an uppercase value is evidence of a caller
+        that did not go through it, and STRING comparison is case-sensitive
+        in both Spark and Trino -- silently lowercasing would hide that
+        caller, while passing it through would match zero stored rows and
+        read as "this parameter set has no results".
+
+        Validating HERE as well as in the derivation builder is deliberate,
+        not redundant. It keeps the refusal at the capability boundary
+        BEFORE any SQL is built (Rule 4), and it covers the two verbs that
+        do not route through that builder at all -- :meth:`parameter_sets`
+        and :meth:`parameter_set_orphans`.
+        """
+        if hashes is None:
+            return None
+        out = list(hashes)
+        for index, value in enumerate(out):
+            if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
+                raise ValueError(
+                    f"{verb}: parameter_set_hashes[{index}] is not a valid "
+                    f"parameter_set_hash: {value!r}. Expected exactly 64 "
+                    "LOWERCASE hex characters, as returned by "
+                    "kbutillib.domains.identity.parameter_set_hash(). An "
+                    "uppercase digest is rejected rather than lowercased, "
+                    "because STRING comparison is case-sensitive and an "
+                    "uppercase value would match zero stored rows instead of "
+                    "failing."
+                )
+        return out
+
     # -- public read surface ---------------------------------------------
 
     def known(
@@ -714,6 +759,7 @@ class ClearinghouseCapability:
         *,
         sources: list[str] | None = None,
         result_types: list[str] | None = None,
+        parameter_set_hashes: list[str] | None = None,
         engine: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return current-state results for specific hashes in ``<type>_result``.
@@ -728,9 +774,32 @@ class ClearinghouseCapability:
         builder: a ``<type>_result`` table is already single-typed, so it
         would be redundant (Rule 5).
 
+        ``parameter_set_hashes`` is likewise pushed into the builder as a
+        PRE-FILTER -- applied before the window, never to the derived rows
+        after it. The difference is not cosmetic: filtering after the window
+        would rank every parameter set's rows together and then discard all
+        but the requested hashes, so a slot whose latest row belongs to
+        another parameter set would come back EMPTY instead of returning the
+        requested parameter set's own current-state row. Pre-filtering lets
+        each ``(..., parameter_set_hash)`` slot win its own window, which is
+        the whole point of putting the hash in the slot key. ``None`` applies
+        no filter; ``[]`` is a request to match nothing (the builder emits
+        ``WHERE 1 = 0``).
+
         Default engine: Trino, promoting to Spark at/above
         :data:`SPARK_PROMOTION_THRESHOLD` hashes.
+
+        Raises:
+            ValueError: Any ``parameter_set_hashes`` element is not exactly
+                64 lowercase hex characters -- raised at the boundary before
+                any SQL is built or any query issued, and BEFORE the
+                empty-``hashes`` short-circuit, so a caller passing a
+                malformed digest alongside an empty hash list still hears
+                about the digest.
         """
+        validated_parameter_sets = self._validate_parameter_set_hashes(
+            parameter_set_hashes, verb="results"
+        )
         encoded = self._encode_hashes(hashes)
         if not encoded:
             return []
@@ -740,6 +809,7 @@ class ClearinghouseCapability:
         inner = current_state_sql(
             self._fqn(entity_type, "result"),
             sources=sources,
+            parameter_set_hashes=validated_parameter_sets,
             engine=resolved_engine,
         )
 
@@ -760,6 +830,7 @@ class ClearinghouseCapability:
         *,
         sources: list[str] | None = None,
         result_types: list[str] | None = None,
+        parameter_set_hashes: list[str] | None = None,
         engine: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return current state over the whole ``<type>_result`` table.
@@ -770,16 +841,32 @@ class ClearinghouseCapability:
         given, filters the derived rows. ``entity_types`` is not passed to
         the builder (redundant on a single-typed table -- Rule 5).
 
+        ``parameter_set_hashes`` is pushed into the builder as a PRE-FILTER,
+        applied before the window rather than to the derived rows -- exactly
+        as in :meth:`results`, and for the same reason (see that method:
+        post-filtering would empty a slot whose latest row belongs to a
+        different parameter set). ``None`` applies no filter; ``[]`` is a
+        request to match nothing.
+
         Default engine: Spark. A whole-table current-state derivation is a
         window function over a partition scan, which is Spark's shape rather
         than Trino's (see :data:`SPARK_PROMOTION_THRESHOLD`). Off-pod there
         is no Spark, so the read still routes through the off-pod REST
         transport and pages to completion.
+
+        Raises:
+            ValueError: Any ``parameter_set_hashes`` element is not exactly
+                64 lowercase hex characters (raised at the boundary, before
+                any SQL is built).
         """
+        validated_parameter_sets = self._validate_parameter_set_hashes(
+            parameter_set_hashes, verb="current_state"
+        )
         resolved_engine = self._resolve_engine(engine, default="spark")
         inner = current_state_sql(
             self._fqn(entity_type, "result"),
             sources=sources,
+            parameter_set_hashes=validated_parameter_sets,
             engine=resolved_engine,
         )
         if result_types is not None:
@@ -797,6 +884,7 @@ class ClearinghouseCapability:
         self,
         entity_type: str | None = None,
         *,
+        by_parameter_set: bool = False,
         engine: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return distinct ``source`` values with row counts, per result table.
@@ -811,22 +899,316 @@ class ClearinghouseCapability:
         the parameter is present, just nullable) because "sources across every
         result table" is a meaningful, bounded cross-type aggregate.
 
-        Default engine: Trino (a small grouped aggregate).
+        THE DEFAULT GRAIN IS FROZEN AND MUST NOT CHANGE: one row per
+        ``source`` (per ``entity_type`` when aggregating all five tables).
+        A consumer keyed on ``source`` would see DUPLICATE rows under an
+        unchanged ``schema_version`` if the default grain ever became
+        per-parameter-set -- a silent break, since nothing in the envelope
+        would tell it the grain had moved. The parameter-set grain is
+        therefore OPT-IN via ``by_parameter_set``, never the default.
+
+        COUNT SEMANTICS. ``row_count`` keeps EXACTLY its existing population
+        and meaning: ``COUNT(*)`` over every row of the table in that group,
+        INCLUDING rows later superseded within their slot. This verb does not
+        apply the current-state derivation and never has; it reports what is
+        stored, not what is current. ``parameter_set_count`` is
+        ``COUNT(DISTINCT parameter_set_hash)`` over that SAME population.
+
+        Args:
+            by_parameter_set: When ``True``, changes the grain to one row per
+                ``(source, parameter_set_hash)`` and adds ``canonical_json``
+                -- the registry's text for that hash, or ``None`` when the
+                hash has no registry row (an orphan;
+                :meth:`parameter_set_orphans` is the verb that reports those
+                as failures). Each aggregate is then computed over the
+                population RESTRICTED to that ``(source, parameter_set_hash)``,
+                so ``parameter_set_count`` is 1 on every row -- it is kept in
+                this grain only so the row SHAPE is the same in both grains
+                and a consumer need not branch on which it asked for.
+            engine: Default is Trino (a small grouped aggregate).
+
+        Returns:
+            One dict per group: ``entity_type``, ``source``, ``row_count``,
+            ``parameter_set_count``, plus ``parameter_set_hash`` and
+            ``canonical_json`` when ``by_parameter_set``.
         """
         resolved_engine = self._resolve_engine(engine, default="trino")
         types = ENTITY_TYPES if entity_type is None else (entity_type,)
+        registry = _quote_fqn(
+            f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", resolved_engine
+        )
         out: list[dict[str, Any]] = []
         for etype in types:
             table = _quote_fqn(self._fqn(etype, "result"), resolved_engine)
-            sql = (
-                f"SELECT '{etype}' AS entity_type, source, COUNT(*) AS row_count "
-                f"FROM {table} GROUP BY source"
-            )
+            if by_parameter_set:
+                # The registry is reduced to ONE representative row per hash
+                # BEFORE the join. Joining the raw registry would multiply
+                # every result row by that hash's registry-row count, so an
+                # ordinary retry (which may append a second row for a hash)
+                # would silently DOUBLE row_count. MAX() over the already-
+                # reduced side then guarantees the grain stays one row per
+                # (source, parameter_set_hash) even if the reduction were
+                # ever wrong, which putting canonical_json in GROUP BY would
+                # not.
+                sql = (
+                    f"SELECT '{etype}' AS entity_type,\n"
+                    "    res.source AS source,\n"
+                    "    res.parameter_set_hash AS parameter_set_hash,\n"
+                    "    COUNT(*) AS row_count,\n"
+                    "    COUNT(DISTINCT res.parameter_set_hash)"
+                    " AS parameter_set_count,\n"
+                    "    MAX(reg.canonical_json) AS canonical_json\n"
+                    f"FROM {table} AS res\n"
+                    "LEFT JOIN (\n"
+                    f"{_registry_representative_sql(registry, indent=4)}\n"
+                    ") AS reg\n"
+                    "    ON reg.parameter_set_hash = res.parameter_set_hash\n"
+                    "GROUP BY res.source, res.parameter_set_hash"
+                )
+            else:
+                sql = (
+                    f"SELECT '{etype}' AS entity_type, source, "
+                    "COUNT(*) AS row_count, "
+                    "COUNT(DISTINCT parameter_set_hash) AS parameter_set_count "
+                    f"FROM {table} GROUP BY source"
+                )
             if self._locus() == "off_pod":
                 out.extend(self._page_offpod(sql, params=None, engine=resolved_engine))
             else:
                 out.extend(self._run(sql, params=None, engine=resolved_engine))
         return out
+
+    def parameter_sets(
+        self,
+        hashes: Sequence[str] | None = None,
+        *,
+        engine: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return ONE representative registry row per ``parameter_set_hash``.
+
+        The registry (:data:`~clearinghouse_schema.PARAMETER_SET_TABLE`) is
+        APPEND-ONLY and a hash may legitimately carry several rows: a retry
+        appends another row for a hash it has already registered, and every
+        such row carries the SAME ``canonical_json`` (a hash always maps to
+        the same text) but a DIFFERENT ``observed_at``/``ingest_batch_id``.
+
+        That is why this is "distinct ON the hash" and NOT
+        ``SELECT DISTINCT`` over all four columns. A plain ``SELECT DISTINCT``
+        would collapse only byte-identical rows, so those retry rows would
+        survive as several rows for one hash -- the exact shape a caller
+        asking "what does this hash mean?" must not get. One row per hash is
+        selected with the same ``ROW_NUMBER()`` discipline the result
+        derivation uses (latest ``observed_at``, then ``ingest_batch_id`` as
+        the tie-break), so the answer is deterministic rather than
+        whichever-row-the-engine-returned-first.
+
+        Args:
+            hashes: If given, restricts the answer to these hashes, as a
+                PRE-FILTER inside the window (fewer rows ranked, same
+                answer). ``None`` returns every registered hash; ``[]`` is a
+                request to match nothing and returns ``[]`` WITHOUT issuing
+                a query (an empty ``IN ()`` list is not valid SQL and is not
+                the semantics wanted anyway).
+            engine: Default is Trino (a small lookup).
+
+        Returns:
+            One dict per hash: ``parameter_set_hash``, ``canonical_json``,
+            ``observed_at``, ``ingest_batch_id``.
+
+        Raises:
+            ValueError: Any element of ``hashes`` is not exactly 64 lowercase
+                hex characters (raised at the boundary, before any SQL).
+        """
+        validated = self._validate_parameter_set_hashes(
+            hashes, verb="parameter_sets"
+        )
+        if validated is not None and not validated:
+            return []
+        resolved_engine = self._resolve_engine(engine, default="trino")
+        table = _quote_fqn(
+            f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", resolved_engine
+        )
+        if validated:
+            sql = _registry_representative_sql(
+                table,
+                where=(
+                    "parameter_set_hash IN "
+                    f"({self._in_placeholders(len(validated))})"
+                ),
+            )
+            params: list[str] | None = list(validated)
+        else:
+            sql = _registry_representative_sql(table)
+            params = None
+        if self._locus() == "off_pod":
+            return self._page_offpod(sql, params=params, engine=resolved_engine)
+        return self._run(sql, params=params, engine=resolved_engine)
+
+    def parameter_set_orphans(
+        self,
+        *,
+        engine: str | None = None,
+    ) -> dict[str, Any]:
+        """Check parameter-set registry integrity and report every finding.
+
+        Registry integrity is a WRITER obligation -- every writer appends the
+        registry rows BEFORE the result rows that use them -- and this is the
+        READER that audits whether the obligation held. It WRITES NOTHING and
+        RAISES NOTHING for a finding: a finding is reported, because the
+        operator response to a broken registry is to read the report and
+        reconcile, which it cannot do if the verb raises. Callers that must
+        treat findings as fatal (:meth:`verify_run`, the CLI ``health`` verb)
+        read ``'failures'`` and fail themselves.
+
+        Four conditions are checked, all four of which make a stored result
+        un-interpretable rather than merely untidy:
+
+        1. MISSING -- a ``parameter_set_hash`` present in one of the five
+           ``<type>_result`` tables with no registry row. The result exists
+           and nothing can say what parameters produced it.
+        2. MALFORMED -- a result hash that is not 64 lowercase hex
+           characters, ``NULL`` included (the column is required and non-null
+           by a Python check at the write boundary, never by the DDL, so a
+           ``NULL`` here is exactly the violation that check exists to
+           prevent and only a read can catch it).
+        3. CONFLICTING -- two registry rows for one hash with DIFFERENT
+           ``canonical_json``. Duplicate rows per hash are harmless and
+           expected (a retry appends one), but they must agree on the text;
+           two different texts for one hash means at least one is a lie
+           about what that hash means.
+        4. MIS-HASHED -- a registry row whose ``canonical_json`` does not
+           hash to its own key, i.e. ``parameter_set_hash`` of the parsed
+           value differs from ``parameter_set_hash`` as stored. Text that
+           cannot be parsed, or that fails the parameter-set rule, counts
+           here too: it cannot be shown to hash to its key.
+
+        Args:
+            engine: Default is Trino (small ``DISTINCT`` aggregates).
+
+        Returns:
+            A report dict with ``'ok'`` (``True`` only when every list is
+            empty), the ``'result_hashes'``/``'registry_hashes'`` counts the
+            check ran over, one list per condition
+            (``'missing_from_registry'``, ``'malformed_result_hashes'``,
+            ``'conflicting_canonical_json'``, ``'mishashed_registry_rows'``)
+            and ``'failures'`` -- human-readable strings, one per finding,
+            empty when the registry is sound. Findings are FAILURES and never
+            warnings: a warning is for a degraded answer, whereas every
+            condition here is stored data that is already wrong.
+        """
+        resolved_engine = self._resolve_engine(engine, default="trino")
+        off_pod = self._locus() == "off_pod"
+
+        def read(sql: str) -> list[dict[str, Any]]:
+            if off_pod:
+                return self._page_offpod(sql, params=None, engine=resolved_engine)
+            return self._run(sql, params=None, engine=resolved_engine)
+
+        # (1)/(2): every distinct hash stored in any of the five result
+        # tables, with the entity types it appears in, so a finding names the
+        # table an operator has to go and look at.
+        result_hash_types: dict[Any, set[str]] = {}
+        for etype in ENTITY_TYPES:
+            table = _quote_fqn(self._fqn(etype, "result"), resolved_engine)
+            rows = read(
+                f"SELECT DISTINCT parameter_set_hash FROM {table}"
+            )
+            for row in rows:
+                digest = row.get("parameter_set_hash")
+                key = digest if isinstance(digest, str) else None
+                result_hash_types.setdefault(key, set()).add(etype)
+
+        # (3)/(4): DISTINCT over BOTH registry columns, deliberately -- it
+        # collapses a retry's byte-identical duplicate rows (which are
+        # harmless) while KEEPING two rows when the text differs, which is
+        # precisely the conflict being looked for.
+        registry = _quote_fqn(
+            f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", resolved_engine
+        )
+        registry_rows = read(
+            "SELECT DISTINCT parameter_set_hash, canonical_json "
+            f"FROM {registry}"
+        )
+        registry_texts: dict[Any, list[Any]] = {}
+        for row in registry_rows:
+            digest = row.get("parameter_set_hash")
+            registry_texts.setdefault(digest, []).append(row.get("canonical_json"))
+
+        failures: list[str] = []
+
+        malformed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
+        for digest, etypes in sorted(
+            result_hash_types.items(), key=lambda item: (item[0] is not None, item[0])
+        ):
+            entry = {
+                "parameter_set_hash": digest,
+                "entity_types": sorted(etypes),
+            }
+            if digest is None or not _HEX64_RE.fullmatch(digest):
+                malformed.append(entry)
+                failures.append(
+                    f"malformed parameter_set_hash {digest!r} stored in "
+                    f"{', '.join(sorted(etypes))} result table(s): a stored "
+                    "parameter_set_hash must be exactly 64 lowercase hex "
+                    "characters and non-null."
+                )
+            elif digest not in registry_texts:
+                missing.append(entry)
+                failures.append(
+                    f"parameter_set_hash {digest} is used by "
+                    f"{', '.join(sorted(etypes))} result row(s) but has NO "
+                    "parameter-set registry row, so nothing can say which "
+                    "parameters produced those results."
+                )
+
+        conflicting: list[dict[str, Any]] = []
+        mishashed: list[dict[str, Any]] = []
+        for digest, texts in sorted(
+            registry_texts.items(), key=lambda item: (item[0] is None, item[0] or "")
+        ):
+            if len(texts) > 1:
+                conflicting.append(
+                    {
+                        "parameter_set_hash": digest,
+                        "canonical_json": sorted(
+                            texts, key=lambda text: "" if text is None else str(text)
+                        ),
+                    }
+                )
+                failures.append(
+                    f"parameter_set_hash {digest!r} has {len(texts)} "
+                    "registry rows carrying DIFFERENT canonical_json; a hash "
+                    "must always map to the same text, so at least one of "
+                    "them is wrong."
+                )
+            for text in texts:
+                finding = _mishash_reason(digest, text)
+                if finding is not None:
+                    computed, reason = finding
+                    mishashed.append(
+                        {
+                            "parameter_set_hash": digest,
+                            "canonical_json": text,
+                            "computed_parameter_set_hash": computed,
+                            "reason": reason,
+                        }
+                    )
+                    failures.append(
+                        f"registry row for parameter_set_hash {digest!r} is "
+                        f"mis-hashed: {reason}"
+                    )
+
+        return {
+            "ok": not failures,
+            "result_hashes": len(result_hash_types),
+            "registry_hashes": len(registry_texts),
+            "missing_from_registry": missing,
+            "malformed_result_hashes": malformed,
+            "conflicting_canonical_json": conflicting,
+            "mishashed_registry_rows": mishashed,
+            "failures": failures,
+        }
 
     def stats(
         self,
@@ -1759,6 +2141,17 @@ class ClearinghouseCapability:
         - every snapshot id the ledger recorded for an ingested batch still
           exists in the table's Iceberg snapshot history.
 
+        It then runs the PARAMETER-SET REGISTRY INTEGRITY check
+        (:meth:`parameter_set_orphans`) over the live tables and folds every
+        finding into ``'discrepancies'``. That check is run unconditionally,
+        not only for the tables this run touched: a missing registry row is a
+        property of the tables as they now stand, and the run that wrote the
+        orphan is not necessarily the run being verified. Its findings are
+        DISCREPANCIES, never warnings -- an orphaned, malformed, conflicting
+        or mis-hashed registry entry means a stored result cannot be
+        attributed to the parameters that produced it, which is the same
+        class of problem as a missing row.
+
         It performs the same explicit ``COUNT(*)`` discipline as :meth:`stats`
         (never a transport ``row_count`` field), and it WRITES NOTHING -- no
         ``load()``, no ledger line. A discrepancy is REPORTED, not raised: the
@@ -1777,8 +2170,10 @@ class ClearinghouseCapability:
             same namespace the ingest wrote), a ``'tables'`` list (one report per
             verified table with its ``'name'``, ``'ledger_rows'``, ``'live_rows'``,
             ``'ok'`` and, when a snapshot is missing, ``'missing_snapshots'``),
-            and a ``'discrepancies'`` list of human-readable strings (empty when
-            everything reconciles).
+            a ``'discrepancies'`` list of human-readable strings (empty when
+            everything reconciles) and ``'parameter_set_integrity'`` -- the
+            full :meth:`parameter_set_orphans` report, whose ``'failures'``
+            are also folded into ``'discrepancies'``.
 
         Raises:
             BerdlLoadRefusedError: Off-pod (before any transport call).
@@ -1852,11 +2247,15 @@ class ClearinghouseCapability:
                 report["missing_snapshots"] = missing
             reports.append(report)
 
+        parameter_set_integrity = self.parameter_set_orphans()
+        discrepancies.extend(parameter_set_integrity["failures"])
+
         return {
             "run_id": run_id,
             "namespace": write_ns,
             "tables": reports,
             "discrepancies": discrepancies,
+            "parameter_set_integrity": parameter_set_integrity,
         }
 
 
@@ -1919,6 +2318,105 @@ def _in_literal(column: str, values: list[str]) -> str:
         return "1 = 0"
     quoted = ", ".join("'" + value.replace("'", "''") + "'" for value in values)
     return f"{column} IN ({quoted})"
+
+
+def _registry_representative_sql(
+    table: str, *, where: str = "", indent: int = 0
+) -> str:
+    """Build SQL selecting ONE representative registry row per hash.
+
+    The parameter-set registry is append-only and a hash may carry several
+    rows (a retry appends one). Every such row holds the SAME
+    ``canonical_json`` but a different ``observed_at``/``ingest_batch_id``,
+    so "one row per hash" cannot be expressed as ``SELECT DISTINCT`` over the
+    four columns -- that collapses only byte-identical rows. It is a
+    ``ROW_NUMBER()`` reduction instead, ordered the same way
+    :func:`clearinghouse_derivation.current_state_sql` orders a result slot
+    (latest ``observed_at``, ``ingest_batch_id`` as the tie-break), so the
+    representative chosen is deterministic.
+
+    Shared by :meth:`ClearinghouseCapability.parameter_sets` (where it IS the
+    query) and by ``sources(by_parameter_set=True)`` (where it is the joined
+    subquery, and where reducing to one row per hash is what stops a
+    duplicate registry row from multiplying the counts). One builder, so the
+    two cannot drift into disagreeing about what a hash means.
+
+    Args:
+        table: The registry's already-quoted fully-qualified name.
+        where: Optional predicate text applied INSIDE the window (a
+            pre-filter: fewer rows ranked, identical answer).
+        indent: Spaces to indent the whole statement by, for embedding as a
+            readable subquery.
+
+    Returns:
+        SQL text. Performs no I/O.
+    """
+    filter_clause = f"\n        WHERE {where}" if where else ""
+    sql = (
+        "SELECT parameter_set_hash, canonical_json, observed_at, ingest_batch_id\n"
+        "FROM (\n"
+        "    SELECT\n"
+        "        parameter_set_hash,\n"
+        "        canonical_json,\n"
+        "        observed_at,\n"
+        "        ingest_batch_id,\n"
+        "        ROW_NUMBER() OVER (\n"
+        "            PARTITION BY parameter_set_hash\n"
+        "            ORDER BY observed_at DESC, ingest_batch_id DESC\n"
+        "        ) AS rn\n"
+        f"    FROM {table}{filter_clause}\n"
+        ") AS ranked_registry\n"
+        "WHERE rn = 1"
+    )
+    if indent:
+        return textwrap.indent(sql, " " * indent)
+    return sql
+
+
+def _mishash_reason(digest: Any, text: Any) -> tuple[Any, str] | None:
+    """Return ``(computed_hash, reason)`` if ``text`` does not hash to ``digest``.
+
+    Returns ``None`` when the registry row is sound -- ``text`` parses, passes
+    the parameter-set rule, and its
+    :func:`~kbutillib.domains.identity.parameter_set_hash` equals ``digest``.
+
+    The three ways a row can fail are reported separately rather than
+    collapsed, because they point an operator at different causes: text that
+    is not a string at all (a ``NULL`` canonical_json), text that is not
+    parseable as a parameter set (corrupt, truncated, or never canonical),
+    and text that parses perfectly but keys the wrong row (the dangerous
+    one -- it looks entirely valid and silently misattributes every result
+    under that hash).
+
+    ``computed_hash`` is ``None`` for the first two cases: there is no value
+    to compare, which is itself the finding.
+    """
+    if not isinstance(text, str):
+        return None, (
+            f"canonical_json is {text!r}, not text, so it cannot be parsed "
+            "or hashed."
+        )
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        return None, (
+            f"canonical_json {text!r} is not parseable JSON ({exc}), so it "
+            "cannot be hashed."
+        )
+    try:
+        computed = parameter_set_hash(parsed)
+    except ParameterSetError as exc:
+        return None, (
+            f"canonical_json {text!r} parses but is not a valid parameter "
+            f"set ({exc}), so it cannot be hashed."
+        )
+    if computed != digest:
+        return computed, (
+            f"canonical_json {text!r} hashes to {computed}, not to its key "
+            f"{digest!r}; every result keyed on {digest!r} is attributed to "
+            "parameters that do not produce that key."
+        )
+    return None
 
 
 def _scalar(rows: list[dict[str, Any]], key: str) -> Any:

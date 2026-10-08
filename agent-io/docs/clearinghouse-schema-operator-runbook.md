@@ -1622,13 +1622,24 @@ step; do not pre-populate it with expected results.**
 
 | Step | Date | Operator | Result |
 |---|---|---|---|
-| Deploy (pod) |  |  |  |
-| Deploy (poplar) |  |  |  |
-| OP-C1 |  |  |  |
-| OP-C2 |  |  |  |
-| OP-C3 scratch |  |  |  |
-| OP-C3 production |  |  |  |
-| OP-C4 |  |  |  |
+| Deploy (pod) | 2026-10-08 | jane (lake-5 merge) | tree at `7fa4bd2` on `deploy/main-20260926`, porcelain clean; C1.0 confirmed `kbutillib.__file__` resolves here under the KIND venv |
+| Deploy (poplar) |  |  | **NOT DONE as far as this pod can see** — not verified, not attempted; outside the kbhub task's scope |
+| OP-C1 | 2026-10-08 | chris + albert (kbhub) | PASS. Guard read `null_source=0 non_parity=0 parity=13` (13 = the 2026-09-21 OP3 run, unchanged since 2026-10-06; `EXPECTED_PARITY_ROWS` not edited). Six creates; `parameter_set_hash STRING` on all five result tables, registry unpartitioned with the four declared columns; `all_result` recreated; partition specs `['source']` ×5 and `[]` for the registry |
+| OP-C2 | 2026-10-08 | albert (kbhub) | PASS. `clearinghouse_parity` namespace created; five result tables only; `clearinghouse_parity_check.py` → **ALL 8 PROPERTIES PASS**, exit 0, incl. `parameter_set_forks_slot`. Postflight: production result rows **0**, parity namespace **19** (the current `ALL_PARITY_ROWS`, vs the stale 13 that had been in production) |
+| OP-C3 scratch |  |  | blocked — `bf-backfill-cli` not merged/deployed |
+| OP-C3 production |  |  | blocked — as above |
+| OP-C4 |  |  | owed to jane, read-only from primary-laptop, after OP-C3 |
+
+**Operator note from the OP-C1 run (2026-10-08).** On kbhub the Claude Code
+auto-mode permission classifier **hard-refuses** execution of a script containing
+`DROP TABLE` against production — it returns a denial rather than surfacing an
+approval prompt, so an agent cannot run C1.2 even in an attended session. Chris ran
+phase 2 by hand. C2.1/C2.2 (creates) and C2.3 ran from the agent session without
+complaint, so the refusal is specific to the production drop. Two consequences worth
+building in: **a drop step on this pod should expect to be executed by the human**,
+and **its script should write its own log file** rather than relying on the caller to
+pipe — the hand-off to Chris cost the verbatim C1.2 and C1.3-dry-run output, which
+survived only in his terminal scrollback.
 
 
 ---

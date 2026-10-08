@@ -60,8 +60,9 @@ described in ``agent-io/prds/berdl-lakehouse-skills/fullprompt.md``:
   a duplicate ``<type>_content`` row).
 - :mod:`kbutillib.domains.kbase.berdl.clearinghouse_derivation` — the
   SQL that derives "current state" from an append-only PER-TYPE
-  ``<entity_type>_result`` table: a window function over the FOUR-tuple
-  ``(entity_hash, entity_type, result_type, source)`` slot key, keeping the
+  ``<entity_type>_result`` table: a window function over the FIVE-tuple
+  ``(entity_hash, entity_type, result_type, source, parameter_set_hash)``
+  slot key, keeping the
   row with the greatest ``(observed_at, ingest_batch_id)`` in each slot
   (:func:`current_state_sql`). Because ``result_table_fqn`` names a
   single-typed table, the ``entity_types`` filter is redundant-but-harmless
@@ -89,7 +90,9 @@ from .clearinghouse_capability import (
     ClearinghouseCapability,
     ClearinghouseLedgerAmbiguousError,
     ClearinghouseLoadPostflightError,
+    ClearinghousePartialWriteError,
     ClearinghouseWriteTargetMismatchError,
+    order_shards_for_load,
 )
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_schema import NAMESPACE as CLEARINGHOUSE_NAMESPACE
@@ -146,4 +149,6 @@ __all__ = [
     "ClearinghouseWriteTargetMismatchError",
     "ClearinghouseLoadPostflightError",
     "ClearinghouseLedgerAmbiguousError",
+    "ClearinghousePartialWriteError",
+    "order_shards_for_load",
 ]

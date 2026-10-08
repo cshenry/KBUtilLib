@@ -569,3 +569,119 @@ class TestQuoteFqn:
 
     def test_empty_namespace_segments_are_dropped(self):
         assert _quote_fqn("t", "a..b") == "`a`.`b`.`t`"
+
+
+# --------------------------------------------------------------------------
+# bf-write-target: the write-target RESOLVERS the clearinghouse guard needs.
+#
+# ClearinghouseCapability._assert_write_target refuses unless the wrapped
+# capability exposes resolve_write_namespace/resolve_probe_namespace. Before
+# this task those methods existed only in test doubles, so register(),
+# ingest_shards() and verify_run() refused on EVERY production call. The
+# resolvers below are the real implementation, and they are only worth
+# anything if they return the SAME value load() probes -- which is why they
+# and load() share one pure function.
+# --------------------------------------------------------------------------
+
+
+class TestWriteTargetResolvers:
+    """The resolvers are pure, agree with each other, and agree with load()."""
+
+    def test_resolvers_agree_with_tenant_set(self):
+        cap = BerdlCapability()
+        write = cap.resolve_write_namespace(dataset="clearinghouse", tenant="kbaseincubator")
+        probe = cap.resolve_probe_namespace(dataset="clearinghouse", tenant="kbaseincubator")
+        assert write == probe == "kbaseincubator.clearinghouse"
+
+    def test_resolvers_agree_with_tenant_unset(self):
+        """No tenant -> the Spark personal-catalog alias, not a bare dataset."""
+        cap = BerdlCapability()
+        write = cap.resolve_write_namespace(dataset="clearinghouse", tenant=None)
+        probe = cap.resolve_probe_namespace(dataset="clearinghouse", tenant=None)
+        assert write == probe == "my.clearinghouse"
+
+    def test_resolvers_do_no_io_and_work_off_pod(self, monkeypatch):
+        """Pure: no transport is constructed, so they answer off-pod too.
+
+        ``_get_transport`` is replaced with a boom so any I/O attempt fails
+        loudly rather than silently working through a real transport.
+        """
+        cap = BerdlCapability()
+
+        def _boom():
+            raise AssertionError("a resolver constructed a transport")
+
+        monkeypatch.setattr(cap, "_get_transport", _boom)
+        monkeypatch.setattr(
+            "kbutillib.domains.kbase.berdl.capability.berdl_notebook_utils_importable",
+            lambda: False,
+        )
+        assert cap.locus() == "off_pod"
+        assert cap.resolve_write_namespace(dataset="d", tenant="t") == "t.d"
+        assert cap.resolve_probe_namespace(dataset="d", tenant="t") == "t.d"
+        assert cap._transport is None
+
+    @pytest.mark.usefixtures("force_in_pod")
+    @pytest.mark.parametrize(
+        "tenant", ["kbaseincubator", None], ids=["tenant_set", "tenant_unset"]
+    )
+    def test_resolver_value_is_exactly_what_load_probes(
+        self, monkeypatch, fake_ingest, tenant
+    ):
+        """The published namespace IS the probed namespace, both loci of tenancy.
+
+        This is the whole point of the shared function: the clearinghouse
+        guard confirms ``resolve_*``'s answer, so that answer has to be the
+        one ``load()`` reads table existence against.
+        """
+        transport = _FakeInPodTransport(exists=True)
+        cap = BerdlCapability()
+        cap._transport = transport
+        monkeypatch.setattr(
+            cap, "memberships", lambda: {"kbaseincubator": "rw", "clearinghouse": "rw"}
+        )
+
+        cap.load(
+            dataset="clearinghouse",
+            tenant=tenant,
+            tables=[{"name": "t1", "mode": "append"}],
+            dataframes={"t1": object()},
+            namespace="default",
+        )
+
+        published = cap.resolve_probe_namespace(dataset="clearinghouse", tenant=tenant)
+        assert transport.table_exists_calls == [("t1", published)]
+
+    @pytest.mark.usefixtures("force_in_pod")
+    def test_load_refuses_when_platform_resolves_a_different_namespace(
+        self, monkeypatch, fake_ingest
+    ):
+        """A platform/resolver disagreement refuses with NOTHING written.
+
+        If ``create_namespace_if_not_exists`` returns a namespace the shared
+        function did not compute, then the resolvers advertise one namespace
+        while the write would land in another -- dev 1206 with a different
+        pair of names. load() must refuse before probing or ingesting.
+        """
+        transport = _FakeInPodTransport(
+            exists=True, resolved_namespace="somewhere.else"
+        )
+        cap = BerdlCapability()
+        cap._transport = transport
+        monkeypatch.setattr(cap, "memberships", lambda: {"kbaseincubator": "rw"})
+
+        with pytest.raises(BerdlLoadRefusedError) as excinfo:
+            cap.load(
+                dataset="clearinghouse",
+                tenant="kbaseincubator",
+                tables=[{"name": "t1", "mode": "append"}],
+                dataframes={"t1": object()},
+            )
+
+        # The message names BOTH values, so an operator can see the drift.
+        message = str(excinfo.value)
+        assert "somewhere.else" in message
+        assert "kbaseincubator.clearinghouse" in message
+        # Nothing staged, nothing probed, no ingest.
+        assert transport.table_exists_calls == []
+        assert fake_ingest.configs == []

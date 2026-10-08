@@ -38,7 +38,7 @@ import importlib.util
 from typing import Any, Literal, Mapping, MutableMapping, Sequence
 
 from .membership import PermissionLevel, decode_memberships
-from .naming import NormalizedDatabase
+from .naming import SPARK_PERSONAL_ALIAS, NormalizedDatabase
 from .transports import BerdlTransport, InPodTransport, OffPodTransport
 
 Locus = Literal["in_pod", "off_pod"]
@@ -364,6 +364,71 @@ class BerdlCapability:
         available_groups = transport.available_groups()
         return decode_memberships(my_groups, available_groups)
 
+    # -- write-target resolution ------------------------------------------
+
+    @staticmethod
+    def _write_target_namespace(dataset: str, tenant: str | None) -> str:
+        """Compute the namespace ``data_lakehouse_ingest`` will WRITE to.
+
+        PURE: no I/O, no Spark session, no transport, no namespace creation
+        and no existence probe. It is string arithmetic over
+        ``(dataset, tenant)`` and nothing else, which is what makes it safe
+        to call from the read-only resolvers below AND from :meth:`load`'s
+        preflight.
+
+        ``data_lakehouse_ingest`` derives its own write target and IGNORES
+        the ``namespace`` argument entirely -- verified live in the pod
+        against ``orchestrator/init_utils.py:102-117``, recorded in
+        ``agent-io/prds/berdl-smoke-verification/in-pod-results.md``: the
+        target is ``f"{tenant}.{dataset}"`` when a tenant is given, and the
+        personal catalog ``f"my.{dataset}"`` (Spark's
+        :data:`~.naming.SPARK_PERSONAL_ALIAS`) when it is not.
+
+        This is the SINGLE place that rule is encoded.
+        :meth:`resolve_write_namespace`, :meth:`resolve_probe_namespace` and
+        :meth:`load`'s existence probe all route through here, so the
+        namespace a caller is told about, the namespace the probe reads, and
+        the namespace the write lands in cannot drift apart (dev 1206).
+
+        Args:
+            dataset: The bare dataset name (never pre-qualified).
+            tenant: The tenant catalog, or ``None`` for the personal catalog.
+
+        Returns:
+            The dotted write-target namespace.
+        """
+        if tenant:
+            return f"{tenant}.{dataset}"
+        return f"{SPARK_PERSONAL_ALIAS}.{dataset}"
+
+    def resolve_write_namespace(self, *, dataset: str, tenant: str | None) -> str:
+        """Return the namespace an ingest for ``(dataset, tenant)`` will WRITE to.
+
+        READ-ONLY: delegates to :meth:`_write_target_namespace` and performs
+        no I/O whatsoever -- it creates nothing, probes no table and writes
+        nothing. Safe to call off-pod and with no Spark session.
+
+        This is one half of the pair
+        :meth:`~kbutillib.domains.kbase.berdl.clearinghouse_capability.ClearinghouseCapability._assert_write_target`
+        requires. Because both halves return the same shared function's
+        result, that guard passes for a real ``BerdlCapability`` -- and it
+        passes for the right reason: the probe namespace and the write
+        namespace are the same value, not two values that happened to agree.
+        """
+        return self._write_target_namespace(dataset, tenant)
+
+    def resolve_probe_namespace(self, *, dataset: str, tenant: str | None) -> str:
+        """Return the namespace :meth:`load`'s existence PROBE will read.
+
+        READ-ONLY, same contract as :meth:`resolve_write_namespace`: no
+        creation, no probe, no write.
+
+        It returns the identical value because :meth:`load` probes exactly
+        where the ingest writes -- that is the dev 1206 fix, and this method
+        is how an outside caller can confirm it without running a load.
+        """
+        return self._write_target_namespace(dataset, tenant)
+
     def load(
         self,
         *,
@@ -436,10 +501,13 @@ class BerdlCapability:
             obtainable) the post-load row count and new snapshot id.
 
         Raises:
-            BerdlLoadRefusedError: Off-pod, or when the write-target
-                namespace cannot be resolved before the existence check. No
-                data is staged, no artifact is generated, and no work is
-                dispatched.
+            BerdlLoadRefusedError: Off-pod; when the write-target
+                namespace cannot be resolved before the existence check; or
+                when ``create_namespace_if_not_exists`` returns a namespace
+                that differs from :meth:`_write_target_namespace`'s result
+                (the value :meth:`resolve_write_namespace` publishes). No
+                data is staged, no artifact is generated, no ingest is
+                called, and no work is dispatched.
             PermissionError: When the caller does not hold read-write
                 membership on the target tenant.
             ValueError: Invalid table/config shape -- see
@@ -492,9 +560,41 @@ class BerdlCapability:
         # ``namespace`` and the tenant as ``tenant_name``). Resolving it
         # here once and using it for both the existence probe and the
         # postflight FQN makes the probe read exactly where the write goes.
+        #
+        # The namespace this method PROBES is computed locally by
+        # ``_write_target_namespace`` -- the same pure function
+        # ``resolve_write_namespace``/``resolve_probe_namespace`` return, so
+        # the guard in ``ClearinghouseCapability._assert_write_target`` is
+        # checking the very value used below rather than a second,
+        # independently-derived one. The transport's return value is then
+        # checked AGAINST it: agreement is confirmed, never assumed.
+        expected_namespace = self._write_target_namespace(dataset, tenant)
         resolved_namespace = transport.create_namespace_if_not_exists(
             load_spark, namespace=dataset, tenant_name=tenant
         )
+        if resolved_namespace and resolved_namespace != expected_namespace:
+            # The platform resolved a namespace this method did not predict,
+            # so ``_write_target_namespace`` no longer matches
+            # ``data_lakehouse_ingest``'s derivation -- which means the
+            # namespace the resolvers advertise (and that the clearinghouse
+            # guard confirmed) is NOT where this write would land. Refuse
+            # before staging anything: continuing would probe
+            # ``expected_namespace`` while writing to ``resolved_namespace``,
+            # recreating dev 1206 with a different pair of names.
+            raise BerdlLoadRefusedError(
+                "BerdlCapability.load() refused: the write-target namespace "
+                "resolved by the platform does not match the one this "
+                "capability computes. create_namespace_if_not_exists returned "
+                f"{resolved_namespace!r}, but _write_target_namespace "
+                f"(and therefore resolve_write_namespace / "
+                f"resolve_probe_namespace) computes "
+                f"{expected_namespace!r} for dataset={dataset!r} "
+                f"tenant={tenant!r}. Probing one namespace while writing to "
+                "the other silently promotes an 'append' to a destructive "
+                "'overwrite' (dev 1206). No data has been staged, no write "
+                "has been attempted, and no ingest has been called. Reconcile "
+                "the derivation rule before retrying."
+            )
         if not resolved_namespace:
             # The write-target namespace could not be determined. Refuse
             # rather than fall back to ``namespace`` (and thus to the
@@ -519,8 +619,11 @@ class BerdlCapability:
             table = dict(raw_table)
             name = table["name"]
             requested_mode = table.get("mode", "append")
+            # Probe the LOCALLY-computed namespace (asserted equal to the
+            # transport's above), so the probe target is provably the value
+            # the resolvers publish.
             exists = transport.table_exists(
-                load_spark, name, namespace=resolved_namespace
+                load_spark, name, namespace=expected_namespace
             )
             effective_mode = select_write_mode(requested_mode, table_exists=exists)
             table["mode"] = effective_mode

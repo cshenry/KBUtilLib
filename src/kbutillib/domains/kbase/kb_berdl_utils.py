@@ -132,11 +132,23 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
         Raises:
             ValueError: If no KBase token is available
         """
-        token = self.get_token(namespace="berdl")
+        # Resolve the token in order:
+        #   1. the "berdl" namespace -- berdl/transports.py seeds the client
+        #      via set_token(..., namespace="berdl"), so this must win;
+        #   2. the standard "kbase" namespace used by every other utility
+        #      module (kb_ws_utils, kb_callback_utils, ...), e.g. ~/.kbase/token;
+        #   3. the KB_AUTH_TOKEN environment variable set by the KBase runtime.
+        token = (
+            self.get_token(namespace="berdl")
+            or self.get_token(namespace="kbase")
+            or os.environ.get("KB_AUTH_TOKEN")
+        )
         if not token:
             raise ValueError(
-                "No KBase token available. Set token via set_token() or "
-                "ensure ~/.kbase/token exists."
+                "No KBase token available. Provide one of: set_token(..., "
+                'namespace="berdl"); a "kbase" token (set_token(..., '
+                'namespace="kbase") or ~/.kbase/token); or the KB_AUTH_TOKEN '
+                "environment variable (set by the KBase runtime)."
             )
 
         return {
@@ -242,8 +254,17 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
 
             result = response.json()
 
-            # Parse the response - structure may vary based on API response format
-            data = result if isinstance(result, list) else result.get("data", result.get("rows", []))
+            # Parse the response - structure may vary based on API response format.
+            # The current BERDL delta API returns rows under "result" alongside a
+            # "pagination" block; older shapes used "data"/"rows" or a bare list.
+            if isinstance(result, list):
+                data = result
+                pagination: Dict[str, Any] = {}
+            else:
+                data = result.get(
+                    "result", result.get("data", result.get("rows", []))
+                )
+                pagination = result.get("pagination", {}) or {}
 
             # Extract column names from first row if data exists
             columns = list(data[0].keys()) if data and isinstance(data[0], dict) else []
@@ -255,6 +276,8 @@ Full docs: https://hub.berdl.kbase.us/apis/mcp/docs
                 "data": data,
                 "columns": columns,
                 "row_count": len(data),
+                "total_count": pagination.get("total_count"),
+                "has_more": pagination.get("has_more"),
                 "query": sql
             }
 

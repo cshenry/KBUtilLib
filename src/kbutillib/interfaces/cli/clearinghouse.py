@@ -1,8 +1,8 @@
 """``kbu clearinghouse`` — read AND operator verbs over the fifteen-table clearinghouse.
 
 The read verbs (``tables``/``stats``/``known``/``show``/``content``/``results``/
-``sources``/``health``) report on the lakehouse and work off-pod, degrading
-rather than failing. The operator verbs run the bootstrap load: ``plan`` and
+``sources``/``parameter-sets``/``health``) report on the lakehouse and work
+off-pod, degrading rather than failing. The operator verbs run the bootstrap load: ``plan`` and
 ``shard`` (the SHARD stage -- anywhere, no pod, no credentials) and ``load`` and
 ``verify`` (the INGEST stage -- IN-POD ONLY, refusing early off-pod with the
 locus named). Every verb -- read or operator -- emits the SAME versioned JSON
@@ -59,6 +59,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import click
+
+from ...domains.identity import DEFAULT_PARAMETER_SET_HASH
 
 #: The output-contract schema version. Bumped ONLY on a breaking change to a
 #: verb's ``data`` shape; additive fields do not bump it (see module docstring
@@ -139,6 +141,14 @@ def _render(envelope: dict[str, Any]) -> None:
     data = envelope.get("data", {})
     verb = envelope.get("verb", "")
 
+    # Parameter-set integrity findings print FIRST and as "failure:", before
+    # whatever table the verb renders. They are not warnings: a warning marks
+    # a degraded ANSWER, whereas each of these marks stored data that is
+    # already wrong (see ClearinghouseCapability.parameter_set_orphans).
+    integrity = data.get("parameter_set_integrity") or {}
+    for line in integrity.get("failures", []):
+        click.echo(f"failure: {line}")
+
     rows: Optional[list[dict[str, Any]]] = None
     if verb in ("tables", "stats", "health"):
         rows = data.get("tables")
@@ -155,6 +165,8 @@ def _render(envelope: dict[str, Any]) -> None:
         rows = data.get("content")
     elif verb == "results":
         rows = data.get("results")
+    elif verb == "parameter-sets":
+        rows = data.get("parameter_sets")
     elif verb == "show":
         click.echo(f"type={data.get('entity_type')} hash={data.get('hash')}")
         click.echo(f"present: {data.get('present')}")
@@ -289,6 +301,48 @@ def _read_hashes(hash_value: Optional[str], hashes_file: Optional[str]) -> list[
                 if stripped:
                     out.append(stripped)
     return out
+
+
+def _parameter_set_filter(
+    parameter_set_hashes: tuple[str, ...], default_parameters: bool
+) -> Optional[list[str]]:
+    """Union ``--parameter-set-hash`` and ``--default-parameters`` into one filter.
+
+    ``--default-parameters`` is exact shorthand for
+    ``--parameter-set-hash <DEFAULT_PARAMETER_SET_HASH>``, so combining the two
+    UNIONS them rather than letting either win: an operator asking for "the
+    default run and this one tuned run" means both, and silently dropping one
+    of them would answer a question nobody asked.
+
+    Returns ``None`` when neither flag was given -- which is "no filter at
+    all", NOT "match nothing". That distinction is the capability's
+    (``None`` applies no filter, ``[]`` matches nothing), and conflating them
+    here would turn a plain ``results`` call into one that returns no rows.
+
+    Order is preserved and duplicates collapsed, so passing the default hash
+    both ways yields one value, not two.
+    """
+    out: list[str] = []
+    for value in parameter_set_hashes:
+        if value not in out:
+            out.append(value)
+    if default_parameters and DEFAULT_PARAMETER_SET_HASH not in out:
+        out.append(DEFAULT_PARAMETER_SET_HASH)
+    return out or None
+
+
+def _exit_on_integrity_failure(envelope: dict[str, Any]) -> None:
+    """Exit non-zero when a built envelope carries a parameter-set integrity finding.
+
+    Called AFTER :func:`_emit`, never instead of it: the envelope is still
+    published (a dashboard reads the findings out of
+    ``data.parameter_set_integrity``, and an operator needs to see WHAT is
+    broken), and only then does the process exit non-zero so the finding is a
+    FAILURE rather than a warning a script can ignore.
+    """
+    report = envelope.get("data", {}).get("parameter_set_integrity") or {}
+    if report.get("failures"):
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +606,55 @@ def content_cmd(
 # ---------------------------------------------------------------------------
 
 
+def _annotate_with_registry_text(
+    cap: Any, rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Add each row's registry text beside its ``parameter_set_hash``.
+
+    A bare hash is opaque -- "which of these two runs used a threshold of
+    1e-5?" is unanswerable from a 64-character digest -- so the human output
+    needs the registry's ``canonical_json`` ON the row, next to the hash it
+    explains, not in a separate lookup table the reader has to join by eye.
+
+    One ``parameter_sets()`` call covers every distinct hash in the page, so
+    this costs one extra query regardless of row count. A hash with no
+    registry row gets ``None``, which renders as the empty cell -- an orphan
+    (``parameter_set_orphans`` is the verb that reports those as failures).
+
+    Returns ``(rows, warnings)``. If the lookup refuses because a STORED hash
+    is malformed, the annotation is skipped and a warning is returned rather
+    than the whole ``results`` read failing: the rows themselves are still
+    the right answer, and bad stored data is the integrity verb's business.
+    No hash is parsed, validated or normalised here -- the values are passed
+    through to the capability, which owns every hash check (Rule 4).
+    """
+    digests: list[str] = []
+    for row in rows:
+        value = row.get("parameter_set_hash")
+        if isinstance(value, str) and value not in digests:
+            digests.append(value)
+    if not digests:
+        return rows, []
+    try:
+        registry = cap.parameter_sets(digests)
+    except ValueError as exc:
+        return rows, [
+            "could not annotate results with their parameter-set text: "
+            f"{exc} Run `kbu clearinghouse health` for the full "
+            "parameter-set integrity report."
+        ]
+    text = {
+        entry.get("parameter_set_hash"): entry.get("canonical_json")
+        for entry in registry
+    }
+    return [
+        {**row, "parameter_set": text.get(row.get("parameter_set_hash"))}
+        if "parameter_set_hash" in row
+        else row
+        for row in rows
+    ], []
+
+
 def _build_results(
     cap: Any,
     *,
@@ -559,6 +662,7 @@ def _build_results(
     hash_value: Optional[str],
     source: Optional[str],
     result_type: Optional[str],
+    parameter_set_hashes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Build the ``results`` envelope: current-state results for ``<T>_result``.
 
@@ -566,6 +670,17 @@ def _build_results(
     whole-table ``current_state()`` is used. ``--source`` and ``--result-type``
     are passed through to the capability as the (list-shaped) filters it
     accepts.
+
+    ``parameter_set_hashes`` (from ``--parameter-set-hash`` /
+    ``--default-parameters``, unioned by :func:`_parameter_set_filter`) is
+    handed to the capability, which pushes it into the derivation as a
+    PRE-FILTER so each parameter set wins its own current-state window. The
+    CLI does no filtering of its own.
+
+    Every returned row is then annotated with its registry text (see
+    :func:`_annotate_with_registry_text`), so the human table shows what each
+    hash MEANS beside the hash. The field is additive, so
+    ``schema_version`` does not move.
     """
     sources = [source] if source else None
     result_types = [result_type] if result_type else None
@@ -575,13 +690,16 @@ def _build_results(
             [hash_value],
             sources=sources,
             result_types=result_types,
+            parameter_set_hashes=parameter_set_hashes,
         )
     else:
         rows = cap.current_state(
             entity_type,
             sources=sources,
             result_types=result_types,
+            parameter_set_hashes=parameter_set_hashes,
         )
+    rows, warnings = _annotate_with_registry_text(cap, list(rows))
     return _envelope(
         "results",
         locus=_locus(cap),
@@ -590,9 +708,10 @@ def _build_results(
             "hash": hash_value,
             "source": source,
             "result_type": result_type,
+            "parameter_set_hashes": parameter_set_hashes,
             "results": rows,
         },
-        warnings=[],
+        warnings=warnings,
     )
 
 
@@ -603,12 +722,34 @@ def _build_results(
 @click.option(
     "--result-type", "result_type", default=None, help="Filter to one result_type."
 )
+@click.option(
+    "--parameter-set-hash",
+    "parameter_set_hashes",
+    multiple=True,
+    metavar="HASH",
+    help=(
+        "Filter to this parameter_set_hash. Repeatable; unions with "
+        "--default-parameters."
+    ),
+)
+@click.option(
+    "--default-parameters",
+    "default_parameters",
+    is_flag=True,
+    default=False,
+    help=(
+        "Shorthand for --parameter-set-hash <the default (empty) parameter "
+        "set>. Unions with any --parameter-set-hash given."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def results_cmd(
     entity_type: str,
     hash_value: Optional[str],
     source: Optional[str],
     result_type: Optional[str],
+    parameter_set_hashes: tuple[str, ...],
+    default_parameters: bool,
     as_json: bool,
 ) -> None:
     """Current-state results for <type>_result (whole-table, or filtered by hash)."""
@@ -619,6 +760,9 @@ def results_cmd(
             hash_value=hash_value,
             source=source,
             result_type=result_type,
+            parameter_set_hashes=_parameter_set_filter(
+                parameter_set_hashes, default_parameters
+            ),
         ),
         as_json=as_json,
     )
@@ -629,13 +773,27 @@ def results_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _build_sources(cap: Any, *, entity_type: Optional[str]) -> dict[str, Any]:
-    """Build the ``sources`` envelope: distinct source values with row counts."""
-    rows = cap.sources(entity_type)
+def _build_sources(
+    cap: Any, *, entity_type: Optional[str], by_parameter_set: bool = False
+) -> dict[str, Any]:
+    """Build the ``sources`` envelope: distinct source values with row counts.
+
+    The DEFAULT grain is one row per source and does not move: a consumer
+    keyed on ``source`` must not start seeing duplicate rows under an
+    unchanged ``schema_version``. ``--by-parameter-set`` opts into the finer
+    ``(source, parameter_set_hash)`` grain, which also carries the registry's
+    ``canonical_json``. ``by_parameter_set`` is echoed into ``data`` so a
+    consumer can tell from the envelope alone which grain it is holding.
+    """
+    rows = cap.sources(entity_type, by_parameter_set=by_parameter_set)
     return _envelope(
         "sources",
         locus=_locus(cap),
-        data={"entity_type": entity_type, "sources": rows},
+        data={
+            "entity_type": entity_type,
+            "by_parameter_set": by_parameter_set,
+            "sources": rows,
+        },
         warnings=[],
     )
 
@@ -647,10 +805,70 @@ def _build_sources(cap: Any, *, entity_type: Optional[str]) -> dict[str, Any]:
     default=None,
     help="Restrict to one entity type (default: all five result tables).",
 )
+@click.option(
+    "--by-parameter-set",
+    "by_parameter_set",
+    is_flag=True,
+    default=False,
+    help=(
+        "One row per (source, parameter_set_hash) with the registry text, "
+        "instead of one row per source."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
-def sources_cmd(entity_type: Optional[str], as_json: bool) -> None:
+def sources_cmd(
+    entity_type: Optional[str], by_parameter_set: bool, as_json: bool
+) -> None:
     """Distinct source values with row counts, per result table."""
-    _emit(_build_sources(_capability(), entity_type=entity_type), as_json=as_json)
+    _emit(
+        _build_sources(
+            _capability(),
+            entity_type=entity_type,
+            by_parameter_set=by_parameter_set,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# parameter-sets
+# ---------------------------------------------------------------------------
+
+
+def _build_parameter_sets(
+    cap: Any, *, hashes: Optional[list[str]]
+) -> dict[str, Any]:
+    """Build the ``parameter-sets`` envelope: what each registered hash means.
+
+    Thin over :meth:`ClearinghouseCapability.parameter_sets`, which returns
+    ONE representative row per hash even when the append-only registry holds
+    several for it (a retry appends one). The CLI does not de-duplicate --
+    that is the capability's job and it does it in SQL.
+    """
+    rows = cap.parameter_sets(hashes)
+    return _envelope(
+        "parameter-sets",
+        locus=_locus(cap),
+        data={"hashes": hashes, "parameter_sets": rows},
+        warnings=[],
+    )
+
+
+@clearinghouse_cmd.command(name="parameter-sets")
+@click.option(
+    "--hash",
+    "hashes",
+    multiple=True,
+    metavar="HASH",
+    help="Restrict to this parameter_set_hash. Repeatable. Default: all.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def parameter_sets_cmd(hashes: tuple[str, ...], as_json: bool) -> None:
+    """List the parameter-set registry: what each parameter_set_hash means."""
+    _emit(
+        _build_parameter_sets(_capability(), hashes=list(hashes) or None),
+        as_json=as_json,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +885,16 @@ def _build_health(cap: Any) -> dict[str, Any]:
     Off-pod the file fields are unavailable, so the capability's own warning is
     lifted into the envelope and no table can be evaluated (a degraded answer
     with a non-empty ``warnings`` — output-contract rule 3).
+
+    It ALSO runs the parameter-set registry integrity check
+    (``parameter_set_orphans()``) and carries the whole report in
+    ``data.parameter_set_integrity``. Those findings are FAILURES, not
+    warnings, and they are deliberately kept out of ``warnings``:
+    fragmentation is a table that wants compacting, whereas an orphaned,
+    malformed, conflicting or mis-hashed registry entry means a stored result
+    cannot be attributed to the parameters that produced it. ``health`` exits
+    NON-ZERO when any finding is present (see
+    :func:`_exit_on_integrity_failure`), so a monitor notices.
     """
     result = cap.stats(include_files=True)
     warnings = list(result.get("warnings", []))
@@ -692,6 +920,7 @@ def _build_health(cap: Any) -> dict[str, Any]:
             "no table could be evaluated for fragmentation (no data-file sizes "
             "available); run health in-pod for file metadata."
         )
+    integrity = cap.parameter_set_orphans()
     return _envelope(
         "health",
         locus=_locus(cap),
@@ -699,6 +928,7 @@ def _build_health(cap: Any) -> dict[str, Any]:
             "threshold_bytes": HEALTH_MIN_AVG_FILE_SIZE_BYTES,
             "tables_evaluated": evaluated,
             "tables": fragmented,
+            "parameter_set_integrity": integrity,
         },
         warnings=warnings,
     )
@@ -707,8 +937,10 @@ def _build_health(cap: Any) -> dict[str, Any]:
 @clearinghouse_cmd.command(name="health")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def health_cmd(as_json: bool) -> None:
-    """Flag tables whose average data-file size is below the fragmentation threshold."""
-    _emit(_build_health(_capability()), as_json=as_json)
+    """Flag fragmented tables and parameter-set registry integrity failures."""
+    envelope = _build_health(_capability())
+    _emit(envelope, as_json=as_json)
+    _exit_on_integrity_failure(envelope)
 
 
 # ===========================================================================
@@ -1055,13 +1287,29 @@ def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
     IN-POD ONLY (the refusal is in :func:`verify_cmd`, before this). Thin over
     :meth:`ClearinghouseCapability.verify_run`, which reads the run ledger and
     confirms every ingested table's live ``COUNT(*)`` is at least the ledger's
-    recorded rows and that every recorded snapshot still exists. A discrepancy
-    is REPORTED in ``warnings`` (and the per-table ``ok`` flag), not raised --
-    the whole point of verify is to tell the operator what a load reported FAILED
-    on a null postflight actually did, so it must answer rather than fail.
+    recorded rows and that every recorded snapshot still exists. A LEDGER
+    discrepancy is REPORTED in ``warnings`` (and the per-table ``ok`` flag),
+    not raised -- the whole point of verify is to tell the operator what a load
+    reported FAILED on a null postflight actually did, so it must answer rather
+    than fail.
+
+    ``verify_run`` also runs the parameter-set registry integrity check and
+    folds its findings into its ``discrepancies``. Those findings are
+    FAILURES, so they are reported differently from the ledger ones: the full
+    report travels in ``data.parameter_set_integrity``, the findings are
+    EXCLUDED from ``warnings`` (a warning is for a degraded answer, and this
+    answer is not degraded -- the data is wrong), and ``verify`` exits
+    non-zero when any is present. ``data.discrepancies`` keeps the complete
+    combined list, exactly as ``verify_run`` returned it, so nothing a
+    consumer already reads disappears.
     """
     result = cap.verify_run(shard_dir, run_id=run_id)
     discrepancies = list(result.get("discrepancies", []))
+    integrity = result.get("parameter_set_integrity") or {}
+    integrity_failures = set(integrity.get("failures", []))
+    ledger_discrepancies = [
+        line for line in discrepancies if line not in integrity_failures
+    ]
     return _envelope(
         "verify",
         locus=_locus(cap),
@@ -1071,8 +1319,9 @@ def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
             "namespace": result.get("namespace"),
             "tables": result.get("tables", []),
             "discrepancies": discrepancies,
+            "parameter_set_integrity": integrity,
         },
-        warnings=discrepancies,
+        warnings=ledger_discrepancies,
     )
 
 
@@ -1090,7 +1339,6 @@ def verify_cmd(shard_dir: str, run_id: Optional[str], as_json: bool) -> None:
     cap = _capability()
     _require_in_pod_or_refuse(cap, "verify")
     resolved_run_id = run_id or _default_run_id(shard_dir)
-    _emit(
-        _build_verify(cap, shard_dir=shard_dir, run_id=resolved_run_id),
-        as_json=as_json,
-    )
+    envelope = _build_verify(cap, shard_dir=shard_dir, run_id=resolved_run_id)
+    _emit(envelope, as_json=as_json)
+    _exit_on_integrity_failure(envelope)

@@ -1,0 +1,141 @@
+# THE DEMO SEED MAPPING -- the first real data to land in the clearinghouse.
+#
+# Unlike `gaa_store_parquet_dump.toml` (which is documentation of the format,
+# with illustrative placeholder paths), this manifest describes a LIVE store
+# and is meant to be run.
+#
+# HOW IT IS LOADED. Not by hand, and not by a bespoke script: the seed is
+# loaded by the backfill command --
+#
+#     kbu clearinghouse backfill run mongo-protein-bakta --slice 00 --limit 12000
+#
+# -- which is run against a SCRATCH DATASET FIRST, and only then against
+# production. See OP-C3 in
+# `agent-io/docs/clearinghouse-schema-operator-runbook.md` for the scratch
+# run, the promotion gate it must pass, and the production run. A sibling
+# PRD's `mongo-protein-bakta` preset is tested to map this collection exactly
+# as this file does, so the two must not drift: change one and you change the
+# other.
+#
+# THE SOURCE LABEL IS A PROVENANCE LABEL, NOT A TOOL VERSION. Every result
+# row below carries `source = "@const(bakta/mongo-seq_protein_bakta)"`. That
+# second segment is not a Bakta release number, because the store recorded no
+# tool version -- the collection says only that these annotations came from
+# Bakta, by way of the `seq_protein_bakta` collection. The `source` column is
+# the partition column on `protein_result` and is `"<tool>/<version>"` by
+# convention, so rather than invent a version that was never recorded, the
+# label names WHERE the rows came from and stays honest about what is known.
+# A later load from a store that does record a Bakta version is a different
+# `source`, hence a different partition and a different slot -- which is the
+# correct outcome, not a collision.
+#
+# THE SLICE. The key range below is slice `00` of 256: `_id` is a
+# 64-character lowercase-hex sha256, so restricting it to the half-open range
+# ["00", "01") selects every document whose `_id` starts with "00" -- a
+# UNIFORM 1/256 SAMPLE of the collection, not its first N documents. That is
+# what makes it a representative demo seed rather than a biased prefix, and it
+# is why the backfill command takes `--slice 00` rather than a plain offset.
+#
+# THE PARAMETER SET IS `{}` -- A DEFAULT RUN. The store recorded no
+# parameters, so nothing was overridden on top of the tool's own defaults and
+# `{}` is the honest declaration. It hashes to
+# DEFAULT_PARAMETER_SET_HASH (44136fa3...aff8a), which is the value OP-C3's
+# promotion gate checks on every seeded result row.
+#
+# THREE SOURCES, ONE COLLECTION. A manifest source names ONE collection; the
+# join across entity types is expressed as SEVERAL sources over the same
+# collection, each hashing on its own identity (see MongoSourceAdapter's
+# docstring). Here that is: the protein's identity and sequence, the protein's
+# annotation result, and the FUNCTION entity named by that annotation's
+# `product` text.
+#
+# IDENTITY IS RECOMPUTED, NEVER TRUSTED FROM `_id`. Every `[source.hash]`
+# below uses `raw_column`, not `precomputed`. Mongo's `_id` is also a 64-hex
+# sha256, but whether it equals what `identity.standardizers` computes from
+# the sequence is UNVERIFIED -- so the standardizer recomputes the identity
+# from the sequence text. Whether the two agree is a spot-check, deliberately
+# not an assumption baked into this file.
+
+# ---- Protein: identity + content (the amino-acid sequence) --------------
+#
+# `aa` is the plain amino-acid sequence column. No `decompress` key is
+# needed here: unlike the surveyed `seq_protein` collection (whose sequence
+# is a zlib blob in `z_seq`), `seq_protein_bakta` carries the sequence
+# uncompressed in `aa`.
+[[source]]
+name        = "mongo-protein-bakta-protein"
+adapter     = "mongo"
+uri         = "mongodb://poplar.cels.anl.gov:27017"
+database    = "database"
+collection  = "seq_protein_bakta"
+sort_key    = "_id"
+min_key     = "00"
+max_key     = "01"
+entity_type = "protein"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  # RECOMPUTED from the sequence -- not the collection's precomputed `_id`.
+  raw_column = "aa"
+
+  [source.content]
+  sequence   = "aa"
+  seq_length = "@len(aa)"
+
+# ---- Protein: the Bakta annotation result -------------------------------
+#
+# Hashes on the SAME `aa` column as the source above, which is what ties
+# each annotation to the protein identity it belongs to.
+[[source]]
+name        = "mongo-protein-bakta-result"
+adapter     = "mongo"
+uri         = "mongodb://poplar.cels.anl.gov:27017"
+database    = "database"
+collection  = "seq_protein_bakta"
+sort_key    = "_id"
+min_key     = "00"
+max_key     = "01"
+entity_type = "protein"
+kinds       = ["result"]
+
+  [source.hash]
+  raw_column = "aa"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  # A PROVENANCE LABEL, not a tool version -- see the header. Written as
+  # @const because it is the same on every row, which also lets the
+  # plan-time result-boundary check resolve the tool before any document is
+  # read.
+  source              = "@const(bakta/mongo-seq_protein_bakta)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(product, gene, genes, db_xrefs, psc, pscc, type)"
+  # REQUIRED on every result source. {} declares a DEFAULT run: the store
+  # recorded no parameters, so nothing was overridden on top of the tool's
+  # own defaults. Resource parameters (threads, memory, paths, batch sizes,
+  # hostnames) would never appear here even if they had been recorded.
+  parameter_set       = {}
+
+# ---- Function: identity + content (the product text) --------------------
+#
+# The annotation's `product` string IS the function's identity here: the
+# function entity is hashed from the same text that becomes its definition,
+# so `protein_result`'s payload and `function_entity` agree on what the
+# function is without a separate function table to join against.
+[[source]]
+name        = "mongo-protein-bakta-function"
+adapter     = "mongo"
+uri         = "mongodb://poplar.cels.anl.gov:27017"
+database    = "database"
+collection  = "seq_protein_bakta"
+sort_key    = "_id"
+min_key     = "00"
+max_key     = "01"
+entity_type = "function"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  raw_column = "product"
+
+  [source.content]
+  definition = "product"

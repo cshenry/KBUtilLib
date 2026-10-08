@@ -1,4 +1,4 @@
-"""Shared fixture rows for the six ``current_state_sql`` derivation properties.
+"""Shared fixture rows for the ``current_state_sql`` derivation properties.
 
 This module exists so that exactly ONE set of fixture rows drives both:
 
@@ -37,13 +37,23 @@ mistaken for real tool output and lets an operator find and account for
 them later. Per the runbook, these rows are expected to remain in the
 table permanently -- the schema is append-only by design -- and this is
 harmless, since each occupies its own ``(entity_hash, entity_type,
-result_type, source)`` slot and can never shadow or be shadowed by a
-real slot. ``entity_type`` is part of the slot key because
-``_standardize_protein`` and ``_standardize_gene`` are the same
+result_type, source, parameter_set_hash)`` slot and can never shadow or
+be shadowed by a real slot. ``entity_type`` is part of the slot key
+because ``_standardize_protein`` and ``_standardize_gene`` are the same
 standardizer, so ``entity_hash`` alone does not uniquely identify an
 entity -- the pair ``(entity_hash, entity_type)`` does. It is also, now,
 what selects which of the five per-type ``result`` tables a row belongs
 to (see :func:`rows_by_entity_type` and :attr:`ParityCase.entity_type`).
+
+``parameter_set_hash`` closes the slot key, and every row here carries
+one. The six original properties are all DEFAULT runs, so each of their
+rows carries
+:data:`~kbutillib.domains.identity.DEFAULT_PARAMETER_SET_HASH` --
+imported, never hardcoded as hex, so the fixture cannot drift from the
+rule that produces it. :data:`PARAMETER_SET_FORKS_SLOT` is the one
+property that varies it: two parameter sets for ONE
+``(entity_hash, entity_type, result_type, source)`` are both current, and
+a ``parameter_set_hashes`` filter returns exactly its own row.
 """
 
 from __future__ import annotations
@@ -52,6 +62,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+from kbutillib.domains.identity import (
+    DEFAULT_PARAMETER_SET_HASH,
+    parameter_set_hash,
+)
 from kbutillib.domains.identity.standardizers import genome_hash_from_fasta
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import ENTITY_TYPES
 
@@ -85,7 +99,7 @@ def fixture_source(property_key: str, tool: str) -> str:
 
 @dataclass(frozen=True)
 class ParityCase:
-    """One of the six current-state derivation properties, with its rows.
+    """One of the current-state derivation properties, with its rows.
 
     Attributes:
         property_key: A short, stable identifier for this property (used
@@ -101,9 +115,12 @@ class ParityCase:
             scope its read to exactly this case's rows.
         rows: The fixture rows to insert/append, each shaped as the
             keyword arguments for a ``result``-table row: ``entity_hash``
-            (64-char lowercase hex str), ``entity_type``, ``result_type``, ``source``,
-            ``result_type_version``, ``payload`` (a plain ``dict``, not
-            yet JSON-encoded), ``observed_at``, ``ingest_batch_id``.
+            (64-char lowercase hex str), ``entity_type``, ``result_type``,
+            ``source``, ``parameter_set_hash`` (64-char lowercase hex str;
+            :data:`~kbutillib.domains.identity.DEFAULT_PARAMETER_SET_HASH`
+            for a default run), ``result_type_version``, ``payload`` (a
+            plain ``dict``, not yet JSON-encoded), ``observed_at``,
+            ``ingest_batch_id``.
     """
 
     property_key: str
@@ -140,6 +157,30 @@ class ParityCase:
             )
         return next(iter(types))
 
+    @property
+    def parameter_set_hashes(self) -> tuple[str, ...]:
+        """Every distinct ``parameter_set_hash`` this case's rows use.
+
+        In the order first introduced, so index 0 is stable and a reader
+        can filter on a named one. DERIVED from :attr:`rows` rather than
+        declared as a field, deliberately: ``sources`` is a declared field
+        because a case may legitimately want to scope a read to a source
+        none of its rows carries, whereas the parameter-set filter under
+        test is always "one of the hashes these rows actually wrote", and
+        deriving it makes a declared-vs-actual mismatch impossible.
+
+        For the six pre-existing properties this is
+        ``(DEFAULT_PARAMETER_SET_HASH,)`` -- every one of their rows is a
+        default run. Only
+        :data:`PARAMETER_SET_FORKS_SLOT` carries two.
+        """
+        seen: list[str] = []
+        for row in self.rows:
+            value = row["parameter_set_hash"]
+            if value not in seen:
+                seen.append(value)
+        return tuple(seen)
+
 
 _RESULT_TYPE = "annotation"
 
@@ -159,6 +200,7 @@ DUPLICATE_COLLAPSE = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _DUPLICATE_COLLAPSE_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "same"}},
             "observed_at": f"2026-01-01 00:0{i}:00",
@@ -184,6 +226,7 @@ NEWEST_WINS = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _NEWEST_WINS_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "old"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -194,6 +237,7 @@ NEWEST_WINS = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _NEWEST_WINS_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "new"}},
             "observed_at": "2026-01-02 00:00:00",
@@ -220,6 +264,7 @@ INGEST_BATCH_ID_TIE_BREAK = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TIE_BREAK_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "lower_batch"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -230,6 +275,7 @@ INGEST_BATCH_ID_TIE_BREAK = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TIE_BREAK_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "higher_batch"}},
             "observed_at": "2026-01-01 00:00:00",  # identical timestamp
@@ -255,6 +301,7 @@ TERM_REMOVAL = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TERM_REMOVAL_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"go": {"term": "GO:0001"}, "ec": {"term": "1.1.1.1"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -265,6 +312,7 @@ TERM_REMOVAL = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _TERM_REMOVAL_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"go": {"term": "GO:0001"}},  # 'ec' namespace dropped
             "observed_at": "2026-01-02 00:00:00",
@@ -295,6 +343,7 @@ SOURCE_ISOLATION = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _SOURCE_ISOLATION_SOURCE_A,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "from_a"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -305,6 +354,7 @@ SOURCE_ISOLATION = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _SOURCE_ISOLATION_SOURCE_B,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "from_b"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -333,6 +383,7 @@ RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _VERSION_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"ns": {"k": "old_version"}},
             "observed_at": "2026-01-01 00:00:00",
@@ -343,6 +394,7 @@ RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY = ParityCase(
             "entity_type": "protein",
             "result_type": _RESULT_TYPE,
             "source": _VERSION_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v2",  # schema bump, same slot key
             "payload": {"ns": {"k": "new_version"}},
             "observed_at": "2026-01-02 00:00:00",
@@ -435,6 +487,7 @@ GENOME_FASTA_INVARIANCE = ParityCase(
             "entity_type": "genome",
             "result_type": _RESULT_TYPE,
             "source": _GENOME_FASTA_INVARIANCE_SOURCE,
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
             "result_type_version": "v1",
             "payload": {"rendering": label},
             "observed_at": f"2026-01-01 00:0{i}:00",
@@ -444,10 +497,104 @@ GENOME_FASTA_INVARIANCE = ParityCase(
     ),
 )
 
+# --------------------------------------------------------------------------
+# Property 9 -- parameter_set_hash is part of the slot key: two parameter
+# sets for ONE (entity_hash, entity_type, result_type, source) are BOTH
+# current, and filtering current state by one hash returns exactly its row.
+#
+# This is the property that makes the column worth having. ``source`` is
+# only ``<tool>/<version>``, so before parameter_set_hash joined the slot
+# key these two rows were one slot and the second would have superseded the
+# first -- the parameterised run silently destroying the default answer.
+# Both rows below share one entity_hash, entity_type, result_type and
+# source, and differ ONLY in parameter_set_hash; both must therefore be
+# current at once. The pair also covers the two ends of the rule: the
+# EMPTY parameter set (a default run, DEFAULT_PARAMETER_SET_HASH) and a
+# non-empty one whose decimal is passed as a STRING ("1e-10"), since the
+# parameter-set rule rejects floats.
+# --------------------------------------------------------------------------
+_PARAMETER_SET_SOURCE = fixture_source("parameter_set_forks_slot", "toolA")
+
+#: The two parameter sets this property contrasts: a default run and an
+#: explicit e-value threshold. Held as the SETS, with the hashes derived
+#: from them by :func:`kbutillib.domains.identity.parameter_set_hash`, so
+#: the fixture can never carry a digest that disagrees with the rule -- the
+#: hex is never hardcoded here.
+PARAMETER_SET_DEFAULT: dict[str, Any] = {}
+PARAMETER_SET_EVALUE: dict[str, Any] = {"evalue": "1e-10"}
+
+#: The two hashes, derived. The first MUST equal DEFAULT_PARAMETER_SET_HASH
+#: (the sha256 of the two bytes ``{}``); asserted at import time below so a
+#: drift in the rule fails the fixture loudly rather than silently changing
+#: which slot these rows occupy.
+PARAMETER_SET_DEFAULT_HASH = parameter_set_hash(PARAMETER_SET_DEFAULT)
+PARAMETER_SET_EVALUE_HASH = parameter_set_hash(PARAMETER_SET_EVALUE)
+
+if PARAMETER_SET_DEFAULT_HASH != DEFAULT_PARAMETER_SET_HASH:
+    raise AssertionError(
+        "parameter-set parity fixture is inconsistent: "
+        f"parameter_set_hash({{}}) is {PARAMETER_SET_DEFAULT_HASH} but "
+        f"DEFAULT_PARAMETER_SET_HASH is {DEFAULT_PARAMETER_SET_HASH}; the "
+        "empty parameter set must hash to the documented default."
+    )
+if PARAMETER_SET_EVALUE_HASH == PARAMETER_SET_DEFAULT_HASH:
+    raise AssertionError(
+        "parameter-set parity fixture is vacuous: the explicit parameter "
+        "set hashes to the same value as the default one, so the two rows "
+        "would share a slot and the property under test could not fail."
+    )
+
+PARAMETER_SET_FORKS_SLOT = ParityCase(
+    property_key="parameter_set_forks_slot",
+    description=(
+        "two parameter sets for one tool version are both current, and a "
+        "parameter_set_hashes filter returns exactly its own row"
+    ),
+    entity_hash=fixture_entity_hash("parity-parameter-set"),
+    result_type=_RESULT_TYPE,
+    sources=(_PARAMETER_SET_SOURCE,),
+    rows=(
+        {
+            "entity_hash": fixture_entity_hash("parity-parameter-set"),
+            "entity_type": "protein",
+            "result_type": _RESULT_TYPE,
+            "source": _PARAMETER_SET_SOURCE,
+            "parameter_set_hash": PARAMETER_SET_DEFAULT_HASH,
+            "result_type_version": "v1",
+            "payload": {"ns": {"k": "default_params"}},
+            "observed_at": "2026-01-01 00:00:00",
+            "ingest_batch_id": "01HPARITYPARAMSET00000FA",
+        },
+        {
+            "entity_hash": fixture_entity_hash("parity-parameter-set"),
+            "entity_type": "protein",
+            "result_type": _RESULT_TYPE,
+            "source": _PARAMETER_SET_SOURCE,
+            "parameter_set_hash": PARAMETER_SET_EVALUE_HASH,
+            "result_type_version": "v1",
+            "payload": {"ns": {"k": "evalue_params"}},
+            # LATER than the default row on purpose: under the old 4-tuple
+            # slot key this row would have won the shared slot and the
+            # default row would have vanished from current state. Both being
+            # current is exactly what the 5-tuple buys.
+            "observed_at": "2026-01-02 00:00:00",
+            "ingest_batch_id": "01HPARITYPARAMSET00000FB",
+        },
+    ),
+)
+
+#: The expected current-state payload for each of this property's two
+#: parameter sets, keyed by hash -- so the DuckDB test and the OP3 parity
+#: script assert against ONE definition rather than re-typing the mapping.
+PARAMETER_SET_EXPECTED_PAYLOADS: dict[str, dict[str, Any]] = {
+    PARAMETER_SET_DEFAULT_HASH: {"ns": {"k": "default_params"}},
+    PARAMETER_SET_EVALUE_HASH: {"ns": {"k": "evalue_params"}},
+}
+
 #: All parity properties, in the order stated by the PRD/task: duplicate
 #: collapse, newest-wins, ingest_batch_id tie-break, term removal, source
-#: isolation, result_type_version outside the slot key, and genome FASTA
-#: rendering invariance.
+#: isolation, result_type_version outside the slot key, genome FASTA
+#: rendering invariance, and parameter_set_hash forking the slot.
 PARITY_CASES: tuple[ParityCase, ...] = (
     DUPLICATE_COLLAPSE,
     NEWEST_WINS,
@@ -456,6 +603,7 @@ PARITY_CASES: tuple[ParityCase, ...] = (
     SOURCE_ISOLATION,
     RESULT_TYPE_VERSION_OUTSIDE_SLOT_KEY,
     GENOME_FASTA_INVARIANCE,
+    PARAMETER_SET_FORKS_SLOT,
 )
 
 #: Every ``source`` value used by any fixture row, in case a caller wants
@@ -465,7 +613,7 @@ ALL_PARITY_SOURCES: tuple[str, ...] = tuple(
     source for case in PARITY_CASES for source in case.sources
 )
 
-#: Every fixture row across all six properties, flattened, in the same
+#: Every fixture row across all properties, flattened, in the same
 #: order as :data:`PARITY_CASES`.
 ALL_PARITY_ROWS: tuple[dict[str, Any], ...] = tuple(
     row for case in PARITY_CASES for row in case.rows

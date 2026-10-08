@@ -26,7 +26,8 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
 
 _NAMESPACE = "clearinghouse"
 
-#: Every table name the fifteen-table config emits.
+#: Every table name table_configs() emits -- the fifteen per-entity-type
+#: tables plus the parameter-set registry.
 _ALL_TABLE_NAMES = [t["name"] for t in table_configs()]
 
 #: Live partition spec every table would report after a first bootstrap

@@ -91,6 +91,20 @@ Iceberg target-file neighbourhood, coarse enough that per-batch ledger overhead
 is negligible and fine enough that a pod restart during ingest costs minutes
 rather than hours. It is configurable (``target_bytes``). This number is NOT
 backed by a measurement at this scale; it is a convention, stated as such.
+
+THE PARAMETER-SET REGISTRY IS WRITTEN BY THIS STAGE, AND FIRST. Every
+``<type>_result`` row carries a ``parameter_set_hash``, stamped from the
+plan's ``parameter_set`` (validated and hashed ONCE at plan time -- see
+:func:`clearinghouse_manifest._plan_parameter_set`, never per row). The hash
+alone is opaque, so :func:`shard_manifest` also emits a shard for the
+sixteenth table, the parameter-set registry
+(:data:`~clearinghouse_schema.PARAMETER_SET_TABLE`), holding one row per
+DISTINCT parameter set the run's result sources used. It is written BEFORE
+any result shard, and ingested before any result table
+(:meth:`~clearinghouse_capability.ClearinghouseCapability.ingest_shards`
+orders it first), so no result row ever exists whose hash the registry
+cannot explain. That ordering is a WRITER obligation on every write path,
+not a reader's problem.
 """
 
 from __future__ import annotations
@@ -101,13 +115,14 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ...identity import standardizers
 from . import clearinghouse_manifest as cm
+from . import clearinghouse_parameters as cp
 from . import clearinghouse_schema as schema
 
 #: Conventional Iceberg target file size, ~512 MB. See the module docstring:
@@ -962,6 +977,14 @@ def _build_row(plan: cm.TablePlan, row: Mapping[str, Any], batch_id: str) -> dic
     ``standardizer_version``, ``observed_at``, ``ingest_batch_id``) the sharder
     owns. ``observed_at`` is left ``None`` here (the ingest stage stamps the
     authoritative timestamp); ``ingest_batch_id`` records the bronze batch.
+
+    On a ``result`` row it also stamps ``parameter_set_hash`` from the plan --
+    the hash the plan computed ONCE at plan time, not re-derived per row. When
+    the plan's result ``source`` is a derivation rather than a
+    ``@const(...)``, the tool was unknown at plan time, so the shared
+    TRANSYT result-boundary validator
+    (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) runs
+    HERE, against this row's resolved ``source``.
     """
     out: dict[str, Any] = {}
     for column, derivation in plan.columns.items():
@@ -970,6 +993,17 @@ def _build_row(plan: cm.TablePlan, row: Mapping[str, Any], batch_id: str) -> dic
     out["standardizer_version"] = standardizers.STANDARDIZER_VERSION
     if plan.kind in ("entity", "result"):
         out["entity_type"] = plan.entity_type
+    if plan.kind == "result":
+        out["parameter_set_hash"] = plan.parameter_set_hash
+        if cm.constant_result_source(plan.columns) is None:
+            cp.validate_transyt_parameter_set(
+                plan.parameter_set or {},
+                source=out.get("source"),
+                where=(
+                    f"source {plan.source_name!r} [source.result]"
+                    ".parameter_set"
+                ),
+            )
     out["observed_at"] = None
     out["ingest_batch_id"] = batch_id
     return out
@@ -1192,6 +1226,75 @@ def _assert_sorted_and_disjoint(reports: list[ShardReport], table: str) -> None:
             prev_max = hashes[-1]
 
 
+def write_parameter_set_registry_shard(
+    plans: Sequence[cm.TablePlan], out_root: str | Path
+) -> ShardReport | None:
+    """Write the run's parameter-set REGISTRY shard, or ``None`` if not needed.
+
+    One row per DISTINCT ``parameter_set_hash`` across every ``result`` plan
+    in ``plans``, each carrying the hash and its ``canonical_json`` -- the
+    text that says what the hash MEANS. A hash always maps to the same text,
+    so a duplicate row is harmless and readers select distinct on the hash;
+    this still dedupes within the run, because one row per set is the point
+    of the table.
+
+    Layout and provenance match every other target table: the file is
+    ``<out_root>/parameter_set/batch-0000.parquet``, ``observed_at`` is left
+    ``None`` for the ingest stage to stamp, and ``ingest_batch_id`` is the
+    sharder's ``"<source_name>:<table>"`` form -- naming the FIRST result
+    source that used the set, so a registry row can be traced back to the
+    source that introduced it. Rows are sorted by ``parameter_set_hash``, the
+    same ordering discipline the per-entity shards apply to ``entity_hash``.
+
+    The registry is NOT range-sharded: it holds one row per distinct
+    parameter set across the whole corpus -- thousands at most, against
+    billions of result rows -- so a single batch is the whole table and the
+    equal-width hash ranges would be pure overhead.
+
+    Args:
+        plans: The run's resolved plans (from
+            :func:`clearinghouse_manifest.shard_plan`). Non-``result`` plans
+            are ignored.
+        out_root: The bronze output root, as passed to :func:`shard_source`.
+
+    Returns:
+        The :class:`ShardReport` for the written shard, or ``None`` when
+        ``plans`` names no ``result`` table (nothing to explain, so no
+        registry directory is created at all).
+    """
+    # Insertion-ordered dedupe by hash: the first result plan to use a set
+    # supplies its row, so the recorded ingest_batch_id names that source.
+    rows_by_hash: dict[str, dict[str, Any]] = {}
+    for plan in plans:
+        if plan.kind != "result" or plan.parameter_set_hash is None:
+            continue
+        if plan.parameter_set_hash in rows_by_hash:
+            continue
+        rows_by_hash[plan.parameter_set_hash] = {
+            "parameter_set_hash": plan.parameter_set_hash,
+            "canonical_json": plan.parameter_set_json,
+            "observed_at": None,
+            "ingest_batch_id": f"{plan.source_name}:{schema.PARAMETER_SET_TABLE}",
+        }
+    if not rows_by_hash:
+        return None
+
+    rows = [rows_by_hash[key] for key in sorted(rows_by_hash)]
+    table_dir = Path(out_root) / schema.PARAMETER_SET_TABLE
+    table_dir.mkdir(parents=True, exist_ok=True)
+    batch_id = "batch-0000"
+    path = table_dir / f"{batch_id}.parquet"
+    _write_parquet(rows, list(schema.parameter_set_column_names()), path)
+    return ShardReport(
+        table=schema.PARAMETER_SET_TABLE,
+        batch_id=batch_id,
+        path=path,
+        rows=len(rows),
+        hash_min=rows[0]["parameter_set_hash"],
+        hash_max=rows[-1]["parameter_set_hash"],
+    )
+
+
 def shard_manifest(
     manifest: cm.Manifest,
     out_root: str | Path,
@@ -1208,12 +1311,22 @@ def shard_manifest(
     runs them serially, but shares no mutable state that would prevent a caller
     fanning :func:`shard_source` out across processes.
 
+    THE REGISTRY SHARD IS WRITTEN FIRST. Before any result shard, this emits
+    one shard for :data:`~clearinghouse_schema.PARAMETER_SET_TABLE` holding
+    one row per DISTINCT parameter set the run's result sources declared (see
+    :func:`write_parameter_set_registry_shard`). A run with no ``result``
+    source writes no registry shard and no registry directory.
+
     Returns:
-        Every :class:`ShardReport` from every table, in plan order.
+        Every :class:`ShardReport` from every table -- the registry shard (if
+        any) first, then the per-table shards in plan order.
     """
     out_root = Path(out_root)
     plans = cm.shard_plan(manifest)
     reports: list[ShardReport] = []
+    registry = write_parameter_set_registry_shard(plans, out_root)
+    if registry is not None:
+        reports.append(registry)
     for plan in plans:
         # Reconstruct the source object for this plan to build its adapter.
         source = _source_for_plan(manifest, plan)

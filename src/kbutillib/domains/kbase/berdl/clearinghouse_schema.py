@@ -1,12 +1,15 @@
 """Table configs and hash-encoding helpers for the content-hash clearinghouse.
 
-This defines the fifteen Apache Iceberg tables of the ``kbaseincubator``
-tenant's ``clearinghouse`` namespace in the BER Data Lakehouse as pure,
-pod-free config dicts shaped for
+This defines the Apache Iceberg tables of the ``kbaseincubator`` tenant's
+``clearinghouse`` namespace in the BER Data Lakehouse as pure, pod-free
+config dicts shaped for
 :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
 (``tables=table_configs()``), plus a pair of hash-encoding helpers.
+:func:`table_configs` emits the fifteen per-entity-type tables plus the
+parameter-set registry -- sixteen configs in total.
 
-The fifteen tables are ``<entity_type>_<kind>`` (type-first) for each of the
+The fifteen per-entity-type tables are ``<entity_type>_<kind>``
+(type-first) for each of the
 five entity types -- ``genome``, ``protein``, ``gene``, ``function``,
 ``ontology_term`` -- and each of the three kinds -- ``entity``, ``content``,
 ``result``. This replaces the earlier three-table scheme (a single
@@ -27,9 +30,47 @@ carries the shared tail (``entity_hash``, ``standardizer_version``,
 ``fasta_reference`` POINTER to the sequence and never the sequence itself,
 since 10M genomes inlined would be ~50TB; and so on).
 
-The public :func:`table_name` resolver is the ONLY place a clearinghouse
-table name is constructed -- ``f"{entity_type}_{kind}"`` -- so the config
-generator and every caller share one definition and cannot drift.
+The public :func:`table_name` resolver is the ONLY place a per-entity-type
+clearinghouse table name is constructed -- ``f"{entity_type}_{kind}"`` --
+so the config generator and every caller share one definition and cannot
+drift. The sixteenth table is the one exception, and for a reason:
+:data:`PARAMETER_SET_TABLE` is a module constant rather than a
+``table_name()`` call because the registry is NOT entity-typed, so there
+is no ``(entity_type, kind)`` pair that could name it.
+
+``parameter_set_hash`` AND THE PARAMETER-SET REGISTRY. A result is keyed
+by tool, tool version AND the parameter set the caller used, so
+``<type>_result`` carries a ``parameter_set_hash`` column (immediately
+after ``source``). Without it, the same protein run through the same tool
+version with a different threshold -- or TRANSYT's required NCBI taxonomy
+id -- would overwrite the default run's row instead of being a distinct
+result. The hash is the sha256 of the canonical JSON of the parameter set
+(see :func:`kbutillib.domains.identity.parameter_set_hash`); a default run
+is ``{}``, whose hash is
+:data:`~kbutillib.domains.identity.DEFAULT_PARAMETER_SET_HASH`.
+
+The hash alone is opaque, so the registry table (:data:`PARAMETER_SET_TABLE`,
+columns ``parameter_set_hash``, ``canonical_json``, ``observed_at``,
+``ingest_batch_id``) records what each hash MEANS -- once per distinct
+parameter set, rather than repeating the parameter text on every result
+row, which at a corpus heading toward a billion result rows is the whole
+point of storing a hash there in the first place. Keeping the PRE-IMAGE
+(``canonical_json``) is what keeps the hash rule RECOMPUTABLE: given the
+registry, any later reader can re-derive the hash from the stored text and
+check that the rule still produces it, which a bare column of digests
+could never support. The table is append-only and UNPARTITIONED;
+duplicate rows for one hash are harmless, because a hash always maps to
+the same canonical text, and readers select distinct on
+``parameter_set_hash``. Registry integrity is a WRITER obligation: every
+writer appends its registry rows BEFORE the result rows that reference
+them, so an orphan check -- distinct ``parameter_set_hash`` values in the
+result tables that are absent from the registry -- comes back empty.
+
+``parameter_set_hash`` is DELIBERATELY NOT A PARTITION KEY. It is a hash,
+and so falls under the same rule as ``entity_hash`` below: a good hash
+scatters uniformly by design, so partitioning on it buys zero read
+pruning while multiplying partition count. ``source`` stays the ONLY
+partition column of the five ``<type>_result`` tables.
 
 Why the hash is stored as hex STRING, and why it still has a boundary:
 the platform's only hashing surface,
@@ -67,11 +108,14 @@ because string-formatted SQL is an injection surface regardless.
 
 Column types are declared exactly once, in ``_ENTITY_COLUMNS``,
 ``_CONTENT_TYPE_HEAD`` + ``_CONTENT_COMMON_TAIL`` (a per-type mapping
-composing each type's head onto a shared tail declared once), and
-``_RESULT_COLUMNS`` below, as ordered ``(name, sql_type)`` pairs. The
-64-character width and hex alphabet are enforced in Python, at the
-boundary, by :func:`encode_entity_hash` and :func:`decode_entity_hash` --
-not by the DDL. This module's config values must never contain a
+composing each type's head onto a shared tail declared once),
+``_RESULT_COLUMNS`` and ``_PARAMETER_SET_COLUMNS`` below, as ordered
+``(name, sql_type)`` pairs. The 64-character width and hex alphabet are
+enforced in Python, at the boundary, by :func:`encode_entity_hash` and
+:func:`decode_entity_hash` -- not by the DDL. ``parameter_set_hash`` is
+likewise REQUIRED and NON-NULL by a Python check at the write boundary and
+not by the DDL: this module's DDL path emits no ``NOT NULL`` for any
+column, so a nullability contract declared here would be fiction. This module's config values must never contain a
 parenthesis (the guard against a partition-transform expression such as
 ``bucket 256 entity_hash`` leaking into a config; see "Partitioning"
 below). Each table config carries the column declarations as a
@@ -95,7 +139,9 @@ partition columns differ from the old scheme:
   - NO partition key at all on the remaining six -- ``genome_entity``,
     ``function_entity``, ``ontology_term_entity``, ``genome_content``,
     ``function_content``, ``ontology_term_content`` -- whose row counts are
-    low enough (~1M-10M) that a partition key buys nothing.
+    low enough (~1M-10M) that a partition key buys nothing. The
+    parameter-set registry is unpartitioned for the same reason, more so:
+    it holds one row per DISTINCT parameter set ever used.
 
 For the unpartitioned tables the config omits the ``partition_by`` key
 entirely (rather than emitting a falsy value), so an absent key
@@ -168,13 +214,45 @@ _ENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
 
 #: Column declarations for every ``<type>_result`` table, in DDL order.
 #: GENERIC: identical for all five entity types.
+#:
+#: ``parameter_set_hash`` sits immediately after ``source`` and is REQUIRED
+#: and NON-NULL -- enforced in Python at the write boundary, not by the DDL
+#: (this module's DDL path declares no ``NOT NULL`` anywhere; see the module
+#: docstring). It is deliberately NOT a partition key: ``source`` remains the
+#: only partition column of the five ``<type>_result`` tables.
 _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entity_hash", "STRING"),
     ("entity_type", "STRING"),
     ("result_type", "STRING"),
     ("source", "STRING"),
+    ("parameter_set_hash", "STRING"),
     ("result_type_version", "STRING"),
     ("payload", "STRING"),
+    ("observed_at", "TIMESTAMP"),
+    ("ingest_batch_id", "STRING"),
+)
+
+#: Name of the PARAMETER-SET REGISTRY table -- the sixteenth clearinghouse
+#: table, and the only one that is not entity-typed.
+#:
+#: Declared as a module constant rather than built by :func:`table_name`
+#: precisely BECAUSE it is not entity-typed: ``table_name`` composes
+#: ``f"{entity_type}_{kind}"`` and validates both halves against
+#: :data:`ENTITY_TYPES`/:data:`_KINDS`, and the registry is neither. It is
+#: also deliberately NOT added to :data:`ENTITY_TYPES` and NOT unioned into
+#: any ``all_<kind>`` view -- making it pretend to be an entity type would
+#: put it in the per-type views and in every caller that iterates the five
+#: types, which is exactly wrong for a one-row-per-distinct-parameter-set
+#: lookup table.
+PARAMETER_SET_TABLE = "parameter_set"
+
+#: Column declarations for the parameter-set registry, in DDL order.
+#: Declared once here, exactly like the other column tuples in this module,
+#: so the DDL, :func:`parameter_set_columns` and the tests all read one
+#: definition.
+_PARAMETER_SET_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("parameter_set_hash", "STRING"),
+    ("canonical_json", "STRING"),
     ("observed_at", "TIMESTAMP"),
     ("ingest_batch_id", "STRING"),
 )
@@ -350,8 +428,35 @@ def column_names(entity_type: str, kind: str) -> tuple[str, ...]:
     return tuple(name for name, _sql_type in table_columns(entity_type, kind))
 
 
+def parameter_set_columns() -> tuple[tuple[str, str], ...]:
+    """Return the ordered ``(name, sql_type)`` pairs of the registry table.
+
+    The registry's companion to :func:`table_columns`, and a SEPARATE
+    accessor rather than a new ``(entity_type, kind)`` pair, because
+    :func:`table_columns` is keyed by exactly that pair and the registry is
+    not entity-typed: there is no entity type and no kind that names it (see
+    :data:`PARAMETER_SET_TABLE`). Routing it through ``table_columns`` would
+    mean inventing a pseudo entity type, which would then leak into
+    :data:`ENTITY_TYPES`, the union views, and every caller that iterates
+    the five types.
+
+    Returns:
+        :data:`_PARAMETER_SET_COLUMNS` -- the declarations in DDL order.
+    """
+    return _PARAMETER_SET_COLUMNS
+
+
+def parameter_set_column_names() -> tuple[str, ...]:
+    """Return just the ordered column NAMES of the registry table.
+
+    Thin convenience over :func:`parameter_set_columns`, mirroring what
+    :func:`column_names` is to :func:`table_columns`.
+    """
+    return tuple(name for name, _sql_type in parameter_set_columns())
+
+
 def table_configs() -> list[dict[str, Any]]:
-    """Return the fifteen clearinghouse table configs for ``BerdlCapability.load``.
+    """Return the sixteen clearinghouse table configs for ``BerdlCapability.load``.
 
     Each dict is shaped for the ``tables=`` argument of
     :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
@@ -361,14 +466,15 @@ def table_configs() -> list[dict[str, Any]]:
     a ``partition_by`` ONLY on the tables that partition -- ``gene_entity``,
     ``protein_entity``, ``gene_content`` and ``protein_content`` on
     ``standardizer_version``, and all five ``<type>_result`` on ``source``.
-    The other six configs carry no ``partition_by`` key at all (its absence
-    means "unpartitioned"; see the module docstring's "Partitioning"
-    section).
+    The other six per-type configs, and the parameter-set registry, carry no
+    ``partition_by`` key at all (its absence means "unpartitioned"; see the
+    module docstring's "Partitioning" section).
 
     Returns:
-        A new list of fifteen dicts in a deterministic, documented order:
+        A new list of sixteen dicts in a deterministic, documented order:
         all five ``<type>_entity`` configs in :data:`ENTITY_TYPES` order,
-        then all five ``<type>_content``, then all five ``<type>_result``.
+        then all five ``<type>_content``, then all five ``<type>_result``,
+        then the single :data:`PARAMETER_SET_TABLE` registry config last.
         Freshly built on every call, so callers may freely mutate the result
         (e.g. to add ``bronze_path`` for bronze-mode ingest) without
         affecting this module's constants.
@@ -401,6 +507,18 @@ def table_configs() -> list[dict[str, Any]]:
                 "partition_by": "source",
             }
         )
+
+    # The sixteenth table: the parameter-set registry. Not entity-typed, so
+    # its name is the module constant and not a table_name() call, and
+    # UNPARTITIONED -- the key is omitted entirely, exactly as the six
+    # unpartitioned per-type configs above omit it. Rendered through the
+    # same _schema_sql() as every other config so the DDL cannot drift.
+    configs.append(
+        {
+            "name": PARAMETER_SET_TABLE,
+            "schema_sql": _schema_sql(_PARAMETER_SET_COLUMNS),
+        }
+    )
 
     return configs
 
@@ -727,8 +845,13 @@ def bootstrap(
             ``my.`` prefix, etc.) is an operator decision this module
             deliberately does not make for you.
         tables: The table configs to bootstrap. Defaults to
-            :func:`table_configs` (the fifteen clearinghouse tables). Tests
-            may pass a smaller/synthetic set.
+            :func:`table_configs` -- the fifteen per-entity-type
+            clearinghouse tables PLUS the parameter-set registry, so a
+            default run creates the registry too. Nothing in this function
+            assumes a config is entity-typed: it reads only ``name``,
+            ``partition_by`` and (via ``load()``) ``schema_sql``, and never
+            parses a name back into a type and kind. Tests may pass a
+            smaller/synthetic set.
         dataset: The ``load()`` call's top-level ``dataset``. Defaults to
             :data:`NAMESPACE`.
         tenant: The ``load()`` call's ``tenant`` (used for its

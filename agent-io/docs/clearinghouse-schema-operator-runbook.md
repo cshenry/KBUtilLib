@@ -923,6 +923,16 @@ assert all(n == 0 for n in counts.values()), "NOT EMPTY -- STOP. Do not drop."
 print("all fifteen empty -- safe to drop")
 ```
 
+**`assert len(counts) == 15` above is HISTORY, not a step to re-run.** It
+was correct when OP2R ran on 2026-09-21 and it is left here verbatim as
+the record of what was executed that day. It predates the parameter-set
+registry: `table_configs()` now returns **sixteen** configs (the fifteen
+per-entity-type tables plus `parameter_set`), so that assertion would fail
+today. Do not "fix" it in place and do not re-run this section to satisfy
+it -- OP2R is a completed, dated one-off. The current-contract equivalent
+is OP-C1's own precondition check below, which asserts sixteen configs and
+the presence of `parameter_set`.
+
 A `TABLE_OR_VIEW_NOT_FOUND` here for any table is also a STOP: it means
 the namespace is not in the state this runbook assumes, and dropping the
 rest would leave you guessing which tables were ever there.
@@ -963,11 +973,19 @@ Then OP3.
 `scripts/clearinghouse_parity_check.py` proves that `current_state_sql()`
 behaves identically on the real Spark/Iceberg engine as it does on the
 DuckDB surrogate the CI suite uses. Run it from inside the pod, after OP1
-and OP2 have both succeeded:
+and OP2 have both succeeded, and after **OP-C2** has created and
+bootstrapped the parity namespace:
 
 ```bash
-python scripts/clearinghouse_parity_check.py
+python scripts/clearinghouse_parity_check.py \
+    --namespace kbaseincubator.clearinghouse_parity
 ```
+
+`--namespace` is REQUIRED and has no default: a default would be the
+namespace fixture rows land in whenever somebody forgets the flag, and the
+only namespace anyone would default to is production. Exit codes are 0
+(all properties pass), 1 (a property failed), 2 (run off-pod) and 3
+(`--namespace` was production, or malformed).
 
 What it does:
 
@@ -986,8 +1004,12 @@ What it does:
    each fixture row lands in the `<entity_type>_result` table resolved by
    `clearinghouse_schema.table_name` for its `entity_type`.
 3. Runs the real `current_state_sql()` SQL text against the live table via
-   Spark, once per property, and asserts the same six properties the
-   DuckDB tests assert:
+   Spark, once per property, and asserts the same properties the DuckDB
+   tests assert -- one per entry in `PARITY_CASES`, which is **eight** as
+   of this revision (the six below plus `genome_fasta_invariance` and
+   `parameter_set_forks_slot`). Count the PASS lines against
+   `len(PARITY_CASES)` in the fixture module rather than against a number
+   typed here, which is how this list came to be stale in the first place:
    - duplicate appends collapse to exactly one current row,
    - the newest row (by `observed_at`) wins per slot,
    - an `observed_at` tie is broken by the greater `ingest_batch_id`,
@@ -1019,13 +1041,25 @@ everywhere else in this document.) It does not block OP2 either way.
 **Every fixture row's `source` carries the `parity-check/` prefix**
 (`PARITY_SOURCE_PREFIX` in the fixture module) so these rows can never be
 mistaken for real tool output, and can be found again later with
-`WHERE source LIKE 'parity-check/%'`. **These rows are expected to remain
-in the append-only `<entity_type>_result` tables permanently** -- this is expected and
-harmless: they occupy their own
-`(entity_hash, entity_type, result_type, source)` slots, distinct from any
-real corpus's slots, and re-running this script
-appends more rows to those same slots without changing any real
-annotation's current-state answer.
+`WHERE source LIKE 'parity-check/%'`. **Parity runs now target
+`kbaseincubator.clearinghouse_parity`, not production, and the script
+REFUSES the production namespace.** `--namespace` is a required argument
+and `check_target_namespace()` rejects
+`kbaseincubator.clearinghouse` before a Spark session is opened, let alone
+before any write -- because the `parity-check/` prefix labels these rows
+but does not isolate them, the demo readers treat every row in the
+production namespace as real data, and the `<type>_result` tables are
+append-only with no supported un-append. See **OP-C2** below, which
+creates the parity namespace and bootstraps the five `<type>_result`
+configs into it. Within that namespace the fixture is permanent and
+harmless: the rows occupy their own
+`(entity_hash, entity_type, result_type, source, parameter_set_hash)`
+slots, and re-running the script appends more rows to those same slots
+without changing any current-state answer.
+
+**Rows already in production from the 2026-09-21 run stay there** -- they
+are what OP-C1's guard counts, and OP-C1 drops and recreates those tables
+anyway. Do not attempt to delete them individually.
 
 **Record the result.** After running OP3, note in this table (or your own
 operational log) the date, who ran it, and whether all six properties
@@ -1043,6 +1077,559 @@ the three-part, tenant-qualified form
 form (`clearinghouse.protein_result`, no tenant segment), and which form
 actually resolves against the live catalog is not verifiable off-pod. Try
 the two-part form next, and record in this log which one worked.
+
+---
+
+## The parameter-set change -- deploy and OP-C1..OP-C4 (2026-10)
+
+Results are now keyed by tool, tool version **and a parameter-set hash**,
+so the same protein run through the same tool version with different
+parameters (a different threshold; TRANSYT's required NCBI taxonomy id) is
+a distinct result rather than one silently overwriting the other. That
+adds a `parameter_set_hash` column to the five `<type>_result` tables and
+a sixteenth table, the parameter-set registry, which records what each
+hash means.
+
+**Resource parameters -- threads, memory, paths, batch sizes, hostnames --
+must NEVER appear in a parameter set.** They describe *how* a run was
+executed, not *what* was computed, so including one forks a slot that
+should not fork: the same protein, same tool, same real parameters would
+land as two "distinct" results because somebody moved the job to a
+different host or gave it more threads. A parameter set contains only the
+parameters the caller set on top of the tool version's defaults, and a
+default run is `{}`.
+
+**Build-complete and operationally-complete are separate: the code can be
+merged, released and green in CI while OP-C1 through OP-C4 are still
+owed** -- the lake does not change until an operator runs them.
+
+### Deploying the parameter-set change
+
+Two installed trees import KBUtilLib and both must be moved before OP-C1:
+
+| Where | Tree | Parked on |
+|---|---|---|
+| BERDL pod (`kbhub`) | `/global_share/KBaseUtilities/KBUtilLib` | branch `deploy/main-20260926` |
+| poplar | `~/venvs/kbdl` imports the Dropbox tree | `wip` |
+
+On each, **merge KBUtilLib `main` in**. Not a reset, not a re-clone, not a
+checkout of `main` over the top: a merge, so that anything committed
+locally on that tree survives.
+
+> **STOP POLICY -- read before you type `git merge`.**
+>
+> **If the merge would touch uncommitted local changes, or if it
+> conflicts, STOP and leave every file exactly as it is for the
+> operator.** Do not `git reset`, do not `git checkout --` a path, do not
+> discard, do not `git stash`, and do not resolve a conflict by picking a
+> side unattended.
+>
+> The reason is specific, not procedural caution: these are **deployed**
+> trees. An uncommitted edit in `/global_share/KBaseUtilities/KBUtilLib`
+> is most likely somebody's fix applied directly in the pod to get a
+> demo working, and it exists nowhere else -- not in git, not on another
+> machine. Discarding it is unrecoverable and you will not know what you
+> destroyed until the thing it fixed breaks again. A stash is no better
+> here: it moves the work somewhere nobody looking at this tree will
+> think to look.
+>
+> Check first, so you find this out before the merge and not during it:
+>
+> ```bash
+> git -C /global_share/KBaseUtilities/KBUtilLib status --porcelain
+> git -C /global_share/KBaseUtilities/KBUtilLib fetch origin
+> git -C /global_share/KBaseUtilities/KBUtilLib merge --no-commit --no-ff origin/main
+> ```
+>
+> A non-empty `status --porcelain` is a STOP. A failed `merge` is a STOP
+> (`git merge --abort` to return to the pre-merge state is fine -- that
+> restores, it does not discard). Report which files, and hand it back.
+
+**After the merge, smoke-check from the INSTALLED tree** -- not from a
+checkout you happen to have, and not from this worktree. Print
+`kbutillib.__file__` first and confirm it is the tree you just merged
+into; a smoke check that passes against the wrong tree is worse than no
+smoke check, because it reports the deploy as done.
+
+```python
+import kbutillib
+print(kbutillib.__file__)   # CONFIRM this is the tree you merged into
+
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    PARAMETER_SET_TABLE, table_configs,
+)
+from kbutillib.domains.kbase.berdl.clearinghouse_derivation import current_state_sql
+from kbutillib.domains.identity import DEFAULT_PARAMETER_SET_HASH, parameter_set_hash
+import kbutillib.domains.kbase.berdl.clearinghouse_manifest as cm
+
+# 1. Sixteen configs, and parameter_set_hash in EVERY result schema.
+configs = table_configs()
+assert len(configs) == 16, f"expected 16 configs, got {len(configs)}"
+assert {c["name"] for c in configs} >= {PARAMETER_SET_TABLE}
+results = [c for c in configs if c["name"].endswith("_result")]
+assert len(results) == 5, f"expected 5 result tables, got {len(results)}"
+assert all("parameter_set_hash" in c["schema_sql"] for c in results)
+
+# 2. current_state_sql emits the FIVE-tuple slot key.
+sql = current_state_sql("kbaseincubator.clearinghouse.protein_result")
+assert "parameter_set_hash" in sql, "slot key is still the old 4-tuple"
+
+# 3. The manifest REFUSES a result source with no parameter_set.
+try:
+    cm.shard_plan(cm.load_manifest("""
+    [[source]]
+    name = "smoke"
+    adapter = "file"
+    path = "x.parquet"
+    format = "parquet"
+    entity_type = "protein"
+    kinds = ["result"]
+    [source.hash]
+    raw_column = "aa"
+    [source.result]
+    result_type = "@const(annotation)"
+    source = "@const(bakta/1.9)"
+    result_type_version = "@const(1.0)"
+    payload = "@json(product)"
+    """))
+except cm.ManifestError as exc:
+    assert "parameter_set" in str(exc)
+else:
+    raise AssertionError("manifest accepted a result source with no parameter_set")
+
+# 4. The default hash imports and is what it should be.
+assert DEFAULT_PARAMETER_SET_HASH == parameter_set_hash({})
+assert DEFAULT_PARAMETER_SET_HASH == (
+    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+)
+print("deploy smoke check PASSED -- proceed to OP-C1")
+```
+
+**Only when all four pass, on both trees, proceed to OP-C1.**
+
+### OP-C1 -- add `parameter_set_hash` and the parameter-set registry (2026-10)
+
+**When this runs.** After the deploy above, and **BEFORE any
+`kbu clearinghouse backfill run`.** That ordering is the whole reason this
+is cheap: nothing can write real data to the lake until the backfill
+command is deployed, so the five `<type>_result` tables still hold nothing
+but the 2026-09-21 parity fixture. **No writer lockout is needed** -- there
+are no writers yet. Run it after the first backfill and you are no longer
+doing OP-C1, you are doing a migration with data in it, which is a
+different and much more expensive problem.
+
+**C1.0 -- precondition: the importing tree actually carries the change.**
+
+```python
+import kbutillib
+print(kbutillib.__file__)
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    PARAMETER_SET_TABLE, _RESULT_COLUMNS, table_configs,
+)
+assert "parameter_set_hash" in [name for name, _type in _RESULT_COLUMNS], \
+    "this tree's _RESULT_COLUMNS has no parameter_set_hash -- STOP, the deploy did not land"
+assert PARAMETER_SET_TABLE in {c["name"] for c in table_configs()}, \
+    "table_configs() has no 'parameter_set' registry config -- STOP"
+print("precondition OK -- this tree carries the parameter-set change")
+```
+
+Either assertion firing is a **STOP**. It means the tree you are about to
+drop production tables from does not have the schema you intend to
+recreate them with, and the drop would leave you with no tables and no way
+to make the new ones.
+
+**C1.1 -- the guard. It refuses the drop unless the tables hold nothing
+but the parity fixture.**
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import table_configs
+
+NS = ["kbaseincubator", "clearinghouse"]
+def fqn(name): return ".".join(f"`{p}`" for p in [*NS, name])
+
+PARITY_PREFIX = "parity-check/"
+EXPECTED_PARITY_ROWS = 13   # measured 2026-10-06; see the note below
+
+result_tables = [c["name"] for c in table_configs() if c["name"].endswith("_result")]
+assert len(result_tables) == 5, result_tables
+
+null_source = 0
+non_parity = 0
+parity = 0
+for name in result_tables:
+    t = fqn(name)
+    # NULL sources are counted EXPLICITLY and SEPARATELY. See why below --
+    # this is not redundant with the non_parity count.
+    null_source += spark.sql(
+        f"SELECT COUNT(*) AS n FROM {t} WHERE source IS NULL"
+    ).collect()[0]["n"]
+    non_parity += spark.sql(
+        f"SELECT COUNT(*) AS n FROM {t} "
+        f"WHERE source IS NOT NULL AND source NOT LIKE '{PARITY_PREFIX}%'"
+    ).collect()[0]["n"]
+    parity += spark.sql(
+        f"SELECT COUNT(*) AS n FROM {t} WHERE source LIKE '{PARITY_PREFIX}%'"
+    ).collect()[0]["n"]
+
+print(f"null_source={null_source} non_parity={non_parity} parity={parity}")
+assert null_source == 0, "a row has a NULL source -- STOP. Replay decision, not a runbook step."
+assert non_parity == 0, "a row's source is outside 'parity-check/' -- STOP. Replay decision."
+assert parity == EXPECTED_PARITY_ROWS, \
+    f"expected exactly {EXPECTED_PARITY_ROWS} parity rows, counted {parity} -- STOP"
+print("guard PASSED -- the result tables hold nothing but the parity fixture")
+```
+
+**Why `source IS NULL` is counted on its own, and why dropping it would
+make the guard silently useless.** In SQL, `NULL NOT LIKE 'parity-check/%'`
+evaluates to **NULL, not TRUE**. A row with a NULL `source` therefore does
+*not* satisfy a bare `source NOT LIKE 'parity-check/%'` predicate, is not
+counted by it, and **sails straight through a guard that only looks at
+that count** -- the guard would report zero non-parity rows and authorise
+the drop while real, unidentifiable rows sat in the table. So NULL is
+counted by an explicit `source IS NULL`, and the `NOT LIKE` branch is
+narrowed with `source IS NOT NULL` to keep the two counts disjoint and the
+arithmetic honest.
+
+**Do not delete this guard, and do not bypass it.** It is the only thing
+standing between this procedure and an irreversible drop of production
+tables. **Any row it finds that is not one of the 13 parity rows means a
+replay decision -- a judgement about what that data is and how it gets
+reproduced -- not a runbook step.** Stop, report what you found, and get
+that decision made. Editing `EXPECTED_PARITY_ROWS` until the assertion
+passes is the specific failure this paragraph exists to forbid.
+
+> **On the number 13.** That is a count **measured against the live lake on
+> 2026-10-06**, from the OP3 run of 2026-09-21. It is not derivable from
+> today's fixture module: `ALL_PARITY_ROWS` now holds **19** rows, because
+> `genome_fasta_invariance` (4 rows) and `parameter_set_forks_slot` (2
+> rows) were added to `PARITY_CASES` after that run. So **13 is right only
+> if OP3 has not been re-run against production since 2026-10-06.** If the
+> count comes back 19, or 32, that is almost certainly a later OP3 run
+> against production rather than corruption -- but it is still a STOP, and
+> still a decision for a human, because the guard cannot tell the
+> difference between "another parity run" and "something wrote rows we do
+> not understand". Re-measure, write the new number and its date here, and
+> say who authorised it.
+
+**C1.2 -- drop the `all_result` view, then the five result tables.** The
+view first, since it references the tables.
+
+```python
+spark.sql(f"DROP VIEW IF EXISTS {fqn('all_result')}")
+for name in result_tables:          # from table_configs(), never typed by hand
+    spark.sql(f"DROP TABLE IF EXISTS {fqn(name)}")
+print(spark.sql("SHOW TABLES IN `kbaseincubator`.`clearinghouse`").collect())
+```
+
+The names come from `table_configs()` so this cannot drop a table the
+module does not own. **Do not drop the namespace** and do not touch the
+ten `_entity`/`_content` tables -- they are unchanged by this migration.
+The `all_entity` and `all_content` views are also unaffected; leave them.
+
+**C1.3 -- recreate the five result tables AND create the registry.** Dry
+run first, then the real run. The registry config is included in the same
+`tables` list, so one `bootstrap()` call does both.
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    PARAMETER_SET_TABLE, bootstrap, table_configs,
+)
+
+wanted = {*result_tables, PARAMETER_SET_TABLE}          # five + the registry
+configs = [c for c in table_configs() if c["name"] in wanted]
+assert len(configs) == 6, [c["name"] for c in configs]
+
+# DRY RUN -- expect 'action': 'create' for all six.
+report = bootstrap(cap, namespace="kbaseincubator.clearinghouse",
+                   tables=configs, dry_run=True)
+print(report)
+
+# REAL RUN -- only after the dry run reads as six creates.
+report = bootstrap(cap, namespace="kbaseincubator.clearinghouse",
+                   tables=configs, dry_run=False)
+print(report["load_result"]["tables"])
+```
+
+`cap` is the `ClearinghouseBootstrapCapability(BerdlCapability())` from
+section 2.0 -- a bare `BerdlCapability()` raises `AttributeError` here.
+Every `'statement'` in the real run's output should carry
+`parameter_set_hash STRING`, and the registry's should carry
+`parameter_set_hash`, `canonical_json`, `observed_at` and
+`ingest_batch_id` with **no partition clause** -- the registry is
+UNPARTITIONED by design.
+
+**C1.4 -- recreate the `all_result` view.** Per **section 2.4**, exactly
+as written there. The registry is **not** part of any `all_<kind>` union
+view: it is not entity-typed and has none of the union's columns.
+
+**C1.5 -- acceptance: `DESCRIBE` all five result tables AND the registry.**
+
+```python
+for name in [*result_tables, PARAMETER_SET_TABLE]:
+    rows = spark.sql(f"DESCRIBE TABLE {fqn(name)}").collect()
+    cols = {r["col_name"]: r["data_type"] for r in rows}
+    assert "parameter_set_hash" in cols, f"{name} HAS NO parameter_set_hash"
+    assert cols["parameter_set_hash"] == "string", (name, cols["parameter_set_hash"])
+    print(name, "parameter_set_hash OK")
+
+# Partition specs UNCHANGED: 'source' is still the only partition column on
+# each result table, and the registry has none. parameter_set_hash is
+# DELIBERATELY NOT a partition key -- it is a hash, and partitioning on it
+# would shatter every table into one partition per parameter set.
+for name in result_tables:
+    print(name, cap.table_partition_spec(name, namespace="kbaseincubator.clearinghouse"))
+print(PARAMETER_SET_TABLE,
+      cap.table_partition_spec(PARAMETER_SET_TABLE, namespace="kbaseincubator.clearinghouse"))
+```
+
+Expect `['source']` for each of the five, and `None` or `[]` for the
+registry.
+
+**Why this `DESCRIBE` step is not optional belt-and-braces.**
+`bootstrap()` verifies **partition specs only**. It has no column-level
+comparison anywhere: a table whose partition spec matches but whose schema
+is missing `parameter_set_hash` passes `bootstrap()` clean and then fails
+at the first write, in the pod, against the live table -- which is exactly
+the shape of task 914. `bootstrap()` **cannot** detect a missing column, so
+this step is the only thing in the procedure that does.
+
+### OP-C2 -- parity in its own namespace
+
+The parity fixture no longer goes anywhere near production. It gets a
+namespace of its own.
+
+**C2.1 -- create the namespace. `bootstrap()` does not create namespaces**
+-- see section 2.0b, which establishes this and the trap in the argument
+spelling. Use that pattern, with the new child name:
+
+```python
+from kbutillib.domains.kbase.berdl.transports import InPodTransport
+
+transport = InPodTransport()
+spark = transport.spark_session()
+transport.create_namespace_if_not_exists(
+    spark,
+    namespace="clearinghouse_parity",  # BARE CHILD -- not the dotted form.
+                                       # The dotted form yields
+                                       # kbaseincubator.kbaseincubator.* ->
+                                       # NoSuchNamespaceException (2.0b).
+    tenant_name="kbaseincubator",      # `tenant_name` HERE; `tenant` on
+                                       # BerdlCapability.load() -- see 2.0b.
+    iceberg=True,
+)
+```
+
+**C2.2 -- bootstrap ONLY the five `<type>_result` configs into it.** Not
+all sixteen. The parity harness reads and writes result rows and nothing
+else, so the ten `_entity`/`_content` tables and the registry have no
+reason to exist there.
+
+```python
+configs = [c for c in table_configs() if c["name"].endswith("_result")]
+assert len(configs) == 5
+bootstrap(cap, namespace="kbaseincubator.clearinghouse_parity",
+          tables=configs, dataset="clearinghouse_parity", dry_run=True)
+bootstrap(cap, namespace="kbaseincubator.clearinghouse_parity",
+          tables=configs, dataset="clearinghouse_parity", dry_run=False)
+```
+
+**C2.3 -- run the parity check against it.**
+
+```bash
+python scripts/clearinghouse_parity_check.py \
+    --namespace kbaseincubator.clearinghouse_parity
+```
+
+Expect **one PASS line per entry in `PARITY_CASES`, which is eight as of
+this revision** (`duplicate_collapse`, `newest_wins`,
+`ingest_batch_id_tie_break`, `term_removal`, `source_isolation`,
+`result_type_version_outside_slot_key`, `genome_fasta_invariance`,
+`parameter_set_forks_slot`), a final `ALL 8 PROPERTIES PASS` line, and
+exit 0. **Count against `len(PARITY_CASES)`, not against a number in this
+document** -- the script prints the count from the fixture module, so the
+two cannot disagree, and a property added later raises the expected number
+without anyone editing this page.
+
+Passing `--namespace kbaseincubator.clearinghouse` here exits **3**
+without opening a Spark session. That is the guard working, not a
+malfunction; do not look for a flag to override it.
+
+**THIS IS A DERIVATION-ONLY HARNESS.** It proves one thing: that
+`current_state_sql()` behaves on real Spark/Iceberg the way it does on the
+DuckDB surrogate. **It has no parameter-set registry**, by design -- C2.2
+bootstraps only the result configs. So **the orphan / registry-integrity
+check is never run against this namespace**: every fixture row's
+`parameter_set_hash` is an orphan there by construction, and that is
+correct and expected rather than a finding. Run integrity checks against
+production only (OP-C4). Do not "fix" the parity namespace by adding a
+registry to it, and do not read a `kbu clearinghouse health` report taken
+against it as meaningful.
+
+### OP-C3 -- the demo seed
+
+This is the first real data in the clearinghouse: a uniform 1/256 sample
+of the `seq_protein_bakta` Mongo collection on poplar, mapped by
+`src/kbutillib/domains/kbase/berdl/examples/clearinghouse_example_seed.toml`
+and loaded by the backfill command's `mongo-protein-bakta` preset.
+
+> **PRECONDITION -- ACKNOWLEDGMENT, AND IT IS A HARD GATE.** OP-C3 requires
+> a **committed revision** of the sibling PRD `clearinghouse-backfill-v1`
+> that has folded lake-5's round-1 changes, specifically:
+>
+> - the load of `parameter_set` is **registry-first** and **hash-keyed,
+>   fill-only** (registry rows written before the result rows that
+>   reference them; a hash already present is not rewritten);
+> - **no gate on an outside party**;
+> - **no precondition requiring KBDL's `/clearinghouse` routes to be
+>   removed**.
+>
+> If that revision is not committed, **OP-C3 is BLOCKED.** Stop here.
+>
+> **KBDL's `/clearinghouse` routes are never removed to unblock OP-C3.**
+> There is no version of this step that trades those routes for progress.
+> KBDL's own SQLite clearinghouse stays exactly as it is; it is a separate
+> system that happens to share a name. If you find yourself considering it,
+> the answer is that OP-C3 waits.
+
+**C3.0 -- is the backfill command even deployed?**
+
+```bash
+kbu clearinghouse backfill --help
+```
+
+**If this does not succeed, STOP.** As of this revision it does *not*:
+`kbu clearinghouse` exposes `content`, `health`, `known`, `load`,
+`parameter-sets`, `plan`, `results`, `shard`, `show`, `sources`, `stats`,
+`tables` and `verify`, and `backfill` is **absent** -- it arrives with the
+sibling PRD. A `No such command 'backfill'` error is the expected answer
+today and means OP-C3 is not yet runnable. It is not something to work
+around with `kbu clearinghouse shard` and `load` by hand.
+
+**C3.1 -- SCRATCH FIRST. Always.**
+
+```bash
+kbu clearinghouse backfill run mongo-protein-bakta \
+    --slice 00 --limit 12000 --dataset clearinghouse_bf_scratch
+```
+
+**If `clearinghouse_bf_scratch` already exists, `DESCRIBE` its result
+tables BEFORE you run this, and STOP if they lack
+`parameter_set_hash`.** A scratch namespace left over from a pre-change
+run has the old eight-column result schema; appending into it either fails
+or, worse, succeeds against a schema that cannot hold the hash, and then
+the promotion gate below is checking a table that was never able to carry
+the thing being verified.
+
+```python
+for name in [c["name"] for c in table_configs() if c["name"].endswith("_result")]:
+    t = ".".join(f"`{p}`" for p in ["kbaseincubator", "clearinghouse_bf_scratch", name])
+    cols = {r["col_name"] for r in spark.sql(f"DESCRIBE TABLE {t}").collect()}
+    assert "parameter_set_hash" in cols, f"{name} is pre-change -- STOP, do not append"
+```
+
+**C3.2 -- the promotion gate. Promote ONLY when every one of these holds.**
+
+1. **Non-zero counts** in `protein_entity`, `protein_content` **and**
+   `protein_result` in the scratch dataset. A zero in any of the three
+   means the load did not do what the mapping says.
+2. **Every result row's `source` is `bakta/mongo-seq_protein_bakta`** --
+   exactly that, no other value present.
+3. **Every result row's `parameter_set_hash` is
+   `DEFAULT_PARAMETER_SET_HASH`** (`44136fa3...aff8a`). The seed declares
+   `parameter_set = {}`, a default run, because the store recorded no
+   parameters.
+4. **The registry holds the `{}` row** -- one row whose
+   `canonical_json` is `{}` and whose hash is that same default.
+5. **The integrity check is EMPTY** (`kbu clearinghouse health`, no
+   parameter-set findings). Registry-first writing is what makes this
+   true; a finding here means result rows reference a hash the registry
+   does not explain.
+6. **Any skipped documents are reported, with reasons.** A silent skip
+   count is not acceptable: ~28% of documents in the surveyed per-tool
+   collections are `_id`-only stubs, so skips are *expected* -- which is
+   exactly why they must be enumerated by reason rather than shrugged off.
+   An unexplained skip is a STOP.
+
+```python
+NS_S = ["kbaseincubator", "clearinghouse_bf_scratch"]
+def sfqn(name): return ".".join(f"`{p}`" for p in [*NS_S, name])
+
+for name in ("protein_entity", "protein_content", "protein_result"):
+    n = spark.sql(f"SELECT COUNT(*) AS n FROM {sfqn(name)}").collect()[0]["n"]
+    print(name, n)
+    assert n > 0, f"{name} is EMPTY -- do not promote"
+
+print(spark.sql(f"""
+  SELECT source, parameter_set_hash, COUNT(*) AS n
+  FROM {sfqn('protein_result')} GROUP BY source, parameter_set_hash
+""").collect())
+# Expect exactly ONE group: ('bakta/mongo-seq_protein_bakta', '44136fa3...aff8a').
+
+print(spark.sql(f"""
+  SELECT DISTINCT parameter_set_hash, canonical_json FROM {sfqn('parameter_set')}
+""").collect())
+# Expect the {} row.
+```
+
+**C3.3 -- PRODUCTION: the same command, without `--dataset`.**
+
+```bash
+kbu clearinghouse backfill run mongo-protein-bakta --slice 00 --limit 12000
+```
+
+**Do not invent flags beyond these.** `--slice`, `--limit` and
+`--dataset` are the three this procedure uses. If the load needs something
+those cannot express, that is a change to the backfill command and its
+PRD, decided and reviewed there -- not a flag guessed at the prompt
+against production.
+
+### OP-C4 -- verify from primary-laptop (off-pod)
+
+Independent confirmation from outside the pod, over Trino. This is a
+read-only step and should be run by someone who did not run OP-C1..OP-C3.
+
+1. **`COUNT(*)` per table, reported table by table.** Not a total, and
+   **never a transport `row_count`** -- off-pod that field is a **page
+   size**, not a table count (dev 1194), so it will happily report a round
+   number that is simply how many rows came back in one page. Issue a real
+   `SELECT COUNT(*)` against each table and write down sixteen numbers.
+2. **Parity rows in production must be ZERO.**
+
+   ```sql
+   -- across all five <type>_result tables; expect 0 everywhere
+   SELECT COUNT(*) FROM "kbaseincubator"."clearinghouse"."protein_result"
+   WHERE source LIKE 'parity-check/%';
+   ```
+
+   Non-zero means either OP-C1 did not actually recreate the tables, or
+   somebody ran the parity script against production after it. Both are a
+   STOP.
+3. **`DESCRIBE` all five result tables and the registry**, showing
+   `parameter_set_hash` present and the partition specs unchanged
+   (`source` only on the five; none on the registry). Note the quoting:
+   Trino **rejects backquoted identifiers** -- use double quotes.
+4. **`kbu clearinghouse parameter-sets`** lists **at least** the `{}` row.
+   More rows is fine and expected as other tools land; the `{}` row
+   missing while result rows carry the default hash is an orphan and a
+   STOP.
+5. **The integrity check returns nothing.** `kbu clearinghouse health`
+   reports no parameter-set findings.
+
+### Run record -- OP-C1..OP-C4
+
+Empty template. **Fill a row in only after you have actually run the
+step; do not pre-populate it with expected results.**
+
+| Step | Date | Operator | Result |
+|---|---|---|---|
+| Deploy (pod) |  |  |  |
+| Deploy (poplar) |  |  |  |
+| OP-C1 |  |  |  |
+| OP-C2 |  |  |  |
+| OP-C3 scratch |  |  |  |
+| OP-C3 production |  |  |  |
+| OP-C4 |  |  |  |
+
 
 ---
 

@@ -40,6 +40,12 @@ THE SHAPE, per source::
       seq_length          = "@len(dna_sequence)"
       protein_entity_hash = "@hash(protein, protein_sequence)"
 
+      [source.result]
+      source        = "@lower(algorithm)"
+      result_type   = "@const(functional_annotation)"
+      payload       = "@json(function_id, score)"
+      parameter_set = {}                 # REQUIRED; {} declares a default run
+
 The MAPPING half -- ``entity_type``, ``kinds``, ``[source.hash]``,
 ``[source.content]``, ``[source.result]`` -- is IDENTICAL across all three
 adapters. Only the source-locating keys differ (``path``/``format`` for
@@ -67,8 +73,38 @@ the offending key in its message:
   - ``source`` on a ``[source.result]`` block must be present and non-empty:
     it is the PARTITION column on every ``<type>_result`` table, and an empty
     partition value is a permanent scar on the table.
+  - ``parameter_set`` on a ``[source.result]`` block is REQUIRED and is an
+    inline TOML table (a mapping after parsing), never a ``@derivation``
+    string -- see below.
   - Every ``@derivation`` used anywhere in a mapping must be one of the closed
     :data:`DERIVATIONS` vocabulary; an unknown ``@name`` is rejected by name.
+
+THE RESULT ``parameter_set``, and why it is not a mapping value like the
+others. A clearinghouse result is keyed by ``(entity, result_type, source,
+PARAMETER_SET_HASH)``, so the same protein run through the same tool version
+with different parameters is a distinct result rather than one run silently
+overwriting the other. The manifest therefore has to say which parameter set
+the whole source represents, and it says it as DATA -- an inline table::
+
+    parameter_set = {}                      # a default run
+    parameter_set = { taxonomy_id = "562" } # TRANSYT, which requires one
+
+It is NOT routed through :func:`parse_derivation`: a derivation names a
+source COLUMN and produces a string per row, whereas a parameter set is a
+structured constant for the source as a whole, validated against the
+parameter-set rule (:mod:`kbutillib.domains.identity.parameter_sets`) and
+hashed ONCE at plan time. Note TOML parses ``1.0e-5`` as a float, which the
+rule rejects -- decimals are passed as strings (``evalue = "1e-5"``) -- so
+``parameter_set = { evalue = 1.0e-5 }`` fails HERE rather than producing a
+result row keyed by a hash no second writer could reproduce.
+
+``parameter_set`` is declared once for the source. A sibling PRD will add a
+PER-ROW alternative, ``parameter_set_column = "<column>"``, with "exactly one
+of ``parameter_set`` / ``parameter_set_column``" semantics;
+:func:`_plan_parameter_set` is deliberately shaped around
+:data:`_PARAMETER_SET_KEYS` so that lands as a small change rather than a
+rewrite. It is not implemented yet and a manifest naming it today is
+rejected like any other unknown result column.
 """
 
 from __future__ import annotations
@@ -83,6 +119,8 @@ try:  # py 3.11+
 except ModuleNotFoundError:  # pragma: no cover - exercised only on <3.11
     import tomli as tomllib  # type: ignore[no-redef]
 
+from ...identity import ParameterSetError
+from . import clearinghouse_parameters as cp
 from . import clearinghouse_schema as schema
 
 #: The closed derivation vocabulary. A mapping value is either a plain source
@@ -173,6 +211,16 @@ class TablePlan:
     #: ``entity`` kind this is empty (entity tables carry only the generic
     #: identity columns the sharder fills itself).
     columns: dict[str, Derivation]
+    #: The validated ``[source.result].parameter_set`` mapping, or ``None``
+    #: for a non-``result`` kind. Carried as DATA (not a derivation) because
+    #: it is a structured constant for the whole source.
+    parameter_set: dict[str, Any] | None = None
+    #: Its canonical JSON text -- the registry's ``canonical_json`` value.
+    #: Computed ONCE here at plan time, never per row.
+    parameter_set_json: str | None = None
+    #: Its 64-char lowercase hex sha256 -- the ``parameter_set_hash`` the
+    #: sharder stamps on every result row. Computed once, at plan time.
+    parameter_set_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -441,10 +489,18 @@ def _plan_source(source: Source) -> list[TablePlan]:
     plans: list[TablePlan] = []
     for kind in source.kinds:
         table = schema.table_name(etype, kind)
+        parameter_set: dict[str, Any] | None = None
+        parameter_set_json: str | None = None
+        parameter_set_hash: str | None = None
         if kind == "content":
             columns = _plan_content(source)
         elif kind == "result":
             columns = _plan_result(source)
+            (
+                parameter_set,
+                parameter_set_json,
+                parameter_set_hash,
+            ) = _plan_parameter_set(source, columns)
         else:  # entity: only the generic identity columns, filled by the sharder
             columns = {}
         plans.append(
@@ -455,6 +511,9 @@ def _plan_source(source: Source) -> list[TablePlan]:
                 table=table,
                 hash_source=hash_source,
                 columns=columns,
+                parameter_set=parameter_set,
+                parameter_set_json=parameter_set_json,
+                parameter_set_hash=parameter_set_hash,
             )
         )
     return plans
@@ -556,13 +615,28 @@ def _plan_content(source: Source) -> dict[str, Derivation]:
     return columns
 
 
+#: The ``[source.result]`` keys that declare the source's PARAMETER SET and
+#: are therefore NOT target columns -- they are stripped before the
+#: column-mapping loop and handled by :func:`_plan_parameter_set`.
+#:
+#: Exactly one member today. A sibling PRD adds ``parameter_set_column`` (the
+#: per-row alternative) with "exactly one of" semantics: that is a second
+#: entry here plus the branch marked in :func:`_plan_parameter_set`, and
+#: nothing else -- which is why the key set is a named constant rather than a
+#: literal inline.
+_PARAMETER_SET_KEYS: tuple[str, ...] = ("parameter_set",)
+
+
 def _plan_result(source: Source) -> dict[str, Derivation]:
     """Validate a ``[source.result]`` block, including the non-empty ``source``.
 
     The result ``source`` column is the PARTITION column on every
     ``<type>_result`` table; an empty partition value is a permanent scar, so
     it is required and non-empty AT PLAN TIME. Every other named column must
-    exist in the generic result schema.
+    exist in the generic result schema -- except the
+    :data:`_PARAMETER_SET_KEYS`, which declare the source's parameter set
+    rather than a target column and are validated by
+    :func:`_plan_parameter_set`.
     """
     name = source.name
     if not source.result:
@@ -571,7 +645,15 @@ def _plan_result(source: Source) -> dict[str, Derivation]:
             "[source.result] block mapping its columns."
         )
     legal = schema.column_names(source.entity_type, "result")
-    reserved = {"entity_hash", "entity_type", "observed_at", "ingest_batch_id"}
+    # The sharder fills these itself: the identity/provenance columns, and
+    # parameter_set_hash, which it computes from the declared parameter_set.
+    reserved = {
+        "entity_hash",
+        "entity_type",
+        "observed_at",
+        "ingest_batch_id",
+        "parameter_set_hash",
+    }
 
     result_source = source.result.get("source")
     if result_source is None or (
@@ -586,6 +668,8 @@ def _plan_result(source: Source) -> dict[str, Derivation]:
 
     columns: dict[str, Derivation] = {}
     for column, value in source.result.items():
+        if column in _PARAMETER_SET_KEYS:
+            continue  # not a target column; see _plan_parameter_set
         if column not in legal:
             raise ManifestError(
                 f"source {name!r} [source.result]: column {column!r} is not "
@@ -600,3 +684,79 @@ def _plan_result(source: Source) -> dict[str, Derivation]:
             value, where=f"source {name!r} [source.result].{column}"
         )
     return columns
+
+
+def constant_result_source(columns: Mapping[str, Derivation]) -> str | None:
+    """Return the result ``source`` value if it is known at PLAN TIME.
+
+    Only ``@const(<tool>/<version>)`` names a source that is the same on
+    every row, so only that form can be checked against a tool-specific rule
+    before any record is read. ``@lower(algorithm)``, a bare column name and
+    every other derivation resolve per row, so they return ``None`` and the
+    sharder makes the check itself (see
+    :mod:`clearinghouse_parameters`).
+    """
+    derivation = columns.get("source")
+    if derivation is None or derivation.name != "const":
+        return None
+    return derivation.args[0]
+
+
+def _plan_parameter_set(
+    source: Source, columns: Mapping[str, Derivation]
+) -> tuple[dict[str, Any], str, str]:
+    """Validate ``[source.result].parameter_set`` and hash it ONCE, at plan time.
+
+    Returns the validated mapping, its canonical JSON text and its
+    ``parameter_set_hash``, which the sharder stamps on every result row and
+    records in the parameter-set registry. Computing them here rather than
+    per row is the point: the set is a constant for the source, so a billion
+    rows cost one canonicalisation and one sha256.
+
+    The TRANSYT result-boundary rule is applied here too, but ONLY when the
+    result ``source`` is a plan-time constant (see
+    :func:`constant_result_source`) -- a manifest whose ``source`` is a
+    derivation has no tool until a row is in hand, and the sharder applies
+    the same shared validator per row for that case.
+
+    Raises:
+        ManifestError: ``parameter_set`` is missing, is not a table, or fails
+            the parameter-set rule -- the last carrying the originating
+            :class:`~kbutillib.domains.identity.ParameterSetError` message
+            VERBATIM (it is already prefixed with the manifest location, so
+            the offending path inside the set is named exactly once).
+    """
+    name = source.name
+    where = f"source {name!r} [source.result].parameter_set"
+
+    # One of _PARAMETER_SET_KEYS must be present. With a single key that is
+    # "parameter_set is required"; the sibling PRD's parameter_set_column
+    # turns this into "exactly one of", which is why it is written as a
+    # membership test over the key set rather than a bare `in source.result`.
+    declared = [key for key in _PARAMETER_SET_KEYS if key in source.result]
+    if not declared:
+        raise ManifestError(
+            f"source {name!r} [source.result]: 'parameter_set' is required. A "
+            "result is keyed by (entity, result_type, source, "
+            "parameter_set_hash), so every result source must say which "
+            "parameter set it represents. Declare parameter_set = {} to say "
+            "this is a DEFAULT run (the tool version's own defaults, nothing "
+            "overridden); declare the parameters the caller set otherwise, "
+            'e.g. parameter_set = { taxonomy_id = "562" }.'
+        )
+
+    params = source.result[declared[0]]
+    if not isinstance(params, dict):
+        raise ManifestError(
+            f"{where}: must be an inline TOML table, got "
+            f"{type(params).__name__}. It is DATA, not a @derivation: write "
+            'parameter_set = {} or parameter_set = { taxonomy_id = "562" }.'
+        )
+
+    try:
+        canonical, digest = cp.result_parameter_set_identity(
+            params, source=constant_result_source(columns), where=where
+        )
+    except ParameterSetError as exc:
+        raise ManifestError(str(exc)) from exc
+    return dict(params), canonical, digest

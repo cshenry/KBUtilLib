@@ -49,6 +49,9 @@ kinds       = ["result"]
   source              = "@lower(algorithm)"
   result_type_version = "@const(1.0)"
   payload             = "@json(function_id, score, evidence)"
+  # REQUIRED on every result source: {} declares a DEFAULT run (nothing
+  # overridden on top of the tool version's own defaults).
+  parameter_set       = {}
 
 # ---- Functions: identity + content (definition text) --------------------
 [[source]]

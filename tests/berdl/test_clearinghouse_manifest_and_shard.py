@@ -12,17 +12,36 @@ tests cover:
     checked against the REAL standardizer, not a stub.
   - Shard output is laid out one directory per target table with deterministic
     ``batch-<NNNN>.parquet`` names, sorted and range-disjoint.
+  - THE PARAMETER SET on a ``[source.result]`` block: the plan-time gate
+    (required, must be an inline table, must pass the parameter-set rule --
+    note TOML parses ``1.0e-5`` as a float, which is rejected), the hash
+    stamped on every sharded result row, the ``parameter_set`` REGISTRY shard
+    a run writes (one row per distinct set), and the shared TRANSYT
+    result-boundary rule at plan time AND per row in the sharder.
+  - A REAL-PATH end-to-end case driving ``cs.shard_manifest`` with nothing
+    monkeypatched and asserting against the parquet bytes read back off disk.
 """
 
 from __future__ import annotations
+
+import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from kbutillib.domains.identity import standardizers
+from kbutillib.domains.identity import (
+    DEFAULT_PARAMETER_SET_HASH,
+    ParameterSetError,
+    parameter_set_hash,
+    standardizers,
+)
 from kbutillib.domains.kbase.berdl import clearinghouse_manifest as cm
 from kbutillib.domains.kbase.berdl import clearinghouse_shard as cs
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    PARAMETER_SET_TABLE,
+    parameter_set_column_names,
+)
 
 # --------------------------------------------------------------------------
 # (a) Five plan-time rejection cases, each naming the offending key
@@ -446,3 +465,466 @@ def test_worked_example_manifest_validates():
     assert "gene_content" in tables
     assert "gene_result" in tables
     assert "genome_content" in tables
+
+
+# ==========================================================================
+# THE PARAMETER SET on a [source.result] block
+# ==========================================================================
+#
+# A result is keyed by (entity, result_type, source, PARAMETER_SET_HASH), so
+# every result source must declare which parameter set it represents. These
+# tests cover the plan-time gate, the hash stamped on sharded rows, the
+# parameter-set REGISTRY shard, and the shared TRANSYT result-boundary rule.
+
+
+def _result_toml(
+    *,
+    name="fixture-result",
+    path="x.parquet",
+    entity_type="gene",
+    source_value="@const(bakta/1.9)",
+    parameter_set="{}",
+    extra="",
+):
+    """Build a one-source result manifest, parameterised where tests vary it.
+
+    ``parameter_set`` is raw TOML text so a test can omit the key entirely
+    (pass ``None``) or declare a value TOML parses as a float.
+    """
+    ps_line = "" if parameter_set is None else f"parameter_set = {parameter_set}"
+    return f"""
+    [[source]]
+    name = "{name}"
+    adapter = "file"
+    path = "{path}"
+    format = "parquet"
+    entity_type = "{entity_type}"
+    kinds = ["result"]
+    [source.hash]
+    raw_column = "dna_sequence"
+    [source.result]
+    source = "{source_value}"
+    result_type = "@const(functional_annotation)"
+    payload = "@json(function_id)"
+    {ps_line}
+    {extra}
+    """
+
+
+def test_reject_result_without_parameter_set():
+    """A result source with no parameter_set is rejected at plan time, and the
+    message says {} is how a DEFAULT run is declared."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(parameter_set=None))
+    message = str(exc.value)
+    assert "parameter_set" in message
+    assert "required" in message
+    # The fix is named: {} declares a default run.
+    assert "{}" in message
+    assert "DEFAULT" in message
+
+
+def test_reject_result_mapping_parameter_set_hash():
+    """parameter_set_hash is filled by the sharder and may not be mapped."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(extra='parameter_set_hash = "@const(deadbeef)"'))
+    message = str(exc.value)
+    assert "parameter_set_hash" in message
+    assert "filled by the sharder" in message
+
+
+def test_reject_result_parameter_set_with_a_float():
+    """TOML parses 1.0e-5 as a float; the parameter-set rule rejects floats, so
+    this fails at PLAN time with the path to the offending value named."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(parameter_set="{ evalue = 1.0e-5 }"))
+    message = str(exc.value)
+    assert "evalue" in message
+    assert "float not allowed" in message
+    assert "pass decimals as strings" in message
+    # And it names the manifest location, once.
+    assert message.count("[source.result].parameter_set") == 1
+
+
+def test_reject_result_parameter_set_that_is_not_a_table():
+    """parameter_set is DATA (an inline table), never a @derivation string."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(parameter_set='"@const(evalue)"'))
+    message = str(exc.value)
+    assert "parameter_set" in message
+    assert "inline TOML table" in message
+
+
+def test_plan_carries_canonical_text_and_hash_computed_once():
+    """The plan carries the validated set as BOTH canonical text and hash,
+    computed at plan time against the live identity functions."""
+    plans = _plan(_result_toml(parameter_set='{ evalue = "1e-5", mode = "fast" }'))
+    (plan,) = plans
+    assert plan.parameter_set == {"evalue": "1e-5", "mode": "fast"}
+    # Canonical: keys sorted at every depth, no insignificant whitespace.
+    assert plan.parameter_set_json == '{"evalue":"1e-5","mode":"fast"}'
+    assert plan.parameter_set_hash == parameter_set_hash(
+        {"evalue": "1e-5", "mode": "fast"}
+    )
+
+
+def test_plan_default_run_hashes_to_the_default_hash():
+    (plan,) = _plan(_result_toml(parameter_set="{}"))
+    assert plan.parameter_set == {}
+    assert plan.parameter_set_json == "{}"
+    assert plan.parameter_set_hash == DEFAULT_PARAMETER_SET_HASH
+    assert plan.parameter_set_hash == parameter_set_hash({})
+
+
+def test_non_result_kinds_carry_no_parameter_set():
+    """An entity/content plan has no parameter set -- only results are keyed
+    by one, and a non-null value there would be meaningless."""
+    toml_text = """
+    [[source]]
+    name = "fixture-genes"
+    adapter = "file"
+    path = "x.parquet"
+    entity_type = "gene"
+    kinds = ["entity", "content"]
+    [source.hash]
+    raw_column = "dna_sequence"
+    [source.content]
+    sequence = "dna_sequence"
+    """
+    for plan in _plan(toml_text):
+        assert plan.parameter_set is None
+        assert plan.parameter_set_json is None
+        assert plan.parameter_set_hash is None
+
+
+# --------------------------------------------------------------------------
+# The shared TRANSYT result-boundary validator, at MANIFEST PLANNING
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["transyt", "transyt_local", "TranSyT", "TRANSYT_LOCAL"])
+def test_transyt_source_refuses_default_parameter_set_at_plan_time(tool):
+    """A TRANSYT result has no default run: {} is refused, case-insensitively
+    on the tool component of `source`."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(source_value=f"@const({tool}/1.0)", parameter_set="{}"))
+    message = str(exc.value)
+    assert "taxonomy_id" in message
+    assert "TRANSYT" in message
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{ taxonomy_id = "" }',        # empty
+        "{ taxonomy_id = 562 }",       # an integer, not a string
+        '{ taxonomy_id = "-562" }',    # negative
+        '{ taxonomy_id = "0562" }',    # leading zero
+        '{ taxonomy_id = "56a" }',     # not a decimal
+        '{ taxonomy_id = "5.62" }',    # not a decimal
+        "{ taxonomy_id = true }",      # a bool is not a string
+        '{ other_key = "562" }',       # the key itself is missing
+    ],
+)
+def test_transyt_rejects_bad_taxonomy_id_at_plan_time(value):
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(source_value="@const(transyt/1.0)", parameter_set=value))
+    assert "taxonomy_id" in str(exc.value)
+
+
+def test_transyt_accepts_a_decimal_taxonomy_id_at_plan_time():
+    (plan,) = _plan(
+        _result_toml(
+            source_value="@const(transyt/1.0)",
+            parameter_set='{ taxonomy_id = "562" }',
+        )
+    )
+    assert plan.parameter_set == {"taxonomy_id": "562"}
+    assert plan.parameter_set_hash == parameter_set_hash({"taxonomy_id": "562"})
+
+
+def test_non_transyt_source_accepts_a_default_parameter_set():
+    """Every other tool gets the generic validation only -- {} is a perfectly
+    good default run for bakta."""
+    (plan,) = _plan(_result_toml(source_value="@const(bakta/1.9)", parameter_set="{}"))
+    assert plan.parameter_set_hash == DEFAULT_PARAMETER_SET_HASH
+
+
+def test_transyt_with_a_derived_source_is_checked_per_row_by_the_sharder(tmp_path):
+    """When `source` is a derivation the tool is unknown at plan time, so the
+    manifest PLANS and the sharder applies the same shared validator per row.
+
+    This is the only place the two halves of 4c can diverge, so it is pinned:
+    the plan succeeds, and the shard of a row whose resolved source turns out
+    to be TRANSYT raises with taxonomy_id named.
+    """
+    src_path = tmp_path / "ann.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "dna_sequence": ["ACGTACGTAC"],
+                "algorithm": ["TranSyT/1.0"],
+                "function_id": ["f1"],
+            }
+        ),
+        str(src_path),
+    )
+    toml_text = _result_toml(
+        path=str(src_path), source_value="@lower(algorithm)", parameter_set="{}"
+    )
+    manifest = cm.load_manifest(toml_text)
+    # Plan time cannot know the tool -> it plans.
+    (plan,) = cm.shard_plan(manifest)
+    assert plan.parameter_set == {}
+    # The sharder resolves `source` per row and refuses it there.
+    with pytest.raises(ParameterSetError) as exc:
+        cs.shard_manifest(manifest, tmp_path / "bronze")
+    assert "taxonomy_id" in str(exc.value)
+    assert "transyt/1.0" in str(exc.value)
+
+
+def test_derived_transyt_source_with_a_taxonomy_id_shards(tmp_path):
+    """The other side of the per-row gate: a declared taxonomy_id passes."""
+    src_path = tmp_path / "ann.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "dna_sequence": ["ACGTACGTAC"],
+                "algorithm": ["TranSyT/1.0"],
+                "function_id": ["f1"],
+            }
+        ),
+        str(src_path),
+    )
+    manifest = cm.load_manifest(
+        _result_toml(
+            path=str(src_path),
+            source_value="@lower(algorithm)",
+            parameter_set='{ taxonomy_id = "562" }',
+        )
+    )
+    reports = cs.shard_manifest(manifest, tmp_path / "bronze")
+    result = [r for r in reports if r.table == "gene_result"]
+    assert result and result[0].rows == 1
+
+
+# --------------------------------------------------------------------------
+# Sharded result rows carry the hash; the run writes a registry shard
+# --------------------------------------------------------------------------
+
+
+def test_two_result_sources_write_hashes_and_a_two_row_registry_shard(tmp_path):
+    """A run with two result sources -- {} and {"taxonomy_id": "562"} -- stamps
+    each table's rows with its own hash and writes ONE 'parameter_set' shard
+    holding exactly two rows, one per distinct set.
+
+    The two sources target DIFFERENT entity types on purpose: the sharder
+    names every shard batch-<NNNN> counting from zero per shard_source() call,
+    so two sources feeding one table would overwrite each other's batch-0000
+    (a pre-existing property of the sharder, unrelated to parameter sets).
+    """
+    src_path = tmp_path / "ann.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "dna_sequence": ["ACGTACGTAC", "TTTTGGGGCC"],
+                "function_id": ["f1", "f2"],
+            }
+        ),
+        str(src_path),
+    )
+    toml_text = (
+        _result_toml(
+            name="default-run",
+            path=str(src_path),
+            entity_type="gene",
+            source_value="@const(bakta/1.9)",
+            parameter_set="{}",
+        )
+        + _result_toml(
+            name="transyt-run",
+            path=str(src_path),
+            entity_type="protein",
+            source_value="@const(transyt/1.0)",
+            parameter_set='{ taxonomy_id = "562" }',
+        )
+    )
+    out_root = tmp_path / "bronze"
+    reports = cs.shard_manifest(cm.load_manifest(toml_text), out_root)
+
+    default_hash = parameter_set_hash({})
+    transyt_hash = parameter_set_hash({"taxonomy_id": "562"})
+
+    gene_rows = pq.read_table(str(out_root / "gene_result" / "batch-0000.parquet"))
+    assert set(gene_rows.column("parameter_set_hash").to_pylist()) == {default_hash}
+    protein_rows = pq.read_table(
+        str(out_root / "protein_result" / "batch-0000.parquet")
+    )
+    assert set(protein_rows.column("parameter_set_hash").to_pylist()) == {
+        transyt_hash
+    }
+
+    # Exactly ONE registry shard, with exactly two rows -- one per distinct set.
+    registry_reports = [r for r in reports if r.table == PARAMETER_SET_TABLE]
+    assert len(registry_reports) == 1
+    assert registry_reports[0].rows == 2
+    registry = pq.read_table(str(registry_reports[0].path)).to_pylist()
+    assert {row["parameter_set_hash"] for row in registry} == {
+        default_hash,
+        transyt_hash,
+    }
+    by_hash = {row["parameter_set_hash"]: row for row in registry}
+    assert by_hash[default_hash]["canonical_json"] == "{}"
+    assert by_hash[transyt_hash]["canonical_json"] == '{"taxonomy_id":"562"}'
+    # Provenance is filled the way the sharder fills it everywhere else.
+    assert by_hash[default_hash]["observed_at"] is None
+    assert by_hash[default_hash]["ingest_batch_id"] == (
+        f"default-run:{PARAMETER_SET_TABLE}"
+    )
+    # The registry shard is written and reported BEFORE any result shard.
+    assert reports[0].table == PARAMETER_SET_TABLE
+    # And it carries exactly the registry's declared columns, in DDL order.
+    assert pq.read_table(str(registry_reports[0].path)).column_names == list(
+        parameter_set_column_names()
+    )
+
+
+def test_two_sources_sharing_a_parameter_set_write_one_registry_row(tmp_path):
+    """One row per DISTINCT set, not per source: two sources both declaring {}
+    produce a single registry row."""
+    src_path = tmp_path / "ann.parquet"
+    pq.write_table(
+        pa.table({"dna_sequence": ["ACGTACGTAC"], "function_id": ["f1"]}),
+        str(src_path),
+    )
+    toml_text = _result_toml(
+        name="a", path=str(src_path), entity_type="gene", parameter_set="{}"
+    ) + _result_toml(
+        name="b", path=str(src_path), entity_type="protein", parameter_set="{}"
+    )
+    out_root = tmp_path / "bronze"
+    reports = cs.shard_manifest(cm.load_manifest(toml_text), out_root)
+    (registry,) = [r for r in reports if r.table == PARAMETER_SET_TABLE]
+    assert registry.rows == 1
+
+
+def test_a_run_with_no_result_source_writes_no_registry_shard(tmp_path):
+    """Nothing to explain, so no registry shard and no registry directory."""
+    src_path = tmp_path / "V2_Genes.parquet"
+    _write_fixture_parquet(src_path, _FIXTURE_SEQS)
+    toml_text = f"""
+    [[source]]
+    name = "fixture-genes"
+    adapter = "file"
+    path = "{src_path}"
+    format = "parquet"
+    entity_type = "gene"
+    kinds = ["entity"]
+    [source.hash]
+    raw_column = "dna_sequence"
+    """
+    out_root = tmp_path / "bronze"
+    reports = cs.shard_manifest(cm.load_manifest(toml_text), out_root)
+    assert all(r.table != PARAMETER_SET_TABLE for r in reports)
+    assert not (out_root / PARAMETER_SET_TABLE).exists()
+
+
+# --------------------------------------------------------------------------
+# REAL-PATH: the real shard entry point, real parquet on disk, no monkeypatch
+# --------------------------------------------------------------------------
+
+
+def test_real_shard_entry_point_writes_hash_and_registry_to_disk(tmp_path):
+    """Drive the REAL shard entry point end to end and read the bytes back.
+
+    NOTHING in clearinghouse_shard or clearinghouse_manifest is monkeypatched:
+    a real TOML manifest goes through the real cm.load_manifest ->
+    cs.shard_manifest path, writes real bronze parquet into tmp_path, and this
+    test then READS THE FILES FROM DISK and checks
+
+      (a) every result row's parameter_set_hash equals the LIVE
+          kbutillib.domains.identity.parameter_set_hash({"evalue": "1e-5"}),
+      (b) a 'parameter_set' registry shard exists on disk carrying that hash
+          with canonical_json '{"evalue":"1e-5"}'.
+
+    A stub cannot satisfy this: the assertions are against file contents, and
+    the expected hash is computed by the shipped identity function, not
+    hard-coded here.
+    """
+    src_path = tmp_path / "V2_Gene_annotations.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "dna_sequence": list(_FIXTURE_SEQS),
+                "function_id": [f"f{i}" for i in range(len(_FIXTURE_SEQS))],
+            }
+        ),
+        str(src_path),
+    )
+    manifest_path = tmp_path / "manifest.toml"
+    manifest_path.write_text(
+        f"""
+[[source]]
+name = "real-path-annotations"
+adapter = "file"
+path = "{src_path}"
+format = "parquet"
+entity_type = "gene"
+kinds = ["result"]
+
+  [source.hash]
+  raw_column = "dna_sequence"
+
+  [source.result]
+  source        = "@const(bakta/1.9)"
+  result_type   = "@const(functional_annotation)"
+  payload       = "@json(function_id)"
+  parameter_set = {{ evalue = "1e-5" }}
+""",
+        encoding="utf-8",
+    )
+
+    out_root = tmp_path / "bronze"
+    # Small target_bytes so more than one result shard is written and the
+    # assertion covers every file, not just the first.
+    reports = cs.shard_manifest(cm.load_manifest(manifest_path), out_root, target_bytes=64)
+
+    expected_hash = parameter_set_hash({"evalue": "1e-5"})
+
+    # (a) Read the result parquet back off disk.
+    result_files = sorted((out_root / "gene_result").glob("*.parquet"))
+    assert result_files, "the real shard path must have written result parquet"
+    total_rows = 0
+    for path in result_files:
+        table = pq.read_table(str(path))
+        hashes = table.column("parameter_set_hash").to_pylist()
+        assert hashes, f"{path.name} has no rows"
+        assert set(hashes) == {expected_hash}
+        total_rows += len(hashes)
+    assert total_rows == len(_FIXTURE_SEQS)
+
+    # (b) Read the registry shard back off disk.
+    registry_files = sorted((out_root / PARAMETER_SET_TABLE).glob("*.parquet"))
+    assert len(registry_files) == 1
+    registry = pq.read_table(str(registry_files[0])).to_pylist()
+    assert len(registry) == 1
+    assert registry[0]["parameter_set_hash"] == expected_hash
+    assert registry[0]["canonical_json"] == '{"evalue":"1e-5"}'
+    # Belt and braces: the stored text really does hash to the stored hash.
+    assert parameter_set_hash(json.loads(registry[0]["canonical_json"])) == (
+        registry[0]["parameter_set_hash"]
+    )
+
+    # THE ORPHAN CHECK, run against the bytes on disk: every distinct
+    # parameter_set_hash appearing on a result row must have a registry row
+    # explaining it. A non-empty difference here means a result exists whose
+    # parameters nothing can name.
+    result_hashes = {
+        value
+        for path in result_files
+        for value in pq.read_table(str(path))
+        .column("parameter_set_hash")
+        .to_pylist()
+    }
+    registry_hashes = {row["parameter_set_hash"] for row in registry}
+    assert result_hashes - registry_hashes == set()

@@ -32,9 +32,16 @@ The success criteria these map to (from the module docstring):
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
+from kbutillib.domains.identity import (
+    DEFAULT_PARAMETER_SET_HASH,
+    ParameterSetError,
+    canonical_parameter_set,
+    parameter_set_hash,
+)
 from kbutillib.domains.kbase.berdl.capability import BerdlLoadRefusedError
 from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
     _HEX_RUN_RE,
@@ -45,11 +52,14 @@ from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
     ClearinghouseCapability,
     ClearinghouseLedgerAmbiguousError,
     ClearinghouseLoadPostflightError,
+    ClearinghousePartialWriteError,
     ClearinghouseWriteTargetMismatchError,
+    order_shards_for_load,
 )
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     ENTITY_TYPES,
     NAMESPACE,
+    PARAMETER_SET_TABLE,
     TENANT,
     table_name,
 )
@@ -563,6 +573,12 @@ class _FakeWriteCapability:
         postflight_row_count: The ``row_count`` every per-table load report
             carries. ``None`` simulates the dev 1194 null-postflight failure.
         snapshot_rows: Rows the reconcile snapshot-history ``query()`` returns.
+        registry_hashes: The ``parameter_set_hash`` values the parameter-set
+            REGISTRY table already holds, as ``register()``'s pre-write
+            lookup sees them. Defaults to empty (a fresh registry), so a
+            ``result`` call writes a registry row for every distinct set.
+        fail_tables: Table names whose ``load()`` raises ``RuntimeError``,
+            standing in for a transport failure mid-ingest.
     """
 
     def __init__(
@@ -573,12 +589,16 @@ class _FakeWriteCapability:
         probe_ns=f"{TENANT}.{NAMESPACE}",
         postflight_row_count=1,
         snapshot_rows=None,
+        registry_hashes=(),
+        fail_tables=(),
     ):
         self._locus = locus
         self._write_ns = write_ns
         self._probe_ns = probe_ns
         self._postflight_row_count = postflight_row_count
         self._snapshot_rows = snapshot_rows if snapshot_rows is not None else []
+        self._registry_hashes = set(registry_hashes)
+        self._fail_tables = set(fail_tables)
         self.load_calls: list[dict] = []
         self.queries: list[str] = []
 
@@ -593,6 +613,9 @@ class _FakeWriteCapability:
 
     def load(self, **kwargs):
         self.load_calls.append(kwargs)
+        failing = [t["name"] for t in kwargs["tables"] if t["name"] in self._fail_tables]
+        if failing:
+            raise RuntimeError(f"simulated transport failure writing {failing!r}")
         return {
             "ingest_result": {"success": True},
             "tables": [
@@ -614,6 +637,15 @@ class _FakeWriteCapability:
 
     def query(self, sql, *, params=None, engine=None, **kwargs):
         self.queries.append(sql)
+        if PARAMETER_SET_TABLE in sql and "parameter_set_hash" in sql:
+            # register()'s pre-write registry lookup: answer with whichever of
+            # the asked-for hashes this registry already holds.
+            asked = list(params or [])
+            return [
+                {"parameter_set_hash": h}
+                for h in asked
+                if h in self._registry_hashes
+            ]
         return list(self._snapshot_rows)
 
 
@@ -892,12 +924,28 @@ def test_write_criterion_d_offpod_ingest_shards_refuses_before_transport(tmp_pat
 @pytest.mark.parametrize("entity_type", ENTITY_TYPES)
 @pytest.mark.parametrize("kind", ["entity", "content", "result"])
 def test_register_selects_the_type_kind_table(entity_type, kind):
+    """register() routes to <type>_<kind> through table_name(), as an append.
+
+    A ``result`` row now has to carry a ``parameter_set`` (it is required --
+    see the parameter-set tests below), and the call then makes TWO appends:
+    the parameter-set registry first, then the rows. So the row's table is the
+    LAST load() call for a result, and the only one otherwise.
+    """
     fake = _FakeWriteCapability()
     cap = ClearinghouseCapability(fake)
-    cap.register(entity_type, [{"entity_hash": _hash(1)}], kind=kind)
-    assert fake.load_calls[0]["tables"][0]["name"] == table_name(entity_type, kind)
+    row = {"entity_hash": _hash(1)}
+    if kind == "result":
+        row["parameter_set"] = {}
+    cap.register(entity_type, [row], kind=kind)
+    if kind == "result":
+        # Registry FIRST, then the result rows.
+        assert fake.load_calls[0]["tables"][0]["name"] == PARAMETER_SET_TABLE
+        assert len(fake.load_calls) == 2
+    else:
+        assert len(fake.load_calls) == 1
+    assert fake.load_calls[-1]["tables"][0]["name"] == table_name(entity_type, kind)
     # Always requested as an append -- never overwrite from this layer.
-    assert fake.load_calls[0]["tables"][0]["mode"] == "append"
+    assert all(call["tables"][0]["mode"] == "append" for call in fake.load_calls)
 
 
 def test_register_unknown_type_or_kind_raises_before_load():
@@ -1151,3 +1199,435 @@ def test_criterion_h_no_backticks_in_any_trino_sql():
                 f"{verb} emitted a backquoted identifier on the Trino path -- "
                 f"Trino rejects these outright:\n{call.sql}"
             )
+
+
+# ==========================================================================
+# THE PARAMETER SET on register(), and registry-first load ordering
+# ==========================================================================
+#
+# register() for kind='result' must: validate EVERY row before the first
+# write; write the parameter-set registry rows BEFORE the result rows; store
+# parameter_set_hash and NEVER the parameter_set input field; and refuse the
+# WHOLE call -- writing nothing -- for a missing, invalid, non-canonical,
+# duplicate-key or hash-mismatched parameter set.
+#
+# The fake's load() is the lowest-level table writer, so `fake.load_calls` is
+# the record of what was actually written, in order. Nothing in
+# clearinghouse_capability is monkeypatched in any of these.
+
+
+def _result_row(seed=1, parameter_set=None, **extra):
+    """A minimal <type>_result row for register(), with a parameter set."""
+    row = {
+        "entity_hash": _hash(seed),
+        "result_type": "functional_annotation",
+        "source": "bakta/1.9",
+        "payload": "{}",
+    }
+    if parameter_set is not None:
+        row["parameter_set"] = parameter_set
+    row.update(extra)
+    return row
+
+
+def _loads_of(fake, table):
+    """Indices of ``fake.load_calls`` that wrote ``table``."""
+    return [
+        i
+        for i, call in enumerate(fake.load_calls)
+        if any(t["name"] == table for t in call["tables"])
+    ]
+
+
+def test_register_result_writes_registry_before_result_rows():
+    """REAL-PATH for register(): the real verb, with only the lowest-level
+    table writer (the fake's load()) replaced, and the ORDER read off that
+    writer's own recorded calls -- registry append strictly first."""
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    result = cap.register("gene", [_result_row(parameter_set={})], kind="result")
+
+    (registry_index,) = _loads_of(fake, PARAMETER_SET_TABLE)
+    (rows_index,) = _loads_of(fake, "gene_result")
+    assert registry_index < rows_index, (
+        "the parameter-set registry must be written BEFORE the result rows "
+        "that reference its hashes"
+    )
+    assert len(fake.load_calls) == 2
+
+    # The registry row says what the hash means.
+    registry_rows = fake.load_calls[registry_index]["dataframes"][PARAMETER_SET_TABLE]
+    assert registry_rows == [
+        {
+            "parameter_set_hash": DEFAULT_PARAMETER_SET_HASH,
+            "canonical_json": "{}",
+            "observed_at": None,
+            "ingest_batch_id": None,
+        }
+    ]
+    assert result["parameter_set_registry"]["written"] == [DEFAULT_PARAMETER_SET_HASH]
+
+
+def test_register_result_stores_the_hash_and_never_the_input_field():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene", [_result_row(parameter_set={"evalue": "1e-5"})], kind="result"
+    )
+    (rows_index,) = _loads_of(fake, "gene_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["gene_result"]
+    assert stored["parameter_set_hash"] == parameter_set_hash({"evalue": "1e-5"})
+    # parameter_set is an INPUT field and is not a column of any result table.
+    assert "parameter_set" not in stored
+
+
+def test_register_result_does_not_mutate_the_callers_rows():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    row = _result_row(parameter_set={})
+    cap.register("gene", [row], kind="result")
+    assert row["parameter_set"] == {}
+    assert "parameter_set_hash" not in row
+
+
+def test_register_result_accepts_canonical_json_text():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    text = canonical_parameter_set({"a": 1, "b": "x"})
+    cap.register("gene", [_result_row(parameter_set=text)], kind="result")
+    (rows_index,) = _loads_of(fake, "gene_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["gene_result"]
+    assert stored["parameter_set_hash"] == parameter_set_hash({"a": 1, "b": "x"})
+
+
+def test_register_result_accepts_a_matching_supplied_hash():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene",
+        [
+            _result_row(
+                parameter_set={"evalue": "1e-5"},
+                parameter_set_hash=parameter_set_hash({"evalue": "1e-5"}),
+            )
+        ],
+        kind="result",
+    )
+    assert len(fake.load_calls) == 2
+
+
+# -- the refusals: every one writes NOTHING --------------------------------
+
+
+@pytest.mark.parametrize(
+    "parameter_set, needle",
+    [
+        (None, "carries no 'parameter_set'"),                 # missing
+        ({"evalue": 1e-5}, "float not allowed"),              # invalid: a float
+        ({"Evalue": "1e-5"}, "invalid key"),                  # invalid: bad key
+        ({"evalue": None}, "None not allowed"),               # invalid: None
+        ('{"b":1,"a":2}', "not canonical"),                   # non-canonical text
+        ('{"a": 1}', "not canonical"),                        # non-canonical spacing
+        ("{not json}", "not valid JSON"),                     # invalid JSON
+        ('{"a":1,"a":2}', "repeats the key"),                 # duplicate keys
+        ("[]", "not an object"),                              # JSON but not an object
+        (7, "must be a mapping"),                             # neither mapping nor text
+    ],
+)
+def test_register_refuses_the_whole_call_and_writes_nothing(parameter_set, needle):
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register("gene", [_result_row(parameter_set=parameter_set)], kind="result")
+    assert needle in str(exc.value)
+    assert "rows[0]" in str(exc.value)
+    # NOTHING was written -- not the registry, not the rows.
+    assert fake.load_calls == []
+
+
+def test_register_refuses_a_hash_that_disagrees_with_the_parameter_set():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "gene",
+            [
+                _result_row(
+                    parameter_set={"evalue": "1e-5"},
+                    parameter_set_hash=DEFAULT_PARAMETER_SET_HASH,
+                )
+            ],
+            kind="result",
+        )
+    message = str(exc.value)
+    assert "rows[0]" in message
+    assert "disagree" in message
+    assert fake.load_calls == []
+
+
+def test_register_validates_every_row_before_the_first_write():
+    """A bad row at index 1 refuses the call with row 0 unwritten -- validation
+    is a whole pass, not interleaved with writing."""
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    rows = [
+        _result_row(seed=1, parameter_set={}),
+        _result_row(seed=2, parameter_set={"evalue": 1e-5}),
+        _result_row(seed=3, parameter_set={}),
+    ]
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register("gene", rows, kind="result")
+    assert "rows[1]" in str(exc.value)
+    assert fake.load_calls == []
+
+
+def test_register_collects_distinct_parameter_sets_across_rows():
+    """Two rows sharing a set contribute ONE registry row; a third with a
+    different set contributes a second."""
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene",
+        [
+            _result_row(seed=1, parameter_set={}),
+            _result_row(seed=2, parameter_set={}),
+            _result_row(seed=3, parameter_set={"evalue": "1e-5"}),
+        ],
+        kind="result",
+    )
+    (registry_index,) = _loads_of(fake, PARAMETER_SET_TABLE)
+    registry_rows = fake.load_calls[registry_index]["dataframes"][PARAMETER_SET_TABLE]
+    assert [row["parameter_set_hash"] for row in registry_rows] == [
+        DEFAULT_PARAMETER_SET_HASH,
+        parameter_set_hash({"evalue": "1e-5"}),
+    ]
+
+
+def test_register_retry_adds_no_registry_row_for_a_hash_already_present():
+    """An ordinary retry of the same call writes the result rows again (the
+    schema is append-only and the current-state derivation collapses them) but
+    adds NO second registry row: the hash is looked up first and skipped."""
+    fake = _FakeWriteCapability(registry_hashes={DEFAULT_PARAMETER_SET_HASH})
+    cap = ClearinghouseCapability(fake)
+    result = cap.register("gene", [_result_row(parameter_set={})], kind="result")
+
+    assert _loads_of(fake, PARAMETER_SET_TABLE) == []  # no registry append at all
+    assert len(_loads_of(fake, "gene_result")) == 1
+    assert result["parameter_set_registry"]["written"] == []
+    assert result["parameter_set_registry"]["already_present"] == [
+        DEFAULT_PARAMETER_SET_HASH
+    ]
+    assert result["parameter_set_registry"]["load_result"] is None
+
+
+def test_register_writes_only_the_unregistered_hashes():
+    """A mixed call writes exactly the hashes the registry lacks."""
+    new_hash = parameter_set_hash({"evalue": "1e-5"})
+    fake = _FakeWriteCapability(registry_hashes={DEFAULT_PARAMETER_SET_HASH})
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene",
+        [
+            _result_row(seed=1, parameter_set={}),
+            _result_row(seed=2, parameter_set={"evalue": "1e-5"}),
+        ],
+        kind="result",
+    )
+    (registry_index,) = _loads_of(fake, PARAMETER_SET_TABLE)
+    registry_rows = fake.load_calls[registry_index]["dataframes"][PARAMETER_SET_TABLE]
+    assert [row["parameter_set_hash"] for row in registry_rows] == [new_hash]
+
+
+def test_register_reports_a_partial_commit_rather_than_claiming_nothing_wrote():
+    """If the result append fails AFTER the registry append committed, the call
+    says so -- it never claims nothing was written -- and says it is safe to
+    retry."""
+    fake = _FakeWriteCapability(fail_tables={"gene_result"})
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghousePartialWriteError) as exc:
+        cap.register("gene", [_result_row(parameter_set={})], kind="result")
+    message = str(exc.value)
+    assert DEFAULT_PARAMETER_SET_HASH in message
+    assert "WERE written" in message
+    assert "safe to retry" in message
+    # The registry append really did happen; the result append was attempted.
+    assert _loads_of(fake, PARAMETER_SET_TABLE) == [0]
+    assert _loads_of(fake, "gene_result") == [1]
+
+
+def test_register_non_result_kinds_need_no_parameter_set():
+    """Only result rows are keyed by a parameter set; entity/content are not."""
+    for kind in ("entity", "content"):
+        fake = _FakeWriteCapability()
+        cap = ClearinghouseCapability(fake)
+        cap.register("gene", [{"entity_hash": _hash(1)}], kind=kind)
+        assert len(fake.load_calls) == 1
+        assert _loads_of(fake, PARAMETER_SET_TABLE) == []
+
+
+# -- the shared TRANSYT validator, in register() ---------------------------
+
+
+@pytest.mark.parametrize("source", ["transyt/1.0", "transyt_local/1.0", "TranSyT/1.0"])
+def test_register_transyt_refuses_a_default_parameter_set(source):
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "gene", [_result_row(parameter_set={}, source=source)], kind="result"
+        )
+    assert "taxonomy_id" in str(exc.value)
+    assert fake.load_calls == []
+
+
+@pytest.mark.parametrize(
+    "parameter_set",
+    [
+        {},                            # missing
+        {"taxonomy_id": ""},           # empty
+        {"taxonomy_id": 562},          # an integer, not a string
+        {"taxonomy_id": True},         # a bool, not a string
+        {"taxonomy_id": "-562"},       # negative
+        {"taxonomy_id": "0562"},       # leading zero
+        {"taxonomy_id": "56a"},        # not a decimal
+    ],
+)
+def test_register_transyt_refuses_a_bad_taxonomy_id(parameter_set):
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "gene",
+            [_result_row(parameter_set=parameter_set, source="transyt/1.0")],
+            kind="result",
+        )
+    assert "taxonomy_id" in str(exc.value)
+    assert fake.load_calls == []
+
+
+@pytest.mark.parametrize("source", ["transyt/1.0", "transyt_local/1.0"])
+def test_register_transyt_accepts_a_decimal_taxonomy_id(source):
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene",
+        [_result_row(parameter_set={"taxonomy_id": "562"}, source=source)],
+        kind="result",
+    )
+    (rows_index,) = _loads_of(fake, "gene_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["gene_result"]
+    assert stored["parameter_set_hash"] == parameter_set_hash({"taxonomy_id": "562"})
+
+
+def test_register_non_transyt_source_accepts_a_default_parameter_set():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "gene", [_result_row(parameter_set={}, source="bakta/1.9")], kind="result"
+    )
+    (rows_index,) = _loads_of(fake, "gene_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["gene_result"]
+    assert stored["parameter_set_hash"] == DEFAULT_PARAMETER_SET_HASH
+
+
+# --------------------------------------------------------------------------
+# Registry-first LOAD order, in every shard-load entry point
+# --------------------------------------------------------------------------
+
+
+def test_order_shards_for_load_puts_the_registry_first():
+    """The ordering function itself, against a deliberately hostile input."""
+    triples = [
+        ("protein_result", "0000", Path("protein_result/0000.parquet")),
+        ("gene_result", "0001", Path("gene_result/0001.parquet")),
+        (PARAMETER_SET_TABLE, "0000", Path(f"{PARAMETER_SET_TABLE}/0000.parquet")),
+        ("gene_entity", "0000", Path("gene_entity/0000.parquet")),
+    ]
+    ordered = order_shards_for_load(list(reversed(triples)))
+    assert ordered[0][0] == PARAMETER_SET_TABLE
+    # Everything else keeps a deterministic (table, batch) order.
+    assert [t[0] for t in ordered[1:]] == [
+        "gene_entity",
+        "gene_result",
+        "protein_result",
+    ]
+
+
+def test_ingest_shards_ingests_the_registry_before_any_result_table(tmp_path):
+    _write_shard_tree(
+        tmp_path,
+        {
+            "gene_result": ["0000"],
+            "protein_result": ["0000"],
+            PARAMETER_SET_TABLE: ["0000"],
+        },
+    )
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.ingest_shards(tmp_path, run_id="r1")
+    loaded = [call["tables"][0]["name"] for call in fake.load_calls]
+    assert loaded[0] == PARAMETER_SET_TABLE
+    assert loaded.index(PARAMETER_SET_TABLE) < loaded.index("gene_result")
+    assert loaded.index(PARAMETER_SET_TABLE) < loaded.index("protein_result")
+
+
+def test_ingest_shards_reorders_a_reversed_order_handed_to_it(tmp_path, monkeypatch):
+    """A deliberately REVERSED table order handed to the shard loader still
+    ingests 'parameter_set' first.
+
+    Registry-first must be a property of the ingest verb, not of its discovery
+    helper: a different producer (a future discovery function, a caller
+    assembling its own list) must not be able to put a result table ahead of
+    the registry. So discovery is replaced with one that returns the worst
+    possible order and the verb is required to fix it.
+    """
+    import kbutillib.domains.kbase.berdl.clearinghouse_capability as cc
+
+    _write_shard_tree(
+        tmp_path, {"gene_result": ["0000"], PARAMETER_SET_TABLE: ["0000"]}
+    )
+    reversed_order = [
+        ("gene_result", "0000", tmp_path / "gene_result" / "0000.parquet"),
+        (
+            PARAMETER_SET_TABLE,
+            "0000",
+            tmp_path / PARAMETER_SET_TABLE / "0000.parquet",
+        ),
+    ]
+    monkeypatch.setattr(cc, "_discover_shards", lambda root: list(reversed_order))
+
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.ingest_shards(tmp_path, run_id="r1")
+    loaded = [call["tables"][0]["name"] for call in fake.load_calls]
+    assert loaded == [PARAMETER_SET_TABLE, "gene_result"]
+
+
+def test_discover_shards_recognises_the_registry_directory(tmp_path):
+    """The registry table is not entity-typed, so it is named by its constant
+    rather than by table_name() -- a discovery that only knew the fifteen
+    per-type names would silently skip its shards."""
+    import kbutillib.domains.kbase.berdl.clearinghouse_capability as cc
+
+    _write_shard_tree(
+        tmp_path, {PARAMETER_SET_TABLE: ["0000"], "gene_entity": ["0000"]}
+    )
+    discovered = cc._discover_shards(tmp_path)
+    assert [name for name, _batch, _path in discovered] == [
+        PARAMETER_SET_TABLE,
+        "gene_entity",
+    ]
+
+
+def test_register_failure_with_no_registry_write_is_not_called_partial():
+    """When every hash was already registered, no registry append was made, so
+    a result-append failure really IS 'nothing was written' -- the original
+    error propagates rather than being dressed up as a partial commit."""
+    fake = _FakeWriteCapability(
+        registry_hashes={DEFAULT_PARAMETER_SET_HASH}, fail_tables={"gene_result"}
+    )
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(RuntimeError) as exc:
+        cap.register("gene", [_result_row(parameter_set={})], kind="result")
+    assert not isinstance(exc.value, ClearinghousePartialWriteError)
+    assert _loads_of(fake, PARAMETER_SET_TABLE) == []

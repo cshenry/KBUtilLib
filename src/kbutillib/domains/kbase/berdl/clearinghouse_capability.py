@@ -108,14 +108,18 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ...identity import ParameterSetError, canonical_parameter_set
 from .capability import BerdlCapability, BerdlLoadRefusedError
 from .clearinghouse_derivation import current_state_sql
+from .clearinghouse_parameters import result_parameter_set_identity
 from .clearinghouse_schema import (
     _KINDS,
     ENTITY_TYPES,
     NAMESPACE,
+    PARAMETER_SET_TABLE,
     TENANT,
     encode_entity_hash,
+    parameter_set_column_names,
     table_name,
 )
 
@@ -124,6 +128,8 @@ __all__ = [
     "ClearinghouseWriteTargetMismatchError",
     "ClearinghouseLoadPostflightError",
     "ClearinghouseLedgerAmbiguousError",
+    "ClearinghousePartialWriteError",
+    "order_shards_for_load",
 ]
 
 #: Fully-qualified namespace prefix the fifteen tables live under, e.g.
@@ -277,6 +283,22 @@ class ClearinghouseLedgerAmbiguousError(RuntimeError):
     it -- see :meth:`ClearinghouseCapability.ingest_shards`). So resume
     REFUSES at the first such batch unless ``reconcile=True``, which reads the
     table's Iceberg snapshot history and decides whether the shard landed.
+    """
+
+
+class ClearinghousePartialWriteError(RuntimeError):
+    """A write that had already begun failed part-way through.
+
+    :meth:`ClearinghouseCapability.register` writes a ``result`` call in TWO
+    appends -- the parameter-set registry rows first, then the result rows --
+    because a result row whose ``parameter_set_hash`` the registry cannot
+    explain is an orphan. If the SECOND append fails (a transport error
+    mid-ingest), the first one has already committed, and saying "nothing was
+    written" would be a lie. So this is raised instead, naming what did land.
+
+    The call is SAFE TO RETRY: the registry is append-only, a hash always maps
+    to the same canonical text, and a retry looks the already-written hashes
+    up and skips them. The original failure is chained as ``__cause__``.
     """
 
 
@@ -1083,9 +1105,39 @@ class ClearinghouseCapability:
         a FAILED load (dev 1194), which may fire after the rows landed -- the
         correct direction to be wrong in.
 
+        THE PARAMETER SET, on a ``result`` call. Every row destined for a
+        ``<type>_result`` table must supply a ``parameter_set`` INPUT field --
+        either a mapping or its canonical JSON text -- and nothing else is
+        accepted: a missing one is an error, not a default run, because
+        "nobody said" and "the caller explicitly ran the defaults" are
+        different claims and only the second may be recorded as ``{}``.
+        Each row's set is validated against the parameter-set rule plus any
+        tool-specific rule (:mod:`clearinghouse_parameters`), hashed, and the
+        hash stored as ``parameter_set_hash``; the ``parameter_set`` field
+        itself is REMOVED and never stored on a result row. See
+        :meth:`_prepare_result_rows` for the exact rules, including why
+        non-canonical text is refused.
+
+        REGISTRY FIRST, THEN THE RESULT ROWS -- two appends, in that order,
+        so no result row ever exists whose hash the registry cannot explain.
+        Only hashes not already in the registry are written, so an ordinary
+        retry of the same call adds no registry row. Two concurrent identical
+        calls may still each insert a row for one hash; that is harmless (a
+        hash always maps to the same text and readers select distinct).
+
+        REFUSE, NEVER WARN. EVERY row is validated BEFORE the first append,
+        and any failure refuses the WHOLE call with nothing written, naming
+        the offending row index and the reason -- the same posture as the
+        dev 1206 pre-write assertion. The one case where "nothing was
+        written" would be false is a transport failure on the SECOND append,
+        after the registry rows committed; that raises
+        :class:`ClearinghousePartialWriteError`, which says so and says the
+        call is safe to retry.
+
         Args:
             entity_type: One of :data:`ENTITY_TYPES`.
-            rows: The DataFrame-mode rows for this one table.
+            rows: The DataFrame-mode rows for this one table. For
+                ``kind='result'`` each row must carry ``parameter_set``.
             kind: One of ``"entity"``, ``"content"``, ``"result"``.
             tenant: Target tenant for the membership check and write target
                 (default :data:`TENANT`).
@@ -1093,27 +1145,298 @@ class ClearinghouseCapability:
                 :data:`NAMESPACE`).
 
         Returns:
-            The wrapped ``load()`` result (postflight-verified).
+            The wrapped ``load()`` result for the ROWS (postflight-verified).
+            On a ``result`` call it additionally carries
+            ``'parameter_set_registry'``: the hashes written, the hashes
+            already present, and the registry ``load()`` result (``None``
+            when every hash was already registered).
 
         Raises:
             ValueError: Unknown ``entity_type`` or ``kind``.
+            ParameterSetError: A result row's ``parameter_set`` is missing,
+                invalid, non-canonical text, invalid or duplicate-key JSON,
+                or disagrees with a ``parameter_set_hash`` the row also
+                carries. Nothing has been written.
             BerdlLoadRefusedError: Off-pod.
             ClearinghouseWriteTargetMismatchError: Write target could not be
                 confirmed (dev 1206).
             ClearinghouseLoadPostflightError: Null postflight (dev 1194).
+            ClearinghousePartialWriteError: The result append failed after the
+                registry append committed. Safe to retry.
         """
         self._require_in_pod("register")
         name = table_name(entity_type, kind)  # Rule 2: raises on bad type/kind
+
+        # Validate EVERY row before anything is written. This runs before the
+        # dev 1206 assertion too: both refuse with nothing written, and the
+        # cheaper, caller-fixable error is the more useful one to raise first.
+        if kind == "result":
+            prepared, registry_rows = self._prepare_result_rows(rows)
+        else:
+            prepared, registry_rows = [dict(row) for row in rows], []
+
         write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
         capability = self._get_capability()
-        result = capability.load(
+
+        registry_report: dict[str, Any] | None = None
+        if registry_rows:
+            registry_report = self._write_parameter_set_registry(
+                registry_rows,
+                tenant=tenant,
+                dataset=dataset,
+                write_ns=write_ns,
+            )
+
+        try:
+            result = capability.load(
+                dataset=dataset,
+                tables=[{"name": name, "mode": "append"}],
+                tenant=tenant,
+                namespace=write_ns,
+                dataframes={name: prepared},
+            )
+            result = self._check_postflight(result)
+        except Exception as exc:
+            # Only a registry append that actually HAPPENED makes this call
+            # partially committed. If every hash was already registered no
+            # load() was made for the registry, so nothing was written and the
+            # original failure is the honest one to raise.
+            if registry_report is None or registry_report["load_result"] is None:
+                raise
+            raise ClearinghousePartialWriteError(
+                f"register({entity_type!r}, kind={kind!r}): the "
+                f"{PARAMETER_SET_TABLE!r} registry rows for "
+                f"{sorted(registry_report['written'])} WERE written, then the "
+                f"append to {name!r} failed: {type(exc).__name__}: {exc}. This "
+                "call is partially committed -- do NOT read it as 'nothing was "
+                "written'. It is safe to retry: the registry is append-only, a "
+                "hash always maps to the same canonical text, and a retry "
+                "looks the written hashes up and skips them."
+            ) from exc
+
+        if kind == "result":
+            result = dict(result)
+            result["parameter_set_registry"] = registry_report or {
+                "written": [],
+                "already_present": [],
+                "load_result": None,
+            }
+        return result
+
+    def _prepare_result_rows(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Validate a ``result`` call's parameter sets; return rows + registry rows.
+
+        Called BEFORE any write. Every row is checked, not just up to the
+        first bad one, in the sense that the FIRST failure refuses the whole
+        call -- nothing is written, so a caller fixes its payload once rather
+        than discovering a second bad row after a partial load.
+
+        Per row, in order:
+
+        1. ``parameter_set`` must be present. Absent is an ERROR, never an
+           implied default run.
+        2. A mapping is taken as-is. A ``str`` is parsed STRICTLY: it must be
+           a JSON OBJECT, with no duplicate keys (``{"a":1,"a":2}`` is
+           refused rather than silently last-wins), and must be byte-equal to
+           ``canonical_parameter_set(parsed)`` -- so ``{"b":1,"a":2}`` is
+           refused as non-canonical. Accepting non-canonical text would mean
+           storing a hash the text as given does not produce.
+        3. The parsed set is validated against the generic parameter-set rule
+           and the tool-specific rule for this row's ``source``
+           (:func:`clearinghouse_parameters.result_parameter_set_identity`).
+        4. If the row ALSO carries ``parameter_set_hash``, it must equal the
+           computed hash; a disagreement is a refusal, not an overwrite.
+        5. ``parameter_set_hash`` is set on the stored row and the
+           ``parameter_set`` input field is REMOVED -- it is not a column of
+           any ``<type>_result`` table and must never be stored on one.
+
+        Returns:
+            ``(stored_rows, registry_rows)``. ``registry_rows`` holds one row
+            per DISTINCT hash, in first-seen order, each carrying the hash,
+            its ``canonical_json``, and the ``observed_at`` /
+            ``ingest_batch_id`` of the first row that used it.
+
+        Raises:
+            ParameterSetError: Any row failed any step above; the message
+                names the row INDEX and the reason. Nothing is written.
+        """
+        prepared: list[dict[str, Any]] = []
+        registry: dict[str, dict[str, Any]] = {}
+        for index, row in enumerate(rows):
+            out = dict(row)
+            where = f"register: rows[{index}]['parameter_set']"
+            if "parameter_set" not in out:
+                raise ParameterSetError(
+                    f"register: rows[{index}] is destined for a result table "
+                    "and carries no 'parameter_set'. A result is keyed by "
+                    "(entity, result_type, source, parameter_set_hash), so "
+                    "every result row must say which parameter set produced "
+                    "it. Pass {} (a mapping or the text '{}') to record a "
+                    "DEFAULT run -- an absent field is not a default run, it "
+                    "is an unanswered question. Nothing has been written."
+                )
+            raw = out.pop("parameter_set")
+            params = self._parse_parameter_set_field(raw, index=index)
+            canonical, digest = result_parameter_set_identity(
+                params, source=out.get("source"), where=where
+            )
+            declared = out.get("parameter_set_hash")
+            if declared is not None and declared != digest:
+                raise ParameterSetError(
+                    f"register: rows[{index}] carries parameter_set_hash "
+                    f"{declared!r} but its parameter_set hashes to {digest!r} "
+                    f"(canonical form {canonical!r}). The two disagree, so "
+                    "which one keys the result cannot be decided here. "
+                    "Nothing has been written -- send the row with a matching "
+                    "hash, or with no parameter_set_hash at all and let it be "
+                    "computed."
+                )
+            out["parameter_set_hash"] = digest
+            prepared.append(out)
+            if digest not in registry:
+                registry[digest] = {
+                    "parameter_set_hash": digest,
+                    "canonical_json": canonical,
+                    "observed_at": out.get("observed_at"),
+                    "ingest_batch_id": out.get("ingest_batch_id"),
+                }
+        return prepared, list(registry.values())
+
+    @staticmethod
+    def _parse_parameter_set_field(raw: Any, *, index: int) -> dict[str, Any]:
+        """Resolve a row's ``parameter_set`` input field to a mapping, or refuse.
+
+        A mapping passes through. A ``str`` is parsed as JSON with
+        ``object_pairs_hook`` so a DUPLICATE KEY is caught rather than
+        silently resolved last-wins, must decode to an OBJECT, and must be
+        byte-equal to its own canonical form. Anything else is refused.
+
+        Raises:
+            ParameterSetError: ``raw`` is neither a mapping nor admissible
+                canonical JSON object text; the message names the row index.
+        """
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        if not isinstance(raw, str):
+            raise ParameterSetError(
+                f"register: rows[{index}]['parameter_set'] must be a mapping "
+                f"or its canonical JSON text, got {type(raw).__name__}. "
+                "Nothing has been written."
+            )
+
+        def _reject_duplicate_keys(
+            pairs: Sequence[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            seen: set[str] = set()
+            for key, _value in pairs:
+                if key in seen:
+                    raise ParameterSetError(
+                        f"register: rows[{index}]['parameter_set'] JSON text "
+                        f"repeats the key {key!r}. A duplicate key has no "
+                        "single meaning -- resolving it last-wins would store "
+                        "a hash the text does not obviously produce -- so it "
+                        "is refused. Nothing has been written."
+                    )
+                seen.add(key)
+            return dict(pairs)
+
+        try:
+            parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+        except ParameterSetError:
+            raise
+        except ValueError as exc:
+            raise ParameterSetError(
+                f"register: rows[{index}]['parameter_set'] is not valid JSON: "
+                f"{exc}. Nothing has been written."
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ParameterSetError(
+                f"register: rows[{index}]['parameter_set'] JSON text decodes "
+                f"to {type(parsed).__name__}, not an object. A parameter set "
+                "is a mapping (possibly empty: '{}'). Nothing has been "
+                "written."
+            )
+        canonical = canonical_parameter_set(parsed)
+        if canonical != raw:
+            raise ParameterSetError(
+                f"register: rows[{index}]['parameter_set'] text {raw!r} is "
+                f"not canonical; the canonical form is {canonical!r}. The "
+                "text as given is what a reader would compare against, so "
+                "accepting it would store a hash it does not produce. Send "
+                "the canonical text, or send the mapping and let it be "
+                "canonicalised. Nothing has been written."
+            )
+        return parsed
+
+    def _registered_parameter_set_hashes(self, hashes: Sequence[str]) -> set[str]:
+        """Return which of ``hashes`` the parameter-set registry already holds.
+
+        A single ``SELECT DISTINCT`` over the registry, bound server-side (the
+        verb is in-pod only, so there is a real bind channel). A lookup
+        failure is NOT swallowed: if the registry cannot be read, the registry
+        state is unknown, and this runs before anything is written, so the
+        whole call refuses with nothing written rather than writing blind.
+        """
+        if not hashes:
+            return set()
+        table = _quote_fqn(f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", "spark")
+        sql = (
+            f"SELECT DISTINCT parameter_set_hash FROM {table} "
+            f"WHERE parameter_set_hash IN ({self._in_placeholders(len(hashes))})"
+        )
+        rows = self._run(sql, params=list(hashes), engine="spark")
+        return {
+            row["parameter_set_hash"]
+            for row in rows
+            if row.get("parameter_set_hash") is not None
+        }
+
+    def _write_parameter_set_registry(
+        self,
+        registry_rows: Sequence[Mapping[str, Any]],
+        *,
+        tenant: str,
+        dataset: str,
+        write_ns: str,
+    ) -> dict[str, Any]:
+        """Append the registry rows whose hash is not already registered.
+
+        Returns a report of ``'written'`` hashes, ``'already_present'``
+        hashes, and the registry ``load()`` result (``None`` when every hash
+        was already present, in which case no ``load()`` is made at all --
+        that is what makes an ordinary retry add no registry row).
+        """
+        hashes = [row["parameter_set_hash"] for row in registry_rows]
+        present = self._registered_parameter_set_hashes(hashes)
+        new_rows = [
+            dict(row)
+            for row in registry_rows
+            if row["parameter_set_hash"] not in present
+        ]
+        report: dict[str, Any] = {
+            "written": [row["parameter_set_hash"] for row in new_rows],
+            "already_present": [h for h in hashes if h in present],
+            "load_result": None,
+        }
+        if not new_rows:
+            return report
+        columns = parameter_set_column_names()
+        load_result = self._get_capability().load(
             dataset=dataset,
-            tables=[{"name": name, "mode": "append"}],
+            tables=[{"name": PARAMETER_SET_TABLE, "mode": "append"}],
             tenant=tenant,
             namespace=write_ns,
-            dataframes={name: list(rows)},
+            dataframes={
+                PARAMETER_SET_TABLE: [
+                    {column: row.get(column) for column in columns}
+                    for row in new_rows
+                ]
+            },
         )
-        return self._check_postflight(result)
+        report["load_result"] = self._check_postflight(load_result)
+        return report
 
     def ingest_shards(
         self,
@@ -1174,6 +1497,14 @@ class ClearinghouseCapability:
         fan-out. The ledger is precisely what prevents that -- and it is why
         ``reconcile`` exists rather than a blanket "re-running is safe".
 
+        LOAD ORDER: THE PARAMETER-SET REGISTRY FIRST. Shards are ingested in
+        :func:`order_shards_for_load` order, which places
+        :data:`PARAMETER_SET_TABLE` ahead of every other table -- so no
+        ``<type>_result`` shard is ever ingested before the registry rows
+        that explain its ``parameter_set_hash`` values. The order is
+        re-applied inside this verb rather than trusted from discovery, so an
+        arbitrary or reversed input order still ingests the registry first.
+
         ``dry_run=True`` is genuinely read-only (matching
         :func:`clearinghouse_schema.bootstrap`'s dry-run guarantee): it resolves
         namespaces, runs the pre-write assertion, reports the write mode each
@@ -1223,7 +1554,12 @@ class ClearinghouseCapability:
 
         ledger_path = shard_root / LEDGER_FILENAME
         ledger_states = _read_ledger_states(ledger_path, run_id=run_id)
-        discovered = _discover_shards(shard_root)
+        # Re-apply the load order to whatever discovery produced. _discover_shards
+        # already returns it ordered; doing it again here is what makes the
+        # registry-first guarantee a property of THIS verb rather than of its
+        # discovery helper, so a different (or monkeypatched, or reversed)
+        # producer cannot ingest a result table ahead of the registry.
+        discovered = order_shards_for_load(_discover_shards(shard_root))
 
         capability = self._get_capability()
         reports: list[dict[str, Any]] = []
@@ -1737,18 +2073,62 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _shard_load_sort_key(table: str, batch: str) -> tuple[int, str, str]:
+    """Sort key putting the parameter-set registry FIRST, then ``(table, batch)``.
+
+    REGISTRY BEFORE RESULTS is a writer obligation, not a reader's problem: a
+    ``<type>_result`` row whose ``parameter_set_hash`` has no registry row is
+    an orphan -- the hash is opaque, so nothing can say what parameters
+    produced that result -- and an ingest that dies between the two leaves
+    exactly that. Loading :data:`PARAMETER_SET_TABLE` first makes the window
+    empty in the only direction that matters: a registry row with no result
+    row yet is inert and harmless.
+
+    The registry is ordered ahead of EVERY other table, not merely ahead of
+    the five ``<type>_result`` tables. That is strictly stronger than the
+    requirement and costs nothing (it is one small shard), and it means the
+    rule holds regardless of how the other fourteen tables sort against each
+    other.
+    """
+    return (0 if table == PARAMETER_SET_TABLE else 1, table, batch)
+
+
+def order_shards_for_load(
+    discovered: Sequence[tuple[str, str, Path]],
+) -> list[tuple[str, str, Path]]:
+    """Order ``(table, batch, path)`` triples for ingest, registry first.
+
+    THE single place shard load order is decided, applied by every shard-load
+    entry point. :func:`_discover_shards` sorts with it, and
+    :meth:`ClearinghouseCapability.ingest_shards` applies it again to
+    whatever list it ends up with -- so a caller (or a test, or a future
+    discovery function) that hands over a reversed or arbitrary order still
+    ingests :data:`PARAMETER_SET_TABLE` before any ``<type>_result`` table
+    rather than relying on the producer to have sorted correctly.
+    """
+    return sorted(
+        discovered, key=lambda triple: _shard_load_sort_key(triple[0], triple[1])
+    )
+
+
 def _discover_shards(shard_root: Path) -> list[tuple[str, str, Path]]:
     """Discover ``(table, batch, shard_path)`` triples under ``shard_root``.
 
     Shards are laid out one subdirectory per table (named for the table), each
     holding one file per batch whose stem is the batch id -- e.g.
     ``<shard_root>/gene_entity/0007.parquet``. Only subdirectories named for a
-    known clearinghouse table (:func:`clearinghouse_schema.table_name` over
-    every type/kind) are considered, so the ledger file and any stray directory
-    beside the shards are ignored. The result is sorted by ``(table, batch)``
-    for a deterministic, resumable ingest order.
+    known clearinghouse table -- the fifteen
+    :func:`clearinghouse_schema.table_name` composes over every type/kind,
+    plus the :data:`PARAMETER_SET_TABLE` registry, which is not entity-typed
+    and so is named by its constant -- are considered, so the ledger file and
+    any stray directory beside the shards are ignored.
+
+    The result is ordered by :func:`order_shards_for_load`: the registry
+    first, then ``(table, batch)`` -- deterministic, resumable, and with the
+    registry ahead of every result table.
     """
     known = {table_name(etype, kind) for kind in _KINDS for etype in ENTITY_TYPES}
+    known.add(PARAMETER_SET_TABLE)
     discovered: list[tuple[str, str, Path]] = []
     if not shard_root.exists():
         return discovered
@@ -1758,8 +2138,7 @@ def _discover_shards(shard_root: Path) -> list[tuple[str, str, Path]]:
             continue
         for shard in sorted(p for p in table_dir.iterdir() if p.is_file()):
             discovered.append((name, shard.stem, shard))
-    discovered.sort(key=lambda triple: (triple[0], triple[1]))
-    return discovered
+    return order_shards_for_load(discovered)
 
 
 def _shard_format(shard_path: Path) -> str:

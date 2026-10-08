@@ -149,7 +149,7 @@ _ALL_CONTENT_VIEW = "all_content"
 #: Every value that has passed :func:`encode_entity_hash` matches this, and a
 #: value that matches this cannot contain a quote, whitespace, comment marker
 #: or any other SQL metacharacter. That property is what makes the off-pod
-#: degradation in :meth:`_bind_offpod` safe: off-pod there is no bind-
+#: degradation in :meth:`_inline_hex_params` safe: off-pod there is no bind-
 #: parameter channel (the REST query endpoint takes only SQL text), so a hash
 #: must reach the SQL string -- but only after :func:`encode_entity_hash` has
 #: produced it AND this pattern has re-confirmed it, so the value inlined is
@@ -386,13 +386,30 @@ class ClearinghouseCapability:
     ) -> list[dict[str, Any]]:
         """Run one query through the collaborator and normalise its rows.
 
-        In-pod: hands ``params`` to ``capability.query(sql, params=..., ...)``
-        for true server-side binding -- the hash never reaches the SQL text.
-        Off-pod: there is no bind-parameter channel, so ``params`` are
-        inlined via :meth:`_bind_offpod` (each re-validated to
-        ``^[0-9a-f]{64}$`` first, so the inlined value is provably
-        injection-free) and ``limit``/``offset`` are forwarded to the REST
-        page.
+        There are THREE binding regimes here, picked from the resolved locus
+        and ``engine``, because only one of the three can bind server-side:
+
+        - **In-pod / Trino** -- ``params`` are handed to
+          ``capability.query(sql, params=..., engine='trino')`` for true
+          server-side binding. The hash never reaches the SQL text.
+        - **In-pod / Spark** -- ``BerdlCapability.query`` REFUSES ``params``
+          on this engine (parameterised ``spark.sql`` is Spark-version
+          dependent and not relied on), so passing them would raise
+          ``ValueError`` instead of running the read. Since the engine is
+          promoted to Spark automatically at
+          :data:`SPARK_PROMOTION_THRESHOLD` hashes, that refusal would land
+          on EVERY bulk read. The params are therefore inlined via
+          :meth:`_inline_hex_params` and ``params=None`` is passed -- the same
+          validated-inlining the off-pod path uses.
+        - **Off-pod** -- no bind-parameter channel at all (the REST query
+          endpoint takes only SQL text), so ``params`` are likewise inlined
+          via :meth:`_inline_hex_params` and ``limit``/``offset`` are
+          forwarded to the REST page.
+
+        On both inlining paths every value is re-validated against
+        ``^[0-9a-f]{64}$`` BEFORE it reaches the SQL text, so a malformed
+        hash raises before any query is issued and the inlined literal is
+        provably injection-free.
 
         Returns a list of ``dict`` rows, normalised across the loci's return
         shapes (off-pod returns ``{'data': [dict, ...]}``; in-pod Trino
@@ -401,53 +418,69 @@ class ClearinghouseCapability:
         """
         capability = self._get_capability()
         if self._locus() == "off_pod":
-            final_sql = self._bind_offpod(sql, params)
+            final_sql = self._inline_hex_params(sql, params)
             result = capability.query(final_sql, limit=limit, offset=offset)
             return self._normalize_offpod_rows(result)
-        # In-pod: bind server-side; paging is unnecessary (no REST cap).
+        # In-pod: paging is unnecessary (no REST cap). Trino binds
+        # server-side; Spark cannot bind at all, so inline-then-no-params.
+        if engine == "spark":
+            final_sql = self._inline_hex_params(sql, params)
+            rows = capability.query(final_sql, params=None, engine=engine)
+            return self._normalize_inpod_rows(rows)
         rows = capability.query(
             sql, params=list(params) if params else None, engine=engine
         )
         return self._normalize_inpod_rows(rows)
 
     @staticmethod
-    def _bind_offpod(sql: str, params: Sequence[str] | None) -> str:
-        """Inline positional ``?`` bind values off-pod, safely, or refuse.
+    def _inline_hex_params(sql: str, params: Sequence[str] | None) -> str:
+        """Inline positional ``?`` bind values safely, or refuse.
 
-        Off-pod the REST query endpoint carries no bind-parameter channel, so
-        a parameterised query cannot be bound server-side. Rather than fail
-        the read (the task's posture is "degrade rather than fail" off-pod),
-        each ``?`` placeholder in ``sql`` is replaced, left to right, with the
-        corresponding single-quoted parameter -- but ONLY after that parameter
-        is re-confirmed to match :data:`_HEX64_RE`. Because an encoded
-        ``entity_hash`` is provably ``^[0-9a-f]{64}$``, the inlined literal
-        cannot contain a quote or any SQL metacharacter, so this substitution
-        introduces no injection surface (see Rule 4 in the module docstring).
+        Used by the TWO paths that have no bind-parameter channel at all:
+
+        - **off-pod**, where the REST query endpoint takes only SQL text, and
+        - **in-pod Spark**, where ``BerdlCapability.query`` raises on
+          ``params`` because parameterised ``spark.sql(..., args=...)`` is
+          Spark-version dependent and is deliberately not relied on. This is
+          the path a hash batch at or above
+          :data:`SPARK_PROMOTION_THRESHOLD` is promoted onto, so every bulk
+          read lands here.
+
+        Rather than fail the read, each ``?`` placeholder in ``sql`` is
+        replaced, left to right, with the corresponding single-quoted
+        parameter -- but ONLY after that parameter is re-confirmed to match
+        :data:`_HEX64_RE`. Because an encoded ``entity_hash`` is provably
+        ``^[0-9a-f]{64}$``, the inlined literal cannot contain a quote or any
+        SQL metacharacter, so this substitution introduces no injection
+        surface (see Rule 4 in the module docstring).
 
         Raises:
             ValueError: A parameter does not match :data:`_HEX64_RE`, or the
                 number of ``?`` placeholders does not equal the number of
-                parameters. This module only ever binds encoded hashes off-
-                pod; anything else reaching here is a programming error and is
-                refused rather than inlined.
+                parameters. This module only ever binds encoded hashes on
+                these paths; anything else reaching here is a programming
+                error and is refused rather than inlined -- and it is refused
+                BEFORE any query is issued.
         """
         if not params:
             if "?" in sql:
                 raise ValueError(
-                    "_bind_offpod: SQL has '?' placeholders but no params given."
+                    "_inline_hex_params: SQL has '?' placeholders but no params "
+                    "given."
                 )
             return sql
         for value in params:
             if not _HEX64_RE.match(value):
                 raise ValueError(
-                    "_bind_offpod: refusing to inline a non-hex parameter "
-                    f"off-pod ({value!r}); only encoded 64-char hex hashes "
+                    "_inline_hex_params: refusing to inline a non-hex "
+                    f"parameter ({value!r}); only encoded 64-char hex hashes "
                     "may be inlined, and only after re-validation."
                 )
         placeholder_count = sql.count("?")
         if placeholder_count != len(params):
             raise ValueError(
-                f"_bind_offpod: {placeholder_count} '?' placeholders but "
+                f"_inline_hex_params: {placeholder_count} '?' "
+                f"placeholders but "
                 f"{len(params)} params."
             )
         out = sql
@@ -1379,10 +1412,18 @@ class ClearinghouseCapability:
 
         Both resolvers are read-only and must not themselves write or probe
         table existence; they only compute the namespace strings. The real
-        ``BerdlCapability`` does not expose them today (mirroring how
-        ``bootstrap()`` requires ``table_exists``/``table_partition_spec`` that
-        only the adapter provides); a real adapter must implement them so that
-        the probe and the write provably read/write the identical namespace.
+        :class:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability`
+        implements both, and implements them by returning the result of ONE
+        shared pure function (``_write_target_namespace``) that its own
+        ``load()`` also uses for the existence probe. So this guard is not
+        merely satisfied by a real capability -- the agreement it checks is
+        structural rather than coincidental: there is one derivation of the
+        namespace, and the probe, the write and this check all read it.
+
+        The guard is deliberately NOT relaxed for that: it still demands both
+        methods and still refuses on a falsy or mismatched pair, so a future
+        collaborator that splits the derivation back into two is caught here
+        rather than in production.
 
         Returns:
             The single confirmed write-target namespace, for the caller to pass
@@ -1755,8 +1796,13 @@ class ClearinghouseCapability:
     def _registered_parameter_set_hashes(self, hashes: Sequence[str]) -> set[str]:
         """Return which of ``hashes`` the parameter-set registry already holds.
 
-        A single ``SELECT DISTINCT`` over the registry, bound server-side (the
-        verb is in-pod only, so there is a real bind channel). A lookup
+        A single ``SELECT DISTINCT`` over the registry on the Spark engine
+        (the verb is in-pod only, and the write that follows is a Spark
+        ingest). Spark has NO bind channel -- ``BerdlCapability.query``
+        refuses ``params`` there -- so :meth:`_run` inlines the hashes after
+        re-validating each against ``^[0-9a-f]{64}$``, which is safe because
+        every value here came from
+        :func:`~kbutillib.domains.identity.parameter_set_hash`. A lookup
         failure is NOT swallowed: if the registry cannot be read, the registry
         state is unknown, and this runs before anything is written, so the
         whole call refuses with nothing written rather than writing blind.

@@ -43,7 +43,10 @@ from kbutillib.domains.identity import (
     canonical_parameter_set,
     parameter_set_hash,
 )
-from kbutillib.domains.kbase.berdl.capability import BerdlLoadRefusedError
+from kbutillib.domains.kbase.berdl.capability import (
+    BerdlCapability,
+    BerdlLoadRefusedError,
+)
 from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
     _HEX_RUN_RE,
     _quote_fqn,
@@ -70,6 +73,16 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
 def _hash(seed: int) -> str:
     """Return a deterministic, valid 64-char lowercase hex digest."""
     return f"{seed:064x}"
+
+
+def _inlined_hex(sql: str) -> list[str]:
+    """Return the 64-char lowercase-hex literals inlined into ``sql``.
+
+    The reader inlines hashes as ``'<64 hex>'`` on the two paths with no bind
+    channel (off-pod, and in-pod Spark). Fakes that used to read ``params``
+    read them back out of the SQL text with this.
+    """
+    return re.findall(r"'([0-9a-f]{64})'", sql)
 
 
 class _Call:
@@ -104,10 +117,19 @@ class _FakeCapability:
 
     def query(self, sql, *, params=None, engine=None, limit=None, offset=0):
         # Mirror BerdlCapability.query's contract: params only bind in-pod on
-        # Trino. Off-pod the reader must never pass params (it inlines first).
+        # Trino. Off-pod the reader must never pass params (it inlines first),
+        # and the in-pod SPARK path cannot bind them either -- the real
+        # BerdlCapability.query raises ValueError there, so a fake that
+        # accepted them would hide the promoted-to-Spark bulk-read bug.
         if self._locus == "off_pod" and params is not None:
             raise AssertionError(
                 "off-pod query() received params; reader must inline instead"
+            )
+        if self._locus == "in_pod" and engine == "spark" and params is not None:
+            raise AssertionError(
+                "in-pod spark query() received params; the real "
+                "BerdlCapability.query raises ValueError for params on the "
+                "Spark engine -- the reader must inline the hashes instead"
             )
         call = _Call(sql, params, engine, limit, offset)
         self.calls.append(call)
@@ -345,10 +367,19 @@ def test_criterion_f_inpod_12000_not_chunked():
     fake = _FakeCapability(locus="in_pod")
     cap = ClearinghouseCapability(fake)
     cap.known("gene", hashes)
-    # In-pod carries no page cap: one query, whole batch bound.
+    # In-pod carries no page cap: ONE query carrying the whole batch.
     assert len(fake.calls) == 1
-    assert len(fake.calls[0].params) == 12000
     assert fake.calls[0].limit is None
+    # 12000 >= SPARK_PROMOTION_THRESHOLD, so this is the Spark path, which
+    # cannot bind params at all: the whole batch must be INLINED, not bound.
+    # (This assertion previously read ``len(params) == 12000``, which encoded
+    # the defect -- the real BerdlCapability.query raises ValueError for
+    # params on engine='spark', so that call never ran in production.)
+    assert fake.calls[0].engine == "spark"
+    assert fake.calls[0].params is None
+    assert "?" not in fake.calls[0].sql
+    assert fake.calls[0].sql.count(f"'{hashes[0]}'") == 1
+    assert fake.calls[0].sql.count(f"'{hashes[11999]}'") == 1
 
 
 # --------------------------------------------------------------------------
@@ -638,11 +669,23 @@ class _FakeWriteCapability:
         }
 
     def query(self, sql, *, params=None, engine=None, **kwargs):
+        # Same contract as the real BerdlCapability.query: params cannot bind
+        # on the Spark engine. register()'s registry lookup runs on Spark, so
+        # the reader must inline -- a fake that accepted params here would let
+        # a production-breaking call look fine.
+        if engine == "spark" and params is not None:
+            raise AssertionError(
+                "in-pod spark query() received params; the real "
+                "BerdlCapability.query raises ValueError for params on the "
+                "Spark engine -- the reader must inline the hashes instead"
+            )
         self.queries.append(sql)
         if PARAMETER_SET_TABLE in sql and "parameter_set_hash" in sql:
             # register()'s pre-write registry lookup: answer with whichever of
-            # the asked-for hashes this registry already holds.
-            asked = list(params or [])
+            # the asked-for hashes this registry already holds. The hashes
+            # arrive INLINED as quoted hex literals (Spark has no bind
+            # channel), so they are read back out of the SQL text.
+            asked = list(params or []) + _inlined_hex(sql)
             return [
                 {"parameter_set_hash": h}
                 for h in asked
@@ -2336,3 +2379,182 @@ def test_verify_run_is_clean_when_the_registry_is_sound(tmp_path):
     result = cap.verify_run(tmp_path, run_id="r1")
     assert result["parameter_set_integrity"]["ok"] is True
     assert result["discrepancies"] == []
+
+
+# --------------------------------------------------------------------------
+# bf-write-target, part 1: the write-target guard must be SATISFIABLE by the
+# real capability.
+#
+# _assert_write_target refuses unless the wrapped capability exposes
+# resolve_write_namespace and resolve_probe_namespace. Those methods used to
+# exist only in the test doubles above, so register(), ingest_shards() and
+# verify_run() refused on every production call -- the CLI builds a bare
+# ClearinghouseCapability(), which lazily constructs a real BerdlCapability.
+# These tests inject NO resolver: they wrap a real BerdlCapability and let the
+# guard run against its own implementation.
+# --------------------------------------------------------------------------
+
+
+class _BoomTransport:
+    """A transport that fails if anything touches it.
+
+    The write-target resolvers are pure, so a guard that reaches a transport
+    at all is doing I/O it promised not to do.
+    """
+
+    def __getattr__(self, name):
+        raise AssertionError(f"_assert_write_target touched the transport ({name})")
+
+
+@pytest.mark.parametrize(
+    "tenant,expected",
+    [("kbaseincubator", "kbaseincubator.clearinghouse"), (None, "my.clearinghouse")],
+    ids=["tenant_set", "tenant_unset"],
+)
+def test_assert_write_target_passes_for_a_real_berdl_capability(tenant, expected):
+    """The guard passes for a REAL BerdlCapability, with no injected resolver."""
+    real = BerdlCapability()
+    real._transport = _BoomTransport()
+    cap = ClearinghouseCapability(real)
+
+    # Nothing is monkeypatched onto the capability: the resolvers the guard
+    # finds are BerdlCapability's own.
+    assert real.resolve_write_namespace.__self__ is real
+    assert cap._assert_write_target(dataset="clearinghouse", tenant=tenant) == expected
+
+
+def test_assert_write_target_passes_for_the_lazily_built_capability():
+    """The CLI's shape -- ClearinghouseCapability() with no collaborator.
+
+    This is the exact construction at interfaces/cli/clearinghouse.py, and it
+    is the one that refused on every production call before this task.
+    """
+    cap = ClearinghouseCapability()
+    assert (
+        cap._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
+        == f"{TENANT}.{NAMESPACE}"
+    )
+    # The guard did not need a pod: a real BerdlCapability was constructed and
+    # answered without ever building a transport.
+    assert isinstance(cap._capability, BerdlCapability)
+    assert cap._capability._transport is None
+
+
+def test_assert_write_target_still_refuses_a_capability_without_resolvers():
+    """Not weakened: a collaborator lacking the resolvers is still refused."""
+    cap = ClearinghouseCapability(_FakeCapability())
+    with pytest.raises(ClearinghouseWriteTargetMismatchError, match="does not expose"):
+        cap._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
+
+
+def test_assert_write_target_still_refuses_a_mismatched_pair():
+    """Not weakened: resolvers that disagree are still refused."""
+    fake = _FakeWriteCapability(write_ns="a.b", probe_ns="c.d")
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ClearinghouseWriteTargetMismatchError, match="dev 1206"):
+        cap._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
+
+
+# --------------------------------------------------------------------------
+# bf-write-target, part 2: in-pod Spark promotion must not pass `params`.
+#
+# At/above SPARK_PROMOTION_THRESHOLD the read helpers promote to Spark, where
+# BerdlCapability.query RAISES ValueError for params (parameterised spark.sql
+# is Spark-version dependent and deliberately not relied on). So every bulk
+# read -- the exact case the promotion exists to serve -- died on arrival. The
+# fix is the one the off-pod path already uses: validate each hash against
+# ^[0-9a-f]{64}$, inline it, pass no params.
+# --------------------------------------------------------------------------
+
+
+_SPARK_BATCH = 5000
+
+
+@pytest.mark.parametrize("verb", ["known", "content", "results"])
+def test_inpod_spark_promotion_inlines_hashes_and_passes_no_params(verb):
+    """5000 hashes reach Spark with no params and the hex inlined."""
+    hashes = [_hash(i) for i in range(_SPARK_BATCH)]
+    fake = _FakeCapability(locus="in_pod")
+    cap = ClearinghouseCapability(fake)
+
+    getattr(cap, verb)("gene", hashes)
+
+    # In-pod is unchunked, so the whole batch is one Spark query.
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call.engine == "spark"
+    # The bug: params were passed, and the real query() raises on them here.
+    assert call.params is None
+    # Every placeholder was substituted -- none left dangling.
+    assert "?" not in call.sql
+    # Every hash is present exactly once, as a quoted hex literal.
+    inlined = _inlined_hex(call.sql)
+    assert inlined == hashes
+
+
+@pytest.mark.parametrize("verb", ["known", "content", "results"])
+def test_inpod_trino_below_threshold_still_binds_server_side(verb):
+    """Non-regression: below the threshold, Trino still binds server-side.
+
+    The fix must not spill inlining onto the one path that CAN bind -- in-pod
+    Trino keeps the hash out of the SQL text entirely.
+    """
+    hashes = [_hash(i) for i in range(3)]
+    fake = _FakeCapability(locus="in_pod")
+    cap = ClearinghouseCapability(fake)
+
+    getattr(cap, verb)("gene", hashes)
+
+    call = fake.calls[0]
+    assert call.engine == "trino"
+    assert list(call.params) == hashes
+    assert call.sql.count("?") == 3
+    assert _inlined_hex(call.sql) == []
+
+
+@pytest.mark.parametrize("verb", ["known", "content", "results"])
+def test_malformed_hash_on_the_spark_path_raises_before_any_query(verb):
+    """A bad digest in a promoted batch raises with NO query issued."""
+    hashes = [_hash(i) for i in range(_SPARK_BATCH - 1)] + ["not-a-hash"]
+    fake = _FakeCapability(locus="in_pod")
+    cap = ClearinghouseCapability(fake)
+
+    with pytest.raises(ValueError):
+        getattr(cap, verb)("gene", hashes)
+
+    assert fake.calls == []
+
+
+def test_inliner_refuses_a_non_hex_param_on_the_spark_path():
+    """The inliner is a SECOND gate, and it also fires before the query.
+
+    Reaching :meth:`_run` directly with a non-hex param stands in for any
+    future caller that bypasses ``_encode_hashes``: the Spark path refuses to
+    inline it rather than formatting it into the SQL text.
+    """
+    fake = _FakeCapability(locus="in_pod")
+    cap = ClearinghouseCapability(fake)
+
+    with pytest.raises(ValueError, match="refusing to inline a non-hex"):
+        cap._run("SELECT 1 WHERE h IN (?)", params=["'; DROP TABLE t --"], engine="spark")
+
+    assert fake.calls == []
+
+
+def test_registry_lookup_runs_on_spark_without_params():
+    """register()'s pre-write registry probe is on the Spark engine too.
+
+    ``_registered_parameter_set_hashes`` hard-codes ``engine='spark'``, so it
+    carried the same defect: with params it would have raised ValueError
+    inside the real capability, before any registry row was written.
+    """
+    fake = _FakeWriteCapability(registry_hashes={DEFAULT_PARAMETER_SET_HASH})
+    cap = ClearinghouseCapability(fake)
+
+    present = cap._registered_parameter_set_hashes([DEFAULT_PARAMETER_SET_HASH])
+
+    assert present == {DEFAULT_PARAMETER_SET_HASH}
+    # The fake asserts params-on-spark itself; this pins the inlining.
+    assert len(fake.queries) == 1
+    assert "?" not in fake.queries[0]
+    assert _inlined_hex(fake.queries[0]) == [DEFAULT_PARAMETER_SET_HASH]

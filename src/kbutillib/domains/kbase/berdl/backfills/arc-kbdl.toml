@@ -1,0 +1,216 @@
+# `arc-kbdl` -- CHRIS'S KOROS ARC STORE, JOINED TO KBDL.
+#
+# WHAT IT READS. Four things, in one store on the BERDL pod, plus the KBDL
+# object store:
+#
+#   ~/.kbdl/runs.sqlite                     the arc's run index (READ-ONLY)
+#   ~/.kbdl/job-results/KBDLBuildGenome/    built genomes, gzipped JSON
+#   ~/.kbdl/job-results/KBDLGenomeAnnotation/   annotations, gzipped JSON
+#   ~/arc-relocate-backup-.../*.tar.gz      a backup arc's extra annotations
+#   KBDL GET /objects/<id>/content          the CanonicalGenome objects
+#
+# THE POD HAS NO SEQUENCES. Every protein translation, every DNA sequence and
+# every contig in this backfill comes from a CanonicalGenome object pulled
+# from KBDL, verified against its own object id (KBDL content objects are
+# content-addressed). That is why an unavailable object leaves the unit
+# INCOMPLETE rather than merely short: the records are retrievable, so the
+# run must come back for them.
+#
+# FOUR SOURCES, ONE STORE, ONE SELECTION. The four `[[source]]` blocks below
+# each declare their own `emit`, because one source emits one record shape.
+# They share ONE FROZEN ORDERED SELECTION of arc record ids, persisted by the
+# adapter through the run context before any record is read -- so `--limit 1`
+# loads ONE record's genome, its proteins, its genes and its annotations,
+# rather than four independent samples of four different records.
+#
+# THE SELECTION IS NOT THE INDEX. `since` narrows what is EMITTED. It does
+# NOT narrow the dependency index (which genome a feature id belongs to, what
+# its taxonomy is, where its FASTA lives), which is built from EVERY build
+# record and EVERY ledger regardless -- otherwise an incremental run could
+# not join a late annotation to a genome built months earlier.
+#
+# THE TARBALL PLACEHOLDER MUST NAME A FILE THAT EXISTS. `${VAR:-default}`
+# treats an EMPTY environment value as unset (see
+# clearinghouse_manifest.expand_placeholders), so `KBU_ARC_TARBALL=""` does
+# NOT mean "no tarballs" -- it falls back to the pod default below, and a
+# missing configured tarball is an ERROR by design. Point the variable at a
+# real archive, or edit `tarballs = ""` in a copy of this manifest to run
+# without one.
+#
+# RUN IT AGAINST A SCRATCH DATASET FIRST. The adapter's watermark checkpoint
+# is keyed by tenant+dataset (as well as the store path, the KBDL endpoint and
+# the reading principal), precisely so a scratch run's watermark can never be
+# mistaken for a production one.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo).
+pulls_from = [
+  "kbhub arc store",
+  "KBDL on poplar",
+]
+# EMPTY, deliberately. Every placeholder below has a default that is correct
+# on the pod, so nothing has to be exported to run this preset; the variables
+# exist to point it at a relocated store without editing package data.
+needs_env = []
+
+  # TOOL VERSIONS -> the result `source` partition value.
+  #
+  # Each annotation row's `source` is "<lowercased tool>/<version>", and the
+  # version comes from here. A tool not listed defaults to "1.0"
+  # (clearinghouse_manifest.DEFAULT_TOOL_VERSION).
+  #
+  # Chris, 2026-10-06: use the installed version where it can be determined,
+  # else 1.0. Every entry ships at "1.0" because the arc's job results record
+  # NO versions -- the annotations carry terms and nothing else -- so "1.0" is
+  # what is actually known today and an invented number would be worse.
+  #
+  # OP-BF4 MAY REPLACE THESE VALUES BEFORE THE FIRST PRODUCTION LOAD. `source`
+  # is a PERMANENT PARTITION value on protein_result: a row loaded under
+  # "bakta/1.0" and the same row later loaded under "bakta/1.9" are two
+  # results, not one corrected one. So the values must be settled BEFORE the
+  # first production load, not after it.
+  #
+  # The table lives here rather than in a [[source]] locator because the
+  # version is a property of the installation, not of where the records are:
+  # all four sources read one store and must label a tool identically.
+  [backfill.tool_versions]
+  BAKTA     = "1.0"
+  PROKKA    = "1.0"
+  DRAM2     = "1.0"
+  KOFAMSCAN = "1.0"
+  TRANSYT   = "1.0"
+  RAST      = "1.0"
+
+# ---- Genomes: identity + content ----------------------------------------
+#
+# IDENTITY IS THE CONTIG SET. `[source.hash].contig_set` names the column
+# holding the genome's contig sequences as a LIST, which is what
+# identity.standardizers hashes for a genome. It is the ONLY hash mode legal
+# for entity_type "genome": `raw_column` would hand one string to the genome
+# standardizer, which iterates its argument and would hash the SET OF ITS
+# CHARACTERS into a confident, reproducible, wrong digest.
+#
+# `fasta_reference` IS A POINTER, and @prefix is null-preserving: a genome
+# with no recovered fasta_object_id is skipped by the adapter
+# (`fasta-pointer-missing`) rather than emitted with "kbdl:obj:None", which
+# would be indistinguishable in the lake from a real reference.
+#
+# `assembly_accession` and `is_closed` are UNMAPPED. The arc store carries
+# neither, and a column left unmapped is null -- which is the honest value.
+[[source]]
+name        = "arc-genomes"
+adapter     = "arc"
+emit        = "genome"
+db_path     = "${KBU_ARC_DB:-~/.kbdl/runs.sqlite}"
+tarballs    = "${KBU_ARC_TARBALL:-~/arc-relocate-backup-20260923T1307Z/inner-loop__additional-genome-annotation.tar.gz}"
+# Empty = the adapter's own default: <shard out>/objects under a backfill run
+# (so the four sources of a unit share ONE cache and each object is fetched
+# once), ~/clearinghouse-shards/objects for a plain `shard`.
+cache_dir   = "${KBU_ARC_CACHE_DIR:-}"
+entity_type = "genome"
+kinds       = ["entity", "content"]
+# The EARLIEST build record's timestamp for the genome (or a ledger-only
+# genome's done_ts), so a rebuilt genome does not appear to have come into
+# existence on the day it was rebuilt.
+observed_at_column = "created_at"
+
+  [source.hash]
+  contig_set = "contig_sequences"
+
+  [source.content]
+  fasta_reference = "@prefix(kbdl:obj:,fasta_object_id)"
+  taxon_id        = "@column(ncbi_taxid)"
+  n_contigs       = "n_contigs"
+  total_length    = "total_length"
+
+# ---- Proteins: identity + content ---------------------------------------
+[[source]]
+name        = "arc-proteins"
+adapter     = "arc"
+emit        = "protein"
+db_path     = "${KBU_ARC_DB:-~/.kbdl/runs.sqlite}"
+tarballs    = "${KBU_ARC_TARBALL:-~/arc-relocate-backup-20260923T1307Z/inner-loop__additional-genome-annotation.tar.gz}"
+# Empty = the adapter's own default: <shard out>/objects under a backfill run
+# (so the four sources of a unit share ONE cache and each object is fetched
+# once), ~/clearinghouse-shards/objects for a plain `shard`.
+cache_dir   = "${KBU_ARC_CACHE_DIR:-}"
+entity_type = "protein"
+kinds       = ["entity", "content"]
+observed_at_column = "created_at"
+
+  [source.hash]
+  raw_column = "protein_translation"
+
+  [source.content]
+  sequence   = "protein_translation"
+  seq_length = "@len(protein_translation)"
+
+# ---- Genes: identity + content ------------------------------------------
+#
+# `protein_entity_hash` is the link from a gene to the protein it encodes,
+# computed with @hash from the SAME translation the protein source hashes --
+# so the two agree by construction rather than by a join.
+[[source]]
+name        = "arc-genes"
+adapter     = "arc"
+emit        = "gene"
+db_path     = "${KBU_ARC_DB:-~/.kbdl/runs.sqlite}"
+tarballs    = "${KBU_ARC_TARBALL:-~/arc-relocate-backup-20260923T1307Z/inner-loop__additional-genome-annotation.tar.gz}"
+# Empty = the adapter's own default: <shard out>/objects under a backfill run
+# (so the four sources of a unit share ONE cache and each object is fetched
+# once), ~/clearinghouse-shards/objects for a plain `shard`.
+cache_dir   = "${KBU_ARC_CACHE_DIR:-}"
+entity_type = "gene"
+kinds       = ["entity", "content"]
+observed_at_column = "created_at"
+
+  [source.hash]
+  raw_column = "dna_sequence"
+
+  [source.content]
+  sequence            = "dna_sequence"
+  seq_length          = "@len(dna_sequence)"
+  protein_entity_hash = "@hash(protein, protein_translation)"
+
+# ---- Annotations: a protein result --------------------------------------
+#
+# ONE ROW PER (feature, tool). The annotations are hashed on the SAME
+# `protein_translation` column as the protein source above, which is what
+# ties an annotation to the protein identity it belongs to.
+#
+# `source` IS ALREADY RESOLVED. The adapter yields a ready `source_label`
+# ("<lowercased tool>/<version>", version from [backfill.tool_versions]),
+# because one store feeds six tools and the version cannot come from a
+# @const. @lower on top of it because `source` is a permanent partition value
+# and two casings would be two partitions holding one tool's output.
+#
+# `parameter_set_column` IS THE PER-ROW FORM, and it is required here because
+# ONE source feeds several tools with different parameter sets: TRANSYT rows
+# carry {"taxonomy_id": "<ncbi taxid>"} (a TRANSYT result is computed against
+# one taxonomy, so there is no such thing as a default TRANSYT run), and
+# every other tool's carry {}. No single static declaration could express
+# that. The sharder canonicalises and hashes each row's set through the same
+# rule the static form uses, and registers one row per DISTINCT set.
+[[source]]
+name        = "arc-annotations"
+adapter     = "arc"
+emit        = "annotation"
+db_path     = "${KBU_ARC_DB:-~/.kbdl/runs.sqlite}"
+tarballs    = "${KBU_ARC_TARBALL:-~/arc-relocate-backup-20260923T1307Z/inner-loop__additional-genome-annotation.tar.gz}"
+# Empty = the adapter's own default: <shard out>/objects under a backfill run
+# (so the four sources of a unit share ONE cache and each object is fetched
+# once), ~/clearinghouse-shards/objects for a plain `shard`.
+cache_dir   = "${KBU_ARC_CACHE_DIR:-}"
+entity_type = "protein"
+kinds       = ["result"]
+observed_at_column = "created_at"
+
+  [source.hash]
+  raw_column = "protein_translation"
+
+  [source.result]
+  result_type          = "@const(annotation)"
+  result_type_version  = "@const(1.0)"
+  source               = "@lower(source_label)"
+  payload              = "@json(terms, kbdl_job_id, feature_id, genome_object_id)"
+  parameter_set_column = "parameter_set"

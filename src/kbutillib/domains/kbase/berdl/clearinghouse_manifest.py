@@ -22,7 +22,7 @@ THE SHAPE, per source::
 
     [[source]]
     name        = "gaa-v2-genes"
-    adapter     = "file"               # file | mongo | lakehouse
+    adapter     = "file"               # file | mongo | lakehouse | arc
     path        = ".../V2_Genes.parquet"
     format      = "parquet"            # parquet | jsonl | tsv (file adapter)
     entity_type = "gene"
@@ -35,6 +35,9 @@ THE SHAPE, per source::
       # OR: precomputed = "<column>"   # source already carries a digest; it is
       #                                # RE-CANONICALISED through
       #                                # encode_entity_hash and NEVER trusted raw
+      # OR: contig_set  = "<column>"   # GENOME ONLY: the column holds the
+      #                                # genome's contig sequences as a LIST
+      #                                # of strings, hashed as a SET
 
       [source.content]
       sequence            = "dna_sequence"
@@ -46,6 +49,9 @@ THE SHAPE, per source::
       result_type   = "@const(functional_annotation)"
       payload       = "@json(function_id, score)"
       parameter_set = {}                 # REQUIRED; {} declares a default run
+      # OR: parameter_set_column = "<column>"   # the PER-ROW alternative: the
+      #                                 # column holds this row's parameter set
+      #                                 # as a JSON OBJECT (a mapping)
 
 ``observed_at_column`` IS PART OF THE MAPPING HALF, NOT THE LOCATOR. It
 names a SOURCE column carrying each record's observation time (an ISO-8601
@@ -88,9 +94,13 @@ the offending key in its message:
   - ``source`` on a ``[source.result]`` block must be present and non-empty:
     it is the PARTITION column on every ``<type>_result`` table, and an empty
     partition value is a permanent scar on the table.
-  - ``parameter_set`` on a ``[source.result]`` block is REQUIRED and is an
-    inline TOML table (a mapping after parsing), never a ``@derivation``
-    string -- see below.
+  - ``[source.hash]`` declares EXACTLY ONE of ``raw_column``,
+    ``precomputed`` or ``contig_set``; ``contig_set`` only for
+    ``entity_type = "genome"`` and ``raw_column`` never for it.
+  - EXACTLY ONE of ``parameter_set`` / ``parameter_set_column`` on a
+    ``[source.result]`` block. ``parameter_set`` is an inline TOML table (a
+    mapping after parsing), never a ``@derivation`` string;
+    ``parameter_set_column`` is a source column NAME -- see below.
   - Every ``@derivation`` used anywhere in a mapping must be one of the closed
     :data:`DERIVATIONS` vocabulary; an unknown ``@name`` is rejected by name.
 
@@ -113,13 +123,29 @@ rule rejects -- decimals are passed as strings (``evalue = "1e-5"``) -- so
 ``parameter_set = { evalue = 1.0e-5 }`` fails HERE rather than producing a
 result row keyed by a hash no second writer could reproduce.
 
-``parameter_set`` is declared once for the source. A sibling PRD will add a
-PER-ROW alternative, ``parameter_set_column = "<column>"``, with "exactly one
-of ``parameter_set`` / ``parameter_set_column``" semantics;
-:func:`_plan_parameter_set` is deliberately shaped around
-:data:`_PARAMETER_SET_KEYS` so that lands as a small change rather than a
-rewrite. It is not implemented yet and a manifest naming it today is
-rejected like any other unknown result column.
+``parameter_set`` is declared once for the source. ITS PER-ROW ALTERNATIVE IS
+``parameter_set_column = "<column>"``, and EXACTLY ONE OF THE TWO must be
+declared (not both, not neither -- a result source must still say which
+parameter set it represents; see :func:`_plan_parameter_set`). The named
+column holds a MAPPING per row, which the sharder validates and canonicalises
+through the SAME rule the static form uses
+(:func:`clearinghouse_parameters.result_parameter_set_identity`), so the two
+forms produce byte-identical canonical text and an identical hash for an
+equal parameter set. A row whose value is not a mapping, carries a float, a
+``None``, or a bad key is a
+:class:`~clearinghouse_shard.ShardParameterSetError` -- that ONE row is
+skipped and counted, rather than the run failing, because a per-row set is
+source DATA and one bad record is not a reason to abandon the other
+hundreds. The registry then gets one row per DISTINCT per-row set, exactly as
+it does for the static form.
+
+WHY A COLUMN AND NOT A DERIVATION. The per-row form is still DATA, not a
+mapping value: it names the column whose VALUE IS ALREADY the parameter set,
+and the sharder reads it with no derivation vocabulary involved. It exists
+for an adapter that computes the set per record -- the ``arc`` adapter yields
+``{"taxonomy_id": "<ncbi taxid>"}`` on TRANSYT rows and ``{}`` on every other
+tool's, which no single static declaration could express because one source
+feeds several tools.
 """
 
 from __future__ import annotations
@@ -153,6 +179,16 @@ from . import clearinghouse_schema as schema
 #:   - ``@json(a, b, ...)``-- a canonical JSON object of the named columns,
 #:     used for a ``result`` payload.
 #:   - ``@const(value)``   -- a literal constant, same on every row.
+#:   - ``@prefix(text, col)`` -- ``col``'s value with the literal ``text``
+#:     prepended, or ``None`` when ``col`` is null. NULL-PRESERVING is the
+#:     whole reason it is a derivation and not string concatenation in an
+#:     adapter: ``genome_content.fasta_reference`` is a POINTER, and
+#:     ``"kbdl:obj:" + None`` would write the literal pointer
+#:     ``"kbdl:obj:None"`` -- a reference to an object that does not exist,
+#:     indistinguishable in the lake from a real one. A missing pointer must
+#:     stay missing. The prefix text is the FIRST argument and may contain
+#:     colons (``@prefix(kbdl:obj:,fasta_object_id)``); it may not contain a
+#:     comma, which is the argument separator.
 #:   - ``@lower(col)``     -- ASCII-lowercased value of ``col``. Earns its
 #:     place on a real hazard: ``source`` is the partition column on all five
 #:     ``<type>_result`` tables, so ``BAKTA/1.9`` and ``bakta/1.9`` would be
@@ -165,6 +201,7 @@ DERIVATIONS: tuple[str, ...] = (
     "json",
     "const",
     "lower",
+    "prefix",
 )
 
 #: The three kinds a source may target, mirroring
@@ -228,8 +265,10 @@ class TablePlan:
     #: identity columns the sharder fills itself).
     columns: dict[str, Derivation]
     #: The validated ``[source.result].parameter_set`` mapping, or ``None``
-    #: for a non-``result`` kind. Carried as DATA (not a derivation) because
-    #: it is a structured constant for the whole source.
+    #: for a non-``result`` kind AND for a source that declared the PER-ROW
+    #: form instead (``parameter_set_column``), whose set is not a constant
+    #: and so has no plan-time value. Carried as DATA (not a derivation)
+    #: because it is a structured constant for the whole source.
     parameter_set: dict[str, Any] | None = None
     #: Its canonical JSON text -- the registry's ``canonical_json`` value.
     #: Computed ONCE here at plan time, never per row.
@@ -240,6 +279,13 @@ class TablePlan:
     #: The source's optional ``observed_at_column``, carried through from
     #: :class:`Source` so the sharder needs nothing but the plan.
     observed_at_column: str | None = None
+    #: The SOURCE column holding each row's own parameter set, when the
+    #: source declared the per-row form; ``None`` for the static form (where
+    #: ``parameter_set``/``_json``/``_hash`` carry the plan-time values) and
+    #: for every non-``result`` kind. Exactly one of this and
+    #: ``parameter_set_hash`` is set on a ``result`` plan, which is how the
+    #: sharder knows whether to stamp the plan's hash or derive the row's.
+    parameter_set_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +336,22 @@ class BackfillInfo:
     #: an unresolved ``${VAR}`` fails at load regardless of whether it is
     #: listed here, and a listed-but-unused name is not an error.
     needs_env: tuple[str, ...] = field(default_factory=tuple)
+    #: Optional ``[backfill.tool_versions]``: tool name -> version string,
+    #: used by an adapter that must build a result ``source`` of the form
+    #: ``"<tool>/<version>"`` for SEVERAL tools out of ONE store. Unlike the
+    #: other two keys this one IS READ -- the ``arc`` adapter resolves each
+    #: annotation row's version through it (see
+    #: :meth:`clearinghouse_shard.SourceAdapter.bind_backfill_info`) and
+    #: defaults any tool not listed to
+    #: :data:`DEFAULT_TOOL_VERSION`.
+    #:
+    #: It lives in ``[backfill]`` rather than in a ``[[source]]`` locator
+    #: because the version is a property of the OPERATOR'S INSTALLATION, not
+    #: of where the records are: four sources read one arc store and all four
+    #: must label the same tool the same way, and duplicating the table per
+    #: source is how two of them would come to disagree -- producing two
+    #: permanent ``source`` partitions for one tool.
+    tool_versions: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -472,6 +534,18 @@ def _expand_locator_value(value: Any, *, where: str, env: Mapping[str, str] | No
     return value
 
 
+#: The version an adapter uses for a tool the ``[backfill.tool_versions]``
+#: table does not list. ``"1.0"`` and not ``"unknown"``: ``source`` is the
+#: permanent partition column on every ``<type>_result`` table, so the value
+#: has to be a VERSION, and Chris's instruction (2026-10-06) is to use the
+#: installed version where it can be determined and ``1.0`` where it cannot.
+DEFAULT_TOOL_VERSION = "1.0"
+
+#: The keys ``[backfill]`` defines. ``tool_versions`` is a sub-TABLE, not an
+#: array of strings, so it is validated separately from the other two.
+_BACKFILL_KEYS = frozenset({"pulls_from", "needs_env", "tool_versions"})
+
+
 def _parse_backfill(raw: Any) -> BackfillInfo:
     """Parse the optional top-level ``[backfill]`` table."""
     if not isinstance(raw, Mapping):
@@ -479,14 +553,16 @@ def _parse_backfill(raw: Any) -> BackfillInfo:
             "manifest '[backfill]' must be a table with optional "
             f"'pulls_from' and 'needs_env' arrays, got {type(raw).__name__}."
         )
-    unknown = sorted(set(raw) - {"pulls_from", "needs_env"})
+    unknown = sorted(set(raw) - _BACKFILL_KEYS)
     if unknown:
         raise ManifestError(
             f"manifest '[backfill]' has unknown key(s) {unknown}; only "
-            "'pulls_from' (what a backfill of this manifest reads) and "
+            "'pulls_from' (what a backfill of this manifest reads), "
             "'needs_env' (the environment variables its placeholders expect) "
-            "are defined. The table is informational -- it is parsed rather "
-            "than ignored precisely so a typo in it is visible."
+            "and 'tool_versions' (tool name -> version string, read by an "
+            "adapter that labels several tools out of one store) are "
+            "defined. The table is parsed rather than ignored precisely so a "
+            "typo in it is visible."
         )
     fields: dict[str, tuple[str, ...]] = {}
     for key in ("pulls_from", "needs_env"):
@@ -502,7 +578,41 @@ def _parse_backfill(raw: Any) -> BackfillInfo:
                 f"non-empty strings, got {value!r}."
             )
         fields[key] = tuple(item.strip() for item in value)
-    return BackfillInfo(pulls_from=fields["pulls_from"], needs_env=fields["needs_env"])
+    return BackfillInfo(
+        pulls_from=fields["pulls_from"],
+        needs_env=fields["needs_env"],
+        tool_versions=_parse_tool_versions(raw.get("tool_versions")),
+    )
+
+
+def _parse_tool_versions(raw: Any) -> dict[str, str]:
+    """Validate ``[backfill.tool_versions]`` -> a plain ``{tool: version}``.
+
+    Every key and value must be a non-empty string. A version given as a
+    TOML number is rejected by name, because ``1.0`` parses as the float
+    ``1.0`` and would stringify to ``"1.0"`` here but could stringify
+    differently elsewhere -- and ``source`` is a permanent partition value,
+    so one tool must never end up with two spellings of one version.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ManifestError(
+            "manifest '[backfill.tool_versions]' must be a table of "
+            f"tool -> version strings, got {type(raw).__name__}."
+        )
+    out: dict[str, str] = {}
+    for tool, version in raw.items():
+        if not isinstance(version, str) or not version.strip():
+            raise ManifestError(
+                f"manifest '[backfill.tool_versions]' key {tool!r} must be a "
+                f"non-empty STRING version, got {type(version).__name__} "
+                f"{version!r}. Quote it (version = \"1.0\"): an unquoted 1.0 "
+                "is a TOML float, and 'source' is a permanent partition "
+                "value that must have exactly one spelling."
+            )
+        out[str(tool)] = version.strip()
+    return out
 
 
 def load_manifest(
@@ -631,7 +741,7 @@ def _parse_source(
     if not adapter or not isinstance(adapter, str):
         raise ManifestError(
             f"source {name!r} is missing a non-empty string 'adapter' "
-            "(one of: file, mongo, lakehouse)."
+            "(one of: file, mongo, lakehouse, arc)."
         )
     entity_type = raw.get("entity_type")
     if not entity_type or not isinstance(entity_type, str):
@@ -762,6 +872,11 @@ def _check_arity(name: str, args: Sequence[str], *, where: str) -> None:
     elif name == "json":
         expected = "one or more column arguments: @json(a, b, ...)"
         ok = len(args) >= 1 and all(args)
+    elif name == "prefix":
+        expected = "exactly two arguments: @prefix(text, column)"
+        # args[0] -- the literal prefix text -- must be non-empty (an empty
+        # prefix is @column), and so must the column name.
+        ok = len(args) == 2 and all(args)
     else:  # pragma: no cover - guarded by the DERIVATIONS membership check
         return
     if not ok:
@@ -822,6 +937,7 @@ def _plan_source(source: Source) -> list[TablePlan]:
         parameter_set: dict[str, Any] | None = None
         parameter_set_json: str | None = None
         parameter_set_hash: str | None = None
+        parameter_set_column: str | None = None
         if kind == "content":
             columns = _plan_content(source)
         elif kind == "result":
@@ -830,6 +946,7 @@ def _plan_source(source: Source) -> list[TablePlan]:
                 parameter_set,
                 parameter_set_json,
                 parameter_set_hash,
+                parameter_set_column,
             ) = _plan_parameter_set(source, columns)
         else:  # entity: only the generic identity columns, filled by the sharder
             columns = {}
@@ -845,6 +962,7 @@ def _plan_source(source: Source) -> list[TablePlan]:
                 parameter_set_json=parameter_set_json,
                 parameter_set_hash=parameter_set_hash,
                 observed_at_column=source.observed_at_column,
+                parameter_set_column=parameter_set_column,
             )
         )
     return plans
@@ -853,7 +971,21 @@ def _plan_source(source: Source) -> list[TablePlan]:
 def _plan_hash(source: Source) -> tuple[str, str, str]:
     """Validate ``[source.hash]`` -> ``(mode, column, entity_type)``.
 
-    Exactly one of ``raw_column`` / ``precomputed`` must be present.
+    Exactly one of ``raw_column`` / ``precomputed`` / ``contig_set`` must be
+    present.
+
+    ``contig_set`` IS GENOME-ONLY, and it is the mode that makes a genome
+    hashable from a manifest at all. A genome's identity is its contig SET,
+    so the hashable value is a LIST of contig sequences rather than a scalar;
+    this mode names the column carrying that list and hands it to
+    ``standardizers.entity_hash("genome", list)`` unchanged. The list-ness is
+    checked AT SHARD TIME, per row, not here -- a column's values are not
+    visible at plan time -- and a row whose value is anything else (notably a
+    ``str``, which the genome standardizer would iterate character by
+    character into a plausible-looking wrong hash) is a
+    :class:`~clearinghouse_shard.ShardValueError` for that row, counted like
+    any other unmappable record. Declaring it for a non-genome type is
+    refused HERE, because that is a manifest mistake and not a data one.
 
     ``precomputed`` accepts the source's hash RULE on trust: the sharder
     passes the digest through
@@ -880,11 +1012,36 @@ def _plan_hash(source: Source) -> tuple[str, str, str]:
         )
     raw_column = spec.get("raw_column")
     precomputed = spec.get("precomputed")
-    if bool(raw_column) == bool(precomputed):
-        raise ManifestError(
-            f"source {name!r} [source.hash]: exactly one of raw_column or "
-            "precomputed must be set (not both, not neither)."
+    contig_set = spec.get("contig_set")
+    declared = [
+        key
+        for key, value in (
+            ("raw_column", raw_column),
+            ("precomputed", precomputed),
+            ("contig_set", contig_set),
         )
+        if value
+    ]
+    if len(declared) != 1:
+        raise ManifestError(
+            f"source {name!r} [source.hash]: exactly one of raw_column, "
+            f"precomputed or contig_set must be set (not both, not neither); "
+            f"got {declared or 'none'}."
+        )
+    if contig_set:
+        if not isinstance(contig_set, str):
+            raise ManifestError(
+                f"source {name!r} [source.hash].contig_set must be a string."
+            )
+        if source.entity_type != "genome":
+            raise ManifestError(
+                f"source {name!r} [source.hash]: contig_set is allowed ONLY "
+                f"for entity_type 'genome', not {source.entity_type!r}. It "
+                "names a column holding a LIST of contig sequences, which is "
+                "what a genome's identity is a set of; no other entity type "
+                "is hashed from a collection."
+            )
+        return ("contig_set", contig_set, source.entity_type)
     if raw_column:
         if not isinstance(raw_column, str):
             raise ManifestError(
@@ -897,7 +1054,8 @@ def _plan_hash(source: Source) -> tuple[str, str, str]:
                 "contig SET, which no single column can carry; a raw_column "
                 "would pass one string to the genome standardizer and be "
                 "iterated character by character into a wrong hash. Route a "
-                "genome through precomputed or the KBDLHashGenomes job."
+                "genome through contig_set (a column holding the contig "
+                "sequence LIST), precomputed, or the KBDLHashGenomes job."
             )
         return ("raw", raw_column, source.entity_type)
     if not isinstance(precomputed, str):
@@ -950,12 +1108,17 @@ def _plan_content(source: Source) -> dict[str, Derivation]:
 #: are therefore NOT target columns -- they are stripped before the
 #: column-mapping loop and handled by :func:`_plan_parameter_set`.
 #:
-#: Exactly one member today. A sibling PRD adds ``parameter_set_column`` (the
-#: per-row alternative) with "exactly one of" semantics: that is a second
-#: entry here plus the branch marked in :func:`_plan_parameter_set`, and
-#: nothing else -- which is why the key set is a named constant rather than a
-#: literal inline.
-_PARAMETER_SET_KEYS: tuple[str, ...] = ("parameter_set",)
+#: Two members, and EXACTLY ONE of them must appear on a result source: the
+#: static ``parameter_set`` (one set for the whole source, hashed once at plan
+#: time) or the per-row ``parameter_set_column`` (a source column whose value
+#: IS that row's set, canonicalised and hashed per row through the same
+#: rule). Both is an error and neither is an error -- see
+#: :func:`_plan_parameter_set`.
+_PARAMETER_SET_KEYS: tuple[str, ...] = ("parameter_set", "parameter_set_column")
+
+#: The per-row member of :data:`_PARAMETER_SET_KEYS`, named so neither this
+#: module nor the sharder spells it as a literal twice.
+PARAMETER_SET_COLUMN_KEY = "parameter_set_column"
 
 
 def _plan_result(source: Source) -> dict[str, Derivation]:
@@ -1035,53 +1198,88 @@ def constant_result_source(columns: Mapping[str, Derivation]) -> str | None:
 
 def _plan_parameter_set(
     source: Source, columns: Mapping[str, Derivation]
-) -> tuple[dict[str, Any], str, str]:
-    """Validate ``[source.result].parameter_set`` and hash it ONCE, at plan time.
+) -> tuple[dict[str, Any] | None, str | None, str | None, str | None]:
+    """Validate a result source's parameter-set declaration.
 
-    Returns the validated mapping, its canonical JSON text and its
-    ``parameter_set_hash``, which the sharder stamps on every result row and
-    records in the parameter-set registry. Computing them here rather than
-    per row is the point: the set is a constant for the source, so a billion
-    rows cost one canonicalisation and one sha256.
+    EXACTLY ONE of :data:`_PARAMETER_SET_KEYS` must be declared, and the two
+    return shapes are disjoint:
 
-    The TRANSYT result-boundary rule is applied here too, but ONLY when the
-    result ``source`` is a plan-time constant (see
-    :func:`constant_result_source`) -- a manifest whose ``source`` is a
+    - STATIC ``parameter_set``: the set is a constant for the whole source, so
+      it is validated and hashed ONCE, HERE. Returns
+      ``(mapping, canonical_json, hash, None)``. Computing it at plan time
+      rather than per row is the point -- a billion rows cost one
+      canonicalisation and one sha256.
+    - PER-ROW ``parameter_set_column``: the set is source DATA and is not
+      knowable until a record is in hand, so nothing is hashed here. Returns
+      ``(None, None, None, column_name)`` and the sharder runs the SAME
+      validator per row (see
+      :func:`clearinghouse_shard._build_row`). All that is checked now is
+      that the value is a non-empty string naming a column.
+
+    The TRANSYT result-boundary rule is applied here too, but ONLY for the
+    static form AND only when the result ``source`` is a plan-time constant
+    (see :func:`constant_result_source`) -- a manifest whose ``source`` is a
     derivation has no tool until a row is in hand, and the sharder applies
-    the same shared validator per row for that case.
+    the same shared validator per row for that case. The per-row form is
+    therefore always validated per row, on both layers.
 
     Raises:
-        ManifestError: ``parameter_set`` is missing, is not a table, or fails
-            the parameter-set rule -- the last carrying the originating
+        ManifestError: Neither key is declared, both are, ``parameter_set``
+            is not a table, ``parameter_set_column`` is not a non-empty
+            string, or the static set fails the parameter-set rule -- the
+            last carrying the originating
             :class:`~kbutillib.domains.identity.ParameterSetError` message
             VERBATIM (it is already prefixed with the manifest location, so
             the offending path inside the set is named exactly once).
     """
     name = source.name
-    where = f"source {name!r} [source.result].parameter_set"
 
-    # One of _PARAMETER_SET_KEYS must be present. With a single key that is
-    # "parameter_set is required"; the sibling PRD's parameter_set_column
-    # turns this into "exactly one of", which is why it is written as a
-    # membership test over the key set rather than a bare `in source.result`.
     declared = [key for key in _PARAMETER_SET_KEYS if key in source.result]
     if not declared:
         raise ManifestError(
-            f"source {name!r} [source.result]: 'parameter_set' is required. A "
-            "result is keyed by (entity, result_type, source, "
-            "parameter_set_hash), so every result source must say which "
-            "parameter set it represents. Declare parameter_set = {} to say "
-            "this is a DEFAULT run (the tool version's own defaults, nothing "
-            "overridden); declare the parameters the caller set otherwise, "
-            'e.g. parameter_set = { taxonomy_id = "562" }.'
+            f"source {name!r} [source.result]: one of 'parameter_set' or "
+            "'parameter_set_column' is required. A result is keyed by "
+            "(entity, result_type, source, parameter_set_hash), so every "
+            "result source must say which parameter set it represents. "
+            "Declare parameter_set = {} to say this is a DEFAULT run (the "
+            "tool version's own defaults, nothing overridden); declare the "
+            "parameters the caller set otherwise, e.g. parameter_set = "
+            '{ taxonomy_id = "562" }; or declare parameter_set_column = '
+            '"<column>" when each RECORD carries its own set.'
+        )
+    if len(declared) > 1:
+        raise ManifestError(
+            f"source {name!r} [source.result]: declare EXACTLY ONE of "
+            f"{', '.join(repr(k) for k in _PARAMETER_SET_KEYS)}, not both. "
+            "They are alternatives, not layers: 'parameter_set' says the set "
+            "is one constant for the whole source and is hashed once at plan "
+            "time, 'parameter_set_column' says each record carries its own "
+            "and is hashed per row. A manifest declaring both leaves it "
+            "undefined which hash a result row is keyed by."
         )
 
-    params = source.result[declared[0]]
+    key = declared[0]
+    if key == PARAMETER_SET_COLUMN_KEY:
+        column = source.result[key]
+        if not isinstance(column, str) or not column.strip():
+            raise ManifestError(
+                f"source {name!r} [source.result].{PARAMETER_SET_COLUMN_KEY} "
+                "must be a non-empty string naming a SOURCE column whose "
+                f"value is this row's parameter set, got "
+                f"{type(column).__name__} {column!r}. It is a column NAME, "
+                "not a @derivation and not the set itself."
+            )
+        return (None, None, None, column.strip())
+
+    where = f"source {name!r} [source.result].parameter_set"
+    params = source.result[key]
     if not isinstance(params, dict):
         raise ManifestError(
             f"{where}: must be an inline TOML table, got "
             f"{type(params).__name__}. It is DATA, not a @derivation: write "
-            'parameter_set = {} or parameter_set = { taxonomy_id = "562" }.'
+            'parameter_set = {} or parameter_set = { taxonomy_id = "562" }. '
+            "To take the set from a column instead, declare "
+            f"{PARAMETER_SET_COLUMN_KEY} = \"<column>\"."
         )
 
     try:
@@ -1090,4 +1288,4 @@ def _plan_parameter_set(
         )
     except ParameterSetError as exc:
         raise ManifestError(str(exc)) from exc
-    return dict(params), canonical, digest
+    return dict(params), canonical, digest, None

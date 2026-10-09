@@ -152,6 +152,7 @@ not a reader's problem.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import heapq
 import json
@@ -160,6 +161,7 @@ import os
 import re
 import secrets
 import shutil
+import tarfile
 import tempfile
 import threading
 import time
@@ -172,7 +174,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ...identity import standardizers
+from ...identity import ParameterSetError, standardizers
 from . import clearinghouse_derivation as cd
 from . import clearinghouse_manifest as cm
 from . import clearinghouse_parameters as cp
@@ -240,6 +242,9 @@ class SourceAdapter(ABC):
         self.run_context: Any = None
         #: The unit label :meth:`restrict_to_unit` was given, or ``None``.
         self._unit: str | None = None
+        #: The manifest's ``[backfill]`` table, or ``None``. See
+        #: :meth:`bind_backfill_info`.
+        self.backfill_info: cm.BackfillInfo | None = None
         #: THIS READER's remaining ``--limit`` allowance. ``None`` until
         #: resolved from the run context on the first record, then a count or
         #: ``-1`` for unlimited. See :meth:`_admit_record` for why the cap is
@@ -349,6 +354,96 @@ class SourceAdapter(ABC):
         """
         return (SINGLE_UNIT,)
 
+    def watermark(self) -> str | None:
+        """The HIGH-WATER MARK of what this read covered, or ``None``.
+
+        An ISO-8601 timestamp string: the greatest source-side modification
+        time among the records this adapter READ. ``shard_manifest`` records
+        it on the source's entry in ``run.json``, so an operator can see what
+        a run covered without re-querying the store, and a later incremental
+        run has a published starting point rather than a guess.
+
+        IT IS NOT A COMPLETION CLAIM, and must not be read as one. A watermark
+        says "no record modified after this time was read"; whether the
+        records that WERE read all landed is
+        :meth:`exhausted` plus the unit's verification, and an adapter whose
+        read was capped or whose objects were unavailable still has a
+        perfectly good watermark for the window it covered. An adapter that
+        PERSISTS a watermark for the next run to start from is therefore
+        responsible for refusing to do so on a capped or incomplete run; this
+        hook only reports.
+
+        The default is ``None`` -- the honest answer for a source with no
+        modification time to take a maximum of (a parquet file, a lake
+        table), which is why the ``file`` adapter does not override it.
+        """
+        return None
+
+    def incomplete_reasons(self) -> tuple[str, ...]:
+        """Why this read is INCOMPLETE despite reaching the end of its source.
+
+        Empty (the default) means "nothing to report", which is the honest
+        answer for every adapter whose only failure mode is stopping early --
+        :meth:`exhausted` already carries that.
+
+        IT EXISTS FOR THE RETRYABLE FAILURE, which exhaustion cannot express.
+        An adapter that walked its whole selection but could not fetch three
+        of the objects it needed has run off the end of its source
+        (``exhausted`` is ``True``) and every batch it DID write verifies --
+        so by both of the signals that existed before this hook, the unit is
+        ``done``. It is not: three records are missing and a retry would get
+        them. Each string names one such failure, and
+        ``clearinghouse_backfill.unit_outcome`` turns a non-empty tuple into
+        ``incomplete``, which is what makes a later ``--resume`` come back for
+        them.
+
+        A NON-RETRYABLE drop is NOT reported here. A record the store itself
+        cannot supply (a missing result file, an annotation for a genome that
+        was never built) is counted in :meth:`skipped` and the unit is done:
+        retrying it would read the same absence again.
+        """
+        return ()
+
+    def bind_backfill_info(self, info: cm.BackfillInfo | None) -> None:
+        """Attach the manifest's top-level ``[backfill]`` table, or ``None``.
+
+        A SECOND binding hook rather than a constructor argument, for the
+        same reason :meth:`bind_run_context` is one: every existing adapter
+        and every test that builds one directly keeps working, and ``None``
+        stays a first-class case.
+
+        Almost nothing reads it -- ``pulls_from`` and ``needs_env`` are
+        informational. ``tool_versions`` is not: an adapter that labels
+        SEVERAL tools out of ONE store (the ``arc`` store holds BAKTA, PROKKA,
+        DRAM2, KOFAMSCAN, TRANSYT and RAST annotations) has to resolve each
+        row's ``"<tool>/<version>"`` from somewhere, and a per-source locator
+        copy of the table is how two of the four sources reading that store
+        would come to disagree -- writing two permanent ``source`` partitions
+        for one tool.
+        """
+        self.backfill_info = info
+
+    def tool_version(self, tool: str) -> str:
+        """The version string for ``tool``, from the bound ``tool_versions``.
+
+        Looked up case-sensitively first and then by exact upper/lower-cased
+        form, so a table written ``BAKTA = "1.9"`` serves a record whose tool
+        arrives as ``bakta``. A tool the table does not list (or no bound
+        ``[backfill]`` at all) resolves to
+        :data:`clearinghouse_manifest.DEFAULT_TOOL_VERSION`, which is Chris's
+        instruction (2026-10-06): the installed version where it can be
+        determined, ``1.0`` where it cannot.
+        """
+        table = (
+            self.backfill_info.tool_versions
+            if self.backfill_info is not None
+            else {}
+        )
+        for candidate in (tool, tool.upper(), tool.lower()):
+            if candidate in table:
+                return table[candidate]
+        return cm.DEFAULT_TOOL_VERSION
+
     def restrict_to_unit(self, unit: str | None) -> None:
         """Restrict this adapter's read to ONE of its :meth:`units`.
 
@@ -444,14 +539,14 @@ class SourceAdapter(ABC):
         return True
 
 
-#: Registry of adapter implementations by manifest ``adapter`` name. All three
+#: Registry of adapter implementations by manifest ``adapter`` name. All four
 #: names are DECLARED here so a manifest can be validated against the full set
-#: of adapter names (the mapping half must be adapter-independent). All three
+#: of adapter names (the mapping half must be adapter-independent). All four
 #: are now registered with real classes (see :data:`_ADAPTER_CLASSES`);
 #: :func:`get_adapter` still distinguishes "not a real adapter name" from a
 #: declared name with no class, but the latter no longer occurs for any of
-#: these three.
-ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse")
+#: these four.
+ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse", "arc")
 
 #: The unit label an adapter with no natural decomposition reports from
 #: :meth:`SourceAdapter.units`. Short, stable, and safe as a path segment --
@@ -1348,17 +1443,6 @@ def _zlib_decode(value: Any) -> str:
     )
 
 
-#: Concrete adapter classes, by name. All three planned adapters are now built:
-#: ``file`` (CPU/disk only), ``lakehouse`` (in-pod / off-pod read), and
-#: ``mongo`` (a batched collection read). :func:`get_adapter` no longer reports
-#: any planned name as unbuilt.
-_ADAPTER_CLASSES: dict[str, type[SourceAdapter]] = {
-    "file": FileSourceAdapter,
-    "lakehouse": LakehouseSourceAdapter,
-    "mongo": MongoSourceAdapter,
-}
-
-
 class ManifestSourceError(RuntimeError):
     """An adapter could not read its declared source (missing path, etc.)."""
 
@@ -1384,11 +1468,1706 @@ class ShardOrderError(RuntimeError):
     """
 
 
+# --------------------------------------------------------------------------
+# The arc adapter: Chris's KOROS arc store, read in place
+# --------------------------------------------------------------------------
+
+#: The one table in ``runs.sqlite`` the adapter reads. Named rather than
+#: inlined because every query below must name the SAME table, and because
+#: the adapter must never reach for ``KorosArcStore``/``RunDatabase`` to get
+#: at it -- their read path CREATES a missing database, which would turn "the
+#: store is not where you said" into "the store is empty", silently, and the
+#: run would report a clean zero.
+ARC_RUNS_TABLE = "runs"
+
+#: The two run kinds a clearinghouse backfill can read. Everything else in
+#: the store (``kbdl.model_build``, ``kbdl.fitness_analysis``,
+#: ``kbutillib.reconstruct``) produces no entity, content or result row this
+#: corpus holds, so it is COUNTED AND SKIPPED by kind rather than ignored:
+#: "430 records, 425 read, 5 not backfillable: kbdl.model_build 3, ..."
+#: reconciles, and "425 records" does not.
+ARC_BUILD_KIND = "kbdl.build_genome"
+ARC_ANNOTATION_KIND = "kbdl.genome_annotation"
+ARC_BACKFILLABLE_KINDS: tuple[str, ...] = (ARC_BUILD_KIND, ARC_ANNOTATION_KIND)
+
+#: What a source's ``emit`` locator key may be. ONE adapter instance emits ONE
+#: of these, because the four are four different record shapes over one store
+#: and a single iterator yielding a mixture could not be mapped by one
+#: manifest source. Four sources read the store, each naming its own.
+ARC_EMIT_CHOICES: tuple[str, ...] = ("genome", "protein", "gene", "annotation")
+
+#: The tarball's ledger members, paired with the annotation directory each one
+#: keys. BOTH are read, and ONLY these paths: the ledger's keys are the file
+#: STEMS inside its directory, so the adapter opens
+#: ``data/annotations/<ledger key>.json`` BY NAME via ``tarfile.getmember``
+#: and never walks the archive. A tarball is untrusted input -- a member named
+#: ``../../etc/x`` or an absolute path is how extraction becomes arbitrary
+#: file write -- and nothing here extracts anything: members are read as
+#: streams and parsed in memory.
+ARC_TARBALL_LEDGERS: tuple[tuple[str, str], ...] = (
+    ("data/batch_ledger.json", "data/annotations"),
+    ("data/pmi_ledger.json", "data/annotations_pmi"),
+)
+
+#: The tool name every tarball annotation member's terms are attributed to,
+#: and the single ontology they use. The tarball shape carries no tool key of
+#: its own -- the arc wrote one tool's output into these files -- so the
+#: attribution is a fact about the archive format and belongs here rather
+#: than being guessed per member.
+ARC_TARBALL_TOOL = "RAST"
+
+#: Per-arc-record byte estimate used ONLY by
+#: :meth:`ArcSourceAdapter.estimate_bytes` to turn the record count into a
+#: shard COUNT. It stands for the genome object a record pulls from KBDL, not
+#: for the record row, because the objects are the bulk by three orders of
+#: magnitude. An over- or under-estimate at worst changes how many
+#: equal-width hash ranges are cut, never correctness.
+ARC_BYTES_PER_RECORD = 1 << 20
+
+#: Skip reasons the ``arc`` adapter reports. Short, stable slugs: they are
+#: keys in ``run.json``, so renaming one invalidates every prior run's
+#: inventory. They divide into two groups that must not be confused, because
+#: the 430 records in the store only reconcile with the report if they are
+#: kept apart (four sources read the same store, so a record "skipped" by one
+#: source may be emitted by another):
+#:
+#: SOURCE-RECORD failures -- the arc record itself could not be read:
+ARC_SKIP_RESULT_FILE_MISSING = "result-file-missing"
+ARC_SKIP_KIND_PREFIX = "kind-not-backfillable:"
+#: PER-TARGET-ROW drops -- the record was read, but one row it would have
+#: produced cannot be mapped:
+ARC_SKIP_OBJECT_UNAVAILABLE = "object-unavailable"
+ARC_SKIP_NO_GENOME_FOR_PREFIX = "no-genome-for-prefix"
+ARC_SKIP_FEATURE_NOT_IN_GENOME = "feature-not-in-genome"
+ARC_SKIP_TRANSYT_WITHOUT_TAXONOMY = "transyt-without-taxonomy"
+ARC_SKIP_TRANSYT_INVALID = "transyt-parameter-set-invalid"
+ARC_SKIP_FASTA_POINTER_MISSING = "fasta-pointer-missing"
+#: NOT a drop at all -- the row IS emitted, with a fallback timestamp, and
+#: this counts how often that happened so the fallback is visible rather than
+#: silent.
+ARC_SKIP_TIMESTAMP_FALLBACK = "timestamp-fallback"
+#: The fast path disagreed with the downloaded object and was discarded in
+#: favour of the exact feature index. Not a drop either: the lookup still
+#: succeeds, this records that ``fasta_object_id[:16]`` was not this genome's
+#: ``genome_id``.
+ARC_SKIP_FASTA_PREFIX_MISMATCH = "fasta-prefix-mismatch"
+#: Two genome objects claim ONE feature id. Counted and then RAISED -- see
+#: :class:`ArcFeatureIdConflictError`.
+ARC_SKIP_FEATURE_ID_CONFLICT = "feature-id-conflict"
+
+#: The SOURCE-RECORD failure reasons: an arc record that could not be READ at
+#: all. Exposed as a named set, not left implicit in the comments above,
+#: because the store's 430 records only reconcile with a report if these are
+#: counted apart from the per-row drops. FOUR SOURCES READ ONE STORE: the same
+#: record is read by all four, so a per-row drop in one source says nothing
+#: about the other three, while a source-record failure applies to every
+#: source that reads it. Summing the two groups together would
+#: quadruple-count.
+#:
+#: ``kind-not-backfillable:<kind>`` is matched by PREFIX
+#: (:data:`ARC_SKIP_KIND_PREFIX`) rather than listed, because the kind is part
+#: of the slug.
+ARC_SOURCE_RECORD_SKIPS: frozenset[str] = frozenset({ARC_SKIP_RESULT_FILE_MISSING})
+
+#: The PER-TARGET-ROW drop reasons: the arc record was read, but one row it
+#: would have produced could not be mapped. Counted per ROW, so a record whose
+#: three tools all failed contributes three.
+ARC_TARGET_ROW_SKIPS: frozenset[str] = frozenset(
+    {
+        ARC_SKIP_OBJECT_UNAVAILABLE,
+        ARC_SKIP_NO_GENOME_FOR_PREFIX,
+        ARC_SKIP_FEATURE_NOT_IN_GENOME,
+        ARC_SKIP_TRANSYT_WITHOUT_TAXONOMY,
+        ARC_SKIP_TRANSYT_INVALID,
+        ARC_SKIP_FASTA_POINTER_MISSING,
+    }
+)
+
+#: Reasons that are NEITHER a failure nor a drop: the row WAS emitted, and the
+#: count records that something about it needed a fallback. Kept out of both
+#: groups above so a reconciliation does not subtract rows that are present.
+ARC_NOTED_REASONS: frozenset[str] = frozenset(
+    {ARC_SKIP_TIMESTAMP_FALLBACK, ARC_SKIP_FASTA_PREFIX_MISMATCH}
+)
+
+
+#: The reason that is counted and then RAISED. It appears in a counter purely
+#: so an inspector of the adapter can see it; the read did not continue, so no
+#: reconciliation includes it.
+ARC_REFUSAL_REASONS: frozenset[str] = frozenset({ARC_SKIP_FEATURE_ID_CONFLICT})
+
+
+def classify_arc_skip(reason: str) -> str:
+    """Which accounting group an ``arc`` skip reason belongs to.
+
+    Returns ``"source-record"``, ``"target-row"``, ``"noted"``,
+    ``"refusal"``, or ``"unknown"``. One function so a report consumer never
+    has to re-derive the grouping -- and so adding a reason without
+    classifying it shows up as ``"unknown"`` rather than silently landing in
+    whichever bucket a caller guessed.
+    """
+    if reason.startswith(ARC_SKIP_KIND_PREFIX):
+        return "source-record"
+    if reason in ARC_SOURCE_RECORD_SKIPS:
+        return "source-record"
+    if reason in ARC_TARGET_ROW_SKIPS:
+        return "target-row"
+    if reason in ARC_NOTED_REASONS:
+        return "noted"
+    if reason in ARC_REFUSAL_REASONS:
+        return "refusal"
+    return "unknown"
+
+
+#: The retryable skip reasons. A unit that recorded one of these is
+#: INCOMPLETE even when every batch it wrote verified, because a retry would
+#: get the missing records (see
+#: :meth:`SourceAdapter.incomplete_reasons`). A missing result file or an
+#: annotation for a genome that was never built is NOT retryable -- reading
+#: it again reads the same absence.
+ARC_RETRYABLE_SKIPS: frozenset[str] = frozenset({ARC_SKIP_OBJECT_UNAVAILABLE})
+
+#: Adapter-state keys the ``arc`` adapter persists through the run context.
+#: The SELECTION is the important one: it is frozen before any record is
+#: read, so all four sources -- and a resume days later -- emit from exactly
+#: the same ordered list of arc records rather than each re-querying a store
+#: that has moved underneath them.
+ARC_STATE_SELECTION = "selection"
+ARC_STATE_SINCE = "since"
+ARC_STATE_UPPER_BOUND = "upper_bound"
+ARC_STATE_CAPPED = "capped"
+ARC_STATE_TARBALLS = "tarballs"
+ARC_STATE_RETRY = "retry"
+ARC_STATE_INCOMPLETE = "incomplete"
+
+#: Subdirectory of the clearinghouse state root holding per-SOURCE watermark
+#: checkpoints. Not under a run id: a checkpoint's whole purpose is to outlive
+#: the run that wrote it and be found by the NEXT run, which has a different
+#: run id (see :func:`arc_checkpoint_path`).
+ARC_CHECKPOINT_DIR = "sources"
+
+#: Suffix of an UNPROMOTED checkpoint. A complete, uncapped run writes its
+#: candidate here; only :func:`promote_arc_checkpoints`, called after the
+#: unit's batches have VERIFIED, renames it to the real name. The two-step is
+#: the whole safety property: the adapter cannot know whether what it emitted
+#: landed, so it is not allowed to publish a watermark that says it did.
+ARC_CHECKPOINT_CANDIDATE_SUFFIX = ".candidate.json"
+
+
+class ArcFeatureIdConflictError(ManifestSourceError):
+    """Two genome objects claim ONE feature id. The read is REFUSED.
+
+    Never last-write-wins. A feature id is the join key between an annotation
+    and the protein it annotates, so two objects claiming one id means every
+    annotation on that id might belong to either genome -- and silently
+    picking one would attribute a protein's annotations to a different
+    organism's protein, with the entity hash of whichever sequence happened to
+    be indexed last. There is no correct guess available, so the adapter
+    stops and names both objects.
+    """
+
+    def __init__(self, feature_id: str, first: str, second: str) -> None:
+        self.feature_id = feature_id
+        self.object_ids = (first, second)
+        super().__init__(
+            f"arc adapter: {ARC_SKIP_FEATURE_ID_CONFLICT} -- feature id "
+            f"{feature_id!r} is claimed by TWO genome objects, {first!r} and "
+            f"{second!r}. A feature id is the join key from an annotation to "
+            "its protein, so choosing one would attribute annotations to the "
+            "wrong organism's sequence. The read is refused rather than "
+            "resolved last-write-wins; reconcile the two objects in the "
+            "store first."
+        )
+
+
+@dataclass
+class _ArcGenome:
+    """One genome object the adapter needs, and what the store says about it.
+
+    Assembled from the arc store BEFORE the object is downloaded (which is
+    why ``contigs``/``features`` start empty) and completed by
+    :meth:`ArcSourceAdapter._load_objects`.
+    """
+
+    genome_object_id: str
+    #: The FASTA object id the build record recorded, or ``None`` for a
+    #: genome known only from a tarball ledger. ``None`` means no
+    #: ``fasta_reference`` pointer can be written, which is a SKIP for the
+    #: genome row and not an invented pointer.
+    fasta_object_id: str | None = None
+    taxonomy: dict[str, Any] = field(default_factory=dict)
+    #: The EARLIEST build record timestamp seen for this genome, or the
+    #: ledger's ``done_ts`` for a ledger-only genome.
+    created_at: str | None = None
+    contigs: list[dict[str, Any]] = field(default_factory=list)
+    features: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``True`` once the object's bytes have been read.
+    loaded: bool = False
+
+    @property
+    def ncbi_taxid(self) -> str | None:
+        """The NCBI taxonomy id as a DECIMAL STRING, or ``None``.
+
+        A string because that is what the clearinghouse stores and what
+        lake-5's TRANSYT validator requires: an int would be reformatted by
+        whichever JSON reader saw it next, and the parameter set would stop
+        being byte-identical to what was asked for.
+        """
+        value = self.taxonomy.get("ncbi_taxid")
+        if value is None or isinstance(value, bool):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def note_created_at(self, value: str | None) -> None:
+        """Keep the EARLIEST timestamp offered for this genome.
+
+        A genome can appear in several build records (a rebuild, a retry), and
+        its ``created_at`` must not depend on which record the iteration
+        happened to see last. The earliest is the one that says when this
+        genome first existed.
+        """
+        if not value:
+            return
+        if self.created_at is None or value < self.created_at:
+            self.created_at = value
+
+#: Default ``db_path``: the arc store's run index on the BERDL pod, as a
+#: manifest PLACEHOLDER WITH A DEFAULT so the preset works untouched and an
+#: operator can point it elsewhere without editing package data.
+ARC_DEFAULT_DB_PATH = "~/.kbdl/runs.sqlite"
+
+#: Default ``tarballs``: the pod's arc backup. A DEFAULT and not a required
+#: value -- but once configured (default or not) an absent file is an ERROR,
+#: because the operator is then relying on annotations that would silently
+#: not be there (see :meth:`ArcSourceAdapter._tarball_paths`).
+ARC_DEFAULT_TARBALL = (
+    "~/arc-relocate-backup-20260923T1307Z/"
+    "inner-loop__additional-genome-annotation.tar.gz"
+)
+
+#: Default object cache when the adapter is NOT running under a backfill run
+#: (a plain ``kbu clearinghouse shard``, or a test). Under a run, the cache
+#: goes to ``<shard out>/objects`` so the four sources of one unit share it.
+ARC_DEFAULT_CACHE_DIR = "~/clearinghouse-shards/objects"
+
+
+def arc_checkpoint_dir() -> Path:
+    """Where per-source arc watermark checkpoints live.
+
+    Under the clearinghouse STATE ROOT (``$KBU_CLEARINGHOUSE_STATE_DIR``, or
+    the pod-persistent default), beside the per-execution ledger directories
+    rather than inside one: a checkpoint must be found by the NEXT run, which
+    has a different run id, and must survive the shard output being
+    regenerated, moved or deleted.
+    """
+    from . import clearinghouse_ingest as ci  # noqa: PLC0415 - avoids a cycle
+
+    return ci.resolve_state_root() / ARC_CHECKPOINT_DIR
+
+
+def arc_checkpoint_key(
+    *,
+    tenant: str,
+    dataset: str,
+    db_path: str,
+    base_url: str,
+    principal: str,
+) -> str:
+    """The identity a watermark checkpoint is keyed by.
+
+    FIVE components, and every one of them changes what the watermark MEANS:
+
+    - ``tenant`` and ``dataset`` -- the WRITE TARGET. A watermark says "every
+      arc record up to this time is already in the lake", which is a claim
+      about ONE namespace. A scratch dataset's checkpoint applied to the
+      production dataset would skip the records production has never seen,
+      and the gap would be invisible: the run would report a clean, complete,
+      empty-ish pass. This is the component that makes "scratch never applies
+      to production" true by construction rather than by a flag someone has
+      to remember to pass.
+    - ``db_path`` -- the STORE, absolute. Two arc stores have two independent
+      histories.
+    - ``base_url`` -- the KBDL endpoint the genome objects came from. The same
+      object id means the same bytes, but a different endpoint may simply not
+      have them.
+    - ``principal`` -- WHO read it. KBDL shows a caller only the objects it
+      may see, so a watermark earned with broad access would tell a narrower
+      caller it had already covered records whose objects it cannot fetch.
+
+    Returned as a sha256 hex digest, because the components include an
+    absolute path and a URL and the result has to be one safe filename. The
+    components themselves are stored INSIDE the checkpoint file, so a
+    checkpoint is still diagnosable without reversing the hash.
+    """
+    material = "\\n".join(
+        [
+            f"tenant={tenant}",
+            f"dataset={dataset}",
+            f"db_path={db_path}",
+            f"base_url={base_url}",
+            f"principal={principal}",
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def arc_checkpoint_path(key: str, *, candidate: bool = False) -> Path:
+    """The promoted (or candidate) checkpoint file for one identity key."""
+    suffix = ARC_CHECKPOINT_CANDIDATE_SUFFIX if candidate else ".json"
+    return arc_checkpoint_dir() / f"arc-{key}{suffix}"
+
+
+def read_arc_checkpoint(key: str) -> dict[str, Any]:
+    """The PROMOTED checkpoint for one identity key, or ``{}``.
+
+    A candidate is never read. An unreadable or non-object file reads as
+    ``{}``, which degrades to "no checkpoint, start from the beginning" -- the
+    safe direction, because a full re-read of an arc store is cheap
+    (fill-only ingest discards what is already there) while a bad watermark
+    skips records permanently.
+    """
+    path = arc_checkpoint_path(key)
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def promote_arc_checkpoints() -> list[Path]:
+    """Promote every candidate checkpoint to a real one. Returns what moved.
+
+    Called by the backfill driver AFTER a unit's batches have been ingested
+    and VERIFIED, and only for a unit that came out ``done``. Until then a
+    candidate exists and nothing reads it, so a run that was killed, capped,
+    or left incomplete advances no watermark -- which is the property the
+    two-step exists for. The adapter writes the candidate because only it
+    knows the ``upper_bound`` and which tarballs it finished; the driver
+    promotes it because only the driver knows whether the rows landed.
+
+    Idempotent: promoting an already-promoted (hence absent) candidate moves
+    nothing and raises nothing.
+    """
+    directory = arc_checkpoint_dir()
+    if not directory.is_dir():
+        return []
+    moved: list[Path] = []
+    for candidate in sorted(directory.glob(f"*{ARC_CHECKPOINT_CANDIDATE_SUFFIX}")):
+        target = candidate.with_name(
+            candidate.name[: -len(ARC_CHECKPOINT_CANDIDATE_SUFFIX)] + ".json"
+        )
+        os.replace(candidate, target)
+        moved.append(target)
+    return moved
+
+
+def _arc_is_iso_timestamp(value: Any) -> bool:
+    """Whether ``value`` is a string ``datetime.fromisoformat`` can parse.
+
+    Used to decide whether a ledger's ``done_ts`` is USABLE, which is the
+    only question asked of it: a ledger entry that was written mid-crash can
+    carry ``null``, ``""`` or a placeholder, and a tarball row must then fall
+    back to the run start time WITH A COUNTED REASON rather than carry a
+    timestamp that no reader can order.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        resolve_observed_at(value, where="arc ledger done_ts")
+    except ShardValueError:
+        return False
+    return True
+
+
+class ArcSourceAdapter(SourceAdapter):
+    """The ``arc`` adapter: Chris's KOROS arc store, read IN PLACE on the pod.
+
+    Reads four things and joins them:
+
+    1. ``~/.kbdl/runs.sqlite`` -- the arc's run index, opened through a
+       READ-ONLY sqlite URI (``file:...?mode=ro``). A missing file RAISES and
+       CREATES NOTHING, which is the whole reason the adapter opens the
+       database itself instead of going through ``KorosArcStore`` /
+       ``RunDatabase``: their read path creates a missing database, so a
+       mistyped path would have turned "the store is not there" into "the
+       store is empty" and the run would have reported a clean zero.
+    2. ``~/.kbdl/job-results/KBDLBuildGenome/<job>.json.gz`` and
+       ``.../KBDLGenomeAnnotation/<job>.json.gz`` -- the preserved job
+       results, opened with :mod:`gzip` for reading only.
+    3. Optional backup TARBALLS of a KOROS arc, streamed with :mod:`tarfile`.
+       Only the four member paths in :data:`ARC_TARBALL_LEDGERS` are opened,
+       BY NAME; nothing is ever extracted.
+    4. The ``CanonicalGenome`` objects, pulled from KBDL through
+       :meth:`~kbutillib.domains.external.kbdl_service_utils.KBDLServiceUtils.download_object`
+       -- content-addressed, so each download verifies its own sha256 against
+       the object id. THE POD HAS NO SEQUENCES; every sequence in the corpus
+       comes from these objects, which is why an unavailable object is a
+       retryable failure and not a drop.
+
+    KBUtilLib NEVER IMPORTS ``kbdl_service``. The store is read as files and
+    rows; the objects are fetched over KBDL's HTTP contract. Nothing here
+    imports the service package, and the facts the adapter relies on about
+    the service's formats (a ``CanonicalGenome``'s ``genome_id`` is
+    ``fasta_object_id[:16]``; its feature ids are ``f"{genome_id}_{index}"``)
+    are encoded here as read-only expectations, checked against the
+    downloaded bytes.
+
+    ONE SOURCE EMITS ONE SHAPE. ``emit`` selects which: ``genome`` (one record
+    per distinct genome object), ``protein`` / ``gene`` (one per feature of
+    each genome object) or ``annotation`` (one per ``(feature, tool)`` pair
+    with a non-empty ontology map). The arc-kbdl preset declares four sources
+    over one store, one per emit, and they share ONE FROZEN SELECTION so the
+    rows they load are a coherent set rather than four independent samples.
+
+    Locator keys:
+
+    - ``db_path`` -- the runs database. Defaults to
+      :data:`ARC_DEFAULT_DB_PATH`.
+    - ``emit`` -- REQUIRED, one of :data:`ARC_EMIT_CHOICES`.
+    - ``tarballs`` -- optional; a list of paths, or one comma-separated
+      string (which is what a ``${VAR}`` placeholder expands to). A configured
+      tarball that DOES NOT EXIST IS AN ERROR, not a skip: the operator named
+      it, so its absence is a mistake to fix and not a quiet reduction in
+      what the backfill covers. An empty string is "no tarballs" and is fine.
+    - ``since`` -- optional ISO timestamp, INCLUSIVE, compared against
+      ``updated_at``. Omitted, the adapter starts from its persisted
+      watermark checkpoint if there is one, and from the beginning otherwise.
+      Given, it OVERRIDES the checkpoint -- an explicit instruction beats a
+      remembered one.
+    - ``base_url`` -- optional KBDL endpoint; the client's own default
+      otherwise.
+    - ``cache_dir`` -- where downloaded genome objects are kept, so the four
+      sources (and a resume) fetch each object ONCE. Defaults to
+      ``<shard out>/objects`` when the adapter is running under a backfill run
+      and ``~/clearinghouse-shards/objects`` otherwise.
+
+    THE DEPENDENCY INDEX AND THE SELECTION ARE DIFFERENT THINGS, and
+    conflating them is the subtle failure this adapter is shaped to avoid.
+    The INDEX -- which genome object a feature id belongs to, what its
+    taxonomy is, where its FASTA lives -- is built from EVERY build record and
+    EVERY tarball ledger, REGARDLESS of ``since``. It drives JOINS only.
+    The SELECTION -- which records this run EMITS from -- is the arc record
+    ids with ``since <= updated_at <= upper_bound``, in ``(updated_at,
+    record_id)`` order, frozen through the run context before anything is
+    read. An incremental run must still be able to join a late annotation to
+    a genome built months ago (so the index ignores ``since``) without
+    re-emitting that genome's rows (so the selection does not).
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        client: An object exposing ``download_object(object_id, dest)`` --
+            a real
+            :class:`~kbutillib.domains.external.kbdl_service_utils.KBDLServiceUtils`
+            in production, a fake in tests. Constructed lazily on first use
+            when not given, so building the adapter (as :func:`get_adapter`
+            does) makes no network call and needs no credentials.
+    """
+
+    adapter_name = "arc"
+
+    def __init__(self, source: cm.Source, *, client: Any = None):
+        super().__init__(source)
+        self._client = client
+        #: The greatest ``updated_at`` among the records READ. See
+        #: :meth:`watermark`.
+        self._watermark: str | None = None
+        #: Retryable failures, as human strings. Non-empty => incomplete.
+        self._retry: list[str] = []
+        #: ``True`` when ``--limit`` truncated the frozen selection, which
+        #: makes the read non-exhaustive and forbids a checkpoint.
+        self._capped = False
+        #: This read's start time, ISO-8601 ``Z``. The fallback timestamp for
+        #: a tarball member whose ledger ``done_ts`` is unusable.
+        self._run_start = _iso_z(utc_now())
+        self._index: dict[str, _ArcGenome] | None = None
+        #: ``fasta_object_id[:16]`` -> genome object id. The FAST PATH, used
+        #: to decide which objects to download; checked against the exact
+        #: feature index once they are.
+        self._fast_path: dict[str, str] = {}
+        #: Exact feature id -> genome object id, built from the DOWNLOADED
+        #: objects. The authoritative join.
+        self._feature_owner: dict[str, str] = {}
+        #: Ledger key -> genome object id, per tarball path.
+        self._ledger_genomes: dict[str, dict[str, str]] = {}
+        #: Ledger key -> ledger entry, per tarball path.
+        self._ledger_entries: dict[str, dict[str, Any]] = {}
+        #: sha256 of each configured tarball, by path.
+        self._tarball_digests: dict[str, str] = {}
+
+    # -- locator ------------------------------------------------------------
+
+    def _locator(self, key: str, default: Any = None) -> Any:
+        return self.source.locator.get(key, default)
+
+    def _db_path(self) -> Path:
+        raw = self._locator("db_path") or ARC_DEFAULT_DB_PATH
+        return Path(str(raw)).expanduser()
+
+    def _emit(self) -> str:
+        value = self._locator("emit")
+        if value not in ARC_EMIT_CHOICES:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: arc adapter requires "
+                f"'emit' to be one of {', '.join(ARC_EMIT_CHOICES)}, got "
+                f"{value!r}. One source emits ONE shape; the arc preset "
+                "declares four sources over the one store."
+            )
+        return str(value)
+
+    def _since(self) -> str | None:
+        """The INCLUSIVE lower bound on ``updated_at``, or ``None``.
+
+        An explicit ``since`` wins over the persisted checkpoint, always: the
+        operator is saying where to start and a remembered position must not
+        override an instruction. With no ``since``, the promoted checkpoint's
+        ``upper_bound`` becomes this run's lower bound -- inclusive on both
+        ends, which can re-read the single boundary record and is the right
+        side to err on (fill-only ingest discards a row already present,
+        while an exclusive bound that was off by a tick would drop one
+        permanently).
+        """
+        explicit = self._locator("since")
+        if explicit:
+            return str(explicit)
+        checkpoint = read_arc_checkpoint(self._checkpoint_key())
+        bound = checkpoint.get(ARC_STATE_UPPER_BOUND)
+        return str(bound) if bound else None
+
+    def _tarball_paths(self) -> list[Path]:
+        """The configured tarballs. A configured-but-absent one RAISES."""
+        raw = self._locator("tarballs", ARC_DEFAULT_TARBALL)
+        if raw is None:
+            raw = ""
+        if isinstance(raw, (list, tuple)):
+            candidates = [str(item).strip() for item in raw]
+        else:
+            # A ``${KBU_ARC_TARBALL:-...}`` placeholder expands to a string,
+            # and the empty expansion must mean "none" rather than one
+            # tarball named "".
+            candidates = [part.strip() for part in str(raw).split(",")]
+        paths: list[Path] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(candidate).expanduser()
+            if not path.is_file():
+                raise ManifestSourceError(
+                    f"source {self.source.name!r}: arc adapter was "
+                    f"configured with tarball {str(path)!r}, which does not "
+                    "exist. A configured tarball is not optional -- an "
+                    "operator named it, so its absence is a mistake to fix "
+                    "and not a quiet reduction in what this backfill covers. "
+                    "Set tarballs = \"\" to run without any."
+                )
+            paths.append(path)
+        return paths
+
+    def _cache_dir(self) -> Path:
+        # An EMPTY string is "unset", not a cache in the current directory:
+        # the preset declares ``cache_dir = "${KBU_ARC_CACHE_DIR:-}"`` so the
+        # variable is optional, and an unset optional placeholder expands to
+        # "" rather than disappearing.
+        raw = self._locator("cache_dir")
+        if raw and str(raw).strip():
+            return Path(str(raw)).expanduser()
+        context = self.run_context
+        out_dir = getattr(context, "out_dir", None) if context else None
+        if out_dir is not None:
+            return Path(out_dir) / "objects"
+        return Path(ARC_DEFAULT_CACHE_DIR).expanduser()
+
+    def _base_url(self) -> str:
+        return str(self._locator("base_url") or "")
+
+    # -- the KBDL client and the object cache --------------------------------
+
+    def _get_client(self) -> Any:
+        """The KBDL client, deferring the import until first use.
+
+        Deferred (not at module scope) so this module stays importable
+        wherever the shard stage is -- exactly as
+        :meth:`LakehouseSourceAdapter._get_capability` defers its capability
+        import.
+        """
+        if self._client is None:
+            from ...external.kbdl_service_utils import (  # noqa: PLC0415
+                KBDLServiceUtils,
+            )
+
+            base_url = self._base_url()
+            self._client = (
+                KBDLServiceUtils(base_url=base_url)
+                if base_url
+                else KBDLServiceUtils()
+            )
+        return self._client
+
+    def _principal(self) -> str:
+        """A stable, non-secret fingerprint of WHO is reading KBDL.
+
+        A component of the checkpoint key (see :func:`arc_checkpoint_key`),
+        because KBDL shows a caller only the objects it may see. It is the
+        first 16 hex characters of the sha256 of the bearer token, NOT the
+        token: a checkpoint file name is written to disk and read by anything
+        that can list the directory, so the raw credential must never be in
+        it. ``"anonymous"`` when there is no token -- itself a distinct
+        principal, since an unauthenticated reader sees a different set of
+        objects again.
+        """
+        client = self._client
+        token = None
+        if client is not None:
+            getter = getattr(client, "get_token", None)
+            if callable(getter):
+                try:
+                    token = getter(namespace="kbase")
+                except Exception:  # pragma: no cover - a fake with no token
+                    token = None
+        if not token:
+            return "anonymous"
+        return hashlib.sha256(str(token).encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_key(self) -> str:
+        context = self.run_context
+        return arc_checkpoint_key(
+            tenant=str(getattr(context, "tenant", "") or ""),
+            dataset=str(getattr(context, "dataset", "") or ""),
+            db_path=str(self._db_path().resolve()),
+            base_url=self._base_url(),
+            principal=self._principal(),
+        )
+
+    def _object_path(self, object_id: str) -> Path:
+        return self._cache_dir() / f"{object_id}.json"
+
+    def _cached_object(self, object_id: str) -> Path | None:
+        """A cached file for ``object_id`` whose sha256 MATCHES, or ``None``.
+
+        The digest is re-checked on REUSE and not only on download. A cache
+        entry is a file on a shared pod that something else may have
+        truncated, and the cost of being wrong is every entity hash derived
+        from those bytes -- so the cheap re-hash is paid every time rather
+        than trusted because the file exists. A reference object (``ref:``)
+        has no digest to check and is reused on presence alone.
+        """
+        from ...external.kbdl_service_utils import (  # noqa: PLC0415
+            is_content_object,
+        )
+
+        path = self._object_path(object_id)
+        if not path.is_file():
+            return None
+        if not is_content_object(object_id):
+            return path
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() == object_id:
+            return path
+        path.unlink(missing_ok=True)
+        return None
+
+    def _fetch_object(self, object_id: str) -> dict[str, Any] | None:
+        """Download (or reuse) and parse one genome object; ``None`` if
+        unavailable.
+
+        An unavailable object is a RETRYABLE failure: the record is not
+        emitted, the reason is counted as
+        :data:`ARC_SKIP_OBJECT_UNAVAILABLE`, and the unit comes out
+        INCOMPLETE even if every batch it did write verified -- so a later
+        ``--resume`` comes back for it. That is the opposite of a missing
+        result file, which is an absence in the store itself and will read
+        the same way forever.
+        """
+        cached = self._cached_object(object_id)
+        if cached is None:
+            try:
+                cached = self._get_client().download_object(
+                    object_id, self._object_path(object_id)
+                )
+            except Exception as exc:
+                self._note_retryable(
+                    f"genome object {object_id!r} could not be downloaded: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return None
+        try:
+            with Path(cached).open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            self._note_retryable(
+                f"genome object {object_id!r} was downloaded but could not be "
+                f"parsed as JSON: {type(exc).__name__}: {exc}"
+            )
+            return None
+        if not isinstance(payload, dict):
+            self._note_retryable(
+                f"genome object {object_id!r} is not a JSON object "
+                f"({type(payload).__name__}); a CanonicalGenome is."
+            )
+            return None
+        return payload
+
+    # -- skip accounting ----------------------------------------------------
+
+    def _skip(self, reason: str, count: int = 1) -> None:
+        self._skipped[reason] = self._skipped.get(reason, 0) + count
+
+    def _note_retryable(self, detail: str) -> None:
+        """Record a retryable failure: counted AND makes the unit incomplete."""
+        self._skip(ARC_SKIP_OBJECT_UNAVAILABLE)
+        if detail not in self._retry:
+            self._retry.append(detail)
+
+    def skipped(self) -> dict[str, int]:
+        return dict(self._skipped)
+
+    def watermark(self) -> str | None:
+        return self._watermark
+
+    def incomplete_reasons(self) -> tuple[str, ...]:
+        return tuple(self._retry)
+
+    def _note_watermark(self, updated_at: Any) -> None:
+        if not isinstance(updated_at, str) or not updated_at:
+            return
+        if self._watermark is None or updated_at > self._watermark:
+            self._watermark = updated_at
+
+    # -- estimates ----------------------------------------------------------
+
+    def estimate_bytes(self) -> int:
+        """Rough total size: the index, the tarballs, and the objects behind
+        them.
+
+        The genome objects dominate by three orders of magnitude and are not
+        on disk yet, so they are estimated as
+        :data:`ARC_BYTES_PER_RECORD` per backfillable arc record. The figure
+        only chooses a shard COUNT.
+        """
+        db_path = self._db_path()
+        total = db_path.stat().st_size if db_path.is_file() else 0
+        for tarball in self._tarball_paths():
+            total += tarball.stat().st_size
+        with self._connect() as connection:
+            placeholders = ", ".join("?" for _ in ARC_BACKFILLABLE_KINDS)
+            (count,) = connection.execute(
+                f"SELECT COUNT(*) FROM {ARC_RUNS_TABLE} WHERE kind IN "
+                f"({placeholders})",
+                ARC_BACKFILLABLE_KINDS,
+            ).fetchone()
+        return total + int(count) * ARC_BYTES_PER_RECORD
+
+    def estimate_rows(self) -> int | None:
+        """``None`` -- the arc store has no cheap count of EMITTED rows.
+
+        A ``COUNT(*)`` over the index is cheap, but it counts ARC RECORDS, and
+        an arc record is not a row for any of the four emits: one build
+        record becomes one genome row, a few thousand protein rows and as
+        many gene rows, and one annotation record becomes one row per
+        ``(feature, tool)`` pair with a non-empty ontology map. Reporting the
+        record count as a row count would be a confident wrong number, which
+        is worse for ``plan`` than no number: the honest answer is that the
+        row count is only knowable by reading the results, and
+        :meth:`SourceAdapter.estimate_rows` exists precisely so an adapter
+        can decline rather than pay for a scan behind the caller's back.
+        """
+        return None
+
+    # -- the store ----------------------------------------------------------
+
+    def _connect(self) -> Any:
+        """Open ``runs.sqlite`` READ-ONLY, creating nothing.
+
+        ``file:<path>?mode=ro`` with ``uri=True``: a missing file raises
+        ``sqlite3.OperationalError`` and NO FILE IS CREATED. That is the
+        difference between this and ``KorosArcStore``/``RunDatabase``, whose
+        read path creates a missing database -- against which a mistyped
+        ``db_path`` reads as an empty store and the run reports a clean zero.
+        """
+        import sqlite3  # noqa: PLC0415 - stdlib, deferred to keep import cheap
+
+        path = self._db_path()
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.OperationalError as exc:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: arc adapter could not open "
+                f"the runs database {str(path)!r} read-only: {exc}. Nothing "
+                "was created -- the read-only URI is deliberate, so a "
+                "mistyped path fails here instead of reading as an empty "
+                "store and reporting a clean zero."
+            ) from exc
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _freeze_selection(self) -> dict[str, Any]:
+        """Return the FROZEN selection, reading it from state when it exists.
+
+        THE SELECTION IS PERSISTED BEFORE ANY RECORD IS READ, and every later
+        reader -- the other three sources of the preset, and a resume days
+        later -- reuses it rather than re-querying. Two reasons, both load
+        bearing:
+
+        - FOUR SOURCES, ONE SAMPLE. ``--limit 1`` must select ONE arc record
+          that all four sources then work from, so the loaded rows are one
+          coherent record's genome, proteins, genes and annotations. Four
+          independent queries with four independent caps would load one
+          genome, a different genome's proteins, and so on.
+        - A RESUME MUST NOT MOVE. Re-querying on resume would pick up records
+          written since the run started, which the run's own ``upper_bound``
+          says it does not cover, and would renumber the ``--limit`` window.
+
+        The ``upper_bound`` is captured BEFORE the select, so a record written
+        while the run is reading is outside this run's window by construction
+        rather than by luck, and the watermark this run may later publish is
+        a time it genuinely covered.
+        """
+        state = self._read_state()
+        if state.get(ARC_STATE_SELECTION) is not None:
+            self._capped = bool(state.get(ARC_STATE_CAPPED))
+            return state
+
+        upper_bound = _iso_z(utc_now())
+        since = self._since()
+        limit = self._record_limit()
+
+        with self._connect() as connection:
+            placeholders = ", ".join("?" for _ in ARC_BACKFILLABLE_KINDS)
+            params: list[Any] = [*ARC_BACKFILLABLE_KINDS, upper_bound]
+            clause = (
+                f"kind IN ({placeholders}) AND updated_at <= ?"
+            )
+            if since:
+                clause += " AND updated_at >= ?"
+                params.append(since)
+            rows = connection.execute(
+                f"SELECT record_id FROM {ARC_RUNS_TABLE} WHERE {clause} "
+                "ORDER BY updated_at, record_id",
+                params,
+            ).fetchall()
+            # Everything that is NOT backfillable is counted by kind, so the
+            # store's record total reconciles with the report instead of
+            # quietly shrinking to the kinds this corpus happens to hold.
+            for row in connection.execute(
+                f"SELECT kind, COUNT(*) AS n FROM {ARC_RUNS_TABLE} WHERE kind "
+                f"NOT IN ({placeholders}) GROUP BY kind",
+                ARC_BACKFILLABLE_KINDS,
+            ).fetchall():
+                self._skip(f"{ARC_SKIP_KIND_PREFIX}{row['kind']}", int(row["n"]))
+
+        selection = [row["record_id"] for row in rows]
+        capped = limit is not None and len(selection) > limit
+        if capped:
+            selection = selection[:limit]
+        self._capped = capped
+
+        frozen = {
+            ARC_STATE_SELECTION: selection,
+            ARC_STATE_SINCE: since,
+            ARC_STATE_UPPER_BOUND: upper_bound,
+            ARC_STATE_CAPPED: capped,
+            ARC_STATE_TARBALLS: self._tarball_selection(),
+        }
+        self._write_state(frozen)
+        return frozen
+
+    def _record_limit(self) -> int | None:
+        """``--limit`` as a count, or ``None``.
+
+        Applied ONCE, to the frozen selection, rather than per reader through
+        :meth:`SourceAdapter._admit_record`. The arc store's four sources are
+        four readers of ONE ordered selection, and the cap belongs to the
+        selection so that all four see the same records -- which is exactly
+        the case :meth:`SourceAdapter._admit_record` documents as the
+        adapter's own responsibility to arrange.
+        """
+        context = self.run_context
+        if context is None:
+            return None
+        getter = getattr(context, "record_limit", None)
+        if not callable(getter):
+            return None
+        value = getter(self.source.name)
+        return None if value is None else int(value)
+
+    def _read_state(self) -> dict[str, Any]:
+        context = self.run_context
+        if context is None:
+            return {}
+        getter = getattr(context, "get_state", None)
+        if not callable(getter):
+            return {}
+        # The selection is shared by every source reading this store, so it
+        # is stored under the ADAPTER NAME rather than the source name --
+        # four sources, one frozen list.
+        return getter(self.adapter_name)
+
+    def _write_state(self, value: Mapping[str, Any]) -> None:
+        context = self.run_context
+        if context is None:
+            return
+        putter = getattr(context, "put_state", None)
+        if not callable(putter):
+            return
+        putter(self.adapter_name, dict(value))
+
+    def _tarball_selection(self) -> dict[str, str]:
+        """``{sha256: path}`` for every configured tarball NOT yet completed.
+
+        Completion is recorded BY DIGEST, not by path: a backup tarball can
+        be moved or renamed and is still the same archive, while a file at
+        the same path may have been replaced by a different one.
+        """
+        done = set(read_arc_checkpoint(self._checkpoint_key()).get("tarballs") or [])
+        selected: dict[str, str] = {}
+        for path in self._tarball_paths():
+            digest = _arc_file_sha256(path)
+            self._tarball_digests[str(path)] = digest
+            if digest not in done:
+                selected[digest] = str(path)
+        return selected
+
+    # -- the dependency index ------------------------------------------------
+
+    def _result_path(self, artifacts: Any) -> Path | None:
+        """The ``.json.gz`` a record's ``artifacts`` JSON points at."""
+        if isinstance(artifacts, str):
+            try:
+                artifacts = json.loads(artifacts)
+            except ValueError:
+                return None
+        if not isinstance(artifacts, Mapping):
+            return None
+        result = artifacts.get("result")
+        if not result or not isinstance(result, str):
+            return None
+        return Path(result).expanduser()
+
+    def _read_result(self, record: Mapping[str, Any]) -> Any | None:
+        """Read one record's gzipped job result, or ``None`` (counted).
+
+        Opened ``"rt"`` -- READ ONLY -- and a missing file is counted as
+        :data:`ARC_SKIP_RESULT_FILE_MISSING` and skipped. That is a
+        SOURCE-RECORD failure, not a per-row drop, and it is NOT retryable:
+        the file is absent from the pod's disk and will be absent next time
+        too.
+        """
+        path = self._result_path(record.get("artifacts"))
+        if path is None or not path.is_file():
+            self._skip(ARC_SKIP_RESULT_FILE_MISSING)
+            return None
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            self._skip(ARC_SKIP_RESULT_FILE_MISSING)
+            return None
+
+    def _build_index(self) -> dict[str, _ArcGenome]:
+        """Build the JOIN index from EVERY build record and EVERY ledger.
+
+        ``since`` IS DELIBERATELY IGNORED HERE. An incremental run has to join
+        a late annotation to a genome that was built months before the
+        window, so the index covers the whole store; which records are
+        EMITTED is the frozen selection's business and nothing in this method
+        touches it.
+
+        THE JOIN KEY IS ``fasta_object_id[:16]``, NEVER
+        ``BuiltGenomeEntry.prefix``. The build result's ``prefix`` is a CLASS
+        prefix -- ``'unk'``, ``'eco'`` -- shared by every genome of that
+        class, so using it as a join key would attribute one genome's
+        annotations to another's proteins. A ``CanonicalGenome``'s own
+        ``genome_id`` is ``fasta_object_id[:16]`` and its feature ids are
+        ``f"{genome_id}_{index}"`` (KBDLJobRunningPrototype
+        ``build_genome.py``), which is what this index is keyed on -- and the
+        key is only a FAST PATH: it decides which objects to download, and
+        :meth:`_load_objects` then checks it against each object's real
+        feature ids.
+        """
+        if self._index is not None:
+            return self._index
+        index: dict[str, _ArcGenome] = {}
+
+        with self._connect() as connection:
+            records = connection.execute(
+                f"SELECT record_id, run_uid, artifacts, created_at, updated_at "
+                f"FROM {ARC_RUNS_TABLE} WHERE kind = ? "
+                "ORDER BY created_at, record_id",
+                (ARC_BUILD_KIND,),
+            ).fetchall()
+        # Materialised as plain dicts: a ``sqlite3.Row`` is a sequence with
+        # keyed access but NO ``.get``, and every reader below treats a
+        # record as a Mapping.
+        for record in (dict(row) for row in records):
+            payload = self._read_result(record)
+            if not isinstance(payload, Mapping):
+                continue
+            genomes = payload.get("genomes")
+            if not isinstance(genomes, Mapping):
+                continue
+            for entry in genomes.values():
+                if not isinstance(entry, Mapping):
+                    continue
+                genome_object_id = entry.get("genome_object_id")
+                fasta_object_id = entry.get("fasta_object_id")
+                if not genome_object_id:
+                    continue
+                known = index.setdefault(
+                    str(genome_object_id),
+                    _ArcGenome(genome_object_id=str(genome_object_id)),
+                )
+                if fasta_object_id:
+                    known.fasta_object_id = str(fasta_object_id)
+                    self._fast_path.setdefault(
+                        str(fasta_object_id)[:16], str(genome_object_id)
+                    )
+                taxonomy = entry.get("taxonomy")
+                if isinstance(taxonomy, Mapping) and not known.taxonomy:
+                    known.taxonomy = dict(taxonomy)
+                known.note_created_at(record["created_at"])
+
+        self._index_ledgers(index)
+        self._index = index
+        return index
+
+    def _index_ledgers(self, index: dict[str, _ArcGenome]) -> None:
+        """Fold every configured tarball's ledgers into the index.
+
+        A ledger-only genome -- one the ledger names but no build record in
+        this store does -- is INDEXED and its proteins, genes and annotations
+        are emitted, because the genome object itself has every sequence they
+        need. Its ``genome`` row is a different matter: without a real
+        ``fasta_object_id`` there is no ``fasta_reference`` pointer to write,
+        and :meth:`_emit_genomes` skips it as
+        :data:`ARC_SKIP_FASTA_POINTER_MISSING` rather than inventing one.
+        """
+        for path in self._tarball_paths():
+            key = str(path)
+            self._ledger_genomes.setdefault(key, {})
+            self._ledger_entries.setdefault(key, {})
+            with tarfile.open(path, "r:gz") as archive:
+                for ledger_member, _annotation_dir in ARC_TARBALL_LEDGERS:
+                    ledger = _arc_read_member(archive, ledger_member)
+                    if not isinstance(ledger, Mapping):
+                        continue
+                    for ledger_key, entry in ledger.items():
+                        if not isinstance(entry, Mapping):
+                            continue
+                        genome_object_id = entry.get("genome_object_id")
+                        if not genome_object_id:
+                            continue
+                        self._ledger_genomes[key][str(ledger_key)] = str(
+                            genome_object_id
+                        )
+                        self._ledger_entries[key][str(ledger_key)] = dict(entry)
+                        known = index.setdefault(
+                            str(genome_object_id),
+                            _ArcGenome(genome_object_id=str(genome_object_id)),
+                        )
+                        taxonomy = entry.get("taxonomy")
+                        if isinstance(taxonomy, Mapping) and not known.taxonomy:
+                            known.taxonomy = dict(taxonomy)
+                        if known.created_at is None and _arc_is_iso_timestamp(
+                            entry.get("done_ts")
+                        ):
+                            known.note_created_at(str(entry["done_ts"]))
+
+    def _load_objects(self, object_ids: Sequence[str]) -> None:
+        """Download each needed genome object ONCE and index its features
+        EXACTLY.
+
+        This is where the fast path stops being trusted. Each downloaded
+        object's own ``features[].id`` values are indexed verbatim, and:
+
+        - a feature id claimed by TWO objects is
+          :class:`ArcFeatureIdConflictError` -- reported and REFUSED, never
+          resolved last-write-wins, because the id is the join key from an
+          annotation to its protein and guessing would attribute annotations
+          to the wrong organism's sequence;
+        - a ``fasta_object_id[:16]`` fast-path entry that does not match the
+          object's real feature ids is DISCARDED (counted as
+          :data:`ARC_SKIP_FASTA_PREFIX_MISMATCH`), so lookups fall through to
+          the exact index rather than following a key that happens to be
+          wrong for this genome.
+        """
+        index = self._build_index()
+        for object_id in object_ids:
+            genome = index.get(object_id)
+            if genome is None or genome.loaded:
+                continue
+            payload = self._fetch_object(object_id)
+            if payload is None:
+                continue
+            contigs = payload.get("contigs")
+            features = payload.get("features")
+            genome.contigs = [c for c in contigs if isinstance(c, Mapping)] if (
+                isinstance(contigs, list)
+            ) else []
+            genome.features = {}
+            if isinstance(features, list):
+                for feature in features:
+                    if not isinstance(feature, Mapping):
+                        continue
+                    feature_id = feature.get("id")
+                    if not feature_id:
+                        continue
+                    feature_id = str(feature_id)
+                    owner = self._feature_owner.get(feature_id)
+                    if owner is not None and owner != object_id:
+                        self._skip(ARC_SKIP_FEATURE_ID_CONFLICT)
+                        raise ArcFeatureIdConflictError(
+                            feature_id, owner, object_id
+                        )
+                    self._feature_owner[feature_id] = object_id
+                    genome.features[feature_id] = dict(feature)
+            taxonomy = payload.get("taxonomy")
+            if isinstance(taxonomy, Mapping) and not genome.taxonomy:
+                genome.taxonomy = dict(taxonomy)
+            genome.loaded = True
+            self._check_fast_path(genome)
+
+    def _check_fast_path(self, genome: _ArcGenome) -> None:
+        """Verify ``fasta_object_id[:16]`` against the object's feature ids."""
+        if not genome.fasta_object_id:
+            return
+        fast_key = genome.fasta_object_id[:16]
+        if self._fast_path.get(fast_key) != genome.genome_object_id:
+            return
+        if not genome.features:
+            return
+        if any(
+            feature_id.rsplit("_", 1)[0] == fast_key
+            for feature_id in genome.features
+        ):
+            return
+        del self._fast_path[fast_key]
+        self._skip(ARC_SKIP_FASTA_PREFIX_MISMATCH)
+
+    def _owner_of_feature(self, feature_id: str) -> str | None:
+        """The genome object id owning ``feature_id``: EXACT index first."""
+        owner = self._feature_owner.get(feature_id)
+        if owner is not None:
+            return owner
+        return self._fast_path.get(feature_id.rsplit("_", 1)[0])
+
+    # -- iteration ----------------------------------------------------------
+
+    def iter_records(self) -> Iterator[Mapping[str, Any]]:
+        """Yield this source's records for its ``emit`` shape.
+
+        The order of operations is the contract:
+
+        1. FREEZE THE SELECTION (before anything is read), so every source and
+           every resume emits from the same ordered record list.
+        2. BUILD THE INDEX from the whole store, ignoring ``since``, so joins
+           reach genomes outside the window.
+        3. DOWNLOAD only the objects the selection actually needs, once each.
+        4. EMIT, counting every unusable item by reason.
+        5. WRITE A CHECKPOINT CANDIDATE -- only if the read was uncapped,
+           reached exhaustion, and left no retryable failure. It is a
+           candidate and not a watermark: whether the rows landed is not
+           something this adapter can know (see
+           :func:`promote_arc_checkpoints`).
+        """
+        self._exhausted = False
+        emit = self._emit()
+        frozen = self._freeze_selection()
+        selected_ids = list(frozen.get(ARC_STATE_SELECTION) or [])
+        tarballs = dict(frozen.get(ARC_STATE_TARBALLS) or {})
+        if self._capped and tarballs:
+            # Said BEFORE any work, because it is counter-intuitive: a
+            # tarball is selected by digest, not by record, so an arc
+            # --limit does not reduce it. An operator sampling with --limit 1
+            # would otherwise be surprised by a full tarball's annotations.
+            self.log_note(
+                f"source {self.source.name!r}: arc --limit caps the SQLite "
+                f"record selection only; {len(tarballs)} not-yet-completed "
+                "tarball(s) are selected by digest and will be processed in "
+                "full."
+            )
+
+        self._build_index()
+        build_records, annotation_records = self._partition(selected_ids)
+        needed = self._needed_objects(
+            emit, build_records, annotation_records, tarballs
+        )
+        self._load_objects(sorted(needed))
+
+        if emit == "genome":
+            rows = self._emit_genomes(needed)
+        elif emit in ("protein", "gene"):
+            rows = self._emit_features(emit, needed)
+        else:
+            rows = self._emit_annotations(annotation_records, tarballs)
+
+        for row in rows:
+            yield row
+
+        self._record_outcome(frozen, tarballs)
+        # Reached only by running off the end of the selection. A capped
+        # selection is NOT exhaustion: the records beyond the cap were never
+        # offered, so the unit is `partial`, not `done`.
+        self._exhausted = not self._capped
+
+    def log_note(self, message: str) -> None:
+        """Report an operator-facing note. Overridden by nothing; kept small.
+
+        The adapter has no logger of its own (``SourceAdapter`` is driver- and
+        transport-free by design), so this is the one seam a caller can
+        patch to capture the note in a test, and it prints otherwise.
+        """
+        print(message)
+
+    def _partition(
+        self, selected_ids: Sequence[Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Fetch the selected records and split them by kind.
+
+        Read back BY RECORD ID from the frozen selection, in the selection's
+        own order, so the emission order is the frozen order and not whatever
+        a fresh ``ORDER BY`` would produce today.
+        """
+        if not selected_ids:
+            return ([], [])
+        with self._connect() as connection:
+            rows: dict[Any, dict[str, Any]] = {}
+            # Chunked so a large selection cannot exceed SQLite's variable
+            # limit (999 by default).
+            for start in range(0, len(selected_ids), 500):
+                chunk = list(selected_ids[start : start + 500])
+                placeholders = ", ".join("?" for _ in chunk)
+                for row in connection.execute(
+                    f"SELECT record_id, kind, run_uid, artifacts, created_at, "
+                    f"updated_at FROM {ARC_RUNS_TABLE} WHERE record_id IN "
+                    f"({placeholders})",
+                    chunk,
+                ).fetchall():
+                    rows[row["record_id"]] = dict(row)
+        builds: list[dict[str, Any]] = []
+        annotations: list[dict[str, Any]] = []
+        for record_id in selected_ids:
+            record = rows.get(record_id)
+            if record is None:
+                continue
+            self._note_watermark(record.get("updated_at"))
+            if record["kind"] == ARC_BUILD_KIND:
+                builds.append(record)
+            elif record["kind"] == ARC_ANNOTATION_KIND:
+                annotations.append(record)
+        return (builds, annotations)
+
+    def _needed_objects(
+        self,
+        emit: str,
+        build_records: Sequence[Mapping[str, Any]],
+        annotation_records: Sequence[Mapping[str, Any]],
+        tarballs: Mapping[str, str],
+    ) -> set[str]:
+        """Which genome objects this read needs -- and no more.
+
+        The selection's build records contribute their own genomes; the
+        selection's annotation records contribute, through the fast path, the
+        genomes their feature ids belong to; the selected tarballs contribute
+        their ledgers' genomes. Downloading the whole index instead would
+        fetch 235 genome objects to emit one record's rows.
+        """
+        needed: set[str] = set()
+        index = self._build_index()
+        for record in build_records:
+            payload = self._read_result(record)
+            if not isinstance(payload, Mapping):
+                continue
+            genomes = payload.get("genomes")
+            if not isinstance(genomes, Mapping):
+                continue
+            for entry in genomes.values():
+                if isinstance(entry, Mapping) and entry.get("genome_object_id"):
+                    needed.add(str(entry["genome_object_id"]))
+        for record in annotation_records:
+            payload = self._read_result(record)
+            if not isinstance(payload, Mapping):
+                continue
+            for feature_id in payload:
+                owner = self._fast_path.get(str(feature_id).rsplit("_", 1)[0])
+                if owner is not None:
+                    needed.add(owner)
+        for path in tarballs.values():
+            for genome_object_id in self._ledger_genomes.get(path, {}).values():
+                needed.add(genome_object_id)
+        return {object_id for object_id in needed if object_id in index}
+
+    # -- the four emit shapes ------------------------------------------------
+
+    def _emit_genomes(self, needed: set[str]) -> Iterator[Mapping[str, Any]]:
+        """One record per DISTINCT genome object.
+
+        ``created_at`` is the EARLIEST build record timestamp for the genome
+        (see :meth:`_ArcGenome.note_created_at`), so a rebuilt genome does
+        not appear to have come into existence on the day it was rebuilt;
+        for a ledger-only genome it is the ledger's ``done_ts``.
+
+        A genome with no real ``fasta_object_id`` is SKIPPED, not emitted
+        with an invented pointer: ``genome_content.fasta_reference`` is a
+        reference to a KBDL object, and a fabricated one is
+        indistinguishable in the lake from a real one.
+        """
+        index = self._build_index()
+        for object_id in sorted(needed):
+            genome = index[object_id]
+            if not genome.loaded:
+                # object-unavailable, counted ONCE PER OBJECT by
+                # _note_retryable. It cannot be counted per lost ROW: how
+                # many genome/protein/gene rows the object would have
+                # produced is a property of bytes that could not be fetched.
+                # The retry list names the object, which is what a resume
+                # needs.
+                continue
+            if not genome.fasta_object_id:
+                self._skip(ARC_SKIP_FASTA_POINTER_MISSING)
+                continue
+            sequences = [
+                str(contig.get("sequence"))
+                for contig in genome.contigs
+                if contig.get("sequence") is not None
+            ]
+            yield {
+                "genome_object_id": object_id,
+                "contig_sequences": sequences,
+                "fasta_object_id": genome.fasta_object_id,
+                "ncbi_taxid": genome.ncbi_taxid,
+                "n_contigs": len(sequences),
+                "total_length": sum(len(sequence) for sequence in sequences),
+                "created_at": genome.created_at or self._run_start,
+            }
+
+    def _emit_features(
+        self, emit: str, needed: set[str]
+    ) -> Iterator[Mapping[str, Any]]:
+        """One record per FEATURE of each needed genome object.
+
+        ``protein`` carries only ``protein_translation``; ``gene`` carries
+        ``dna_sequence`` as well as the translation, because
+        ``gene_content.protein_entity_hash`` is derived from the protein
+        sequence and the gene row has to carry it to compute the link.
+
+        A feature missing the sequence its emit needs is skipped as
+        :data:`ARC_SKIP_FEATURE_NOT_IN_GENOME`: ``dna_sequence`` and
+        ``protein_translation`` are REQUIRED on every ``CanonicalGenome``
+        feature, so an absent one is a malformed object, and a row hashed
+        from ``None`` would be a protein that is not a protein.
+        """
+        index = self._build_index()
+        wanted = "dna_sequence" if emit == "gene" else "protein_translation"
+        for object_id in sorted(needed):
+            genome = index[object_id]
+            if not genome.loaded:
+                continue
+            created_at = genome.created_at or self._run_start
+            for feature_id in sorted(genome.features):
+                feature = genome.features[feature_id]
+                translation = feature.get("protein_translation")
+                if feature.get(wanted) is None or translation is None:
+                    self._skip(ARC_SKIP_FEATURE_NOT_IN_GENOME)
+                    continue
+                row: dict[str, Any] = {
+                    "feature_id": feature_id,
+                    "genome_object_id": object_id,
+                    "protein_translation": str(translation),
+                    "created_at": created_at,
+                }
+                if emit == "gene":
+                    row["dna_sequence"] = str(feature["dna_sequence"])
+                yield row
+
+    def _emit_annotations(
+        self,
+        annotation_records: Sequence[Mapping[str, Any]],
+        tarballs: Mapping[str, str],
+    ) -> Iterator[Mapping[str, Any]]:
+        """One record per ``(feature, tool)`` pair with a NON-EMPTY ontology
+        map.
+
+        Both annotation shapes are the same three-level mapping -- ``{feature:
+        {TOOL: {ONTOLOGY: [term, ...]}}}`` -- so one emitter serves the
+        gzipped job results and the tarball members. A feature whose map is
+        ``{}`` is UNANNOTATED and produces nothing (not a skip: there is
+        nothing there to lose), and a tool whose ontology map is empty is
+        likewise passed over.
+        """
+        for record in annotation_records:
+            payload = self._read_result(record)
+            if not isinstance(payload, Mapping):
+                continue
+            yield from self._annotation_rows(
+                payload,
+                kbdl_job_id=str(record.get("run_uid") or ""),
+                created_at=str(record.get("created_at") or self._run_start),
+            )
+        for digest, path in sorted(tarballs.items()):
+            yield from self._tarball_annotation_rows(Path(path))
+
+    def _tarball_annotation_rows(
+        self, path: Path
+    ) -> Iterator[Mapping[str, Any]]:
+        """Stream one tarball's annotation members, matched to its ledgers.
+
+        ONLY the ledger's own keys are opened, and only under the two
+        directories :data:`ARC_TARBALL_LEDGERS` names
+        (``data/annotations/<key>.json`` and
+        ``data/annotations_pmi/<key>.json``), resolved with
+        ``tarfile.getmember`` -- so no member path from the archive is ever
+        joined to a filesystem path and nothing is extracted. A tarball is
+        untrusted input and this is the whole of the trust placed in it.
+
+        ``created_at`` is the ledger's ``done_ts`` when that is a usable
+        timestamp, and the RUN START otherwise -- counted as
+        :data:`ARC_SKIP_TIMESTAMP_FALLBACK`, so a fallback is visible in the
+        inventory instead of looking like the archive's own time.
+        """
+        key = str(path)
+        with tarfile.open(path, "r:gz") as archive:
+            for ledger_member, annotation_dir in ARC_TARBALL_LEDGERS:
+                ledger = _arc_read_member(archive, ledger_member)
+                if not isinstance(ledger, Mapping):
+                    continue
+                for ledger_key in sorted(ledger):
+                    entry = ledger.get(ledger_key)
+                    if not isinstance(entry, Mapping):
+                        continue
+                    payload = _arc_read_member(
+                        archive, f"{annotation_dir}/{ledger_key}.json"
+                    )
+                    if not isinstance(payload, Mapping):
+                        continue
+                    done_ts = entry.get("done_ts")
+                    if _arc_is_iso_timestamp(done_ts):
+                        created_at = str(done_ts)
+                    else:
+                        created_at = self._run_start
+                        self._skip(ARC_SKIP_TIMESTAMP_FALLBACK)
+                    yield from self._annotation_rows(
+                        payload,
+                        kbdl_job_id=str(entry.get("ann_job_id") or ""),
+                        created_at=created_at,
+                        genome_object_id=self._ledger_genomes.get(key, {}).get(
+                            str(ledger_key)
+                        ),
+                    )
+
+    def _annotation_rows(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        kbdl_job_id: str,
+        created_at: str,
+        genome_object_id: str | None = None,
+    ) -> Iterator[Mapping[str, Any]]:
+        """Turn one ``{feature: {TOOL: {ONTOLOGY: [term]}}}`` map into rows.
+
+        One row per ``(feature, tool)`` with a non-empty ontology map. Each
+        row carries the protein sequence its annotation belongs to, looked up
+        through the EXACT feature index built from the downloaded objects
+        (``genome_object_id``, when the caller knows it from a ledger, is the
+        fallback for a feature whose prefix does not resolve).
+
+        TRANSYT IS THE ONE TOOL WITH A PARAMETER SET. A TRANSYT result is
+        computed against one NCBI taxonomy, so the taxonomy id is not a
+        tuning knob but part of what the result MEANS -- there is no such
+        thing as a default TRANSYT run. This emitter therefore:
+
+        - skips a TRANSYT row whose genome has no ``ncbi_taxid`` at all,
+          counted as :data:`ARC_SKIP_TRANSYT_WITHOUT_TAXONOMY`;
+        - builds ``{"taxonomy_id": "<decimal string>"}`` otherwise and passes
+          it to lake-5's SHARED TRANSYT validator
+          (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) --
+          called, never restated -- so a taxonomy id that is not a decimal
+          id with no leading zeros is skipped and counted as
+          :data:`ARC_SKIP_TRANSYT_INVALID` rather than loaded;
+        - yields ``{}`` for every other tool, the default run.
+
+        The row also carries a ready ``source_label`` (``"<tool>/<version>"``,
+        lowercased tool, version from the preset's
+        ``[backfill.tool_versions]``), because ``source`` is the permanent
+        partition column on ``protein_result`` and resolving the version in
+        one place is what stops two of the four sources spelling one tool
+        two ways.
+        """
+        index = self._build_index()
+        for feature_id, tools in payload.items():
+            if not isinstance(tools, Mapping) or not tools:
+                continue
+            feature_id = str(feature_id)
+            owner = self._owner_of_feature(feature_id) or genome_object_id
+            if owner is None:
+                self._skip(ARC_SKIP_NO_GENOME_FOR_PREFIX, len(tools))
+                continue
+            genome = index.get(owner)
+            if genome is None or not genome.loaded:
+                self._skip(ARC_SKIP_OBJECT_UNAVAILABLE, len(tools))
+                continue
+            feature = genome.features.get(feature_id)
+            translation = feature.get("protein_translation") if feature else None
+            if translation is None:
+                self._skip(ARC_SKIP_FEATURE_NOT_IN_GENOME, len(tools))
+                continue
+            taxid = genome.ncbi_taxid
+            for tool, ontologies in tools.items():
+                if not isinstance(ontologies, Mapping) or not ontologies:
+                    continue
+                tool = str(tool)
+                source_label = (
+                    f"{tool.lower()}/{self.tool_version(tool)}"
+                )
+                is_transyt = (
+                    cp.tool_of_source(source_label) in cp.TRANSYT_TOOLS
+                )
+                if is_transyt and taxid is None:
+                    self._skip(ARC_SKIP_TRANSYT_WITHOUT_TAXONOMY)
+                    continue
+                parameter_set: dict[str, Any] = (
+                    {cp.TRANSYT_TAXONOMY_ID_KEY: taxid} if is_transyt else {}
+                )
+                if is_transyt:
+                    try:
+                        cp.validate_transyt_parameter_set(
+                            parameter_set,
+                            source=source_label,
+                            where=f"arc adapter feature {feature_id!r}",
+                        )
+                    except ParameterSetError:
+                        self._skip(ARC_SKIP_TRANSYT_INVALID)
+                        continue
+                yield {
+                    "feature_id": feature_id,
+                    "genome_object_id": owner,
+                    "protein_translation": str(translation),
+                    "tool": tool,
+                    "source_label": source_label,
+                    "terms": {
+                        str(ontology): terms
+                        for ontology, terms in ontologies.items()
+                    },
+                    "kbdl_job_id": kbdl_job_id,
+                    "ncbi_taxid": taxid,
+                    "parameter_set": parameter_set,
+                    "created_at": created_at,
+                }
+
+    # -- the watermark checkpoint -------------------------------------------
+
+    def _record_outcome(
+        self, frozen: Mapping[str, Any], tarballs: Mapping[str, str]
+    ) -> None:
+        """Persist what this read did, and a checkpoint CANDIDATE if earned.
+
+        THREE CONDITIONS, all required, before a candidate is written at all:
+
+        1. UNCAPPED. A ``--limit`` run read a sample, so its ``upper_bound``
+           is a time it did NOT cover.
+        2. EXHAUSTED -- the selection was walked to the end.
+        3. NO RETRYABLE FAILURE. An object the run could not fetch means
+           records are missing from the window the watermark would claim; a
+           later run starting from it would never come back for them.
+
+        And even then it is a CANDIDATE. Whether the rows reached the lake is
+        not knowable here, so the promotion to a real watermark belongs to
+        the driver, after verification (:func:`promote_arc_checkpoints`).
+        """
+        state = dict(frozen)
+        state[ARC_STATE_RETRY] = list(self._retry)
+        state[ARC_STATE_INCOMPLETE] = bool(self._retry)
+        self._write_state(state)
+
+        if self._capped or self._retry:
+            return
+        key = self._checkpoint_key()
+        previous = read_arc_checkpoint(key)
+        completed = sorted(
+            {*(previous.get("tarballs") or []), *tarballs.keys()}
+        )
+        directory = arc_checkpoint_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            ARC_STATE_UPPER_BOUND: frozen.get(ARC_STATE_UPPER_BOUND),
+            "tarballs": completed,
+            "written_at": _iso_z(utc_now()),
+            # The key's components, stored so a checkpoint is diagnosable
+            # without reversing the hash that names it.
+            "key": {
+                "tenant": str(getattr(self.run_context, "tenant", "") or ""),
+                "dataset": str(getattr(self.run_context, "dataset", "") or ""),
+                "db_path": str(self._db_path().resolve()),
+                "base_url": self._base_url(),
+                "principal": self._principal(),
+            },
+            "source": self.source.name,
+        }
+        candidate = arc_checkpoint_path(key, candidate=True)
+        tmp = candidate.with_name(f".{candidate.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp, candidate)
+
+
+def _arc_file_sha256(path: Path) -> str:
+    """The sha256 of a file, read in bounded chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _arc_read_member(archive: Any, member_name: str) -> Any | None:
+    """Read and JSON-parse ONE named member of an open tarball, or ``None``.
+
+    ``getmember`` by exact name and ``extractfile`` to a stream: NOTHING IS
+    EXTRACTED TO DISK, and no member path from the archive is ever joined to
+    a filesystem path. That is the point -- a tarball is untrusted input, and
+    a member named ``../../etc/x`` or an absolute path is how extraction
+    becomes an arbitrary file write. A member that is absent, is not a
+    regular file, or does not parse reads as ``None``.
+    """
+    try:
+        member = archive.getmember(member_name)
+    except KeyError:
+        return None
+    if not member.isfile():
+        return None
+    handle = archive.extractfile(member)
+    if handle is None:  # pragma: no cover - isfile() already excludes this
+        return None
+    with handle:
+        try:
+            return json.loads(handle.read().decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+
+#: Concrete adapter classes, by name. All four planned adapters are now built:
+#: ``file`` (CPU/disk only), ``lakehouse`` (in-pod / off-pod read), ``mongo``
+#: (a batched collection read) and ``arc`` (Chris's KOROS arc store on the
+#: BERDL pod -- a read-only sqlite index, gzipped job results, optional backup
+#: tarballs, joined to genome objects pulled from KBDL). :func:`get_adapter`
+#: no longer reports any planned name as unbuilt.
+_ADAPTER_CLASSES: dict[str, type[SourceAdapter]] = {
+    "file": FileSourceAdapter,
+    "lakehouse": LakehouseSourceAdapter,
+    "mongo": MongoSourceAdapter,
+    "arc": ArcSourceAdapter,
+}
+
+
 def get_adapter(
     source: cm.Source,
     *,
     run_context: Any = None,
     unit: str | None = None,
+    backfill: cm.BackfillInfo | None = None,
 ) -> SourceAdapter:
     """Construct the adapter a source's ``adapter`` key names.
 
@@ -1399,13 +3178,16 @@ def get_adapter(
             ``kbu clearinghouse shard``.
         unit: A unit label to restrict the read to (see
             :meth:`SourceAdapter.restrict_to_unit`), or ``None``.
+        backfill: The manifest's ``[backfill]`` table to bind (see
+            :meth:`SourceAdapter.bind_backfill_info`), or ``None``.
 
     Raises:
         cm.ManifestError: The ``adapter`` name is not one of
             :data:`ADAPTER_NAMES` at all.
         AdapterNotImplementedError: The name is in :data:`ADAPTER_NAMES` but
-            maps to no registered class. With ``file``, ``lakehouse`` and
-            ``mongo`` all built, this no longer fires for any planned name.
+            maps to no registered class. With ``file``, ``lakehouse``,
+            ``mongo`` and ``arc`` all built, this no longer fires for any
+            planned name.
         ManifestSourceError: ``unit`` names a unit this adapter does not
             decompose into.
     """
@@ -1424,6 +3206,8 @@ def get_adapter(
     adapter = cls(source)
     if run_context is not None:
         adapter.bind_run_context(run_context)
+    if backfill is not None:
+        adapter.bind_backfill_info(backfill)
     if unit is not None:
         adapter.restrict_to_unit(unit)
     return adapter
@@ -1459,6 +3243,14 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
     if name == "lower":
         value = row.get(args[0])
         return None if value is None else str(value).lower()
+    if name == "prefix":
+        text, column = args
+        value = row.get(column)
+        # NULL IN, NULL OUT. A prefixed null would become the literal
+        # pointer "kbdl:obj:None" -- a reference to an object that does not
+        # exist, and indistinguishable in the lake from a real one. A missing
+        # pointer stays missing.
+        return None if value is None else f"{text}{value}"
     if name == "const":
         return args[0]
     if name == "hash":
@@ -1479,7 +3271,17 @@ def _compute_entity_hash(plan: cm.TablePlan, row: Mapping[str, Any]) -> str:
     ``raw`` mode hashes the raw column value through
     :func:`standardizers.entity_hash`; ``precomputed`` mode RE-CANONICALISES
     the source's digest through :func:`schema.encode_entity_hash` and never
-    trusts it raw. Either way the result is the 64-char lowercase hex form.
+    trusts it raw; ``contig_set`` mode (genome only) hashes the column's LIST
+    of contig sequences through the same standardizer. Either way the result
+    is the 64-char lowercase hex form.
+
+    ``contig_set`` IS WHERE THE LIST-NESS IS ENFORCED, and it refuses a
+    ``str`` explicitly. ``entity_hash("genome", "ACGT")`` does not raise -- the
+    genome standardizer iterates its argument, so a string is hashed as the
+    SET OF ITS CHARACTERS and yields a confident, wrong, reproducible digest.
+    That is the one failure mode this mode exists to prevent, so a non-list
+    is a :class:`ShardValueError` for that row (counted like any other
+    unmappable record) rather than a hash nobody can explain.
     """
     mode, column, entity_type = plan.hash_source
     value = row.get(column)
@@ -1491,12 +3293,45 @@ def _compute_entity_hash(plan: cm.TablePlan, row: Mapping[str, Any]) -> str:
         )
     if mode == "raw":
         return standardizers.entity_hash(entity_type, value)
+    if mode == "contig_set":
+        if isinstance(value, tuple):
+            value = list(value)
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ShardValueError(
+                f"source {plan.source_name!r} table {plan.table!r}: "
+                f"[source.hash].contig_set column {column!r} must hold a LIST "
+                f"of contig sequence STRINGS, got {type(value).__name__}. A "
+                "bare string is refused rather than hashed: the genome "
+                "standardizer iterates its argument, so a string would be "
+                "hashed as the set of its characters and produce a confident "
+                "wrong digest."
+            )
+        return standardizers.entity_hash(entity_type, value)
     # precomputed: re-canonicalise, never trust raw.
     return schema.encode_entity_hash(str(value))
 
 
 class ShardValueError(ValueError):
     """A source record could not be mapped to a target row (e.g. null hash)."""
+
+
+class ShardParameterSetError(ShardValueError):
+    """A result row's PER-ROW parameter set was refused.
+
+    A subclass of :class:`ShardValueError` so the sharder's existing
+    one-record-skip handling applies unchanged, but a distinct type so the
+    skip is counted under its own reason
+    (:data:`SKIP_PARAMETER_SET`) instead of the generic
+    ``shard-value-error``: "forty rows carried an unusable parameter set" and
+    "forty rows had no hashable value" are different operational problems,
+    and a run inventory that merged them would name neither.
+
+    Raised only for the ``parameter_set_column`` form. The static form is
+    validated once at plan time, where a failure is a
+    :class:`~clearinghouse_manifest.ManifestError` and the run never starts.
+    """
 
 
 class ShardRegistryError(RuntimeError):
@@ -1515,6 +3350,19 @@ class ShardRegistryError(RuntimeError):
 #: run's inventory.
 SKIP_NULL_OBSERVED_AT = "null-observed_at"
 SKIP_SHARD_VALUE_ERROR = "shard-value-error"
+
+#: A result row whose PER-ROW parameter set (``parameter_set_column``) was not
+#: a mapping, carried a float/``None``/bad key, or failed the tool-specific
+#: boundary rule. Counted separately from
+#: :data:`SKIP_SHARD_VALUE_ERROR` -- see :class:`ShardParameterSetError`.
+SKIP_PARAMETER_SET = "parameter-set-invalid"
+
+#: The ``source`` recorded on a registry batch holding PER-ROW parameter sets.
+#: A single label rather than one source name: a unit's per-row sets are
+#: merged across every source that declared ``parameter_set_column`` (two
+#: sources yielding the same set must produce ONE registry row, not two), so
+#: no single source name is the truthful answer.
+_PER_ROW_REGISTRY_SOURCE = "parameter_set_column"
 
 
 # --------------------------------------------------------------------------
@@ -1684,11 +3532,62 @@ def _observed_micros(value: Any) -> int:
     return int(moment.timestamp() * 1_000_000)
 
 
+def _row_parameter_set(
+    plan: cm.TablePlan,
+    row: Mapping[str, Any],
+    *,
+    source_value: Any,
+    collector: dict[str, str] | None,
+) -> str:
+    """Canonicalise and hash ONE row's own parameter set; record it for the
+    registry.
+
+    The per-row counterpart of
+    :func:`clearinghouse_manifest._plan_parameter_set`, and deliberately a
+    call INTO the same shared function
+    (:func:`clearinghouse_parameters.result_parameter_set_identity`) rather
+    than a second implementation: a second answer to "what is this parameter
+    set" is the one thing the registry exists to prevent, and the test that
+    an equal static and per-row set produce the same canonical text and hash
+    is only meaningful because both go through this one rule.
+
+    Returns:
+        The row's 64-char lowercase hex ``parameter_set_hash``.
+
+    Raises:
+        ShardParameterSetError: The value is absent, is not a mapping, or
+            either validation layer refused it. ONE row is lost, counted
+            under :data:`SKIP_PARAMETER_SET`.
+    """
+    column = plan.parameter_set_column
+    where = (
+        f"source {plan.source_name!r} [source.result]."
+        f"{cm.PARAMETER_SET_COLUMN_KEY} {column!r}"
+    )
+    if column not in row:
+        raise ShardParameterSetError(
+            f"{where}: the record carries no such column. The source declared "
+            "its parameter set comes from this column, so a record without it "
+            "has no parameter set and cannot be keyed."
+        )
+    params = row[column]
+    try:
+        canonical, digest = cp.result_parameter_set_identity(
+            params, source=source_value, where=where
+        )
+    except ParameterSetError as exc:
+        raise ShardParameterSetError(str(exc)) from exc
+    if collector is not None:
+        collector.setdefault(digest, canonical)
+    return digest
+
+
 def _build_row(
     plan: cm.TablePlan,
     row: Mapping[str, Any],
     *,
     run_observed_at: datetime,
+    parameter_sets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build one bronze output row from a source record for a target table.
 
@@ -1707,13 +3606,30 @@ def _build_row(
     ``observed_at`` is one of the two columns the current-state derivation
     orders by, so every row in the corpus tied on it.
 
-    On a ``result`` row it also stamps ``parameter_set_hash`` from the plan --
-    the hash the plan computed ONCE at plan time, not re-derived per row. When
-    the plan's result ``source`` is a derivation rather than a
-    ``@const(...)``, the tool was unknown at plan time, so the shared TRANSYT
-    result-boundary validator
-    (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) runs
-    HERE, against this row's resolved ``source``.
+    On a ``result`` row it also stamps ``parameter_set_hash``, from ONE of two
+    places depending on which form the source declared:
+
+    - STATIC ``parameter_set``: the hash the plan computed ONCE at plan time,
+      not re-derived per row. When the plan's result ``source`` is a
+      derivation rather than a ``@const(...)``, the tool was unknown at plan
+      time, so the shared TRANSYT result-boundary validator
+      (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) runs
+      HERE, against this row's resolved ``source``.
+    - PER-ROW ``parameter_set_column``: the row's OWN set, canonicalised and
+      hashed here through
+      :func:`clearinghouse_parameters.result_parameter_set_identity` -- the
+      same function the static form uses at plan time, which is what makes
+      the two forms produce byte-identical canonical text and an identical
+      hash for an equal set. Both layers (the generic parameter-set rule and
+      the tool-specific TRANSYT rule) run, against this row's resolved
+      ``source``, and a refusal is a :class:`ShardParameterSetError` that
+      skips THIS ROW rather than failing the run.
+
+    ``parameter_sets`` is the per-row form's only other output: the sharder
+    must register every DISTINCT set it saw, and the canonical text that
+    explains a hash is produced here and nowhere else. It is a
+    ``{hash: canonical_json}`` collector the caller owns; ``None`` when the
+    caller does not need it (a direct ``_build_row`` call in a test).
     """
     out: dict[str, Any] = {}
     for column, derivation in plan.columns.items():
@@ -1723,16 +3639,21 @@ def _build_row(
     if plan.kind in ("entity", "result"):
         out["entity_type"] = plan.entity_type
     if plan.kind == "result":
-        out["parameter_set_hash"] = plan.parameter_set_hash
-        if cm.constant_result_source(plan.columns) is None:
-            cp.validate_transyt_parameter_set(
-                plan.parameter_set or {},
-                source=out.get("source"),
-                where=(
-                    f"source {plan.source_name!r} [source.result]"
-                    ".parameter_set"
-                ),
+        if plan.parameter_set_column is not None:
+            out["parameter_set_hash"] = _row_parameter_set(
+                plan, row, source_value=out.get("source"), collector=parameter_sets
             )
+        else:
+            out["parameter_set_hash"] = plan.parameter_set_hash
+            if cm.constant_result_source(plan.columns) is None:
+                cp.validate_transyt_parameter_set(
+                    plan.parameter_set or {},
+                    source=out.get("source"),
+                    where=(
+                        f"source {plan.source_name!r} [source.result]"
+                        ".parameter_set"
+                    ),
+                )
     if plan.observed_at_column is None:
         out["observed_at"] = run_observed_at
     else:
@@ -1902,6 +3823,12 @@ class SourceOutcome:
     emitted: int
     accepted: int
     exhausted: bool | None
+    #: The adapter's :meth:`SourceAdapter.watermark`, or ``None``. Recorded
+    #: so a run says what window it covered, NOT as a completion claim.
+    watermark: str | None = None
+    #: The adapter's :meth:`SourceAdapter.incomplete_reasons`. A non-empty
+    #: tuple makes the unit ``incomplete`` even when every batch verified.
+    incomplete_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2325,6 +4252,14 @@ class TableOutcome:
     skips: list[SkipReport] = field(default_factory=list)
     sources: list[SourceOutcome] = field(default_factory=list)
     parameter_set_hashes: set[str] = field(default_factory=set)
+    #: ``{parameter_set_hash: canonical_json}`` for every PER-ROW parameter
+    #: set this table's rows carried (see
+    #: :data:`~clearinghouse_manifest.PARAMETER_SET_COLUMN_KEY`). Empty for a
+    #: static ``parameter_set``, whose single row the plan already explains.
+    #: ``shard_manifest`` turns these into registry rows -- one per DISTINCT
+    #: set -- after the tables are sharded, because a per-row set is not
+    #: knowable until the records have been read.
+    parameter_sets: dict[str, str] = field(default_factory=dict)
 
 
 def shard_table(
@@ -2418,14 +4353,18 @@ def shard_table(
                 emitted += 1
                 try:
                     out_row = _build_row(
-                        plan, record, run_observed_at=context.observed_at
+                        plan,
+                        record,
+                        run_observed_at=context.observed_at,
+                        parameter_sets=outcome.parameter_sets,
                     )
                 except ShardValueError as exc:
-                    reason = (
-                        SKIP_NULL_OBSERVED_AT
-                        if "observed_at" in str(exc)
-                        else SKIP_SHARD_VALUE_ERROR
-                    )
+                    if isinstance(exc, ShardParameterSetError):
+                        reason = SKIP_PARAMETER_SET
+                    elif "observed_at" in str(exc):
+                        reason = SKIP_NULL_OBSERVED_AT
+                    else:
+                        reason = SKIP_SHARD_VALUE_ERROR
                     key = (plan.source_name, reason)
                     skip_counts[key] = skip_counts.get(key, 0) + 1
                     continue
@@ -2459,6 +4398,8 @@ def shard_table(
                     emitted=emitted,
                     accepted=accepted,
                     exhausted=adapter.exhausted(),
+                    watermark=adapter.watermark(),
+                    incomplete_reasons=tuple(adapter.incomplete_reasons()),
                 )
             )
             if metrics is not None:
@@ -2847,11 +4788,28 @@ def write_parameter_set_registry_shard(
             "observed_at": context.observed_at,
             _ROW_SOURCE_KEY: plan.source_name,
         }
+    return _write_registry_batch(rows_by_hash, out_root, context=context)
+
+
+def _write_registry_batch(
+    rows_by_hash: Mapping[str, dict[str, Any]],
+    out_root: str | Path,
+    *,
+    context: ShardRunContext,
+) -> ShardReport | None:
+    """Write one registry batch from ready rows, or ``None`` when there are
+    none.
+
+    The shared tail of both registry writers -- the plan-time one
+    (:func:`write_parameter_set_registry_shard`) and the per-row one
+    (:func:`write_discovered_parameter_set_shard`) -- so the registry's key
+    column, sort order, column list and disjointness assertion have exactly
+    one implementation regardless of where the rows came from.
+    """
     if not rows_by_hash:
         return None
-
     spec = _key_spec(None, "registry")
-    rows = [rows_by_hash[key] for key in sorted(rows_by_hash)]
+    rows = [dict(rows_by_hash[key]) for key in sorted(rows_by_hash)]
     sources = {row.pop(_ROW_SOURCE_KEY) for row in rows}
     table_dir = Path(out_root) / schema.PARAMETER_SET_TABLE
     table_dir.mkdir(parents=True, exist_ok=True)
@@ -2867,6 +4825,57 @@ def write_parameter_set_registry_shard(
     )
     _assert_sorted_and_disjoint([report], schema.PARAMETER_SET_TABLE, spec.key_column)
     return report
+
+
+def write_discovered_parameter_set_shard(
+    discovered: Mapping[str, str],
+    out_root: str | Path,
+    *,
+    context: ShardRunContext,
+    already_known: set[str],
+    source_name: str,
+) -> ShardReport | None:
+    """Write the registry batch for PER-ROW parameter sets, or ``None``.
+
+    One row per DISTINCT set the unit's records carried -- exactly what
+    :func:`write_parameter_set_registry_shard` does for the static form, but
+    necessarily AFTER the result tables are sharded rather than before,
+    because a per-row set does not exist until its record has been read. An
+    arc annotation source feeding two TRANSYT taxa and four other tools
+    therefore registers three sets: one per taxon, plus the ``{}`` the other
+    four share.
+
+    WRITING IT SECOND DOES NOT LOAD IT SECOND, which is the only thing the
+    ordering rule actually requires. The ingest side discovers tables from
+    the output directory and puts
+    :data:`~clearinghouse_schema.PARAMETER_SET_TABLE` FIRST unconditionally
+    (``clearinghouse_backfill._target_tables``), so a registry batch written
+    last is still ingested before any ``<type>_result`` batch. The orphan
+    check in :func:`shard_manifest` then runs after this call, so a result
+    row whose hash reached neither registry batch still fails the unit before
+    it is published.
+
+    Args:
+        discovered: ``{parameter_set_hash: canonical_json}``, as collected by
+            :func:`_row_parameter_set` during sharding.
+        out_root: The bronze output root.
+        context: Run/unit identity and the run ``observed_at``.
+        already_known: Hashes an earlier unit -- or this unit's plan-time
+            batch -- already registered. Never re-emitted: registry batches
+            are immutable and the earlier row already explains the hash.
+        source_name: Recorded as the batch's contributing source.
+    """
+    rows_by_hash = {
+        digest: {
+            "parameter_set_hash": digest,
+            "canonical_json": canonical,
+            "observed_at": context.observed_at,
+            _ROW_SOURCE_KEY: source_name,
+        }
+        for digest, canonical in sorted(discovered.items())
+        if digest not in already_known
+    }
+    return _write_registry_batch(rows_by_hash, out_root, context=context)
 
 
 # --------------------------------------------------------------------------
@@ -3006,6 +5015,8 @@ def publish_unit(
                 "emitted": outcome.emitted,
                 "accepted": outcome.accepted,
                 "exhausted": outcome.exhausted,
+                "watermark": outcome.watermark,
+                "incomplete_reasons": list(outcome.incomplete_reasons),
                 "unit_id": context.unit_id,
             }
             for outcome in sources
@@ -3150,6 +5161,16 @@ def shard_manifest(
     loadable before the registry row explaining its hash. A unit that
     discovers no new set writes no registry batch.
 
+    A SOURCE DECLARING ``parameter_set_column`` ADDS A SECOND REGISTRY BATCH,
+    necessarily written AFTER its result tables: a per-row parameter set does
+    not exist until the record carrying it has been read, so there is nothing
+    to register before the read. It is ordered FIRST in the returned reports
+    all the same, and the ingest side puts the registry table first
+    unconditionally, so "the registry loads before the results" still holds
+    (see :func:`write_discovered_parameter_set_shard`). The orphan check below
+    runs after BOTH batches and is what makes the claim checked rather than
+    assumed.
+
     THE UNIT IS THEN PUBLISHED to ``<out_root>/run.json`` atomically, as one
     append (see :func:`publish_unit`). Nothing is published if anything raised.
 
@@ -3212,14 +5233,40 @@ def shard_manifest(
     skips: list[SkipReport] = []
     sources: list[SourceOutcome] = []
     used_parameter_sets: set[str] = set()
+    discovered: dict[str, str] = {}
+    table_reports: list[ShardReport] = []
     for table, work in _group_plans_by_table(
         manifest, plans, run_context=run_context, adapter_unit=adapter_unit
     ):
         outcome = shard_table(work, out_root, context=context)
-        reports.extend(outcome.reports)
+        table_reports.extend(outcome.reports)
         skips.extend(outcome.skips)
         sources.extend(outcome.sources)
         used_parameter_sets |= outcome.parameter_set_hashes
+        for digest, canonical in outcome.parameter_sets.items():
+            discovered.setdefault(digest, canonical)
+
+    # The PER-ROW registry batch, for sets that did not exist at plan time
+    # (parameter_set_column). Written after the tables but ordered FIRST in
+    # the reports, so run.json lists the registry ahead of the result batches
+    # it explains -- and ingested first regardless, because the ingest side
+    # puts the registry table first unconditionally.
+    if discovered:
+        per_row = write_discovered_parameter_set_shard(
+            discovered,
+            out_root,
+            context=context,
+            already_known=registered,
+            source_name=_PER_ROW_REGISTRY_SOURCE,
+        )
+        if per_row is not None:
+            reports.append(per_row)
+            registered.update(
+                pq.read_table(str(per_row.path), columns=["parameter_set_hash"])
+                .column("parameter_set_hash")
+                .to_pylist()
+            )
+    reports.extend(table_reports)
 
     orphans = sorted(used_parameter_sets - registered)
     if orphans:
@@ -3261,7 +5308,12 @@ def _group_plans_by_table(
     order: list[str] = []
     for plan in plans:
         source = _source_for_plan(manifest, plan)
-        adapter = get_adapter(source, run_context=run_context, unit=adapter_unit)
+        adapter = get_adapter(
+            source,
+            run_context=run_context,
+            unit=adapter_unit,
+            backfill=manifest.backfill,
+        )
         if plan.table not in grouped:
             grouped[plan.table] = []
             order.append(plan.table)

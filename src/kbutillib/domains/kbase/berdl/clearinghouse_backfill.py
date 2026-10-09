@@ -971,13 +971,21 @@ def unit_outcome(
     1. A verification discrepancy is ``incomplete``, whatever else is true. A
        unit whose rows cannot be proven to have landed is not finished, and
        ``--limit`` does not excuse it.
-    2. Otherwise, EXHAUSTION decides. Every source outcome in the unit's own
+    2. An adapter-reported RETRYABLE FAILURE is ``incomplete`` next, and this
+       is the case neither of the other signals can express. An adapter that
+       walked its whole selection but could not fetch three of the genome
+       objects it needed is ``exhausted`` (its loop ran off the end) and
+       every batch it wrote verifies -- so by rules 1 and 3 the unit is
+       ``done``, and it is not: three records are missing and a retry would
+       get them. See
+       :meth:`clearinghouse_shard.SourceAdapter.incomplete_reasons`.
+    3. Otherwise, EXHAUSTION decides. Every source outcome in the unit's own
        ``run.json`` must report ``exhausted`` true. That flag is set only when
        the adapter's loop ran off the end of its source, so it is the one
        signal that distinguishes a complete unit from a stopped one.
-    3. A non-exhausted unit under ``--limit`` is ``partial`` -- expected, and
+    4. A non-exhausted unit under ``--limit`` is ``partial`` -- expected, and
        reprocessed by a later run without ``--limit``.
-    4. A non-exhausted unit with NO ``--limit`` is ``incomplete``: something
+    5. A non-exhausted unit with NO ``--limit`` is ``incomplete``: something
        stopped the read and nothing asked it to.
 
     Returns:
@@ -994,6 +1002,20 @@ def unit_outcome(
             f"{unit_dir}/run.json records no source outcomes at all, so "
             "nothing can say whether this unit's sources were drained. A unit "
             "is not done on the strength of an empty report."
+        ]
+    retryable = [
+        f"source {outcome.get('source')!r} -> {outcome.get('table')}: {reason}"
+        for outcome in outcomes
+        for reason in (outcome.get("incomplete_reasons") or [])
+    ]
+    if retryable:
+        return UNIT_INCOMPLETE, [
+            "a source reported a RETRYABLE failure, so records are missing "
+            "from a window that otherwise looks covered. --limit does not "
+            "excuse it and exhaustion does not contradict it: the read "
+            "reached the end of its selection, and some of what it selected "
+            "could not be fetched. A later --resume retries exactly these:",
+            *retryable,
         ]
     unexhausted = [
         f"source {outcome.get('source')!r} -> {outcome.get('table')}: "
@@ -1399,6 +1421,15 @@ def run_backfill(
             "deleted_unpublished": deleted,
         }
         record_unit(out, run_id=run_id, unit=unit, entry=recorded)
+        if state_value == UNIT_DONE:
+            # ONLY NOW may a source-level watermark become real. An adapter
+            # that read a complete, uncapped window wrote a CANDIDATE
+            # checkpoint, deliberately unreadable, because whether the rows
+            # reached the lake is not something an adapter can know. This is
+            # the point at which it is known: ingested and verified, with the
+            # unit recorded `done`. A capped, incomplete or killed unit never
+            # gets here and its candidate is simply never promoted.
+            cs.promote_arc_checkpoints()
         unit_reports.append(
             {
                 "unit": unit,

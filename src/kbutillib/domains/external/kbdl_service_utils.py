@@ -53,6 +53,7 @@ at KBDLJobRunningPrototype commit ``a024b55``)::
                                      hashes to a registered object
     GET    /objects                 list the caller's objects
     GET    /objects/{object_id}     object metadata
+    GET    /objects/{object_id}/content  the object's BYTES, streamed
     GET    /objects/{object_id}/files   archive entry listing (409 if the
                                      object is not an archive type)
     DELETE /objects/{object_id}     delete (owner-only) -> 204
@@ -135,6 +136,7 @@ whose result feeds ``genome``/``genome_ref`` into annotation.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import time
@@ -161,6 +163,9 @@ __all__ = [
     "KBDLConflictError",
     "KBDLPayloadTooLargeError",
     "KBDLJobFailedError",
+    "KBDLObjectDigestError",
+    "REFERENCE_OBJECT_ID_PREFIX",
+    "is_content_object",
 ]
 
 #: Environment variable supplying the KBDL service endpoint (no default;
@@ -298,6 +303,61 @@ class KBDLJobFailedError(KBDLServiceError):
         self.job_id = job_id
         self.failure = failure
         super().__init__(f"job {job_id} failed: {failure}")
+
+
+class KBDLObjectDigestError(KBDLServiceError):
+    """A downloaded CONTENT object's sha256 is not its object id.
+
+    KBDL content objects are CONTENT-ADDRESSED: the object id *is* the
+    sha256 of the bytes, so the download carries its own proof and a
+    mismatch is detectable without trusting the transport. This is that
+    detection firing -- truncation, a proxy rewriting the body, or the wrong
+    object served -- and the partially-written file has already been deleted
+    when it is raised, so a mismatch can never leave a poisoned cache entry
+    that a later run would reuse.
+
+    NOT raised for a REFERENCE object (``ref:`` prefix; see
+    :func:`is_content_object`), whose id is a hash of the resolved PATH and
+    not of the bytes, so there is nothing to compare.
+    """
+
+    def __init__(self, object_id: str, digest: str) -> None:
+        self.object_id = object_id
+        self.digest = digest
+        super().__init__(
+            f"object {object_id!r} downloaded with sha256 {digest!r}: the "
+            "bytes are not the object. A KBDL content object id IS the "
+            "sha256 of its bytes, so this is truncation, a rewritten body "
+            "or the wrong object -- the partial file has been deleted and "
+            "nothing was cached."
+        )
+
+
+#: Prefix of a KBDL REFERENCE object id. A reference object's id is a hash of
+#: the RESOLVED PATH it points at, not of any bytes (see
+#: ``src/kbdl_service/object_store/references.py`` in
+#: KBDLJobRunningPrototype), so the content-addressing proof that makes
+#: :meth:`KBDLServiceUtils.download_object` self-verifying does not apply to
+#: it. Checking it anyway would reject every reference object as corrupt.
+REFERENCE_OBJECT_ID_PREFIX = "ref:"
+
+
+def is_content_object(object_id: str) -> bool:
+    """Whether ``object_id`` names a CONTENT object (so sha256 == id holds).
+
+    ``True`` for a content-addressed object id, ``False`` for a reference
+    object (:data:`REFERENCE_OBJECT_ID_PREFIX`). This is the one place the
+    distinction is drawn, so a caller never has to know the prefix.
+    """
+    return not str(object_id).startswith(REFERENCE_OBJECT_ID_PREFIX)
+
+
+#: Byte size of each chunk :meth:`KBDLServiceUtils.download_object` reads from
+#: the response and feeds to the hasher. A CanonicalGenome with inlined contig
+#: and feature sequences is tens of megabytes, which must never be held whole
+#: in memory on a shared pod -- so the download streams and hashes in one
+#: pass rather than reading ``response.content``.
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 # ── Client ────────────────────────────────────────────────────────────────
@@ -854,6 +914,74 @@ class KBDLServiceUtils(SharedEnvUtils):
         visible to the caller.
         """
         return self._request("GET", f"/objects/{object_id}").json()
+
+    def download_object(
+        self, object_id: str, dest_path: "str | Path"
+    ) -> Path:
+        """Download an object's BYTES to ``dest_path``, verifying the digest.
+
+        Streams ``GET /objects/{object_id}/content`` to a temp file BESIDE
+        ``dest_path``, hashing as it goes, and only then moves it into place
+        with :func:`os.replace`. The order is the whole point:
+
+        - THE CHECK PRECEDES THE RENAME. A content object id is the sha256 of
+          its bytes, so a completed download carries its own proof. Verifying
+          after the rename would mean a truncated body had already become the
+          cache entry a later run reuses, and a run that reuses a poisoned
+          cache produces wrong entity hashes with nothing to show why.
+        - THE RENAME IS ATOMIC. A reader either sees no file or sees the whole
+          verified one; it can never see a partial. The temp file is created
+          in ``dest_path``'s own directory so the replace stays within one
+          filesystem (a cross-device ``os.replace`` raises).
+        - A MISMATCH DELETES THE TEMP FILE and raises
+          :class:`KBDLObjectDigestError`, so nothing is cached and the next
+          attempt starts clean.
+
+        THE DIGEST IS CHECKED FOR CONTENT OBJECTS ONLY. A REFERENCE object's
+        id (``ref:...``) is a hash of the resolved path, not of the bytes, so
+        there is nothing for the bytes to equal; such an object is downloaded
+        and placed with no digest comparison (see :func:`is_content_object`).
+        CanonicalGenome objects are content objects and ARE checked.
+
+        Args:
+            object_id: The KBDL object id. For a content object this is also
+                the expected sha256 of the downloaded bytes.
+            dest_path: Where to place the verified file. Parent directories
+                are created.
+
+        Returns:
+            ``Path(dest_path)`` -- the verified file.
+
+        Raises:
+            KBDLNotFoundError: No such object, or not visible to the caller.
+            KBDLObjectDigestError: A content object's sha256 is not its id.
+                The temp file has been deleted; nothing is left behind.
+        """
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{os.getpid()}.part")
+        digest = hashlib.sha256()
+        try:
+            response = self._request(
+                "GET", f"/objects/{object_id}/content", stream=True
+            )
+            with tmp.open("wb") as handle:
+                for chunk in response.iter_content(
+                    chunk_size=DOWNLOAD_CHUNK_BYTES
+                ):
+                    if not chunk:
+                        continue
+                    digest.update(chunk)
+                    handle.write(chunk)
+            if is_content_object(object_id):
+                actual = digest.hexdigest()
+                if actual != str(object_id):
+                    raise KBDLObjectDigestError(str(object_id), actual)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, dest)
+        return dest
 
     def list_archive_files(self, object_id: str) -> List[Dict[str, Any]]:
         """List the entries inside an archive-type object.

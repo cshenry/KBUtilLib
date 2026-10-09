@@ -75,6 +75,34 @@ KIND_UNKNOWN_WELLFORMED = 1
 KIND_MALFORMED = 2
 
 
+def _restrict_private(directory: Path, *files: Path) -> None:
+    """Force 0700 on *directory* and 0600 on *files*. Best-effort, never raises.
+
+    The index and its archive hold analysis payloads that can include
+    unpublished collaborator material, and on the BERDL pod ``$HOME`` and the
+    multi-tenant ``/global_share`` (mode 1777, root-owned) are **the same
+    physical array** (`/dev/md127`). Default creation modes put the store at
+    0644 under a 0755 home — world-readable to anything that can reach the
+    path. `mkdir` and `sqlite3.connect` both honour the process umask rather
+    than any intent of ours, so the mode is set explicitly here instead of
+    being assumed, and re-set on every connect so a re-provision or a stray
+    `chmod` does not quietly re-open it.
+
+    Never raises: a permissions failure must not take the index down, and the
+    caller is on a soft-fail path already.
+    """
+    try:
+        directory.chmod(0o700)
+    except OSError:  # pragma: no cover - best effort
+        pass
+    for f in files:
+        try:
+            if f.exists():
+                f.chmod(0o600)
+        except OSError:  # pragma: no cover
+            pass
+
+
 def resolve_db_path(db_path: Union[str, Path, None] = None) -> Path:
     """Resolve the run-database path by the pinned precedence (S22).
 
@@ -163,6 +191,7 @@ class RunDatabase:
         callers on the read path (which let it propagate).
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        _restrict_private(self.db_path.parent, self.db_path)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         return conn
@@ -227,6 +256,7 @@ class RunDatabase:
         if "description" not in have:
             conn.execute("ALTER TABLE runs ADD COLUMN description TEXT")
         conn.commit()
+        _restrict_private(self.db_path.parent, self.db_path)
 
     def _ensure_initialized_for_write(self, conn: sqlite3.Connection) -> None:
         if not self._initialized:
@@ -739,6 +769,7 @@ class RunDatabase:
         and distinct from "unopenable".
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        _restrict_private(self.db_path.parent, self.db_path)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         self._ensure_schema(conn)

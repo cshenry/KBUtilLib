@@ -112,9 +112,19 @@ def archive_payload(
         if dest.exists() and dest.stat().st_size > 0:
             return dest
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # 0700/0600 explicitly: archived payloads can carry unpublished
+        # collaborator material, and on the BERDL pod $HOME and the
+        # multi-tenant /global_share are the same physical array. mkdir and
+        # gzip.open honour the umask, not our intent.
+        for d in (resolve_archive_root(root), dest.parent):
+            try:
+                d.chmod(0o700)
+            except OSError:
+                pass
         tmp = dest.with_name(dest.name + ".part")
         with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as fh:
             json.dump(payload, fh)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, dest)
         return dest
     except MemoryError:

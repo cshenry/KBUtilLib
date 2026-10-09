@@ -213,3 +213,41 @@ class TestArchiveArc:
         rep = s.archive_arc("projA", "arc1", tmp_path / "retired", dry_run=False)
         assert rep["purged"] is False and "refusing to purge" in rep["error"]
         assert len(s.list_analyses("projA", "arc1")) == 1
+
+
+class TestPrivateModes:
+    """The store must not be world-readable.
+
+    On the BERDL pod `$HOME` and the multi-tenant `/global_share` (mode 1777,
+    root-owned) are the SAME physical array, and default creation modes put the
+    index at 0644 under a 0755 home. These payloads can carry unpublished
+    collaborator material, so the mode is asserted rather than assumed --
+    `mkdir` and `sqlite3.connect` honour the umask, not our intent.
+    """
+
+    def test_index_dir_and_file_are_private(self, runs_root):
+        s = KorosArcStore()
+        s.record_analysis("projA", "arc1", _record(), raw={"a": 1})
+        db = s.db.db_path
+        assert db.is_file()
+        assert db.stat().st_mode & 0o777 == 0o600, oct(db.stat().st_mode & 0o777)
+        assert db.parent.stat().st_mode & 0o777 == 0o700, oct(db.parent.stat().st_mode & 0o777)
+
+    def test_archived_payloads_are_private(self, runs_root):
+        s = KorosArcStore()
+        s.record_analysis("projA", "arc1", _record(), raw={"a": 1})
+        p = Path(s.list_analyses("projA", "arc1")[0].artifacts["result"])
+        assert p.stat().st_mode & 0o777 == 0o600, oct(p.stat().st_mode & 0o777)
+        assert p.parent.stat().st_mode & 0o777 == 0o700
+        assert p.parent.parent.stat().st_mode & 0o777 == 0o700
+
+    def test_a_loosened_mode_is_re_tightened_on_next_connect(self, runs_root):
+        """A stray chmod (or a re-provision) must not leave it open."""
+        s = KorosArcStore()
+        s.record_analysis("projA", "arc1", _record(), raw={"a": 1})
+        db = s.db.db_path
+        db.chmod(0o644)
+        db.parent.chmod(0o755)
+        KorosArcStore().list_analyses("projA", "arc1")   # any connect re-asserts
+        assert db.stat().st_mode & 0o777 == 0o600
+        assert db.parent.stat().st_mode & 0o777 == 0o700

@@ -179,8 +179,12 @@ def _render(envelope: dict[str, Any]) -> None:
         rows = data.get("shards")
     elif verb == "load":
         click.echo(
-            f"run_id={data.get('run_id')} namespace={data.get('namespace')} "
+            f"execution={data.get('run_id')} namespace={data.get('namespace')} "
             f"dry_run={data.get('dry_run')}"
+        )
+        click.echo(
+            f"shard run={data.get('source_run_id')} "
+            f"ledger={data.get('state_dir')}"
         )
         rows = data.get("tables")
     elif verb == "verify":
@@ -997,10 +1001,13 @@ def _manifest_error_types() -> tuple[type[BaseException], ...]:
 def _default_run_id(shard_dir: str) -> str:
     """Derive a default ``run_id`` from a shard directory's name.
 
-    Resuming a load is calling ``load`` again with the same ``run_id``; keying
-    it to the shard directory name gives a stable default so a plain
-    ``kbu clearinghouse load <dir>`` resumes its own prior run without the
-    operator having to remember an id. ``--run-id`` overrides it.
+    ``verify`` names a LOAD EXECUTION, and an execution id is a ULID the load
+    minted, so there is no derivable default that is right -- this is a
+    last-resort fallback for the case where the operator shards, loads and
+    verifies under one caller-chosen id. A ``verify`` whose id names no
+    execution reports exactly that (``no inventory at ...``) rather than
+    inventing an answer. ``load`` does NOT use this: omitting its ``--run-id``
+    mints a new execution.
     """
     from pathlib import Path
 
@@ -1214,22 +1221,42 @@ def _build_load(
     cap: Any,
     *,
     shard_dir: str,
-    run_id: str,
+    run_id: Optional[str],
     dry_run: bool,
     reconcile: bool,
 ) -> dict[str, Any]:
-    """Build the ``load`` envelope: the run ledger's outcome for each shard.
+    """Build the ``load`` envelope: the ledger's outcome for each shard batch.
 
     IN-POD ONLY -- but the locus refusal happens in :func:`load_cmd` BEFORE this
     is reached, so a bare :class:`BerdlLoadRefusedError` from deep in a
     transport never surfaces (success criterion (a)). This is thin over
     :meth:`ClearinghouseCapability.ingest_shards`, which owns the dev 1206
-    pre-write assertion, the dev 1194 postflight check, and the JSON-lines run
-    ledger. ``--dry-run`` is the operator's last gate: ingest_shards' own
-    ``dry_run=True`` resolves namespaces, runs the pre-write assertion, reports
-    the action each shard WOULD take, and writes nothing -- no ``load()``, no
-    ledger line. ``--reconcile`` resolves an ambiguous ``"started"`` batch
-    against the table's Iceberg snapshot history rather than refusing.
+    pre-write assertion, the lake-5 schema preflight, the dev 1194 postflight
+    check, the fill-only filter, the per-namespace lock and the durable
+    execution ledger.
+
+    ``run_id`` names the LOAD EXECUTION, not the shard run: omitted, the
+    capability mints a fresh one (and a fresh batch id per batch, with the
+    source run's ids kept as provenance); given an existing one, that
+    execution resumes.
+
+    ``--dry-run`` is the operator's last gate: ``ingest_shards``' own
+    ``dry_run=True`` reads the inventory, runs the pre-write assertion and the
+    schema preflight, checks each batch's integrity and reports the rows each
+    batch WOULD append after the fill-only filter -- writing nothing at all
+    (no ``load()``, no ledger line, no lock). ``--reconcile`` decides a batch
+    left ``started`` by the exact count of rows carrying its
+    ``ingest_batch_id``.
+
+    THE NAMESPACE-WIDE REGISTRY ORPHAN CHECK RUNS AT THE END, always. It is
+    :meth:`ClearinghouseCapability.parameter_set_orphans` -- the same callable
+    ``verify`` and ``health`` use, not a second set of rules -- and its
+    findings make this command exit non-zero
+    (:func:`_exit_on_integrity_failure`, after the envelope is emitted) while
+    the per-batch results above are left exactly as the ingest reported them.
+    An orphan another writer left is a real failure of the namespace and must
+    not be exited zero over; it is also not a reason to un-mark a batch this
+    load proved landed.
     """
     result = cap.ingest_shards(
         shard_dir,
@@ -1241,7 +1268,14 @@ def _build_load(
     if dry_run:
         warnings.append(
             "dry-run: no rows were ingested and no ledger line was written; "
-            "the reported action for each shard is what a real load WOULD do."
+            "the reported action for each batch is what a real load WOULD do."
+        )
+    lock = result.get("lock") or {}
+    if lock.get("took_over_from"):
+        warnings.append(
+            "the namespace ingest lock was held by a process that is gone "
+            f"(previous holder: {lock['took_over_from']}); it was taken over "
+            "by this run."
         )
     return _envelope(
         "load",
@@ -1249,10 +1283,15 @@ def _build_load(
         data={
             "shard_dir": shard_dir,
             "run_id": result.get("run_id", run_id),
+            "execution_id": result.get("execution_id"),
+            "source_run_id": result.get("source_run_id"),
             "namespace": result.get("namespace"),
+            "state_dir": result.get("state_dir"),
             "dry_run": result.get("dry_run", dry_run),
             "reconcile": reconcile,
+            "lock": result.get("lock"),
             "tables": result.get("tables", []),
+            "parameter_set_integrity": cap.parameter_set_orphans(),
         },
         warnings=warnings,
     )
@@ -1264,7 +1303,10 @@ def _build_load(
     "--run-id",
     "run_id",
     default=None,
-    help="Run id to ingest/resume under (default: derived from the shard-dir name).",
+    help="LOAD EXECUTION id to resume (default: mint a new execution). This "
+    "names the execution, not the shard run -- one shard run can be loaded "
+    "more than once (scratch, then production) and each load is proven by "
+    "its own per-batch counts.",
 )
 @click.option(
     "--dry-run",
@@ -1290,11 +1332,21 @@ def load_cmd(
     reconcile: bool,
     as_json: bool,
 ) -> None:
-    """Ingest shards (IN-POD ONLY): verify postflight and write the run ledger.
+    """Ingest a published shard run (IN-POD ONLY), fill-only and resumably.
+
+    SHARD_DIR is a LOCAL directory on this pod holding the ``run.json`` a
+    completed ``kbu clearinghouse shard`` run published, plus the batch files
+    it names. The batches are read here by the driver and appended as
+    DataFrames -- Spark executors cannot read the pod's local disk.
+
+    Every batch is filtered against the keys the target already holds before
+    it is appended, so re-running this command is cheap and changes nothing;
+    a batch with no surviving rows is committed without a write at all.
 
     Runs in the FOREGROUND to completion and is expected to be killed by a pod
-    restart. It is NOT a daemon; resumability comes from the ledger -- re-run
-    the same command with the same --run-id.
+    restart. It is NOT a daemon; resumability comes from the ledger under
+    $KBU_CLEARINGHOUSE_STATE_DIR -- re-run with --run-id <execution id>, and
+    add --reconcile to decide a batch the kill left mid-append.
     """
     cap = _capability()
     # The locus refusal must be EARLY and must name the locus as the reason: a
@@ -1303,17 +1355,18 @@ def load_cmd(
     # answer. This resolves the locus at THIS boundary, before ingest_shards
     # touches any namespace, ledger, or transport.
     _require_in_pod_or_refuse(cap, "load")
-    resolved_run_id = run_id or _default_run_id(shard_dir)
-    _emit(
-        _build_load(
-            cap,
-            shard_dir=shard_dir,
-            run_id=resolved_run_id,
-            dry_run=dry_run,
-            reconcile=reconcile,
-        ),
-        as_json=as_json,
+    envelope = _build_load(
+        cap,
+        shard_dir=shard_dir,
+        run_id=run_id,
+        dry_run=dry_run,
+        reconcile=reconcile,
     )
+    _emit(envelope, as_json=as_json)
+    # The namespace-wide orphan check's findings are a FAILURE, so the exit
+    # code says so -- after the envelope is emitted, so the operator sees what
+    # is broken. The per-batch results in it are untouched.
+    _exit_on_integrity_failure(envelope)
 
 
 # ---------------------------------------------------------------------------

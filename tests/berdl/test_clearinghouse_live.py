@@ -42,10 +42,12 @@ What it covers (the PRD's minimum, plus the three flagged-most-likely-wrong)
   confirm a fresh synthetic hash is absent.
 - ``current_state()`` returns the latest row per slot after two registrations
   into the same slot.
-- ``ingest_shards()`` of a tiny shard directory: the pre-write assertion passes
-  against a correctly-resolved namespace, postflight ``row_count`` and
-  ``snapshot_id`` come back NON-NULL, and the ledger records state
-  ``"ingested"``.
+- ``ingest_shards()`` of a tiny PUBLISHED run: the pre-write assertion and the
+  lake-5 schema preflight pass against a correctly-resolved namespace, the
+  batch reaches ``load()`` as a DataFrame, the execution ledger records a
+  terminal ``"committed"`` line, ``verify_run`` proves the batch landed by its
+  own ``ingest_batch_id`` count -- and a SECOND ingest of the same directory
+  appends NOTHING, because fill-only finds every row present.
 - A deliberately mismatched write target RAISES
   (:class:`ClearinghouseWriteTargetMismatchError`) and calls ``load()`` EXACTLY
   ZERO times (flagged risk #2, dev 1206: an implementation that writes and then
@@ -416,46 +418,83 @@ def test_live_current_state_latest_per_slot(live_clearinghouse):
 @_need_live
 @pytest.mark.integration
 def test_live_ingest_shards_tiny_directory(live_clearinghouse, tmp_path):
-    """ingest_shards() of a tiny shard dir: postflight non-null, ledger 'ingested'.
+    """ingest_shards() of a tiny PUBLISHED run: fill-only, and provably landed.
 
-    The pre-write assertion must pass against the correctly-resolved scratch
-    namespace, postflight ``row_count`` and ``snapshot_id`` must come back
-    NON-NULL, and the ledger must record state ``"ingested"``.
+    The pre-write assertion and the lake-5 schema preflight must pass against
+    the correctly-resolved scratch namespace; the batch must reach ``load()``
+    as a DataFrame (the shards are on the pod's local disk, which Spark
+    executors cannot read); the ledger must record a terminal ``committed``
+    line under the EXECUTION state dir; and a SECOND ingest of the same
+    directory must append nothing, because every row is now present.
     """
-    try:
-        import pandas as pd  # noqa: PLC0415
-    except Exception:  # pragma: no cover - environment gate
-        pytest.skip("pandas not importable; cannot write a parquet shard fixture")
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    from kbutillib.domains.kbase.berdl import clearinghouse_ingest as ci  # noqa: PLC0415
+    from kbutillib.domains.kbase.berdl.clearinghouse_shard import (  # noqa: PLC0415
+        RUN_MANIFEST_VERSION,
+        new_ulid,
+    )
+
+    # The ledger and the lock must not touch this developer's real state.
+    os.environ[ci.STATE_DIR_ENV] = str(tmp_path / "state")
+    os.environ[ci.LOCK_DIR_ENV] = str(tmp_path / "locks")
 
     shard_root = tmp_path / "shards"
     table = table_name("ontology_term", "entity")
     (shard_root / table).mkdir(parents=True)
-    df = pd.DataFrame(
-        [_entity_row(4000 + i, "ontology_term", batch="0001") for i in range(2)]
+    batch_id = new_ulid()
+    rows = [
+        _entity_row(4000 + i, "ontology_term", batch=batch_id) for i in range(2)
+    ]
+    shard_path = shard_root / table / f"{batch_id}.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), shard_path)
+    hashes = sorted(row["entity_hash"] for row in rows)
+    (shard_root / "run.json").write_text(
+        json.dumps(
+            {
+                "run_manifest_version": RUN_MANIFEST_VERSION,
+                "run_id": new_ulid(),
+                "units": [{"unit_id": "u1", "attempt_id": "A", "slice": None}],
+                "batches": [
+                    {
+                        "table": table,
+                        "batch_id": batch_id,
+                        "file": f"{table}/{shard_path.name}",
+                        "rows": len(rows),
+                        "key_column": "entity_hash",
+                        "hash_min": hashes[0],
+                        "hash_max": hashes[-1],
+                        "sha256": ci.file_sha256(shard_path),
+                        "source": ["live-test"],
+                        "slice": None,
+                        "unit_id": "u1",
+                        "attempt_id": "A",
+                    }
+                ],
+                "skipped": [],
+                "sources": [],
+            }
+        )
     )
-    shard_path = shard_root / table / "0001.parquet"
-    df.to_parquet(shard_path)
 
-    result = live_clearinghouse.ingest_shards(shard_root, run_id="live-ingest-1")
+    result = live_clearinghouse.ingest_shards(shard_root)
 
     assert result["namespace"], "ingest resolved an empty namespace"
     ingested = [t for t in result["tables"] if t["action"] == "ingest"]
     assert ingested, f"nothing was ingested: {result['tables']}"
-    for t in ingested:
-        assert t["row_count"] is not None, f"null postflight row_count: {t}"
-        assert t["snapshot_id"] is not None, f"null postflight snapshot_id: {t}"
+    assert all(t["rows_ingested"] == len(rows) for t in ingested)
 
-    ledger_lines = [
-        json.loads(line)
-        for line in (shard_root / chc.LEDGER_FILENAME).read_text().splitlines()
-        if line.strip()
-    ]
-    terminal = [
-        ln
-        for ln in ledger_lines
-        if ln["table"] == table and ln["state"] == "ingested"
-    ]
-    assert terminal, f"ledger has no 'ingested' line for {table}: {ledger_lines}"
+    records = ci.ExecutionLedger(Path(result["state_dir"])).records()
+    assert records, f"no ledger under {result['state_dir']}"
+    assert all(r["state"] == ci.LEDGER_COMMITTED for r in records.values())
+
+    verified = live_clearinghouse.verify_run(shard_root, run_id=result["run_id"])
+    assert verified["ok"], verified["discrepancies"]
+
+    # FILL-ONLY: a second load of the same directory writes nothing.
+    again = live_clearinghouse.ingest_shards(shard_root)
+    assert all(t["rows_ingested"] == 0 for t in again["tables"]), again["tables"]
 
 
 @_need_live

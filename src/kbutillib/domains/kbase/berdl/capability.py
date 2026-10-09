@@ -323,6 +323,32 @@ class BerdlCapability:
                 self._transport = OffPodTransport(**self._off_pod_kwargs)
         return self._transport
 
+    def spark_session(self) -> Any:
+        """The pod's Spark session, for a caller that must build a DataFrame.
+
+        IN-POD ONLY -- a Spark session exists only inside the BERDL pod, so
+        this refuses off-pod with the same
+        :class:`BerdlLoadRefusedError` :meth:`load` raises, rather than
+        handing back ``None`` for a caller to misread as "no session needed".
+
+        It exists because a DataFrame-mode ``load()`` needs a DataFrame, and
+        the only thing that can make one out of rows the DRIVER read off the
+        pod's local disk is the session. The clearinghouse shard ingest is
+        exactly that case: Spark executors cannot read the pod's local disk,
+        so the driver reads each batch and the anti-join plus the append run
+        over a session-built DataFrame (see
+        ``ClearinghouseCapability.ingest_shards``). ``load()`` itself still
+        resolves its own session when none is passed; this is for callers that
+        need one BEFORE the load call.
+        """
+        if self.locus() != "in_pod":
+            raise BerdlLoadRefusedError(
+                "BerdlCapability.spark_session() is in-pod only: a Spark "
+                "session exists only inside the BERDL JupyterHub pod and this "
+                "process is off-pod."
+            )
+        return self._get_transport().spark_session()
+
     def databases(self) -> list[NormalizedDatabase]:
         """List reachable databases, normalized and deduplicated.
 

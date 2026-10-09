@@ -75,19 +75,26 @@ class _FakeIngestCapability:
     Records every ingest/verify call. If ``fail_on_write`` is set, ANY real
     write (a non-dry-run ingest reaching ``ingest_shards``) fails the test
     outright -- this is how the dry-run test proves nothing was written.
+
+    ``orphans`` is the namespace-wide parameter-set registry report the ``load``
+    verb runs at the end of every invocation; its default is a sound registry.
     """
 
-    def __init__(self, locus="in_pod", *, fail_on_write=False):
+    def __init__(self, locus="in_pod", *, fail_on_write=False, orphans=None):
         self._locus_value = locus
         self._fail_on_write = fail_on_write
+        self._orphans = orphans or {"ok": True, "failures": []}
         self.ingest_calls: list[dict] = []
         self.verify_calls: list[dict] = []
+        self.orphan_calls = 0
         self.pre_write_asserted = False
 
     def _locus(self):
         return self._locus_value
 
-    def ingest_shards(self, shard_dir, *, run_id, dry_run=False, reconcile=False):
+    def ingest_shards(
+        self, shard_dir, *, run_id=None, dry_run=False, reconcile=False
+    ):
         self.ingest_calls.append(
             {
                 "shard_dir": str(shard_dir),
@@ -103,24 +110,50 @@ class _FakeIngestCapability:
             raise AssertionError(
                 "a real write reached ingest_shards() -- the dry-run gate leaked!"
             )
-        if dry_run:
-            action = "would_ingest"
-        else:
-            action = "ingest"
+        action = "would_ingest" if dry_run else "ingest"
+        execution_id = run_id or "01EXECUTION00000000000000"
         return {
-            "run_id": run_id,
+            "run_id": execution_id,
+            "execution_id": execution_id,
+            "source_run_id": "01SHARDRUN0000000000000000"[:26],
             "namespace": "kbaseincubator.clearinghouse",
+            "state_dir": f"/tmp/state/{execution_id}",
             "dry_run": dry_run,
+            "lock": {"namespace": "kbaseincubator.clearinghouse", "pid": 1},
             "tables": [
-                {"name": "gene_entity", "batch": "batch-0000", "action": action}
+                {
+                    "name": "gene_entity",
+                    "batch_id": "01BATCH000000000000000000",
+                    "unit_id": "u1",
+                    "action": action,
+                    "rows_in": 6,
+                    "rows_dropped_present": 0,
+                    "rows_ingested": 6,
+                }
             ],
         }
+
+    def parameter_set_orphans(self, **kwargs):
+        self.orphan_calls += 1
+        return dict(self._orphans)
 
     def verify_run(self, shard_dir, *, run_id):
         self.verify_calls.append({"shard_dir": str(shard_dir), "run_id": run_id})
         return {
             "run_id": run_id,
             "namespace": "kbaseincubator.clearinghouse",
+            "ok": True,
+            "batches": [
+                {
+                    "batch_id": "01BATCH000000000000000000",
+                    "name": "gene_entity",
+                    "unit_id": "u1",
+                    "ledger_rows": 6,
+                    "live_rows": 6,
+                    "ok": True,
+                }
+            ],
+            "units": [{"unit_id": "u1", "ok": True, "missing_parameter_sets": []}],
             "tables": [
                 {"name": "gene_entity", "ledger_rows": 6, "live_rows": 6, "ok": True}
             ],
@@ -206,6 +239,91 @@ def test_load_emits_one_envelope(monkeypatch, tmp_path):
     env = _assert_one_clean_envelope(result.stdout, "load", locus="in_pod")
     assert env["data"]["dry_run"] is False
     assert len(fake.ingest_calls) == 1
+
+
+def test_load_without_a_run_id_starts_a_new_execution(monkeypatch, tmp_path):
+    """Omitting --run-id means a NEW load execution, not a resume of a run id
+    derived from the directory name: one shard run can be loaded more than
+    once, and each load is proven by its own per-batch counts."""
+    shard_dir = tmp_path / "bronze"
+    shard_dir.mkdir()
+    fake = _FakeIngestCapability(locus="in_pod")
+    result = _invoke(
+        monkeypatch, ["clearinghouse", "load", str(shard_dir)], fake=fake
+    )
+    assert result.exit_code == 0, result.output
+    assert fake.ingest_calls[0]["run_id"] is None
+
+
+def test_load_resumes_the_execution_named_by_run_id(monkeypatch, tmp_path):
+    shard_dir = tmp_path / "bronze"
+    shard_dir.mkdir()
+    fake = _FakeIngestCapability(locus="in_pod")
+    result = _invoke(
+        monkeypatch,
+        ["clearinghouse", "load", str(shard_dir), "--run-id", "01EXEC"],
+        fake=fake,
+    )
+    assert result.exit_code == 0, result.output
+    assert fake.ingest_calls[0]["run_id"] == "01EXEC"
+
+
+def test_load_runs_the_namespace_orphan_check_and_exits_nonzero_on_a_finding(
+    monkeypatch, tmp_path
+):
+    """lake-5's namespace-wide registry check runs at the END of every load.
+
+    An orphan another writer left is a real failure of the namespace, so the
+    exit code says so -- but it does not un-mark the batches THIS load proved:
+    the per-batch results are reported exactly as the ingest returned them.
+    """
+    shard_dir = tmp_path / "bronze"
+    shard_dir.mkdir()
+    finding = "gene_result: 2 parameter_set_hash values with no registry row"
+    fake = _FakeIngestCapability(
+        locus="in_pod",
+        orphans={"ok": False, "failures": [finding], "missing_from_registry": ["x"]},
+    )
+    result = _invoke(
+        monkeypatch, ["clearinghouse", "load", str(shard_dir)], fake=fake
+    )
+    assert fake.orphan_calls == 1
+    assert result.exit_code != 0
+    # Printed IN FULL, and the load's own result still stands.
+    assert finding in result.output
+    assert "ingest" in result.output
+
+
+def test_load_reports_a_lock_taken_over_from_a_dead_holder_as_a_warning(
+    tmp_path,
+):
+    """A dead holder's lock is taken over -- and the operator is TOLD.
+
+    Built directly rather than through the runner because the envelope is the
+    contract: a warning belongs in ``warnings`` (where a dashboard reads it)
+    as well as on stderr.
+    """
+    fake = _FakeIngestCapability(locus="in_pod")
+    real_ingest = fake.ingest_shards
+
+    def with_takeover(*args, **kwargs):
+        result = real_ingest(*args, **kwargs)
+        result["lock"] = {
+            **result["lock"],
+            "took_over_from": {"pid": 999999, "host": "deadhost"},
+        }
+        return result
+
+    fake.ingest_shards = with_takeover
+    envelope = ch._build_load(
+        fake,
+        shard_dir=str(tmp_path),
+        run_id=None,
+        dry_run=False,
+        reconcile=False,
+    )
+    assert envelope["data"]["lock"]["took_over_from"]["pid"] == 999999
+    assert any("taken over" in warning for warning in envelope["warnings"])
 
 
 def test_verify_emits_one_envelope(monkeypatch, tmp_path):

@@ -111,6 +111,7 @@ from typing import Any, Mapping, Sequence
 
 from ...identity import ParameterSetError, canonical_parameter_set, parameter_set_hash
 from .capability import BerdlCapability, BerdlLoadRefusedError
+from . import clearinghouse_ingest as ci
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_parameters import result_parameter_set_identity
 from .clearinghouse_schema import (
@@ -121,6 +122,7 @@ from .clearinghouse_schema import (
     TENANT,
     encode_entity_hash,
     parameter_set_column_names,
+    table_configs,
     table_name,
 )
 
@@ -130,6 +132,9 @@ __all__ = [
     "ClearinghouseLoadPostflightError",
     "ClearinghouseLedgerAmbiguousError",
     "ClearinghousePartialWriteError",
+    "ClearinghouseReconcileMismatchError",
+    "ClearinghouseSchemaPreflightError",
+    "ClearinghouseRegistryOrderError",
     "order_shards_for_load",
 ]
 
@@ -207,21 +212,12 @@ SPARK_PROMOTION_THRESHOLD = 4000
 #: failure mode as the uppercase-hash trap (Rule 4).
 OFFPOD_PAGE_CAP = 5000
 
-#: Name of the JSON-lines run ledger :meth:`ClearinghouseCapability.ingest_shards`
-#: writes beside the shards. One line per ``(table, batch)`` records the
-#: outcome of that shard's ingest, so a killed run can resume against the same
-#: ``run_id`` without re-ingesting a shard already at ``"ingested"`` (see the
-#: ``ingest_shards`` docstring's resumability contract).
-LEDGER_FILENAME = "ingest_ledger.jsonl"
-
-#: The three ledger states a ``(table, batch)`` line can carry.
-#: ``"started"`` is written BEFORE the ingest call and is deliberately
-#: non-terminal: a ``"started"`` line with no matching ``"ingested"``/``"failed"``
-#: line means the process died mid-ingest, which is AMBIGUOUS and refused
-#: (unless ``reconcile=True``). ``"ingested"`` is the only skip-on-resume state.
-_LEDGER_STARTED = "started"
-_LEDGER_INGESTED = "ingested"
-_LEDGER_FAILED = "failed"
+#: Name of the JSON-lines ledger each LOAD EXECUTION keeps. Re-exported from
+#: :mod:`clearinghouse_ingest`, which owns it along with the rest of the
+#: execution state -- there is one definition of the name, not one per module.
+#: The ledger does NOT live beside the shards: see
+#: :data:`clearinghouse_ingest.STATE_DIR_ENV`.
+LEDGER_FILENAME = ci.LEDGER_FILENAME
 
 
 class ClearinghouseWriteTargetMismatchError(RuntimeError):
@@ -284,6 +280,49 @@ class ClearinghouseLedgerAmbiguousError(RuntimeError):
     it -- see :meth:`ClearinghouseCapability.ingest_shards`). So resume
     REFUSES at the first such batch unless ``reconcile=True``, which reads the
     table's Iceberg snapshot history and decides whether the shard landed.
+    """
+
+
+class ClearinghouseReconcileMismatchError(RuntimeError):
+    """Raised when reconcile counted a PARTIAL append and stopped the run.
+
+    A batch left ``"started"`` is decided by counting the rows carrying its
+    ``ingest_batch_id``: equal to the expectation means it landed, zero means
+    it did not. Any OTHER count means part of the append committed, and
+    neither available move is safe -- appending again duplicates the rows
+    that are there, and leaving it under-counts the run. So the run stops and
+    reports the batch, because a human deciding from the count is cheap and a
+    silently duplicated ``<type>_content`` row (which has no current-state
+    derivation to collapse it) is not.
+    """
+
+
+class ClearinghouseSchemaPreflightError(RuntimeError):
+    """Raised when the target namespace is not the lake-5 clearinghouse schema.
+
+    Every ``<type>_result`` table must carry ``parameter_set_hash`` (the last
+    column of the five-tuple slot key) and the
+    :data:`~clearinghouse_schema.PARAMETER_SET_TABLE` registry must exist.
+    ``clearinghouse_schema.bootstrap()`` creates a table that is absent but
+    CANNOT add a column to one that exists, so a result table left over from
+    before lake-5 looks healthy to it -- and appending five-tuple-keyed rows
+    into a four-tuple table either fails mid-run or silently loses the only
+    record of which parameters produced each result. This check is therefore
+    the only mechanical guard that the operator's rebuild actually happened,
+    and it refuses with ``load()`` called exactly zero times.
+    """
+
+
+class ClearinghouseRegistryOrderError(RuntimeError):
+    """Raised when a result batch would be loaded before its registry batches.
+
+    REGISTRY FIRST is a writer obligation: a result row whose
+    ``parameter_set_hash`` has no registry row is an orphan, because the hash
+    is opaque and nothing can say what parameters produced the result. The
+    ingest orders every unit's registry batch ahead of its results, so this
+    fires only if that ordering was defeated (an uncommitted registry batch
+    from this or an earlier unit), and it refuses rather than writing the
+    orphan.
     """
 
 
@@ -1870,281 +1909,830 @@ class ClearinghouseCapability:
         self,
         shard_dir: str | Path,
         *,
-        run_id: str,
+        run_id: str | None = None,
         dry_run: bool = False,
         reconcile: bool = False,
         tenant: str = TENANT,
         dataset: str = NAMESPACE,
+        adopt_source_batch_ids: bool = False,
     ) -> dict[str, Any]:
-        """Ingest a directory of bronze parquet shards, table by table, resumably.
+        """Ingest a published shard run's batches, FILL-ONLY and resumably.
 
         IN-POD ONLY. Refuses off-pod (:class:`BerdlLoadRefusedError`) before it
-        resolves any namespace, opens the ledger, or makes any transport call
-        (success criterion (d)). Each shard is ingested through
-        ``BerdlCapability.load()`` in BRONZE mode (``paths={'bronze_base': ...}``
-        plus each table's own ``bronze_path``/``format``); every table's
-        postflight is verified (:meth:`_check_postflight`) and every outcome is
-        recorded in a JSON-lines run ledger.
+        reads the inventory, resolves any namespace, opens the ledger or makes
+        any transport call.
 
-        THE PRE-WRITE ASSERTION (dev 1206), fail-closed. Before ANY ``load()``
-        call, :meth:`_assert_write_target` resolves the write-target namespace
-        and the existence-probe namespace and refuses unless they can be SHOWN
-        to be the same non-empty value -- raising
-        :class:`ClearinghouseWriteTargetMismatchError` with ``load()`` called
-        exactly zero times. A guard that cannot confirm it probed the same name
-        it is about to write to has established nothing, and writing anyway is
-        the failure.
+        THE SHARDS ARE ON THIS POD'S OWN DISK. The backfill runs entirely
+        inside the BERDL pod and the bronze sharder writes its batches to the
+        pod's local persistent home, which Spark EXECUTORS cannot read -- so
+        every batch is read HERE, by the driver, with pyarrow, and handed to
+        ``BerdlCapability.load()`` in DATAFRAME mode (``dataframes={table:
+        ...}``), the same mode :meth:`register` uses. There is no bronze path,
+        no ``paths={'bronze_base': ...}`` and no object-storage staging: a
+        bronze-mode load pointed at a local file is read cluster-side and
+        cannot see it. That was the defect this verb was rewritten to remove.
 
-        THE RUN LEDGER (resumability). A bootstrap load takes days and the pod
-        (a rootless JupyterHub container with no init system) restarts
-        routinely, so this verb must survive being killed and resumed. The
-        ledger lives beside the shards at :data:`LEDGER_FILENAME`, one line per
-        ``(table, batch)``::
+        ``<shard_dir>/run.json`` IS REQUIRED. The run inventory the sharder
+        publishes is the only source of each batch's sha256, row count and
+        ``[hash_min, hash_max]`` range, and every integrity check plus the
+        whole idempotence story depends on those. A directory without one is
+        refused (:class:`clearinghouse_ingest.ClearinghouseBatchIntegrityError`)
+        rather than scanned for files, because a scan cannot tell a published
+        batch from a half-written one.
 
-            {"run_id":..., "table":"gene_entity", "batch":"0007",
-             "shard_path":..., "rows":4821003, "state":"ingested",
-             "snapshot_id":..., "at":...}
+        FILL-ONLY, ALWAYS ON, NO FLAG. Before each append the target's
+        EXISTING KEYS are read back, restricted to the batch's own hash range,
+        and the batch is left-anti-joined against them in Spark; only the
+        survivors are appended. The join mirrors
+        :func:`clearinghouse_ingest.fill_only_survivors`, which is the pure
+        statement of the rule (key modes: ``entity_hash`` for entity/content,
+        the slot key IMPORTED from
+        :data:`clearinghouse_derivation.SLOT_KEY_COLUMNS` for results, and
+        ``parameter_set_hash`` for the registry). A batch with zero survivors
+        is committed WITHOUT calling ``load()`` at all. That is what makes a
+        second ingest of the same shard directory -- or a reload of a run that
+        already landed -- cost nothing and change nothing.
 
-        Resume is simply calling ``ingest_shards()`` again with the same
-        ``run_id`` -- there is NO separate resume code path:
+        FILL-ONLY IS NOT ATOMIC AGAINST WRITERS OUTSIDE THIS PROCESS. The
+        survivors are computed against the keys as they stood at the read. A
+        writer that appends a colliding key between that read and the append
+        leaves a duplicate. The per-namespace lock below excludes other
+        clearinghouse INGESTS, not arbitrary writers, and the lake has no
+        transaction to take; this window is documented rather than closed.
 
-        - A ``(table, batch)`` already at state ``"ingested"`` is SKIPPED.
-        - A ``(table, batch)`` at state ``"started"`` with no terminal
-          (``"ingested"``/``"failed"``) line is AMBIGUOUS -- the process died
-          mid-ingest. This REFUSES (:class:`ClearinghouseLedgerAmbiguousError`)
-          unless ``reconcile=True``, which reads the table's Iceberg snapshot
-          history and decides whether the shard landed.
+        A LOAD EXECUTION IS NOT A SHARD RUN. ``run_id`` names the EXECUTION:
+        omitted, a fresh one is minted; given an existing one, that execution
+        is RESUMED (and refuses if it is bound to another namespace or another
+        shard run). A new execution derives its OWN inventory from
+        ``run.json`` with a fresh ULID per batch, rewrites each row's
+        ``ingest_batch_id`` to match, and records the source run id, source
+        batch id and source sha256 as provenance -- so the same shard run can
+        be loaded into scratch, checked, and promoted to production with each
+        load provable by its own per-batch counts.
+        ``adopt_source_batch_ids=True`` is for the single case where a shard
+        run and its first execution are one operation and the ids in the rows
+        are already this execution's own.
 
-        WHY THIS IS SAFE, AND EXACTLY HOW FAR. The clearinghouse schema is
-        APPEND-ONLY, so a crash BETWEEN the ingest and the ledger-write costs at
-        worst a duplicate row -- and the current-state derivation collapses that
-        harmlessly (same hash for ``<type>_entity``; latest-per-slot for
-        ``<type>_result``). BUT ``<type>_content`` HAS NO SUCH DERIVATION: a
-        re-ingested content shard leaves two rows for one ``entity_hash`` with no
-        rule saying which wins, and a reader joining content by hash gets a
-        fan-out. The ledger is precisely what prevents that -- and it is why
-        ``reconcile`` exists rather than a blanket "re-running is safe".
+        THE LEDGER LIVES WITH THE EXECUTION, NOT THE SHARDS, at
+        ``$KBU_CLEARINGHOUSE_STATE_DIR/<run_id>/ingest_ledger.jsonl``
+        (default ``~/.kbu/clearinghouse/runs/<run_id>/``). The shard directory
+        is sharder output and may be regenerated or deleted; the ledger is the
+        only record of what reached the lake. Every line is ``fsync``ed, and a
+        durable ``started`` line carrying the target namespace, the batch's
+        checksum and the post-filter ``expected_rows`` precedes every append.
+        ``expected_rows`` is counted from a MATERIALISED survivor set, so a
+        concurrent writer between the count and the append cannot make the
+        number of rows appended differ from the number recorded.
 
-        LOAD ORDER: THE PARAMETER-SET REGISTRY FIRST. Shards are ingested in
-        :func:`order_shards_for_load` order, which places
-        :data:`PARAMETER_SET_TABLE` ahead of every other table -- so no
-        ``<type>_result`` shard is ever ingested before the registry rows
-        that explain its ``parameter_set_hash`` values. The order is
-        re-applied inside this verb rather than trusted from discovery, so an
-        arbitrary or reversed input order still ingests the registry first.
+        RESUME RECONCILES BEFORE IT TOUCHES ANYTHING. Every batch left
+        ``started`` is decided FIRST, by the exact count
+        ``COUNT(*) WHERE ingest_batch_id = '<validated ULID>'``:
 
-        ``dry_run=True`` is genuinely read-only (matching
-        :func:`clearinghouse_schema.bootstrap`'s dry-run guarantee): it resolves
-        namespaces, runs the pre-write assertion, reports the write mode each
-        table WOULD take, and writes nothing -- no ``load()`` call, no ledger
-        line.
+        - count == ``expected_rows`` -> COMMITTED; the original batch is kept.
+        - count == 0 with ``expected_rows`` > 0 -> RETRYABLE; the SAME
+          immutable batch is re-read, re-filtered and re-appended under a new
+          durable attempt line.
+        - any other count -> the run STOPS
+          (:class:`ClearinghouseReconcileMismatchError`) and reports the batch
+          for repair. A partial append is not something to guess about.
+
+        Without ``reconcile=True`` a ``started`` batch refuses
+        (:class:`ClearinghouseLedgerAmbiguousError`) exactly as before.
+
+        SCHEMA PREFLIGHT. Before the first batch, the target namespace's live
+        columns are read and the ingest refuses -- writing nothing, calling no
+        ``load()`` -- if any ``<type>_result`` table lacks
+        ``parameter_set_hash`` or the
+        :data:`~clearinghouse_schema.PARAMETER_SET_TABLE` registry table does
+        not exist. ``bootstrap()`` cannot detect a MISSING COLUMN on an
+        existing table, so this is the only mechanical guard that the result
+        tables were actually rebuilt for the five-tuple slot key.
+
+        REGISTRY FIRST, WITHIN AND ACROSS UNITS. Within every unit the
+        ``parameter_set`` batch is ingested and committed before any
+        ``<type>_result`` batch, whatever order ``run.json`` lists them in
+        (the order is imposed by :func:`clearinghouse_ingest.derive_execution_inventory`,
+        not trusted from the file), and a unit's result batches are refused
+        unless every registry batch of that unit and every earlier one is
+        already committed.
+
+        A PER-NAMESPACE LOCK. An exclusive ``flock`` on a file in the shared,
+        pod-visible lock directory (``$KBU_CLEARINGHOUSE_LOCK_DIR``, default
+        ``/global_share/KBaseUtilities/clearinghouse-locks``) is held for the
+        whole ingest and refuses to start if another live process holds it,
+        naming the holder. It is an OS lock, so process death releases it and
+        a dead holder's lock is reported and taken over.
+
+        ``dry_run=True`` is genuinely read-only: it reads the inventory, runs
+        the pre-write assertion and the schema preflight, checks each batch's
+        integrity, computes the fill-only survivor count each batch WOULD
+        append, and writes nothing at all -- no ``load()``, no ledger line, no
+        execution binding and no lock.
 
         Args:
-            shard_dir: Directory holding the bronze parquet shards and the run
-                ledger. Each table's shards are expected under a per-table
-                subdirectory named for the table (``<shard_dir>/<table>/``),
-                with each shard a file whose stem is the batch id.
-            run_id: The run this call belongs to. Resuming is the same call with
-                the same ``run_id``; ledger lines from other ``run_id`` values
-                are ignored when deciding skip/refuse.
-            dry_run: When ``True``, performs the pre-write assertion and reports
-                the per-table plan but writes nothing.
-            reconcile: When ``True``, an ambiguous ``"started"`` batch is
-                resolved against the table's Iceberg snapshot history instead of
-                refused.
+            shard_dir: A directory a completed shard run published, holding
+                ``run.json`` and the per-table batch files it names.
+            run_id: The LOAD EXECUTION id. Omitted mints a new execution;
+                given an existing one resumes it.
+            dry_run: Report what would happen and write nothing.
+            reconcile: Decide a ``started`` batch by its exact per-batch-id
+                count instead of refusing.
             tenant: Target tenant (default :data:`TENANT`).
             dataset: The ``load()`` dataset / namespace (default
                 :data:`NAMESPACE`).
+            adopt_source_batch_ids: Keep the shard run's batch ids instead of
+                minting fresh ones -- only for a shard-and-load that is one
+                operation under one id.
 
         Returns:
-            A dict with ``'run_id'``, ``'namespace'``, ``'dry_run'``, and a
-            ``'tables'`` list -- one report per ``(table, batch)`` with its
-            ``'name'``, ``'batch'``, resolved ``'action'`` (``'ingest'``,
-            ``'skip'``, ``'reconcile'`` or -- dry-run only -- ``'would_ingest'``),
-            and, for a real ingest, its postflight ``'row_count'``/``'snapshot_id'``.
+            A dict with ``'run_id'`` (the execution id), ``'execution_id'``,
+            ``'source_run_id'``, ``'namespace'``, ``'state_dir'``,
+            ``'dry_run'``, ``'lock'`` and a ``'tables'`` list -- one report per
+            batch with its ``'name'``, ``'batch_id'``, ``'unit_id'``,
+            ``'action'`` (``'ingest'``, ``'skip'``, ``'reconcile'``,
+            ``'failed'`` or -- dry-run only -- ``'would_ingest'``),
+            ``'rows_in'``, ``'rows_dropped_present'``, ``'rows_ingested'`` and
+            ``'snapshot_id'``.
 
         Raises:
             BerdlLoadRefusedError: Off-pod (before any transport call).
+            ClearinghouseBatchIntegrityError: No usable ``run.json``.
             ClearinghouseWriteTargetMismatchError: Write target unconfirmed
                 (dev 1206) -- ``load()`` called zero times.
-            ClearinghouseLedgerAmbiguousError: A ``"started"`` batch with no
-                terminal line and ``reconcile=False``.
-            ClearinghouseLoadPostflightError: A null postflight on a real
-                ingest (dev 1194).
+            ClearinghouseSchemaPreflightError: The target is not the
+                lake-5 schema -- ``load()`` called zero times.
+            ClearinghouseNamespaceLockedError: Another live ingest holds the
+                namespace.
+            ClearinghouseLedgerAmbiguousError: A ``started`` batch with
+                ``reconcile=False``.
+            ClearinghouseReconcileMismatchError: A ``started`` batch whose
+                count is neither its expectation nor zero.
+            ClearinghouseLoadPostflightError: A null postflight (dev 1194).
         """
         self._require_in_pod("ingest_shards")
         shard_root = Path(shard_dir)
+        run = ci.read_run_inventory(shard_root)
 
-        # Pre-write assertion FIRST, before opening the ledger or reading any
-        # shard -- so a mismatch refuses with load() called zero times, in
+        # Pre-write assertion and schema preflight BEFORE anything is written,
+        # so either refusal leaves load() called exactly zero times -- in
         # dry_run as well as a real run.
         write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        self._assert_lake5_schema(write_ns)
 
-        ledger_path = shard_root / LEDGER_FILENAME
-        ledger_states = _read_ledger_states(ledger_path, run_id=run_id)
-        # Re-apply the load order to whatever discovery produced. _discover_shards
-        # already returns it ordered; doing it again here is what makes the
-        # registry-first guarantee a property of THIS verb rather than of its
-        # discovery helper, so a different (or monkeypatched, or reversed)
-        # producer cannot ingest a result table ahead of the registry.
-        discovered = order_shards_for_load(_discover_shards(shard_root))
+        execution_id = run_id or (
+            str(run.get("run_id"))
+            if adopt_source_batch_ids and run.get("run_id")
+            else ci.new_execution_id()
+        )
+        binding = ci.bind_execution(
+            execution_id=execution_id,
+            shard_dir=shard_root,
+            namespace=write_ns,
+            tenant=tenant,
+            dataset=dataset,
+            run=run,
+            adopt_source_batch_ids=adopt_source_batch_ids,
+        )
+        inventory: list[dict[str, Any]] = list(binding["inventory"])
+        state_dir = ci.execution_state_dir(execution_id)
+        ledger = ci.ExecutionLedger(state_dir)
 
-        capability = self._get_capability()
-        reports: list[dict[str, Any]] = []
+        if dry_run:
+            return {
+                "run_id": execution_id,
+                "execution_id": execution_id,
+                "source_run_id": run.get("run_id"),
+                "namespace": write_ns,
+                "state_dir": str(state_dir),
+                "dry_run": True,
+                "lock": None,
+                "tables": self._dry_run_reports(
+                    inventory, shard_root=shard_root, write_ns=write_ns
+                ),
+            }
 
-        for name, batch, shard_path in discovered:
-            key = (name, batch)
-            state = ledger_states.get(key)
-
-            if state == _LEDGER_INGESTED:
-                reports.append({"name": name, "batch": batch, "action": "skip"})
-                continue
-
-            if state == _LEDGER_STARTED:
-                # Ambiguous: died mid-ingest, no terminal line. Refuse unless
-                # reconcile decides against snapshot history.
-                if not reconcile:
-                    raise ClearinghouseLedgerAmbiguousError(
-                        f"ingest_shards: ledger has {name!r} batch {batch!r} at "
-                        f"state {_LEDGER_STARTED!r} with no terminal line for "
-                        f"run_id {run_id!r} -- the process died mid-ingest and "
-                        "whether the shard landed is unknown. Refusing to "
-                        "continue past it. A duplicate <type>_content shard has "
-                        "no current-state derivation to collapse it, so this "
-                        "cannot be assumed safe. Re-run with reconcile=True to "
-                        "decide against the table's Iceberg snapshot history."
-                    )
-                landed = self._reconcile_started_batch(name, batch, write_ns=write_ns)
-                if landed:
-                    _append_ledger_line(
-                        ledger_path,
-                        run_id=run_id,
-                        table=name,
-                        batch=batch,
-                        shard_path=str(shard_path),
-                        rows=None,
-                        state=_LEDGER_INGESTED,
-                        snapshot_id=None,
-                        extra={"reconciled": True},
-                    )
-                    reports.append(
-                        {"name": name, "batch": batch, "action": "reconcile"}
-                    )
-                    continue
-                # Reconcile decided the shard did NOT land -- fall through and
-                # ingest it as a fresh batch below.
-
-            if dry_run:
-                reports.append({"name": name, "batch": batch, "action": "would_ingest"})
-                continue
-
-            # Real ingest: write a non-terminal 'started' line BEFORE the
-            # load(), so a crash mid-ingest leaves the ambiguous marker the
-            # resume path refuses on.
-            _append_ledger_line(
-                ledger_path,
-                run_id=run_id,
-                table=name,
-                batch=batch,
-                shard_path=str(shard_path),
-                rows=None,
-                state=_LEDGER_STARTED,
-                snapshot_id=None,
+        lock = ci.NamespaceLock(write_ns)
+        lock_report = lock.acquire(execution_id=execution_id)
+        if lock.previous_holder is not None:
+            lock_report = {
+                **lock_report,
+                "took_over_from": lock.previous_holder,
+            }
+        try:
+            ci.write_execution(state_dir, binding)
+            # RECONCILE FIRST, before any batch is read or appended: a batch
+            # left 'started' owns rows that may be in the table, and nothing
+            # else may be decided until it is.
+            self._reconcile_started_batches(
+                inventory,
+                ledger=ledger,
+                write_ns=write_ns,
+                reconcile=reconcile,
+                execution_id=execution_id,
             )
-            try:
-                result = capability.load(
-                    dataset=dataset,
-                    tables=[
-                        {
-                            "name": name,
-                            "mode": "append",
-                            "bronze_path": str(shard_path),
-                            "format": _shard_format(shard_path),
-                        }
-                    ],
-                    tenant=tenant,
-                    namespace=write_ns,
-                    paths={"bronze_base": str(shard_root)},
-                )
-                result = self._check_postflight(result)
-            except Exception as exc:
-                _append_ledger_line(
-                    ledger_path,
-                    run_id=run_id,
-                    table=name,
-                    batch=batch,
-                    shard_path=str(shard_path),
-                    rows=None,
-                    state=_LEDGER_FAILED,
-                    snapshot_id=None,
-                    extra={"error": f"{type(exc).__name__}: {exc}"},
-                )
-                raise
-
-            table_report = _first_table_report(result, name)
-            row_count = table_report.get("row_count")
-            snapshot_id = table_report.get("new_snapshot_id")
-            _append_ledger_line(
-                ledger_path,
-                run_id=run_id,
-                table=name,
-                batch=batch,
-                shard_path=str(shard_path),
-                rows=row_count,
-                state=_LEDGER_INGESTED,
-                snapshot_id=snapshot_id,
+            reports = self._ingest_inventory(
+                inventory,
+                ledger=ledger,
+                shard_root=shard_root,
+                write_ns=write_ns,
+                tenant=tenant,
+                dataset=dataset,
+                execution_id=execution_id,
             )
-            reports.append(
-                {
-                    "name": name,
-                    "batch": batch,
-                    "action": "ingest",
-                    "row_count": row_count,
-                    "snapshot_id": snapshot_id,
-                }
-            )
+        finally:
+            lock.release()
 
         return {
-            "run_id": run_id,
+            "run_id": execution_id,
+            "execution_id": execution_id,
+            "source_run_id": run.get("run_id"),
             "namespace": write_ns,
-            "dry_run": dry_run,
+            "state_dir": str(state_dir),
+            "dry_run": False,
+            "lock": lock_report,
             "tables": reports,
         }
 
-    def _reconcile_started_batch(self, name: str, batch: str, *, write_ns: str) -> bool:
-        """Decide whether an ambiguous ``"started"`` shard actually landed.
+    # -- ingest: the per-batch machinery ---------------------------------
 
-        Reads the table's Iceberg snapshot history and returns whether a
-        snapshot exists that could correspond to this batch's append. This
-        deliberately makes a single, read-only ``query(..., engine="spark")``
-        call against ``<ns>.<table>.snapshots`` -- the Iceberg metadata table --
-        and reports whether the table has ANY snapshot at all. A more precise
-        per-batch attribution would require a batch marker in the snapshot
-        summary that the write path does not currently record; absent that, the
-        conservative reading is "if the table shows no snapshots the shard
-        cannot have landed, so re-ingest is safe; otherwise treat it as landed
-        and skip". This mirrors the append-only reasoning in the ``ingest_shards``
-        docstring and is intentionally the read-only half of reconcile.
+    def _dry_run_reports(
+        self,
+        inventory: Sequence[Mapping[str, Any]],
+        *,
+        shard_root: Path,
+        write_ns: str,
+    ) -> list[dict[str, Any]]:
+        """Report what each batch WOULD do, writing nothing.
 
-        Returns:
-            ``True`` if the table shows at least one snapshot (treat the shard
-            as landed -- skip re-ingest), ``False`` if it shows none (safe to
-            re-ingest).
+        Runs the real integrity checks and the real fill-only read, because a
+        dry run whose answer came from a different code path would not be
+        evidence about the run that follows. An integrity failure is REPORTED
+        here rather than ledgered -- a dry run writes no ledger line, by the
+        same guarantee ``clearinghouse_schema.bootstrap``'s dry-run makes.
         """
-        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}.snapshots")
+        reports: list[dict[str, Any]] = []
+        for entry in inventory:
+            report: dict[str, Any] = {
+                "name": entry.get("table"),
+                "batch_id": entry.get("batch_id"),
+                "unit_id": entry.get("unit_id"),
+            }
+            try:
+                batch = ci.verify_batch_file(
+                    entry,
+                    shard_root=shard_root,
+                    expected_batch_id=str(entry.get("source_batch_id")),
+                    expected_sha256=str(entry.get("source_sha256") or ""),
+                )
+                _survivors, expected_rows = self._fill_only_survivors(
+                    entry, batch=batch, write_ns=write_ns
+                )
+            except ci.ClearinghouseBatchIntegrityError as exc:
+                report.update({"action": "would_refuse", "error": str(exc)})
+                reports.append(report)
+                continue
+            report.update(
+                {
+                    "action": "would_ingest",
+                    "rows_in": batch.num_rows,
+                    "rows_dropped_present": batch.num_rows - expected_rows,
+                    "rows_ingested": expected_rows,
+                }
+            )
+            reports.append(report)
+        return reports
+
+    def _ingest_inventory(
+        self,
+        inventory: Sequence[Mapping[str, Any]],
+        *,
+        ledger: Any,
+        shard_root: Path,
+        write_ns: str,
+        tenant: str,
+        dataset: str,
+        execution_id: str,
+    ) -> list[dict[str, Any]]:
+        """Ingest every batch of the derived inventory, in load order.
+
+        Three states drive it, and nothing else: ``committed`` is skipped,
+        ``started`` can only be a batch the reconcile pass decided RETRYABLE
+        (an undecided one raised there, before this ran), and anything else --
+        no line, or ``failed`` -- is ingested. A failed batch IS retried,
+        because the batch file is immutable and fill-only makes the retry
+        harmless; what a failed line must not do is disappear, and
+        :meth:`verify_run` blocks on one that was never resolved.
+        """
+        states = ledger.records()
+        reports: list[dict[str, Any]] = []
+        for position, entry in enumerate(inventory):
+            batch_id = str(entry["batch_id"])
+            table = str(entry["table"])
+            record = states.get(batch_id)
+            state = None if record is None else record.get("state")
+            if state == ci.LEDGER_COMMITTED:
+                reports.append(
+                    {
+                        "name": table,
+                        "batch_id": batch_id,
+                        "unit_id": entry.get("unit_id"),
+                        # 'reconcile' when THIS call's reconcile pass is what
+                        # committed it, so the report says which batches the
+                        # operator's --reconcile actually decided.
+                        "action": (
+                            "reconcile" if record.get("reconciled") else "skip"
+                        ),
+                        "rows_in": record.get("rows_in"),
+                        "rows_dropped_present": record.get("rows_dropped_present"),
+                        "rows_ingested": record.get("rows_ingested"),
+                        "snapshot_id": record.get("snapshot_id"),
+                    }
+                )
+                continue
+
+            if table != PARAMETER_SET_TABLE and table.endswith("_result"):
+                self._assert_registry_committed_through(
+                    inventory, position=position, ledger=ledger
+                )
+
+            report = self._ingest_one_batch(
+                entry,
+                ledger=ledger,
+                shard_root=shard_root,
+                write_ns=write_ns,
+                tenant=tenant,
+                dataset=dataset,
+                execution_id=execution_id,
+            )
+            reports.append(report)
+        return reports
+
+    def _assert_registry_committed_through(
+        self,
+        inventory: Sequence[Mapping[str, Any]],
+        *,
+        position: int,
+        ledger: Any,
+    ) -> None:
+        """Refuse a result batch until every registry batch before it committed.
+
+        REGISTRY ACROSS UNITS. A result row's ``parameter_set_hash`` may have
+        been registered by its OWN unit or by an earlier one, so "the registry
+        is loaded first" has to mean every registry batch up to this point --
+        not merely this unit's. The inventory is in load order with each
+        unit's registry batch ahead of its results, so "up to this point" is
+        exactly the prefix.
+        """
+        states = ledger.records()
+        pending = [
+            str(entry["batch_id"])
+            for entry in inventory[:position]
+            if entry.get("table") == PARAMETER_SET_TABLE
+            and (states.get(str(entry["batch_id"])) or {}).get("state")
+            != ci.LEDGER_COMMITTED
+        ]
+        if pending:
+            raise ClearinghouseRegistryOrderError(
+                "ingest: refusing to load a <type>_result batch while "
+                f"{len(pending)} parameter-set registry batch(es) of this or "
+                f"an earlier unit are not committed ({', '.join(pending[:3])}"
+                f"{', ...' if len(pending) > 3 else ''}). A result row whose "
+                "parameter_set_hash the registry cannot explain is an orphan: "
+                "the hash is opaque, so nothing can say what parameters "
+                "produced the result. The registry is always written first."
+            )
+
+    def _ingest_one_batch(
+        self,
+        entry: Mapping[str, Any],
+        *,
+        ledger: Any,
+        shard_root: Path,
+        write_ns: str,
+        tenant: str,
+        dataset: str,
+        execution_id: str,
+    ) -> dict[str, Any]:
+        """Integrity-check, fill-only filter and append ONE batch."""
+        batch_id = ci.validate_batch_id(str(entry["batch_id"]))
+        table = str(entry["table"])
+        base = {
+            "execution_id": execution_id,
+            "batch_id": batch_id,
+            "table": table,
+            "unit_id": entry.get("unit_id"),
+            "namespace": write_ns,
+            "source_batch_id": entry.get("source_batch_id"),
+            "sha256": entry.get("source_sha256"),
+        }
+        try:
+            batch = ci.verify_batch_file(
+                entry,
+                shard_root=shard_root,
+                expected_batch_id=str(entry.get("source_batch_id")),
+                expected_sha256=str(entry.get("source_sha256") or ""),
+            )
+        except ci.ClearinghouseBatchIntegrityError as exc:
+            # REFUSE THIS BATCH, LEDGER IT, CARRY ON. One corrupt file does
+            # not invalidate the other batches, and a failed line blocks
+            # verification of the run, so the failure cannot be lost.
+            ledger.append({**base, "state": ci.LEDGER_FAILED, "error": str(exc)})
+            return {
+                "name": table,
+                "batch_id": batch_id,
+                "unit_id": entry.get("unit_id"),
+                "action": "failed",
+                "error": str(exc),
+            }
+        if not entry.get("adopted_source_batch_id"):
+            batch = ci.retag_batch_ids(batch, batch_id)
+        survivors, expected_rows = self._fill_only_survivors(
+            entry, batch=batch, write_ns=write_ns
+        )
+        rows_in = batch.num_rows
+        dropped = rows_in - expected_rows
+
+        if expected_rows == 0:
+            # Nothing survives, so nothing is appended -- and crucially NO
+            # load() is made at all. This is the whole point of fill-only: a
+            # second ingest of a landed run is free.
+            ledger.append(
+                {
+                    **base,
+                    "state": ci.LEDGER_COMMITTED,
+                    "rows_in": rows_in,
+                    "rows_dropped_present": dropped,
+                    "rows_ingested": 0,
+                    "expected_rows": 0,
+                    "snapshot_id": None,
+                    "load_called": False,
+                }
+            )
+            return {
+                "name": table,
+                "batch_id": batch_id,
+                "unit_id": entry.get("unit_id"),
+                "action": "ingest",
+                "rows_in": rows_in,
+                "rows_dropped_present": dropped,
+                "rows_ingested": 0,
+                "snapshot_id": None,
+            }
+
+        # The durable 'started' line: target namespace, checksum and the
+        # expected_rows counted from the ALREADY-MATERIALISED survivors, so
+        # what is appended cannot differ from what was recorded.
+        ledger.append(
+            {
+                **base,
+                "state": ci.LEDGER_STARTED,
+                "rows_in": rows_in,
+                "rows_dropped_present": dropped,
+                "expected_rows": expected_rows,
+            }
+        )
+        try:
+            result = self._get_capability().load(
+                dataset=dataset,
+                tables=[{"name": table, "mode": "append"}],
+                tenant=tenant,
+                namespace=write_ns,
+                dataframes={table: survivors},
+            )
+            result = self._check_postflight(result)
+        except Exception as exc:
+            ledger.append(
+                {
+                    **base,
+                    "state": ci.LEDGER_FAILED,
+                    "rows_in": rows_in,
+                    "rows_dropped_present": dropped,
+                    "expected_rows": expected_rows,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+        snapshot_id = _first_table_report(result, table).get("new_snapshot_id")
+        ledger.append(
+            {
+                **base,
+                "state": ci.LEDGER_COMMITTED,
+                "rows_in": rows_in,
+                "rows_dropped_present": dropped,
+                "rows_ingested": expected_rows,
+                "expected_rows": expected_rows,
+                "snapshot_id": snapshot_id,
+                "load_called": True,
+            }
+        )
+        return {
+            "name": table,
+            "batch_id": batch_id,
+            "unit_id": entry.get("unit_id"),
+            "action": "ingest",
+            "rows_in": rows_in,
+            "rows_dropped_present": dropped,
+            "rows_ingested": expected_rows,
+            "snapshot_id": snapshot_id,
+        }
+
+    # -- fill-only: the Spark anti-join and the keys it joins against ----
+
+    def _existing_keys(self, entry: Mapping[str, Any], *, write_ns: str) -> Any:
+        """Read the target's existing key tuples inside this batch's range.
+
+        ONE read per batch, restricted to ``[hash_min, hash_max]`` on the
+        batch's own range column (``entity_hash``, or ``parameter_set_hash``
+        for the registry) -- which is the only reason this is affordable
+        against a populated corpus: a batch covers a contiguous slice of the
+        hash space because the sharder sorted it, so the keys that could
+        possibly collide are a bounded window rather than the whole table.
+
+        The bounds are INLINED after being validated against
+        ``^[0-9a-f]{64}$`` (:func:`clearinghouse_ingest.validate_hex64`),
+        because the read runs on Spark and ``BerdlCapability.query`` has no
+        bind channel there -- the same validated-inlining discipline every
+        bulk read in this class uses.
+        """
+        import pyarrow as pa  # noqa: PLC0415 - import-cheap
+
+        table = str(entry["table"])
+        key_columns = ci.key_columns_for_table(table)
+        range_column = ci.range_column_for_table(table)
+        hash_min = ci.validate_hex64(
+            str(entry.get("hash_min")), where=f"batch {entry.get('batch_id')!r} hash_min"
+        )
+        hash_max = ci.validate_hex64(
+            str(entry.get("hash_max")), where=f"batch {entry.get('batch_id')!r} hash_max"
+        )
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "spark")
+        columns = ", ".join(key_columns)
         rows = self._run(
-            f"SELECT snapshot_id FROM {fqn} ORDER BY committed_at DESC LIMIT 1",
+            f"SELECT {columns} FROM {fqn} "
+            f"WHERE {range_column} BETWEEN '{hash_min}' AND '{hash_max}'",
             params=None,
             engine="spark",
         )
-        return bool(rows)
+        return pa.table(
+            {
+                column: pa.array(
+                    [row.get(column) for row in rows], type=pa.string()
+                )
+                for column in key_columns
+            }
+        )
+
+    def _fill_only_survivors(
+        self, entry: Mapping[str, Any], *, batch: Any, write_ns: str
+    ) -> tuple[Any, int]:
+        """Materialise the rows of ``batch`` the target does not already hold.
+
+        MIRRORS :func:`clearinghouse_ingest.fill_only_survivors` EXACTLY, and
+        that function is the specification: a left-anti-join of the batch
+        against the target's existing keys on the key columns, keeping row
+        order and the full schema, keeping within-batch duplicates, and
+        treating a NULL anywhere in a key tuple as unmatched (as SQL does).
+        The pure function is tested directly; this path is tested against a
+        Spark stand-in that applies it, so the two cannot drift silently.
+
+        THE SURVIVORS ARE MATERIALISED ONCE, HERE, and counted from that
+        materialisation -- ``cache()`` then ``count()`` on the Spark path --
+        before any ``started`` line is written. A recomputed DataFrame would
+        re-read the target, so a concurrent writer could make the rows
+        appended differ from the ``expected_rows`` recorded, which is the one
+        thing the ledger must never be wrong about.
+
+        Returns:
+            ``(payload, row_count)`` where ``payload`` is what goes to
+            ``load(dataframes={table: payload})``: a cached Spark DataFrame
+            when a session is available, otherwise the survivor rows as a
+            list of dicts -- the same DataFrame-mode payload shape
+            :meth:`_write_parameter_set_registry` already uses.
+        """
+        key_columns = ci.key_columns_for_table(str(entry["table"]))
+        existing = self._existing_keys(entry, write_ns=write_ns)
+        spark = self._spark_session()
+        if spark is None:
+            survivors = ci.fill_only_survivors(batch, existing, key_columns)
+            return survivors.to_pylist(), survivors.num_rows
+        batch_df = spark.createDataFrame(batch.to_pylist())
+        if existing.num_rows:
+            keys_df = spark.createDataFrame(existing.to_pylist())
+            survivors_df = batch_df.join(
+                keys_df, on=list(key_columns), how="left_anti"
+            )
+        else:
+            survivors_df = batch_df
+        survivors_df = survivors_df.cache()
+        return survivors_df, int(survivors_df.count())
+
+    def _spark_session(self) -> Any:
+        """The pod's Spark session, or ``None`` when the collaborator has none.
+
+        ``None`` is not a failure: the survivors are then computed by the pure
+        function in the driver and passed as a list of dicts, exactly as
+        :meth:`_write_parameter_set_registry` passes its registry rows. The
+        answer is identical either way -- the Spark path exists because a
+        full-size batch's anti-join belongs in the engine, not because the
+        semantics differ.
+        """
+        getter = getattr(self._get_capability(), "spark_session", None)
+        if getter is None:
+            return None
+        return getter()
+
+    # -- the lake-5 schema preflight -------------------------------------
+
+    def _assert_lake5_schema(self, write_ns: str) -> None:
+        """Refuse a target that is not the lake-5 schema, before any write.
+
+        Reads the live columns of every ``<type>_result`` table and of the
+        parameter-set registry and refuses unless each result table carries
+        ``parameter_set_hash`` and the registry table exists. ``bootstrap()``
+        creates a table that does not exist but CANNOT add a column to one
+        that does, so an un-rebuilt result table from before lake-5 looks
+        perfectly healthy to it -- and an append of five-tuple-keyed rows into
+        a four-tuple table is unrecoverable. This check is the only mechanical
+        guard that the operator's rebuild (lake-5 OP-C1) actually happened.
+
+        Raises:
+            ClearinghouseSchemaPreflightError: Naming every table that is
+                missing the column or missing entirely. ``load()`` has been
+                called zero times.
+        """
+        findings: list[str] = []
+        for config in table_configs():
+            name = config["name"]
+            if name != PARAMETER_SET_TABLE and not name.endswith("_result"):
+                continue
+            columns = self._live_columns(name)
+            if columns is None:
+                findings.append(f"{name}: table does not exist in {write_ns}")
+            elif name != PARAMETER_SET_TABLE and "parameter_set_hash" not in columns:
+                findings.append(
+                    f"{name}: exists but has no 'parameter_set_hash' column "
+                    f"(columns: {', '.join(sorted(columns)) or 'none'})"
+                )
+        if findings:
+            raise ClearinghouseSchemaPreflightError(
+                "ingest: refusing to load -- the target namespace "
+                f"{write_ns!r} is not the lake-5 clearinghouse schema:\n  "
+                + "\n  ".join(findings)
+                + "\nThe result slot key ends in parameter_set_hash and every "
+                "result row carries one, so an append into a table without "
+                "that column either fails or silently drops the only thing "
+                "that says which parameters produced the result. bootstrap() "
+                "cannot add a column to an existing table, so the result "
+                "tables must be rebuilt (operator step OP-C1) before this "
+                "run. Nothing has been written and load() has been called "
+                "zero times."
+            )
+
+    def _live_columns(self, name: str) -> set[str] | None:
+        """The live column names of one clearinghouse table, or ``None``.
+
+        ``DESCRIBE`` on Spark, which is the schema probe available in-pod
+        without a write. ``None`` means the table could not be described --
+        the only reading of which that matters here is "it is not there",
+        which is itself a refusal, so the distinction between an absent table
+        and an unreadable one is not one this guard needs to draw.
+        """
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}", "spark")
+        try:
+            rows = self._run(f"DESCRIBE {fqn}", params=None, engine="spark")
+        except Exception:
+            return None
+        columns: set[str] = set()
+        for row in rows:
+            value = row.get("col_name") if isinstance(row, dict) else None
+            if value is None and isinstance(row, dict) and row:
+                value = next(iter(row.values()), None)
+            if isinstance(value, str) and value and not value.startswith("#"):
+                columns.add(value)
+        return columns or None
+
+    # -- reconcile -------------------------------------------------------
+
+    def _reconcile_started_batches(
+        self,
+        inventory: Sequence[Mapping[str, Any]],
+        *,
+        ledger: Any,
+        write_ns: str,
+        reconcile: bool,
+        execution_id: str,
+    ) -> None:
+        """Decide every ``started`` batch BEFORE anything else is touched.
+
+        RECONCILE BEFORE DELETE OR REGENERATE. A ``started`` batch may own
+        rows that are already in the table, so its file and its inventory
+        entry are protected until the exact count has decided it. This runs as
+        a PASS over the whole inventory before the ingest loop, which is what
+        makes that ordering a property of the verb rather than of the order
+        batches happen to appear in.
+
+        The rule is the count, never a heuristic (the previous implementation
+        treated ANY snapshot on the table as proof a batch had landed, which
+        on a populated corpus is always true and therefore proves nothing):
+
+        - ``COUNT(*) WHERE ingest_batch_id = <batch>`` == ``expected_rows``
+          -> committed, the original batch kept.
+        - 0 with ``expected_rows`` > 0 -> retryable; the same immutable batch
+          is re-filtered and re-appended under a new attempt line.
+        - anything else -> stop the run and report it for repair.
+
+        A batch decided RETRYABLE is left at ``started`` and nothing else is
+        done to it here: the ingest loop re-reads it, re-runs fill-only
+        against the target as it now stands, and writes a fresh ``started``
+        attempt line before appending. That is the "retry the SAME immutable
+        batch under a new attempt line" rule, and it falls out of leaving the
+        state alone rather than needing a second channel to carry it.
+
+        Raises:
+            ClearinghouseLedgerAmbiguousError: ``reconcile=False``.
+            ClearinghouseReconcileMismatchError: A count that is neither the
+                expectation nor zero.
+        """
+        states = ledger.records()
+        for entry in inventory:
+            batch_id = str(entry["batch_id"])
+            record = states.get(batch_id)
+            if record is None or record.get("state") != ci.LEDGER_STARTED:
+                continue
+            table = str(entry["table"])
+            if not reconcile:
+                raise ClearinghouseLedgerAmbiguousError(
+                    f"ingest: execution {execution_id!r} has batch "
+                    f"{batch_id!r} of table {table!r} at state "
+                    f"{ci.LEDGER_STARTED!r} with no terminal line -- the "
+                    "process died around the append and whether its rows "
+                    "landed is unknown. Refusing to continue past it: a "
+                    "duplicate <type>_content row has no current-state "
+                    "derivation to collapse it. Re-run with reconcile=True to "
+                    "decide it by the exact count of rows carrying this "
+                    "batch id."
+                )
+            expected = record.get("expected_rows")
+            expected_rows = int(expected) if isinstance(expected, int) else 0
+            counted = self._count_batch_rows(table, batch_id)
+            if counted == expected_rows:
+                ledger.append(
+                    {
+                        "execution_id": execution_id,
+                        "batch_id": batch_id,
+                        "table": table,
+                        "unit_id": entry.get("unit_id"),
+                        "namespace": write_ns,
+                        "state": ci.LEDGER_COMMITTED,
+                        "rows_in": record.get("rows_in"),
+                        "rows_dropped_present": record.get("rows_dropped_present"),
+                        "rows_ingested": counted,
+                        "expected_rows": expected_rows,
+                        "snapshot_id": None,
+                        "reconciled": True,
+                    }
+                )
+                continue
+            if counted == 0 and expected_rows > 0:
+                continue  # left at 'started'; the ingest loop retries it
+            raise ClearinghouseReconcileMismatchError(
+                f"ingest: reconcile of batch {batch_id!r} (table {table!r}, "
+                f"namespace {write_ns!r}) counted {counted} rows carrying that "
+                f"ingest_batch_id but the ledger expected {expected_rows}. "
+                "Neither 'it landed' nor 'it did not' is true, so this is a "
+                "PARTIAL append and no automatic decision is safe: appending "
+                "again would duplicate the rows that are there, and leaving it "
+                "would under-count the run. The run stops here. Repair the "
+                "batch (the rows carrying this id are the ones to remove) and "
+                "resume."
+            )
+
+    def _count_batch_rows(self, name: str, batch_id: str) -> int:
+        """Count the rows of ``name`` carrying exactly this ``ingest_batch_id``.
+
+        THE reconcile and verification primitive, replacing the any-snapshot
+        heuristic. ``batch_id`` is validated as a ULID
+        (:func:`clearinghouse_ingest.validate_batch_id`) immediately before it
+        is inlined, because the read runs on Spark and there is no bind
+        channel there.
+        """
+        validated = ci.validate_batch_id(batch_id)
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}", "spark")
+        rows = self._run(
+            f"SELECT COUNT(*) AS row_count FROM {fqn} "
+            f"WHERE ingest_batch_id = '{validated}'",
+            params=None,
+            engine="spark",
+        )
+        value = _scalar(rows, "row_count")
+        return int(value) if isinstance(value, (int, float)) else 0
 
     def _live_snapshot_ids(self, name: str) -> set[str]:
         """Return the set of snapshot ids currently present on ``<ns>.<name>``.
 
         A single read-only ``query(..., engine="spark")`` against the table's
         Iceberg ``.snapshots`` metadata table. Used by :meth:`verify_run` to
-        confirm the snapshot a ledger line recorded for an ingested shard still
+        confirm the snapshot a ledger line recorded for a committed batch still
         exists in the table's history. Ids are stringified so a ledger's
         JSON-decoded (often string) snapshot value compares cleanly against the
         metadata table's (often numeric) column.
@@ -2170,136 +2758,252 @@ class ClearinghouseCapability:
         *,
         run_id: str,
     ) -> dict[str, Any]:
-        """Re-check a completed run's row counts and snapshots against the ledger.
+        """Prove a load execution landed, batch by batch, against the live table.
 
-        IN-POD ONLY. Refuses off-pod (:class:`BerdlLoadRefusedError`) before any
-        transport call. This is the POST-INGEST audit half of the ingest
-        contract: :meth:`ingest_shards` wrote a run ledger recording, per
-        ``(table, batch)``, the row count and Iceberg snapshot id it observed at
-        ingest time. This verb reads that ledger back and, for every table that
-        the run marked ``"ingested"``, confirms two things against the LIVE
-        table:
+        IN-POD ONLY. Refuses off-pod before any transport call. This is the
+        POST-INGEST audit half of the ingest contract, and it is a PER-BATCH
+        proof rather than a table-wide count: a table-wide ``COUNT(*)`` on a
+        populated corpus can be satisfied by anyone's rows, so it cannot
+        distinguish "this execution's batches landed" from "the table is
+        big". Every batch in the execution's inventory must show BOTH:
 
-        - the table's current ``COUNT(*)`` is at least the sum of the ledger's
-          recorded per-batch row counts for this run (a live count BELOW the
-          ledger sum means rows the ledger says landed are missing -- a real
-          discrepancy), and
-        - every snapshot id the ledger recorded for an ingested batch still
-          exists in the table's Iceberg snapshot history.
+        - a TERMINAL ``committed`` ledger line, and
+        - an EXACT live count of rows carrying its ``ingest_batch_id`` equal
+          to the ``rows_ingested`` that line recorded.
 
-        It then runs the PARAMETER-SET REGISTRY INTEGRITY check
-        (:meth:`parameter_set_orphans`) over the live tables and folds every
-        finding into ``'discrepancies'``. That check is run unconditionally,
-        not only for the tables this run touched: a missing registry row is a
-        property of the tables as they now stand, and the run that wrote the
-        orphan is not necessarily the run being verified. Its findings are
-        DISCREPANCIES, never warnings -- an orphaned, malformed, conflicting
-        or mis-hashed registry entry means a stored result cannot be
-        attributed to the parameters that produced it, which is the same
-        class of problem as a missing row.
+        Anything missing, failed, unresolved (still ``started``) or in EXCESS
+        of its recorded rows is a discrepancy and blocks completion. Every
+        snapshot id the ledger recorded is also confirmed still present in the
+        table's Iceberg history.
 
-        It performs the same explicit ``COUNT(*)`` discipline as :meth:`stats`
-        (never a transport ``row_count`` field), and it WRITES NOTHING -- no
-        ``load()``, no ledger line. A discrepancy is REPORTED, not raised: the
-        correct operator response to a load reported FAILED on a null postflight
-        (dev 1194) is precisely to run ``verify`` and reconcile, so this verb
-        must be able to tell the operator what it found without itself failing.
+        THE UNIT IS THE UNIT OF COMPLETION. A unit's batches were published
+        atomically by the sharder, so a unit is the smallest thing that can be
+        complete. A unit completes only when every one of its batches is
+        proven AND every distinct ``parameter_set_hash`` in its result batches
+        is present in the target's registry -- a result whose parameters the
+        registry cannot explain is an orphan, and no amount of row counting
+        makes it interpretable.
+
+        It then runs the NAMESPACE-WIDE registry integrity check
+        (:meth:`parameter_set_orphans`) and folds its findings into
+        ``'discrepancies'``. That check is namespace-wide on purpose: an
+        orphan is a property of the tables as they now stand and the writer
+        that left it is not necessarily this execution.
+
+        It WRITES NOTHING -- no ``load()``, no ledger line. A discrepancy is
+        REPORTED, not raised: the correct operator response to a load reported
+        FAILED on a null postflight (dev 1194) is precisely to run verify, so
+        this verb must be able to say what it found without failing.
 
         Args:
-            shard_dir: The shard directory whose ``ingest_ledger.jsonl`` this run
-                wrote (same directory :meth:`ingest_shards` used).
-            run_id: The run whose ledger lines to verify.
+            shard_dir: The shard directory the execution drew from. Used only
+                to read the batch files' ``parameter_set_hash`` values for the
+                unit registry check -- the ledger and inventory come from the
+                execution's own state directory.
+            run_id: The LOAD EXECUTION id to verify.
 
         Returns:
-            A dict with ``'run_id'``, ``'namespace'`` (the confirmed write-target
-            namespace, resolved through the dev 1206 guard so verify reads the
-            same namespace the ingest wrote), a ``'tables'`` list (one report per
-            verified table with its ``'name'``, ``'ledger_rows'``, ``'live_rows'``,
-            ``'ok'`` and, when a snapshot is missing, ``'missing_snapshots'``),
-            a ``'discrepancies'`` list of human-readable strings (empty when
-            everything reconciles) and ``'parameter_set_integrity'`` -- the
-            full :meth:`parameter_set_orphans` report, whose ``'failures'``
-            are also folded into ``'discrepancies'``.
+            A dict with ``'run_id'``/``'execution_id'``, ``'namespace'``,
+            ``'state_dir'``, ``'ok'``, a ``'batches'`` list (per batch:
+            ``'batch_id'``, ``'name'``, ``'unit_id'``, ``'ledger_rows'``,
+            ``'live_rows'``, ``'state'``, ``'ok'``), a ``'units'`` list (per
+            unit: ``'unit_id'``, ``'ok'``, ``'missing_parameter_sets'``), a
+            ``'tables'`` list (per table: ``'name'``, ``'ledger_rows'``,
+            ``'live_rows'``, ``'ok'``, ``'missing_snapshots'``) kept for the
+            published CLI contract, a ``'discrepancies'`` list and
+            ``'parameter_set_integrity'``.
 
         Raises:
             BerdlLoadRefusedError: Off-pod (before any transport call).
             ClearinghouseWriteTargetMismatchError: Namespace unconfirmed
-                (dev 1206) -- no read is attempted against an unconfirmed target.
+                (dev 1206).
         """
         self._require_in_pod("verify_run")
         write_ns = self._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
         shard_root = Path(shard_dir)
-        ledger_path = shard_root / LEDGER_FILENAME
-        records = _read_ledger_records(ledger_path, run_id=run_id)
+        state_dir = ci.execution_state_dir(run_id)
+        binding = ci.read_execution(state_dir)
+        ledger = ci.ExecutionLedger(state_dir)
+        records = ledger.records()
+        discrepancies: list[str] = []
 
-        # Collapse the ingested ledger lines per table: sum recorded rows, and
-        # collect every recorded snapshot id.
+        inventory = list(binding.get("inventory", []))
+        if not inventory:
+            discrepancies.append(
+                f"execution {run_id!r}: no inventory at {state_dir} -- there "
+                "is no record of which batches this execution was to load, so "
+                "nothing about it can be proven. (A dry run writes no "
+                "binding; a real run writes one before its first batch.)"
+            )
+        if binding and binding.get("namespace") not in (None, write_ns):
+            discrepancies.append(
+                f"execution {run_id!r} is bound to namespace "
+                f"{binding.get('namespace')!r} but verify resolved "
+                f"{write_ns!r}; the counts below are read from "
+                f"{write_ns!r}."
+            )
+
+        batch_reports: list[dict[str, Any]] = []
         per_table_rows: dict[str, int] = {}
         per_table_snaps: dict[str, set[str]] = {}
-        for (table, _batch), record in records.items():
-            if record.get("state") != _LEDGER_INGESTED:
-                continue
-            rows = record.get("rows")
-            if isinstance(rows, int):
-                per_table_rows[table] = per_table_rows.get(table, 0) + rows
-            per_table_snaps.setdefault(table, set())
-            snap = record.get("snapshot_id")
-            if snap is not None:
-                per_table_snaps[table].add(str(snap))
+        unit_hashes: dict[Any, set[str]] = {}
+        unit_ok: dict[Any, bool] = {}
 
-        reports: list[dict[str, Any]] = []
-        discrepancies: list[str] = []
-        for table in sorted(set(per_table_rows) | set(per_table_snaps)):
-            fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "trino")
-            live_rows = _scalar(
-                self._run(
-                    f"SELECT COUNT(*) AS row_count FROM {fqn}",
-                    params=None,
-                    engine="trino",
-                ),
-                "row_count",
-            )
-            ledger_rows = per_table_rows.get(table)
-            live_snaps = self._live_snapshot_ids(table)
-            missing = sorted(per_table_snaps.get(table, set()) - live_snaps)
-
+        for entry in inventory:
+            batch_id = str(entry["batch_id"])
+            table = str(entry["table"])
+            unit_id = entry.get("unit_id")
+            unit_ok.setdefault(unit_id, True)
+            unit_hashes.setdefault(unit_id, set())
+            record = records.get(batch_id)
+            state = None if record is None else str(record.get("state"))
+            ledger_rows = None if record is None else record.get("rows_ingested")
             ok = True
-            if (
-                ledger_rows is not None
-                and isinstance(live_rows, int)
-                and live_rows < ledger_rows
-            ):
+            if record is None:
                 ok = False
                 discrepancies.append(
-                    f"{table}: live COUNT(*)={live_rows} is below the ledger's "
-                    f"recorded {ledger_rows} ingested rows for run {run_id!r} -- "
-                    "rows the ledger says landed appear to be missing."
+                    f"{table} batch {batch_id}: no ledger line at all -- the "
+                    "manifest names it but this execution never recorded "
+                    "ingesting it."
                 )
-            if missing:
+            elif state != ci.LEDGER_COMMITTED:
                 ok = False
                 discrepancies.append(
-                    f"{table}: {len(missing)} snapshot id(s) the ledger recorded "
-                    f"for run {run_id!r} are absent from the table's Iceberg "
-                    f"snapshot history: {', '.join(missing)}."
+                    f"{table} batch {batch_id}: ledger state {state!r} is not "
+                    f"{ci.LEDGER_COMMITTED!r}"
+                    + (
+                        f" ({record.get('error')})" if record.get("error") else ""
+                    )
+                    + " -- unresolved or failed batches block completion."
                 )
+            live_rows = self._count_batch_rows(table, batch_id)
+            expected = ledger_rows if isinstance(ledger_rows, int) else None
+            if expected is None:
+                if state == ci.LEDGER_COMMITTED:
+                    ok = False
+                    discrepancies.append(
+                        f"{table} batch {batch_id}: committed line records no "
+                        "rows_ingested, so its live count cannot be checked."
+                    )
+            elif live_rows != expected:
+                ok = False
+                discrepancies.append(
+                    f"{table} batch {batch_id}: {live_rows} live row(s) carry "
+                    f"this ingest_batch_id but the ledger committed "
+                    f"{expected}"
+                    + (
+                        " -- EXCESS rows, which means the batch was appended "
+                        "more than once."
+                        if live_rows > expected
+                        else " -- rows the ledger says landed are missing."
+                    )
+                )
+            if isinstance(expected, int):
+                per_table_rows[table] = per_table_rows.get(table, 0) + expected
+            per_table_snaps.setdefault(table, set())
+            if record is not None and record.get("snapshot_id") is not None:
+                per_table_snaps[table].add(str(record["snapshot_id"]))
+            if not ok:
+                unit_ok[unit_id] = False
+            batch_reports.append(
+                {
+                    "batch_id": batch_id,
+                    "name": table,
+                    "unit_id": unit_id,
+                    "state": state,
+                    "ledger_rows": expected,
+                    "live_rows": live_rows,
+                    "ok": ok,
+                }
+            )
+            if table.endswith("_result") and table != PARAMETER_SET_TABLE:
+                try:
+                    unit_hashes[unit_id] |= ci.batch_parameter_set_hashes(
+                        entry, shard_root=shard_root
+                    )
+                except Exception as exc:  # the file may be gone; say so
+                    unit_ok[unit_id] = False
+                    discrepancies.append(
+                        f"{table} batch {batch_id}: cannot read its "
+                        f"parameter_set_hash values for the unit registry "
+                        f"check ({type(exc).__name__}: {exc})."
+                    )
 
-            report: dict[str, Any] = {
-                "name": table,
-                "ledger_rows": ledger_rows,
-                "live_rows": live_rows,
-                "ok": ok,
-            }
+        # THE UNIT REGISTRY CHECK: every hash a unit's results claim must be
+        # in the registry, or those results cannot be interpreted.
+        unit_reports: list[dict[str, Any]] = []
+        for unit_id, hashes in unit_hashes.items():
+            missing: list[str] = []
+            if hashes:
+                registered = self._registered_parameter_set_hashes(
+                    self._validate_parameter_set_hashes(
+                        sorted(hashes), verb="verify_run"
+                    )
+                )
+                missing = sorted(hashes - registered)
             if missing:
-                report["missing_snapshots"] = missing
-            reports.append(report)
+                unit_ok[unit_id] = False
+                discrepancies.append(
+                    f"unit {unit_id!r}: {len(missing)} parameter_set_hash "
+                    f"value(s) its result batches carry are absent from "
+                    f"{PARAMETER_SET_TABLE}: {', '.join(missing[:3])}"
+                    f"{', ...' if len(missing) > 3 else ''}. A result whose "
+                    "parameter set the registry cannot explain is an orphan, "
+                    "so this unit is not complete."
+                )
+            unit_reports.append(
+                {
+                    "unit_id": unit_id,
+                    "ok": unit_ok.get(unit_id, True),
+                    "missing_parameter_sets": missing,
+                }
+            )
+
+        # The per-table roll-up, kept because the CLI's published output
+        # contract renders it -- but it is now a SUM OF PROVEN BATCHES, not a
+        # table-wide audit that any rows could satisfy.
+        table_reports: list[dict[str, Any]] = []
+        for table in sorted(set(per_table_rows) | set(per_table_snaps)):
+            live_snaps = self._live_snapshot_ids(table)
+            missing_snaps = sorted(per_table_snaps.get(table, set()) - live_snaps)
+            if missing_snaps:
+                discrepancies.append(
+                    f"{table}: {len(missing_snaps)} snapshot id(s) the ledger "
+                    f"recorded for execution {run_id!r} are absent from the "
+                    f"table's Iceberg snapshot history: "
+                    f"{', '.join(missing_snaps)}."
+                )
+            table_live = sum(
+                report["live_rows"]
+                for report in batch_reports
+                if report["name"] == table and isinstance(report["live_rows"], int)
+            )
+            report = {
+                "name": table,
+                "ledger_rows": per_table_rows.get(table),
+                "live_rows": table_live,
+                "ok": all(
+                    r["ok"] for r in batch_reports if r["name"] == table
+                )
+                and not missing_snaps,
+            }
+            if missing_snaps:
+                report["missing_snapshots"] = missing_snaps
+            table_reports.append(report)
 
         parameter_set_integrity = self.parameter_set_orphans()
         discrepancies.extend(parameter_set_integrity["failures"])
 
         return {
             "run_id": run_id,
+            "execution_id": run_id,
             "namespace": write_ns,
-            "tables": reports,
+            "state_dir": str(state_dir),
+            "source_run_id": binding.get("source_run_id"),
+            "ok": not discrepancies,
+            "batches": batch_reports,
+            "units": unit_reports,
+            "tables": table_reports,
             "discrepancies": discrepancies,
             "parameter_set_integrity": parameter_set_integrity,
         }
@@ -2506,117 +3210,6 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _read_ledger_states(
-    ledger_path: Path, *, run_id: str
-) -> dict[tuple[str, str], str]:
-    """Read the run ledger and return the LAST state per ``(table, batch)``.
-
-    The ledger is JSON-lines, appended to; a ``(table, batch)`` may have
-    several lines (a ``"started"`` then an ``"ingested"``/``"failed"``). The
-    LAST line for a key is its current state, so a ``"started"`` followed by
-    ``"ingested"`` reads as ingested, while a lone ``"started"`` (the process
-    died before writing a terminal line) reads as ``"started"`` -- the
-    ambiguous state resume refuses on. Only lines matching ``run_id`` are
-    considered; a missing ledger file is an empty set of states. Malformed
-    lines are skipped rather than crashing a days-long resume.
-    """
-    states: dict[tuple[str, str], str] = {}
-    if not ledger_path.exists():
-        return states
-    for line in ledger_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if record.get("run_id") != run_id:
-            continue
-        table = record.get("table")
-        batch = record.get("batch")
-        state = record.get("state")
-        if table is None or batch is None or state is None:
-            continue
-        states[(str(table), str(batch))] = str(state)
-    return states
-
-
-def _read_ledger_records(
-    ledger_path: Path, *, run_id: str
-) -> dict[tuple[str, str], dict[str, Any]]:
-    """Read the run ledger and return the LAST full record per ``(table, batch)``.
-
-    Like :func:`_read_ledger_states` but keeps the whole record (rows,
-    snapshot_id, state, ...) of each key's final line, which
-    :meth:`ClearinghouseCapability.verify_run` needs to sum recorded rows and
-    collect recorded snapshot ids. Only lines matching ``run_id`` are kept; a
-    missing ledger is an empty mapping and malformed lines are skipped.
-    """
-    records: dict[tuple[str, str], dict[str, Any]] = {}
-    if not ledger_path.exists():
-        return records
-    for line in ledger_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(record, dict) or record.get("run_id") != run_id:
-            continue
-        table = record.get("table")
-        batch = record.get("batch")
-        if table is None or batch is None:
-            continue
-        records[(str(table), str(batch))] = record
-    return records
-
-
-def _append_ledger_line(
-    ledger_path: Path,
-    *,
-    run_id: str,
-    table: str,
-    batch: str,
-    shard_path: str,
-    rows: int | None,
-    state: str,
-    snapshot_id: Any,
-    extra: Mapping[str, Any] | None = None,
-) -> None:
-    """Append one JSON-lines record to the run ledger, flushed to disk.
-
-    One append per ``(table, batch)`` state transition. The file is opened in
-    append mode and each line is a complete JSON object followed by a newline,
-    so a crash mid-write leaves at most one truncated trailing line (which
-    :func:`_read_ledger_states` skips) rather than a corrupted earlier record.
-    """
-    record: dict[str, Any] = {
-        "run_id": run_id,
-        "table": table,
-        "batch": batch,
-        "shard_path": shard_path,
-        "rows": rows,
-        "state": state,
-        "snapshot_id": snapshot_id,
-        "at": _now_iso(),
-    }
-    if extra:
-        record.update(extra)
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record) + "\n")
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string (ledger ``at`` field)."""
-    from datetime import datetime, timezone  # local: keep module import-cheap
-
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _shard_load_sort_key(table: str, batch: str) -> tuple[int, str, str]:
     """Sort key putting the parameter-set registry FIRST, then ``(table, batch)``.
 
@@ -2642,59 +3235,18 @@ def order_shards_for_load(
 ) -> list[tuple[str, str, Path]]:
     """Order ``(table, batch, path)`` triples for ingest, registry first.
 
-    THE single place shard load order is decided, applied by every shard-load
-    entry point. :func:`_discover_shards` sorts with it, and
-    :meth:`ClearinghouseCapability.ingest_shards` applies it again to
-    whatever list it ends up with -- so a caller (or a test, or a future
-    discovery function) that hands over a reversed or arbitrary order still
-    ingests :data:`PARAMETER_SET_TABLE` before any ``<type>_result`` table
-    rather than relying on the producer to have sorted correctly.
+    THE single place a ``(table, batch, path)`` triple list is ordered for
+    load, registry first, for any caller holding one. The ingest itself no
+    longer discovers shards by scanning -- it reads the run inventory and
+    orders it per UNIT via
+    :func:`clearinghouse_ingest.derive_execution_inventory`, which imposes
+    the same registry-first rule on the inventory's own publication order --
+    so this is the ordering rule for callers working from paths rather than
+    from an inventory.
     """
     return sorted(
         discovered, key=lambda triple: _shard_load_sort_key(triple[0], triple[1])
     )
-
-
-def _discover_shards(shard_root: Path) -> list[tuple[str, str, Path]]:
-    """Discover ``(table, batch, shard_path)`` triples under ``shard_root``.
-
-    Shards are laid out one subdirectory per table (named for the table), each
-    holding one file per batch whose stem is the batch id -- e.g.
-    ``<shard_root>/gene_entity/0007.parquet``. Only subdirectories named for a
-    known clearinghouse table -- the fifteen
-    :func:`clearinghouse_schema.table_name` composes over every type/kind,
-    plus the :data:`PARAMETER_SET_TABLE` registry, which is not entity-typed
-    and so is named by its constant -- are considered, so the ledger file and
-    any stray directory beside the shards are ignored.
-
-    The result is ordered by :func:`order_shards_for_load`: the registry
-    first, then ``(table, batch)`` -- deterministic, resumable, and with the
-    registry ahead of every result table.
-    """
-    known = {table_name(etype, kind) for kind in _KINDS for etype in ENTITY_TYPES}
-    known.add(PARAMETER_SET_TABLE)
-    discovered: list[tuple[str, str, Path]] = []
-    if not shard_root.exists():
-        return discovered
-    for table_dir in sorted(p for p in shard_root.iterdir() if p.is_dir()):
-        name = table_dir.name
-        if name not in known:
-            continue
-        for shard in sorted(p for p in table_dir.iterdir() if p.is_file()):
-            discovered.append((name, shard.stem, shard))
-    return order_shards_for_load(discovered)
-
-
-def _shard_format(shard_path: Path) -> str:
-    """Infer a bronze ``format`` from a shard file's suffix.
-
-    Bronze-mode ``load()`` needs each table's ``format``; it is taken from the
-    shard file's extension (``.parquet`` -> ``"parquet"``, ``.csv`` -> ``"csv"``,
-    etc.), defaulting to ``"parquet"`` for an extensionless shard, since the
-    bootstrap corpus is parquet.
-    """
-    suffix = shard_path.suffix.lstrip(".").lower()
-    return suffix or "parquet"
 
 
 def _first_table_report(load_result: dict[str, Any], name: str) -> dict[str, Any]:

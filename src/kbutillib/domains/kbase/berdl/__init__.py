@@ -91,8 +91,19 @@ from .clearinghouse_capability import (
     ClearinghouseLedgerAmbiguousError,
     ClearinghouseLoadPostflightError,
     ClearinghousePartialWriteError,
+    ClearinghouseReconcileMismatchError,
+    ClearinghouseRegistryOrderError,
+    ClearinghouseSchemaPreflightError,
     ClearinghouseWriteTargetMismatchError,
     order_shards_for_load,
+)
+from .clearinghouse_ingest import (
+    ClearinghouseBatchIntegrityError,
+    ClearinghouseExecutionBindingError,
+    ClearinghouseLockUnavailableError,
+    ClearinghouseNamespaceLockedError,
+    fill_only_survivors,
+    key_columns_for_table,
 )
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_schema import NAMESPACE as CLEARINGHOUSE_NAMESPACE
@@ -150,5 +161,14 @@ __all__ = [
     "ClearinghouseLoadPostflightError",
     "ClearinghouseLedgerAmbiguousError",
     "ClearinghousePartialWriteError",
+    "ClearinghouseReconcileMismatchError",
+    "ClearinghouseSchemaPreflightError",
+    "ClearinghouseRegistryOrderError",
+    "ClearinghouseBatchIntegrityError",
+    "ClearinghouseExecutionBindingError",
+    "ClearinghouseLockUnavailableError",
+    "ClearinghouseNamespaceLockedError",
+    "fill_only_survivors",
+    "key_columns_for_table",
     "order_shards_for_load",
 ]

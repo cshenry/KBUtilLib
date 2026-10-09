@@ -119,8 +119,8 @@ credentials — just CPU and disk) and an **ingest stage** (in-pod only).
 |----------|-----------------|----------------------------------|-------|
 | `plan`   | anywhere        | **nothing**                      | Resolves the manifest, reports per-table row counts and target shard sizes. |
 | `shard`  | anywhere        | bronze parquet under `--out`     | Builds the shards. No pod, no credentials. |
-| `load`   | **in-pod only** | tables + run ledger              | Ingests shards, verifies postflight, writes the run ledger. Foreground, **not** a daemon. |
-| `verify` | **in-pod only** | **nothing**                      | Re-checks a completed run's row counts + snapshots against the ledger, **and** parameter-set registry integrity. A ledger discrepancy is reported in `warnings`; a registry finding is a **failure** (in `data.parameter_set_integrity`, excluded from `warnings`) and exits non-zero. |
+| `load`   | **in-pod only** | tables + execution ledger        | Ingests a published run's batches **fill-only** (drops rows the target already holds) as DataFrames, verifies postflight, writes the execution ledger. Foreground, **not** a daemon. Runs the namespace-wide registry orphan check at the end and exits non-zero on a finding. |
+| `verify` | **in-pod only** | **nothing**                      | Proves a load execution landed **per batch** (an exact `ingest_batch_id` count against the ledger's `rows_ingested`), checks each unit's parameter sets are in the registry, **and** runs parameter-set registry integrity. A ledger discrepancy is reported in `warnings`; a registry finding is a **failure** (in `data.parameter_set_integrity`, excluded from `warnings`) and exits non-zero. |
 
 `load` and `verify` **refuse early off-pod**, before any transport call, with a
 message that **names the locus as the reason** (not a bare
@@ -128,19 +128,72 @@ message that **names the locus as the reason** (not a bare
 message). There is **no force flag** — the locus is the reason, not a switch you
 can flip.
 
-## `load` is a foreground run, resumable from the ledger
+## `load` reads the run inventory, and only ever adds what is missing
+
+`load SHARD_DIR` requires **`<SHARD_DIR>/run.json`** — the inventory a completed
+`shard` run publishes. It is not optional and the directory is never scanned
+instead: the inventory is the only source of each batch's sha256 (so the bytes
+can be checked), its row count (so the append can be proven) and its hash range
+(so the fill-only read can ask the target only about keys that could collide).
+
+**The shards stay on the pod's local disk.** The driver reads each batch with
+pyarrow and hands it to `load()` in **DataFrame mode**. There is no bronze path
+and no object-storage staging — Spark *executors* cannot read the pod's local
+disk, so a bronze-mode load pointed at one is read cluster-side and fails.
+
+**FILL-ONLY is always on.** Before each append the target's existing keys inside
+the batch's hash range are read back and the batch is left-anti-joined against
+them; only the survivors are appended, and a batch with no survivors is
+committed **without calling `load()` at all**. Key modes: `entity_hash` for
+`<type>_entity`/`<type>_content`, the full result slot key for `<type>_result`,
+`parameter_set_hash` for `parameter_set`. So re-running a load is cheap and
+changes nothing. It is **not** atomic against writers outside the process — the
+lock below excludes other clearinghouse ingests, not arbitrary writers.
+
+## `load` is a foreground run, resumable from the execution ledger
 
 `load` runs in the **foreground**. It is not a daemon and takes no `--daemon`
-flag. Resumability comes from the **run ledger** (`ingest_ledger.jsonl`, written
-beside the shards): each `(table, batch)` records `started` → `ingested`/`failed`
-with its row count and Iceberg snapshot id. A re-run reads the ledger and skips
-what already landed.
+flag. Resumability comes from the **execution ledger**, at
+`$KBU_CLEARINGHOUSE_STATE_DIR/<execution id>/ingest_ledger.jsonl` (default
+`~/.kbu/clearinghouse/runs/<execution id>/`) — **not** beside the shards, which
+are sharder output and may be regenerated or deleted. Each batch records
+`started` → `committed`/`failed` with `rows_in`, `rows_dropped_present`,
+`rows_ingested` and its snapshot id, every line `fsync`ed.
 
-- `load --dry-run` is **the operator's last gate**. It resolves namespaces, runs
-  the pre-write assertion (the dev 1206 write-target guard), reports the write
-  mode — and **writes nothing**. Use it before every real load.
-- `load --reconcile` reconciles a `started`-but-not-terminal batch left by an
-  interrupted run.
+**A load execution is not a shard run.** `--run-id` names the EXECUTION:
+
+- omitted → a **new** execution, with a fresh batch ULID per batch (the rows'
+  `ingest_batch_id` is rewritten to match) and the source run id, source batch
+  id and source sha256 kept as provenance. That is what lets one shard run be
+  loaded into scratch, checked, and promoted to production with each load
+  provable by its own per-batch counts.
+- given → **resume** that execution (refused if it is bound to another
+  namespace or another shard run).
+
+Other guarantees:
+
+- `load --dry-run` is **the operator's last gate**. It reads the inventory, runs
+  the pre-write assertion (the dev 1206 write-target guard) and the lake-5
+  schema preflight, checks each batch's integrity, reports the rows each batch
+  *would* append after the fill-only filter — and **writes nothing**: no
+  `load()`, no ledger line, no lock. Use it before every real load.
+- `load --reconcile` decides a batch left `started` by an interrupted run with
+  the **exact count** of rows carrying its `ingest_batch_id`: equal to the
+  recorded `expected_rows` → committed; `0` → retried; **anything else** → the
+  run stops and reports the batch for repair (a partial append is not something
+  to guess about).
+- **A schema preflight** refuses, with `load()` uncalled, if any
+  `<type>_result` table lacks `parameter_set_hash` or the `parameter_set`
+  registry table is missing. `bootstrap()` cannot add a column to an existing
+  table, so this is the only mechanical check that the result tables were
+  rebuilt.
+- **A per-namespace lock** (an OS `flock` in the shared
+  `$KBU_CLEARINGHOUSE_LOCK_DIR`, default
+  `/global_share/KBaseUtilities/clearinghouse-locks`) is held for the whole
+  ingest and refuses to start if another live process holds it, naming the
+  holder. Process death releases it; a dead holder's lock is reported and
+  taken over. If that directory cannot be written, `load` refuses rather than
+  take a private lock.
 
 ## The dev 1206 guard fails closed
 
@@ -189,9 +242,10 @@ ingests there.
    kbu clearinghouse load ./bronze --dry-run --json
    ```
 
-   This resolves namespaces, runs the dev 1206 pre-write assertion, reports the
-   write mode, and writes nothing. The envelope's `warnings` says it was a
-   dry run.
+   This resolves namespaces, runs the dev 1206 pre-write assertion and the
+   schema preflight, checks each batch's integrity, reports the rows each batch
+   would append after the fill-only filter, and writes nothing. The envelope's
+   `warnings` says it was a dry run.
 
 5. **Load (in-pod).** Ingest for real:
 
@@ -199,15 +253,22 @@ ingests there.
    kbu clearinghouse load ./bronze --json
    ```
 
-   Foreground; resumable from the ledger if interrupted.
+   Foreground; fill-only; resumable with
+   `load ./bronze --run-id <execution id>` if interrupted (the id is in the
+   envelope and in the human output). Note the shard directory argument stays
+   a **local directory on the pod**.
 
 6. **Verify (in-pod).** Re-check the completed run against its ledger:
 
    ```bash
-   kbu clearinghouse verify ./bronze --json
+   kbu clearinghouse verify ./bronze --run-id <execution id> --json
    ```
 
-   `verify` does its own explicit `COUNT(*)` per table and confirms every
+   `verify` counts, for **every batch in the execution's inventory**, the live
+   rows carrying that batch's `ingest_batch_id` and requires it to equal the
+   `rows_ingested` the ledger committed — anything missing, failed, unresolved
+   or in excess blocks completion. It also requires every `parameter_set_hash`
+   a unit's result batches carry to be in the registry, and confirms every
    snapshot the ledger recorded still exists in the table's Iceberg history. It
    **reports** discrepancies (in `data.discrepancies` **and** `warnings`); it
    does not raise on a discrepancy, precisely so you can inspect a run that a
@@ -222,12 +283,15 @@ the *verification* failed. So the correct response to a FAILED-on-null-postfligh
 load is:
 
 ```bash
-kbu clearinghouse verify ./bronze          # what actually landed?
-kbu clearinghouse load ./bronze --reconcile # only if verify shows a gap
+kbu clearinghouse verify ./bronze --run-id <execution id>   # what landed?
+kbu clearinghouse load ./bronze --run-id <execution id> --reconcile
 ```
 
 **Never blindly re-run a plain `load`** after a null-postflight FAILED. Use
 `verify` to see the ground truth, then `--reconcile` to close any real gap.
+(Fill-only makes a blind re-run much less dangerous than it was — the rows that
+landed are now dropped as present — but `--reconcile` is still the right verb,
+because only it resolves the `started` ledger line the kill left behind.)
 
 ### The one case duplicates are not harmless: re-ingested CONTENT shards
 

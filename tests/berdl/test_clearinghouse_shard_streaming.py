@@ -864,10 +864,15 @@ def test_run_json_is_append_only_across_units(tmp_path):
 
 
 def test_run_json_is_not_mistaken_for_a_shard(tmp_path):
-    """It lives at the output ROOT, so shard discovery -- which only descends
-    into directories named for a known table -- never sees it."""
-    from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
-        _discover_shards,
+    """It lives at the output ROOT and is the inventory, never an entry in it.
+
+    The ingest reads ``run.json`` and loads exactly the batches it names, so
+    the inventory listing itself would be a batch the loader tried to read as
+    parquet.
+    """
+    from kbutillib.domains.kbase.berdl.clearinghouse_ingest import (
+        derive_execution_inventory,
+        resolve_batch_path,
     )
 
     src = _write_parquet(tmp_path / "genes.parquet", {"dna_sequence": _seqs(10)})
@@ -876,11 +881,18 @@ def test_run_json_is_not_mistaken_for_a_shard(tmp_path):
         cm.load_manifest(_gene_entity_toml(src)), out_root, target_bytes=1024
     )
     assert (out_root / cs.RUN_MANIFEST_FILE).is_file()
-    discovered = _discover_shards(out_root)
-    assert discovered
-    assert all(path.suffix == ".parquet" for _, _, path in discovered)
-    # The batch id discovery reports IS the ULID file stem the sharder minted.
-    assert all(cs.is_ulid(batch) for _, batch, _ in discovered)
+    run = cs.read_run_manifest(out_root)
+    inventory = derive_execution_inventory(run, execution_id="E")
+    assert inventory
+    assert all(entry["file"] != cs.RUN_MANIFEST_FILE for entry in inventory)
+    for entry in inventory:
+        path = resolve_batch_path(out_root, entry["file"])
+        assert path.suffix == ".parquet"
+        assert path.is_file()
+        # The batch id the inventory carries IS the ULID file stem the sharder
+        # minted (the execution's own fresh id is recorded separately).
+        assert cs.is_ulid(entry["source_batch_id"])
+        assert path.stem == entry["source_batch_id"]
 
 
 def test_manifest_sha256_falls_back_to_canonical_text_in_memory(tmp_path):

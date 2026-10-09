@@ -1,0 +1,83 @@
+# `mongo-protein-kofam2` -- THE SECOND KOFAM COLLECTION, JOINED TO ITS
+# SEQUENCES.
+#
+# WHAT IT READS. TWO collections in the `database` database of the Mongo 8
+# store on poplar:
+#
+#   seq_protein_kofam2  260.6M docs, {_id, kos}         the annotations
+#   seq_protein         420.8M docs, {_id, z_seq}       the sequences
+#
+# IT IS A SEPARATE PRESET FROM `mongo-protein-kofam`, AND A SEPARATE `source`
+# PARTITION, because it is a separate collection. The two hold overlapping but
+# not identical populations (253.3M against 260.6M) and differ in shape:
+# `seq_protein_kofam` carries a single `ko`, this one carries a LIST under
+# `kos`. Merging them into one `source` value would make two stores'
+# assignments indistinguishable in the lake, and `source` is a PERMANENT
+# partition value on `protein_result` -- so the label names the collection the
+# rows came from. Two labels is the correct outcome, not a duplicate.
+#
+# `kos` WAS NULL IN THE ONE SAMPLED DOCUMENT (survey, 2026-09-24). That is why
+# `require_fields = ["kos"]` matters here more than anywhere else in this
+# directory: whatever fraction of the 260.6M documents carries no list is
+# skipped and COUNTED under `missing:kos`, so the first scratch run reports
+# how much of this collection actually holds assignments instead of leaving it
+# to be guessed. An EMPTY list counts as missing too -- "present but empty"
+# and "absent" are the same fact about the store. The check runs BEFORE the
+# join, so an unassigned protein's sequence is never fetched.
+#
+# WHY A JOIN, HOW IT WORKS, AND WHAT A MISS COSTS. Identical to
+# `mongo-protein-kofam`, and the reasoning is there: this collection holds no
+# sequence, a clearinghouse protein's identity IS its sequence, `_id` is not
+# trusted as that identity, so the adapter issues ONE
+# `find({_id: {"$in": [...page...]}}, {_id: 1, z_seq: 1})` per page against
+# `seq_protein` and counts an unmatched record under `no-join-match`.
+#
+# IT WRITES RESULTS ONLY. `mongo-protein-seq` is the preset that loads the
+# protein entities these results key on; load it first.
+#
+# THE SOURCE LABEL IS A PROVENANCE LABEL, NOT A TOOL VERSION, and the
+# PARAMETER SET IS `{}` -- a default run. See `mongo-protein-bakta`.
+#
+# WHERE IT RUNS AND THE UNIT. The BERDL pod against poplar's port, auth
+# disabled; one unit is one of the 256 two-hex-digit `_id` prefixes, cutting
+# the PRIMARY collection only.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo). BOTH
+# collections are listed -- the join reads one as surely as the cursor reads
+# the other.
+pulls_from = [
+  "poplar Mongo",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein_kofam2",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein (join)",
+]
+# EMPTY, deliberately -- see `mongo-protein-seq`.
+needs_env = []
+
+# ---- Protein: the KofamScan annotation result ---------------------------
+[[source]]
+name           = "mongo-protein-kofam2-result"
+adapter        = "mongo"
+uri            = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database       = "database"
+collection     = "seq_protein_kofam2"
+sort_key       = "_id"
+require_fields = ["kos"]
+entity_type    = "protein"
+kinds          = ["result"]
+
+  [source.join]
+  collection = "seq_protein"
+  fields     = { sequence = "z_seq" }
+  decompress = ["sequence"]
+
+  [source.hash]
+  # RECOMPUTED from the JOINED, decompressed sequence -- never `_id`.
+  raw_column = "sequence"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  source              = "@const(kofam/mongo-seq_protein_kofam2)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(kos)"
+  parameter_set       = {}

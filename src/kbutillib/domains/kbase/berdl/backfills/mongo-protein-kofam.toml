@@ -1,0 +1,97 @@
+# `mongo-protein-kofam` -- THE KOFAM KO ASSIGNMENTS, JOINED TO THEIR SEQUENCES.
+#
+# WHAT IT READS. TWO collections in the `database` database of the Mongo 8
+# store on poplar:
+#
+#   seq_protein_kofam   253.3M docs, {_id, ko}          the annotations
+#   seq_protein         420.8M docs, {_id, z_seq}       the sequences
+#
+# WHY A JOIN AT ALL, when every other manifest expresses a cross-collection
+# relationship as several sources. Because a clearinghouse protein's IDENTITY
+# IS ITS SEQUENCE, and this collection does not have one. `seq_protein_kofam`
+# holds `{_id, ko}`: the KO term and the store's own `_id`, which is NOT
+# trusted as the clearinghouse hash (whether it equals what
+# `kbutillib.domains.identity.standardizers` computes from the sequence is
+# unverified -- see `mongo-protein-seq`). So a `protein_result` row over this
+# collection has nothing to hash unless the sequence is fetched alongside it.
+#
+# THE JOIN IS A PER-PAGE LOOKUP ON AN INDEXED KEY, NOT A RELATIONAL JOIN. The
+# adapter reads a page of `batch_size` documents off the primary cursor and
+# issues ONE `find({_id: {"$in": [...page ids...]}}, {_id: 1, z_seq: 1})`
+# against `seq_protein`, then merges and zlib-decodes `z_seq` into a plain
+# `sequence` field. That is one extra round trip per 5,000 documents rather
+# than one per document, and `_id` is the ONLY index the store has -- which is
+# why `join.on` is left at its `_id` default.
+#
+# A RECORD WITH NO MATCH IS SKIPPED AND COUNTED, under `no-join-match`. A KO
+# assignment for a protein that is not in `seq_protein` cannot be tied to a
+# protein identity at all, and retrying would read the same absence again --
+# so it is a counted drop on the source's run.json entry, never a fabricated
+# hash.
+#
+# IT WRITES RESULTS ONLY. There is no `protein_entity` / `protein_content`
+# source here: the sequences it reads belong to `seq_protein`, and
+# `mongo-protein-seq` is the preset that loads them. LOAD THAT FIRST, or these
+# result rows will sit in the lake with no protein to join to. (The ingest is
+# fill-only, so the order is a usability matter, not a correctness one.)
+#
+# `require_fields = ["ko"]` DROPS THE UNASSIGNED. A document carrying no `ko`,
+# or a null one, records no assignment; it is skipped and counted under
+# `missing:ko`. The check runs BEFORE the join, so an unassigned protein's
+# sequence is never fetched.
+#
+# THE SOURCE LABEL IS A PROVENANCE LABEL, NOT A TOOL VERSION, and the
+# PARAMETER SET IS `{}` -- a default run. Both for exactly the reasons spelled
+# out in `mongo-protein-bakta`, which this preset follows deliberately rather
+# than choosing its own convention.
+#
+# WHERE IT RUNS AND THE UNIT. The BERDL pod against poplar's port, auth
+# disabled; one unit is one of the 256 two-hex-digit `_id` prefixes. The unit
+# cuts the PRIMARY collection only -- the join lookup is by explicit id list,
+# so it needs no range of its own.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo). BOTH
+# collections are listed: the join reads one as surely as the cursor reads the
+# other, and an operator judging what this preset reaches for needs to see it.
+pulls_from = [
+  "poplar Mongo",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein_kofam",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein (join)",
+]
+# EMPTY, deliberately -- see `mongo-protein-seq`.
+needs_env = []
+
+# ---- Protein: the KofamScan annotation result ---------------------------
+#
+# `join.fields` is `{output: input}` -- the same direction as `decompress` --
+# and is ALSO the projection, so the lookup moves `_id` and `z_seq` and
+# nothing else. `join.decompress` lists OUTPUT names, because by the time a
+# joined blob is decoded it already lives under the name the merge gave it.
+[[source]]
+name           = "mongo-protein-kofam-result"
+adapter        = "mongo"
+uri            = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database       = "database"
+collection     = "seq_protein_kofam"
+sort_key       = "_id"
+require_fields = ["ko"]
+entity_type    = "protein"
+kinds          = ["result"]
+
+  [source.join]
+  collection = "seq_protein"
+  fields     = { sequence = "z_seq" }
+  decompress = ["sequence"]
+
+  [source.hash]
+  # RECOMPUTED from the JOINED, decompressed sequence -- never the `_id` this
+  # collection and `seq_protein` happen to share.
+  raw_column = "sequence"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  source              = "@const(kofam/mongo-seq_protein_kofam)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(ko)"
+  parameter_set       = {}

@@ -1,0 +1,150 @@
+# `mongo-protein-bakta` -- THE BAKTA ANNOTATIONS, AND THE PROTEINS THEY NAME.
+#
+# WHAT IT READS. One collection: `seq_protein_bakta` (264.0M documents) in the
+# `database` database of the Mongo 8 store on poplar. A document carries the
+# amino-acid sequence IN PLAINTEXT as `aa`, plus Bakta's output: `product`,
+# `gene`, `genes`, `db_xrefs`, the `psc` / `pscc` cluster sub-documents, and
+# `type`.
+#
+# THIS PRESET AND `examples/clearinghouse_example_seed.toml` ARE ONE MAPPING,
+# AND MUST NOT DRIFT. The seed is the hand-written demo mapping of this exact
+# collection; this is the runnable preset. `tests/berdl/
+# test_clearinghouse_mongo_presets.py` loads both TOMLs and asserts that every
+# source they share by (collection, entity_type, kinds) agrees on its hash
+# rule, its field mappings, its parameter set, its result type and version,
+# and its source label. Change one and you must change the other.
+#
+# IT SEEDS ITS OWN PROTEIN ENTITIES, which no other annotation preset here can
+# do. `seq_protein_kofam`, `seq_protein_kofam2` and `protein_to_rast2` hold no
+# sequence and must JOIN `seq_protein` to find one; this collection carries
+# `aa` itself, so the first source below emits `protein_entity` and
+# `protein_content` directly and a seed of THIS PRESET ALONE yields results
+# that are already joinable to the proteins they annotate.
+#
+# THE SOURCE LABEL IS A PROVENANCE LABEL, NOT A TOOL VERSION. Every result row
+# carries `source = "@const(bakta/mongo-seq_protein_bakta)"`. That second
+# segment is not a Bakta release number, because the store recorded no tool
+# version -- the collection says only that these annotations came from Bakta,
+# by way of the `seq_protein_bakta` collection. `source` is the PARTITION
+# column on `protein_result` and is "<tool>/<version>" by convention, so
+# rather than invent a version that was never recorded, the label names WHERE
+# the rows came from and stays honest about what is known. A later load from a
+# store that DOES record a Bakta version is a different `source`, hence a
+# different partition and a different slot -- the correct outcome, not a
+# collision.
+#
+# THE PARAMETER SET IS `{}` -- A DEFAULT RUN. The store recorded no
+# parameters, so nothing was overridden on top of the tool's own defaults and
+# `{}` is the honest declaration. It hashes to
+# identity.DEFAULT_PARAMETER_SET_HASH (44136fa3...aff8a), and the sharder
+# emits the `parameter_set` registry batch explaining that hash before any
+# result batch.
+#
+# THREE SOURCES, ONE COLLECTION. A manifest source names ONE collection; the
+# join across ENTITY TYPES is expressed as several sources over the same
+# collection, each hashing on its own identity (see MongoSourceAdapter's
+# docstring). Here that is: the protein's identity and sequence, the protein's
+# annotation result, and the FUNCTION entity named by that annotation's
+# `product` text.
+#
+# WHERE IT RUNS, THE UNIT, AND THE INDEX. Identical to `mongo-protein-seq`:
+# the preset runs in the BERDL pod against poplar's port, auth is disabled,
+# the unit is one of the 256 two-hex-digit `_id` prefixes (a uniform 1/256
+# sample), and `_id` is the ONLY index the store has -- so `sort_key` is `_id`
+# and nothing else may be paged or filtered on.
+#
+# IDENTITY IS RECOMPUTED, NEVER TRUSTED FROM `_id`. Every `[source.hash]`
+# below uses `raw_column`. See `mongo-protein-seq` for why.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo).
+pulls_from = [
+  "poplar Mongo",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein_bakta",
+]
+# EMPTY, deliberately -- see `mongo-protein-seq`.
+needs_env = []
+
+# ---- Protein: identity + content (the amino-acid sequence) --------------
+#
+# `aa` is the plain amino-acid sequence field. No `decompress` key is needed
+# here: unlike `seq_protein` (whose sequence is a zlib blob in `z_seq`),
+# `seq_protein_bakta` carries the sequence uncompressed.
+[[source]]
+name        = "mongo-protein-bakta-protein"
+adapter     = "mongo"
+uri         = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database    = "database"
+collection  = "seq_protein_bakta"
+sort_key    = "_id"
+entity_type = "protein"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  # RECOMPUTED from the sequence -- not the collection's precomputed `_id`.
+  raw_column = "aa"
+
+  [source.content]
+  sequence   = "aa"
+  seq_length = "@len(aa)"
+
+# ---- Protein: the Bakta annotation result -------------------------------
+#
+# Hashes on the SAME `aa` field as the source above, which is what ties each
+# annotation to the protein identity it belongs to.
+[[source]]
+name        = "mongo-protein-bakta-result"
+adapter     = "mongo"
+uri         = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database    = "database"
+collection  = "seq_protein_bakta"
+sort_key    = "_id"
+entity_type = "protein"
+kinds       = ["result"]
+
+  [source.hash]
+  raw_column = "aa"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  # A PROVENANCE LABEL, not a tool version -- see the header. Written as
+  # @const because it is the same on every row, which also lets the plan-time
+  # result-boundary check resolve the tool before any document is read.
+  source              = "@const(bakta/mongo-seq_protein_bakta)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(product, gene, genes, db_xrefs, psc, pscc, type)"
+  # REQUIRED on every result source. {} declares a DEFAULT run -- see the
+  # header.
+  parameter_set       = {}
+
+# ---- Function: identity + content (the product text) --------------------
+#
+# The annotation's `product` string IS the function's identity here: the
+# function entity is hashed from the same text that becomes its definition, so
+# `protein_result`'s payload and `function_entity` agree on what the function
+# is without a separate function table to join against.
+#
+# `require_fields` IS WHAT MAKES AN UNNAMED PRODUCT A COUNTED DROP. A document
+# with no `product` (or an empty one) has no function to name; without the
+# requirement the sharder would reject each one as a `shard-value-error` on a
+# null hash column, which is true but says nothing about WHY. With it the
+# record is skipped and counted under `missing:product`, and the count appears
+# on the source's entry in run.json. The requirement is a LOCATOR key, not a
+# mapping key, so it changes nothing this preset shares with
+# `examples/clearinghouse_example_seed.toml`.
+[[source]]
+name           = "mongo-protein-bakta-function"
+adapter        = "mongo"
+uri            = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database       = "database"
+collection     = "seq_protein_bakta"
+sort_key       = "_id"
+require_fields = ["product"]
+entity_type    = "function"
+kinds          = ["entity", "content"]
+
+  [source.hash]
+  raw_column = "product"
+
+  [source.content]
+  definition = "product"

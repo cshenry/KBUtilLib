@@ -1099,6 +1099,47 @@ MONGO_BATCH_SIZE = 5000
 #: size, which is the side to err on for a count-only sizing.
 MONGO_BYTES_PER_DOC = 1024
 
+#: The default ``join.on`` field. BOTH collections of the surveyed store are
+#: keyed by ``_id`` and the ``_id`` index is the ONLY index that exists, so a
+#: join on any other field would be a collection scan per page -- which is why
+#: the default is the one field that is always indexed, and why overriding it
+#: is a decision about the store's indexes rather than a convenience.
+MONGO_JOIN_DEFAULT_ON = "_id"
+
+#: The ``join`` locator's closed key set, rejected BY NAME so a typo
+#: (``field`` for ``fields``) fails loudly rather than silently joining
+#: nothing onto every record.
+_MONGO_JOIN_KEYS = frozenset({"collection", "on", "fields", "decompress"})
+
+#: Skip reason: the primary record had NO document in the join collection, so
+#: the fields the mapping needs (for ``seq_protein_kofam``, the sequence the
+#: entity hash is computed from) do not exist for it. Counted rather than
+#: fabricated: an annotation whose protein is not in ``seq_protein`` cannot be
+#: tied to a protein identity, and a retry would read the same absence again.
+MONGO_SKIP_NO_JOIN_MATCH = "no-join-match"
+
+#: Skip-reason PREFIX for a record that failed ``require_fields``; the field
+#: name is appended (``missing:ko``). The field is IN the reason because one
+#: source may require several, and "41,000 records dropped" is not actionable
+#: while "41,000 missing:ko" is.
+MONGO_SKIP_MISSING_PREFIX = "missing:"
+
+
+@dataclass(frozen=True)
+class MongoJoinSpec:
+    """A parsed ``join`` locator: ONE lookup collection, ONE ``$in`` per page.
+
+    ``fields`` is ``{output_field: input_field}`` -- the same direction as the
+    ``decompress`` locator -- and ``decompress`` lists OUTPUT names (the join's
+    own side), because by the time a joined value is decompressed it is already
+    living under its output name.
+    """
+
+    collection: str
+    on: str
+    fields: Mapping[str, str]
+    decompress: tuple[str, ...]
+
 
 class MongoSourceAdapter(SourceAdapter):
     """The ``mongo`` adapter: reads a MongoDB collection with a batched cursor.
@@ -1125,13 +1166,26 @@ class MongoSourceAdapter(SourceAdapter):
       are ``_id``-only stubs), and its ``quality`` sub-fields are stored as
       STRINGS, not numbers. It feeds ``protein_result``.
 
-    A single manifest source names ONE collection. The join across collections
-    is expressed as SEVERAL sources in one manifest -- one per collection, each
-    hashing on the same protein identity -- not as a join inside this adapter,
-    which keeps the adapter a pure per-collection reader and the sharder's
+    A single manifest source names ONE collection, and the join ACROSS ENTITY
+    TYPES is expressed as SEVERAL sources in one manifest -- one per entity
+    type, each hashing on its own identity -- not as a join inside this
+    adapter. That keeps the adapter a pure reader and the sharder's
     range-cutting untouched. The ``protein_content`` source reads
     ``seq_protein`` and DECOMPRESSES ``z_seq`` (see ``decompress`` below); the
     ``protein_result`` source reads ``protein_to_rast2``.
+
+    THE ``join`` LOCATOR IS THE ONE EXCEPTION, and it exists because the
+    annotation collections DO NOT CARRY THE SEQUENCE. ``seq_protein_kofam``
+    holds ``{_id, ko}`` and nothing else; ``protein_to_rast2`` holds
+    ``{_id, function?, ...}``. The clearinghouse identity of a protein is
+    computed FROM ITS SEQUENCE (never from ``_id`` -- see above), so a
+    ``protein_result`` source over either collection has nothing to hash
+    unless the sequence is fetched from ``seq_protein`` alongside it. That is
+    a per-record LOOKUP on an indexed key, not a relational join: the adapter
+    reads a PAGE of the primary collection and issues ONE
+    ``find({on: {"$in": [...page ids...]}})`` against the join collection, so
+    the cost is one extra round trip per page rather than one per record. See
+    ``join`` below.
 
     IMPORTANT -- the Mongo ``_id`` is NOT trusted as the clearinghouse
     ``entity_hash``. Both are 64-hex sha256, but whether Mongo's ``_id`` equals
@@ -1178,6 +1232,48 @@ class MongoSourceAdapter(SourceAdapter):
       instance; the ranges never overlap, so no document is read twice.
     - ``start_after`` (optional) -- resume a killed read strictly AFTER this
       ``sort_key`` value, so a restart does not replay the whole collection.
+    - ``join`` (optional) -- a mapping
+      ``{collection, on, fields, decompress}`` that merges fields from a
+      SECOND collection of the same database into every record:
+
+      * ``collection`` (required) -- the join collection's name, e.g.
+        ``"seq_protein"``.
+      * ``on`` (optional) -- the field joined on, in BOTH collections;
+        defaults to :data:`MONGO_JOIN_DEFAULT_ON`. The surveyed store has no
+        index but ``_id``, so overriding this asks for a collection scan per
+        page.
+      * ``fields`` (required) -- ``{output_field: input_field}``, read off the
+        join document and merged into the record under ``output_field``. Also
+        the PROJECTION: nothing else is fetched from the join collection.
+      * ``decompress`` (optional) -- a list of OUTPUT names to
+        zlib-decompress and UTF-8 decode in place, for a joined blob like
+        ``z_seq``. Every name must appear in ``fields``.
+
+      ONE ``$in`` PER PAGE, and the page is ``batch_size`` records -- the same
+      granularity the primary cursor already reads at, rather than a second
+      tunable that could disagree with it. A record with NO document in the
+      join collection is SKIPPED and counted under
+      :data:`MONGO_SKIP_NO_JOIN_MATCH`; a record whose join document exists
+      but lacks a projected field simply does not get that output field, which
+      is exactly what ``decompress`` does for a stub (the mapping then fails
+      that record rather than the adapter fabricating a value).
+    - ``require_fields`` (optional) -- a list of field names every record must
+      carry non-empty. A record missing one, or holding ``None`` or an empty
+      string / list / mapping in one, is SKIPPED and counted under
+      ``missing:<field>`` (see :data:`MONGO_SKIP_MISSING_PREFIX`). It is what
+      makes ``protein_to_rast2``'s ~28% ``_id``-only stubs a COUNTED,
+      explained drop rather than 112M rows of nulls or 112M rows counted
+      ``shard-value-error``. A record is counted under the FIRST
+      requirement it fails, so the counts sum to the number of records
+      dropped.
+
+      THE CHECK RUNS TWICE, by design, and the accounting is identical either
+      way. A requirement naming a field the join or ``decompress`` PRODUCES
+      can only be judged after the merge; one naming a plain primary field can
+      be judged before it, and judging it there is what keeps the adapter from
+      fetching ~112M sequences for records it is about to drop. Both report
+      the same reason key, so where a record was dropped is invisible in
+      ``skipped()`` -- only that it was, and why.
 
     Where it runs: wherever it can reach the Mongo store. No machine is
     hardcoded; the connection is taken entirely from the manifest. ``pymongo``
@@ -1193,13 +1289,26 @@ class MongoSourceAdapter(SourceAdapter):
             ``estimated_document_count()`` -- a real pymongo ``Collection`` in
             production, a fake in tests. When ``None`` (the default) a client
             is connected lazily on first use from the locator keys.
+        join_collection: The collection the ``join`` locator looks up,
+            injected the same way and for the same reason as ``collection``.
+            When ``None`` (the default) it is resolved off the lazily built
+            client; a test that injects ``collection`` and declares a ``join``
+            must inject this too, because an injected primary collection means
+            there is no client to resolve the second one from.
     """
 
     adapter_name = "mongo"
 
-    def __init__(self, source: cm.Source, *, collection: Any = None):
+    def __init__(
+        self,
+        source: cm.Source,
+        *,
+        collection: Any = None,
+        join_collection: Any = None,
+    ):
         super().__init__(source)
         self._collection = collection
+        self._join_collection = join_collection
         self._client = None
         #: The ``(min_key, max_key)`` pair :meth:`restrict_to_unit` set, or
         #: ``None``. ``max_key`` is ``None`` for the final ``"ff"`` prefix.
@@ -1263,6 +1372,100 @@ class MongoSourceAdapter(SourceAdapter):
                 '{"sequence": "z_seq"}.'
             )
         return dict(spec)
+
+    def _join_spec(self) -> MongoJoinSpec | None:
+        """Parse the ``join`` locator, or ``None`` when the source declares none.
+
+        Every key is checked BY NAME against :data:`_MONGO_JOIN_KEYS`: a typo
+        in ``fields`` would otherwise leave the join producing no columns at
+        all, which looks exactly like a store that lost a collection.
+        """
+        raw = self.source.locator.get("join")
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join' must be a "
+                "mapping with keys 'collection', 'on', 'fields' and "
+                f"'decompress', got {type(raw).__name__}."
+            )
+        unknown = sorted(set(raw) - _MONGO_JOIN_KEYS)
+        if unknown:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join' has "
+                f"unknown key(s) {unknown}; only "
+                f"{sorted(_MONGO_JOIN_KEYS)} are read."
+            )
+        collection = raw.get("collection")
+        if not collection or not isinstance(collection, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join' requires a "
+                "non-empty string 'collection' naming the collection to look "
+                'up, e.g. "seq_protein".'
+            )
+        on = raw.get("on", MONGO_JOIN_DEFAULT_ON)
+        if not on or not isinstance(on, str):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join.on', when "
+                f"given, must be a non-empty string (default "
+                f"{MONGO_JOIN_DEFAULT_ON!r})."
+            )
+        fields = raw.get("fields")
+        if (
+            not isinstance(fields, Mapping)
+            or not fields
+            or not all(
+                isinstance(k, str) and isinstance(v, str) and k and v
+                for k, v in fields.items()
+            )
+        ):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join.fields' must "
+                "be a non-empty mapping of {output_field: input_field} "
+                'strings, e.g. {"sequence": "z_seq"}; it is also the '
+                "projection, so a join that fetches nothing is a mistake."
+            )
+        decompress = raw.get("decompress", ())
+        if isinstance(decompress, str) or not isinstance(decompress, Sequence):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join.decompress' "
+                'must be a list of output field names, e.g. ["sequence"].'
+            )
+        if not all(isinstance(item, str) and item for item in decompress):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join.decompress' "
+                "must be a list of non-empty output field names."
+            )
+        stray = sorted(set(decompress) - set(fields))
+        if stray:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join.decompress' "
+                f"names {stray}, which 'join.fields' does not produce; it "
+                "lists OUTPUT names (the keys of 'fields'), not the join "
+                "collection's own field names."
+            )
+        return MongoJoinSpec(
+            collection=collection,
+            on=on,
+            fields=dict(fields),
+            decompress=tuple(decompress),
+        )
+
+    def _require_fields(self) -> tuple[str, ...]:
+        """Parse the ``require_fields`` locator; empty when none is declared."""
+        raw = self.source.locator.get("require_fields")
+        if raw is None:
+            return ()
+        if (
+            isinstance(raw, str)
+            or not isinstance(raw, Sequence)
+            or not all(isinstance(item, str) and item for item in raw)
+        ):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'require_fields' "
+                'must be a list of non-empty field names, e.g. ["ko"].'
+            )
+        return tuple(raw)
 
     def units(self) -> tuple[str, ...]:
         """The 256 two-hex-digit prefixes of ``sort_key``: this source's units.
@@ -1372,6 +1575,34 @@ class MongoSourceAdapter(SourceAdapter):
         ]
         return self._collection
 
+    def _get_join_collection(self, join: MongoJoinSpec) -> Any:
+        """Return the ``join`` locator's collection, injected or lazily resolved.
+
+        Resolved from the SAME database as the primary collection -- the
+        surveyed store keeps every protein collection in one database, and a
+        cross-database join would need a second connection string the manifest
+        does not carry.
+
+        An INJECTED primary collection means no client was ever built, so there
+        is nothing to resolve a second collection from. That is a test-shaped
+        mistake and it is named as one rather than failing later on a ``None``.
+        """
+        if self._join_collection is not None:
+            return self._join_collection
+        self._get_collection()
+        if self._client is None:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: mongo adapter 'join' needs the "
+                f"collection {join.collection!r}, but the primary collection "
+                "was injected so there is no client to resolve it from. Pass "
+                "join_collection= as well, or let the adapter connect from the "
+                "locator."
+            )
+        self._join_collection = self._client[self._database_name()][
+            join.collection
+        ]
+        return self._join_collection
+
     # -- SourceAdapter interface --------------------------------------------
 
     def estimate_bytes(self) -> int:
@@ -1390,7 +1621,7 @@ class MongoSourceAdapter(SourceAdapter):
         return max(1, count * MONGO_BYTES_PER_DOC)
 
     def iter_records(self) -> Iterator[Mapping[str, Any]]:
-        """Yield each document as a dict row, batched, sorted and resumable.
+        """Yield each document as a dict row, paged, sorted and resumable.
 
         Streams a batched cursor -- NEVER loading the collection into memory --
         sorted ascending on ``sort_key`` so the read is a STABLE window that a
@@ -1399,22 +1630,121 @@ class MongoSourceAdapter(SourceAdapter):
         a plain dict, ``decompress`` fields are zlib-decoded (see
         ``decompress`` in the class docstring), and the row is yielded keyed by
         field name for the sharder to map.
+
+        THE CURSOR IS CONSUMED A PAGE AT A TIME because a ``join`` is one
+        ``$in`` per page; the page is ``batch_size`` documents, which is the
+        granularity the cursor already fetches at. With no ``join`` declared
+        the paging is pure chunking: the same documents, in the same order,
+        with the same memory ceiling the cursor's own batch already imposes.
+
+        The order of operations per page is the contract:
+
+        1. REQUIRE the primary-only requirements, so a stub is dropped before
+           the adapter pays to look its sequence up.
+        2. JOIN the survivors with ONE ``$in``, dropping and counting the
+           records with no match.
+        3. DECOMPRESS -- the primary ``decompress`` mapping and the join's own
+           ``decompress`` list.
+        4. REQUIRE again, now over the merged record, for any requirement the
+           join or a decompression produces.
+        5. Claim the ``--limit`` budget and yield. The budget is claimed LAST,
+           so a skipped record does not spend a row of the allowance; and it
+           is claimed in the adapter's own loop so a ``--limit`` stop is NOT
+           exhaustion (see :meth:`SourceAdapter._admit_record`). For mongo the
+           budget is per source per slice, so each slice reads up to ``--limit``
+           documents of its own.
         """
         collection = self._get_collection()
         cursor = collection.find(
             self._query_filter(), batch_size=self._batch_size()
         ).sort(self._sort_key(), 1)
         decompress = self._decompress_spec()
+        join = self._join_spec()
+        required = self._require_fields()
+        # A requirement the join or a decompression PRODUCES cannot be judged
+        # before the merge; every other one can, and judging it there is what
+        # keeps a 28%-stub collection from driving 28% more join lookups.
+        produced = set(decompress)
+        if join is not None:
+            produced.update(join.fields)
+        pre_required = tuple(f for f in required if f not in produced)
         self._exhausted = False
-        for document in cursor:
-            # See FileSourceAdapter.iter_records: the budget is claimed in the
-            # adapter's loop so a --limit stop is NOT exhaustion. For mongo the
-            # budget is per source per slice, so each slice reads up to --limit
-            # documents of its own.
-            if not self._admit_record():
-                return
-            yield self._prepare_row(document, decompress)
+        for page in _mongo_pages(cursor, self._batch_size()):
+            kept = [doc for doc in page if self._satisfies(doc, pre_required)]
+            if join is not None:
+                kept = self._join_page(kept, join)
+            for document in kept:
+                row = self._prepare_row(document, decompress, join)
+                if not self._satisfies(row, required):
+                    continue
+                if not self._admit_record():
+                    return
+                yield row
         self._exhausted = True
+
+    # -- require_fields / join ----------------------------------------------
+
+    def _skip(self, reason: str, count: int = 1) -> None:
+        self._skipped[reason] = self._skipped.get(reason, 0) + count
+
+    def _satisfies(
+        self, row: Mapping[str, Any], required: Sequence[str]
+    ) -> bool:
+        """Whether ``row`` carries every one of ``required`` non-empty.
+
+        Counts the FIRST failed requirement and returns immediately, so the
+        per-reason counts sum to the number of records dropped rather than to
+        the number of (record, requirement) pairs that failed.
+        """
+        for name in required:
+            if _mongo_is_absent(row.get(name)):
+                self._skip(f"{MONGO_SKIP_MISSING_PREFIX}{name}")
+                return False
+        return True
+
+    def _join_page(
+        self, page: Sequence[Mapping[str, Any]], join: MongoJoinSpec
+    ) -> list[dict[str, Any]]:
+        """Merge the join collection's fields into one page, with ONE ``$in``.
+
+        The ``$in`` list is DEDUPLICATED and the projection is exactly
+        ``join.on`` plus the fields ``join.fields`` reads, so the lookup moves
+        the sequences and nothing else. A record with no match is dropped and
+        counted under :data:`MONGO_SKIP_NO_JOIN_MATCH`; a match missing a
+        projected field leaves that output field unset, exactly as a stub does
+        under ``decompress``.
+        """
+        if not page:
+            return []
+        keys: list[Any] = []
+        seen: set[Any] = set()
+        for document in page:
+            key = document.get(join.on)
+            if key is not None and key not in seen:
+                seen.add(key)
+                keys.append(key)
+        matches: dict[Any, Mapping[str, Any]] = {}
+        if keys:
+            projection = {join.on: 1}
+            for input_field in join.fields.values():
+                projection[input_field] = 1
+            cursor = self._get_join_collection(join).find(
+                {join.on: {"$in": keys}}, projection=projection
+            )
+            for document in cursor:
+                matches[document.get(join.on)] = document
+        merged: list[dict[str, Any]] = []
+        for document in page:
+            match = matches.get(document.get(join.on))
+            if match is None:
+                self._skip(MONGO_SKIP_NO_JOIN_MATCH)
+                continue
+            row = dict(document)
+            for output_field, input_field in join.fields.items():
+                if input_field in match:
+                    row[output_field] = match[input_field]
+            merged.append(row)
+        return merged
 
     def estimate_rows(self) -> int | None:
         """Row count from ``estimated_document_count()`` -- collection metadata.
@@ -1433,7 +1763,10 @@ class MongoSourceAdapter(SourceAdapter):
         return "mongo-estimated-document-count"
 
     def _prepare_row(
-        self, document: Mapping[str, Any], decompress: Mapping[str, str]
+        self,
+        document: Mapping[str, Any],
+        decompress: Mapping[str, str],
+        join: MongoJoinSpec | None = None,
     ) -> dict[str, Any]:
         """Copy a Mongo document to a plain dict, decoding compressed fields.
 
@@ -1443,13 +1776,62 @@ class MongoSourceAdapter(SourceAdapter):
         input field is yielded unchanged (no output field added) -- a stub row,
         which a manifest requiring the decoded column naturally rejects rather
         than the adapter fabricating a value.
+
+        ``join.decompress`` is decoded IN PLACE, under the output name the
+        merge already put the value under: a joined blob has no separate input
+        field left to pop, because :meth:`_join_page` renamed it on the way in.
         """
         row = dict(document)
         for output_field, input_field in decompress.items():
             if input_field not in row:
                 continue
             row[output_field] = _zlib_decode(row.pop(input_field))
+        if join is not None:
+            for output_field in join.decompress:
+                if output_field in row:
+                    row[output_field] = _zlib_decode(row[output_field])
         return row
+
+
+def _mongo_pages(
+    cursor: Iterable[Mapping[str, Any]], size: int
+) -> Iterator[list[Mapping[str, Any]]]:
+    """Chunk a cursor into lists of at most ``size`` documents, in order.
+
+    A GENERATOR over the cursor, never a materialisation of it: at most
+    ``size`` documents are held at once, which is the batch the cursor already
+    fetches. The final page is short, and an EXACTLY FULL final page is
+    followed by no empty page.
+    """
+    page: list[Mapping[str, Any]] = []
+    for document in cursor:
+        page.append(document)
+        if len(page) >= size:
+            yield page
+            page = []
+    if page:
+        yield page
+
+
+def _mongo_is_absent(value: Any) -> bool:
+    """Whether ``require_fields`` should treat ``value`` as not carried.
+
+    ``None`` and an EMPTY string / bytes / list / tuple / mapping / set are all
+    absent: ``seq_protein_kofam2``'s ``kos`` was null in the one sampled
+    document and ``protein_to_rast2``'s stubs carry no ``function`` at all, so
+    "present but empty" and "absent" are the same fact about the store and
+    deserve the same count.
+
+    A NUMBER AND A BOOLEAN ARE PRESENT, including ``0`` and ``False``. A
+    requirement is about whether the store recorded a value, not about whether
+    the value is truthy, and dropping a legitimate ``0`` would be a silent data
+    loss no count could explain.
+    """
+    if value is None:
+        return True
+    if isinstance(value, (str, bytes, bytearray, memoryview, list, tuple, dict, set)):
+        return len(value) == 0
+    return False
 
 
 def _zlib_decode(value: Any) -> str:

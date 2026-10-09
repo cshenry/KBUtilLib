@@ -189,6 +189,19 @@ from . import clearinghouse_schema as schema
 #:     stay missing. The prefix text is the FIRST argument and may contain
 #:     colons (``@prefix(kbdl:obj:,fasta_object_id)``); it may not contain a
 #:     comma, which is the argument separator.
+#:   - ``@concat(text, col, text, col, ...)`` -- ``@prefix`` generalised to a
+#:     pointer built from MORE THAN ONE column. The arguments STRICTLY
+#:     ALTERNATE literal text and column name, starting with literal text, so
+#:     the argument count is always even; a literal may be empty (``@concat(,
+#:     a, :, b)`` is ``"<a>:<b>"``) but a column name may not. NULL IN, NULL
+#:     OUT, and it is null-preserving across EVERY named column, for exactly
+#:     the reason ``@prefix`` is: ``genome_content.fasta_reference`` for a
+#:     KBDL archive member is
+#:     ``@concat(kbdl:archive:,archive_object_id,:,entry_name)``, and a row
+#:     missing either half would otherwise write
+#:     ``"kbdl:archive:None:x"`` -- a pointer to nothing, indistinguishable
+#:     in the lake from a real one. Literals may contain colons; they may not
+#:     contain a comma, which is the argument separator.
 #:   - ``@lower(col)``     -- ASCII-lowercased value of ``col``. Earns its
 #:     place on a real hazard: ``source`` is the partition column on all five
 #:     ``<type>_result`` tables, so ``BAKTA/1.9`` and ``bakta/1.9`` would be
@@ -202,6 +215,7 @@ DERIVATIONS: tuple[str, ...] = (
     "const",
     "lower",
     "prefix",
+    "concat",
 )
 
 #: The three kinds a source may target, mirroring
@@ -877,6 +891,21 @@ def _check_arity(name: str, args: Sequence[str], *, where: str) -> None:
         # args[0] -- the literal prefix text -- must be non-empty (an empty
         # prefix is @column), and so must the column name.
         ok = len(args) == 2 and all(args)
+    elif name == "concat":
+        expected = (
+            "an EVEN number of arguments, at least four, strictly alternating "
+            "literal text and column name starting with the literal: "
+            "@concat(text, column, text, column, ...). A literal may be empty; "
+            "a column name may not. Two arguments is @prefix -- use that"
+        )
+        # Four is the minimum because a two-argument @concat is exactly
+        # @prefix, and two spellings of one rule is how a manifest grammar
+        # stops being readable.
+        ok = (
+            len(args) >= 4
+            and len(args) % 2 == 0
+            and all(args[index] for index in range(1, len(args), 2))
+        )
     else:  # pragma: no cover - guarded by the DERIVATIONS membership check
         return
     if not ok:

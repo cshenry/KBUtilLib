@@ -272,6 +272,21 @@ class UnitPlan:
     #: Units dropped because ``--limit`` capped the UNIT COUNT (adapter units
     #: only). Reported so a capped run never looks like a complete one.
     units_dropped_by_limit: int = 0
+    #: For an ADAPTER-unit plan: every label the adapter reported, BEFORE
+    #: ``--limit`` capped the count. Kept beside ``units`` because the two
+    #: answer different questions, and :func:`freeze_adapter_units` needs the
+    #: uncapped list: the list is what gets FROZEN for the life of the run,
+    #: and a later invocation with a different ``--limit`` must re-cap the
+    #: same frozen list rather than freeze a shorter one. Empty for the
+    #: slice and single kinds, whose unit sets are not discovered.
+    all_units: tuple[str, ...] = ()
+    #: Frozen units that live discovery no longer reports. Set by
+    #: :func:`freeze_adapter_units`; the unit itself still runs, and its
+    #: adapter is what refuses (see
+    #: :class:`clearinghouse_shard.KbdlHashArchiveUnavailableError`) -- this
+    #: is reported so the envelope names the disappearance rather than only
+    #: showing the failure it causes.
+    vanished_units: tuple[str, ...] = ()
 
 
 def plan_units(
@@ -332,6 +347,7 @@ def plan_units(
                 labels.append(label)
     if labels == [cs.SINGLE_UNIT]:
         return UnitPlan(kind=UNIT_KIND_SINGLE, units=(cs.SINGLE_UNIT,))
+    discovered = list(labels)
     dropped = 0
     if limit is not None and limit < len(labels):
         # An adapter whose units are not slices caps the NUMBER OF UNITS, not
@@ -344,6 +360,107 @@ def plan_units(
         kind=UNIT_KIND_ADAPTER,
         units=tuple(labels),
         units_dropped_by_limit=dropped,
+        all_units=tuple(discovered),
+    )
+
+
+#: State-file field holding the FROZEN unit list of an adapter-unit run, and
+#: the time it was frozen. Kept in ``<out>/backfill-state.json`` rather than in
+#: the registration because the registration is written AFTER planning, and the
+#: freeze has to happen before anything is submitted.
+FROZEN_UNITS_FIELD = "frozen_units"
+FROZEN_UNITS_AT_FIELD = "frozen_units_at"
+#: State-file field recording frozen units that live discovery stopped
+#: reporting, with the time each was first noticed missing.
+VANISHED_UNITS_FIELD = "vanished_units"
+
+
+def freeze_adapter_units(
+    out: Path,
+    *,
+    run_id: str,
+    plan: UnitPlan,
+    limit: int | None = None,
+) -> UnitPlan:
+    """FREEZE an adapter-unit run's unit list, once, before any work starts.
+
+    Returns the plan the invocation should actually drive. For a SLICE or
+    SINGLE plan that is the plan unchanged -- their unit sets are derived, not
+    discovered, so there is nothing to freeze.
+
+    FOR AN ADAPTER-UNIT PLAN the list is discovered from a live service, and
+    the discovery order is not stable. The genome-archive case is the concrete
+    one: KBDL's ``ObjectStore.list`` orders by ``added_at`` with NO tie-break,
+    so two archives added in the same instant can come back either way round.
+    The adapter already sorts the ids lexicographically, which fixes the
+    ORDER; this fixes the MEMBERSHIP. On the first invocation for an ``out``
+    the discovered list is written to the state file; every later invocation
+    (every ``--resume``) drives THAT list and re-applies ``--limit`` to it.
+
+    Why membership has to be frozen and not merely sorted:
+
+    - A RESUME MUST NOT MOVE. An archive uploaded while a week-long run is in
+      flight would otherwise join the run, extending a corpus the run's own
+      registration already describes, and -- because ``--limit`` selects the
+      first N of the list -- could renumber the window so that a resume
+      processes units the first invocation never planned.
+    - A DISAPPEARANCE MUST BE VISIBLE. A frozen unit that live discovery no
+      longer reports is recorded in :data:`VANISHED_UNITS_FIELD` and carried
+      on the returned plan. The unit is still driven: it is the ADAPTER that
+      refuses, where the refusal can name the archive and the run can stop on
+      it. Dropping the unit here instead would shrink the run to fit the loss
+      and report a clean pass.
+
+    THE ``--limit`` SELECTION IS PERSISTED TOO, by the caller's existing
+    :func:`record_planned_units` call, which runs immediately after this and
+    still before any unit is sharded.
+
+    Args:
+        out: The run's shard directory root -- where the state file lives.
+        run_id: The run id to stamp on a state file this call creates.
+        plan: The freshly planned :class:`UnitPlan`.
+        limit: ``--limit``, re-applied to the frozen list.
+
+    Returns:
+        A :class:`UnitPlan` whose ``units`` come from the frozen list.
+    """
+    if plan.kind != UNIT_KIND_ADAPTER:
+        return plan
+
+    discovered = list(plan.all_units or plan.units)
+    state = read_state(out)
+    frozen = [str(label) for label in (state.get(FROZEN_UNITS_FIELD) or [])]
+    if not frozen:
+        frozen = discovered
+        state["run_id"] = run_id
+        state.setdefault("state_version", 1)
+        state[FROZEN_UNITS_FIELD] = frozen
+        state[FROZEN_UNITS_AT_FIELD] = _iso_now()
+        write_state(out, state)
+
+    live = set(discovered)
+    vanished = [label for label in frozen if label not in live]
+    if vanished:
+        recorded = dict(state.get(VANISHED_UNITS_FIELD) or {})
+        for label in vanished:
+            recorded.setdefault(label, _iso_now())
+        state = read_state(out)
+        state[VANISHED_UNITS_FIELD] = recorded
+        write_state(out, state)
+
+    units = list(frozen)
+    dropped = 0
+    if limit is not None and limit < len(units):
+        dropped = len(units) - limit
+        units = units[:limit]
+    return UnitPlan(
+        kind=plan.kind,
+        units=tuple(units),
+        slice_spec=plan.slice_spec,
+        key_range=plan.key_range,
+        units_dropped_by_limit=dropped,
+        all_units=tuple(frozen),
+        vanished_units=tuple(vanished),
     )
 
 
@@ -1480,6 +1597,8 @@ def exit_states(unit_reports: Sequence[Mapping[str, Any]]) -> list[str]:
 __all__ = [
     "BACKFILL_STATE_FILE",
     "DEFAULT_OUT_ROOT",
+    "FROZEN_UNITS_AT_FIELD",
+    "FROZEN_UNITS_FIELD",
     "RUN_REGISTRATION_FILE",
     "UNIT_DONE",
     "UNIT_INCOMPLETE",
@@ -1488,6 +1607,7 @@ __all__ = [
     "UNIT_KIND_SLICE",
     "UNIT_PARTIAL",
     "UNIT_PENDING",
+    "VANISHED_UNITS_FIELD",
     "BackfillError",
     "BackfillRunContext",
     "Preset",
@@ -1498,6 +1618,7 @@ __all__ = [
     "describe_preset",
     "exit_states",
     "find_run_for_out",
+    "freeze_adapter_units",
     "manifest_for_unit",
     "plan_units",
     "preset_root",

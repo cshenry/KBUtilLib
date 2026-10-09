@@ -564,14 +564,20 @@ class SourceAdapter(ABC):
         return True
 
 
-#: Registry of adapter implementations by manifest ``adapter`` name. All four
-#: names are DECLARED here so a manifest can be validated against the full set
-#: of adapter names (the mapping half must be adapter-independent). All four
-#: are now registered with real classes (see :data:`_ADAPTER_CLASSES`);
+#: Registry of adapter implementations by manifest ``adapter`` name. Every
+#: name is DECLARED here so a manifest can be validated against the full set
+#: of adapter names (the mapping half must be adapter-independent). All of
+#: them are registered with real classes (see :data:`_ADAPTER_CLASSES`);
 #: :func:`get_adapter` still distinguishes "not a real adapter name" from a
 #: declared name with no class, but the latter no longer occurs for any of
-#: these four.
-ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse", "arc")
+#: them.
+ADAPTER_NAMES: tuple[str, ...] = (
+    "file",
+    "mongo",
+    "lakehouse",
+    "arc",
+    "kbdl_hash",
+)
 
 #: The unit label an adapter with no natural decomposition reports from
 #: :meth:`SourceAdapter.units`. Short, stable, and safe as a path segment --
@@ -1475,7 +1481,8 @@ class ManifestSourceError(RuntimeError):
 class AdapterNotImplementedError(NotImplementedError):
     """A manifest named a planned adapter with no class registered.
 
-    All three planned adapters (``file``, ``lakehouse``, ``mongo``) are now
+    Every declared adapter (``file``, ``lakehouse``, ``mongo``, ``arc``,
+    ``kbdl_hash``) is now
     built, so this cannot fire for any of them in practice; it remains the
     distinct signal for a name that is in :data:`ADAPTER_NAMES` but maps to no
     class, versus a name that is not a known adapter at all.
@@ -3201,17 +3208,939 @@ def _arc_read_member(archive: Any, member_name: str) -> Any | None:
             return None
 
 
-#: Concrete adapter classes, by name. All four planned adapters are now built:
+# --------------------------------------------------------------------------
+# The `kbdl_hash` adapter: KBDL's own KBDLHashGenomes job, one job per archive
+# --------------------------------------------------------------------------
+
+#: Default ``max_in_flight``: ONE. The adapter runs one archive per unit and
+#: the driver runs units sequentially, so one job is outstanding at a time by
+#: construction; the key exists to BOUND that rather than to raise it, and the
+#: default is the bound the lifecycle actually implements. Round 1 of the
+#: confront set it to 1 for that reason -- a default of 4 would have described
+#: a concurrency the driver does not offer.
+KBDL_HASH_DEFAULT_MAX_IN_FLIGHT = 1
+
+#: Seconds between polls of a submitted hash job, and the wall-clock budget a
+#: single job's polling is given. The budget exists because a job CANCELLED
+#: while we are polling never reaches one of the client's own terminal states
+#: (:data:`~kbutillib.domains.external.kbdl_service_utils._TERMINAL_STATES` is
+#: ``completed``/``failed``), so an unbounded poll would wait on it forever.
+KBDL_HASH_POLL_INTERVAL = 30.0
+KBDL_HASH_POLL_TIMEOUT = 86400.0
+
+#: The job states this adapter treats as terminal. A SUPERSET of the client's
+#: own: ``cancelled`` is terminal here because an operator cancelling a job is
+#: a terminal cause the run must stop on, not a state to keep polling.
+KBDL_HASH_TERMINAL_STATES: frozenset[str] = frozenset(
+    {"completed", "failed", "cancelled"}
+)
+
+#: Skip-reason prefixes and slugs this adapter reports.
+#:
+#: ``hash-error:<code>`` is one entry of the job output's ``errors`` map.
+#: ``hash-job-failed:<cause>`` is the whole job failing. The
+#: standardizer-version slug is a per-entry mismatch between the version KBDL
+#: hashed with and the version THIS pod would hash with -- two digests from
+#: two rules are two different identities, and loading one under the other's
+#: name is the one error the whole clearinghouse exists to prevent.
+KBDL_HASH_SKIP_ERROR_PREFIX = "hash-error:"
+KBDL_HASH_SKIP_JOB_FAILED_PREFIX = "hash-job-failed:"
+KBDL_HASH_SKIP_VERSION_MISMATCH = "standardizer-version-mismatch"
+KBDL_HASH_SKIP_ENTRY_UNUSABLE = "hash-entry-unusable"
+
+#: Member-error codes that are TERMINAL -- a reported exclusion, not a retry.
+#: ``invalid_input`` means the archive member is not something the hasher can
+#: read, and it will not be next time either (see
+#: ``src/kbdl_service/schemas/hash_genomes.py`` in KBDLJobRunningPrototype).
+#: Every OTHER code, ``internal_error`` included, is treated as retryable:
+#: ``job_types/hash_genomes.py`` returns ``internal_error`` for a stream read
+#: failure, which a later attempt may well not hit, and an unrecognised code
+#: is not provably terminal so it is not assumed to be.
+KBDL_HASH_TERMINAL_ERROR_CODES: frozenset[str] = frozenset({"invalid_input"})
+
+#: Keys of the adapter's durable per-(source, unit) state. ``attempts`` is the
+#: ordered list of hash-job attempts for this archive -- each one
+#: ``{job_id, submitted_at, reason}`` -- and the LAST entry is the ACCEPTED
+#: attempt. It is a list and not a single id so that a retry is a RECORDED NEW
+#: ATTEMPT rather than an overwrite: "this archive was hashed twice and the
+#: second result is the one loaded" has to stay readable after the fact.
+KBDL_HASH_STATE_ARCHIVE = "archive"
+KBDL_HASH_STATE_ATTEMPTS = "attempts"
+KBDL_HASH_STATE_RETENTION_RESUBMITS = "retention_resubmits"
+KBDL_HASH_STATE_RETRY = "retry"
+KBDL_HASH_STATE_INCOMPLETE = "incomplete"
+KBDL_HASH_STATE_EMITTED = "emitted"
+KBDL_HASH_STATE_PROBE = "standardizer_version_probe"
+
+#: ``reason`` values recorded on an attempt, naming WHY it was submitted.
+KBDL_HASH_ATTEMPT_INITIAL = "initial"
+KBDL_HASH_ATTEMPT_RETENTION_LOSS = "retention-loss"
+KBDL_HASH_ATTEMPT_OPERATOR_RETRY = "retry-failed-archives"
+
+
+class KbdlHashVersionMismatchError(ManifestSourceError):
+    """KBDL hashes with a DIFFERENT standardizer version than this pod.
+
+    The run is REFUSED. ``entity_hash`` is the join key of the entire
+    clearinghouse, and two standardizer versions are two hash RULES: rows
+    loaded under one rule and rows loaded under the other look like different
+    entities where they are the same one, and like the same entity where a
+    rule changed. Nothing downstream can detect or repair that, so the only
+    safe response is to not load any of it.
+    """
+
+
+class KbdlHashJobFailedError(ManifestSourceError):
+    """A ``KBDLHashGenomes`` job reached ``failed`` or ``cancelled``.
+
+    The command STOPS with the terminal cause (round 1 of the confront). A
+    failed job is not a shortage of rows that a skip-and-continue would
+    describe honestly -- it is an archive whose contents are unknown, and
+    every later unit would report the same way while the operator read a
+    success. ``--retry-failed-archives`` is the explicit instruction that
+    turns it into a recorded new attempt instead.
+    """
+
+
+class KbdlHashArchiveUnavailableError(ManifestSourceError):
+    """A frozen archive is gone, or is no longer visible to this caller.
+
+    Round 2 of the confront: the unit cannot complete and the run stops. The
+    archive list was frozen when the run was created precisely so the unit set
+    could not drift; an archive that has since disappeared is a change to the
+    corpus the run claims to cover, and continuing would load a subset while
+    reporting the whole.
+    """
+
+
+class KbdlHashRetentionLostError(ManifestSourceError):
+    """A hash job's result was reclaimed twice. The run stops.
+
+    KBDL deletes a job's result 30 days after completion. ONE automatic
+    resubmission is the right response to that; a second loss on a freshly
+    submitted job is not a retention problem and resubmitting again would be
+    an unbounded loop against a service that is telling us something else.
+    """
+
+
+class KbdlHashSourceAdapter(SourceAdapter):
+    """The ``kbdl_hash`` adapter: every genome KBDL already holds, hashed in place.
+
+    NO SEQUENCE CROSSES THE NETWORK. KBDL's own ``KBDLHashGenomes`` job reads
+    each ``GenomeArchive``'s FASTA members on poplar, read-only, and hashes
+    them with the SAME ``kbutillib`` standardizer this pod would use; only the
+    digests and their counts come back. That is the whole point of routing a
+    genome backfill through a job rather than a download: the archives are
+    large, the pod is small, and a hash computed beside the bytes is the same
+    hash computed over them.
+
+    ONE ARCHIVE IS ONE UNIT. :meth:`units` reports one label per archive --
+    the archive's object id -- so the driver shards, ingests, verifies and
+    records one archive before starting the next, and a run killed anywhere
+    loses at most the archive in flight.
+
+    Locator keys:
+
+    - ``archives`` -- an explicit list of ``GenomeArchive`` object ids (or one
+      comma-separated string, which is what a ``${VAR}`` placeholder expands
+      to). Mutually exclusive with ``all_visible``.
+    - ``all_visible`` -- ``true`` to hash EVERY object
+      :meth:`~kbutillib.domains.external.kbdl_service_utils.KBDLServiceUtils.list_objects`
+      reports whose type is
+      :data:`~kbutillib.domains.external.kbdl_service_utils.OBJECT_TYPE_GENOME_ARCHIVE`.
+    - ``max_in_flight`` -- bound on outstanding hash jobs; defaults to
+      :data:`KBDL_HASH_DEFAULT_MAX_IN_FLIGHT`.
+    - ``base_url`` -- optional KBDL endpoint; the client's own default
+      otherwise.
+    - ``poll_interval`` / ``poll_timeout`` -- optional polling tuning.
+
+    THE ARCHIVE LIST IS FROZEN, NOT REDISCOVERED. ``units()`` resolves
+    ``all_visible`` once, sorts the ids LEXICOGRAPHICALLY and returns them in
+    that order; :func:`clearinghouse_backfill.freeze_adapter_units` persists
+    that list in the run's own state file before any job is submitted, and
+    every later invocation of the run reads it from there. KBDL's
+    ``ObjectStore.list`` orders by ``added_at`` with no tie-break, so live
+    rediscovery is not a stable order -- a resume that re-listed would
+    renumber a ``--limit`` window and silently cover a different corpus.
+
+    THE JOB ID IS PERSISTED BEFORE THE FIRST POLL, through the run context
+    (:meth:`SourceAdapter.bind_run_context`). A hash job over a large archive
+    runs for hours; an id held only in memory would be lost to the first pod
+    restart and the resume would submit a SECOND job for the same archive.
+    There remains a gap this adapter does not try to close: a crash in the
+    window between ``POST /jobs`` returning and the state file being replaced
+    leaves a running job with no recorded id, and the resume submits another.
+    Closing it needs a server-side idempotency key (submit-with-token), which
+    KBDL does not offer; the cost of the gap is one wasted job and a second
+    identical result, not a wrong row, because the rows are keyed by
+    ``entity_hash`` and the ingest is fill-only.
+
+    TWO KINDS, ONE JOB. A ``kinds = ["entity", "content"]`` source resolves to
+    two plans and therefore two adapter INSTANCES, each with its own
+    ``iter_records``. They do not submit two jobs: the first persists its job
+    id in the run context's per-(source, unit) state and the second reads the
+    recorded attempt. Without a run context -- a plain ``kbu clearinghouse
+    shard`` -- there is nowhere to record it and each instance submits its own
+    job, which is one reason this source is driven through ``kbu
+    clearinghouse backfill run``.
+
+    AN ARCHIVE IS NOT DONE WHEN ITS JOB SUCCEEDS. It is done when its rows are
+    ingested and VERIFIED and the driver records the unit, which is a judgement
+    only :func:`clearinghouse_backfill.unit_outcome` can make. This adapter
+    records what it submitted, read and emitted; it never records completion.
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        client: An object exposing ``list_objects``, ``get_object_metadata``,
+            ``submit_hash_genomes``, ``check_job``, ``get_job_result`` and
+            ``poll_until_terminal`` -- a real
+            :class:`~kbutillib.domains.external.kbdl_service_utils.KBDLServiceUtils`
+            in production, a fake in tests. Constructed lazily on first use
+            when not given, so building the adapter makes no network call.
+    """
+
+    adapter_name = "kbdl_hash"
+
+    def __init__(self, source: cm.Source, *, client: Any = None):
+        super().__init__(source)
+        self._client = client
+        #: Retryable failures, as human strings. Non-empty => incomplete.
+        self._retry: list[str] = []
+        #: This read's start time, ISO-8601 ``Z``; the ``observed_at`` fallback
+        #: for a job status record carrying no usable completion time.
+        self._run_start = _iso_z(utc_now())
+        #: Memoised :meth:`units` -- resolving ``all_visible`` twice in one
+        #: process would be two ``GET /objects`` calls for one answer.
+        self._unit_labels: tuple[str, ...] | None = None
+
+    # -- locator ------------------------------------------------------------
+
+    def _locator(self, key: str, default: Any = None) -> Any:
+        return self.source.locator.get(key, default)
+
+    def _base_url(self) -> str:
+        return str(self._locator("base_url") or "")
+
+    def _archives(self) -> list[str] | None:
+        """The explicit ``archives`` list, or ``None`` when not declared.
+
+        Accepts a TOML list or one comma-separated string, because a
+        ``${KBU_KBDL_ARCHIVES}`` placeholder can only ever expand to a string.
+        """
+        raw = self._locator("archives")
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, str):
+            values = [part.strip() for part in raw.split(",") if part.strip()]
+        elif isinstance(raw, (list, tuple)):
+            values = [str(part).strip() for part in raw if str(part).strip()]
+        else:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash 'archives' must be a "
+                "list of object ids or one comma-separated string, got "
+                f"{type(raw).__name__}."
+            )
+        if not values:
+            return None
+        return values
+
+    def _all_visible(self) -> bool:
+        value = self._locator("all_visible", False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        raise ManifestSourceError(
+            f"source {self.source.name!r}: kbdl_hash 'all_visible' must be a "
+            f"boolean, got {type(value).__name__}."
+        )
+
+    def _max_in_flight(self) -> int:
+        raw = self._locator("max_in_flight", KBDL_HASH_DEFAULT_MAX_IN_FLIGHT)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash 'max_in_flight' must "
+                f"be a positive integer, got {raw!r}."
+            ) from exc
+        if value < 1:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash 'max_in_flight' must "
+                f"be at least 1, got {value}. Zero outstanding jobs is not a "
+                "slower backfill, it is no backfill."
+            )
+        return value
+
+    def _poll_interval(self) -> float:
+        return float(self._locator("poll_interval", KBDL_HASH_POLL_INTERVAL))
+
+    def _poll_timeout(self) -> float:
+        return float(self._locator("poll_timeout", KBDL_HASH_POLL_TIMEOUT))
+
+    # -- the KBDL client ----------------------------------------------------
+
+    def _get_client(self) -> Any:
+        """The KBDL client, deferring the import until first use."""
+        if self._client is None:
+            from ...external.kbdl_service_utils import (  # noqa: PLC0415
+                KBDLServiceUtils,
+            )
+
+            base_url = self._base_url()
+            self._client = (
+                KBDLServiceUtils(base_url=base_url)
+                if base_url
+                else KBDLServiceUtils()
+            )
+        return self._client
+
+    @staticmethod
+    def _object_type(record: Mapping[str, Any]) -> str:
+        """An object record's type, under either of the service's two spellings.
+
+        ``upload_object`` posts the field as ``object_type`` and that is what
+        ``GET /objects`` returns; ``type`` is accepted as well so a listing
+        shape that spells it the shorter way is not silently read as "no
+        type" -- which, in a filter, is indistinguishable from "no archives".
+        """
+        for key in ("object_type", "type"):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    def _visible_archives(self) -> list[str]:
+        """Every visible object whose type is ``GenomeArchive``, by object id."""
+        from ...external.kbdl_service_utils import (  # noqa: PLC0415
+            OBJECT_TYPE_GENOME_ARCHIVE,
+        )
+
+        records = self._get_client().list_objects()
+        out: list[str] = []
+        for record in records or []:
+            if not isinstance(record, Mapping):
+                continue
+            if self._object_type(record) != OBJECT_TYPE_GENOME_ARCHIVE:
+                continue
+            object_id = record.get("object_id") or record.get("id")
+            if isinstance(object_id, str) and object_id:
+                out.append(object_id)
+        return out
+
+    def _require_visible(self, archive: str) -> None:
+        """Refuse to submit for an archive that is gone or no longer visible.
+
+        Checked BEFORE every submission and not before a READ: a recorded
+        finished job's result stands on its own, and re-checking the archive
+        it came from would make a resume fail on an archive whose work is
+        already done.
+        """
+        from ...external.kbdl_service_utils import (  # noqa: PLC0415
+            OBJECT_TYPE_GENOME_ARCHIVE,
+        )
+
+        client = self._get_client()
+        try:
+            metadata = client.get_object_metadata(archive)
+        except Exception as exc:
+            reason = (
+                f"archive {archive!r} is no longer readable from KBDL "
+                f"({type(exc).__name__}: {exc})"
+            )
+            self._note_retryable(reason)
+            raise KbdlHashArchiveUnavailableError(
+                f"source {self.source.name!r}: {reason}. The archive list was "
+                "FROZEN when this run was created, so an archive that has "
+                "since vanished or lost visibility leaves this unit "
+                "incomplete and stops the run rather than loading a subset "
+                "of a corpus the run claims to cover in full."
+            ) from exc
+        if not isinstance(metadata, Mapping):  # pragma: no cover - defensive
+            metadata = {}
+        object_type = self._object_type(metadata)
+        if object_type != OBJECT_TYPE_GENOME_ARCHIVE:
+            reason = (
+                f"archive {archive!r} is a {object_type or 'typeless'} object, "
+                f"not a {OBJECT_TYPE_GENOME_ARCHIVE}"
+            )
+            self._note_retryable(reason)
+            raise KbdlHashArchiveUnavailableError(
+                f"source {self.source.name!r}: {reason}. KBDLHashGenomes hashes "
+                "the FASTA members of a genome archive; another object type has "
+                "none, and submitting anyway would spend a job to be told so."
+            )
+
+    # -- accounting ---------------------------------------------------------
+
+    def _skip(self, reason: str, count: int = 1) -> None:
+        self._skipped[reason] = self._skipped.get(reason, 0) + count
+
+    def _note_retryable(self, detail: str) -> None:
+        """Record a retryable failure: it makes the UNIT incomplete.
+
+        Deliberately does NOT also count a skip reason of its own -- the
+        caller counts the reason that fits (``hash-error:internal_error``, a
+        version mismatch, a job failure), and a second generic count would
+        double-report one event.
+        """
+        if detail not in self._retry:
+            self._retry.append(detail)
+
+    def skipped(self) -> dict[str, int]:
+        return dict(self._skipped)
+
+    def incomplete_reasons(self) -> tuple[str, ...]:
+        return tuple(self._retry)
+
+    def estimate_bytes(self) -> int:
+        """One archive's hash output, not one archive's sequence.
+
+        The sharder uses this only to choose a shard COUNT, and what this
+        adapter emits is a handful of digests and counts per genome -- never a
+        sequence. A deliberately small, honest figure beats an estimate of the
+        archive's size, which would split a few hundred rows across hundreds of
+        shards.
+        """
+        return 1 << 16
+
+    # -- units of work ------------------------------------------------------
+
+    def units(self) -> tuple[str, ...]:
+        """One label per archive: the archive's object id, LEXICOGRAPHICALLY sorted.
+
+        Resolved ONCE per process and memoised. ``all_visible`` costs one
+        ``GET /objects``; it reads NO RECORDS and submits NO JOB, so planning
+        is cheap and off-pod planning of an explicit ``archives`` list needs no
+        network at all.
+
+        Sorted rather than left in listing order because KBDL's
+        ``ObjectStore.list`` orders by ``added_at`` with no tie-break: two
+        archives added in the same instant can come back in either order, so
+        the listing order is not a stable basis for a ``--limit`` window or for
+        a resume. Lexicographic order of the ids is.
+
+        Raises:
+            ManifestSourceError: Neither or both of ``archives``/
+                ``all_visible`` were declared, or the resolved list is empty.
+                An empty list is REFUSED rather than returned: a zero-unit run
+                reports a clean success having loaded nothing, which is the one
+                outcome indistinguishable from a working backfill of an empty
+                corpus.
+        """
+        if self._unit_labels is not None:
+            return self._unit_labels
+        explicit = self._archives()
+        all_visible = self._all_visible()
+        if explicit is not None and all_visible:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash takes EITHER an "
+                "explicit 'archives' list OR 'all_visible = true', not both. "
+                "They are two answers to one question (which archives does "
+                "this run cover), and intersecting them would cover neither "
+                "of the two sets the operator named."
+            )
+        if explicit is None and not all_visible:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash requires either an "
+                "'archives' list of GenomeArchive object ids or "
+                "'all_visible = true'."
+            )
+        resolved = explicit if explicit is not None else self._visible_archives()
+        labels = tuple(sorted(dict.fromkeys(resolved)))
+        if not labels:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash resolved NO archives "
+                + (
+                    "from its 'archives' list."
+                    if explicit is not None
+                    else
+                    "-- no object visible to this caller has type "
+                    "'GenomeArchive'. Check the bearer token: KBDL shows a "
+                    "caller only the objects it may see, and an "
+                    "under-privileged token is indistinguishable from an "
+                    "empty store."
+                )
+                + " Refusing rather than planning zero units, because a "
+                "zero-unit run reports a clean success having loaded nothing."
+            )
+        self._unit_labels = labels
+        return labels
+
+    def restrict_to_unit(self, unit: str | None) -> None:
+        """Narrow this read to ONE archive, named by its object id.
+
+        Accepts the label WITHOUT re-resolving :meth:`units` to validate it.
+        That is deliberate: the label the driver hands back comes from the
+        FROZEN list persisted when the run was created, and re-listing KBDL to
+        check it would reintroduce exactly the live rediscovery the freeze
+        exists to prevent -- an archive added since the freeze would be
+        "valid" and one removed since would fail validation here instead of
+        failing where it can be reported (see :meth:`_require_visible`).
+        """
+        if unit is None:
+            self._unit = None
+            return
+        if not isinstance(unit, str) or not unit:
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: kbdl_hash unit labels are "
+                f"GenomeArchive object ids; got {unit!r}."
+            )
+        self._unit = unit
+
+    def _archive(self) -> str:
+        """This read's archive: the restricted unit, or a lone configured one."""
+        if self._unit:
+            return self._unit
+        labels = self.units()
+        if len(labels) == 1:
+            return labels[0]
+        raise ManifestSourceError(
+            f"source {self.source.name!r}: kbdl_hash covers {len(labels)} "
+            "archives and was not restricted to one of them. One archive is "
+            "one UNIT -- a job per archive, hours long, resumable on its own "
+            "-- so this source is read through `kbu clearinghouse backfill "
+            "run`, which drives the units, rather than as one undivided "
+            "shard."
+        )
+
+    # -- durable state ------------------------------------------------------
+
+    def _read_state(self) -> dict[str, Any]:
+        """This (source, unit)'s durable state; ``{}`` without a run context.
+
+        Keyed by the SOURCE name, not the adapter name (which is how the arc
+        adapter keys its shared frozen selection): this state is one archive's
+        job attempts, and the run context already scopes the file per unit.
+        """
+        context = self.run_context
+        if context is None:
+            return {}
+        getter = getattr(context, "get_state", None)
+        if not callable(getter):
+            return {}
+        return getter(self.source.name)
+
+    def _write_state(self, value: Mapping[str, Any]) -> None:
+        context = self.run_context
+        if context is None:
+            return
+        putter = getattr(context, "put_state", None)
+        if not callable(putter):
+            return
+        putter(self.source.name, dict(value))
+
+    def _retry_failed_archives(self) -> bool:
+        """Whether ``--retry-failed-archives`` is in force for this run."""
+        return bool(getattr(self.run_context, "retry_failed_archives", False))
+
+    def _persist(self, state: dict[str, Any]) -> None:
+        state[KBDL_HASH_STATE_RETRY] = list(self._retry)
+        state[KBDL_HASH_STATE_INCOMPLETE] = bool(self._retry)
+        self._write_state(state)
+
+    # -- the job lifecycle --------------------------------------------------
+
+    def _submit(self, archive: str, state: dict[str, Any], *, reason: str) -> str:
+        """Submit one hash job and PERSIST ITS ID BEFORE RETURNING.
+
+        The id is written through the run context before a single poll, which
+        is the whole reason the run context has durable state: the job runs for
+        hours on poplar, and an id that only ever existed in this process is an
+        id a pod restart turns into a duplicate submission.
+        """
+        # Validated FIRST, and validated rather than consulted. ONE archive is
+        # one unit and the driver runs units sequentially, so exactly one job
+        # is outstanding when this returns -- the bound is satisfied by the
+        # lifecycle's shape rather than by arithmetic here. Resolving it anyway
+        # is what makes a malformed `max_in_flight` a refusal before anything
+        # is spent on it, instead of a locator key nobody ever reads.
+        self._max_in_flight()
+        self._require_visible(archive)
+        attempts = list(state.get(KBDL_HASH_STATE_ATTEMPTS) or [])
+        job_id = self._get_client().submit_hash_genomes([archive])
+        attempts.append(
+            {
+                "job_id": str(job_id),
+                "archive": archive,
+                "reason": reason,
+                "submitted_at": _iso_z(utc_now()),
+            }
+        )
+        state[KBDL_HASH_STATE_ATTEMPTS] = attempts
+        self._persist(state)
+        return str(job_id)
+
+    def _status(self, job_id: str) -> Mapping[str, Any]:
+        """A job's terminal status record, polling only if it is not yet terminal.
+
+        Checked ONCE first so an already-``cancelled`` job is recognised
+        immediately: ``cancelled`` is not in the client's own terminal set, so
+        handing it straight to ``poll_until_terminal`` would wait out the whole
+        timeout on a job that is never going to move.
+        """
+        client = self._get_client()
+        status = client.check_job(job_id)
+        if not isinstance(status, Mapping):  # pragma: no cover - defensive
+            status = {}
+        if str(status.get("state") or "") in KBDL_HASH_TERMINAL_STATES:
+            return status
+        polled = client.poll_until_terminal(
+            job_id,
+            interval=self._poll_interval(),
+            timeout=self._poll_timeout(),
+        )
+        return polled if isinstance(polled, Mapping) else {}
+
+    def _failure_cause(self, status: Mapping[str, Any]) -> str:
+        """A short, stable cause slug for a failed or cancelled job."""
+        state_name = str(status.get("state") or "unknown")
+        failure = status.get("failure") or status.get("error")
+        if isinstance(failure, Mapping):
+            code = failure.get("code") or failure.get("type")
+            if code:
+                return f"{state_name}:{code}"
+        return state_name
+
+    def _resolve_result(
+        self, archive: str, state: dict[str, Any]
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Get this archive's accepted hash-job ``(result, status)``.
+
+        The lifecycle, in the order round 1 of the confront fixed it:
+
+        1. NO RECORDED ATTEMPT -> confirm the archive is still visible, submit,
+           persist the id, poll, read.
+        2. A RECORDED ATTEMPT -> REATTACH. A ``queued``/``running`` job is
+           polled; a ``completed`` one is read. Neither resubmits: a succeeded
+           job is NEVER resubmitted automatically, because a second result for
+           one input is not a repair.
+        3. ``failed`` / ``cancelled`` -> STOP with the terminal cause, unless
+           ``--retry-failed-archives``, which submits a recorded NEW attempt.
+        4. A RECLAIMED RESULT (KBDL deletes results 30 days after completion,
+           and a reclaimed one reads as not-found/conflict) is the ONLY case
+           that resubmits automatically, and only ONCE. Transport and auth
+           errors do not resubmit -- they say nothing about the job.
+        """
+        from ...external.kbdl_service_utils import (  # noqa: PLC0415
+            KBDLConflictError,
+            KBDLNotFoundError,
+        )
+
+        attempts = list(state.get(KBDL_HASH_STATE_ATTEMPTS) or [])
+        if attempts:
+            job_id = str(attempts[-1].get("job_id") or "")
+        else:
+            job_id = ""
+        if not job_id:
+            job_id = self._submit(
+                archive, state, reason=KBDL_HASH_ATTEMPT_INITIAL
+            )
+
+        # At most three passes: the recorded attempt, one retention
+        # resubmission, and one operator-instructed retry. The bound is
+        # explicit so a service answering oddly cannot spin here.
+        for _ in range(3):
+            try:
+                status = self._status(job_id)
+            except KBDLNotFoundError as exc:
+                job_id = self._resubmit_after_retention_loss(
+                    archive, state, job_id, detail=f"job record gone: {exc}"
+                )
+                continue
+            job_state = str(status.get("state") or "")
+            if job_state in ("failed", "cancelled"):
+                cause = self._failure_cause(status)
+                self._skip(f"{KBDL_HASH_SKIP_JOB_FAILED_PREFIX}{cause}")
+                if not self._retry_failed_archives():
+                    reason = (
+                        f"hash job {job_id!r} for archive {archive!r} is "
+                        f"{cause}"
+                    )
+                    self._note_retryable(reason)
+                    self._persist(state)
+                    raise KbdlHashJobFailedError(
+                        f"source {self.source.name!r}: {reason}. The command "
+                        "STOPS on the terminal cause rather than skipping the "
+                        "archive: a failed job leaves this archive's contents "
+                        "unknown, and continuing would report a success over a "
+                        "corpus nobody has read. Re-run with "
+                        "--retry-failed-archives to submit a recorded NEW "
+                        "attempt."
+                    )
+                job_id = self._submit(
+                    archive, state, reason=KBDL_HASH_ATTEMPT_OPERATOR_RETRY
+                )
+                continue
+            if job_state != "completed":  # pragma: no cover - _status is terminal
+                raise ManifestSourceError(
+                    f"source {self.source.name!r}: hash job {job_id!r} reported "
+                    f"non-terminal state {job_state!r} after polling to "
+                    "terminal."
+                )
+            try:
+                result = self._get_client().get_job_result(job_id)
+            except (KBDLNotFoundError, KBDLConflictError) as exc:
+                job_id = self._resubmit_after_retention_loss(
+                    archive, state, job_id, detail=f"result reclaimed: {exc}"
+                )
+                continue
+            if not isinstance(result, Mapping):
+                raise ManifestSourceError(
+                    f"source {self.source.name!r}: hash job {job_id!r} returned "
+                    f"a {type(result).__name__} result; KBDLHashGenomes returns "
+                    "a JSON object with 'genomes' and 'errors'."
+                )
+            return result, status
+
+        raise KbdlHashRetentionLostError(  # pragma: no cover - bound guard
+            f"source {self.source.name!r}: archive {archive!r} could not be "
+            "resolved to a readable hash result within the attempt bound."
+        )
+
+    def _resubmit_after_retention_loss(
+        self, archive: str, state: dict[str, Any], job_id: str, *, detail: str
+    ) -> str:
+        """Resubmit ONCE for a confirmed retention loss; refuse a second time."""
+        used = int(state.get(KBDL_HASH_STATE_RETENTION_RESUBMITS) or 0)
+        if used >= 1:
+            reason = (
+                f"hash job {job_id!r} for archive {archive!r} was lost a "
+                f"second time ({detail})"
+            )
+            self._note_retryable(reason)
+            self._persist(state)
+            raise KbdlHashRetentionLostError(
+                f"source {self.source.name!r}: {reason}. ONE automatic "
+                "resubmission answers KBDL's 30-day result retention; a "
+                "freshly submitted job whose result is gone again is not a "
+                "retention problem, and resubmitting on it would loop."
+            )
+        state[KBDL_HASH_STATE_RETENTION_RESUBMITS] = used + 1
+        self._persist(state)
+        return self._submit(
+            archive, state, reason=KBDL_HASH_ATTEMPT_RETENTION_LOSS
+        )
+
+    # -- the standardizer-version probe -------------------------------------
+
+    def _probe_standardizer_version(
+        self, archive: str, result: Mapping[str, Any], state: dict[str, Any]
+    ) -> None:
+        """REFUSE the run if KBDL hashes with a different standardizer version.
+
+        Round 2 of the confront requires a version probe before any hash job
+        is submitted for a run. KBDL exposes no version endpoint, so the probe
+        IS A ONE-ARCHIVE HASH JOB -- and this archive's own job is exactly
+        that, so the probe costs no extra job and wastes no work. Because the
+        driver runs units sequentially, one archive at a time, a mismatch
+        raises here before ANY OTHER archive's job is submitted.
+
+        THE PROBED VERSION IS THE JOB'S, NOT AN ENTRY'S OPINION: the result's
+        top-level ``standardizer_version`` when it carries one, else the first
+        ``genomes`` entry's. A mismatch there is a statement about the
+        SERVICE and refuses the run; a mismatch on a LATER entry of an
+        otherwise-agreeing job is a per-entry problem, counted as
+        :data:`KBDL_HASH_SKIP_VERSION_MISMATCH` and left to make the archive
+        incomplete (see :meth:`_rows`).
+        """
+        reported = result.get("standardizer_version")
+        if not isinstance(reported, str) or not reported:
+            genomes = result.get("genomes")
+            if isinstance(genomes, Mapping):
+                for entry in genomes.values():
+                    if isinstance(entry, Mapping):
+                        candidate = entry.get("standardizer_version")
+                        if isinstance(candidate, str) and candidate:
+                            reported = candidate
+                            break
+        if not isinstance(reported, str) or not reported:
+            # An errors-only job reports no version at all. Nothing to
+            # compare, so nothing is claimed: the per-entry check still gates
+            # every row that does arrive.
+            state[KBDL_HASH_STATE_PROBE] = None
+            return
+        state[KBDL_HASH_STATE_PROBE] = reported
+        if reported != standardizers.STANDARDIZER_VERSION:
+            raise KbdlHashVersionMismatchError(
+                f"source {self.source.name!r}: KBDL hashed archive "
+                f"{archive!r} with standardizer version {reported!r}, and this "
+                f"pod runs {standardizers.STANDARDIZER_VERSION!r}. The run is "
+                "REFUSED before any further hash job is submitted. "
+                "entity_hash is the clearinghouse's join key, so two "
+                "standardizer versions are two hash RULES: rows loaded under "
+                "one would look like different entities from the same genome "
+                "loaded under the other, and nothing downstream could detect "
+                "it. Upgrade KBDL on poplar, or run the backfill from a pod on "
+                f"standardizer {reported!r}."
+            )
+
+    # -- emission -----------------------------------------------------------
+
+    def iter_records(self) -> Iterator[Mapping[str, Any]]:
+        """Yield one record per hashed genome of this unit's archive.
+
+        The order of operations is the contract:
+
+        1. RESOLVE THE ACCEPTED JOB -- read a recorded one, or submit (id
+           persisted first), poll and read. See :meth:`_resolve_result`.
+        2. PROBE THE VERSION, refusing the run on a service-level mismatch
+           before any other archive's job is submitted.
+        3. EMIT one row per ``genomes`` entry, counting every ``errors`` entry
+           and every per-entry version mismatch by reason -- and making the
+           archive INCOMPLETE for the retryable ones.
+        """
+        self._exhausted = False
+        archive = self._archive()
+        state = dict(self._read_state())
+        state[KBDL_HASH_STATE_ARCHIVE] = archive
+        result, status = self._resolve_result(archive, state)
+        self._probe_standardizer_version(archive, result, state)
+
+        emitted = 0
+        for row in self._rows(archive, result, status):
+            if not self._admit_record():
+                break
+            emitted += 1
+            yield row
+        else:
+            # Reached only by running off the end of the entries -- a --limit
+            # break leaves `exhausted` False, which is what makes the unit
+            # `partial` rather than `done`.
+            self._exhausted = True
+
+        state[KBDL_HASH_STATE_EMITTED] = emitted
+        self._persist(state)
+
+    def _rows(
+        self,
+        archive: str,
+        result: Mapping[str, Any],
+        status: Mapping[str, Any],
+    ) -> Iterator[Mapping[str, Any]]:
+        """One row per usable ``genomes`` entry; everything else counted.
+
+        THE ERROR MAP IS READ BY CODE, because the codes mean different things
+        (round 2 of the confront):
+
+        - ``invalid_input`` -> TERMINAL. A reported exclusion: counted, and the
+          archive is still DONE, because the member will read the same way
+          forever.
+        - anything else, ``internal_error`` included -> RETRYABLE. The archive
+          is INCOMPLETE: its successful rows are still emitted (and ingested,
+          and verified), and the command exits non-zero so a later run comes
+          back for the rest. Nothing is auto-resubmitted.
+
+        A PER-ENTRY STANDARDIZER VERSION MISMATCH is retryable in the same
+        sense: the digest was computed by a rule this pod does not implement,
+        so the row is dropped rather than loaded under the wrong rule, and the
+        archive is not finished.
+        """
+        observed_at = self._observed_at(status)
+        genomes = result.get("genomes")
+        if genomes is None:
+            genomes = {}
+        if not isinstance(genomes, Mapping):
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: hash result for archive "
+                f"{archive!r} has a {type(genomes).__name__} 'genomes'; "
+                "KBDLHashGenomes returns a mapping of genome key -> entry."
+            )
+        errors = result.get("errors")
+        if isinstance(errors, Mapping):
+            for key, failure in errors.items():
+                code = ""
+                message = ""
+                if isinstance(failure, Mapping):
+                    code = str(failure.get("code") or "")
+                    message = str(failure.get("message") or "")
+                code = code or "unknown"
+                self._skip(f"{KBDL_HASH_SKIP_ERROR_PREFIX}{code}")
+                if code not in KBDL_HASH_TERMINAL_ERROR_CODES:
+                    self._note_retryable(
+                        f"archive {archive!r} member {key!r} failed to hash "
+                        f"with a retryable code {code!r}: "
+                        f"{message or 'no message'}"
+                    )
+
+        for genome_key, entry in genomes.items():
+            if not isinstance(entry, Mapping):
+                self._skip(KBDL_HASH_SKIP_ENTRY_UNUSABLE)
+                self._note_retryable(
+                    f"archive {archive!r} genome {genome_key!r} is a "
+                    f"{type(entry).__name__}, not a hash entry"
+                )
+                continue
+            version = entry.get("standardizer_version")
+            if version != standardizers.STANDARDIZER_VERSION:
+                # NOT loaded under this pod's rule. A digest from another
+                # standardizer version is another identity space; a row that
+                # carried it would collide with nothing and join to nothing
+                # while looking exactly like a genome entity.
+                self._skip(KBDL_HASH_SKIP_VERSION_MISMATCH)
+                self._note_retryable(
+                    f"archive {archive!r} genome {genome_key!r} was hashed "
+                    f"with standardizer version {version!r}, not this pod's "
+                    f"{standardizers.STANDARDIZER_VERSION!r}"
+                )
+                continue
+            entity_hash = entry.get("entity_hash")
+            entry_name = entry.get("entry_name")
+            if not entity_hash or not entry_name:
+                self._skip(KBDL_HASH_SKIP_ENTRY_UNUSABLE)
+                self._note_retryable(
+                    f"archive {archive!r} genome {genome_key!r} is missing "
+                    "entity_hash or entry_name"
+                )
+                continue
+            yield {
+                "genome_key": genome_key,
+                "entity_hash": entity_hash,
+                "standardizer_version": version,
+                # The entry's own archive id when it carries one (it does),
+                # falling back to the unit's -- the two agree, and preferring
+                # the entry's keeps the pointer a statement about the result
+                # rather than about the loop.
+                "archive_object_id": entry.get("archive_object_id") or archive,
+                "entry_name": entry_name,
+                "n_contigs": entry.get("n_contigs"),
+                "total_length": entry.get("total_length"),
+                "longest_contig": entry.get("longest_contig"),
+                "shortest_contig": entry.get("shortest_contig"),
+                "observed_at": observed_at,
+            }
+
+    def _observed_at(self, status: Mapping[str, Any]) -> str:
+        """When the hash was observed: the job's completion time, else run start.
+
+        A job's own completion time is the honest observation time for every
+        digest it produced -- the hash is a property of the archive as it stood
+        when the job read it, not of when this backfill got round to loading
+        it. The run start is the fallback when the status record carries no
+        usable time, which keeps ``observed_at`` non-null (the sharder refuses
+        a null in a DECLARED observed_at column).
+        """
+        for key in ("completed_at", "finished_at", "ended_at", "updated_at"):
+            value = status.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return self._run_start
+
+
+#: Concrete adapter classes, by name. Every declared adapter is built:
 #: ``file`` (CPU/disk only), ``lakehouse`` (in-pod / off-pod read), ``mongo``
-#: (a batched collection read) and ``arc`` (Chris's KOROS arc store on the
+#: (a batched collection read), ``arc`` (Chris's KOROS arc store on the
 #: BERDL pod -- a read-only sqlite index, gzipped job results, optional backup
-#: tarballs, joined to genome objects pulled from KBDL). :func:`get_adapter`
-#: no longer reports any planned name as unbuilt.
+#: tarballs, joined to genome objects pulled from KBDL) and ``kbdl_hash``
+#: (KBDL's own ``KBDLHashGenomes`` job, one per GenomeArchive, hashing the
+#: FASTA members in place on poplar so no sequence crosses the network).
+#: :func:`get_adapter` no longer reports any declared name as unbuilt.
 _ADAPTER_CLASSES: dict[str, type[SourceAdapter]] = {
     "file": FileSourceAdapter,
     "lakehouse": LakehouseSourceAdapter,
     "mongo": MongoSourceAdapter,
     "arc": ArcSourceAdapter,
+    "kbdl_hash": KbdlHashSourceAdapter,
 }
 
 
@@ -3239,8 +4168,8 @@ def get_adapter(
             :data:`ADAPTER_NAMES` at all.
         AdapterNotImplementedError: The name is in :data:`ADAPTER_NAMES` but
             maps to no registered class. With ``file``, ``lakehouse``,
-            ``mongo`` and ``arc`` all built, this no longer fires for any
-            planned name.
+            ``mongo``, ``arc`` and ``kbdl_hash`` all built, this no longer
+            fires for any declared name.
         ManifestSourceError: ``unit`` names a unit this adapter does not
             decompose into.
     """
@@ -3304,6 +4233,22 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
         # exist, and indistinguishable in the lake from a real one. A missing
         # pointer stays missing.
         return None if value is None else f"{text}{value}"
+    if name == "concat":
+        # STRICTLY ALTERNATING literal, column, literal, column -- the arity
+        # check in clearinghouse_manifest guarantees an even count and a
+        # non-empty name in every odd position, so this walk needs no
+        # defence of its own.
+        pieces: list[str] = []
+        for index in range(0, len(args), 2):
+            value = row.get(args[index + 1])
+            # NULL IN, NULL OUT, across EVERY named column, for the same
+            # reason @prefix is null-preserving: a pointer assembled from a
+            # missing half ("kbdl:archive:None:x") is a reference to nothing
+            # and is indistinguishable in the lake from a real one.
+            if value is None:
+                return None
+            pieces.append(f"{args[index]}{value}")
+        return "".join(pieces)
     if name == "const":
         return args[0]
     if name == "hash":

@@ -1,0 +1,113 @@
+# `kbdl-genome-archives` -- EVERY GENOME KBDL ALREADY HOLDS, AS A GENOME ENTITY.
+#
+# WHAT IT READS. One thing: the `GenomeArchive` objects in KBDL's object store
+# on poplar. Nothing on local disk, no sqlite index, no tarball.
+#
+# NO SEQUENCE CROSSES THE NETWORK. This preset does not download an archive.
+# It submits KBDL's own `KBDLHashGenomes` job, one job per archive, and that
+# job reads each archive's FASTA members IN PLACE on poplar, read-only, and
+# hashes them with the SAME `kbutillib.domains.identity.standardizers` rule
+# this pod would use. What comes back is digests and counts -- a few hundred
+# bytes per genome. That is the entire reason a genome backfill goes through a
+# job rather than through `download_object`: the archives are large, the pod is
+# small, and a hash computed beside the bytes is the same hash computed over
+# them.
+#
+# ONE ARCHIVE IS ONE UNIT. The adapter reports one unit per archive, so
+# `backfill run` shards, ingests, verifies and records one archive before
+# starting the next. A run killed anywhere loses at most the archive in
+# flight, and `--limit 1` means ONE ARCHIVE (not one genome) -- the first of
+# the frozen sorted list.
+#
+# THE ARCHIVE LIST IS FROZEN WHEN THE RUN IS CREATED. `all_visible = true`
+# resolves through `GET /objects`, whose order is `added_at` with NO
+# tie-break; the adapter sorts the ids lexicographically and
+# `clearinghouse_backfill.freeze_adapter_units` persists the sorted list in
+# `<out>/backfill-state.json` BEFORE any job is submitted. Every `--resume`
+# drives that list. An archive uploaded mid-run therefore does NOT join the
+# run, and an archive that disappears leaves its unit incomplete and stops the
+# run rather than quietly shrinking what the run covered.
+#
+# THE JOB ID IS PERSISTED BEFORE THE FIRST POLL, through the run context, so a
+# resume REATTACHES to a queued or running job instead of submitting a second
+# one. A succeeded job is never resubmitted automatically. Only a confirmed
+# retention loss (KBDL deletes a result 30 days after completion) resubmits,
+# and only once; a failed or cancelled job STOPS the command with its terminal
+# cause, and `--retry-failed-archives` is the explicit instruction that turns
+# it into a recorded new attempt.
+#
+# AN ARCHIVE IS NOT DONE WHEN ITS JOB SUCCEEDS. It is done when its rows are
+# ingested and VERIFIED and the driver records the unit. A member that failed
+# to hash with `internal_error`, or one hashed by a standardizer version this
+# pod does not run, leaves the archive INCOMPLETE: the successful rows are
+# still loaded and verified, and the command exits non-zero so a later run
+# comes back for the rest. Only `invalid_input` is terminal -- a reported
+# exclusion that will read the same way forever.
+#
+# RUN IT AGAINST A SCRATCH DATASET FIRST, with `--limit 1`, and look at the
+# one archive's rows before letting it walk the store.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo).
+pulls_from = [
+  "KBDL on poplar",
+]
+# EMPTY, deliberately. The one placeholder below defaults to empty, which the
+# adapter reads as "the KBDL client's own default endpoint"
+# (kbdl_service_utils.DEFAULT_BASE_URL -- http://poplar.cels.anl.gov:8791,
+# reachable from a BERDL pod with no tunnel), so nothing has to be exported to
+# run this preset.
+needs_env = []
+
+# ---- Genomes: identity + content ----------------------------------------
+#
+# IDENTITY IS PRECOMPUTED, AND THAT IS THE POINT. `[source.hash].precomputed`
+# names the column carrying a digest the SOURCE computed -- here, the digest
+# KBDLHashGenomes computed on poplar with `genome_hash_from_fasta`. The
+# sharder re-canonicalises it through `clearinghouse_schema.encode_entity_hash`
+# (64 lowercase hex or nothing) but cannot check WHICH rule produced it, which
+# is why the adapter checks the job's reported `standardizer_version` against
+# this pod's and refuses the run on a service-level mismatch before any other
+# archive's job is submitted. `contig_set` is not available here by
+# construction: it would need the contig sequences on the pod, and the whole
+# design is that they never arrive.
+#
+# `fasta_reference` IS A POINTER INTO THE ARCHIVE, not to a standalone object:
+# a genome in a GenomeArchive is one MEMBER of it, so the reference needs both
+# the archive's object id and the member's entry name. @concat is @prefix
+# generalised to that shape and is null-preserving across BOTH columns -- a
+# row missing either half is dropped rather than written as
+# "kbdl:archive:None:x", which would be a pointer to nothing and
+# indistinguishable in the lake from a real one.
+#
+# `taxon_id`, `assembly_accession` and `is_closed` are UNMAPPED. A hash job
+# reads FASTA and reports digests and contig statistics; it performs no
+# taxonomic assignment, consults no assembly registry and makes no claim about
+# closure. An unmapped column is null, which is the honest value -- and a
+# later source can fill these in for the same entity_hash, because the ingest
+# is fill-only.
+[[source]]
+name        = "kbdl-genome-archives"
+adapter     = "kbdl_hash"
+all_visible = true
+# Empty = the KBDL client's own default endpoint. Point this at another
+# deployment without editing package data.
+base_url    = "${KBU_KBDL_BASE_URL:-}"
+# ONE OUTSTANDING JOB. The driver runs units sequentially and this adapter
+# runs one archive per unit, so one job is in flight by construction; the key
+# bounds that rather than raising it.
+max_in_flight = 1
+entity_type = "genome"
+kinds       = ["entity", "content"]
+# The hash JOB's completion time, which is when the digests were observed --
+# a property of the archive as the job read it, not of when this backfill got
+# round to loading it.
+observed_at_column = "observed_at"
+
+  [source.hash]
+  precomputed = "entity_hash"
+
+  [source.content]
+  fasta_reference = "@concat(kbdl:archive:,archive_object_id,:,entry_name)"
+  n_contigs       = "n_contigs"
+  total_length    = "total_length"

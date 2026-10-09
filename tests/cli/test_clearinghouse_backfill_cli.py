@@ -1175,3 +1175,172 @@ def test_human_render_receives_the_same_dict_the_serialiser_would_emit(
     assert set(captured[0]) == _ENVELOPE_KEYS
     assert captured[0]["verb"] == "backfill-run"
     json.dumps(captured[0])  # the rendered object is exactly what --json emits
+
+
+# ==========================================================================
+# The `kbdl-genome-archives` preset: adapter units, FROZEN before any job
+# ==========================================================================
+#
+# Covers the one thing the adapter's own tests cannot: that the CLI freezes the
+# unit list where it has to -- after the run id and --out are resolved, and
+# BEFORE register_run, record_planned_units and run_backfill (which is what
+# submits the hash jobs). The adapter is wired to a fake KBDL client so no
+# network, no poplar and no real job are involved.
+
+_KBDL_PRESET = "kbdl-genome-archives"
+_ARCHIVE_A = "a" * 64
+_ARCHIVE_B = "b" * 64
+_ARCHIVE_C = "c" * 64
+
+
+class _FakeHashClient:
+    """The KBDL surface the ``kbdl_hash`` adapter uses, and nothing else."""
+
+    def __init__(self, archive_ids):
+        self.objects = {
+            # Listed in REVERSE lexicographic order, because the adapter's
+            # sort is what makes a frozen list reproducible and a fixture that
+            # was already sorted could not show it.
+            object_id: {"object_id": object_id, "object_type": "GenomeArchive"}
+            for object_id in sorted(archive_ids, reverse=True)
+        }
+        self.submitted: list[list[str]] = []
+        self._counter = 0
+        self._results: dict[str, dict] = {}
+
+    def list_objects(self):
+        return list(self.objects.values())
+
+    def get_object_metadata(self, object_id):
+        from kbutillib.domains.external import kbdl_service_utils as ksu
+
+        if object_id not in self.objects:
+            raise ksu.KBDLNotFoundError(f"no object {object_id}")
+        return dict(self.objects[object_id])
+
+    def submit_hash_genomes(self, archive_ids):
+        import hashlib
+
+        from kbutillib.domains.identity import standardizers
+
+        ids = list(archive_ids)
+        self._counter += 1
+        job_id = f"job-{self._counter}"
+        self.submitted.append(ids)
+        self._results[job_id] = {
+            "genomes": {
+                "g1.fna": {
+                    "entity_hash": hashlib.sha256(
+                        f"{ids[0]}:g1.fna".encode()
+                    ).hexdigest(),
+                    "standardizer_version": standardizers.STANDARDIZER_VERSION,
+                    "archive_object_id": ids[0],
+                    "entry_name": "g1.fna",
+                    "n_contigs": 1,
+                    "total_length": 10,
+                }
+            },
+            "errors": {},
+        }
+        return job_id
+
+    def check_job(self, job_id):
+        return {
+            "job_id": job_id,
+            "state": "completed",
+            "completed_at": "2026-10-08T12:00:00Z",
+        }
+
+    def poll_until_terminal(self, job_id, **_kw):  # pragma: no cover - terminal
+        return self.check_job(job_id)
+
+    def get_job_result(self, job_id):
+        return self._results[job_id]
+
+
+@pytest.fixture()
+def wired_kbdl_hash(monkeypatch):
+    client = _FakeHashClient([_ARCHIVE_A, _ARCHIVE_B])
+
+    class _Wired(cs.KbdlHashSourceAdapter):
+        def __init__(self, source):
+            super().__init__(source, client=client)
+
+    monkeypatch.setitem(cs._ADAPTER_CLASSES, "kbdl_hash", _Wired)
+    return client
+
+
+def test_run_plans_one_adapter_unit_per_archive_and_freezes_the_list(
+    monkeypatch, tmp_path, state_root, wired_kbdl_hash
+):
+    out = tmp_path / "out"
+    result = _invoke(
+        monkeypatch,
+        [
+            "clearinghouse", "backfill", "run", _KBDL_PRESET,
+            "--out", str(out), "--json",
+        ],
+        fake=_FakeBackfillCapability(),
+    )
+
+    assert result.exit_code == 0, _all_output(result)
+    env = _assert_one_clean_envelope(result.stdout, "backfill-run", locus="in_pod")
+    data = env["data"]
+    assert data["unit_kind"] == cb.UNIT_KIND_ADAPTER
+    assert [u["unit"] for u in data["units"]] == [_ARCHIVE_A, _ARCHIVE_B]
+    assert all(u["state"] == cb.UNIT_DONE for u in data["units"])
+    # ONE hash job per archive, each naming only its own archive.
+    assert wired_kbdl_hash.submitted == [[_ARCHIVE_A], [_ARCHIVE_B]]
+    # and the list is on disk, sorted, for a resume to drive.
+    assert cb.read_state(out)[cb.FROZEN_UNITS_FIELD] == [_ARCHIVE_A, _ARCHIVE_B]
+
+
+def test_run_resume_drives_the_frozen_list_and_ignores_rediscovery(
+    monkeypatch, tmp_path, state_root, wired_kbdl_hash
+):
+    """An archive uploaded mid-run does NOT join the run, and one that has
+    disappeared is reported rather than quietly dropped."""
+    out = tmp_path / "out"
+    first = _invoke(
+        monkeypatch,
+        [
+            "clearinghouse", "backfill", "run", _KBDL_PRESET,
+            "--out", str(out), "--limit", "1", "--json",
+        ],
+        fake=_FakeBackfillCapability(),
+    )
+    assert first.exit_code == 0, _all_output(first)
+    assert json.loads(first.stdout)["data"]["units"][0]["unit"] == _ARCHIVE_A
+
+    # The store moves on between invocations: B vanishes, C appears.
+    del wired_kbdl_hash.objects[_ARCHIVE_B]
+    wired_kbdl_hash.objects[_ARCHIVE_C] = {
+        "object_id": _ARCHIVE_C,
+        "object_type": "GenomeArchive",
+    }
+
+    second = _invoke(
+        monkeypatch,
+        [
+            "clearinghouse", "backfill", "run", _KBDL_PRESET,
+            "--out", str(out), "--resume", "--json",
+        ],
+        fake=_FakeBackfillCapability(),
+    )
+
+    # STOPS with the terminal cause, naming the archive: B was frozen into this
+    # run and is now unreachable. No envelope, because the run did not finish.
+    assert second.exit_code != 0
+    message = _all_output(second)
+    assert _ARCHIVE_B in message
+    assert "frozen" in message.lower()
+    # The frozen list is UNCHANGED -- C did not join the run, and B was not
+    # dropped from it to make the run look complete.
+    state = cb.read_state(out)
+    assert state[cb.FROZEN_UNITS_FIELD] == [_ARCHIVE_A, _ARCHIVE_B]
+    assert _ARCHIVE_C not in state[cb.FROZEN_UNITS_FIELD]
+    assert _ARCHIVE_B in state[cb.VANISHED_UNITS_FIELD]
+    # A is still recorded done from the first invocation, so the resume did not
+    # redo it and did not resubmit its hash job.
+    assert cb.unit_record(state, _ARCHIVE_A)["state"] == cb.UNIT_DONE
+    assert wired_kbdl_hash.submitted == [[_ARCHIVE_A]]

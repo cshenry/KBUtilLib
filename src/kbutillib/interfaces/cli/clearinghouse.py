@@ -1506,16 +1506,25 @@ def _backfill_error_types() -> tuple[type[BaseException], ...]:
 
     A :class:`~clearinghouse_backfill.BackfillError` (a conflicting
     ``--resume``, an unknown preset, a ``--slice`` against a non-mongo
-    manifest) and a :class:`~clearinghouse_manifest.ManifestError` (an
-    unresolved ``${VAR}``) are both OPERATOR errors with a message that already
-    names the problem, so they become a non-zero ``ClickException`` rather than
-    a traceback.
+    manifest), a :class:`~clearinghouse_manifest.ManifestError` (an
+    unresolved ``${VAR}``) and a
+    :class:`~clearinghouse_shard.ManifestSourceError` are all OPERATOR errors
+    with a message that already names the problem, so they become a non-zero
+    ``ClickException`` rather than a traceback.
+
+    ``ManifestSourceError`` is the ADAPTER REFUSING its own read, and the
+    ``kbdl_hash`` adapter is why it is listed: a hash job that failed, an
+    archive that lost visibility, and a KBDL whose standardizer version does
+    not match this pod's are each a terminal cause the run must stop on, and
+    each already carries a message that names the archive and what to do. A
+    traceback would bury all three.
     """
     try:
         from ...domains.kbase.berdl.clearinghouse_backfill import BackfillError
         from ...domains.kbase.berdl.clearinghouse_manifest import ManifestError
+        from ...domains.kbase.berdl.clearinghouse_shard import ManifestSourceError
 
-        return (BackfillError, ManifestError)
+        return (BackfillError, ManifestError, ManifestSourceError)
     except Exception:  # pragma: no cover - defensive: keep the CLI importable
         return (ValueError,)
 
@@ -1674,6 +1683,15 @@ def _build_backfill_run(
         resolved_run_id = adopted
         out = backfill.resolve_out(out_dir, resolved_run_id)
 
+    # FREEZE THE UNIT LIST BEFORE ANYTHING IS SUBMITTED. For an adapter-unit
+    # plan (the genome archives) the unit set was DISCOVERED from a live
+    # service; this persists it in the run's state file on the first
+    # invocation and drives the persisted list on every later one, so a
+    # --resume cannot pick up an archive uploaded since or renumber its
+    # --limit window. Inert for slice and single plans.
+    plan = backfill.freeze_adapter_units(
+        out, run_id=resolved_run_id, plan=plan, limit=limit
+    )
     registration = backfill.register_run(
         run_id=resolved_run_id,
         out=out,
@@ -1714,6 +1732,16 @@ def _build_backfill_run(
             "The rows that landed are correct and stay; a later run without "
             "--limit processes these units again and fill-only discards what "
             "is already there."
+        )
+    if plan.vanished_units:
+        warnings.append(
+            f"{len(plan.vanished_units)} FROZEN unit(s) are no longer reported "
+            f"by the source ({list(plan.vanished_units[:5])}"
+            f"{', ...' if len(plan.vanished_units) > 5 else ''}). The unit list "
+            "was frozen when this run was created, so these were part of the "
+            "corpus this run claims to cover; each is still attempted and its "
+            "adapter refuses with the cause, which leaves the unit incomplete "
+            "and exits non-zero rather than shrinking the run to fit the loss."
         )
     if plan.units_dropped_by_limit:
         warnings.append(
@@ -1919,6 +1947,11 @@ def _build_backfill_shard(
     if resolved_run_id is None:
         resolved_run_id = _new_backfill_run_id()
     out.mkdir(parents=True, exist_ok=True)
+    # Same freeze as `backfill run` -- see there. Sharding is the half that
+    # submits the hash jobs, so the list has to be fixed before it too.
+    plan = backfill.freeze_adapter_units(
+        out, run_id=resolved_run_id, plan=plan, limit=limit
+    )
     backfill.record_planned_units(out, run_id=resolved_run_id, units=plan.units)
     reports = backfill.shard_units(
         manifest=manifest,

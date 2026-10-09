@@ -141,7 +141,7 @@ import io
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -165,6 +165,7 @@ __all__ = [
     "KBDLJobFailedError",
     "KBDLObjectDigestError",
     "REFERENCE_OBJECT_ID_PREFIX",
+    "OBJECT_TYPE_GENOME_ARCHIVE",
     "is_content_object",
 ]
 
@@ -193,7 +194,7 @@ KBDL_SERVICE_URL_ENV_VAR = "KBDL_SERVICE_URL"
 #: ``e5ab88e`` in the global_share deploy.
 DEFAULT_BASE_URL = "http://poplar.cels.anl.gov:8791"
 
-#: The nine job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
+#: The job types accepted by ``POST /jobs`` (kbdl_service.schemas.envelope.JobType).
 JOB_TYPE_GENOME_ANNOTATION = "KBDLGenomeAnnotation"
 JOB_TYPE_MODEL_RECONSTRUCTION = "KBDLModelReconstruction"
 JOB_TYPE_FITNESS_MODEL_ANALYSIS = "KBDLFitnessModelAnalysis"
@@ -204,6 +205,15 @@ JOB_TYPE_BUILD_SKANI_DB = "KBDLBuildSKANIDB"
 JOB_TYPE_STORE_LOAD = "KBDLStoreLoad"
 JOB_TYPE_UPLOAD_OBJECT = "KBDLUploadObject"
 JOB_TYPE_HORIZYN = "KBDLHorizyn"
+JOB_TYPE_HASH_GENOMES = "KBDLHashGenomes"
+
+#: The ``object_type`` KBDL gives an uploaded genome archive. The ONE spelling
+#: shared by :meth:`KBDLServiceUtils.upload_object` (which accepts
+#: ``transform`` only for this type) and any caller that filters
+#: :meth:`KBDLServiceUtils.list_objects` down to the archives -- a second
+#: spelling would silently select nothing while looking like it selected the
+#: archives.
+OBJECT_TYPE_GENOME_ARCHIVE = "GenomeArchive"
 
 #: The only schema_version this client (and the v0 service) speaks.
 SCHEMA_VERSION = "1"
@@ -622,6 +632,49 @@ class KBDLServiceUtils(SharedEnvUtils):
         if gff is not None:
             payload["gff"] = gff
         return self._submit(JOB_TYPE_BUILD_GENOME, payload)
+
+    def submit_hash_genomes(self, archive_ids: Sequence[str]) -> str:
+        """Submit a ``KBDLHashGenomes`` job over ``archive_ids``. Returns the job id.
+
+        The job hashes every FASTA member of each named ``GenomeArchive``
+        object IN PLACE, on poplar, read-only, with
+        ``kbutillib.domains.identity.standardizers.genome_hash_from_fasta`` --
+        so NO SEQUENCE CROSSES THE NETWORK. Its result is
+        ``{"genomes": {<genome_key>: {"entity_hash",
+        "standardizer_version", "archive_object_id", "entry_name",
+        "n_contigs", "total_length", "longest_contig",
+        "shortest_contig"}}, "errors": {<key>: {"code", "message"}}}``.
+
+        See ``kbdl_service.schemas.hash_genomes.KBDLHashGenomesParams`` in the
+        service repo for the params shape: ``archives``, a non-empty list of
+        ``{"object_id": "<64-hex>"}``.
+
+        Args:
+            archive_ids: One or more ``GenomeArchive`` object ids.
+
+        Raises:
+            ValueError: ``archive_ids`` is empty, or any entry is not a
+                non-empty string. Raised before any request is sent -- an
+                empty ``archives`` list is rejected server-side too, and
+                paying a round trip to be told so hides the caller's bug
+                behind a transport error.
+        """
+        ids = list(archive_ids)
+        if not ids:
+            raise ValueError(
+                "submit_hash_genomes requires at least one archive object id; "
+                "KBDLHashGenomes takes a non-empty 'archives' list."
+            )
+        bad = [value for value in ids if not isinstance(value, str) or not value]
+        if bad:
+            raise ValueError(
+                "submit_hash_genomes archive ids must be non-empty strings; "
+                f"got {bad!r}."
+            )
+        return self._submit(
+            JOB_TYPE_HASH_GENOMES,
+            {"archives": [{"object_id": value} for value in ids]},
+        )
 
     def submit_model_reconstruction(self, **params: Any) -> str:
         """Submit a ``KBDLModelReconstruction`` job. Returns the job id.

@@ -187,13 +187,22 @@ class _FakeBackfillCapability:
 def _runner() -> CliRunner:
     """A runner that keeps stdout and stderr APART.
 
-    ``mix_stderr=True`` is click's default, and under it ``result.stdout`` is
-    stdout AND stderr interleaved -- which would make the output contract
-    ("stdout under --json is exactly one JSON object, every warning on
-    stderr") untestable, because the warnings would be in the string the test
-    tries to parse.
+    Under click < 8.2 the default is ``mix_stderr=True``, and with it
+    ``result.stdout`` is stdout AND stderr interleaved -- which would make the
+    output contract ("stdout under --json is exactly one JSON object, every
+    warning on stderr") untestable, because the warnings would be in the
+    string the test tries to parse. So the streams are split explicitly there.
+
+    Click 8.2 REMOVED the parameter and made separate streams the only
+    behaviour, so passing it raises ``TypeError``. Both generations satisfy
+    pyproject's ``click >=8.0.1``, and the repo is tested against both, so the
+    argument is probed rather than assumed: a bare ``CliRunner()`` on 8.2+ is
+    exactly the runner this helper is asking for.
     """
-    return CliRunner(mix_stderr=False)
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
 
 
 def _invoke(monkeypatch, argv, *, fake=None):

@@ -46,6 +46,20 @@ dev = [
   "ipykernel >=6.0",  # provides the python3 kernelspec that tests/harness notebook execution needs
   "duckdb >=0.10",  # dev-only local SQL engine for off-pod clearinghouse-schema testing
 ]
+# Backfill source drivers (kbu clearinghouse backfill). pymongo is the ONLY
+# entry: the mongo source adapter is the one adapter that needs a driver, and
+# it imports it lazily at first CONNECTION -- never at module scope -- so the
+# whole clearinghouse read surface, the file and lakehouse adapters, and
+# `backfill run file-example` all work without this extra installed. A missing
+# pymongo surfaces as a ManifestSourceError naming `kbutillib[backfill]`
+# (clearinghouse_shard.MongoSourceAdapter._get_collection), not as an
+# ImportError traceback from inside a 256-unit run.
+#
+# Deliberately NOT in `all`: `all` is "every transport plus the docs build",
+# which CI installs, and a Mongo driver is neither a transport nor a docs dep.
+backfill = [
+  "pymongo >=4.6",
+]
 # Transport adapters (kept optional so `import kbutillib` and the core library
 # never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
 mcp = [
@@ -209,6 +223,14 @@ kbutillib = [
     # the gaa_store_parquet_dump.toml worked example, which was likewise
     # never shipped by a non-editable install.
     "domains/kbase/berdl/examples/*.toml",
+    # Backfill PRESETS and their fixtures. `kbu clearinghouse backfill list`
+    # enumerates this directory and `backfill run <name>` loads a manifest out
+    # of it, so a non-editable install that shipped neither would offer no
+    # presets at all. The .parquet glob is the `file-example` fixture: the
+    # preset points at it via ${MANIFEST_DIR}, which only resolves if the file
+    # travels inside the wheel beside the manifest.
+    "domains/kbase/berdl/backfills/*.toml",
+    "domains/kbase/berdl/backfills/*.parquet",
 ]
 
 [tool.uv]

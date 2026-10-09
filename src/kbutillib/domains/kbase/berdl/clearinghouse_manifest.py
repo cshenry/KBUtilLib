@@ -124,6 +124,7 @@ rejected like any other unknown result column.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -265,10 +266,39 @@ class Source:
 
 
 @dataclass(frozen=True)
+class BackfillInfo:
+    """The optional top-level ``[backfill]`` table: INFORMATIONAL ONLY.
+
+    A manifest may carry a ``[backfill]`` table describing what a backfill of
+    it pulls from and what it needs in the environment. Nothing in the shard
+    or ingest path reads it -- ``kbu clearinghouse backfill list`` prints it so
+    an operator can see what a preset will reach for BEFORE running it, and
+    ``needs_env`` is what makes an unresolved ``${VAR}`` diagnosable rather
+    than merely fatal.
+
+    It is parsed into this object precisely SO THAT IT IS NOT A LOCATOR. The
+    table lives at the top level, not inside a ``[[source]]`` block, so it
+    could never have been mistaken for an adapter key -- but it would have
+    been silently ignored, and a typo in it would then be invisible. Parsing
+    it validates its two keys and rejects anything else by name.
+    """
+
+    #: Human-readable identifiers of the stores a backfill of this manifest
+    #: reads, e.g. ``["mongo://poplar:27017/database.seq_protein_bakta"]``.
+    pulls_from: tuple[str, ...] = field(default_factory=tuple)
+    #: Environment variable names the manifest's placeholders expect. Advisory:
+    #: an unresolved ``${VAR}`` fails at load regardless of whether it is
+    #: listed here, and a listed-but-unused name is not an error.
+    needs_env: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class Manifest:
     """A parsed manifest: an ordered list of :class:`Source` blocks."""
 
     sources: tuple[Source, ...] = field(default_factory=tuple)
+    #: The optional ``[backfill]`` table, or ``None`` when absent.
+    backfill: BackfillInfo | None = None
 
 
 # --------------------------------------------------------------------------
@@ -298,13 +328,205 @@ _MAPPING_KEYS = frozenset(
 )
 
 
-def load_manifest(source: str | Path) -> Manifest:
+#: Matches one INNERMOST ``${VAR}`` or ``${VAR:-default}`` placeholder. The
+#: name is a shell-style identifier; the default may be empty but may contain
+#: NO braces, which is what makes the match innermost -- an outer
+#: ``${A:-${B}/x}`` does not match until ``${B}`` has been substituted. See
+#: :func:`expand_placeholders` for why that matters.
+_PLACEHOLDER_RE = re.compile(
+    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^{}]*))?\}"
+)
+
+#: Anything that still LOOKS like a placeholder after expansion finished.
+#: Used only to turn a pathological input into a named error rather than an
+#: unbounded loop.
+_PLACEHOLDER_RESIDUE_RE = re.compile(r"\$\{[^{}]*\}")
+
+#: How many innermost-first passes :func:`expand_placeholders` will make. One
+#: pass per nesting level, and a hard cap so an environment value that itself
+#: contains ``${...}`` cannot drive an unbounded loop.
+_MAX_EXPANSION_PASSES = 8
+
+#: An INJECTED variable: the directory the manifest file itself was read from.
+#: It is what lets a preset shipped as PACKAGE DATA point at a fixture shipped
+#: beside it -- ``${MANIFEST_DIR}/file-example.parquet`` -- without the
+#: manifest having to know where pip put the wheel, and without the preset
+#: loader special-casing one preset's path. It is AUTHORITATIVE, not a default:
+#: the environment cannot override it, because the manifest's own location is
+#: a fact about the file rather than an operator preference. It is unavailable
+#: (and so an error, like any unset bare variable) when the manifest was
+#: parsed from a TOML string with no path.
+MANIFEST_DIR_VAR = "MANIFEST_DIR"
+
+
+def expand_placeholders(
+    value: str,
+    *,
+    where: str,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Expand ``${VAR}`` / ``${VAR:-default}`` and a LEADING ``~`` in one string.
+
+    A manifest is config, and a preset shipped as package data cannot hardcode
+    one operator's home directory, one pod's mount point or one store's
+    hostname. This is the whole of the substitution vocabulary -- two forms and
+    a tilde, no command substitution, no arithmetic, no nesting -- for the same
+    reason :data:`DERIVATIONS` is closed: a manifest that needs more than this
+    needs an adapter, not a wider language.
+
+    EXPANSION IS INNERMOST-FIRST, so a DEFAULT may itself be a placeholder:
+    ``${KBU_FIXTURE:-${MANIFEST_DIR}/example.parquet}`` resolves to the
+    override when it is set and to the shipped fixture otherwise. One pass
+    per nesting level, capped at :data:`_MAX_EXPANSION_PASSES`.
+
+    ``${VAR}`` with no value in the environment is a :class:`ManifestError`
+    NAMING THE VARIABLE. That is the point of the form: a preset that silently
+    expanded an unset variable to the empty string would resolve
+    ``${ARC_ROOT}/store`` to ``/store`` and then fail hundreds of lines later
+    with a path nobody recognises. ``${VAR:-default}`` is the form that says
+    "unset is fine", and it never raises.
+
+    The tilde is expanded LAST and only when it LEADS the fully substituted
+    result, so ``${HOME_OVERRIDE:-~/clearinghouse}`` works and a tilde in the
+    middle of a path (a legal filename character) is left alone.
+
+    Args:
+        value: The raw manifest string.
+        where: A human description of the value's location, used in the error
+            message (e.g. ``"source 'arc-proteins' key 'path'"``).
+        env: The environment to read; defaults to :data:`os.environ`.
+
+    Returns:
+        The expanded string.
+
+    Raises:
+        ManifestError: A ``${VAR}`` placeholder with no default is unset or
+            empty in the environment.
+    """
+    environ = os.environ if env is None else env
+    missing: list[str] = []
+
+    def _substitute(match: re.Match[str]) -> str:
+        name = match.group("name")
+        default = match.group("default")
+        resolved = environ.get(name)
+        if resolved:
+            return resolved
+        if default is not None:
+            return default
+        missing.append(name)
+        return ""
+
+    expanded = value
+    for _ in range(_MAX_EXPANSION_PASSES):
+        nxt = _PLACEHOLDER_RE.sub(_substitute, expanded)
+        if nxt == expanded:
+            break
+        expanded = nxt
+    if not missing and _PLACEHOLDER_RESIDUE_RE.search(expanded):
+        raise ManifestError(
+            f"{where}: placeholder expansion did not settle after "
+            f"{_MAX_EXPANSION_PASSES} passes and {expanded!r} still contains "
+            "a ${...} token. Expansion is innermost-first, one pass per "
+            "nesting level, and is capped so that an environment value which "
+            "itself contains a placeholder cannot drive an unbounded loop. "
+            "Flatten the value."
+        )
+    if missing:
+        names = ", ".join(sorted(dict.fromkeys(missing)))
+        raise ManifestError(
+            f"{where}: unresolved manifest placeholder(s) ${{{names}}} -- "
+            f"{'these variables are' if len(set(missing)) > 1 else 'this variable is'} "
+            "not set in the environment and the value declares no default. "
+            "Either export it, or write it as ${NAME:-<default>} if an unset "
+            "variable is acceptable. (An unset ${NAME} is refused rather than "
+            "expanded to the empty string, which would turn '${ROOT}/store' "
+            "into '/store' and fail much later with a path nobody recognises.)"
+        )
+    if expanded.startswith("~"):
+        expanded = str(Path(expanded).expanduser())
+    return expanded
+
+
+def _expand_locator_value(value: Any, *, where: str, env: Mapping[str, str] | None) -> Any:
+    """Expand placeholders through a locator value of any shape.
+
+    Strings are expanded; lists and mappings are walked so a nested locator
+    (``decompress = { sequence = "${FIELD}" }``) is covered too. Numbers,
+    booleans and dates pass through untouched -- there is nothing in them to
+    expand, and coercing them to strings to find out would change the value
+    the adapter receives.
+    """
+    if isinstance(value, str):
+        return expand_placeholders(value, where=where, env=env)
+    if isinstance(value, Mapping):
+        return {
+            key: _expand_locator_value(item, where=f"{where}.{key}", env=env)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _expand_locator_value(item, where=f"{where}[{i}]", env=env)
+            for i, item in enumerate(value)
+        ]
+    return value
+
+
+def _parse_backfill(raw: Any) -> BackfillInfo:
+    """Parse the optional top-level ``[backfill]`` table."""
+    if not isinstance(raw, Mapping):
+        raise ManifestError(
+            "manifest '[backfill]' must be a table with optional "
+            f"'pulls_from' and 'needs_env' arrays, got {type(raw).__name__}."
+        )
+    unknown = sorted(set(raw) - {"pulls_from", "needs_env"})
+    if unknown:
+        raise ManifestError(
+            f"manifest '[backfill]' has unknown key(s) {unknown}; only "
+            "'pulls_from' (what a backfill of this manifest reads) and "
+            "'needs_env' (the environment variables its placeholders expect) "
+            "are defined. The table is informational -- it is parsed rather "
+            "than ignored precisely so a typo in it is visible."
+        )
+    fields: dict[str, tuple[str, ...]] = {}
+    for key in ("pulls_from", "needs_env"):
+        value = raw.get(key)
+        if value is None:
+            fields[key] = ()
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise ManifestError(
+                f"manifest '[backfill]' key {key!r} must be an array of "
+                f"non-empty strings, got {value!r}."
+            )
+        fields[key] = tuple(item.strip() for item in value)
+    return BackfillInfo(pulls_from=fields["pulls_from"], needs_env=fields["needs_env"])
+
+
+def load_manifest(
+    source: str | Path, *, env: Mapping[str, str] | None = None
+) -> Manifest:
     """Parse a manifest from a TOML file path or a TOML string.
+
+    PLACEHOLDERS ARE EXPANDED HERE, at load, in every ``[[source]]`` LOCATOR
+    value -- see :func:`expand_placeholders`. Load is the right seam because
+    everything downstream (``shard_plan``, the adapters, the run inventory's
+    ``manifest_sha256``) then sees ONE resolved manifest: an adapter never has
+    to know that ``path`` might still contain a ``${VAR}``, and a run's
+    provenance records what was actually read rather than a template of it.
+    The MAPPING half is deliberately NOT expanded -- a ``@const(${VAR})`` in a
+    result column would make the same manifest produce different partition
+    values on different machines, which is the opposite of what the mapping
+    half is for.
 
     Args:
         source: A filesystem path (``str`` or :class:`~pathlib.Path`) to a
             ``.toml`` manifest, or the TOML text itself. A value that names an
             existing file is read from disk; otherwise it is parsed as text.
+        env: The environment placeholder expansion reads; defaults to
+            :data:`os.environ`. Tests pass an explicit mapping.
 
     Returns:
         The parsed :class:`Manifest`. This performs STRUCTURAL parsing only
@@ -314,10 +536,12 @@ def load_manifest(source: str | Path) -> Manifest:
         shardable.
 
     Raises:
-        ManifestError: The TOML is malformed, has no ``[[source]]`` blocks, or
-            a block is missing a required structural key.
+        ManifestError: The TOML is malformed, has no ``[[source]]`` blocks, a
+            block is missing a required structural key, ``[backfill]`` is
+            malformed, or a ``${VAR}`` placeholder is unresolved.
     """
     text = _read_manifest_text(source)
+    env = _expansion_env(source, env)
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -334,8 +558,48 @@ def load_manifest(source: str | Path) -> Manifest:
             f"got {type(raw_sources).__name__}."
         )
 
-    sources = tuple(_parse_source(raw, index=i) for i, raw in enumerate(raw_sources))
-    return Manifest(sources=sources)
+    sources = tuple(
+        _parse_source(raw, index=i, env=env) for i, raw in enumerate(raw_sources)
+    )
+    raw_backfill = data.get("backfill")
+    backfill = None if raw_backfill is None else _parse_backfill(raw_backfill)
+    return Manifest(sources=sources, backfill=backfill)
+
+
+def _expansion_env(
+    source: str | Path, env: Mapping[str, str] | None
+) -> Mapping[str, str]:
+    """The environment expansion reads, with :data:`MANIFEST_DIR_VAR` injected.
+
+    Injected AFTER the caller's environment so it cannot be overridden: a
+    manifest's own directory is a fact about the file, and an operator who had
+    ``MANIFEST_DIR`` exported for some unrelated reason would otherwise
+    silently repoint every shipped preset's fixture. When the manifest came
+    from a TOML string there is no directory, so the variable is simply absent
+    and a manifest that uses it fails with the normal "unresolved placeholder"
+    error naming it -- which is the honest answer.
+    """
+    base = dict(os.environ if env is None else env)
+    path = _manifest_file(source)
+    if path is not None:
+        base[MANIFEST_DIR_VAR] = str(path.parent)
+    else:
+        base.pop(MANIFEST_DIR_VAR, None)
+    return base
+
+
+def _manifest_file(source: str | Path) -> Path | None:
+    """The file ``source`` names, or ``None`` when it is TOML text."""
+    try:
+        candidate = Path(source)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+    try:
+        if candidate.is_file():
+            return candidate.resolve()
+    except OSError:  # pragma: no cover - e.g. a name longer than PATH_MAX
+        return None
+    return None
 
 
 def _read_manifest_text(source: str | Path) -> str:
@@ -351,7 +615,9 @@ def _read_manifest_text(source: str | Path) -> str:
     return source
 
 
-def _parse_source(raw: Any, *, index: int) -> Source:
+def _parse_source(
+    raw: Any, *, index: int, env: Mapping[str, str] | None = None
+) -> Source:
     if not isinstance(raw, Mapping):
         raise ManifestError(
             f"[[source]] #{index} is not a table, got {type(raw).__name__}."
@@ -392,7 +658,18 @@ def _parse_source(raw: Any, *, index: int) -> Source:
             "stamp the shard run's start time on every row."
         )
 
-    locator = {k: v for k, v in raw.items() if k not in _MAPPING_KEYS}
+    # Placeholders are expanded over the LOCATOR half only (see
+    # load_manifest): a locator names where the data lives, which legitimately
+    # differs per machine and per operator, while the mapping half must be
+    # byte-identical everywhere or the same manifest would write different
+    # partition values on different hosts.
+    locator = {
+        key: _expand_locator_value(
+            value, where=f"source {name!r} key {key!r}", env=env
+        )
+        for key, value in raw.items()
+        if key not in _MAPPING_KEYS
+    }
     return Source(
         name=name,
         adapter=adapter,

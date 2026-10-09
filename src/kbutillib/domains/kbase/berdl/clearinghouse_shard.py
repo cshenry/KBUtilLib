@@ -234,6 +234,17 @@ class SourceAdapter(ABC):
         #: is mid-flight or was abandoned, ``True`` only when the adapter drove
         #: its unit to natural exhaustion. See :meth:`exhausted`.
         self._exhausted: bool | None = None
+        #: The backfill RUN CONTEXT, or ``None`` when the adapter is driven
+        #: directly (a plain ``kbu clearinghouse shard``, or a test). See
+        #: :meth:`bind_run_context`.
+        self.run_context: Any = None
+        #: The unit label :meth:`restrict_to_unit` was given, or ``None``.
+        self._unit: str | None = None
+        #: THIS READER's remaining ``--limit`` allowance. ``None`` until
+        #: resolved from the run context on the first record, then a count or
+        #: ``-1`` for unlimited. See :meth:`_admit_record` for why the cap is
+        #: per reader rather than per run.
+        self._budget_remaining: int | None = None
 
     @abstractmethod
     def iter_records(self) -> Iterator[Mapping[str, Any]]:
@@ -310,6 +321,128 @@ class SourceAdapter(ABC):
         """
         return self._exhausted
 
+    # -- units of work ------------------------------------------------------
+
+    def units(self) -> tuple[str, ...]:
+        """The UNIT LABELS this source decomposes into, in processing order.
+
+        A UNIT IS THE SMALLEST THING A BACKFILL CAN FINISH. ``kbu
+        clearinghouse backfill run`` shards, ingests, verifies and records ONE
+        unit before it starts the next, so a run killed anywhere loses at most
+        the unit in flight -- which is only true if a unit is small enough to
+        finish and self-contained enough to redo. Mongo's unit is a
+        two-hex-digit prefix of its sort key (1/256 of the key space, a
+        uniform sample rather than a biased prefix); the genome archive's will
+        be one archive.
+
+        THE DEFAULT IS ONE UNIT, and that is the honest answer for a source
+        with no natural decomposition: a parquet file is read start to finish
+        or not at all, so the file adapter does not override this. An adapter
+        that returns the default is run as a single unit that completes only
+        when every source and table in its manifest verifies.
+
+        Returned as labels, not objects, because the labels are what travel:
+        they are the directory name under ``<out>/units/``, the key in
+        ``backfill-state.json`` and the ``slice`` recorded on every batch in
+        ``run.json``. They must therefore be stable across runs and safe as a
+        path segment.
+        """
+        return (SINGLE_UNIT,)
+
+    def restrict_to_unit(self, unit: str | None) -> None:
+        """Restrict this adapter's read to ONE of its :meth:`units`.
+
+        The counterpart to :meth:`units`: the backfill driver asks for the
+        labels, then runs the adapter once per label with the read narrowed to
+        that label. ``None`` means no restriction.
+
+        The default ACCEPTS only its own single label and REFUSES anything
+        else, by name. An adapter that silently ignored a unit label it does
+        not implement would read its whole source once per label -- 256 full
+        reads of a parquet file, each ingested fill-only so that 255 of them
+        wrote nothing, with nothing in the output to show the restriction had
+        been dropped.
+        """
+        if unit is None or unit == SINGLE_UNIT:
+            self._unit = None
+            return
+        raise ManifestSourceError(
+            f"source {self.source.name!r}: adapter {self.adapter_name!r} runs "
+            f"as ONE unit and cannot be restricted to unit {unit!r}. Its "
+            f"units() reports {list(self.units())}. A source with no natural "
+            "decomposition is a single unit -- it is read start to finish or "
+            "not at all -- so there is no narrower read to ask it for."
+        )
+
+    def unit(self) -> str | None:
+        """The unit label this adapter was restricted to, or ``None``."""
+        return self._unit
+
+    # -- the backfill run context -------------------------------------------
+
+    def bind_run_context(self, context: Any) -> None:
+        """Attach the backfill RUN CONTEXT this adapter runs under.
+
+        The context is the adapter's only channel to anything durable: a
+        ``--limit`` budget (see :meth:`_admit_record`) and small per-source,
+        per-unit JSON state it can persist BEFORE a long wait and read back
+        after a restart. The genome-archive adapter needs the latter -- it
+        submits a hash job, waits hours, and must not resubmit on a resume --
+        and an adapter that kept that id in memory would lose it to the first
+        pod restart.
+
+        ``None`` (the default) is a first-class case: a plain ``kbu
+        clearinghouse shard`` has no backfill run, so every context-dependent
+        behaviour degrades to "unlimited and nothing persisted" rather than
+        requiring a context to exist.
+        """
+        self.run_context = context
+
+    def _admit_record(self) -> bool:
+        """Claim one record against the run's ``--limit`` budget.
+
+        ``True`` means yield the record; ``False`` means the budget is spent
+        and the adapter must ``break``, which leaves :meth:`exhausted` at
+        ``False`` so the unit is recorded ``partial`` rather than ``done``.
+        That distinction is the whole reason ``--limit`` is routed through the
+        context rather than applied by the driver slicing the iterator: the
+        driver cannot tell a source that genuinely held N rows from one it
+        stopped at N, and only the adapter's own loop can.
+
+        THE CAP IS PER READER, deliberately, and this is the one subtlety
+        worth stating. A manifest source with ``kinds = ["entity",
+        "content"]`` resolves to two plans, each with its own adapter instance
+        and its own read of the source; and the arc store's manifest has
+        several sources over ONE frozen ordered record selection. In both
+        cases every reader must see THE SAME first ``--limit`` records, which
+        is what a per-reader cap over an ordered source gives. A single budget
+        shared across readers would instead spend the whole allowance on the
+        first one and hand the rest zero -- ``--limit 10`` would load 10
+        ``protein_entity`` rows and 0 ``protein_content`` rows, which is not a
+        sample of anything. Cross-reader CONSISTENCY therefore comes from the
+        source being ordered and frozen (the adapter's job: mongo sorts on
+        ``sort_key``, the arc adapter freezes its selection), not from the
+        arithmetic here.
+
+        With no context, or a context with no budget, this is always ``True``.
+        """
+        if self._budget_remaining is None:
+            context = self.run_context
+            limit = None
+            if context is not None:
+                reader_limit = getattr(context, "record_limit", None)
+                if reader_limit is not None:
+                    limit = reader_limit(self.source.name)
+            # -1 is the sentinel for "unlimited", kept out of the None state so
+            # the limit is resolved from the context exactly once per read.
+            self._budget_remaining = -1 if limit is None else int(limit)
+        if self._budget_remaining < 0:
+            return True
+        if self._budget_remaining == 0:
+            return False
+        self._budget_remaining -= 1
+        return True
+
 
 #: Registry of adapter implementations by manifest ``adapter`` name. All three
 #: names are DECLARED here so a manifest can be validated against the full set
@@ -319,6 +452,112 @@ class SourceAdapter(ABC):
 #: declared name with no class, but the latter no longer occurs for any of
 #: these three.
 ADAPTER_NAMES: tuple[str, ...] = ("file", "mongo", "lakehouse")
+
+#: The unit label an adapter with no natural decomposition reports from
+#: :meth:`SourceAdapter.units`. Short, stable, and safe as a path segment --
+#: it is the directory name under ``<out>/units/`` for a single-unit run.
+SINGLE_UNIT = "all"
+
+#: Every two-lowercase-hex-digit prefix, in order: the 256 units a mongo
+#: source decomposes into. ``_id`` is a 64-character lowercase-hex sha256, so
+#: each prefix selects a UNIFORM 1/256 sample of the collection rather than a
+#: biased leading window.
+HEX_PREFIXES: tuple[str, ...] = tuple(f"{i:02x}" for i in range(256))
+
+#: A ``--slice`` value: one two-lowercase-hex-digit prefix, or an inclusive
+#: ``AA-BB`` range of them. Uppercase is REJECTED rather than folded: the key
+#: space is lowercase hex, so ``"0F"`` would select nothing while looking like
+#: it selected something, and silently lowercasing it would hide the fact that
+#: the operator's mental model of the keys is wrong.
+_SLICE_RE = re.compile(r"^(?P<lo>[0-9a-f]{2})(?:-(?P<hi>[0-9a-f]{2}))?$")
+
+
+def parse_slice(spec: str) -> tuple[str, str]:
+    """Parse a ``--slice`` value into an INCLUSIVE ``(lo, hi)`` prefix pair.
+
+    ``"00"`` is the single prefix ``("00", "00")``; ``"00-0f"`` is
+    ``("00", "0f")``, sixteen prefixes. Both ends must be two lowercase hex
+    digits and ``lo <= hi``.
+
+    Raises:
+        ValueError: Malformed, not lowercase hex, or ``lo > hi``.
+    """
+    if not isinstance(spec, str) or not spec:
+        raise ValueError(
+            "--slice must be a two-lowercase-hex-digit prefix ('00') or an "
+            f"inclusive range of them ('00-0f'); got {spec!r}."
+        )
+    match = _SLICE_RE.match(spec)
+    if match is None:
+        raise ValueError(
+            f"--slice {spec!r} is not a valid slice. It must be two LOWERCASE "
+            "hex digits ('00', 'a3', 'ff') or an inclusive range of two such "
+            "prefixes ('00-0f'). The key space is lowercase hex, so an "
+            "uppercase prefix would match nothing while looking like it "
+            "matched something."
+        )
+    lo = match.group("lo")
+    hi = match.group("hi") or lo
+    if int(lo, 16) > int(hi, 16):
+        raise ValueError(
+            f"--slice {spec!r} runs backwards: {lo!r} > {hi!r}. The range is "
+            "inclusive and ascending, matching the ascending sort the cursor "
+            "reads in."
+        )
+    return lo, hi
+
+
+def slice_prefixes(spec: str | None) -> tuple[str, ...]:
+    """The prefixes one ``--slice`` selects -- ALL 256 when ``spec`` is ``None``.
+
+    Each returned prefix is one UNIT of work. Omitting ``--slice`` is
+    therefore a 256-unit run over the whole key space, not an unsliced
+    single-unit read of the collection: a 264M-document source cannot be
+    sharded, ingested and verified as one unit that a pod restart could then
+    lose in its entirety.
+    """
+    if spec is None:
+        return HEX_PREFIXES
+    lo, hi = parse_slice(spec)
+    return tuple(f"{i:02x}" for i in range(int(lo, 16), int(hi, 16) + 1))
+
+
+def unit_key_range(prefix: str) -> tuple[str, str | None]:
+    """The half-open ``[min_key, max_key)`` one prefix selects.
+
+    ``"00"`` -> ``("00", "01")``; ``"fe"`` -> ``("fe", "ff")``; ``"ff"`` ->
+    ``("ff", None)``. The upper bound is OMITTED for ``"ff"`` because there is
+    no successor prefix and nothing sorts above ``"ff..."`` in a lowercase-hex
+    key space -- so the range is open at the top, which is the only way the
+    256 ranges cover the space exactly once with no gap and no overlap.
+
+    Raises:
+        ValueError: Not two lowercase hex digits.
+    """
+    lo, hi = parse_slice(prefix)
+    if lo != hi:
+        raise ValueError(
+            f"unit_key_range takes ONE prefix, not a range; got {prefix!r}. "
+            "A range is a set of units (see slice_prefixes), and each unit "
+            "gets its own key range."
+        )
+    value = int(lo, 16)
+    if value == 0xFF:
+        return lo, None
+    return lo, f"{value + 1:02x}"
+
+
+def slice_key_range(spec: str | None) -> tuple[str | None, str | None]:
+    """The half-open key range a whole ``--slice`` covers, for reporting.
+
+    ``None`` for both bounds means the whole key space. This is what the
+    envelope prints; the per-unit ranges the adapters actually read come from
+    :func:`unit_key_range`.
+    """
+    if spec is None:
+        return None, None
+    lo, hi = parse_slice(spec)
+    return lo, unit_key_range(hi)[1]
 
 
 class FileSourceAdapter(SourceAdapter):
@@ -387,15 +626,23 @@ class FileSourceAdapter(SourceAdapter):
         path = self._path()
         self._exhausted = False
         if fmt == "parquet":
-            yield from self._iter_parquet(path)
+            rows = self._iter_parquet(path)
         elif fmt == "jsonl":
-            yield from self._iter_jsonl(path)
+            rows = self._iter_jsonl(path)
         elif fmt == "tsv":
-            yield from self._iter_tsv(path)
+            rows = self._iter_tsv(path)
         else:  # pragma: no cover - guarded by _format
             raise ManifestSourceError(
                 f"source {self.source.name!r}: unsupported file format {fmt!r}."
             )
+        for row in rows:
+            # The ``--limit`` budget is claimed HERE, in the adapter's own
+            # loop, so a budget stop is distinguishable from a file that
+            # genuinely held that many rows: a break leaves _exhausted False
+            # and the unit is recorded `partial`, never `done`.
+            if not self._admit_record():
+                return
+            yield row
         # Reached only by running off the end of the file -- a caller that
         # breaks out of the loop never gets here, which is exactly the
         # distinction exhausted() exists to record.
@@ -828,6 +1075,9 @@ class MongoSourceAdapter(SourceAdapter):
         super().__init__(source)
         self._collection = collection
         self._client = None
+        #: The ``(min_key, max_key)`` pair :meth:`restrict_to_unit` set, or
+        #: ``None``. ``max_key`` is ``None`` for the final ``"ff"`` prefix.
+        self._unit_range: tuple[str, str | None] | None = None
 
     # -- locator resolution --------------------------------------------------
 
@@ -888,6 +1138,44 @@ class MongoSourceAdapter(SourceAdapter):
             )
         return dict(spec)
 
+    def units(self) -> tuple[str, ...]:
+        """The 256 two-hex-digit prefixes of ``sort_key``: this source's units.
+
+        ``_id`` (and any sha256 sort key) is 64 lowercase hex characters, so a
+        two-digit prefix selects a UNIFORM 1/256 sample of the collection --
+        which is why a backfill slices by prefix rather than by offset. Each
+        prefix is one unit of work: shard it, ingest it, verify it, record it,
+        move on.
+
+        This is the full set the source COULD be cut into. The driver's
+        ``--slice`` narrows which of them a given run processes; it does not
+        change what the source decomposes into.
+        """
+        return HEX_PREFIXES
+
+    def restrict_to_unit(self, unit: str | None) -> None:
+        """Narrow the read to one two-hex-digit prefix of ``sort_key``.
+
+        Sets the half-open range ``[unit, next(unit))`` -- and OMITS the upper
+        bound for ``"ff"``, which has no successor prefix; its range is
+        ``["ff", ...)``, open at the top, which is correct because nothing
+        sorts above ``"ff..."`` in a lowercase-hex key space.
+
+        The restriction is held on the adapter rather than written back into
+        the (frozen) locator, and :meth:`_query_filter` prefers it over the
+        manifest's own ``min_key``/``max_key``. A manifest that already pins a
+        narrower range and a driver that then asks for a unit are a
+        CONTRADICTION, not an intersection, so the explicit per-unit
+        instruction wins and the manifest's range is reported as overridden
+        rather than silently ANDed into something neither party asked for.
+        """
+        if unit is None:
+            self._unit = None
+            self._unit_range = None
+            return
+        self._unit_range = unit_key_range(unit)
+        self._unit = unit
+
     def _query_filter(self) -> dict[str, Any]:
         """Build the ``find`` filter from min_key / max_key / start_after.
 
@@ -895,11 +1183,17 @@ class MongoSourceAdapter(SourceAdapter):
         parallel slices never overlap on a boundary value; ``start_after`` is a
         strict ``$gt`` resume point. All three are optional; with none set the
         filter is empty and the whole collection is read.
+
+        A :meth:`restrict_to_unit` range OVERRIDES the locator's own
+        ``min_key``/``max_key`` -- see that method.
         """
         sort_key = self._sort_key()
         conditions: dict[str, Any] = {}
-        min_key = self.source.locator.get("min_key")
-        max_key = self.source.locator.get("max_key")
+        if self._unit_range is not None:
+            min_key, max_key = self._unit_range
+        else:
+            min_key = self.source.locator.get("min_key")
+            max_key = self.source.locator.get("max_key")
         start_after = self.source.locator.get("start_after")
         if start_after is not None:
             conditions["$gt"] = start_after
@@ -923,7 +1217,17 @@ class MongoSourceAdapter(SourceAdapter):
         """
         if self._collection is not None:
             return self._collection
-        from pymongo import MongoClient  # noqa: PLC0415
+        try:
+            from pymongo import MongoClient  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - env-dependent
+            raise ManifestSourceError(
+                f"source {self.source.name!r}: the mongo adapter needs "
+                "'pymongo', which is not installed. Install the backfill "
+                "extra: pip install 'kbutillib[backfill]'. (The driver is "
+                "imported lazily and only here, so every other adapter and "
+                "the whole read surface work without it -- which is why this "
+                "surfaces at first connection rather than at import.)"
+            ) from exc
 
         uri = self.source.locator.get("uri")
         if uri:
@@ -977,6 +1281,12 @@ class MongoSourceAdapter(SourceAdapter):
         decompress = self._decompress_spec()
         self._exhausted = False
         for document in cursor:
+            # See FileSourceAdapter.iter_records: the budget is claimed in the
+            # adapter's loop so a --limit stop is NOT exhaustion. For mongo the
+            # budget is per source per slice, so each slice reads up to --limit
+            # documents of its own.
+            if not self._admit_record():
+                return
             yield self._prepare_row(document, decompress)
         self._exhausted = True
 
@@ -1074,8 +1384,21 @@ class ShardOrderError(RuntimeError):
     """
 
 
-def get_adapter(source: cm.Source) -> SourceAdapter:
+def get_adapter(
+    source: cm.Source,
+    *,
+    run_context: Any = None,
+    unit: str | None = None,
+) -> SourceAdapter:
     """Construct the adapter a source's ``adapter`` key names.
+
+    Args:
+        source: The parsed ``[[source]]`` block.
+        run_context: The backfill run context to bind (see
+            :meth:`SourceAdapter.bind_run_context`), or ``None`` for a direct
+            ``kbu clearinghouse shard``.
+        unit: A unit label to restrict the read to (see
+            :meth:`SourceAdapter.restrict_to_unit`), or ``None``.
 
     Raises:
         cm.ManifestError: The ``adapter`` name is not one of
@@ -1083,6 +1406,8 @@ def get_adapter(source: cm.Source) -> SourceAdapter:
         AdapterNotImplementedError: The name is in :data:`ADAPTER_NAMES` but
             maps to no registered class. With ``file``, ``lakehouse`` and
             ``mongo`` all built, this no longer fires for any planned name.
+        ManifestSourceError: ``unit`` names a unit this adapter does not
+            decompose into.
     """
     name = source.adapter
     if name not in ADAPTER_NAMES:
@@ -1096,7 +1421,12 @@ def get_adapter(source: cm.Source) -> SourceAdapter:
             f"source {source.name!r}: adapter {name!r} is planned but not "
             "implemented yet."
         )
-    return cls(source)
+    adapter = cls(source)
+    if run_context is not None:
+        adapter.bind_run_context(run_context)
+    if unit is not None:
+        adapter.restrict_to_unit(unit)
+    return adapter
 
 
 # --------------------------------------------------------------------------
@@ -2794,6 +3124,8 @@ def shard_manifest(
     manifest_path: str | Path | None = None,
     observed_at: datetime | None = None,
     metrics: ShardMetrics | None = None,
+    run_context: Any = None,
+    adapter_unit: str | None = None,
 ) -> list[ShardReport]:
     """Validate a manifest and shard every source it names as ONE UNIT.
 
@@ -2834,6 +3166,14 @@ def shard_manifest(
         observed_at: The run start time stamped on rows whose source declares
             no ``observed_at_column``. Defaults to now, UTC.
         metrics: Optional :class:`ShardMetrics` to instrument the run.
+        run_context: The backfill run context bound to every adapter this call
+            constructs (see :meth:`SourceAdapter.bind_run_context`), or
+            ``None`` -- the plain-``shard`` case, where there is no backfill
+            run, no ``--limit`` budget and nothing durable to persist.
+        adapter_unit: A unit label every adapter's read is restricted to (see
+            :meth:`SourceAdapter.restrict_to_unit`), or ``None``. This is the
+            UNIT OF WORK label, distinct from ``unit_id`` (the ULID naming
+            this call's publication in ``run.json``).
 
     Returns:
         Every :class:`ShardReport` from every table -- the registry batch (if
@@ -2872,7 +3212,9 @@ def shard_manifest(
     skips: list[SkipReport] = []
     sources: list[SourceOutcome] = []
     used_parameter_sets: set[str] = set()
-    for table, work in _group_plans_by_table(manifest, plans):
+    for table, work in _group_plans_by_table(
+        manifest, plans, run_context=run_context, adapter_unit=adapter_unit
+    ):
         outcome = shard_table(work, out_root, context=context)
         reports.extend(outcome.reports)
         skips.extend(outcome.skips)
@@ -2902,7 +3244,11 @@ def shard_manifest(
 
 
 def _group_plans_by_table(
-    manifest: cm.Manifest, plans: Sequence[cm.TablePlan]
+    manifest: cm.Manifest,
+    plans: Sequence[cm.TablePlan],
+    *,
+    run_context: Any = None,
+    adapter_unit: str | None = None,
 ) -> list[tuple[str, list[tuple[cm.TablePlan, SourceAdapter]]]]:
     """Group a unit's plans by target table, in first-appearance order.
 
@@ -2915,7 +3261,7 @@ def _group_plans_by_table(
     order: list[str] = []
     for plan in plans:
         source = _source_for_plan(manifest, plan)
-        adapter = get_adapter(source)
+        adapter = get_adapter(source, run_context=run_context, unit=adapter_unit)
         if plan.table not in grouped:
             grouped[plan.table] = []
             order.append(plan.table)

@@ -1,0 +1,131 @@
+# `file-example` -- THE SHIPPED, RUNNABLE BACKFILL PRESET.
+#
+# WHAT IT IS FOR. Every other preset in this directory reads a live store:
+# Mongo on poplar, the arc store, the genome archive. None of them can be run
+# as a smoke test, and none of them can be run at all from a machine that
+# cannot reach the store. This one reads 48 protein rows out of a parquet file
+# that ships BESIDE IT as package data, so
+#
+#     kbu clearinghouse backfill run file-example --dataset <scratch>
+#
+# is a complete end-to-end exercise of the backfill path -- plan, unit, shard,
+# fill-only ingest, verify, record -- on any pod, with no credentials, no
+# network and no fixture to fetch. It is the first thing to run after a
+# deploy and the first thing to run when a real preset misbehaves, because it
+# separates "the backfill machinery is broken" from "that store is
+# unreachable".
+#
+# ONE UNIT. The `file` adapter exposes no `units()` decomposition, so this
+# manifest is a SINGLE unit: the file is read start to finish or not at all,
+# and the unit is `done` only once every source below has reached exhaustion
+# and every batch has verified. `--slice` is REFUSED against it, by adapter
+# name -- a slice is a range of a mongo sort key, and there is no sort key
+# here to slice.
+#
+# THE FIXTURE PATH IS A PLACEHOLDER WITH A DEFAULT. `${KBU_BACKFILL_EXAMPLE:-
+# <shipped parquet>}` resolves to the file shipped next to this manifest, so
+# the preset works untouched; exporting KBU_BACKFILL_EXAMPLE points it at
+# another parquet of the same shape without editing package data (which an
+# operator cannot edit anyway -- it is inside the installed wheel). The
+# default form is used deliberately rather than a bare `${VAR}`: an unset bare
+# placeholder is a ManifestError, which is right for a store hostname and
+# wrong for a value that has a correct default.
+#
+# THE SEQUENCES ARE SYNTHETIC. They are deterministic pseudo-random amino-acid
+# strings, not real proteins, and the `product` strings are real gene-product
+# names only so the derived `function_entity` rows look like what the live
+# presets produce. Nothing here should ever be loaded into the PRODUCTION
+# dataset -- it is a machinery test, and its entity hashes are hashes of
+# nothing. Run it against a scratch dataset.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo). `backfill list`
+# prints these so an operator can see what a preset reaches for before running
+# it; nothing in the shard or ingest path reads them.
+pulls_from = [
+  "file://<kbutillib package data>/domains/kbase/berdl/backfills/file-example.parquet",
+]
+needs_env = [
+  # Optional. Unset is correct -- the locator below declares the shipped
+  # fixture as its default.
+  "KBU_BACKFILL_EXAMPLE",
+]
+
+# ---- Protein: identity + content (the amino-acid sequence) --------------
+#
+# IDENTITY IS RECOMPUTED, never taken from `protein_id`. `[source.hash]` uses
+# `raw_column = "aa"`, so the entity hash is what identity.standardizers
+# computes from the sequence text -- the same rule the live presets use and
+# the same rule the lakehouse applies, which is what makes a row loaded from
+# this file and a row loaded from Mongo agree about what a protein is.
+# `protein_id` is carried nowhere; it is a fixture label, not an identity.
+[[source]]
+name        = "file-example-protein"
+adapter     = "file"
+path        = "${KBU_BACKFILL_EXAMPLE:-${MANIFEST_DIR}/file-example.parquet}"
+format      = "parquet"
+entity_type = "protein"
+kinds       = ["entity", "content"]
+# The fixture records its own observation time, so the sharder reads it per
+# row rather than stamping the run's start time (see resolve_observed_at).
+observed_at_column = "observed_at"
+
+  [source.hash]
+  raw_column = "aa"
+
+  [source.content]
+  sequence   = "aa"
+  seq_length = "@len(aa)"
+
+# ---- Protein: an annotation result --------------------------------------
+#
+# Hashes on the SAME `aa` column as the source above, which is what ties the
+# annotation to the protein identity it belongs to.
+[[source]]
+name        = "file-example-result"
+adapter     = "file"
+path        = "${KBU_BACKFILL_EXAMPLE:-${MANIFEST_DIR}/file-example.parquet}"
+format      = "parquet"
+entity_type = "protein"
+kinds       = ["result"]
+observed_at_column = "observed_at"
+
+  [source.hash]
+  raw_column = "aa"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  # A PROVENANCE LABEL, not a tool version: these annotations came from the
+  # shipped example file, and saying so is the honest value for the column
+  # that partitions protein_result. @lower because `source` is a permanent
+  # partition value and two casings of it would be two partitions holding one
+  # label's output.
+  source              = "@lower(@const(file-example/kbutillib-package-data))"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(product, protein_id)"
+  # REQUIRED on every result source. {} declares a DEFAULT run -- nothing was
+  # overridden on top of any tool's defaults, because no tool ran. It hashes
+  # to identity.DEFAULT_PARAMETER_SET_HASH, and the sharder emits the
+  # `parameter_set` registry batch explaining it before any result batch.
+  parameter_set       = {}
+
+# ---- Function: identity + content (the product text) --------------------
+#
+# The annotation's `product` string IS the function's identity, exactly as in
+# the live mongo preset: the function entity is hashed from the same text that
+# becomes its definition, so protein_result's payload and function_entity
+# agree on what the function is with no third table to join.
+[[source]]
+name        = "file-example-function"
+adapter     = "file"
+path        = "${KBU_BACKFILL_EXAMPLE:-${MANIFEST_DIR}/file-example.parquet}"
+format      = "parquet"
+entity_type = "function"
+kinds       = ["entity", "content"]
+observed_at_column = "observed_at"
+
+  [source.hash]
+  raw_column = "product"
+
+  [source.content]
+  definition = "product"

@@ -1915,6 +1915,7 @@ class ClearinghouseCapability:
         tenant: str = TENANT,
         dataset: str = NAMESPACE,
         adopt_source_batch_ids: bool = False,
+        unit: str | None = None,
     ) -> dict[str, Any]:
         """Ingest a published shard run's batches, FILL-ONLY and resumably.
 
@@ -2094,6 +2095,16 @@ class ClearinghouseCapability:
             adopt_source_batch_ids=adopt_source_batch_ids,
         )
         inventory: list[dict[str, Any]] = list(binding["inventory"])
+        # A `unit` restriction NARROWS WHAT IS INGESTED, NOT WHAT IS CHECKED.
+        # The inventory stays whole: the cross-unit registry gate
+        # (_assert_registry_committed_through) reads the PREFIX of the
+        # inventory before each result batch, so filtering the list would
+        # shrink that prefix and let a result batch load while an EARLIER
+        # unit's registry batch was still missing -- the exact orphan the gate
+        # exists to prevent. Instead the unit is passed down and non-matching
+        # entries are skipped at the point of ingest.
+        if unit is not None:
+            ci.assert_unit_in_inventory(inventory, unit, shard_dir=shard_root)
         state_dir = ci.execution_state_dir(execution_id)
         ledger = ci.ExecutionLedger(state_dir)
 
@@ -2106,8 +2117,9 @@ class ClearinghouseCapability:
                 "state_dir": str(state_dir),
                 "dry_run": True,
                 "lock": None,
+                "unit": unit,
                 "tables": self._dry_run_reports(
-                    inventory, shard_root=shard_root, write_ns=write_ns
+                    inventory, shard_root=shard_root, write_ns=write_ns, unit=unit
                 ),
             }
 
@@ -2138,6 +2150,7 @@ class ClearinghouseCapability:
                 tenant=tenant,
                 dataset=dataset,
                 execution_id=execution_id,
+                unit=unit,
             )
         finally:
             lock.release()
@@ -2150,6 +2163,7 @@ class ClearinghouseCapability:
             "state_dir": str(state_dir),
             "dry_run": False,
             "lock": lock_report,
+            "unit": unit,
             "tables": reports,
         }
 
@@ -2161,6 +2175,7 @@ class ClearinghouseCapability:
         *,
         shard_root: Path,
         write_ns: str,
+        unit: str | None = None,
     ) -> list[dict[str, Any]]:
         """Report what each batch WOULD do, writing nothing.
 
@@ -2172,6 +2187,8 @@ class ClearinghouseCapability:
         """
         reports: list[dict[str, Any]] = []
         for entry in inventory:
+            if unit is not None and entry.get("unit_id") != unit:
+                continue
             report: dict[str, Any] = {
                 "name": entry.get("table"),
                 "batch_id": entry.get("batch_id"),
@@ -2212,8 +2229,16 @@ class ClearinghouseCapability:
         tenant: str,
         dataset: str,
         execution_id: str,
+        unit: str | None = None,
     ) -> list[dict[str, Any]]:
         """Ingest every batch of the derived inventory, in load order.
+
+        ``unit``, when given, restricts WHICH batches are ingested -- but the
+        loop still walks the WHOLE inventory, because ``position`` is what the
+        cross-unit registry gate measures its prefix against. A unit loaded
+        out of order therefore refuses (an earlier unit's registry batch is
+        not committed) instead of writing results whose parameters nothing can
+        explain, which is the correct answer rather than a limitation.
 
         Three states drive it, and nothing else: ``committed`` is skipped,
         ``started`` can only be a batch the reconcile pass decided RETRYABLE
@@ -2226,6 +2251,8 @@ class ClearinghouseCapability:
         states = ledger.records()
         reports: list[dict[str, Any]] = []
         for position, entry in enumerate(inventory):
+            if unit is not None and entry.get("unit_id") != unit:
+                continue
             batch_id = str(entry["batch_id"])
             table = str(entry["table"])
             record = states.get(batch_id)
@@ -2757,6 +2784,7 @@ class ClearinghouseCapability:
         shard_dir: str | Path,
         *,
         run_id: str,
+        unit: str | None = None,
     ) -> dict[str, Any]:
         """Prove a load execution landed, batch by batch, against the live table.
 
@@ -2801,6 +2829,12 @@ class ClearinghouseCapability:
                 unit registry check -- the ledger and inventory come from the
                 execution's own state directory.
             run_id: The LOAD EXECUTION id to verify.
+            unit: Verify only this unit's batches. UNLIKE ingest, filtering IS
+                correct here: a unit's batches were published atomically and
+                its completeness is a statement about itself, so verifying one
+                unit says nothing false about the others. The namespace-wide
+                registry check still runs -- it is a property of the tables as
+                they now stand, not of a unit.
 
         Returns:
             A dict with ``'run_id'``/``'execution_id'``, ``'namespace'``,
@@ -2842,6 +2876,19 @@ class ClearinghouseCapability:
                 f"{write_ns!r}; the counts below are read from "
                 f"{write_ns!r}."
             )
+        if unit is not None and inventory:
+            restricted = [
+                entry for entry in inventory if entry.get("unit_id") == unit
+            ]
+            if not restricted:
+                discrepancies.append(
+                    f"execution {run_id!r}: no batch in its inventory belongs "
+                    f"to unit {unit!r} (it holds "
+                    f"{sorted({str(e.get('unit_id')) for e in inventory})}). "
+                    "Nothing about that unit can be proven from this "
+                    "execution, so this is reported rather than answered ok."
+                )
+            inventory = restricted
 
         batch_reports: list[dict[str, Any]] = []
         per_table_rows: dict[str, int] = {}
@@ -2999,6 +3046,7 @@ class ClearinghouseCapability:
             "execution_id": run_id,
             "namespace": write_ns,
             "state_dir": str(state_dir),
+            "unit": unit,
             "source_run_id": binding.get("source_run_id"),
             "ok": not discrepancies,
             "batches": batch_reports,

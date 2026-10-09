@@ -768,6 +768,36 @@ def write_execution(state_dir: Path, binding: Mapping[str, Any]) -> Path:
     return path
 
 
+def assert_unit_in_inventory(
+    inventory: Sequence[Mapping[str, Any]],
+    unit: str,
+    *,
+    shard_dir: Path | str,
+) -> None:
+    """Refuse a ``--unit`` that names no unit in the execution's inventory.
+
+    A typo'd unit label would otherwise be a NO-OP that reports success: every
+    entry is skipped, no batch is ingested, the envelope says zero batches and
+    exits zero. An operator loading 256 units one at a time would read that as
+    "already done". So the label is checked against what the inventory
+    actually holds, and the available labels are named in the error.
+
+    Raises:
+        ClearinghouseBatchIntegrityError: ``unit`` matches no inventory entry.
+    """
+    present = [str(entry.get("unit_id")) for entry in inventory]
+    if unit in present:
+        return
+    available = sorted(dict.fromkeys(present))
+    raise ClearinghouseBatchIntegrityError(
+        f"ingest: --unit {unit!r} names no unit in the run at {shard_dir}. "
+        f"Its inventory holds {len(available)} unit(s): "
+        f"{available[:8]}{', ...' if len(available) > 8 else ''}. Refusing "
+        "rather than ingesting nothing and exiting zero, which an operator "
+        "loading units one at a time would read as 'already done'."
+    )
+
+
 def bind_execution(
     *,
     execution_id: str,

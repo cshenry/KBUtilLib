@@ -1001,7 +1001,9 @@ def test_an_uncapped_complete_run_writes_a_candidate_that_promotion_makes_real(
     # adapter can know.
     assert cs.read_arc_checkpoint(key) == {}
 
-    cs.promote_arc_checkpoints()
+    # the adapter reports the key it wrote, which is how it reaches the driver
+    assert adapter.checkpoint_candidates() == (key,)
+    cs.promote_arc_checkpoints(adapter.checkpoint_candidates())
     promoted = cs.read_arc_checkpoint(key)
     assert promoted[cs.ARC_STATE_UPPER_BOUND] == context.state["arc"][
         cs.ARC_STATE_UPPER_BOUND
@@ -1016,7 +1018,9 @@ def test_a_capped_run_writes_no_checkpoint_at_all(arc_store):
 
     key = adapter._checkpoint_key()
     assert not cs.arc_checkpoint_path(key, candidate=True).exists()
-    cs.promote_arc_checkpoints()
+    assert adapter.checkpoint_candidates() == ()
+    # even NAMED explicitly, a key with no candidate moves nothing
+    cs.promote_arc_checkpoints([key])
     assert cs.read_arc_checkpoint(key) == {}
 
 
@@ -1043,7 +1047,7 @@ def test_a_scratch_checkpoint_is_not_used_for_a_production_target(arc_store):
     scratch = FakeRunContext(dataset="scratch")
     adapter = _bound("g", arc_store, scratch, emit="genome")
     list(adapter.iter_records())
-    cs.promote_arc_checkpoints()
+    cs.promote_arc_checkpoints(adapter.checkpoint_candidates())
     scratch_key = adapter._checkpoint_key()
     assert cs.read_arc_checkpoint(scratch_key)[cs.ARC_STATE_UPPER_BOUND]
 
@@ -1060,7 +1064,7 @@ def test_an_explicit_since_overrides_a_promoted_checkpoint(arc_store):
     context = FakeRunContext()
     adapter = _bound("g", arc_store, context, emit="genome")
     list(adapter.iter_records())
-    cs.promote_arc_checkpoints()
+    cs.promote_arc_checkpoints(adapter.checkpoint_candidates())
 
     remembered = _bound("g", arc_store, FakeRunContext(), emit="genome")
     assert remembered._since() is not None  # the checkpoint supplies it
@@ -1108,7 +1112,7 @@ def test_tarball_completion_is_recorded_by_digest(arc_store, tmp_path):
     adapter = _bound("a", arc_store, context, emit="annotation",
                      tarballs=str(tarball))
     list(adapter.iter_records())
-    cs.promote_arc_checkpoints()
+    cs.promote_arc_checkpoints(adapter.checkpoint_candidates())
 
     digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
     assert cs.read_arc_checkpoint(adapter._checkpoint_key())["tarballs"] == [digest]
@@ -1597,3 +1601,286 @@ observed_at_column = "observed_at"
     ]
     explained = {r["parameter_set_hash"] for r in registry}
     assert all(r["parameter_set_hash"] in explained for r in results)
+
+
+# ==========================================================================
+# Checkpoint promotion is SCOPED TO THE UNIT THAT EARNED IT
+# ==========================================================================
+#
+# `arc_checkpoint_dir()` is ONE directory under the clearinghouse state root,
+# shared by every arc source of every manifest on the machine -- a watermark
+# has to outlive the shard output it came from, so it cannot live in the unit
+# directory. The driver promotes a candidate after a unit verifies, and the
+# only thing that makes "after THIS unit verifies" different from "after ANY
+# unit verifies" is that the keys travel with the unit, in its own run.json.
+# These tests are about that difference. Without it: store B's run leaves a
+# candidate, an unrelated manifest's unit finishes, B's watermark advances
+# past rows that never landed, and nothing comes back for them -- the lake is
+# append-only and fill-only, so the gap is permanent and reports clean.
+
+
+class _FakeCap:
+    """The two methods ``run_backfill`` calls on an ingest capability.
+
+    Deliberately not the ledger-writing fake in
+    ``test_clearinghouse_backfill.py``: nothing here reads a ledger, and the
+    one thing these tests need from a capability is the knob that decides
+    whether a unit reaches the promotion guard at all -- whether the run
+    verified.
+    """
+
+    def __init__(self, *, verify_ok=True):
+        self.verify_ok = verify_ok
+
+    def _locus(self):
+        return "in_pod"
+
+    def ingest_shards(
+        self,
+        shard_dir,
+        *,
+        run_id=None,
+        dry_run=False,
+        reconcile=False,
+        tenant=None,
+        dataset=None,
+        unit=None,
+    ):
+        run = cs.read_run_manifest(shard_dir)
+        return {
+            "tables": [
+                {
+                    "table": batch.get("table"),
+                    "rows_ingested": batch.get("rows") or 0,
+                }
+                for batch in run.get("batches") or []
+            ],
+            "source_run_id": run_id,
+            "namespace": f"{tenant}.{dataset}",
+        }
+
+    def verify_run(self, shard_dir, *, run_id=None, unit=None):
+        return {"discrepancies": [] if self.verify_ok else ["a batch is short"]}
+
+
+def _drive_preset(cap, preset_path, out, run_id, *, limit=None, dataset="prod"):
+    """Run one manifest through the real driver, start to finish."""
+    manifest = cm.load_manifest(preset_path)
+    plan = cb.plan_units(manifest, limit=limit)
+    cb.register_run(
+        run_id=run_id,
+        out=out,
+        tenant="kbaseincubator",
+        dataset=dataset,
+        manifest=manifest,
+        manifest_path=preset_path,
+        slice_spec=None,
+        limit=limit,
+        preset=None,
+        unit_kind=plan.kind,
+        resume=False,
+    )
+    Path(out).mkdir(parents=True, exist_ok=True)
+    cb.record_planned_units(out, run_id=run_id, units=plan.units)
+    result = cb.run_backfill(
+        cap,
+        manifest=manifest,
+        manifest_path=preset_path,
+        plan=plan,
+        out=out,
+        run_id=run_id,
+        limit=limit,
+        resume=False,
+        tenant="kbaseincubator",
+        dataset=dataset,
+    )
+    return plan, result
+
+
+def _recorded_keys(out, plan):
+    """The checkpoint keys every unit of a finished run recorded, in order."""
+    keys: list[str] = []
+    for unit in plan.units:
+        run = cs.read_run_manifest(cb.unit_dir_for(out, unit))
+        for key in cs.arc_checkpoint_candidates(run):
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+@pytest.fixture
+def arc_preset(arc_store, tmp_path, monkeypatch):
+    """The shipped ``arc-kbdl`` preset, wired to the fixture store.
+
+    The same substitution ``preset_shard`` makes -- the preset AS SHIPPED,
+    pointed at the fixture through the placeholders it already declares, with
+    only the adapter CLASS swapped so it gets a fake KBDL client.
+    """
+    tarball = _make_tarball(
+        tmp_path / "scope-backup.tar.gz",
+        ledger_key="ledger-genome",
+        genome_object_id=arc_store.object_id,
+    )
+    monkeypatch.setenv("KBU_ARC_DB", str(arc_store.db_path))
+    monkeypatch.setenv("KBU_ARC_TARBALL", str(tarball))
+    monkeypatch.setenv("KBU_ARC_CACHE_DIR", str(tmp_path / "scope-objects"))
+
+    class _WiredArc(cs.ArcSourceAdapter):
+        def __init__(self, source):
+            super().__init__(source, client=arc_store.client)
+
+        def log_note(self, message):
+            pass
+
+    preset = next(p for p in cb.available_presets() if p.name == PRESET)
+    original = dict(cs._ADAPTER_CLASSES)
+    cs._ADAPTER_CLASSES["arc"] = _WiredArc
+    try:
+        yield preset.path
+    finally:
+        cs._ADAPTER_CLASSES.clear()
+        cs._ADAPTER_CLASSES.update(original)
+
+
+@pytest.fixture
+def file_preset():
+    """The shipped ``file-example`` preset: a manifest with NO arc source.
+
+    It needs no wiring -- its parquet fixture ships beside it -- and it is the
+    second manifest in the two-manifest test: an ordinary unrelated backfill,
+    sharing nothing with the arc run but the checkpoint directory.
+    """
+    return next(p for p in cb.available_presets() if p.name == "file-example").path
+
+
+def test_another_manifests_completed_unit_never_promotes_a_foreign_candidate(
+    arc_preset, file_preset, tmp_path
+):
+    """THE DEFECT, end to end, through the real driver on both manifests.
+
+    The arc run leaves a candidate and does NOT reach `done` (its batches did
+    not verify, so records may be missing from the window its watermark would
+    claim). An unrelated manifest then finishes a unit. The arc candidate must
+    still be a candidate afterwards: the file manifest earned nothing about
+    the arc store, and promoting what happened to be lying in the shared
+    checkpoint directory would advance the arc watermark past rows that never
+    landed.
+    """
+    arc_plan, arc_result = _drive_preset(
+        _FakeCap(verify_ok=False), arc_preset, tmp_path / "arc-out", "RARC"
+    )
+    # Not done -- so the promotion guard was never reached for this unit.
+    assert {u["state"] for u in arc_result["units"]} == {cb.UNIT_INCOMPLETE}
+    # ...and yet the adapter DID write a candidate: the read was uncapped,
+    # exhausted and clean, which is all the adapter can know.
+    stranded = _recorded_keys(tmp_path / "arc-out", arc_plan)
+    assert len(stranded) == 1, stranded
+    key = stranded[0]
+    assert cs.arc_checkpoint_path(key, candidate=True).is_file()
+    assert cs.read_arc_checkpoint(key) == {}
+
+    file_plan, file_result = _drive_preset(
+        _FakeCap(), file_preset, tmp_path / "file-out", "RFILE"
+    )
+    # The second manifest's unit really is done, so it really did reach the
+    # promotion guard -- the test would be vacuous otherwise.
+    assert {u["state"] for u in file_result["units"]} == {cb.UNIT_DONE}
+    # It recorded no checkpoint keys, because it has no arc source.
+    assert _recorded_keys(tmp_path / "file-out", file_plan) == []
+
+    # THE ASSERTION: the arc candidate survived, unpromoted.
+    assert cs.arc_checkpoint_path(key, candidate=True).is_file()
+    assert not cs.arc_checkpoint_path(key).exists()
+    assert cs.read_arc_checkpoint(key) == {}
+
+
+def test_a_completed_arc_unit_promotes_its_own_key_and_no_other(
+    arc_preset, tmp_path
+):
+    """Exactly one candidate moves, and it is the one this unit earned."""
+    foreign = "f" * 64
+    directory = cs.arc_checkpoint_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    cs.arc_checkpoint_path(foreign, candidate=True).write_text(
+        json.dumps({cs.ARC_STATE_UPPER_BOUND: "2099-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    plan, result = _drive_preset(
+        _FakeCap(), arc_preset, tmp_path / "arc-out", "ROWN"
+    )
+    assert {u["state"] for u in result["units"]} == {cb.UNIT_DONE}
+
+    keys = _recorded_keys(tmp_path / "arc-out", plan)
+    assert len(keys) == 1, keys
+    mine = keys[0]
+    assert mine != foreign
+    # mine: promoted, and readable
+    assert cs.read_arc_checkpoint(mine)[cs.ARC_STATE_UPPER_BOUND]
+    assert not cs.arc_checkpoint_path(mine, candidate=True).exists()
+    # the foreign one: untouched, and still unreadable
+    assert cs.arc_checkpoint_path(foreign, candidate=True).is_file()
+    assert cs.read_arc_checkpoint(foreign) == {}
+
+
+def test_the_four_arc_sources_of_one_unit_report_one_shared_key(
+    arc_preset, tmp_path
+):
+    """One store, one identity: the preset's four sources earn ONE watermark.
+
+    The key is the store's identity, not the source's, so a unit that read it
+    through four sources must not promote four times or record four keys.
+    """
+    plan, _ = _drive_preset(_FakeCap(), arc_preset, tmp_path / "arc-out", "RFOUR")
+    unit = plan.units[0]
+    run = cs.read_run_manifest(cb.unit_dir_for(tmp_path / "arc-out", unit))
+    reported = [
+        outcome[cs.ARC_CHECKPOINT_CANDIDATES_FIELD]
+        for outcome in run["sources"]
+    ]
+    assert len(reported) > 1               # several sources read the one store
+    assert all(entry == reported[0] for entry in reported)
+    assert cs.arc_checkpoint_candidates(run) == reported[0]
+
+
+def test_promotion_of_an_unknown_key_moves_nothing_and_is_idempotent(arc_store):
+    context = FakeRunContext()
+    adapter = _bound("g", arc_store, context, emit="genome")
+    list(adapter.iter_records())
+    key = adapter._checkpoint_key()
+
+    # an unknown key: nothing to move, and NOT an error
+    assert cs.promote_arc_checkpoints(["0" * 64]) == []
+    assert cs.arc_checkpoint_path(key, candidate=True).is_file()
+
+    first = cs.promote_arc_checkpoints([key])
+    assert first == [cs.arc_checkpoint_path(key)]
+    promoted = cs.read_arc_checkpoint(key)
+
+    # twice: the candidate is gone, so the second call moves nothing and
+    # leaves the promoted checkpoint exactly as it was.
+    assert cs.promote_arc_checkpoints([key, key]) == []
+    assert cs.read_arc_checkpoint(key) == promoted
+
+
+def test_promotion_has_no_zero_argument_form_anywhere(arc_store):
+    """The glob-everything form is GONE, not merely unused.
+
+    Asserted twice over, because either alone would pass while the defect was
+    reachable: the signature refuses the call, and no caller in the shipped
+    tree makes it.
+    """
+    with pytest.raises(TypeError):
+        cs.promote_arc_checkpoints()
+
+    package = Path(cs.__file__).resolve().parents[3]
+    assert package.name == "kbutillib", package
+    offenders = [
+        f"{path}:{number}"
+        for path in sorted(package.rglob("*.py"))
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        )
+        if "promote_arc_checkpoints()" in line
+    ]
+    assert offenders == []

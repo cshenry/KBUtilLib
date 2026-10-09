@@ -169,7 +169,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -401,6 +401,31 @@ class SourceAdapter(ABC):
         cannot supply (a missing result file, an annotation for a genome that
         was never built) is counted in :meth:`skipped` and the unit is done:
         retrying it would read the same absence again.
+        """
+        return ()
+
+    def checkpoint_candidates(self) -> tuple[str, ...]:
+        """Identity keys of the checkpoint CANDIDATES this read wrote.
+
+        An adapter that persists a watermark for the next run writes it as a
+        candidate first (see :meth:`watermark` for why an adapter may not
+        publish one itself), and the driver promotes it once the rows are
+        ingested and verified. This hook is how the driver learns WHICH
+        candidates are this unit's.
+
+        It exists because the candidates do not live in the unit's output
+        directory -- a watermark has to be found by the NEXT run, so it lives
+        under the clearinghouse state root, in ONE directory shared by every
+        source of every manifest. There is consequently nothing about a
+        candidate file on disk that says which unit earned it, and a driver
+        that promoted whatever it found there would advance one store's
+        watermark on an unrelated run's success. ``shard_manifest`` records
+        these keys on the source's entry in ``run.json`` so they travel with
+        the unit that earned them, and
+        ``clearinghouse_backfill.run_backfill`` promotes exactly these.
+
+        The default is empty -- the honest answer for every adapter that
+        keeps no cross-run watermark, which is all of them but ``arc``.
         """
         return ()
 
@@ -1653,6 +1678,12 @@ ARC_CHECKPOINT_DIR = "sources"
 #: landed, so it is not allowed to publish a watermark that says it did.
 ARC_CHECKPOINT_CANDIDATE_SUFFIX = ".candidate.json"
 
+#: Field on a ``run.json`` source entry listing the checkpoint candidate keys
+#: that source wrote. The ONE name shared by the writer (``shard_manifest``)
+#: and the reader (:func:`arc_checkpoint_candidates`), so the keys a unit
+#: earned cannot be recorded under one spelling and promoted under another.
+ARC_CHECKPOINT_CANDIDATES_FIELD = "arc_checkpoint_candidates"
+
 
 class ArcFeatureIdConflictError(ManifestSourceError):
     """Two genome objects claim ONE feature id. The read is REFUSED.
@@ -1837,8 +1868,8 @@ def read_arc_checkpoint(key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def promote_arc_checkpoints() -> list[Path]:
-    """Promote every candidate checkpoint to a real one. Returns what moved.
+def promote_arc_checkpoints(keys: Iterable[str]) -> list[Path]:
+    """Promote the NAMED candidate checkpoints to real ones. Returns what moved.
 
     Called by the backfill driver AFTER a unit's batches have been ingested
     and VERIFIED, and only for a unit that came out ``done``. Until then a
@@ -1848,17 +1879,28 @@ def promote_arc_checkpoints() -> list[Path]:
     knows the ``upper_bound`` and which tarballs it finished; the driver
     promotes it because only the driver knows whether the rows landed.
 
-    Idempotent: promoting an already-promoted (hence absent) candidate moves
-    nothing and raises nothing.
+    THE KEYS ARE REQUIRED, and there is deliberately no promote-everything
+    form. :func:`arc_checkpoint_dir` is ONE directory under the state root,
+    shared by every arc source of every manifest on the machine, so a glob
+    over it is not scoped to the unit that just verified. Promoting what it
+    finds means: store B's run leaves a candidate without reaching ``done``
+    (its batches did not verify, or it was killed after sharding); any later
+    run A, from any manifest, finishes any unit; A promotes B's candidate;
+    B's next run starts after rows that never landed. The lake is
+    append-only and fill-only, so nothing ever comes back for that range --
+    the gap is permanent and reports clean. The driver therefore promotes
+    only the keys the just-completed unit's own run inventory recorded (see
+    :func:`arc_checkpoint_candidates`).
+
+    Idempotent, per key: a named key whose candidate is absent -- already
+    promoted, or never written -- moves nothing and raises nothing.
     """
-    directory = arc_checkpoint_dir()
-    if not directory.is_dir():
-        return []
     moved: list[Path] = []
-    for candidate in sorted(directory.glob(f"*{ARC_CHECKPOINT_CANDIDATE_SUFFIX}")):
-        target = candidate.with_name(
-            candidate.name[: -len(ARC_CHECKPOINT_CANDIDATE_SUFFIX)] + ".json"
-        )
+    for key in dict.fromkeys(keys):
+        candidate = arc_checkpoint_path(key, candidate=True)
+        if not candidate.is_file():
+            continue
+        target = arc_checkpoint_path(key)
         os.replace(candidate, target)
         moved.append(target)
     return moved
@@ -1976,6 +2018,9 @@ class ArcSourceAdapter(SourceAdapter):
         self._watermark: str | None = None
         #: Retryable failures, as human strings. Non-empty => incomplete.
         self._retry: list[str] = []
+        #: Identity keys this read wrote a checkpoint CANDIDATE for. See
+        #: :meth:`checkpoint_candidates`.
+        self._candidates: list[str] = []
         #: ``True`` when ``--limit`` truncated the frozen selection, which
         #: makes the read non-exhaustive and forbids a checkpoint.
         self._capped = False
@@ -2231,6 +2276,9 @@ class ArcSourceAdapter(SourceAdapter):
 
     def incomplete_reasons(self) -> tuple[str, ...]:
         return tuple(self._retry)
+
+    def checkpoint_candidates(self) -> tuple[str, ...]:
+        return tuple(self._candidates)
 
     def _note_watermark(self, updated_at: Any) -> None:
         if not isinstance(updated_at, str) or not updated_at:
@@ -3111,6 +3159,11 @@ class ArcSourceAdapter(SourceAdapter):
         tmp = candidate.with_name(f".{candidate.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(tmp, candidate)
+        # Reported to the driver through `run.json`, so the promotion after
+        # verification names THIS key rather than sweeping the shared
+        # checkpoint directory. See :meth:`checkpoint_candidates`.
+        if key not in self._candidates:
+            self._candidates.append(key)
 
 
 def _arc_file_sha256(path: Path) -> str:
@@ -3829,6 +3882,10 @@ class SourceOutcome:
     #: The adapter's :meth:`SourceAdapter.incomplete_reasons`. A non-empty
     #: tuple makes the unit ``incomplete`` even when every batch verified.
     incomplete_reasons: tuple[str, ...] = ()
+    #: The adapter's :meth:`SourceAdapter.checkpoint_candidates` -- the
+    #: checkpoint keys this source earned, recorded so the driver promotes
+    #: this unit's candidates and nobody else's.
+    checkpoint_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4400,6 +4457,7 @@ def shard_table(
                     exhausted=adapter.exhausted(),
                     watermark=adapter.watermark(),
                     incomplete_reasons=tuple(adapter.incomplete_reasons()),
+                    checkpoint_candidates=tuple(adapter.checkpoint_candidates()),
                 )
             )
             if metrics is not None:
@@ -4907,6 +4965,28 @@ def unit_ids(run: Mapping[str, Any]) -> list[str]:
     return [str(unit["unit_id"]) for unit in run.get("units", [])]
 
 
+def arc_checkpoint_candidates(run: Mapping[str, Any]) -> list[str]:
+    """The checkpoint candidate keys a run inventory records, deduplicated.
+
+    Read from the inventory of ONE unit directory, which is what scopes the
+    answer: the driver shards each unit into its own ``<out>/units/<unit>``,
+    so every source entry in that ``run.json`` belongs to that unit. The
+    four sources of an arc preset read one store with one identity and so
+    report the SAME key; order is preserved and repeats are dropped.
+
+    Empty for every manifest with no arc source, and for an inventory written
+    before this field existed -- which is the correct answer in both cases:
+    nothing to promote.
+    """
+    keys: list[str] = []
+    for outcome in run.get("sources") or []:
+        for key in outcome.get(ARC_CHECKPOINT_CANDIDATES_FIELD) or []:
+            text = str(key)
+            if text and text not in keys:
+                keys.append(text)
+    return keys
+
+
 def batches_for_unit(run: Mapping[str, Any], unit_id: str) -> list[dict[str, Any]]:
     """Every batch entry one unit published, in the order it published them."""
     return [
@@ -5017,6 +5097,9 @@ def publish_unit(
                 "exhausted": outcome.exhausted,
                 "watermark": outcome.watermark,
                 "incomplete_reasons": list(outcome.incomplete_reasons),
+                ARC_CHECKPOINT_CANDIDATES_FIELD: list(
+                    outcome.checkpoint_candidates
+                ),
                 "unit_id": context.unit_id,
             }
             for outcome in sources

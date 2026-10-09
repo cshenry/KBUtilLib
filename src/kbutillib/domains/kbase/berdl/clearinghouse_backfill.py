@@ -1427,9 +1427,21 @@ def run_backfill(
             # checkpoint, deliberately unreadable, because whether the rows
             # reached the lake is not something an adapter can know. This is
             # the point at which it is known: ingested and verified, with the
-            # unit recorded `done`. A capped, incomplete or killed unit never
-            # gets here and its candidate is simply never promoted.
-            cs.promote_arc_checkpoints()
+            # unit recorded `done`.
+            #
+            # PROMOTED BY KEY, from THIS unit's inventory. The candidates do
+            # not live in the unit directory -- a watermark must outlive it --
+            # so one directory under the state root holds the candidates of
+            # every arc source of every manifest, and reaching that
+            # unit-completion guard says nothing about whose candidates are
+            # sitting in it. The keys recorded in this unit's own `run.json`
+            # are the ones this unit earned, and they are the only ones
+            # promoted here: a capped, incomplete or killed unit neither gets
+            # here nor has another unit's success promote the candidate it
+            # left behind. Empty for every manifest with no arc source.
+            cs.promote_arc_checkpoints(
+                cs.arc_checkpoint_candidates(cs.read_run_manifest(unit_dir))
+            )
         unit_reports.append(
             {
                 "unit": unit,

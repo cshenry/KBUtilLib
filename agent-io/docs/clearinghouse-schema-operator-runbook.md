@@ -1107,12 +1107,23 @@ owed** -- the lake does not change until an operator runs them.
 
 Two installed trees import KBUtilLib and both must be moved before OP-C1:
 
-| Where | Tree | Parked on |
+| Where | Tree that is actually imported | How `main` gets there |
 |---|---|---|
-| BERDL pod (`kbhub`) | `/global_share/KBaseUtilities/KBUtilLib` | branch `deploy/main-20260926` |
-| poplar | `~/venvs/kbdl` imports the Dropbox tree | `wip` |
+| BERDL pod (`kbhub`) | `/global_share/KBaseUtilities/KBUtilLib`, on branch `deploy/main-20260926` | merge KBUtilLib `main` **into that branch, there** |
+| poplar | `~/projects/KBUtilLib` (`/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib`), which `~/venvs/kbdl` picks up through an editable `.pth` | `git fetch` then `git merge --ff-only origin/main` in that clone |
 
-On each, **merge KBUtilLib `main` in**. Not a reset, not a re-clone, not a
+> **The poplar row was wrong until 2026-10-08 and the correction matters.**
+> It said `~/venvs/kbdl` imports the **Dropbox** tree, parked on `wip`. It
+> does not: Miles measured it on 2026-10-08. The venv picks up
+> `~/projects/KBUtilLib` through an editable `.pth`, and the dist-info
+> `direct_url.json` that names the Dropbox path is **stale** — it records
+> where the install was first run from, not what is imported now. **Never
+> "merge `main` into `wip`" as a poplar deploy**; that moves a tree nothing
+> on poplar imports, and then the smoke check passes against code the
+> running process cannot see. The measured route is in
+> [Backfill → Deploy](#deploy-two-trees-two-routes-and-one-trap-each).
+
+On the pod, **merge KBUtilLib `main` in**. Not a reset, not a re-clone, not a
 checkout of `main` over the top: a merge, so that anything committed
 locally on that tree survives.
 
@@ -1467,10 +1478,20 @@ against it as meaningful.
 
 ### OP-C3 -- the demo seed
 
-This is the first real data in the clearinghouse: a uniform 1/256 sample
-of the `seq_protein_bakta` Mongo collection on poplar, mapped by
+This is the first real data in the clearinghouse: a **capped hash-prefix
+sample** of the `seq_protein_bakta` Mongo collection on poplar, mapped by
 `src/kbutillib/domains/kbase/berdl/examples/clearinghouse_example_seed.toml`
 and loaded by the backfill command's `mongo-protein-bakta` preset.
+
+**Say what the sample is, and no more.** `--slice 00` takes the documents
+whose `_id` starts `00`; `_id` is a 64-character lowercase-hex sha256, so
+*if* the `_id` space is uniform that slice is 1/256 of the collection —
+**and whether it is uniform is unmeasured here.** `--limit 12000` then takes
+a **sorted prefix within that slice** (the adapter pages on `_id`, the only
+index the store has), so the 12,000 documents are the *lowest* 12,000 `_id`s
+of the slice, not a draw from it. Treat the result as a smoke sample of real
+documents — enough to prove the mapping, the hashing and the write path —
+and **not** as an unbiased or representative sample of the collection.
 
 > **PRECONDITION -- ACKNOWLEDGMENT, AND IT IS A HARD GATE.** OP-C3 requires
 > a **committed revision** of the sibling PRD `clearinghouse-backfill-v1`
@@ -1497,13 +1518,18 @@ and loaded by the backfill command's `mongo-protein-bakta` preset.
 kbu clearinghouse backfill --help
 ```
 
-**If this does not succeed, STOP.** As of this revision it does *not*:
-`kbu clearinghouse` exposes `content`, `health`, `known`, `load`,
-`parameter-sets`, `plan`, `results`, `shard`, `show`, `sources`, `stats`,
-`tables` and `verify`, and `backfill` is **absent** -- it arrives with the
-sibling PRD. A `No such command 'backfill'` error is the expected answer
-today and means OP-C3 is not yet runnable. It is not something to work
-around with `kbu clearinghouse shard` and `load` by hand.
+**If this does not succeed, STOP.** `backfill` is now on KBUtilLib `main`
+(it arrived with the sibling PRD), so a `No such command 'backfill'` here
+does not mean the feature is missing -- it means **this tree has not been
+deployed**, and the fix is the deploy route in
+[Backfill → Deploy](#deploy-two-trees-two-routes-and-one-trap-each), not a
+workaround. In particular, `kbu clearinghouse shard` and `load` by hand are
+**not** a substitute: they record no unit state, so nothing can later say
+which slices of the collection are in the lake.
+
+Run it through `kbu`, not through a bare interpreter -- see the bare-venv
+trap in the Backfill section. `backfill list` should show
+`mongo-protein-bakta` among the presets.
 
 **C3.1 -- SCRATCH FIRST. Always.**
 
@@ -1630,6 +1656,417 @@ step; do not pre-populate it with expected results.**
 | OP-C3 production |  |  |  |
 | OP-C4 |  |  |  |
 
+
+---
+
+## Backfill: filling the clearinghouse from a source
+
+**This section comes after the parameter-set section on purpose: every load
+step below has lake-5's OP-C1 as a hard precondition.** `kbu clearinghouse
+backfill` is the command that puts real data in the lake, one unit of work at a
+time, from a manifest shipped as package data (a *preset*). The verb reference
+-- every flag, every unit state, the lock, the ledger -- is
+[`agent-io/docs/kbu-clearinghouse-cli.md`](kbu-clearinghouse-cli.md#kbu-clearinghouse-backfill--one-command-per-unit-of-work).
+This section is the **procedure**: where it runs, how the trees get deployed,
+what order to run the presets in, and what each gate is.
+
+### PRECONDITION: OP-C1 is done, and the command checks
+
+**Every step in this section requires [OP-C1](#op-c1---add-parameter_set_hash-and-the-parameter-set-registry-2026-10)
+-- the five `<type>_result` tables rebuilt with `parameter_set_hash`, and the
+`parameter_set` registry table created.** This is not advice. `backfill run`
+carries a **schema preflight** that `DESCRIBE`s the target namespace before it
+writes anything, and **refuses a namespace that predates the lake-5 change**
+(`ClearinghouseSchemaPreflightError`), with `load()` called zero times, naming
+the tables that lack the column.
+
+**A scratch namespace created before the lake-5 deploy is refused the same
+way**, and that is the case most likely to bite: `clearinghouse_bf_scratch`
+from an earlier run has the old eight-column result schema, and `bootstrap()`
+**cannot add a column to an existing table**. Drop and recreate the scratch
+namespace rather than trying to evolve it; the clearinghouse is append-only, so
+replay is cheap.
+
+**There is no gate here on anyone outside this PRD.** An earlier revision
+carried one; it was **withdrawn on 2026-10-07**. If you find a sentence
+anywhere that makes a backfill step wait on an outside party, it is stale --
+the preconditions are OP-C1, the deploy, and nothing else.
+
+### Where it runs: in the pod, pulling. There is no staging step.
+
+**Every `backfill run` runs IN THE BERDL POD (`kbhub`), and nowhere else.** The
+locus refusal is the first thing the verb does -- before the preset is
+resolved, before a run id is minted, before a directory is created -- so a
+`backfill run` from a laptop leaves nothing behind at all. `backfill
+list`/`shard`/`status` run anywhere; `run` and `load` do not.
+
+**The pod PULLS. Nothing is pushed into the lake from poplar.**
+
+| Source | How the pod reaches it |
+|---|---|
+| Mongo 8 (the `mongo-protein-*` presets) | `mongodb://poplar.cels.anl.gov:27017`, cross-site, **auth disabled** -- so there is no credential to carry and `needs_env` is genuinely empty. |
+| KBDL (the genome objects the arc preset needs, and the archive hash jobs) | KBDL's HTTP API on poplar, port **8791**. |
+| The arc store (`~/.kbdl/runs.sqlite`, `~/.kbdl/job-results/`, the `~/arc-relocate-backup-*` tarballs) | **Read in place, on the pod's own filesystem.** |
+
+So there is **no staging step** and no bronze hand-off: the pod reads the
+source, shards onto its own local disk under `--out`, reads those files back
+*itself*, and appends them as DataFrames. (It has to: Spark **executors**
+cannot see the pod's local disk, so a bronze-mode load pointed at one is read
+cluster-side and fails.) Do not go looking for a step that copies data from
+poplar into the lake. There is not one, and inventing one would mean inventing
+a second write path.
+
+> **NEVER DELETE `~/.kbdl/job-results/` OR THE `~/arc-relocate-backup-*`
+> TARBALLS ON THE POD.** They hold the **only surviving copies** of those KBDL
+> outputs -- the built genomes and the annotation ledgers the arc preset reads.
+> They are not a cache, they are not reproducible from a re-run, and nothing
+> else on the fleet has them. If disk pressure on the pod makes them look like
+> the obvious thing to clear, it is not: move them and record where, or stop
+> and ask.
+
+### Deploy: two trees, two routes, and one trap each
+
+Merged work does **not** reach either host by being on `main` in Dropbox. Two
+installed trees have to be moved, each by its own route, and each has a
+specific way of looking deployed when it is not.
+
+**1. The BERDL pod (`kbhub`).** The pod's `kbu` **and KIND** import
+`/global_share/KBaseUtilities/KBUtilLib`, on branch **`deploy/main-20260926`**
+-- **not** the Dropbox tree. Merged work reaches the pod **only** by merging
+KBUtilLib `main` into that branch, *there*:
+
+```bash
+git -C /global_share/KBaseUtilities/KBUtilLib status --porcelain   # MUST be empty
+git -C /global_share/KBaseUtilities/KBUtilLib fetch origin
+git -C /global_share/KBaseUtilities/KBUtilLib merge --no-commit --no-ff origin/main
+```
+
+A non-empty `status --porcelain` is a **STOP** -- read the stop policy in
+[Deploying the parameter-set change](#deploying-the-parameter-set-change)
+before you type `git merge`. An uncommitted edit in that tree is most likely
+somebody's fix applied directly in the pod to get a demo working, and it exists
+nowhere else.
+
+> **THE BARE-VENV TRAP. Always launch through `kbu`.** The `kbu` shim sets
+> `PYTHONPATH` so that `/global_share/KBaseUtilities/KBUtilLib` is what gets
+> imported. The bare `~/venvs/kbu-modeling/bin/python` **imports the Dropbox
+> dev tree instead** -- so `python -m kbutillib...` or an `import kbutillib` in
+> a notebook started from that interpreter runs *different code* from the `kbu`
+> you just deployed, with no error and no warning. If you must use the
+> interpreter directly, print `kbutillib.__file__` **first** and confirm the
+> path.
+
+**Install the `backfill` extra on the pod** before any `mongo-protein-*`
+preset: the Mongo source adapter needs `pymongo`, and it imports it lazily at
+first *connection*, so the whole read surface and `backfill run file-example`
+work fine without it and the failure arrives mid-run as a
+`ManifestSourceError` naming the extra:
+
+```bash
+pip install -e '/global_share/KBaseUtilities/KBUtilLib[backfill]'
+```
+
+**2. poplar.** poplar's `~/venvs/kbdl` imports KBUtilLib from
+**`~/projects/KBUtilLib`** (`/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib`),
+editable via a `.pth` -- **not** the Dropbox tree, whatever the dist-info says.
+Measured by Miles, 2026-10-08.
+
+```bash
+git -C ~/projects/KBUtilLib fetch
+# ASSERT the fetched main is the Dropbox main before merging:
+git -C ~/projects/KBUtilLib rev-parse origin/main
+git -C ~/Dropbox/Projects/KBUtilLib rev-parse main        # the two MUST match
+git -C ~/projects/KBUtilLib merge --ff-only origin/main
+# SMOKE-TEST FROM THE VENV THAT IMPORTS IT, and trust the file path:
+~/venvs/kbdl/bin/python -c "import kbutillib; print(kbutillib.__file__)"
+```
+
+> **The dist-info `direct_url.json` in that venv is STALE** -- it records the
+> path the editable install was first run from, not what is imported now.
+> `kbutillib.__file__` is the only answer to trust.
+>
+> **Never document or perform "merge `main` into `wip`" as a poplar deploy.**
+> It moves a tree nothing on poplar imports, and the smoke check then passes
+> against code the running process cannot see.
+
+**Which deploy needs a restart.** A KBUtilLib **clearinghouse** deploy needs
+**no KBDL restart** -- KBDL imports no `berdl` module, so nothing it is running
+changes. The **KBDL content route** is different: it is KBDL's own code, it
+does need KBDL restarted, and **it must be deployed on poplar before the arc
+preset can fetch genome objects at all** (the pod has no sequences; every
+protein translation, DNA sequence and contig in the arc backfill comes from a
+CanonicalGenome object pulled from KBDL). Check that route is live before you
+start the arc load, not after.
+
+### The order, with the exact commands
+
+Four stages, in this order. **Each one goes into a scratch dataset first and is
+verified there before production.** Scratch and production are separate runs --
+see the rule below.
+
+#### 1. The arc store (`arc-kbdl`)
+
+```bash
+kbu clearinghouse backfill run arc-kbdl --dataset clearinghouse_bf_scratch
+kbu clearinghouse backfill status --run-id <run id from the envelope>
+# only then, production:
+kbu clearinghouse backfill run arc-kbdl
+```
+
+One unit (the arc adapter's four sources share **one frozen ordered selection**
+of record ids, so `--limit 1` loads one record's genome, its proteins, its
+genes and its annotations -- not four independent samples). `--slice` is
+refused: a slice is a range of a Mongo sort key.
+
+Read `backfill status` **before** promoting: it reports the skip counts by
+reason and the watermark the adapter persisted. An `object-unavailable` skip
+leaves the unit `incomplete` and the command exits non-zero -- those records are
+retrievable, so the run must come back for them.
+
+> **Tool versions.** The `[backfill.tool_versions]` table in `arc-kbdl.toml` is
+> still `"1.0"` for every tool, pending an operator decision (**OP-BF4**). Those
+> values become the `source` partition value of every annotation row
+> (`<tool>/<version>`), and a partition value cannot be corrected in place.
+> **Measured versions exist and must be folded in before the first PRODUCTION
+> arc load** -- make that decision and edit the manifest first; a scratch run
+> under `1.0` is fine and is thrown away with the namespace.
+
+#### 2. The genome archives (`kbdl-genome-archives`)
+
+```bash
+kbu clearinghouse backfill run kbdl-genome-archives --limit 1 \
+    --dataset clearinghouse_bf_scratch
+```
+
+**Start with `--limit 1`, always.** Here one unit is **one KBDL archive**, and
+processing it is a KBDL job that **reads the whole archive on poplar** --
+`--limit` for this adapter caps the **number of units**, so `--limit 1` is "do
+one archive and stop". `max_in_flight` defaults to **1**: one hash job at a
+time, deliberately.
+
+The unit list is **frozen** when the run is created, so a later `--resume`
+cannot pick up an archive uploaded since or renumber the `--limit` window. An
+archive the source stops reporting is still attempted, refuses with the cause,
+and leaves the unit `incomplete` rather than shrinking the run to fit the loss.
+
+For archives an earlier run left `incomplete` through member errors, and only
+those, there is `--retry-failed-archives`: it submits a **recorded new**
+hash-job attempt. It is inert for every other adapter.
+
+#### 3. The seed (`mongo-protein-bakta`) -- this IS lake-5's OP-C3
+
+```bash
+kbu clearinghouse backfill run mongo-protein-bakta \
+    --slice 00 --limit 12000 --dataset clearinghouse_bf_scratch
+# then the SAME command without --dataset:
+kbu clearinghouse backfill run mongo-protein-bakta --slice 00 --limit 12000
+```
+
+**This is [OP-C3](#op-c3---the-demo-seed), not a separate step** -- the full
+procedure, the `DESCRIBE` check on a pre-existing scratch namespace, and the
+promotion gate are written out there. It is a **capped hash-prefix sample**:
+`--slice 00` is the `_id` prefix `00` (a 1/256 slice *only if* the `_id` space
+is uniform, which is unmeasured), and `--limit 12000` takes a **sorted prefix
+within it**. Not an unbiased sample, and not described as one.
+
+**Promote to production only when every one of these holds** (the gate in
+full is OP-C3's C3.2):
+
+1. **Non-zero** `protein_entity`, `protein_content` **and** `protein_result`
+   counts in the scratch dataset.
+2. Every result row's `source` is exactly `bakta/mongo-seq_protein_bakta`.
+3. Every result row's `parameter_set_hash` is `DEFAULT_PARAMETER_SET_HASH`
+   (`44136fa3...aff8a`) -- the preset declares `parameter_set = {}`, a default
+   run, because the store recorded no parameters.
+4. The registry holds the `{}` row.
+5. The orphan check is **empty** (`kbu clearinghouse health`, no parameter-set
+   findings).
+6. Skips are **reported, with reasons**. Skips are expected here; an
+   *unexplained* skip is a STOP.
+
+> **A capped seed leaves slice `00` PARTIAL.** `--limit 12000` stops the unit
+> short, so it is recorded `partial`, never `done` -- which is correct and does
+> not exit non-zero. The consequence is for the next stage: **the full preload
+> runs `00..ff` INCLUDING `00`.** Never instruct `01..ff` after a seed. The rows
+> the seed landed are correct and stay; fill-only discards them on the second
+> pass.
+
+#### 4. The full Mongo preload
+
+**One preset at a time, all 256 slices including `00`, each into scratch and
+verified before production.** Not gated on anyone outside this PRD.
+
+```bash
+# scratch first, for each preset in turn:
+kbu clearinghouse backfill run mongo-protein-seq --dataset clearinghouse_bf_scratch
+kbu clearinghouse backfill status --run-id <run id>
+# then production:
+kbu clearinghouse backfill run mongo-protein-seq
+```
+
+| Order | Preset | What it writes |
+|---|---|---|
+| 1 | `mongo-protein-seq` | **The protein identities.** `seq_protein` (420.8M docs) is the only collection that holds a sequence, and a clearinghouse protein's identity *is* its sequence. |
+| 2 | `mongo-protein-bakta` | Bakta annotations **and** their own protein identities (its collection carries the sequence). |
+| 3 | `mongo-protein-kofam` | KOFAM KO assignments, joined to `seq_protein` for the sequence. Results only. |
+| 4 | `mongo-protein-kofam2` | The second KOFAM collection, same shape. Results only. |
+| 5 | `mongo-protein-rast2` | RAST functional roles and the functions they name. Results only. |
+
+**`mongo-protein-seq` goes first** because every other preset writes
+`protein_result` rows keyed by a protein entity hash, and that one is what puts
+the matching `protein_entity`/`protein_content` rows in the lake. The ingest is
+fill-only, so the order is a usability matter rather than a correctness one --
+load it last and the result rows simply sit there with nothing to join to.
+
+Omitting `--slice` runs all 256 prefixes as 256 units, each sharded, ingested,
+verified and recorded before the next starts. That is the shape to use: it is
+resumable at unit granularity, and `backfill status` can then say exactly which
+prefixes are in the lake.
+
+### Four rules that are easy to get wrong
+
+**1. Scratch and production are SEPARATE RUNS. Never `--resume` a scratch run
+into production.** The dataset is part of a run's **immutable identity** --
+`--resume` refuses a dataset that differs from the registered one -- so this is
+enforced, not merely advised. Promote by running the command again without
+`--dataset`, which mints a new run.
+
+**2. A backfill never replaces an existing row, so re-running is safe.**
+Fill-only is always on: the target's existing keys inside each batch's hash
+range are read back, the batch is left-anti-joined against them, and only the
+survivors are appended -- a batch with no survivors is committed without
+calling `load()` at all. **A second run over data already loaded ingests zero
+rows in every table, the `parameter_set` registry included, and that is a
+SUCCESS.** In particular, **a run that adds no new parameter set ingests zero
+registry rows**; do not read that as a broken registry write.
+
+**3. Fill-only is idempotent, but it is NOT atomic against other writers.**
+The per-namespace lock (an `flock` in the shared
+`$KBU_CLEARINGHOUSE_LOCK_DIR`, default
+`/global_share/KBaseUtilities/clearinghouse-locks`) means **two backfills
+cannot run against one namespace at once** -- it is a shared directory on
+purpose, and if it cannot be written the ingest refuses rather than take a
+private lock nobody else can see. It does **not** exclude *arbitrary* writers,
+e.g. the service writing results from lake-4. The read-back and the append are
+two steps, so a writer that inserts the same slot in between leaves, at worst,
+**a duplicate slot row**. **Run production backfills when those writers are
+idle**, and expect a duplicate rather than a loss if one races.
+
+**4. A namespace-wide orphan makes `run` exit non-zero even though every unit
+is done.** The registry orphan check runs at the end of every `run` and `load`,
+over the whole namespace. A finding there may have been left by **another
+writer**, so it is reported in full (`data.parameter_set_integrity`) and it
+does **not** un-mark a unit this run verified -- retracting proof that your rows
+landed would be a lie told to make someone else's problem look tidier.
+**Read the report. A re-run cannot fix it**; reconciling the registry can.
+
+### Resume, status, and reading a run
+
+**Resume.**
+
+```bash
+kbu clearinghouse backfill run <preset> --resume --out ~/clearinghouse-shards/<run id>
+# or, equivalently:
+kbu clearinghouse backfill run <preset> --resume --run-id <run id>
+```
+
+`--resume` adopts the run recorded at `--out` (which is why you need not
+remember the id), skips units already `done`, and redoes the unfinished one
+exactly once. It is the right response to a pod restart; `backfill run` is a
+foreground command and is *expected* to be killed by one.
+
+**It reconciles before it deletes.** For the unit it must redo, anything already
+published may be in the lake under a `started` ledger line, so the reconcile
+pass decides each of those by an **exact count** of the rows carrying that batch
+id *before* anything is removed: equal to the recorded `expected_rows` →
+committed; `0` → retried; **anything else** → the run stops and reports the
+batch for repair. Only then are unpublished files cleared, and a published batch
+is reused rather than regenerated.
+
+**Status.**
+
+```bash
+kbu clearinghouse backfill status --run-id <run id> --json
+```
+
+Reads **only local files** (the state file, each unit's `run.json`, each unit's
+ledger), so it runs anywhere and needs no pod. It reports units
+`done`/`partial`/`incomplete`/`pending` with their reasons, rows and batches
+**per table across all sixteen tables** (the `parameter_set` registry carries an
+`is_registry` flag), skips by reason, and any watermark an adapter persisted.
+Its row counts are the **ledger's** -- what the loads recorded writing.
+`kbu clearinghouse verify` is what checks those against the live tables.
+
+**Unit states**: `done` (drained, ingested, verified), `partial` (a `--limit`
+stopped it -- asked-for, exits 0, re-run without `--limit`), `incomplete` (a
+retryable failure nobody asked for -- exits non-zero, `--resume` it), `pending`
+(planned, not started).
+
+**Load executions versus shard runs.** `--run-id` on `backfill load` names the
+**load execution**, not the shard run. So loading the same shards again -- which
+is what **promotion to production** is -- mints a fresh execution and
+**rewrites each row's `ingest_batch_id` to that execution's**, keeping the shard
+run id, batch id and sha256 as provenance (`data.id_mapping`). That is what
+makes each load provable by its own per-batch counts; it also means **the batch
+ids in production are not the ones in scratch**. Use the execution id for the
+load you care about, which `status` reports per unit.
+
+### Incremental arc runs, and the watermark
+
+The arc adapter **persists a watermark**, so a later run reads only what is new.
+Two properties to know:
+
+- It is **promoted only when the unit came out `done`.** The adapter writes a
+  *candidate* (only it knows the upper bound it read to); the driver promotes it
+  after the batches ingest and verify (only it knows whether the rows landed).
+  A capped, killed or `incomplete` unit **advances no watermark** -- so the next
+  run comes back for that range.
+- Its key is **tenant + dataset + store path + KBDL endpoint + reading
+  principal**. So **a scratch run never moves production's watermark**, by
+  construction rather than by a flag someone has to remember. (It also means a
+  watermark earned under broader KBDL access does not apply to a narrower
+  caller, which is the point of including the principal.)
+
+Normally you do nothing: re-run `backfill run arc-kbdl` and the promoted
+checkpoint narrows what is emitted. To force a window -- a re-read, or a
+deliberate catch-up -- pass the previous watermark as **`since`** on the arc
+sources. There is no CLI flag for it: `since` is a source locator key, so copy
+the preset and run the copy by path:
+
+```bash
+# `backfill list --json` reports each preset's path (data.presets[].path);
+# the presets live inside the installed wheel, which you cannot edit.
+kbu clearinghouse backfill list --json | grep -A1 '"name": "arc-kbdl"'
+cp <that path> /tmp/arc-since.toml
+# Add `since = "<previous watermark>"` (ISO timestamp, INCLUSIVE) to EACH
+# [[source]] block in the copy -- all four share one selection, so a `since`
+# on some of them and not others is a half-answer. Then run the copy BY PATH:
+kbu clearinghouse backfill run /tmp/arc-since.toml --dataset clearinghouse_bf_scratch
+```
+
+An explicit `since` **wins over the persisted checkpoint, always** -- an
+operator saying where to start is an instruction, not a hint.
+
+**`since` narrows what is EMITTED, never the dependency index.** The index that
+says which genome a feature belongs to, what its taxonomy is and where its FASTA
+lives is built from **every** build record and **every** ledger regardless of
+`since` -- otherwise an incremental run could not join a late annotation to a
+genome built months earlier.
+
+### What the skip reasons mean
+
+Every dropped record is counted under a reason, and `status` sums them. Four
+kinds, and the difference is what you act on:
+
+| Kind | Reasons | What it means |
+|---|---|---|
+| **Expected absence** | `missing:<field>`, `no-join-match` | The document does not carry what the mapping requires (~28% of the per-tool Mongo collections are `_id`-only stubs), or its protein is not in `seq_protein` so there is no identity to hash it to. Retrying reads the same absence. |
+| **Not backfillable** | `kind-not-backfillable:<kind>`, `result-file-missing`, `fasta-pointer-missing`, `no-genome-for-prefix`, `feature-not-in-genome`, `transyt-without-taxonomy`, `transyt-parameter-set-invalid` | The record's shape cannot become a clearinghouse row. Counted, never fabricated. |
+| **Retryable** | `object-unavailable` | A KBDL object that *is* retrievable was not available. This leaves the unit **`incomplete`** and exits non-zero, so the run comes back for it. |
+| **Advisory** | `timestamp-fallback`, `fasta-prefix-mismatch` | The row was written, with a noted compromise. |
+
+A skip reason you cannot account for is a **stop**, not a rounding error. That
+is the whole reason they are enumerated by reason instead of totalled.
 
 ---
 

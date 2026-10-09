@@ -1672,7 +1672,7 @@ what order to run the presets in, and what each gate is.
 
 ### PRECONDITION: OP-C1 is done, and the command checks
 
-**Every step in this section requires [OP-C1](#op-c1---add-parameter_set_hash-and-the-parameter-set-registry-2026-10)
+**Every step in this section requires [OP-C1](#op-c1----add-parameter_set_hash-and-the-parameter-set-registry-2026-10)
 -- the five `<type>_result` tables rebuilt with `parameter_set_hash`, and the
 `parameter_set` registry table created.** This is not advice. `backfill run`
 carries a **schema preflight** that `DESCRIBE`s the target namespace before it
@@ -1862,7 +1862,7 @@ kbu clearinghouse backfill run mongo-protein-bakta \
 kbu clearinghouse backfill run mongo-protein-bakta --slice 00 --limit 12000
 ```
 
-**This is [OP-C3](#op-c3---the-demo-seed), not a separate step** -- the full
+**This is [OP-C3](#op-c3----the-demo-seed), not a separate step** -- the full
 procedure, the `DESCRIBE` check on a pre-existing scratch namespace, and the
 promotion gate are written out there. It is a **capped hash-prefix sample**:
 `--slice 00` is the `_id` prefix `00` (a 1/256 slice *only if* the `_id` space

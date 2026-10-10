@@ -463,10 +463,13 @@ to read — MSCommunity will silently drop its kinetic constraints on a
 zero-growth community and proceed, and `kinetics_relaxed=True` is how you find
 out.
 
-**`render_community_map` / `render_member_map` do not work** and will fail at
-call time even though `kbu cap list` reports them available: they need the
-`escher_edit` backend, which is not installed on this pod. Everything else in
-the domain works.
+**Escher figures work.** `render_community_map(comm, result, output_path)`
+writes `<output_path>.svg` and `.html` — verified 2026-10-10. Note the
+positional order: the FBA result comes second, and `output_path` is a path
+PREFIX, not a directory. `render_member_map(comm, member_id, map,
+output_path)` additionally requires a single-organism Escher **map file** for
+`map`; no such map is checked in on this pod, so that one path is untested
+here — supply your own map.
 
 ## Boundaries
 

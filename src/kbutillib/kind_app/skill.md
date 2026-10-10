@@ -412,6 +412,62 @@ print(pathlib.Path(kbutillib.__file__).parent)
 PY
 ```
 
+## Community modeling — `exec` only, and two things you MUST pass
+
+There is **no `kbu community` verb**. Community modeling is library-only, so it
+is always an `exec` script. The entry point is `MSCommunityUtils`, and the 14
+`community.*` capabilities (`kbu cap list`) are its methods.
+
+Working as of 2026-10-10, verified end to end on two real ModelSEED models. Two
+arguments are **not optional on this host**, and both fail in misleading ways if
+you omit them:
+
+1. **`final_solver="glpk"` on `build_community`.** The merged community model
+   otherwise defaults to gurobi, and this pod's gurobi is a SIZE-LIMITED
+   license that refuses a genome-scale LP with `Model too large for
+   size-limited license`. That error names the license, not the model, and is
+   easy to misread as the community being too big. It is not. Set the member
+   models' own `.solver = "glpk"` too.
+2. **A real `MSMedia` for `media=`, not a dict.** `run_community_fba(comm,
+   media=...)` wants a media OBJECT or an id string. Build one from a media
+   JSON with `MSMedia.from_dict(json.load(open(path)))`. A raw dict raises on
+   `media_obj.id`.
+
+```
+kbu model exec - <<'PY'
+import json, cobra
+from modelseedpy.core.msmedia import MSMedia
+from kbutillib.domains.modeling.ms_community_utils import MSCommunityUtils
+
+def member(path, mid):
+    m = cobra.io.load_json_model(path); m.id = mid; m.solver = "glpk"; return m
+
+cu = MSCommunityUtils()
+comm = cu.build_community([member(p1, "orgA"), member(p2, "orgB")],
+                          final_solver="glpk")
+media = MSMedia.from_dict(json.load(open(media_json)))
+res = cu.run_community_fba(comm, media=media)
+print(res.status, res.community_growth, res.member_growth)
+tbl, totals = cu.cross_feeding_table(comm)
+PY
+```
+
+`CommunityFBAResult` fields are `status`, `community_growth`, `member_growth`,
+`exchange_fluxes`, `fluxes`, `media_id`, `trustworthy`, `kinetics_relaxed`,
+`notes` — note it is `community_growth`, **not** `objective_value`.
+
+**Always run a no-carbon control.** A positive growth number is not evidence of
+a working community: check that growth is ~0 on a carbon-free medium as well as
+> 0 with carbon. `trustworthy` and `kinetics_relaxed` are the other two fields
+to read — MSCommunity will silently drop its kinetic constraints on a
+zero-growth community and proceed, and `kinetics_relaxed=True` is how you find
+out.
+
+**`render_community_map` / `render_member_map` do not work** and will fail at
+call time even though `kbu cap list` reports them available: they need the
+`escher_edit` backend, which is not installed on this pod. Everything else in
+the domain works.
+
 ## Boundaries
 
 - This skill covers `kbu model` and the KBDL job service it hands large work

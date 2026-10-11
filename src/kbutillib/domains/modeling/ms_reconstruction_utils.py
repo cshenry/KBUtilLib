@@ -14,11 +14,18 @@ import pandas as pd
 from .kb_model_utils import KBModelUtils
 
 __all__ = [
+    "GPR_STRING_SUPPORT",
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: Capability marker read by downstream callers (notably the KBDL model-reconstruction
+#: service) to decide whether a complex-bearing job can run against this install.
+#: ``1`` = :meth:`MSReconstructionUtils._add_reactions_from_gene_mapping` accepts
+#: verbatim GPR strings as ``reaction_gene_hash`` values, not just lists of gene ids.
+GPR_STRING_SUPPORT = 1
 
 class MSReconstructionUtils(KBModelUtils):
     """Utilities for metabolic model reconstruction and gapfilling.
@@ -109,7 +116,7 @@ class MSReconstructionUtils(KBModelUtils):
         self,
         mdlutl: Any,
         builder: Any,
-        reaction_gene_hash: Dict[str, List[str]],
+        reaction_gene_hash: Dict[str, Union[List[str], str]],
         template: Any,
         template_reactions_only: bool = False,
     ) -> List[Any]:
@@ -121,7 +128,25 @@ class MSReconstructionUtils(KBModelUtils):
         Args:
             mdlutl: MSModelUtil object for the model
             builder: MSBuilder object for creating reactions
-            reaction_gene_hash: Dictionary mapping reaction IDs to lists of gene IDs
+            reaction_gene_hash: Dictionary mapping reaction IDs to EITHER a list of
+                gene IDs OR a ready-made GPR string. The two value types are handled
+                differently and never mixed:
+
+                * **list** -- the isozyme shorthand. A new reaction gets
+                  ``" or ".join(gene_ids)``; an existing reaction has each gene id
+                  appended with ``" or "`` if it is not already a substring of the
+                  current rule. This is the historical behaviour and is preserved
+                  byte-for-byte.
+                * **str** -- an arbitrary GPR (``"(gA and gB) or gC"``) used
+                  verbatim, so enzyme complexes survive. A new reaction's rule is
+                  the string as given. For an existing reaction the two rules are
+                  OR'd with explicit parentheses --
+                  ``"(" + existing + ") or (" + incoming + ")"`` -- unless one side
+                  is empty, in which case the non-empty side is used as-is.
+
+                Callers that need the gene ids back out of a str value must parse it
+                with cobra (``cobra.core.gene.GPR.from_string(s).genes``) rather than
+                splitting on ``" or "``.
             template: Template object for the model
             template_reactions_only: If True, only add reactions that exist in the
                 template; the ModelSEED-database fallback (which would otherwise pull
@@ -137,7 +162,7 @@ class MSReconstructionUtils(KBModelUtils):
         modelseeddb = self.biochem_db
         reactions_added = []
 
-        for rxn_id, gene_ids in reaction_gene_hash.items():
+        for rxn_id, gene_spec in reaction_gene_hash.items():
             if rxn_id + "_c0" not in mdlutl.model.reactions:
                 reaction = None
                 template_reaction = None
@@ -167,8 +192,13 @@ class MSReconstructionUtils(KBModelUtils):
                     # Create the reaction
                     reaction = template_reaction.to_reaction(builder.base_model, builder.index)
 
-                    # Build GPR from gene IDs
-                    gpr = " or ".join(gene_ids)
+                    # Build the GPR. A str value is a GPR the caller already
+                    # computed (enzyme complexes included) and is used verbatim; a
+                    # list is the isozyme shorthand and is OR'd as it always was.
+                    if isinstance(gene_spec, str):
+                        gpr = gene_spec
+                    else:
+                        gpr = " or ".join(gene_spec)
                     reaction.gene_reaction_rule = gpr
                     reaction.annotation[SBO_ANNOTATION] = "SBO:0000176"
 
@@ -182,12 +212,25 @@ class MSReconstructionUtils(KBModelUtils):
                 # Update existing reaction with additional genes
                 rxn = mdlutl.model.reactions.get_by_id(rxn_id + "_c0")
                 existing_gpr = rxn.gene_reaction_rule
-                for gene_id in gene_ids:
-                    if gene_id not in existing_gpr:
-                        if existing_gpr:
-                            existing_gpr += " or " + gene_id
-                        else:
-                            existing_gpr = gene_id
+                if isinstance(gene_spec, str):
+                    # Two GPRs, OR'd with explicit parentheses so neither side's
+                    # internal "and" can be re-associated by the merge.
+                    if not existing_gpr:
+                        existing_gpr = gene_spec
+                    elif gene_spec:
+                        existing_gpr = "(" + existing_gpr + ") or (" + gene_spec + ")"
+                else:
+                    # Unchanged list merge, substring check and all. The
+                    # `gene_id not in existing_gpr` test is a substring test, not a
+                    # token test, so a gene id that is a substring of one already in
+                    # the rule is silently skipped -- preserved deliberately for
+                    # byte-compatibility; see agent-io/work-records/.
+                    for gene_id in gene_spec:
+                        if gene_id not in existing_gpr:
+                            if existing_gpr:
+                                existing_gpr += " or " + gene_id
+                            else:
+                                existing_gpr = gene_id
                 rxn.gene_reaction_rule = existing_gpr
 
         return reactions_added
@@ -209,7 +252,7 @@ class MSReconstructionUtils(KBModelUtils):
         max_gapfilling: int = 10,
         gapfilling_delta: float = 0,
         remove_noncore_genome_reactions: bool = False,
-        reactions_to_add: Optional[Dict[str, List[str]]] = None,
+        reactions_to_add: Optional[Dict[str, Union[List[str], str]]] = None,
         template_reactions_only: bool = False,
     ) -> tuple:
         """Build a single metabolic model from an MSGenome object.
@@ -235,8 +278,12 @@ class MSReconstructionUtils(KBModelUtils):
             gapfilling_delta: Delta threshold for gapfilling
             remove_noncore_genome_reactions: If True, remove non-core genome reactions
                 (excludes bio, DM_, EX_, SK_ reactions)
-            reactions_to_add: Dictionary mapping reaction IDs to lists of gene IDs
-                to add to the model. Reactions are pulled from template or ModelSEED DB.
+            reactions_to_add: Dictionary mapping reaction IDs to EITHER a list of
+                gene IDs (OR'd together into an isozyme GPR) OR a ready-made GPR
+                string used verbatim, so enzyme complexes such as
+                ``"(gA and gB) or gC"`` survive. Reactions are pulled from template
+                or ModelSEED DB. See :meth:`_add_reactions_from_gene_mapping` for the
+                exact merge rules when a reaction is already in the model.
             template_reactions_only: If True, reactions in ``reactions_to_add`` are only
                 added when present in the template (the ModelSEED-DB fallback is skipped);
                 reactions absent from the template are dropped silently. If False (default),

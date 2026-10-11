@@ -262,6 +262,40 @@ base-vs-branch name comparison above unambiguous. My own new tests do not depend
 on it: they either stay on the template path (where the DB is never consulted)
 or pass a `_CountingDB` that is never reached.
 
+### full-suite base-vs-branch comparison (definitive)
+
+The cached baseline was captured in a different environment (it has no `cobra`,
+hence the seven `--ignore`d modules), so its 99-name `known_failing` set cannot
+be compared to this interpreter's results directly. Rather than reason about
+the drift, the full suite was run **twice in this same venv** — once with the
+two changed files reverted to the base commit via
+`git checkout HEAD~1 -- <the two files>`, once with them restored — and the
+failure *names* diffed:
+
+```
+python -m pytest -q --continue-on-collection-errors \
+  --ignore=tests/berdl/test_clearinghouse_derivation.py \
+  --ignore=tests/biochem/test_escher_utils.py \
+  --ignore=tests/biochem/test_ms_biochem_deltag.py \
+  --ignore=tests/kbase/test_kb_annotation_utils_parquet.py \
+  --ignore=tests/modeling/test_comprehensive_gapfill_wrapper.py \
+  --ignore=tests/notebook
+
+base commit (two files reverted): 275 failed, 3854 passed, 417 skipped, 9 errors   exit 1
+this branch:                      275 failed, 3874 passed, 417 skipped, 9 errors   exit 1
+```
+
+Diffed as sorted name sets (`comm -13` / `comm -23` over the FAILED/ERROR
+nodeids): **292 names on each side, and the two sets are identical.** Nothing
+fails on the branch that passed on the base commit, and nothing that failed on
+the base commit was masked. The delta is exactly `+20 passed` — the 20 tests
+added by this task.
+
+The 275 failures and 9 errors are all environmental: this venv has `cobra` and
+`pytest` but lacks `modelseedpy`, `duckdb`, `chemicals`, `pandas`-backed and
+`torch`-backed optional stacks. They are pre-existing and out of scope, which
+the identical-name-set result establishes rather than assumes.
+
 ### pre-existing environmental breakage, unrelated
 
 - `tests/modeling/test_comprehensive_gapfill_wrapper.py` — 4 collection errors,
@@ -270,8 +304,10 @@ or pass a `_CountingDB` that is never reached.
 - `tests/berdl/test_clearinghouse_parity_script.py` — collection error,
   `ModuleNotFoundError: No module named 'duckdb'`. Not on the baseline's
   `--ignore` list, so a full-suite run with the baseline's exact command
-  aborts on it under this interpreter; `--continue-on-collection-errors` was
-  added to get past it. Environmental, and untouched by this change.
+  *aborts collection* on it under this interpreter (`Interrupted: 1 error during
+  collection`, exit 2); `--continue-on-collection-errors` was added to get past
+  it, and was used identically for both runs of the comparison above.
+  Environmental, and untouched by this change.
 
 ## inferred rather than verified
 

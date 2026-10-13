@@ -375,23 +375,31 @@ def test_shard_layout_and_deterministic_names(tmp_path):
     out_root = tmp_path / "bronze"
     reports = cs.shard_manifest(manifest, out_root, target_bytes=64)
 
-    # One directory per target table.
+    # One directory per target table (run.json sits at the ROOT, not in one).
     dirs = {p.name for p in out_root.iterdir() if p.is_dir()}
     assert dirs == {"gene_entity", "gene_content"}
 
-    # Deterministic batch-<NNNN>.parquet names, contiguous from 0000 per table.
+    # Every batch file's STEM is its batch id, and every batch id is a ULID.
+    # This replaces the old batch-<NNNN> counter, which restarted at zero on
+    # every call and so let two sources into one table overwrite each other.
     for table in ("gene_entity", "gene_content"):
-        files = sorted(p.name for p in (out_root / table).iterdir())
-        expected_names = [
-            f"batch-{i:04d}.parquet" for i in range(len(files))
-        ]
-        assert files == expected_names
+        stems = sorted(p.stem for p in (out_root / table).glob("*.parquet"))
+        ids = sorted(r.batch_id for r in reports if r.table == table)
+        assert stems == ids
+        for batch_id in ids:
+            assert cs.is_ulid(batch_id), batch_id
 
-    # A re-run reproduces byte-identical batch ids (deterministic).
+    # Batch ids are UNIQUE across the whole run, and across runs: a re-run
+    # mints fresh ULIDs rather than reproducing the old ones. That is the
+    # point -- a stable name is what made two writers collide.
+    all_ids = [r.batch_id for r in reports]
+    assert len(all_ids) == len(set(all_ids))
     out_root2 = tmp_path / "bronze2"
     reports2 = cs.shard_manifest(manifest, out_root2, target_bytes=64)
-    assert [(r.table, r.batch_id, r.hash_min, r.hash_max) for r in reports] == [
-        (r.table, r.batch_id, r.hash_min, r.hash_max) for r in reports2
+    assert set(all_ids).isdisjoint({r.batch_id for r in reports2})
+    # The RANGES, which are computed from the hash space, do reproduce.
+    assert [(r.table, r.hash_min, r.hash_max) for r in reports] == [
+        (r.table, r.hash_min, r.hash_max) for r in reports2
     ]
 
 
@@ -893,10 +901,10 @@ def test_two_result_sources_write_hashes_and_a_two_row_registry_shard(tmp_path):
     each table's rows with its own hash and writes ONE 'parameter_set' shard
     holding exactly two rows, one per distinct set.
 
-    The two sources target DIFFERENT entity types on purpose: the sharder
-    names every shard batch-<NNNN> counting from zero per shard_source() call,
-    so two sources feeding one table would overwrite each other's batch-0000
-    (a pre-existing property of the sharder, unrelated to parameter sets).
+    The two sources target DIFFERENT entity types so each table's rows come
+    from exactly one parameter set, which is what makes the per-table
+    assertions below unambiguous. (Two sources into ONE table is now a
+    supported case -- the unit merges them -- and is covered separately.)
     """
     src_path = tmp_path / "ann.parquet"
     pq.write_table(
@@ -930,10 +938,12 @@ def test_two_result_sources_write_hashes_and_a_two_row_registry_shard(tmp_path):
     default_hash = parameter_set_hash({})
     transyt_hash = parameter_set_hash({"taxonomy_id": "562"})
 
-    gene_rows = pq.read_table(str(out_root / "gene_result" / "batch-0000.parquet"))
+    gene_rows = pq.read_table(
+        [str(p) for p in sorted((out_root / "gene_result").glob("*.parquet"))]
+    )
     assert set(gene_rows.column("parameter_set_hash").to_pylist()) == {default_hash}
     protein_rows = pq.read_table(
-        str(out_root / "protein_result" / "batch-0000.parquet")
+        [str(p) for p in sorted((out_root / "protein_result").glob("*.parquet"))]
     )
     assert set(protein_rows.column("parameter_set_hash").to_pylist()) == {
         transyt_hash
@@ -951,11 +961,17 @@ def test_two_result_sources_write_hashes_and_a_two_row_registry_shard(tmp_path):
     by_hash = {row["parameter_set_hash"]: row for row in registry}
     assert by_hash[default_hash]["canonical_json"] == "{}"
     assert by_hash[transyt_hash]["canonical_json"] == '{"taxonomy_id":"562"}'
-    # Provenance is filled the way the sharder fills it everywhere else.
-    assert by_hash[default_hash]["observed_at"] is None
-    assert by_hash[default_hash]["ingest_batch_id"] == (
-        f"default-run:{PARAMETER_SET_TABLE}"
-    )
+    # Provenance is filled the way the sharder fills it everywhere else: a
+    # non-null observed_at and a per-batch ULID ingest_batch_id equal to the
+    # batch's file stem. The registry is NOT an exception to either rule.
+    for row in registry:
+        assert row["observed_at"] is not None
+        assert row["ingest_batch_id"] == registry_reports[0].batch_id
+    assert cs.is_ulid(registry_reports[0].batch_id)
+    assert registry_reports[0].path.stem == registry_reports[0].batch_id
+    # Its range bounds refer to parameter_set_hash -- the registry has no
+    # entity_hash column at all.
+    assert registry_reports[0].key_column == "parameter_set_hash"
     # The registry shard is written and reported BEFORE any result shard.
     assert reports[0].table == PARAMETER_SET_TABLE
     # And it carries exactly the registry's declared columns, in DDL order.

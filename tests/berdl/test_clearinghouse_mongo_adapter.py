@@ -16,6 +16,14 @@ boundary. These tests cover:
     can map, tolerates ``_id``-only stub documents, and never fabricates a
     sequence for a stub.
   - Missing required locators (``database``, ``collection``) are rejected.
+  - The ``join`` locator merges a SECOND collection's fields into every record
+    with exactly ONE ``$in`` lookup per page (never one per record), projects
+    only the fields it maps, zlib-decodes the ones it declares, and SKIPS AND
+    COUNTS a record with no join match under ``no-join-match``.
+  - The ``require_fields`` locator skips and counts a record missing a field,
+    or holding ``None`` / an empty value in one, under ``missing:<field>`` --
+    the ~28% ``_id``-only stubs of ``protein_to_rast2`` -- while leaving a
+    legitimate ``0`` alone.
   - End to end through the sharder: ``seq_protein``-shaped documents (with a real
     zlib blob) shard to bronze ``protein_content`` parquet whose ``entity_hash``
     matches the REAL standardizer over the DECOMPRESSED sequence -- the Mongo
@@ -76,8 +84,12 @@ class FakeCollection:
     def estimated_document_count(self):
         return self._count
 
-    def find(self, query_filter, *, batch_size=None):
-        recorder: dict = {"filter": query_filter, "batch_size": batch_size}
+    def find(self, query_filter, projection=None, *, batch_size=None):
+        recorder: dict = {
+            "filter": query_filter,
+            "projection": projection,
+            "batch_size": batch_size,
+        }
         self.finds.append(recorder)
         docs = [d for d in self._docs if _matches(d, query_filter)]
         return FakeCursor(docs, batch_size=batch_size, recorder=recorder)
@@ -97,6 +109,8 @@ def _matches(doc, query_filter):
             return False
         if "$lt" in cond and not value < cond["$lt"]:
             return False
+        if "$in" in cond and value not in cond["$in"]:
+            return False
     return True
 
 
@@ -113,6 +127,37 @@ def _mongo_source(**locator):
         content={"sequence": "sequence", "seq_length": "@len(sequence)"},
         result={},
     )
+
+
+def _annotation_source(**locator):
+    """A ``protein_result`` source over an annotation collection.
+
+    The shape the ``join`` locator exists for: the primary collection carries
+    the annotation and no sequence, so ``[source.hash]`` names a column only
+    the join can supply.
+    """
+    base = {"database": "database", "collection": "seq_protein_kofam"}
+    base.update(locator)
+    return cm.Source(
+        name="kofam-mongo",
+        adapter="mongo",
+        entity_type="protein",
+        kinds=("result",),
+        locator=base,
+        hash_spec={"raw_column": "sequence"},
+        content={},
+        result={
+            "result_type": "@const(annotation)",
+            "source": "@const(kofam/mongo-seq_protein_kofam)",
+            "result_type_version": "@const(1.0)",
+            "payload": "@json(ko)",
+            "parameter_set": {},
+        },
+    )
+
+
+_JOIN = {"collection": "seq_protein", "fields": {"sequence": "z_seq"}}
+_JOIN_ZLIB = dict(_JOIN, decompress=["sequence"])
 
 
 # --------------------------------------------------------------------------
@@ -424,3 +469,346 @@ def test_decompress_is_a_locator_key_not_a_mapping_key(tmp_path):
     # And it plans cleanly.
     plans = cm.shard_plan(manifest)
     assert [p.kind for p in plans] == ["content"]
+
+
+# --------------------------------------------------------------------------
+# The `join` locator: one $in per page
+# --------------------------------------------------------------------------
+
+
+def _ids(n, start=0):
+    return [f"{i:064x}" for i in range(start, start + n)]
+
+
+def test_join_issues_exactly_one_in_query_per_page():
+    """The join is ONE lookup per page, not one per record.
+
+    Seven primary documents at a page size of three is three pages, so three
+    ``$in`` queries -- and every id of each page appears in exactly one of
+    them, so nothing is looked up twice or missed.
+    """
+    ids = _ids(7)
+    primary = FakeCollection([{"_id": i, "ko": "K00001"} for i in ids])
+    join = FakeCollection([{"_id": i, "z_seq": f"MK{i[-1]}"} for i in ids])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN, batch_size=3),
+        collection=primary,
+        join_collection=join,
+    )
+    rows = list(adapter.iter_records())
+
+    assert len(rows) == 7
+    # Three pages of 3, 3, 1 -- three lookups, not seven.
+    assert len(join.finds) == 3
+    queried = []
+    for find, expected in zip(join.finds, (3, 3, 1)):
+        in_list = find["filter"]["_id"]["$in"]
+        assert len(in_list) == expected
+        queried.extend(in_list)
+    # Every id looked up exactly once, across the three pages.
+    assert sorted(queried) == sorted(ids)
+    # The projection moves `_id` and the joined field, and nothing else.
+    assert join.finds[0]["projection"] == {"_id": 1, "z_seq": 1}
+
+
+def test_join_merges_the_looked_up_fields_into_each_record():
+    primary = FakeCollection([{"_id": "a" * 64, "ko": "K00001"}])
+    join = FakeCollection([{"_id": "a" * 64, "z_seq": "MKQL"}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN), collection=primary, join_collection=join
+    )
+    (row,) = list(adapter.iter_records())
+    # The annotation's own fields survive, and the joined field arrives under
+    # its OUTPUT name (`sequence`), not the join collection's (`z_seq`).
+    assert row["ko"] == "K00001"
+    assert row["sequence"] == "MKQL"
+    assert "z_seq" not in row
+
+
+def test_join_decompresses_the_fields_it_declares():
+    """A joined `z_seq` blob is zlib-decoded in place under its output name."""
+    seq = "MKAILVGADTPRQWY"
+    primary = FakeCollection([{"_id": "b" * 64, "ko": "K00002"}])
+    join = FakeCollection(
+        [{"_id": "b" * 64, "z_seq": zlib.compress(seq.encode("utf-8"))}]
+    )
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN_ZLIB),
+        collection=primary,
+        join_collection=join,
+    )
+    (row,) = list(adapter.iter_records())
+    assert row["sequence"] == seq
+
+
+def test_join_miss_is_skipped_and_counted():
+    """A record with no document in the join collection is dropped and counted.
+
+    An annotation whose protein is absent from `seq_protein` cannot be tied to
+    a protein identity at all, so it is a counted drop rather than a fabricated
+    hash.
+    """
+    ids = _ids(4)
+    primary = FakeCollection([{"_id": i, "ko": "K1"} for i in ids])
+    # Only two of the four proteins exist in the join collection.
+    join = FakeCollection([{"_id": ids[0], "z_seq": "M"}, {"_id": ids[2], "z_seq": "K"}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN), collection=primary, join_collection=join
+    )
+    rows = list(adapter.iter_records())
+    assert [r["_id"] for r in rows] == [ids[0], ids[2]]
+    assert adapter.skipped() == {cs.MONGO_SKIP_NO_JOIN_MATCH: 2}
+    # A join miss is not a short read: the cursor still ran off the end.
+    assert adapter.exhausted() is True
+
+
+def test_join_document_missing_the_projected_field_sets_no_output_field():
+    """A match that exists but carries no `z_seq` yields no `sequence`.
+
+    The same rule `decompress` applies to a stub: the adapter never fabricates
+    a value, and the mapping fails that record instead.
+    """
+    primary = FakeCollection([{"_id": "c" * 64, "ko": "K1"}])
+    join = FakeCollection([{"_id": "c" * 64}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN_ZLIB),
+        collection=primary,
+        join_collection=join,
+    )
+    (row,) = list(adapter.iter_records())
+    assert "sequence" not in row
+    assert adapter.skipped() == {}
+
+
+def test_join_needs_an_injected_join_collection_when_the_primary_is_injected():
+    """Injecting the primary collection builds no client, so the join
+    collection cannot be resolved -- and says so by name."""
+    primary = FakeCollection([{"_id": "d" * 64, "ko": "K1"}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN), collection=primary
+    )
+    with pytest.raises(cs.ManifestSourceError) as exc:
+        list(adapter.iter_records())
+    assert "join_collection" in str(exc.value)
+
+
+def test_join_on_defaults_to_id_and_is_overridable():
+    primary = FakeCollection([{"_id": "e" * 64, "md5": "m1", "ko": "K1"}])
+    join = FakeCollection([{"md5": "m1", "z_seq": "MK"}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=dict(_JOIN, on="md5")),
+        collection=primary,
+        join_collection=join,
+    )
+    (row,) = list(adapter.iter_records())
+    assert row["sequence"] == "MK"
+    assert join.finds[0]["filter"] == {"md5": {"$in": ["m1"]}}
+    assert join.finds[0]["projection"] == {"md5": 1, "z_seq": 1}
+    # The default, for comparison.
+    assert cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN)
+    )._join_spec().on == cs.MONGO_JOIN_DEFAULT_ON
+
+
+def test_duplicate_join_keys_in_one_page_are_looked_up_once():
+    """Two annotations of one protein cost one entry in the $in list."""
+    shared = "f" * 64
+    primary = FakeCollection(
+        [{"_id": shared, "ko": "K1"}, {"_id": shared, "ko": "K2"}]
+    )
+    join = FakeCollection([{"_id": shared, "z_seq": "MK"}])
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=_JOIN), collection=primary, join_collection=join
+    )
+    rows = list(adapter.iter_records())
+    assert len(rows) == 2
+    assert join.finds[0]["filter"] == {"_id": {"$in": [shared]}}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "seq_protein",
+        {"fields": {"sequence": "z_seq"}},
+        {"collection": "seq_protein"},
+        {"collection": "seq_protein", "fields": {}},
+        {"collection": "seq_protein", "fields": {"sequence": 1}},
+        {"collection": "seq_protein", "fields": {"sequence": "z_seq"}, "on": ""},
+        {"collection": "seq_protein", "fields": {"sequence": "z_seq"}, "field": {}},
+        {
+            "collection": "seq_protein",
+            "fields": {"sequence": "z_seq"},
+            "decompress": "sequence",
+        },
+        {
+            "collection": "seq_protein",
+            "fields": {"sequence": "z_seq"},
+            # Names the join collection's own field, not the OUTPUT name.
+            "decompress": ["z_seq"],
+        },
+    ],
+)
+def test_bad_join_spec_is_rejected(bad):
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(join=bad), collection=FakeCollection([])
+    )
+    with pytest.raises(cs.ManifestSourceError):
+        list(adapter.iter_records())
+
+
+# --------------------------------------------------------------------------
+# The `require_fields` locator
+# --------------------------------------------------------------------------
+
+
+def test_require_fields_drops_stubs_and_counts_them_by_field():
+    """~28% of protein_to_rast2 is _id-only stubs; each is a counted drop."""
+    docs = [
+        {"_id": _ids(1, 0)[0], "function": "hypothetical protein"},
+        {"_id": _ids(1, 1)[0]},  # a stub: no `function` at all
+        {"_id": _ids(1, 2)[0], "function": None},  # present but null
+        {"_id": _ids(1, 3)[0], "function": ""},  # present but empty
+        {"_id": _ids(1, 4)[0], "function": "DNA gyrase"},
+    ]
+    source = _annotation_source(
+        collection="protein_to_rast2", require_fields=["function"]
+    )
+    adapter = cs.MongoSourceAdapter(source, collection=FakeCollection(docs))
+    rows = list(adapter.iter_records())
+    assert [r["function"] for r in rows] == ["hypothetical protein", "DNA gyrase"]
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}function": 3}
+
+
+def test_require_fields_treats_an_empty_list_as_missing_but_keeps_a_zero():
+    """`kos` was null in the sampled kofam2 document, and an empty list says the
+    same thing -- but a legitimate 0 is a recorded value and must survive."""
+    docs = [
+        {"_id": _ids(1, 0)[0], "kos": ["K00001"]},
+        {"_id": _ids(1, 1)[0], "kos": []},
+        {"_id": _ids(1, 2)[0], "kos": {}},
+        {"_id": _ids(1, 3)[0], "kos": 0},
+        {"_id": _ids(1, 4)[0], "kos": False},
+    ]
+    source = _annotation_source(
+        collection="seq_protein_kofam2", require_fields=["kos"]
+    )
+    adapter = cs.MongoSourceAdapter(source, collection=FakeCollection(docs))
+    rows = list(adapter.iter_records())
+    assert [r["kos"] for r in rows] == [["K00001"], 0, False]
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}kos": 2}
+
+
+def test_each_record_is_counted_under_the_first_requirement_it_fails():
+    """So the counts sum to records dropped, not to failed (record, field) pairs."""
+    docs = [{"_id": _ids(1, 0)[0]}]
+    source = _annotation_source(require_fields=["ko", "other"])
+    adapter = cs.MongoSourceAdapter(source, collection=FakeCollection(docs))
+    assert list(adapter.iter_records()) == []
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}ko": 1}
+
+
+def test_a_primary_only_requirement_is_checked_before_the_join():
+    """A stub never costs a sequence lookup: the $in list holds survivors only.
+
+    At a 28% stub rate over 399.9M documents this is ~112M lookups not issued,
+    which is the whole reason the check runs where it does.
+    """
+    ids = _ids(4)
+    primary = FakeCollection(
+        [
+            {"_id": ids[0], "function": "DNA gyrase"},
+            {"_id": ids[1]},
+            {"_id": ids[2]},
+            {"_id": ids[3], "function": "RecA"},
+        ]
+    )
+    join = FakeCollection([{"_id": i, "z_seq": "MK"} for i in ids])
+    source = _annotation_source(
+        collection="protein_to_rast2",
+        require_fields=["function"],
+        join=_JOIN,
+    )
+    adapter = cs.MongoSourceAdapter(
+        source, collection=primary, join_collection=join
+    )
+    rows = list(adapter.iter_records())
+    assert len(rows) == 2
+    # Only the two surviving ids were looked up.
+    assert join.finds[0]["filter"] == {"_id": {"$in": [ids[0], ids[3]]}}
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}function": 2}
+
+
+def test_a_requirement_the_join_produces_is_checked_after_the_merge():
+    """It cannot be judged earlier, and reports the same reason key either way."""
+    ids = _ids(2)
+    primary = FakeCollection([{"_id": i, "ko": "K1"} for i in ids])
+    # The second protein's join document exists but carries no blob.
+    join = FakeCollection([{"_id": ids[0], "z_seq": "MK"}, {"_id": ids[1]}])
+    source = _annotation_source(require_fields=["sequence"], join=_JOIN)
+    adapter = cs.MongoSourceAdapter(
+        source, collection=primary, join_collection=join
+    )
+    rows = list(adapter.iter_records())
+    assert [r["_id"] for r in rows] == [ids[0]]
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}sequence": 1}
+
+
+def test_a_requirement_a_primary_decompress_produces_is_checked_after_it():
+    primary = FakeCollection(
+        [
+            {"_id": _ids(1, 0)[0], "z_seq": "MK"},
+            {"_id": _ids(1, 1)[0]},  # no blob -> no `sequence` after decode
+        ]
+    )
+    source = _mongo_source(
+        decompress={"sequence": "z_seq"}, require_fields=["sequence"]
+    )
+    adapter = cs.MongoSourceAdapter(source, collection=primary)
+    rows = list(adapter.iter_records())
+    assert [r["sequence"] for r in rows] == ["MK"]
+    assert adapter.skipped() == {f"{cs.MONGO_SKIP_MISSING_PREFIX}sequence": 1}
+
+
+@pytest.mark.parametrize("bad", ["ko", ["ko", 1], ["ko", ""], 7])
+def test_bad_require_fields_is_rejected(bad):
+    adapter = cs.MongoSourceAdapter(
+        _annotation_source(require_fields=bad), collection=FakeCollection([])
+    )
+    with pytest.raises(cs.ManifestSourceError):
+        list(adapter.iter_records())
+
+
+def test_a_skipped_record_does_not_spend_the_limit_budget():
+    """The --limit allowance counts rows yielded, not documents examined."""
+
+    class _Context:
+        def record_limit(self, source_name):
+            return 2
+
+    docs = [
+        {"_id": _ids(1, 0)[0]},
+        {"_id": _ids(1, 1)[0], "ko": "K1"},
+        {"_id": _ids(1, 2)[0]},
+        {"_id": _ids(1, 3)[0], "ko": "K2"},
+        {"_id": _ids(1, 4)[0], "ko": "K3"},
+    ]
+    source = _annotation_source(require_fields=["ko"])
+    adapter = cs.MongoSourceAdapter(source, collection=FakeCollection(docs))
+    adapter.bind_run_context(_Context())
+    rows = list(adapter.iter_records())
+    assert [r["ko"] for r in rows] == ["K1", "K2"]
+    # Stopped on the budget, not on the end of the source.
+    assert adapter.exhausted() is False
+
+
+def test_paging_preserves_order_and_completeness_without_a_join():
+    """With no join the paging is pure chunking: same documents, same order."""
+    ids = _ids(7)
+    cap = FakeCollection([{"_id": i, "z_seq": "M"} for i in reversed(ids)])
+    adapter = cs.MongoSourceAdapter(_mongo_source(batch_size=3), collection=cap)
+    out = list(adapter.iter_records())
+    assert [r["_id"] for r in out] == ids
+    assert adapter.exhausted() is True
+    # One find on the primary collection; the paging is client-side chunking of
+    # the cursor, not a second query per page.
+    assert len(cap.finds) == 1

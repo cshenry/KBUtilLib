@@ -56,11 +56,20 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import click
 
 from ...domains.identity import DEFAULT_PARAMETER_SET_HASH
+
+# The write-target defaults the backfill verbs' --dataset options show. Taken
+# from the schema module -- never spelled here -- and import-safe: that module
+# imports nothing but `typing`, so it costs `kbu --help` nothing, which is why
+# this is a module-level import while the capability and the sharder stay
+# lazy. Click evaluates an option's default at import, so a lazy accessor
+# would not work for these two.
+from ...domains.kbase.berdl.clearinghouse_schema import NAMESPACE, TENANT
 
 #: The output-contract schema version. Bumped ONLY on a breaking change to a
 #: verb's ``data`` shape; additive fields do not bump it (see module docstring
@@ -179,14 +188,42 @@ def _render(envelope: dict[str, Any]) -> None:
         rows = data.get("shards")
     elif verb == "load":
         click.echo(
-            f"run_id={data.get('run_id')} namespace={data.get('namespace')} "
+            f"execution={data.get('run_id')} namespace={data.get('namespace')} "
             f"dry_run={data.get('dry_run')}"
+        )
+        click.echo(
+            f"shard run={data.get('source_run_id')} "
+            f"ledger={data.get('state_dir')}"
         )
         rows = data.get("tables")
     elif verb == "verify":
         click.echo(f"run_id={data.get('run_id')} namespace={data.get('namespace')}")
         for line in data.get("discrepancies", []):
             click.echo(f"discrepancy: {line}")
+        rows = data.get("tables")
+    elif verb == "backfill-list":
+        rows = data.get("presets")
+    elif verb in ("backfill-run", "backfill-shard"):
+        click.echo(
+            f"run_id={data.get('run_id')} out={data.get('out')} "
+            f"dataset={data.get('tenant')}.{data.get('dataset')}"
+        )
+        click.echo(
+            f"units: {data.get('unit_count')} ({data.get('unit_kind')})"
+            + (f" slice={data.get('slice')}" if data.get("slice") else "")
+            + (f" limit={data.get('limit')}" if data.get("limit") else "")
+        )
+        rows = data.get("units")
+    elif verb == "backfill-status":
+        totals = data.get("totals") or {}
+        click.echo(f"run_id={data.get('run_id')} out={data.get('out')}")
+        click.echo(
+            "units: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(totals.items()))
+            + f", planned-not-started={len(data.get('pending_units') or [])}"
+        )
+        for skip in data.get("skipped") or []:
+            click.echo(f"skipped {skip['reason']}: {skip['count']}")
         rows = data.get("tables")
 
     if rows is None:
@@ -997,10 +1034,13 @@ def _manifest_error_types() -> tuple[type[BaseException], ...]:
 def _default_run_id(shard_dir: str) -> str:
     """Derive a default ``run_id`` from a shard directory's name.
 
-    Resuming a load is calling ``load`` again with the same ``run_id``; keying
-    it to the shard directory name gives a stable default so a plain
-    ``kbu clearinghouse load <dir>`` resumes its own prior run without the
-    operator having to remember an id. ``--run-id`` overrides it.
+    ``verify`` names a LOAD EXECUTION, and an execution id is a ULID the load
+    minted, so there is no derivable default that is right -- this is a
+    last-resort fallback for the case where the operator shards, loads and
+    verifies under one caller-chosen id. A ``verify`` whose id names no
+    execution reports exactly that (``no inventory at ...``) rather than
+    inventing an answer. ``load`` does NOT use this: omitting its ``--run-id``
+    mints a new execution.
     """
     from pathlib import Path
 
@@ -1014,18 +1054,26 @@ def _default_run_id(shard_dir: str) -> str:
 
 
 def _build_plan(manifest_path: str) -> dict[str, Any]:
-    """Build the ``plan`` envelope: per-table row counts and target shard sizes.
+    """Build the ``plan`` envelope: per-table row ESTIMATES and target shard sizes.
 
     Resolves the manifest through
     :func:`clearinghouse_manifest.load_manifest` +
     :func:`~clearinghouse_manifest.shard_plan` (the single plan-time validator --
     an invalid manifest raises :class:`ManifestError` naming the offending key,
     which :func:`plan_cmd` turns into a non-zero exit) and reports, per target
-    table, the row count and the shard count/target size sharding WOULD produce.
-    It WRITES NOTHING: row counts come from streaming each source adapter's
-    records read-only (the sanctioned source read), and the shard count is the
-    same ``ceil(estimate_bytes / target_bytes)`` the sharder uses. ``plan`` runs
-    anywhere; it is not locus-gated.
+    table, the estimated row count and the shard count/target size sharding
+    WOULD produce. It WRITES NOTHING and runs anywhere; it is not locus-gated.
+
+    PLAN NEVER ITERATES SOURCE RECORDS. It used to count with
+    ``sum(1 for _ in adapter.iter_records())`` -- a FULL SCAN of the source to
+    print one number, which on the real 264M-document protein store costs the
+    same read as the sharding run it is meant to be a cheap preview of. The
+    count now comes from :meth:`SourceAdapter.estimate_rows`, which is
+    metadata-only by contract (parquet footer, ``estimated_document_count()``,
+    ``COUNT(*)``) and may legitimately be ``None``. ``estimate_method`` names
+    the mechanism beside the number, because an estimate whose provenance is
+    unstated cannot be judged -- and ``"unavailable"`` is a better answer than
+    an accurate number nobody can afford.
     """
     import math
 
@@ -1035,20 +1083,29 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
 
     target_bytes = shard_module.DEFAULT_TARGET_BYTES
     tables: list[dict[str, Any]] = []
-    # Count each source's records ONCE and reuse the count for every target
-    # table that source feeds (a source with kinds=[entity, content] shards the
-    # same records to two tables), and size the shards from the adapter estimate.
-    source_stats: dict[str, tuple[int, int]] = {}
+    warnings: list[str] = []
+    # Estimate each source ONCE and reuse it for every target table that source
+    # feeds (a source with kinds=[entity, content] shards the same records to
+    # two tables).
+    source_stats: dict[str, tuple[Optional[int], str, int]] = {}
     for plan in plans:
         stats = source_stats.get(plan.source_name)
         if stats is None:
             src = next(s for s in manifest.sources if s.name == plan.source_name)
             adapter = shard_module.get_adapter(src)
-            row_count = sum(1 for _ in adapter.iter_records())
+            row_count = adapter.estimate_rows()
+            estimate_method = adapter.estimate_rows_method()
             est_bytes = max(1, adapter.estimate_bytes())
-            source_stats[plan.source_name] = (row_count, est_bytes)
-            stats = source_stats[plan.source_name]
-        row_count, est_bytes = stats
+            if row_count is None:
+                warnings.append(
+                    f"source {plan.source_name!r}: no cheap row-count estimate "
+                    f"is available from the {src.adapter!r} adapter for this "
+                    "source; row_count is null. plan never scans a source to "
+                    "produce one."
+                )
+            stats = (row_count, estimate_method, est_bytes)
+            source_stats[plan.source_name] = stats
+        row_count, estimate_method, est_bytes = stats
         shard_count = max(1, math.ceil(est_bytes / target_bytes))
         tables.append(
             {
@@ -1057,6 +1114,7 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
                 "entity_type": plan.entity_type,
                 "kind": plan.kind,
                 "row_count": row_count,
+                "estimate_method": estimate_method,
                 "estimated_source_bytes": est_bytes,
                 "target_shard_bytes": target_bytes,
                 "estimated_shards": shard_count,
@@ -1066,7 +1124,7 @@ def _build_plan(manifest_path: str) -> dict[str, Any]:
         "plan",
         locus="anywhere",
         data={"manifest": manifest_path, "tables": tables},
-        warnings=[],
+        warnings=warnings,
     )
 
 
@@ -1099,7 +1157,14 @@ def _build_shard(
     manifest at plan time (so a bad manifest fails BEFORE any file is written)
     and writes one directory per target table of sorted bronze parquet. Runs
     anywhere -- sharding needs CPU and disk, no pod and no credentials. Reports
-    one row per written shard (table, batch, path, rows, hash range).
+    one row per written shard (table, batch, path, rows, hash range, sha256),
+    plus the run inventory's own ids and the per-source skip counts, so an
+    operator sees what was DROPPED without opening ``run.json``.
+
+    One invocation is one UNIT of a run and appends itself to
+    ``<out>/run.json`` atomically when it finishes. ``manifest_path`` is handed
+    down so the inventory's ``manifest_sha256`` is of the real file bytes
+    rather than of a re-rendering of the parsed object.
     """
     manifest_module, shard_module = _shard_stage()
     kwargs: dict[str, Any] = {}
@@ -1111,27 +1176,42 @@ def _build_shard(
     # validates the whole plan before writing, so a bad manifest fails with
     # nothing on disk.
     manifest = manifest_module.load_manifest(manifest_path)
-    reports = shard_module.shard_manifest(manifest, out_dir, **kwargs)
+    reports = shard_module.shard_manifest(
+        manifest, out_dir, manifest_path=manifest_path, **kwargs
+    )
     shards = [
         {
             "table": report.table,
             "batch": report.batch_id,
             "path": str(report.path),
             "rows": report.rows,
+            "rows_deduplicated": report.rows_deduplicated,
+            "key_column": report.key_column,
             "hash_min": report.hash_min,
             "hash_max": report.hash_max,
+            "sha256": report.sha256,
+            "source": list(report.sources),
+            "unit_id": report.unit_id,
+            "attempt_id": report.attempt_id,
+            "slice": report.slice,
             "split": report.split,
         }
         for report in reports
     ]
+    run = shard_module.read_run_manifest(out_dir)
     return _envelope(
         "shard",
         locus="anywhere",
         data={
             "manifest": manifest_path,
             "out_dir": out_dir,
+            "run_id": run.get("run_id"),
+            "unit_id": reports[0].unit_id if reports else None,
+            "run_manifest": str(shard_module.run_manifest_path(out_dir)),
             "shards": shards,
             "shard_count": len(shards),
+            "skipped": run.get("skipped", []),
+            "sources": run.get("sources", []),
         },
         warnings=[],
     )
@@ -1174,22 +1254,42 @@ def _build_load(
     cap: Any,
     *,
     shard_dir: str,
-    run_id: str,
+    run_id: Optional[str],
     dry_run: bool,
     reconcile: bool,
 ) -> dict[str, Any]:
-    """Build the ``load`` envelope: the run ledger's outcome for each shard.
+    """Build the ``load`` envelope: the ledger's outcome for each shard batch.
 
     IN-POD ONLY -- but the locus refusal happens in :func:`load_cmd` BEFORE this
     is reached, so a bare :class:`BerdlLoadRefusedError` from deep in a
     transport never surfaces (success criterion (a)). This is thin over
     :meth:`ClearinghouseCapability.ingest_shards`, which owns the dev 1206
-    pre-write assertion, the dev 1194 postflight check, and the JSON-lines run
-    ledger. ``--dry-run`` is the operator's last gate: ingest_shards' own
-    ``dry_run=True`` resolves namespaces, runs the pre-write assertion, reports
-    the action each shard WOULD take, and writes nothing -- no ``load()``, no
-    ledger line. ``--reconcile`` resolves an ambiguous ``"started"`` batch
-    against the table's Iceberg snapshot history rather than refusing.
+    pre-write assertion, the lake-5 schema preflight, the dev 1194 postflight
+    check, the fill-only filter, the per-namespace lock and the durable
+    execution ledger.
+
+    ``run_id`` names the LOAD EXECUTION, not the shard run: omitted, the
+    capability mints a fresh one (and a fresh batch id per batch, with the
+    source run's ids kept as provenance); given an existing one, that
+    execution resumes.
+
+    ``--dry-run`` is the operator's last gate: ``ingest_shards``' own
+    ``dry_run=True`` reads the inventory, runs the pre-write assertion and the
+    schema preflight, checks each batch's integrity and reports the rows each
+    batch WOULD append after the fill-only filter -- writing nothing at all
+    (no ``load()``, no ledger line, no lock). ``--reconcile`` decides a batch
+    left ``started`` by the exact count of rows carrying its
+    ``ingest_batch_id``.
+
+    THE NAMESPACE-WIDE REGISTRY ORPHAN CHECK RUNS AT THE END, always. It is
+    :meth:`ClearinghouseCapability.parameter_set_orphans` -- the same callable
+    ``verify`` and ``health`` use, not a second set of rules -- and its
+    findings make this command exit non-zero
+    (:func:`_exit_on_integrity_failure`, after the envelope is emitted) while
+    the per-batch results above are left exactly as the ingest reported them.
+    An orphan another writer left is a real failure of the namespace and must
+    not be exited zero over; it is also not a reason to un-mark a batch this
+    load proved landed.
     """
     result = cap.ingest_shards(
         shard_dir,
@@ -1201,7 +1301,14 @@ def _build_load(
     if dry_run:
         warnings.append(
             "dry-run: no rows were ingested and no ledger line was written; "
-            "the reported action for each shard is what a real load WOULD do."
+            "the reported action for each batch is what a real load WOULD do."
+        )
+    lock = result.get("lock") or {}
+    if lock.get("took_over_from"):
+        warnings.append(
+            "the namespace ingest lock was held by a process that is gone "
+            f"(previous holder: {lock['took_over_from']}); it was taken over "
+            "by this run."
         )
     return _envelope(
         "load",
@@ -1209,10 +1316,15 @@ def _build_load(
         data={
             "shard_dir": shard_dir,
             "run_id": result.get("run_id", run_id),
+            "execution_id": result.get("execution_id"),
+            "source_run_id": result.get("source_run_id"),
             "namespace": result.get("namespace"),
+            "state_dir": result.get("state_dir"),
             "dry_run": result.get("dry_run", dry_run),
             "reconcile": reconcile,
+            "lock": result.get("lock"),
             "tables": result.get("tables", []),
+            "parameter_set_integrity": cap.parameter_set_orphans(),
         },
         warnings=warnings,
     )
@@ -1224,7 +1336,10 @@ def _build_load(
     "--run-id",
     "run_id",
     default=None,
-    help="Run id to ingest/resume under (default: derived from the shard-dir name).",
+    help="LOAD EXECUTION id to resume (default: mint a new execution). This "
+    "names the execution, not the shard run -- one shard run can be loaded "
+    "more than once (scratch, then production) and each load is proven by "
+    "its own per-batch counts.",
 )
 @click.option(
     "--dry-run",
@@ -1250,11 +1365,21 @@ def load_cmd(
     reconcile: bool,
     as_json: bool,
 ) -> None:
-    """Ingest shards (IN-POD ONLY): verify postflight and write the run ledger.
+    """Ingest a published shard run (IN-POD ONLY), fill-only and resumably.
+
+    SHARD_DIR is a LOCAL directory on this pod holding the ``run.json`` a
+    completed ``kbu clearinghouse shard`` run published, plus the batch files
+    it names. The batches are read here by the driver and appended as
+    DataFrames -- Spark executors cannot read the pod's local disk.
+
+    Every batch is filtered against the keys the target already holds before
+    it is appended, so re-running this command is cheap and changes nothing;
+    a batch with no surviving rows is committed without a write at all.
 
     Runs in the FOREGROUND to completion and is expected to be killed by a pod
-    restart. It is NOT a daemon; resumability comes from the ledger -- re-run
-    the same command with the same --run-id.
+    restart. It is NOT a daemon; resumability comes from the ledger under
+    $KBU_CLEARINGHOUSE_STATE_DIR -- re-run with --run-id <execution id>, and
+    add --reconcile to decide a batch the kill left mid-append.
     """
     cap = _capability()
     # The locus refusal must be EARLY and must name the locus as the reason: a
@@ -1263,17 +1388,18 @@ def load_cmd(
     # answer. This resolves the locus at THIS boundary, before ingest_shards
     # touches any namespace, ledger, or transport.
     _require_in_pod_or_refuse(cap, "load")
-    resolved_run_id = run_id or _default_run_id(shard_dir)
-    _emit(
-        _build_load(
-            cap,
-            shard_dir=shard_dir,
-            run_id=resolved_run_id,
-            dry_run=dry_run,
-            reconcile=reconcile,
-        ),
-        as_json=as_json,
+    envelope = _build_load(
+        cap,
+        shard_dir=shard_dir,
+        run_id=run_id,
+        dry_run=dry_run,
+        reconcile=reconcile,
     )
+    _emit(envelope, as_json=as_json)
+    # The namespace-wide orphan check's findings are a FAILURE, so the exit
+    # code says so -- after the envelope is emitted, so the operator sees what
+    # is broken. The per-batch results in it are untouched.
+    _exit_on_integrity_failure(envelope)
 
 
 # ---------------------------------------------------------------------------
@@ -1342,3 +1468,836 @@ def verify_cmd(shard_dir: str, run_id: Optional[str], as_json: bool) -> None:
     envelope = _build_verify(cap, shard_dir=shard_dir, run_id=resolved_run_id)
     _emit(envelope, as_json=as_json)
     _exit_on_integrity_failure(envelope)
+
+
+# ===========================================================================
+# ``kbu clearinghouse backfill`` -- the one-command fill path
+# ===========================================================================
+#
+# WHY THIS IS A SUBGROUP AND NOT FIVE MORE VERBS. `shard` and `load` are the
+# two halves of the pipeline, addressed one invocation at a time. `backfill`
+# DRIVES them over a whole source: it decides the units of work, runs the two
+# halves per unit, verifies each one, and keeps the record of which finished.
+# The verbs below are that driver's surface, and they emit the SAME envelope
+# as everything else in this module (`backfill-run`, `backfill-status`, ... as
+# the `verb`), so a dashboard reading `kbu clearinghouse` output needs no new
+# parser.
+#
+# EVERY POLICY DECISION LIVES IN clearinghouse_backfill, NOT HERE. What a unit
+# is, what `--limit` means for each adapter kind, when a unit is `done` versus
+# `partial` versus `incomplete`, what `--resume` may and may not change --
+# those are in the module, tested without click. These functions parse options,
+# refuse off-pod, build the envelope and set the exit code.
+
+
+def _backfill_module() -> Any:
+    """Lazy-import the backfill driver (pure; no pod, no credentials).
+
+    Imported inside the function for the same reason as :func:`_shard_stage`:
+    ``kbu --help`` must not pull pyarrow or the manifest parser.
+    """
+    from ...domains.kbase.berdl import clearinghouse_backfill as backfill_module
+
+    return backfill_module
+
+
+def _backfill_error_types() -> tuple[type[BaseException], ...]:
+    """The planning/driving errors the backfill verbs turn into clean exits.
+
+    A :class:`~clearinghouse_backfill.BackfillError` (a conflicting
+    ``--resume``, an unknown preset, a ``--slice`` against a non-mongo
+    manifest), a :class:`~clearinghouse_manifest.ManifestError` (an
+    unresolved ``${VAR}``) and a
+    :class:`~clearinghouse_shard.ManifestSourceError` are all OPERATOR errors
+    with a message that already names the problem, so they become a non-zero
+    ``ClickException`` rather than a traceback.
+
+    ``ManifestSourceError`` is the ADAPTER REFUSING its own read, and the
+    ``kbdl_hash`` adapter is why it is listed: a hash job that failed, an
+    archive that lost visibility, and a KBDL whose standardizer version does
+    not match this pod's are each a terminal cause the run must stop on, and
+    each already carries a message that names the archive and what to do. A
+    traceback would bury all three.
+    """
+    try:
+        from ...domains.kbase.berdl.clearinghouse_backfill import BackfillError
+        from ...domains.kbase.berdl.clearinghouse_manifest import ManifestError
+        from ...domains.kbase.berdl.clearinghouse_shard import ManifestSourceError
+
+        return (BackfillError, ManifestError, ManifestSourceError)
+    except Exception:  # pragma: no cover - defensive: keep the CLI importable
+        return (ValueError,)
+
+
+def _resolve_backfill_target(
+    spec: str, *, slice_spec: Optional[str], limit: Optional[int]
+) -> tuple[Any, Any, Any, Any, Optional[str]]:
+    """Resolve a preset-or-path to ``(module, manifest, path, plan, preset)``.
+
+    Loading the manifest EXPANDS its placeholders (see
+    :func:`clearinghouse_manifest.load_manifest`), so everything downstream --
+    the unit plan, the digest recorded in the run's identity, the adapters --
+    sees one resolved manifest. An unresolved ``${VAR}`` therefore fails HERE,
+    before a run id is minted or a directory is created.
+    """
+    backfill = _backfill_module()
+    manifest_module, _shard_module = _shard_stage()
+    manifest_path, preset = backfill.resolve_manifest_path(spec)
+    manifest = manifest_module.load_manifest(manifest_path)
+    plan = backfill.plan_units(manifest, slice_spec=slice_spec, limit=limit)
+    return backfill, manifest, manifest_path, plan, preset
+
+
+def _backfill_plan_data(
+    *,
+    plan: Any,
+    run_id: str,
+    out: Any,
+    preset: Optional[str],
+    manifest_path: Any,
+    tenant: str,
+    dataset: str,
+    limit: Optional[int],
+    resume: bool,
+) -> dict[str, Any]:
+    """The fields every ``run``/``shard`` envelope carries about the plan."""
+    return {
+        "preset": preset,
+        "manifest": str(manifest_path),
+        "run_id": run_id,
+        "out": str(out),
+        "tenant": tenant,
+        "dataset": dataset,
+        "unit_kind": plan.kind,
+        "unit_count": len(plan.units),
+        "slice": plan.slice_spec,
+        "slice_key_range": list(plan.key_range),
+        "limit": limit,
+        "resume": resume,
+        "units_dropped_by_limit": plan.units_dropped_by_limit,
+    }
+
+
+@clearinghouse_cmd.group(name="backfill")
+def backfill_cmd() -> None:
+    """Fill the clearinghouse from a source, one unit of work at a time.
+
+    ``run`` is the one-command path: it shards a unit onto this pod's local
+    disk, ingests it fill-only, VERIFIES it, and only then records the unit
+    done -- so a run killed mid-unit resumes that unit once and loses nothing
+    else. ``shard`` and ``load`` are the two halves on their own, and
+    ``status`` merges the state file, each unit's inventory and each unit's
+    ledger into one answer.
+    """
+
+
+# ---------------------------------------------------------------------------
+# backfill list
+# ---------------------------------------------------------------------------
+
+
+def _build_backfill_list() -> dict[str, Any]:
+    """Build the ``backfill-list`` envelope: every shipped preset.
+
+    Runs ANYWHERE and needs nothing: no pod, no credentials, and not even the
+    environment a RUN of a preset would need. A preset whose placeholders
+    cannot be resolved here is still listed, with its ``needs_env`` and an
+    ``error`` string -- because "which variables do I have to export" is
+    exactly the question this verb exists to answer, and a verb that failed on
+    the unset variable could not answer it.
+    """
+    backfill = _backfill_module()
+    presets = [backfill.describe_preset(preset) for preset in backfill.available_presets()]
+    warnings = [
+        f"preset {row['name']!r} could not be fully resolved: {row['error']}"
+        for row in presets
+        if row.get("error")
+    ]
+    return _envelope(
+        "backfill-list",
+        locus="anywhere",
+        data={"presets": presets, "preset_dir": str(backfill.preset_root())},
+        warnings=warnings,
+    )
+
+
+@backfill_cmd.command(name="list")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def backfill_list_cmd(as_json: bool) -> None:
+    """List every shipped backfill preset with its adapters, tables and needs."""
+    _emit(_build_backfill_list(), as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# backfill run
+# ---------------------------------------------------------------------------
+
+
+def _build_backfill_run(
+    cap: Any,
+    *,
+    spec: str,
+    slice_spec: Optional[str],
+    limit: Optional[int],
+    dataset: str,
+    resume: bool,
+    run_id: Optional[str],
+    out_dir: Optional[str],
+    retry_failed_archives: bool,
+) -> dict[str, Any]:
+    """Build the ``backfill-run`` envelope: every unit this invocation drove.
+
+    IN-POD ONLY -- the refusal is in :func:`backfill_run_cmd`, BEFORE this, so
+    nothing is planned, no run id is minted and no directory is created off
+    pod.
+
+    THE ORDER PER UNIT IS shard -> ingest -> verify -> record, and the record
+    is written last. See :func:`clearinghouse_backfill.run_backfill`.
+
+    THE NAMESPACE-WIDE REGISTRY ORPHAN CHECK RUNS AT THE END, always, and is
+    the same :meth:`ClearinghouseCapability.parameter_set_orphans` that
+    ``load``, ``verify`` and ``health`` use -- not a second set of rules. Its
+    findings are reported IN FULL and make this command exit non-zero
+    (:func:`_exit_on_integrity_failure`), and they do NOT un-mark a unit this
+    run verified: an orphan is a property of the namespace, possibly left by
+    another writer, and retracting proof that this run's rows landed would be
+    a lie told to make a different problem look tidier.
+    """
+    backfill, manifest, manifest_path, plan, preset = _resolve_backfill_target(
+        spec, slice_spec=slice_spec, limit=limit
+    )
+    resolved_run_id = run_id or _new_backfill_run_id()
+    out = backfill.resolve_out(out_dir, resolved_run_id)
+    if resume:
+        # --resume ADOPTS the state file's run id, which is what makes
+        # `--resume --out DIR` work without the operator remembering the id.
+        adopted = backfill.find_run_for_out(out) if run_id is None else run_id
+        if adopted is None:
+            raise backfill.BackfillError(
+                f"backfill run --resume found no run to resume at {out}: "
+                f"neither a {backfill.BACKFILL_STATE_FILE} there nor a "
+                "registration naming that out path. Pass --run-id <id> (its "
+                "default --out is ~/clearinghouse-shards/<id>/), or drop "
+                "--resume to start a new run."
+            )
+        resolved_run_id = adopted
+        out = backfill.resolve_out(out_dir, resolved_run_id)
+
+    # FREEZE THE UNIT LIST BEFORE ANYTHING IS SUBMITTED. For an adapter-unit
+    # plan (the genome archives) the unit set was DISCOVERED from a live
+    # service; this persists it in the run's state file on the first
+    # invocation and drives the persisted list on every later one, so a
+    # --resume cannot pick up an archive uploaded since or renumber its
+    # --limit window. Inert for slice and single plans.
+    plan = backfill.freeze_adapter_units(
+        out, run_id=resolved_run_id, plan=plan, limit=limit
+    )
+    registration = backfill.register_run(
+        run_id=resolved_run_id,
+        out=out,
+        tenant=TENANT,
+        dataset=dataset,
+        manifest=manifest,
+        manifest_path=manifest_path,
+        slice_spec=plan.slice_spec,
+        limit=limit,
+        preset=preset,
+        unit_kind=plan.kind,
+        resume=resume,
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    backfill.record_planned_units(out, run_id=resolved_run_id, units=plan.units)
+
+    result = backfill.run_backfill(
+        cap,
+        manifest=manifest,
+        manifest_path=manifest_path,
+        plan=plan,
+        out=out,
+        run_id=resolved_run_id,
+        limit=limit,
+        resume=resume,
+        tenant=TENANT,
+        dataset=dataset,
+        retry_failed_archives=retry_failed_archives,
+    )
+    units = result["units"]
+    incomplete = backfill.exit_states(units)
+    warnings: list[str] = []
+    partial = [u["unit"] for u in units if u["state"] == backfill.UNIT_PARTIAL]
+    if partial:
+        warnings.append(
+            f"{len(partial)} unit(s) are PARTIAL, not done, because --limit "
+            f"stopped them ({partial[:5]}{', ...' if len(partial) > 5 else ''}). "
+            "The rows that landed are correct and stay; a later run without "
+            "--limit processes these units again and fill-only discards what "
+            "is already there."
+        )
+    if plan.vanished_units:
+        warnings.append(
+            f"{len(plan.vanished_units)} FROZEN unit(s) are no longer reported "
+            f"by the source ({list(plan.vanished_units[:5])}"
+            f"{', ...' if len(plan.vanished_units) > 5 else ''}). The unit list "
+            "was frozen when this run was created, so these were part of the "
+            "corpus this run claims to cover; each is still attempted and its "
+            "adapter refuses with the cause, which leaves the unit incomplete "
+            "and exits non-zero rather than shrinking the run to fit the loss."
+        )
+    if plan.units_dropped_by_limit:
+        warnings.append(
+            f"--limit {limit} capped the UNIT COUNT for this adapter: "
+            f"{plan.units_dropped_by_limit} unit(s) of the frozen sorted list "
+            "were not attempted at all."
+        )
+    data = _backfill_plan_data(
+        plan=plan,
+        run_id=resolved_run_id,
+        out=out,
+        preset=preset,
+        manifest_path=manifest_path,
+        tenant=TENANT,
+        dataset=dataset,
+        limit=limit,
+        resume=resume,
+    )
+    data.update(
+        {
+            "retry_failed_archives": retry_failed_archives,
+            "registration": registration,
+            "units": units,
+            "incomplete_units": incomplete,
+            "state_file": str(backfill.state_path(out)),
+            "parameter_set_integrity": cap.parameter_set_orphans(),
+        }
+    )
+    return _envelope("backfill-run", locus=_locus(cap), data=data, warnings=warnings)
+
+
+def _new_backfill_run_id() -> str:
+    """Mint a backfill run id from the sharder's ONE ULID minter."""
+    from ...domains.kbase.berdl.clearinghouse_shard import new_ulid
+
+    return new_ulid()
+
+
+def _exit_on_incomplete_units(envelope: dict[str, Any]) -> None:
+    """Exit non-zero when any unit is ``incomplete``. Called AFTER :func:`_emit`.
+
+    An ``incomplete`` unit is a RETRYABLE FAILURE that nobody asked for, and
+    it exits non-zero even when every batch that was emitted verified --
+    "the rows I wrote are correct" is not "the unit is finished". ``partial``
+    (a ``--limit`` stop) deliberately does NOT exit non-zero: it is the
+    outcome the operator asked for, and failing on it would train them to
+    ignore the exit code of the sampling runs they do most often.
+    """
+    if envelope.get("data", {}).get("incomplete_units"):
+        raise SystemExit(1)
+
+
+_SLICE_HELP = (
+    "Restrict a mongo backfill to a two-lowercase-hex-digit key prefix ('00') "
+    "or an inclusive range of them ('00-0f'). Each prefix is ONE UNIT of "
+    "work, mapped to the adapter's half-open [AA, next(BB)) range via its "
+    "min_key/max_key locator keys (max_key omitted for 'ff', which has no "
+    "successor). Omitted, all 256 prefixes run as units. REFUSED for any "
+    "other adapter -- a slice is a range of a mongo sort key."
+)
+
+_LIMIT_HELP = (
+    "Cap the work per unit. Adapter-defined: records per source per slice for "
+    "mongo, records of the frozen ordered selection for the arc store, and the "
+    "NUMBER OF UNITS for an adapter whose units are not slices (the first N of "
+    "its frozen sorted list). A unit a --limit stopped is recorded PARTIAL, "
+    "never done, and is processed again by a later run without --limit."
+)
+
+
+@backfill_cmd.command(name="run")
+@click.argument("preset")
+@click.option("--slice", "slice_spec", default=None, help=_SLICE_HELP)
+@click.option("--limit", "limit", type=int, default=None, help=_LIMIT_HELP)
+@click.option(
+    "--dataset",
+    "dataset",
+    default=NAMESPACE,
+    show_default=True,
+    help="Target dataset. Part of the run's IMMUTABLE identity: a scratch run "
+    "and a production run can never share a run id or a ledger, because "
+    "--resume refuses a dataset that differs from the registered one.",
+)
+@click.option(
+    "--resume",
+    "resume",
+    is_flag=True,
+    default=False,
+    help="Adopt the run recorded at --out (or named by --run-id), skip units "
+    "already done, and redo an unfinished one. Reconciles the ledger BEFORE "
+    "deleting anything, reuses every published batch, and regenerates only "
+    "unpublished files. REFUSES any option that conflicts with the run's "
+    "registered identity.",
+)
+@click.option("--run-id", "run_id", default=None, help="Run id (default: a new ULID).")
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Local shard directory (default: ~/clearinghouse-shards/<run_id>/).",
+)
+@click.option(
+    "--retry-failed-archives",
+    "retry_failed_archives",
+    is_flag=True,
+    default=False,
+    help="Passed to the kbdl_hash adapter through the run context: submit a "
+    "recorded NEW hash-job attempt for archives an earlier run left "
+    "incomplete through member errors. Inert for every other adapter.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def backfill_run_cmd(
+    preset: str,
+    slice_spec: Optional[str],
+    limit: Optional[int],
+    dataset: str,
+    resume: bool,
+    run_id: Optional[str],
+    out_dir: Optional[str],
+    retry_failed_archives: bool,
+    as_json: bool,
+) -> None:
+    """Shard, ingest, verify and record EACH UNIT in turn (IN-POD ONLY).
+
+    PRESET is a shipped preset name (see ``backfill list``) or a path to a
+    manifest. Everything runs here, in this process, inside the pod: the pod
+    PULLS from the source, shards onto its own local disk under --out, reads
+    those files back itself and appends them as DataFrames (Spark executors
+    cannot see the pod's local disk), verifies the unit against the ledger,
+    and only then records the unit done.
+
+    Runs in the FOREGROUND and is expected to be killed by a pod restart. It
+    is not a daemon. Re-run with --resume: units already done are skipped,
+    the unit that was in flight is redone exactly once, and every published
+    batch is reused rather than regenerated.
+
+    Exits non-zero if any unit is INCOMPLETE, or if the namespace-wide
+    parameter-set registry check finds an orphan -- without un-marking any
+    unit this run verified.
+    """
+    cap = _capability()
+    # The locus refusal is FIRST, before the preset is resolved, before a run
+    # id is minted and before any directory is created: a `backfill run` off a
+    # laptop must leave nothing behind at all.
+    _require_in_pod_or_refuse(cap, "backfill run")
+    try:
+        envelope = _build_backfill_run(
+            cap,
+            spec=preset,
+            slice_spec=slice_spec,
+            limit=limit,
+            dataset=dataset,
+            resume=resume,
+            run_id=run_id,
+            out_dir=out_dir,
+            retry_failed_archives=retry_failed_archives,
+        )
+    except _backfill_error_types() as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(envelope, as_json=as_json)
+    # Both checks run, and both after the envelope: an operator needs to see
+    # WHAT is wrong, and the exit code then says that something is.
+    _exit_on_incomplete_units(envelope)
+    _exit_on_integrity_failure(envelope)
+
+
+# ---------------------------------------------------------------------------
+# backfill shard
+# ---------------------------------------------------------------------------
+
+
+def _build_backfill_shard(
+    *,
+    spec: str,
+    out_dir: str,
+    slice_spec: Optional[str],
+    limit: Optional[int],
+    resume: bool,
+    run_id: Optional[str],
+) -> dict[str, Any]:
+    """Build the ``backfill-shard`` envelope: the SHARD half, unit by unit.
+
+    Runs ANYWHERE -- sharding needs CPU and disk, no pod and no credentials --
+    which is what makes it useful on its own: a unit can be built on a big
+    machine and loaded from the pod later. ``--resume`` NEVER deletes a
+    published batch: a unit whose ``run.json`` exists has finished sharding
+    and is left untouched, and a unit with no inventory has only unpublished
+    (possibly truncated) files, which are what gets cleared.
+
+    No ingest, no verification and therefore NO UNIT STATE: ``backfill-state``
+    records a unit only once it has been proven to have landed, which this
+    half cannot do. ``status`` on a shard-only directory reports the units as
+    planned-not-started, which is the truth.
+    """
+    backfill, manifest, manifest_path, plan, preset = _resolve_backfill_target(
+        spec, slice_spec=slice_spec, limit=limit
+    )
+    out = Path(out_dir).expanduser()
+    resolved_run_id = run_id
+    if resume and resolved_run_id is None:
+        resolved_run_id = backfill.find_run_for_out(out)
+    if resolved_run_id is None:
+        resolved_run_id = _new_backfill_run_id()
+    out.mkdir(parents=True, exist_ok=True)
+    # Same freeze as `backfill run` -- see there. Sharding is the half that
+    # submits the hash jobs, so the list has to be fixed before it too.
+    plan = backfill.freeze_adapter_units(
+        out, run_id=resolved_run_id, plan=plan, limit=limit
+    )
+    backfill.record_planned_units(out, run_id=resolved_run_id, units=plan.units)
+    reports = backfill.shard_units(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        plan=plan,
+        out=out,
+        run_id=resolved_run_id,
+        limit=limit,
+        resume=resume,
+        tenant=TENANT,
+        dataset=NAMESPACE,
+    )
+    data = _backfill_plan_data(
+        plan=plan,
+        run_id=resolved_run_id,
+        out=out,
+        preset=preset,
+        manifest_path=manifest_path,
+        tenant=TENANT,
+        dataset=NAMESPACE,
+        limit=limit,
+        resume=resume,
+    )
+    data["units"] = reports
+    return _envelope(
+        "backfill-shard",
+        locus="anywhere",
+        data=data,
+        warnings=[
+            "backfill shard writes shards only -- nothing was ingested and no "
+            "unit was recorded done. A unit is recorded only once its rows are "
+            "proven to have landed, which this half cannot do; run "
+            "`backfill run --resume` or `backfill load` from the pod."
+        ],
+    )
+
+
+@backfill_cmd.command(name="shard")
+@click.argument("preset")
+@click.option(
+    "--out",
+    "out_dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Shard directory root; one subdirectory per unit under <out>/units/.",
+)
+@click.option("--slice", "slice_spec", default=None, help=_SLICE_HELP)
+@click.option("--limit", "limit", type=int, default=None, help=_LIMIT_HELP)
+@click.option(
+    "--resume",
+    "resume",
+    is_flag=True,
+    default=False,
+    help="Reuse every unit that already published a run.json and clear only "
+    "unpublished files from the rest. Never deletes a published batch.",
+)
+@click.option("--run-id", "run_id", default=None, help="Run id (default: a new ULID).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def backfill_shard_cmd(
+    preset: str,
+    out_dir: str,
+    slice_spec: Optional[str],
+    limit: Optional[int],
+    resume: bool,
+    run_id: Optional[str],
+    as_json: bool,
+) -> None:
+    """Build every planned unit's shards under --out. Runs anywhere."""
+    try:
+        envelope = _build_backfill_shard(
+            spec=preset,
+            out_dir=out_dir,
+            slice_spec=slice_spec,
+            limit=limit,
+            resume=resume,
+            run_id=run_id,
+        )
+    except (*_backfill_error_types(), *_manifest_error_types()) as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# backfill load
+# ---------------------------------------------------------------------------
+
+
+def _build_backfill_load(
+    cap: Any,
+    *,
+    shard_dir: str,
+    run_id: Optional[str],
+    dataset: str,
+    dry_run: bool,
+    reconcile: bool,
+    unit: Optional[str],
+) -> dict[str, Any]:
+    """Build the ``backfill-load`` envelope: the INGEST half of a shard run.
+
+    IN-POD ONLY (the refusal is in :func:`backfill_load_cmd`, before this).
+    Thin over :meth:`ClearinghouseCapability.ingest_shards` plus, when
+    anything was written, its UNIT VERIFICATION -- which now includes the
+    per-unit registry check: a unit completes only when every one of its
+    batches is proven AND every ``parameter_set_hash`` its result batches
+    carry is present in the target's registry.
+
+    ``--run-id`` names the LOAD EXECUTION, not the shard run. Loading another
+    run's shards is therefore A NEW LOAD: the capability mints a fresh
+    execution, rewrites each row's ``ingest_batch_id`` to its own, and keeps
+    the shard batch ids as provenance -- so the SAME shard directory can be
+    loaded into scratch, checked, and promoted to production, with each load
+    provable by its own per-batch counts and the mapping between them
+    recorded. ``data.id_mapping`` is that mapping.
+
+    ``--unit`` restricts both the ingest and the verification to one unit.
+    Note that the ingest still walks the whole inventory in order, so a unit
+    loaded out of order is REFUSED rather than loaded: a result batch may
+    depend on a registry batch an earlier unit published.
+
+    THE NAMESPACE-WIDE REGISTRY ORPHAN CHECK RUNS AT THE END, always, exactly
+    as in ``load``.
+    """
+    backfill = _backfill_module()
+    ingest = cap.ingest_shards(
+        shard_dir,
+        run_id=run_id,
+        dry_run=dry_run,
+        reconcile=reconcile,
+        tenant=TENANT,
+        dataset=dataset,
+        unit=unit,
+    )
+    execution_id = ingest.get("execution_id") or ingest.get("run_id")
+    verification: dict[str, Any] = {}
+    if not dry_run and execution_id:
+        verification = cap.verify_run(shard_dir, run_id=execution_id, unit=unit)
+    warnings: list[str] = []
+    if dry_run:
+        warnings.append(
+            "dry-run: no rows were ingested, no ledger line was written and no "
+            "verification was run; the reported action for each batch is what "
+            "a real load WOULD do."
+        )
+    lock = ingest.get("lock") or {}
+    if lock.get("took_over_from"):
+        warnings.append(
+            "the namespace ingest lock was held by a process that is gone "
+            f"(previous holder: {lock['took_over_from']}); it was taken over "
+            "by this run."
+        )
+    warnings.extend(str(line) for line in verification.get("discrepancies") or [])
+    unverified = [
+        str(report.get("unit_id"))
+        for report in verification.get("units") or []
+        if not report.get("ok")
+    ]
+    return _envelope(
+        "backfill-load",
+        locus=_locus(cap),
+        data={
+            "shard_dir": shard_dir,
+            "unit": unit,
+            "run_id": ingest.get("run_id", run_id),
+            "execution_id": execution_id,
+            "source_run_id": ingest.get("source_run_id"),
+            # THE MAPPING a re-load records: this execution's id against the
+            # shard run whose batch ids the rows were sharded with.
+            "id_mapping": {
+                "shard_run_id": ingest.get("source_run_id"),
+                "load_execution_id": execution_id,
+            },
+            "namespace": ingest.get("namespace"),
+            "state_dir": ingest.get("state_dir"),
+            "dry_run": ingest.get("dry_run", dry_run),
+            "reconcile": reconcile,
+            "lock": ingest.get("lock"),
+            "tables": ingest.get("tables", []),
+            "units": verification.get("units", []),
+            "unverified_units": unverified,
+            "discrepancies": verification.get("discrepancies", []),
+            "parameter_set_integrity": cap.parameter_set_orphans(),
+        },
+        warnings=warnings,
+    )
+
+
+@backfill_cmd.command(name="load")
+@click.argument("shard_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--run-id",
+    "run_id",
+    default=None,
+    help="LOAD EXECUTION id to resume (default: mint a new execution). This "
+    "names the execution, not the shard run: loading another run's shards is "
+    "a new load that keeps the shard batch ids as provenance and records the "
+    "mapping in data.id_mapping.",
+)
+@click.option(
+    "--unit",
+    "unit",
+    default=None,
+    help="Restrict the ingest AND the verification to one unit id. A unit "
+    "loaded out of order is refused -- its result batches may depend on a "
+    "registry batch an earlier unit published.",
+)
+@click.option(
+    "--dataset", "dataset", default=NAMESPACE, show_default=True, help="Target dataset."
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Run the pre-write assertion and report what each batch would do, "
+    "writing nothing (genuinely read-only; no verification either).",
+)
+@click.option(
+    "--reconcile",
+    "reconcile",
+    is_flag=True,
+    default=False,
+    help="Resolve an ambiguous 'started' batch against the table's Iceberg "
+    "snapshot history instead of refusing.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def backfill_load_cmd(
+    shard_dir: str,
+    run_id: Optional[str],
+    unit: Optional[str],
+    dataset: str,
+    dry_run: bool,
+    reconcile: bool,
+    as_json: bool,
+) -> None:
+    """Ingest and VERIFY a backfill shard directory (IN-POD ONLY).
+
+    SHARD_DIR is a local directory holding the run.json a completed shard run
+    published, plus the batch files it names -- either <out>/units/<unit>/ from
+    a `backfill shard`, or any `kbu clearinghouse shard` output.
+
+    Unlike `kbu clearinghouse load`, this also runs the UNIT VERIFICATION
+    (including the per-unit registry check) after the ingest, so the command's
+    answer is "did this land and is it provable", not only "what did I
+    append". Exits non-zero on an unverified unit or a registry orphan.
+    """
+    cap = _capability()
+    _require_in_pod_or_refuse(cap, "backfill load")
+    envelope = _build_backfill_load(
+        cap,
+        shard_dir=shard_dir,
+        run_id=run_id,
+        dataset=dataset,
+        dry_run=dry_run,
+        reconcile=reconcile,
+        unit=unit,
+    )
+    _emit(envelope, as_json=as_json)
+    if envelope["data"]["unverified_units"] or envelope["data"]["discrepancies"]:
+        raise SystemExit(1)
+    _exit_on_integrity_failure(envelope)
+
+
+# ---------------------------------------------------------------------------
+# backfill status
+# ---------------------------------------------------------------------------
+
+
+def _build_backfill_status(
+    *, run_id: Optional[str], out_dir: Optional[str]
+) -> dict[str, Any]:
+    """Build the ``backfill-status`` envelope: three records merged into one.
+
+    Runs ANYWHERE: every input is a local file (the state file, each unit's
+    ``run.json``, each unit's ledger), so an operator can read a run's state
+    without a pod and without Spark. Nothing is read from the lake here, which
+    is why the row counts are the LEDGER's -- what the loads recorded writing.
+    ``kbu clearinghouse verify`` is what checks those against the live tables.
+
+    Reports all SIXTEEN tables, iterated from
+    :func:`clearinghouse_schema.table_configs`, so the ``parameter_set``
+    registry appears beside the fifteen per-type tables rather than being
+    dropped by an ``ENTITY_TYPES x KINDS`` loop that cannot see it.
+    """
+    backfill = _backfill_module()
+    if out_dir is None and run_id is None:
+        raise backfill.BackfillError(
+            "backfill status needs --run-id, or --out to find the run from. "
+            "With neither there is nothing to look up: a run's state file "
+            "lives under its --out and its registration under its run id."
+        )
+    out = Path(out_dir).expanduser() if out_dir else backfill.resolve_out(None, run_id)
+    resolved_run_id = run_id or backfill.find_run_for_out(out)
+    if resolved_run_id is None:
+        raise backfill.BackfillError(
+            f"backfill status found no run at {out}: neither a "
+            f"{backfill.BACKFILL_STATE_FILE} there nor a registration naming "
+            "that out path. Pass --run-id, or check the path."
+        )
+    report = backfill.status_report(run_id=resolved_run_id, out=out)
+    warnings: list[str] = []
+    totals = report["totals"]
+    if totals.get(backfill.UNIT_INCOMPLETE):
+        warnings.append(
+            f"{totals[backfill.UNIT_INCOMPLETE]} unit(s) are INCOMPLETE -- a "
+            "retryable failure remains. Re-run `backfill run --resume`."
+        )
+    if totals.get(backfill.UNIT_PARTIAL):
+        warnings.append(
+            f"{totals[backfill.UNIT_PARTIAL]} unit(s) are PARTIAL (--limit "
+            "stopped them). A later run without --limit processes them again."
+        )
+    if report["unexpected_tables"]:
+        warnings.append(
+            "the ledger records rows for table(s) that are not in the "
+            f"clearinghouse schema: {report['unexpected_tables']}. They are "
+            "reported separately rather than folded into a total."
+        )
+    return _envelope(
+        "backfill-status", locus="anywhere", data=report, warnings=warnings
+    )
+
+
+@backfill_cmd.command(name="status")
+@click.option("--run-id", "run_id", default=None, help="The backfill run id.")
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="The run's shard directory. Used to FIND the run when --run-id is "
+    "omitted, via its state file or the registration that recorded this path.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def backfill_status_cmd(
+    run_id: Optional[str], out_dir: Optional[str], as_json: bool
+) -> None:
+    """Merge the state file, each unit's run.json and each unit's ledger.
+
+    Reports units done / partial / incomplete / pending with their reasons,
+    batches and rows ingested per table across all sixteen tables (the
+    parameter-set registry included), skips by reason, and any watermark an
+    adapter persisted through the run context. Reads only local files, so it
+    runs anywhere.
+    """
+    try:
+        envelope = _build_backfill_status(run_id=run_id, out_dir=out_dir)
+    except _backfill_error_types() as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(envelope, as_json=as_json)

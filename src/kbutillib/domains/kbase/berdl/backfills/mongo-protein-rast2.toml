@@ -1,0 +1,118 @@
+# `mongo-protein-rast2` -- THE RAST FUNCTIONAL ROLES, AND THE FUNCTIONS THEY
+# NAME.
+#
+# WHAT IT READS. TWO collections in the `database` database of the Mongo 8
+# store on poplar:
+#
+#   protein_to_rast2    399.9M docs, {_id, function?, quality?, annotations?}
+#   seq_protein         420.8M docs, {_id, z_seq}       the sequences
+#
+# ABOUT 28% OF THE PRIMARY COLLECTION IS `_id`-ONLY STUBS (survey,
+# 2026-09-24): every annotation field is OPTIONAL, and roughly 112M documents
+# carry none of them. `require_fields = ["function"]` is what turns that into
+# a COUNTED, explained drop -- ~112M under `missing:function` on the source's
+# run.json entry -- rather than 112M rows of nulls in the lake or 112M
+# `shard-value-error`s that say nothing about why.
+#
+# THE REQUIREMENT IS CHECKED BEFORE THE JOIN, AND THAT IS THE POINT. The
+# adapter evaluates a requirement naming a plain primary field on the raw
+# document, before it builds the page's `$in` list. At a 28% stub rate over
+# 399.9M documents that is ~112M sequence lookups never issued. (A requirement
+# naming a field the JOIN produces is necessarily checked after the merge
+# instead; both report the same reason key, so `skipped()` reads the same
+# either way.)
+#
+# `quality` SUB-FIELDS ARE STRINGS, NOT NUMBERS, in this store. Nothing here
+# coerces them: `payload` is `@json(function, quality, annotations)`, which
+# canonicalises whatever the document held. A reader that wants a float parses
+# it; a backfill that invented one would be recording a number the store never
+# said.
+#
+# WHY A JOIN, HOW IT WORKS, AND WHAT A MISS COSTS. See
+# `mongo-protein-kofam`. In short: a clearinghouse protein's identity IS its
+# sequence, this collection has none, `_id` is not trusted as that identity,
+# so the adapter issues ONE
+# `find({_id: {"$in": [...page...]}}, {_id: 1, z_seq: 1})` per page against
+# `seq_protein` and counts an unmatched record under `no-join-match`.
+#
+# THE FUNCTION SOURCE NEEDS NO JOIN. A function's identity is the role TEXT,
+# which `protein_to_rast2` carries itself -- so the second source below reads
+# the primary collection alone and never pays for a lookup. Only the
+# protein-keyed result needs a sequence.
+#
+# IT WRITES NO PROTEIN ENTITIES. `mongo-protein-seq` is the preset that loads
+# the protein entities these results key on; load it first.
+#
+# THE SOURCE LABEL IS A PROVENANCE LABEL, NOT A TOOL VERSION, and the
+# PARAMETER SET IS `{}` -- a default run. See `mongo-protein-bakta`.
+#
+# WHERE IT RUNS AND THE UNIT. The BERDL pod against poplar's port, auth
+# disabled; one unit is one of the 256 two-hex-digit `_id` prefixes, cutting
+# the PRIMARY collection only.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo). BOTH
+# collections are listed -- the join reads one as surely as the cursor reads
+# the other.
+pulls_from = [
+  "poplar Mongo",
+  "mongodb://poplar.cels.anl.gov:27017/database.protein_to_rast2",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein (join)",
+]
+# EMPTY, deliberately -- see `mongo-protein-seq`.
+needs_env = []
+
+# ---- Protein: the RAST annotation result --------------------------------
+[[source]]
+name           = "mongo-protein-rast2-result"
+adapter        = "mongo"
+uri            = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database       = "database"
+collection     = "protein_to_rast2"
+sort_key       = "_id"
+require_fields = ["function"]
+entity_type    = "protein"
+kinds          = ["result"]
+
+  [source.join]
+  collection = "seq_protein"
+  fields     = { sequence = "z_seq" }
+  decompress = ["sequence"]
+
+  [source.hash]
+  # RECOMPUTED from the JOINED, decompressed sequence -- never `_id`.
+  raw_column = "sequence"
+
+  [source.result]
+  result_type         = "@const(annotation)"
+  source              = "@const(rast/mongo-protein_to_rast2)"
+  result_type_version = "@const(1.0)"
+  payload             = "@json(function, quality, annotations)"
+  parameter_set       = {}
+
+# ---- Function: identity + content (the functional role text) ------------
+#
+# The RAST role string IS the function's identity: the function entity is
+# hashed from the same text that becomes its definition, so `protein_result`'s
+# payload and `function_entity` agree on what the function is with no third
+# table to join -- exactly as `mongo-protein-bakta` does with `product`.
+#
+# NO JOIN HERE. The role text lives in this collection, so this source reads
+# the primary cursor alone. `require_fields` drops the same ~28% of stubs,
+# before any work is done on them.
+[[source]]
+name           = "mongo-protein-rast2-function"
+adapter        = "mongo"
+uri            = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database       = "database"
+collection     = "protein_to_rast2"
+sort_key       = "_id"
+require_fields = ["function"]
+entity_type    = "function"
+kinds          = ["entity", "content"]
+
+  [source.hash]
+  raw_column = "function"
+
+  [source.content]
+  definition = "function"

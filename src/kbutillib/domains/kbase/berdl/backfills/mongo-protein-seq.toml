@@ -1,0 +1,78 @@
+# `mongo-protein-seq` -- THE PROTEIN IDENTITIES, FROM THE ONLY COLLECTION THAT
+# HOLDS A SEQUENCE.
+#
+# WHAT IT READS. One collection: `seq_protein` (420.8M documents) in the
+# `database` database of the Mongo 8 store on poplar. Each document is
+# `{_id, z_seq}` and nothing else -- `z_seq` is the amino-acid sequence as a
+# zlib blob (magic 0x789c).
+#
+# IT IS THE FOUNDATION OF THE PRELOAD, and the order matters. Every other
+# mongo preset writes `protein_result` rows keyed by a protein entity hash;
+# this is the preset that puts the matching `protein_entity` and
+# `protein_content` rows in the lake. Load it FIRST (or accept that a result
+# row has nothing to join to until it is loaded). The one exception is
+# `mongo-protein-bakta`, whose collection carries the sequence itself and so
+# seeds its own protein entities.
+#
+# WHERE IT RUNS, AND WHY THE URI POINTS AT A HOSTNAME. These presets run IN
+# THE BERDL POD, not on poplar, so the connection is cross-site: the default
+# below names `poplar.cels.anl.gov:27017`, whose port is reachable from the
+# pod. AUTH IS DISABLED on the store, so there is no credential to carry and
+# `needs_env` is genuinely empty. `KBU_MONGO_URI` points the preset at a
+# relocated or tunnelled store without editing package data (which an
+# operator cannot edit anyway -- it is inside the installed wheel).
+#
+# THE UNIT IS A 1/256 SLICE. `_id` is a 64-character lowercase-hex sha256, so
+# the mongo adapter decomposes the source into the 256 two-hex-digit prefixes
+# of `sort_key`. One unit is one prefix -- a UNIFORM 1/256 sample, not a
+# biased first-N -- sharded, ingested, verified and recorded before the next
+# starts. `--slice 00 --limit 12000` is the scratch-dataset probe; see OP-C3
+# in `agent-io/docs/clearinghouse-schema-operator-runbook.md`.
+#
+# PAGE AND FILTER ON `_id` ONLY. The store has exactly one index, on `_id`.
+# `sort_key = "_id"` is therefore not a preference: any other sort or filter
+# field would scan 420.8M documents.
+#
+# IDENTITY IS RECOMPUTED, NEVER TRUSTED FROM `_id`. Mongo's `_id` is also a
+# 64-hex sha256 of the protein, but whether it equals what
+# `kbutillib.domains.identity.standardizers` computes from the sequence is
+# UNVERIFIED. `[source.hash].raw_column` therefore names the DECOMPRESSED
+# sequence and lets the standardizer recompute the identity. Whether the two
+# agree is a spot-check, deliberately not an assumption baked into this file.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo).
+pulls_from = [
+  "poplar Mongo",
+  "mongodb://poplar.cels.anl.gov:27017/database.seq_protein",
+]
+# EMPTY, deliberately. The one placeholder below has a default that is correct
+# from the pod and auth is disabled on the store, so nothing has to be
+# exported to run this preset.
+needs_env = []
+
+# ---- Protein: identity + content (the amino-acid sequence) --------------
+#
+# `decompress` is an ADAPTER LOCATOR key, not a mapping key: it renames and
+# zlib-decodes `z_seq` into a plain `sequence` field BEFORE the mapping half
+# sees the record, which is what lets `[source.content]` map an ordinary
+# string column. The raw blob is dropped once decoded, so no compressed bytes
+# reach the lake.
+[[source]]
+name        = "mongo-protein-seq"
+adapter     = "mongo"
+uri         = "${KBU_MONGO_URI:-mongodb://poplar.cels.anl.gov:27017}"
+database    = "database"
+collection  = "seq_protein"
+sort_key    = "_id"
+decompress  = { sequence = "z_seq" }
+entity_type = "protein"
+kinds       = ["entity", "content"]
+
+  [source.hash]
+  # RECOMPUTED from the decompressed sequence -- not the collection's `_id`.
+  raw_column = "sequence"
+
+  [source.content]
+  sequence   = "sequence"
+  seq_length = "@len(sequence)"

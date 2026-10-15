@@ -329,6 +329,35 @@ class TestJobLifecycle:
         assert envelope["data"]["status"] == "done"
         assert envelope["data"]["n_items"] == 2
 
+    def test_run_exits_one_when_the_job_ends_blocked(
+        self, runner: CliRunner, fake_council: List[str], items_file: Path
+    ) -> None:
+        """A halted endpoint blocks the job, and `run` says so with exit 1."""
+        job_id = _envelope(
+            runner.invoke(
+                main,
+                fake_council + ["submit", "--query", "go_mf", "--input", str(items_file), "--json"],
+            )
+        )["data"]["job_id"]
+
+        util = CouncilUtils(
+            council_config=fake_council[fake_council.index("--config") + 1],
+            store_url=fake_council[fake_council.index("--store") + 1],
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        )
+        try:
+            util.store().set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+        finally:
+            util.close()
+
+        result = runner.invoke(main, fake_council + ["run", "--job", job_id, "--json"])
+        envelope = _envelope(result)
+        assert result.exit_code == 1
+        assert envelope["data"]["blockers"]
+        assert any("blocked" in warning for warning in envelope["warnings"])
+
     def test_run_refuses_both_forms_at_once(
         self, runner: CliRunner, fake_council: List[str], items_file: Path
     ) -> None:

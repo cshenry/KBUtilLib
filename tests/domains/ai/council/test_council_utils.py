@@ -240,6 +240,21 @@ class TestJobControl:
         # Cancelling twice is not an error: it is terminal, not a transition.
         assert util.cancel(job_id)["status"] == "cancelled"
 
+    def test_run_reports_a_halted_endpoint_as_a_blocker(self, util: CouncilUtils) -> None:
+        """A halted endpoint means `run` returns blocked rather than hanging.
+
+        This is what ``kbu council run`` exits 1 on, so the blocker has to be
+        on the returned status and not merely in a log line.
+        """
+        job_id = util.submit("go_mf", _items()[:1])
+        util.store().set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+        status = util.run(job_id)
+        assert status["status"] != "done"
+        assert status["blockers"]
+        assert any("local" == blocker.get("endpoint") for blocker in status["blockers"])
+        # Nothing was spent against the halted endpoint.
+        assert status["worker"]["claimed"] == 0
+
     def test_delete_refuses_a_live_job(self, util: CouncilUtils) -> None:
         job_id = util.submit("go_mf", _items()[:1])
         with pytest.raises(ValueError, match="cancel it first"):

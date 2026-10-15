@@ -1,0 +1,3829 @@
+{
+ "description": "Ten rows of Jose Faria's CONCORDIA V3 GO council, inputs plus recorded per-role replies plus the recorded decision, so the replay parity check runs offline on any machine. Extracted by scripts/council/replay_go_v3.py --emit-fixture.",
+ "source": {
+  "input_and_menu": {
+   "path": "/scratch/chenry/go_council_v3/go_council_kit/input_strat100_jose_v3.jsonl",
+   "sha256": "b4c5278c5ce65e6d7e4477f261676633bd754407b9a97aacacbdc8f95b9dc69c"
+  },
+  "per_role_replies": {
+   "path": "/scratch/chenry/go_council_v3/go_council_kit/results_strat100_jose_v3.jsonl",
+   "sha256": "bc965496507c6535e037008781058a105d62c003214b141d027143fcd1a753ef"
+  }
+ },
+ "selection_rule": "The first ten `ok` rows by input_id, extended in input_id order until at least one meta-skipped and one meta-run row are included.",
+ "input_ids": [
+  148,
+  293,
+  631,
+  789,
+  1250,
+  1402,
+  1465,
+  1497,
+  1711,
+  2029
+ ],
+ "rows": [
+  {
+   "input": {
+    "input_id": 148,
+    "gene_row": 22,
+    "source": "KOFAMSCAN_annotation",
+    "text": "reco",
+    "candidates": [
+     {
+      "go_id": "GO:0009037",
+      "name": "tyrosine-based site-specific recombinase activity",
+      "def": "Catalysis of the formation of new phosphodiester bonds between a pair of short, unique DNA target sequences; occurs through a phosphotyrosyl intermediate in which the target sequence is first cleaved by the nucleophilic attack by a tyrosine in the active site.",
+      "score": 0.1495,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0009009",
+      "name": "site-specific recombinase activity",
+      "def": "Catalysis of the formation of new phosphodiester bonds between a pair of short, unique target DNA sequences.",
+      "score": 0.1477,
+      "height": 1,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0005047",
+      "name": "signal recognition particle binding",
+      "def": "Binding to a signal recognition particle.",
+      "score": 0.1208,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0008312",
+      "name": "7S RNA binding",
+      "def": "Binding to a 7S RNA, the RNA component of the signal recognition particle (SRP).",
+      "score": 0.1151,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:1990238",
+      "name": "double-stranded DNA endonuclease activity",
+      "def": "Catalysis of the hydrolysis of ester linkages within a double-stranded DNA molecule by creating internal breaks.",
+      "score": 0.0928,
+      "height": 1,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0140664",
+      "name": "ATP-dependent DNA damage sensor activity",
+      "def": "A molecule that recognises toxic DNA structures, and initiates a signaling response, driven by ATP hydrolysis.",
+      "score": 0.0843,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0017070",
+      "name": "U6 snRNA binding",
+      "def": "Binding to a U6 small nuclear RNA (U6 snRNA).",
+      "score": 0.0815,
+      "height": 1,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0016994",
+      "name": "precorrin-6A reductase activity",
+      "def": "Catalysis of the reaction: precorrin-6B + NADP+ = precorrin-6A + NADPH + H+.",
+      "score": 0.0728,
+      "height": 0,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0030621",
+      "name": "U4 snRNA binding",
+      "def": "Binding to a U4 small nuclear RNA (U4 snRNA).",
+      "score": 0.0815,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0043819",
+      "name": "precorrin-6A synthase (deacetylating) activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + H2O + precorrin-5 = S-adenosyl-L-homocysteine + acetate + 2 H+ + precorrin-6X.",
+      "score": 0.0645,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0030624",
+      "name": "U6atac snRNA binding",
+      "def": "Binding to a U6atac small nuclear RNA (U6atac snRNA).",
+      "score": 0.0815,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0043818",
+      "name": "precorrin-3B synthase activity",
+      "def": "Catalysis of the reaction: H+ + NADH + O2 + precorrin-3A = H2O + NAD+ + precorrin-3B.",
+      "score": 0.0631,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0043115",
+      "name": "precorrin-2 dehydrogenase activity",
+      "def": "Catalysis of the reaction: NAD+ + precorrin-2 = 2 H+ + NADH + sirohydrochlorin.",
+      "score": 0.0601,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0004971",
+      "name": "AMPA glutamate receptor activity",
+      "def": "An ionotropic glutamate receptor activity that exhibits fast gating by glutamate and acts by opening a cation channel permeable to sodium, potassium, and, in the absence of a GluR2 subunit, calcium.",
+      "score": 0.0686,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0030788",
+      "name": "precorrin-2 C20-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + precorrin-2 = S-adenosyl-L-homocysteine + H+ + precorrin-3A.",
+      "score": 0.0591,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0061714",
+      "name": "folic acid receptor activity",
+      "def": "Combining selectively with extracellular folic acid and delivering it into the cell via endocytosis.",
+      "score": 0.0676,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0046026",
+      "name": "precorrin-4 C11-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + precorrin-4 = S-adenosyl-L-homocysteine + precorrin 5.",
+      "score": 0.0581,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0043778",
+      "name": "cobalt-precorrin-8 methylmutase activity",
+      "def": "Catalysis of the reaction: cobalt-precorrin 8 = cobyrinate.",
+      "score": 0.0564,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0004948",
+      "name": "calcitonin receptor activity",
+      "def": "Combining with calcitonin and transmitting the signal across the membrane by activating an associated G-protein; promotes the exchange of GDP for GTP on the alpha subunit of a heterotrimeric G-protein complex.",
+      "score": 0.0666,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0016993",
+      "name": "precorrin-8X methylmutase activity",
+      "def": "Catalysis of the reaction: precorrin-8X = hydrogenobyrinate.",
+      "score": 0.0564,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0042834",
+      "name": "peptidoglycan binding",
+      "def": "Interacting selectively and non-covalently, in a non-covalent manner, with peptidoglycan, any of a class of glycoconjugates found in bacterial cell walls.",
+      "score": 0.066,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0004983",
+      "name": "neuropeptide Y receptor activity",
+      "def": "Combining with neuropeptide Y to initiate a change in cell activity.",
+      "score": 0.0552,
+      "height": 1,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0043777",
+      "name": "cobalt-precorrin-7 C15-methyltransferase activity",
+      "def": "Catalysis of the reaction: cobalt-precorrin 7 + S-adenosyl-L-methionine = cobalt-precorrin 8 + S-adenosyl-L-homocysteine + CO2.",
+      "score": 0.0549,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0001609",
+      "name": "G protein-coupled adenosine receptor activity",
+      "def": "Combining with adenosine and transmitting the signal across the membrane by activating an associated G-protein; promotes the exchange of GDP for GTP on the alpha subunit of a heterotrimeric G-protein complex.",
+      "score": 0.0635,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0016934",
+      "name": "extracellularly glycine-gated chloride channel activity",
+      "def": "Enables the transmembrane transfer of a chloride ion by a channel that opens when glycine is bound by the channel complex or one of its constituent parts on the extracellular side of the plasma membrane.",
+      "score": 0.0628,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0004984",
+      "name": "olfactory receptor activity",
+      "def": "Combining with an odorant and transmitting the signal from one side of the membrane to the other to initiate a change in cell activity in response to detection of smell.",
+      "score": 0.0526,
+      "height": 1,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0004966",
+      "name": "galanin receptor activity",
+      "def": "Combining with galanin to initiate a change in cell activity.",
+      "score": 0.0623,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0015344",
+      "name": "siderophore uptake transmembrane transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: siderophore-iron(ferrioxamine)(out) + H+(out) = siderophore-iron(ferrioxamine)(in) + H+(in).",
+      "score": 0.0525,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0001646",
+      "name": "cAMP receptor activity",
+      "def": "Combining with cAMP (cyclic AMP, adenosine 3',5'-cyclophosphate) and transmitting the signal from one side of the membrane to the other to initiate a change in cell activity.",
+      "score": 0.052,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0017125",
+      "name": "deoxycytidyl transferase activity",
+      "def": "Catalysis of the insertion of a dCMP residue opposite a template abasic site in DNA.",
+      "score": 0.5984,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0070579",
+      "name": "DNA 5-methylcytosine dioxygenase activity",
+      "def": "Catalysis of the reaction: 5-methylcytosine (5mC) in DNA + 2-oxoglutarate + O2 = 5-hydroxymethylcytosine (5hmC) in DNA + succinate + CO2. This reaction is the first step in the removal of cytosine methylated on position 5 in double-stranded DNA. This activity ",
+      "score": 0.3428,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0048306",
+      "name": "calcium-dependent protein binding",
+      "def": "Binding to a protein or protein complex in the presence of calcium.",
+      "score": 0.2149,
+      "height": 1,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0031491",
+      "name": "nucleosome binding",
+      "def": "Binding to a nucleosome, a complex comprised of DNA wound around a multisubunit core and associated proteins, which forms the primary packing unit of DNA into higher order structures.",
+      "score": 0.3151,
+      "height": 1,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0000403",
+      "name": "Y-form DNA binding",
+      "def": "Binding to a DNA segment shaped like a Y. This shape occurs when DNA contains a region of paired double-stranded DNA on one end and a region of unpaired DNA strands on the opposite end.",
+      "score": 0.3227,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0045027",
+      "name": "DNA end binding",
+      "def": "Binding to DNA ends exposed by the creation of double-strand breaks (DSBs).",
+      "score": 0.2936,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0070975",
+      "name": "FHA domain binding",
+      "def": "Binding to a FHA domain of a protein. The FHA domain is a phosphopeptide recognition domain found in many regulatory proteins, and consists of approximately 80-100 amino acid residues folded into an 11-stranded beta sandwich.",
+      "score": 0.2122,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0017116",
+      "name": "single-stranded DNA helicase activity",
+      "def": "Catalysis of the reaction: ATP + H2O = ADP + phosphate, in the presence of single-stranded DNA; drives the unwinding of a DNA helix.",
+      "score": 0.2134,
+      "height": 1,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0042809",
+      "name": "nuclear vitamin D receptor binding",
+      "def": "Binding to a nuclear vitamin D receptor, a nuclear receptor that mediates the action of vitamin D by binding DNA and controlling the transcription of hormone-sensitive genes.",
+      "score": 0.1734,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0003911",
+      "name": "DNA ligase (NAD+) activity",
+      "def": "Catalysis of the reaction: NAD+ + deoxyribonucleotide(n) + deoxyribonucleotide(m) = AMP + nicotinamide nucleotide + deoxyribonucleotide(n+m).",
+      "score": 0.1914,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0036310",
+      "name": "ATP-dependent DNA/DNA annealing activity",
+      "def": "An ATP-dependent activity that facilitates the formation of a complementary double-stranded DNA molecule.",
+      "score": 0.2139,
+      "height": 0,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 148,
+      "source": "KOFAMSCAN_annotation",
+      "row": 22
+     }
+    ]
+   },
+   "result": {
+    "input_id": 148,
+    "gene_row": 22,
+    "source": "KOFAMSCAN_annotation",
+    "text": "reco",
+    "status": "ok",
+    "decline_reason": "contentless",
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {},
+    "proposers": {
+     "gemini35flash": {
+      "picked": [],
+      "overall_confidence": "high",
+      "no_functional_content": true,
+      "notes": "The annotation string 'reco' is a bare gene symbol (likely recO) and does not state any functional activity."
+     },
+     "gpt54": {
+      "picked": [],
+      "overall_confidence": "high",
+      "no_functional_content": true,
+      "notes": "The annotation string \"reco\" is too truncated/ambiguous to support any specific molecular function from the candidate list."
+     },
+     "gpt55": {
+      "picked": [],
+      "overall_confidence": "high",
+      "no_functional_content": true,
+      "notes": "The annotation string is only a bare gene/protein symbol and does not state a molecular function."
+     }
+    },
+    "critic": {
+     "verdict": "strongly_consistent",
+     "reason": "The annotation string 'reco' is a meaningless truncated fragment with no functional information, so correctly no GO terms were assigned.",
+     "overpicked": [],
+     "missed": [],
+     "contentless_input": true
+    },
+    "meta": {
+     "final_go_ids": [],
+     "final_confidence": "high",
+     "no_functional_content": true,
+     "reasoning": "meta skipped: council agreed and the critic raised nothing.",
+     "skipped": true
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 293,
+    "gene_row": 44,
+    "source": "prior_annotation",
+    "text": "HNH nuclease domain-containing protein",
+    "candidates": [
+     {
+      "go_id": "GO:1990247",
+      "name": "N6-methyladenosine-containing RNA reader activity",
+      "def": "A protein adaptor that recognizes and binds an RNA molecule modified by N6-methyladenosine (m6A), a modification present at internal sites of mRNAs and some non-coding RNAs.",
+      "score": 0.8916,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0045505",
+      "name": "dynein intermediate chain binding",
+      "def": "Binding to an intermediate chain of the dynein complex.",
+      "score": 0.7989,
+      "height": 0,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:1990763",
+      "name": "arrestin family protein binding",
+      "def": "Binding to a member of the arrestin family, proteins involved in agonist-mediated desensitization of G protein-coupled receptors.",
+      "score": 0.6902,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:1990756",
+      "name": "ubiquitin-like ligase-substrate adaptor activity",
+      "def": "The binding activity of a molecule that brings together a ubiquitin-like ligase (including ubiquitin ligase and UFM1 ligase) and its substrate. Usually mediated by F-box BTB/POZ domain proteins.",
+      "score": 0.7278,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0031699",
+      "name": "beta-3 adrenergic receptor binding",
+      "def": "Binding to a beta-3 adrenergic receptor.",
+      "score": 0.6902,
+      "height": 0,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0061860",
+      "name": "DNA clamp unloader activity",
+      "def": "Facilitating the opening of the ring structure of the PCNA complex, or any of the related sliding clamp complexes, and their removal from the DNA duplex, driven by ATP hydrolysis.",
+      "score": 0.6981,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:2001069",
+      "name": "glycogen binding",
+      "def": "Binding to glycogen.",
+      "score": 0.6746,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0031435",
+      "name": "mitogen-activated protein kinase kinase kinase binding",
+      "def": "Binding to a mitogen-activated protein kinase kinase kinase, a protein that can phosphorylate a MAP kinase kinase.",
+      "score": 0.6448,
+      "height": 0,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0019894",
+      "name": "kinesin binding",
+      "def": "Interacting selectively and non-covalently and stoichiometrically with kinesin, a member of a superfamily of microtubule-based motor proteins that perform force-generating tasks such as organelle transport and chromosome segregation.",
+      "score": 0.653,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0043533",
+      "name": "inositol 1,3,4,5 tetrakisphosphate binding",
+      "def": "Binding to inositol 1,3,4,5 tetrakisphosphate.",
+      "score": 0.5898,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0005521",
+      "name": "lamin binding",
+      "def": "Binding to lamin; any of a group of intermediate-filament proteins that form the fibrous matrix on the inner surface of the nuclear envelope.",
+      "score": 0.5976,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0102390",
+      "name": "mycophenolic acid acyl-glucuronide esterase activity",
+      "def": "Catalysis of the reaction: mycophenolic acid O-acyl-glucuronide(1-) + H2O = mycophenolate + H+ + D-glucopyranuronate.",
+      "score": 0.5941,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0031432",
+      "name": "titin binding",
+      "def": "Binding to titin, any of a family of giant proteins found in striated and smooth muscle. In striated muscle, single titin molecules span half the sarcomere, with their N- and C-termini in the Z-disc and M-line, respectively.",
+      "score": 0.581,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0031491",
+      "name": "nucleosome binding",
+      "def": "Binding to a nucleosome, a complex comprised of DNA wound around a multisubunit core and associated proteins, which forms the primary packing unit of DNA into higher order structures.",
+      "score": 0.5341,
+      "height": 1,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0051959",
+      "name": "dynein light intermediate chain binding",
+      "def": "Binding to a light intermediate chain of the dynein complex.",
+      "score": 0.5562,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0001227",
+      "name": "DNA-binding transcription repressor activity, RNA polymerase II-specific",
+      "def": "A DNA-binding transcription factor activity that represses or decreases the transcription of specific gene sets transcribed by RNA polymerase II.",
+      "score": 0.5247,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0005516",
+      "name": "calmodulin binding",
+      "def": "Binding to calmodulin, a calcium-binding protein with many roles, both in the calcium-bound and calcium-free states.",
+      "score": 0.4901,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0120325",
+      "name": "NuRD complex binding",
+      "def": "Binding to a NuRD complex.",
+      "score": 0.487,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0017080",
+      "name": "sodium channel regulator activity",
+      "def": "Binds to and modulates the activity of a sodium channel.",
+      "score": 0.4791,
+      "height": 1,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0033229",
+      "name": "L-cysteine transmembrane transporter activity",
+      "def": "Enables the transfer of L-cysteine from one side of a membrane to the other.",
+      "score": 0.4789,
+      "height": 1,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:2001070",
+      "name": "starch binding",
+      "def": "Binding to starch.",
+      "score": 0.4782,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0008266",
+      "name": "poly(U) RNA binding",
+      "def": "Binding to a sequence of uracil residues in an RNA molecule.",
+      "score": 0.4479,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0008310",
+      "name": "single-stranded DNA 3'-5' DNA exonuclease activity",
+      "def": "Catalysis of the sequential cleavage of mononucleotides from a free 3' terminus of a single-stranded DNA molecule.",
+      "score": 0.4445,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0036458",
+      "name": "hepatocyte growth factor binding",
+      "def": "Binding to a hepatocyte growth factor.",
+      "score": 0.4059,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0036122",
+      "name": "BMP binding",
+      "def": "Binding to a member of the bone morphogenetic protein (BMP) family.",
+      "score": 0.4401,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0070182",
+      "name": "DNA polymerase binding",
+      "def": "Binding to a DNA polymerase.",
+      "score": 0.5545,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0051787",
+      "name": "misfolded protein binding",
+      "def": "Binding to a misfolded protein.",
+      "score": 0.0384,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:1901981",
+      "name": "phosphatidylinositol phosphate binding",
+      "def": "Binding to phosphatidylinositol phosphate.",
+      "score": 0.3801,
+      "height": 1,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0005154",
+      "name": "epidermal growth factor receptor binding",
+      "def": "Binding to an epidermal growth factor receptor.",
+      "score": 0.5526,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0019171",
+      "name": "(3R)-hydroxyacyl-[acyl-carrier-protein] dehydratase activity",
+      "def": "Catalysis of the reaction: a (3R)-hydroxyacyl-[acyl-carrier-protein] = a (2E)-enoyl-[acyl-carrier-protein] + H2O.",
+      "score": 0.0333,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0000014",
+      "name": "single-stranded DNA endonuclease activity",
+      "def": "Catalysis of the hydrolysis of ester linkages within a single-stranded deoxyribonucleic acid molecule by creating internal breaks.",
+      "score": 0.3289,
+      "height": 1,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0072320",
+      "name": "volume-sensitive chloride channel activity",
+      "def": "Enables the transmembrane transfer of a chloride ion by a volume-sensitive channel. A volume-sensitive channel is a channel that responds to changes in the volume of a cell.",
+      "score": 0.5887,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0030171",
+      "name": "voltage-gated proton channel activity",
+      "def": "Enables the transmembrane transfer of a proton by a voltage-gated channel. A voltage-gated channel is a channel whose open state is dependent on the voltage across the membrane in which it is embedded.",
+      "score": 0.0211,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0016230",
+      "name": "sphingomyelin phosphodiesterase activator activity",
+      "def": "Binds to and increases the activity of the enzyme sphingomyelin phosphodiesterase.",
+      "score": 0.3176,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0070840",
+      "name": "dynein complex binding",
+      "def": "Binding to a dynein complex, a protein complex that contains two or three dynein heavy chains and several light chains, and has microtubule motor activity.",
+      "score": 0.5486,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0008999",
+      "name": "protein-N-terminal-alanine acetyltransferase activity",
+      "def": "Catalysis of the reaction: acetyl-CoA + N-terminal L-alanyl-[protein] = CoA + H+ + N-terminal N(alpha)-acetyl-L-alanyl-[protein].",
+      "score": 0.0303,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0043737",
+      "name": "deoxyribonuclease V activity",
+      "def": "Catalysis of the endonucleolytic cleavage at apurinic or apyrimidinic sites to products with a 5'-phosphate.",
+      "score": 0.2885,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0017147",
+      "name": "Wnt-protein binding",
+      "def": "Binding to a Wnt-protein, a secreted growth factor involved in signaling.",
+      "score": 0.5883,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0005225",
+      "name": "volume-sensitive anion channel activity",
+      "def": "Enables the transmembrane transfer of a monoatomic anion by a volume-sensitive channel. A volume-sensitive channel is a channel that responds to changes in the volume of a cell.",
+      "score": 0.021,
+      "height": 1,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0000703",
+      "name": "oxidized pyrimidine nucleobase lesion DNA N-glycosylase activity",
+      "def": "Catalysis of the removal oxidized pyrimidine bases by cleaving the N-C1' glycosidic bond between the oxidized pyrimidine and the deoxyribose sugar. The reaction involves formation of a covalent enzyme-pyrimidine base intermediate. Release of the enzyme and fre",
+      "score": 0.2764,
+      "height": 1,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 293,
+      "source": "prior_annotation",
+      "row": 44
+     },
+     {
+      "parsed_input_id": 294,
+      "source": "BAKTA_annotation",
+      "row": 44
+     }
+    ]
+   },
+   "result": {
+    "input_id": 293,
+    "gene_row": 44,
+    "source": "prior_annotation",
+    "text": "HNH nuclease domain-containing protein",
+    "status": "ok",
+    "decline_reason": "no_candidate_matched",
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0000014": 1
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The annotation describes an HNH nuclease, which is a type of endonuclease, but the candidate list lacks a general endonuclease or DNA endonuclease term; the available term GO:0000014 (single-stranded DNA endonuclease activity) is too specific as many HNH nucleases act on double-stranded DNA."
+     },
+     "gpt54": {
+      "picked": [],
+      "overall_confidence": "low",
+      "no_functional_content": false,
+      "notes": "The annotation indicates an HNH nuclease domain, suggesting nuclease activity, but none of the candidate GO terms specifically match HNH endonuclease/nuclease function; the listed nuclease candidates are too specific or unsupported."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0000014",
+        "confidence": "low",
+        "why": "An HNH nuclease domain supports endonuclease activity on nucleic acid, but the annotation does not explicitly specify single-stranded DNA as the substrate."
+       }
+      ],
+      "overall_confidence": "low",
+      "no_functional_content": false,
+      "notes": "The candidate list lacks a generic HNH nuclease or DNA endonuclease activity term, so the closest supported candidate is only weakly matched."
+     }
+    },
+    "critic": {
+     "verdict": "inconsistent",
+     "reason": "The annotation only indicates a generic HNH nuclease domain, not a specific substrate preference; GO:0000014 (single-stranded DNA endonuclease activity) overspecifies substrate specificity not supported by the text, and no listed candidate matches a general endonuclease/nuclease activity.",
+     "overpicked": [
+      "GO:0000014"
+     ],
+     "missed": [],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [],
+     "final_confidence": "high",
+     "no_functional_content": false,
+     "reasoning": "The annotation string 'HNH nuclease domain-containing protein' indicates the presence of an HNH nuclease domain, which is associated with endonuclease activity on nucleic acids. However, the candidate list does not include a general endonuclease or nuclease activity term that would be appropriate. GO:0000014 (single-stranded DNA endonuclease activity) was proposed by one council member but specifies single-stranded DNA as the substrate, which is not supported by the annotation text. HNH nucleases can act on various substrates including double-stranded DNA, and the annotation does not specify substrate preference. The critic correctly identified this as overpicking. Since no appropriate general nuclease/endonuclease term is available among the candidates, and the only proposed term overspecifies the substrate, no GO terms can be defensibly assigned from this candidate list.",
+     "skipped": false
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 631,
+    "gene_row": 89,
+    "source": "PROKKA_annotation",
+    "text": "Fructose-bisphosphate aldolase | 4.1.2.13 | fba | COG0191",
+    "candidates": [
+     {
+      "go_id": "GO:0004332",
+      "name": "fructose-bisphosphate aldolase activity",
+      "def": "Catalysis of the reaction: beta-D-fructose 1,6-bisphosphate = D-glyceraldehyde 3-phosphate + dihydroxyacetone phosphate.",
+      "score": 0.7822,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0030785",
+      "name": "[ribulose-bisphosphate carboxylase]-lysine N-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + [ribulose-1,5-bisphosphate carboxylase]-lysine = S-adenosyl-L-homocysteine + [ribulose-1,5-bisphosphate carboxylase]-N6-methyl-L-lysine.",
+      "score": 0.4969,
+      "height": 0,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0042132",
+      "name": "fructose 1,6-bisphosphate 1-phosphatase activity",
+      "def": "Catalysis of the reaction: D-fructose 1,6-bisphosphate + H2O = D-fructose 6-phosphate + phosphate.",
+      "score": 0.3996,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0009025",
+      "name": "tagatose-bisphosphate aldolase activity",
+      "def": "Catalysis of the reaction: D-tagatose 1,6-diphosphate = D-glyceraldehyde 3-phosphate + glycerone phosphate.",
+      "score": 0.3174,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0061595",
+      "name": "6-deoxy-6-sulfofructose-1-phosphate aldolase activity",
+      "def": "Catalysis of the reaction 6-deoxy-6-sulfofructose-1-phosphate = 3-sulfolactaldehyde + dihydroxyacetone phosphate.",
+      "score": 0.3416,
+      "height": 0,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0004331",
+      "name": "fructose-2,6-bisphosphate 2-phosphatase activity",
+      "def": "Catalysis of the reaction: D-fructose 2,6-bisphosphate + H2O = D-fructose-6-phosphate + phosphate.",
+      "score": 0.2861,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0004139",
+      "name": "deoxyribose-phosphate aldolase activity",
+      "def": "Catalysis of the reaction: 2-deoxy-D-ribose 5-phosphate = D-glyceraldehyde 3-phosphate + acetaldehyde.",
+      "score": 0.221,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0008994",
+      "name": "rhamnulose-1-phosphate aldolase activity",
+      "def": "Catalysis of the reaction: L-rhamnulose 1-phosphate = glycerone phosphate + (S)-lactaldehyde.",
+      "score": 0.2416,
+      "height": 0,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0047905",
+      "name": "fructose-6-phosphate phosphoketolase activity",
+      "def": "Catalysis of the reaction: D-fructose 6-phosphate + phosphate = acetyl phosphate + D-erythrose 4-phosphate + H2O.",
+      "score": 0.2111,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0047933",
+      "name": "glucose-1,6-bisphosphate synthase activity",
+      "def": "Catalysis of the reaction: 3-phospho-D-glyceroyl phosphate + alpha-D-glucose 1-phosphate = 3-phospho-D-glycerate + alpha-D-glucose 1,6-bisphosphate + H+.",
+      "score": 0.2365,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0050193",
+      "name": "phosphoketolase activity",
+      "def": "Catalysis of the reaction: D-xylulose 5-phosphate + phosphate = acetyl phosphate + D-glyceraldehyde 3-phosphate + H2O.",
+      "score": 0.2111,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0008738",
+      "name": "L-fuculose-phosphate aldolase activity",
+      "def": "Catalysis of the reaction: L-fuculose 1-phosphate = (S)-lactaldehyde + glycerone phosphate.",
+      "score": 0.23,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0008117",
+      "name": "sphinganine-1-phosphate aldolase activity",
+      "def": "Catalysis of the reaction: sphinganine 1-phosphate = phosphoethanolamine + palmitaldehyde.",
+      "score": 0.2018,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0043917",
+      "name": "ribose 1,5-bisphosphate isomerase activity",
+      "def": "Catalysis of the reaction: alpha-D-ribose 1,5-bisphosphate = D-ribulose 1,5-bisphosphate.",
+      "score": 0.224,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0008732",
+      "name": "L-allo-threonine aldolase activity",
+      "def": "Catalysis of the reaction: L-allo-threonine = glycine + acetaldehyde.",
+      "score": 0.2223,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0004793",
+      "name": "threonine aldolase activity",
+      "def": "Catalysis of the reaction: L-threonine = glycine + acetaldehyde.",
+      "score": 0.2223,
+      "height": 1,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0016984",
+      "name": "ribulose-bisphosphate carboxylase activity",
+      "def": "Catalysis of the reaction: 2 (2R)-3-phosphoglycerate + 2 H+ = CO2 + D-ribulose 1,5-bisphosphate + H2O.",
+      "score": 0.1803,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0050278",
+      "name": "sedoheptulose-bisphosphatase activity",
+      "def": "Catalysis of the reaction: sedoheptulose 1,7-bisphosphate + H2O = sedoheptulose 7-phosphate + phosphate.",
+      "score": 0.2191,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0047904",
+      "name": "fructose 5-dehydrogenase activity",
+      "def": "Catalysis of the reaction: a ubiquinone + keto-D-fructose = 5-dehydro-D-fructose + a ubiquinol.",
+      "score": 0.1714,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0047061",
+      "name": "glucose-fructose oxidoreductase activity",
+      "def": "Catalysis of the reaction: D-fructose + D-glucose = D-glucitol + D-glucono-1,5-lactone.",
+      "score": 0.1675,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0022877",
+      "name": "protein-N(PI)-phosphohistidine-fructose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein N-phosphohistidine + fructose(out) = protein histidine + fructose phosphate(in). This differs from",
+      "score": 0.1623,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0043876",
+      "name": "D-threonine aldolase activity",
+      "def": "Catalysis of the reaction: D-threonine (or D-allo-threonine) = glycine + acetaldehyde.",
+      "score": 0.2008,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0004150",
+      "name": "dihydroneopterin aldolase activity",
+      "def": "Catalysis of the reaction: 2-amino-4-hydroxy-6-(D-erythro-1,2,3-trihydroxypropyl)-7,8-dihydropteridine = 2-amino-4-hydroxy-6-hydroxymethyl-7,8-dihydropteridine + glycolaldehyde.",
+      "score": 0.1615,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0090582",
+      "name": "protein-phosphocysteine-D-fructose-phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + D-fructose(out) = protein cysteine + D-fructose-1-phosphate(in).",
+      "score": 0.1585,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0097657",
+      "name": "3',5'-nucleotide bisphosphate phosphatase activity",
+      "def": "Catalysis of the reaction: 3',5'-nucleoside bisphosphate + H20 = 5'-nucleoside monophosphate + phosphate.",
+      "score": 0.1918,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0015408",
+      "name": "ABC-type ferric iron transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + Fe3+(out) = ADP + phosphate + Fe3+(in).",
+      "score": 0.0546,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0052618",
+      "name": "coenzyme F420-0:L-glutamate ligase activity",
+      "def": "Catalysis of the reaction: GTP + L-glutamate + factor F420-0 = GDP + H+ + factor gamma-F420-1 + phosphate.",
+      "score": 0.0349,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0061860",
+      "name": "DNA clamp unloader activity",
+      "def": "Facilitating the opening of the ring structure of the PCNA complex, or any of the related sliding clamp complexes, and their removal from the DNA duplex, driven by ATP hydrolysis.",
+      "score": 0.0298,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0052619",
+      "name": "coenzyme F420-1:gamma-L-glutamate ligase activity",
+      "def": "Catalysis of the reaction: GTP + L-glutamate + factor gamma-F420-1 = GDP + H+ + factor gamma-F420-2 + phosphate.",
+      "score": 0.0349,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0047841",
+      "name": "dehydrogluconokinase activity",
+      "def": "Catalysis of the reaction: 2-dehydro-D-gluconate + ATP = 6-phospho-2-dehydro-D-gluconate + ADP + 2 H+.",
+      "score": 0.225,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0004321",
+      "name": "fatty-acyl-CoA synthase activity",
+      "def": "Catalysis of the reaction: acetyl-CoA + n malonyl-CoA + 2n NADH + 2n NADPH + 4n H+ = a long-chain acyl-CoA + n CoA + n CO2 + 2n NAD+ + 2n NADP+.",
+      "score": 0.0284,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0046962",
+      "name": "sodium-transporting ATPase activity, rotational mechanism",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other by a rotational mechanism according to the reaction: 4 Na+(in) + ATP + H2O => 4 Na+(out) + ADP + phosphate + H+.",
+      "score": 0.0233,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0003688",
+      "name": "DNA replication origin binding",
+      "def": "Binding to a DNA replication origin, a unique DNA sequence of a replicon at which DNA replication is initiated and proceeds bidirectionally or unidirectionally.",
+      "score": 0.0269,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0043720",
+      "name": "3-keto-5-aminohexanoate cleavage activity",
+      "def": "Catalysis of the reaction: 3-keto-5-aminohexanoate + acetyl-CoA = L-3-aminobutyryl-CoA + acetoacetate.",
+      "score": 0.198,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0004333",
+      "name": "fumarate hydratase activity",
+      "def": "Catalysis of the reaction: (S)-malate = fumarate + H2O.",
+      "score": 0.2769,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0106408",
+      "name": "diadenylate cyclase activity",
+      "def": "Catalysis of the reaction: 2 ATP = 3',3'-c-di-AMP + 2 diphosphate.",
+      "score": 0.0232,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0015385",
+      "name": "sodium:proton antiporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: Na+(out) + H+(in) = Na+(in) + H+(out).",
+      "score": 0.0136,
+      "height": 1,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0051721",
+      "name": "protein phosphatase 2A binding",
+      "def": "Binding to protein phosphatase 2A.",
+      "score": 0.1914,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0045152",
+      "name": "antisigma factor binding",
+      "def": "Binding to an antisigma factor, a factor which inhibits the ability of the sigma factor to function as a transcriptional initiator.",
+      "score": 0.0043,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0015020",
+      "name": "glucuronosyltransferase activity",
+      "def": "Catalysis of the reaction: glucuronate acceptor + UDP-alpha-D-glucuronate = acceptor beta-D-glucuronoside + H+ + UDP.",
+      "score": 0.0119,
+      "height": 1,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 631,
+      "source": "PROKKA_annotation",
+      "row": 89
+     }
+    ]
+   },
+   "result": {
+    "input_id": 631,
+    "gene_row": 89,
+    "source": "PROKKA_annotation",
+    "text": "Fructose-bisphosphate aldolase | 4.1.2.13 | fba | COG0191",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0004332": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0004332",
+        "confidence": "high",
+        "why": "The annotation explicitly names 'Fructose-bisphosphate aldolase' and provides the EC number 4.1.2.13, which corresponds directly to fructose-bisphosphate aldolase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": ""
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0004332",
+        "confidence": "high",
+        "why": "The annotation explicitly names fructose-bisphosphate aldolase and gives EC 4.1.2.13, which matches fructose-bisphosphate aldolase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The annotation supports the specific aldolase activity and not the other phosphatase, transporter, or alternative aldolase substrate terms."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0004332",
+        "confidence": "high",
+        "why": "The annotation explicitly names fructose-bisphosphate aldolase and gives EC 4.1.2.13, matching fructose-bisphosphate aldolase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": ""
+     }
+    },
+    "critic": {
+     "verdict": "strongly_consistent",
+     "reason": "The annotation explicitly names fructose-bisphosphate aldolase and EC 4.1.2.13, which directly and unambiguously matches GO:0004332; no overreach or omission is present.",
+     "overpicked": [],
+     "missed": [],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0004332"
+     ],
+     "final_confidence": "high",
+     "no_functional_content": false,
+     "reasoning": "meta skipped: council agreed and the critic raised nothing.",
+     "skipped": true
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 789,
+    "gene_row": 110,
+    "source": "RAST_annotation",
+    "text": "putative DinF, damage-inducible protein | possible cation efflux pump (multidrug resistance protein)",
+    "candidates": [
+     {
+      "go_id": "GO:0015341",
+      "name": "zinc efflux antiporter activity",
+      "def": "Enables the transfer of a zinc ion or zinc ions from the inside of the cell to the outside of the cell across a membrane according to the reaction H+(out) + Zn2+(in) = H+(in) + Zn2+(out). The activity is driven by proton motive force.",
+      "score": 0.4128,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0031409",
+      "name": "pigment binding",
+      "def": "Binding to a pigment, a general or particular coloring matter in living organisms, e.g. melanin.",
+      "score": 0.3597,
+      "height": 1,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0015093",
+      "name": "ferrous iron transmembrane transporter activity",
+      "def": "Enables the transfer of ferrous iron (Fe(II) or Fe2+) ions from one side of a membrane to the other.",
+      "score": 0.403,
+      "height": 1,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0030611",
+      "name": "arsenate reductase activity",
+      "def": "Catalysis of the reaction: arsenite + A + H2O = arsenate + AH2 + H+.",
+      "score": 0.3586,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0015086",
+      "name": "cadmium ion transmembrane transporter activity",
+      "def": "Enables the transfer of cadmium (Cd) ions from one side of a membrane to the other.",
+      "score": 0.3069,
+      "height": 1,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0015104",
+      "name": "antimonite transmembrane transporter activity",
+      "def": "Enables the transfer of antimonite from one side of a membrane to the other.",
+      "score": 0.3586,
+      "height": 1,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0160220",
+      "name": "D-alanine-(R)-lactate ligase activity",
+      "def": "Catalysis of the reaction: (R)-lactate + ATP + D-alanine = ADP + D-alanyl-(R)-lactate + phosphate.",
+      "score": 0.2166,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0015105",
+      "name": "arsenite transmembrane transporter activity",
+      "def": "Enables the transfer of arsenite from one side of a membrane to the other.",
+      "score": 0.3586,
+      "height": 1,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0000978",
+      "name": "RNA polymerase II cis-regulatory region sequence-specific DNA binding",
+      "def": "Binding to a specific upstream regulatory DNA sequence (transcription factor recognition sequence or binding site) located in cis relative to the transcription start site (i.e., on the same strand of DNA) of a gene transcribed by RNA polymerase II.",
+      "score": 0.3035,
+      "height": 1,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0015190",
+      "name": "L-leucine transmembrane transporter activity",
+      "def": "Enables the transfer of L-leucine from one side of a membrane to the other. L-leucine is 2-amino-4-methylpentanoic acid.",
+      "score": 0.2502,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0010329",
+      "name": "auxin efflux transmembrane transporter activity",
+      "def": "Enables the transfer of auxin, from one side of a membrane to the other, out of a cell.",
+      "score": 0.2324,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0099618",
+      "name": "UDP-glucuronate dehydrogenase activity",
+      "def": "Catalysis of the reaction: UDP-alpha-D-glucuronate + NAD+ = UDP-beta-L-threo-pentopyranos-4-ulose + CO2 + NADH.",
+      "score": 0.1938,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0019177",
+      "name": "dihydroneopterin triphosphate pyrophosphohydrolase activity",
+      "def": "Catalysis of the reaction: dihydroneopterin triphosphate = dihydroneopterin phosphate + diphosphate.",
+      "score": 0.2188,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0099619",
+      "name": "UDP-4-amino-4-deoxy-L-arabinose formyltransferase activity",
+      "def": "Catalysis of the reaction: 10-formyltetrahydrofolate + UDP-4-amino-4-deoxy-beta-L-arabinopyranose = 5,6,7,8-tetrahydrofolate + UDP-4-deoxy-4-formamido-beta-L-arabinopyranose.",
+      "score": 0.1938,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0008828",
+      "name": "dATP diphosphatase activity",
+      "def": "Catalysis of the reaction: dATP + H2O = dAMP + H+ + diphosphate.",
+      "score": 0.2188,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0015099",
+      "name": "nickel cation transmembrane transporter activity",
+      "def": "Enables the transfer of nickel (Ni) cations from one side of a membrane to the other.",
+      "score": 0.1974,
+      "height": 1,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0017089",
+      "name": "glycolipid transfer activity",
+      "def": "Removes a glycolipid from a membrane or a monolayer lipid particle, transports it through the aqueous phase while protected in a hydrophobic pocket, and brings it to an acceptor membrane or lipid particle. A glycolipid is a compound usually containing 1-4 link",
+      "score": 0.1422,
+      "height": 1,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0015094",
+      "name": "lead ion transmembrane transporter activity",
+      "def": "Enables the transfer of lead (Pb) ions from one side of a membrane to the other.",
+      "score": 0.1956,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0004146",
+      "name": "dihydrofolate reductase activity",
+      "def": "Catalysis of the reaction: 5,6,7,8-tetrahydrofolate + NADP+ = 7,8-dihydrofolate + NADPH + H+.",
+      "score": 0.1165,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0015100",
+      "name": "vanadium ion transmembrane transporter activity",
+      "def": "Enables the transfer of vanadium (V) ions from one side of a membrane to the other.",
+      "score": 0.1956,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0008716",
+      "name": "D-alanine-D-alanine ligase activity",
+      "def": "Catalysis of the reaction: 2 D-alanine + ATP = D-alanyl-D-alanine + ADP + 2 H+ + phosphate.",
+      "score": 0.1933,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0070975",
+      "name": "FHA domain binding",
+      "def": "Binding to a FHA domain of a protein. The FHA domain is a phosphopeptide recognition domain found in many regulatory proteins, and consists of approximately 80-100 amino acid residues folded into an 11-stranded beta sandwich.",
+      "score": 0.1904,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0015503",
+      "name": "glutathione-regulated potassium exporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: K+(in) + H+(out) = K+(out) + H+(in), where glutathione maintains the closed state.",
+      "score": 0.1095,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0005384",
+      "name": "manganese ion transmembrane transporter activity",
+      "def": "Enables the transfer of manganese (Mn) ions from one side of a membrane to the other.",
+      "score": 0.1796,
+      "height": 1,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0015446",
+      "name": "ATPase-coupled arsenite transmembrane transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + arsenite(in) = ADP + phosphate + arsenite(out).",
+      "score": 0.1084,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0046583",
+      "name": "monoatomic cation efflux transmembrane transporter activity",
+      "def": "Enables the transfer of a cation or cations from the inside of the cell to the outside of the cell across a membrane.",
+      "score": 0.1728,
+      "height": 1,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0009678",
+      "name": "diphosphate hydrolysis-driven proton transmembrane transporter activity",
+      "def": "Catalysis of the reaction: diphosphate + H+(in) + H2O = 2 H+(out) + 2 phosphate.",
+      "score": 0.1084,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:1901982",
+      "name": "maltose binding",
+      "def": "Binding to maltose.",
+      "score": 0.1035,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0004335",
+      "name": "galactokinase activity",
+      "def": "Catalysis of the reaction: D-galactose + ATP = alpha-D-galactose 1-phosphate + ADP + 2 H+.",
+      "score": 0.1614,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0004321",
+      "name": "fatty-acyl-CoA synthase activity",
+      "def": "Catalysis of the reaction: acetyl-CoA + n malonyl-CoA + 2n NADH + 2n NADPH + 4n H+ = a long-chain acyl-CoA + n CoA + n CO2 + 2n NAD+ + 2n NADP+.",
+      "score": 0.0209,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0070678",
+      "name": "preprotein binding",
+      "def": "Binding to a preprotein, the unprocessed form of a protein destined to undergo co- or post-translational processing.",
+      "score": 0.36,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0080139",
+      "name": "borate efflux transmembrane transporter activity",
+      "def": "Enables the transfer of borate from the inside of the cell to the outside of the cell across a membrane.",
+      "score": 0.2003,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0047488",
+      "name": "heparin lyase activity",
+      "def": "Catalysis of the eliminative cleavage of polysaccharides containing 1,4-linked D-glucuronate or L-iduronate residues and 1,4-alpha-linked 2-sulfoamino-2-deoxy-6-sulfo-D-glucose residues to give oligosaccharides with terminal 4-deoxy-alpha-D-gluc-4-enuronosyl g",
+      "score": 0.0309,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0015606",
+      "name": "spermidine transmembrane transporter activity",
+      "def": "Enables the transfer of spermidine, N-(3-aminopropyl)-1,4-diaminobutane, from one side of a membrane to the other.",
+      "score": 0.3293,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0033744",
+      "name": "L-methionine (S)-S-oxide reductase activity",
+      "def": "Catalysis of the reaction: [thioredoxin]-disulfide + L-methionine + H2O = L-methionine (S)-S-oxide + [thioredoxin]-dithiol.",
+      "score": 0.0204,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0015199",
+      "name": "amino-acid betaine transmembrane transporter activity",
+      "def": "Enables the transfer of betaine from one side of a membrane to the other. Betaine is the N-trimethyl derivative of an amino acid.",
+      "score": 0.3289,
+      "height": 1,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0015193",
+      "name": "L-proline transmembrane transporter activity",
+      "def": "Enables the transfer of L-proline from one side of a membrane to the other. L-proline is pyrrolidine-2-carboxylic acid.",
+      "score": 0.1637,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0015021",
+      "name": "heparin-sulfate lyase activity",
+      "def": "Catalysis of the elimination of sulfate; appears to act on linkages between N-acetyl-D-glucosamine and uronate. Product is an unsaturated sugar.",
+      "score": 0.0297,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0015220",
+      "name": "choline transmembrane transporter activity",
+      "def": "Enables the transfer of choline from one side of a membrane to the other. Choline (2-hydroxyethyltrimethylammonium) is an amino alcohol that occurs widely in living organisms as a constituent of certain types of phospholipids and in the neurotransmitter acetyl",
+      "score": 0.3284,
+      "height": 1,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0008113",
+      "name": "peptide-methionine (S)-S-oxide reductase activity",
+      "def": "Catalysis of the reaction: L-methionyl-[protein] + [thioredoxin]-disulfide + H2O = L-methionyl-(S)-S-oxide-[protein] + [thioredoxin]-dithiol.",
+      "score": 0.0201,
+      "height": 0,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 789,
+      "source": "RAST_annotation",
+      "row": 110
+     }
+    ]
+   },
+   "result": {
+    "input_id": 789,
+    "gene_row": 110,
+    "source": "RAST_annotation",
+    "text": "putative DinF, damage-inducible protein | possible cation efflux pump (multidrug resistance protein)",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0046583": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0046583",
+        "confidence": "medium",
+        "why": "The annotation describes a possible cation efflux pump, which matches monoatomic cation efflux transmembrane transporter activity."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "The annotation specifies a 'possible cation efflux pump', which is best represented by the general monoatomic cation efflux transmembrane transporter activity."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0046583",
+        "confidence": "medium",
+        "why": "The annotation explicitly says 'possible cation efflux pump (multidrug resistance protein)', which supports a monoatomic cation efflux transmembrane transporter activity but does not specify a particular ion."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "DinF/MATE-family annotations often imply multidrug or cation efflux, but this string does not justify choosing any specific substrate transporter term from the list."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0046583",
+        "confidence": "medium",
+        "why": "The annotation explicitly describes a possible cation efflux pump, matching cation efflux transmembrane transporter activity."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "The multidrug-resistance/DinF wording suggests an efflux transporter, but no specific drug or ion substrate among the candidates is directly stated."
+     }
+    },
+    "critic": {
+     "verdict": "consistent",
+     "reason": "The annotation explicitly mentions a 'possible cation efflux pump', which matches the generic term GO:0046583 (monoatomic cation efflux transmembrane transporter activity); no specific ion is named, so a generic term is appropriate rather than one of the specific metal-ion efflux candidates.",
+     "overpicked": [],
+     "missed": [],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0046583"
+     ],
+     "final_confidence": "high",
+     "no_functional_content": false,
+     "reasoning": "meta skipped: council agreed and the critic raised nothing.",
+     "skipped": true
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 1250,
+    "gene_row": 177,
+    "source": "ai_annotation",
+    "text": "CHAP-domain peptidoglycan hydrolase, likely a secreted cell wall amidase/peptidase associated with a conjugative transposon or prophage-like surface element.",
+    "candidates": [
+     {
+      "go_id": "GO:1901981",
+      "name": "phosphatidylinositol phosphate binding",
+      "def": "Binding to phosphatidylinositol phosphate.",
+      "score": 0.2883,
+      "height": 1,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0004040",
+      "name": "amidase activity",
+      "def": "Catalysis of the reaction: a monocarboxylic acid amide + H2O = a monocarboxylate + NH4+.",
+      "score": 0.3779,
+      "height": 1,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0016230",
+      "name": "sphingomyelin phosphodiesterase activator activity",
+      "def": "Binds to and increases the activity of the enzyme sphingomyelin phosphodiesterase.",
+      "score": 0.2209,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0045148",
+      "name": "tripeptide aminopeptidase activity",
+      "def": "Catalysis of the hydrolysis of a single N-terminal amino acid residue from a tripeptide.",
+      "score": 0.2589,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0005199",
+      "name": "structural constituent of cell wall",
+      "def": "The action of a molecule that contributes to the structural integrity of a cell wall.",
+      "score": 0.2173,
+      "height": 1,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0042288",
+      "name": "MHC class I protein binding",
+      "def": "Binding to a major histocompatibility complex class I molecule; a set of molecules displayed on cell surfaces that are responsible for lymphocyte recognition and antigen presentation.",
+      "score": 0.2292,
+      "height": 1,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0015648",
+      "name": "lipid-linked peptidoglycan transporter activity",
+      "def": "Enables the directed movement of lipid-linked peptidoglycans into, out of or within a cell, or between cells.",
+      "score": 0.1932,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0016805",
+      "name": "dipeptidase activity",
+      "def": "Catalysis of the hydrolysis of a dipeptide.",
+      "score": 0.1997,
+      "height": 1,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0070012",
+      "name": "oligopeptidase activity",
+      "def": "Catalysis of the hydrolysis of a peptide bond in an oligopeptide, i.e. a molecule containing a small number (2 to 20) of amino acid residues connected by peptide bonds.",
+      "score": 0.1898,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0001594",
+      "name": "trace-amine receptor activity",
+      "def": "Combining with a trace amine to initiate a change in cell activity. Trace amines are biogenic amines that are synthesized from aromatic amino acids and are substrates for monoamine oxidase, and are therefore detectable only at trace levels in mammals.",
+      "score": 0.1887,
+      "height": 1,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0008745",
+      "name": "N-acetylmuramoyl-L-alanine amidase activity",
+      "def": "Catalysis of the hydrolysis of the link between N-acetylmuramoyl residues and L-amino acid residues in certain bacterial cell-wall glycopeptides.",
+      "score": 0.1946,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0008955",
+      "name": "peptidoglycan glycosyltransferase activity",
+      "def": "Catalysis of the reaction: [GlcNAc-(1->4)-Mur2Ac(oyl-L-Ala-gamma-D-Glu-L-Lys-D-Ala-D-Ala)](n)-di-trans,octa-cis-undecaprenyl diphosphate + beta-D-GlcNAc-(1->4)-Mur2Ac(oyl-L-Ala-gamma-D-Glu-L-Lys-D-Ala-D-Ala)-di-trans,octa-cis-undecaprenyl diphosphate = [GlcNAc",
+      "score": 0.1706,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0061473",
+      "name": "murein tripeptide carboxypeptidase activity",
+      "def": "Catalysis of the reaction: L-alanyl-gamma-D-glutamyl-meso-diaminoheptanedioate (murein tripeptide) + H2O = L-alanyl-D-glutamate + meso-2,6-diaminoheptanedioate.",
+      "score": 0.1761,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0031727",
+      "name": "CCR2 chemokine receptor binding",
+      "def": "Binding to a CCR2 chemokine receptor.",
+      "score": 0.1727,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0004803",
+      "name": "transposase activity",
+      "def": "Catalysis of the transposition of transposable elements or transposons. Transposases are involved in recombination required for transposition and are site-specific for the transposon/transposable element.",
+      "score": 0.1484,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0042834",
+      "name": "peptidoglycan binding",
+      "def": "Interacting selectively and non-covalently, in a non-covalent manner, with peptidoglycan, any of a class of glycoconjugates found in bacterial cell walls.",
+      "score": 0.1691,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0043533",
+      "name": "inositol 1,3,4,5 tetrakisphosphate binding",
+      "def": "Binding to inositol 1,3,4,5 tetrakisphosphate.",
+      "score": 0.1646,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0008656",
+      "name": "cysteine-type endopeptidase activator activity involved in apoptotic process",
+      "def": "Binds to and increases the rate of proteolysis catalyzed by a cysteine-type endopeptidase involved in the apoptotic process.",
+      "score": 0.1404,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0008239",
+      "name": "dipeptidyl-peptidase activity",
+      "def": "Catalysis of the hydrolysis of N-terminal dipeptides from a polypeptide chain.",
+      "score": 0.1627,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0071209",
+      "name": "U7 snRNA binding",
+      "def": "Binding to a U7 small nuclear RNA (U7 snRNA).",
+      "score": 0.1377,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0042393",
+      "name": "histone binding",
+      "def": "Binding to a histone, any of a group of water-soluble proteins found in association with the DNA of eukaryotic or archaeal chromosomes. They are involved in the condensation and coiling of chromosomes during cell division and have also been implicated in gene ",
+      "score": 0.1352,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0009003",
+      "name": "signal peptidase activity",
+      "def": "An endopeptidase that cleaves a hydrophobic, N-terminal signal or leader sequences from mitochondrial, secreted and periplasmic proteins.",
+      "score": 0.1328,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0016920",
+      "name": "pyroglutamyl-peptidase activity",
+      "def": "Catalysis of the release of the N-terminal pyroglutamyl group from a peptide or protein.",
+      "score": 0.1534,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0004415",
+      "name": "hyalurononglucosaminidase activity",
+      "def": "Catalysis of the random hydrolysis of (1->4) linkages between N-acetyl-beta-D-glucosamine and D-glucuronate residues in hyaluronate.",
+      "score": 0.1239,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0015100",
+      "name": "vanadium ion transmembrane transporter activity",
+      "def": "Enables the transfer of vanadium (V) ions from one side of a membrane to the other.",
+      "score": 0.1503,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0000150",
+      "name": "DNA strand exchange activity",
+      "def": "Catalysis of the identification and base-pairing of homologous sequences between single-stranded DNA and double-stranded DNA.",
+      "score": 0.1217,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0015094",
+      "name": "lead ion transmembrane transporter activity",
+      "def": "Enables the transfer of lead (Pb) ions from one side of a membrane to the other.",
+      "score": 0.1503,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0070182",
+      "name": "DNA polymerase binding",
+      "def": "Binding to a DNA polymerase.",
+      "score": 0.5545,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0008525",
+      "name": "phosphatidylcholine intramembrane carrier activity",
+      "def": "Enables the transport of phosphatidylcholine from a region of a membrane to a different region on the same membrane.",
+      "score": 0.6709,
+      "height": 1,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0005154",
+      "name": "epidermal growth factor receptor binding",
+      "def": "Binding to an epidermal growth factor receptor.",
+      "score": 0.5526,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0008965",
+      "name": "phosphoenolpyruvate-protein phosphotransferase activity",
+      "def": "Catalysis of the reaction: phosphoenolpyruvate + protein L-histidine = pyruvate + protein N(pi)-phospho-L-histidine.",
+      "score": 0.5731,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0009392",
+      "name": "N-acetyl-anhydromuramoyl-L-alanine amidase activity",
+      "def": "Catalysis of the reaction: GlcNAc-1,6-anhMurNAc-L-Ala-gamma-D-Glu-DAP-D-Ala + H2O glcNAc-1,6-anhMurNAc + L-Ala-gamma-D-Glu-DAP-D-Ala.",
+      "score": 0.7274,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0072320",
+      "name": "volume-sensitive chloride channel activity",
+      "def": "Enables the transmembrane transfer of a chloride ion by a volume-sensitive channel. A volume-sensitive channel is a channel that responds to changes in the volume of a cell.",
+      "score": 0.5887,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:1904121",
+      "name": "phosphatidylethanolamine transfer activity",
+      "def": "Removes phosphatidylethanolamine from a membrane or a monolayer lipid particle, transports it through the aqueous phase while protected in a hydrophobic pocket, and brings it to an acceptor membrane or lipid particle.",
+      "score": 0.6409,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0047129",
+      "name": "opine dehydrogenase activity",
+      "def": "Catalysis of the reaction: (2S)-2-[(R)-1-carboxyethylamino]pentanoate + H2O + NAD+ = L-2-aminopentanoate + H+ + NADH + pyruvate.",
+      "score": 0.3542,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0070840",
+      "name": "dynein complex binding",
+      "def": "Binding to a dynein complex, a protein complex that contains two or three dynein heavy chains and several light chains, and has microtubule motor activity.",
+      "score": 0.5486,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:1990050",
+      "name": "phosphatidic acid transfer activity",
+      "def": "Removes a phosphatidic acid from a membrane or a monolayer lipid particle, transports it through the aqueous phase while protected in a hydrophobic pocket, and brings it to an acceptor membrane or lipid particle. Phosphatidic acid refers to a glycophospholipid",
+      "score": 0.6409,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0019177",
+      "name": "dihydroneopterin triphosphate pyrophosphohydrolase activity",
+      "def": "Catalysis of the reaction: dihydroneopterin triphosphate = dihydroneopterin phosphate + diphosphate.",
+      "score": 0.4617,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0047863",
+      "name": "dimethylallylcistransferase activity",
+      "def": "Catalysis of the reaction: dimethylallyl diphosphate + isopentenyl diphosphate = diphosphate + neryl diphosphate.",
+      "score": 0.3525,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0017147",
+      "name": "Wnt-protein binding",
+      "def": "Binding to a Wnt-protein, a secreted growth factor involved in signaling.",
+      "score": 0.5883,
+      "height": 0,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 1250,
+      "source": "ai_annotation",
+      "row": 177
+     }
+    ]
+   },
+   "result": {
+    "input_id": 1250,
+    "gene_row": 177,
+    "source": "ai_annotation",
+    "text": "CHAP-domain peptidoglycan hydrolase, likely a secreted cell wall amidase/peptidase associated with a conjugative transposon or prophage-like surface element.",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0008745": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0008745",
+        "confidence": "high",
+        "why": "The annotation describes a CHAP-domain peptidoglycan hydrolase and cell wall amidase, which corresponds to N-acetylmuramoyl-L-alanine amidase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "CHAP domains are well-known to possess N-acetylmuramoyl-L-alanine amidase activity, acting as cell wall peptidoglycan hydrolases."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0008745",
+        "confidence": "high",
+        "why": "The annotation explicitly describes a secreted cell wall amidase/peptidase acting on peptidoglycan, which matches N-acetylmuramoyl-L-alanine amidase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "CHAP-domain peptidoglycan hydrolases are cell wall lytic enzymes; among the candidates, the specific peptidoglycan amidase term fits best, while generic amidase activity is less specific."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0008745",
+        "confidence": "medium",
+        "why": "The annotation describes a CHAP-domain peptidoglycan hydrolase likely acting as a cell wall amidase, matching hydrolysis of the N-acetylmuramoyl-L-alanine linkage in bacterial peptidoglycan."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "The annotation also mentions peptidase activity, but the candidate list lacks a specific peptidoglycan endopeptidase term."
+     }
+    },
+    "critic": {
+     "verdict": "inconsistent",
+     "reason": "The annotation only hedges ('likely a secreted cell wall amidase/peptidase') without confirming cleavage of the specific N-acetylmuramoyl-L-alanine bond, so GO:0008745 is an overly specific term chosen mainly because 'amidase' appears in both strings; a generic amidase or peptidoglycan-binding term is better supported.",
+     "overpicked": [
+      "GO:0008745"
+     ],
+     "missed": [
+      "GO:0004040",
+      "GO:0042834"
+     ],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0008745"
+     ],
+     "final_confidence": "medium",
+     "reasoning": "The annotation describes a 'CHAP-domain peptidoglycan hydrolase' that is 'likely a secreted cell wall amidase/peptidase.' CHAP domains are well-characterized as peptidoglycan hydrolases that specifically cleave the amide bond between N-acetylmuramic acid and L-alanine in bacterial cell walls - this is precisely the activity defined by GO:0008745 (N-acetylmuramoyl-L-alanine amidase activity). While the critic notes the word 'likely' introduces some uncertainty, the explicit mention of 'CHAP-domain' provides strong mechanistic evidence for this specific activity, as CHAP domains are functionally defined by this catalytic specificity. The generic GO:0004040 (amidase activity) would be too broad since it refers to monocarboxylic acid amides generally, not the specific peptidoglycan amide bond. GO:0042834 (peptidoglycan binding) describes a binding function rather than the catalytic hydrolase activity that is the primary functional claim. The combination of 'CHAP-domain' and 'peptidoglycan hydrolase' with 'cell wall amidase' provides sufficient evidence for GO:0008745, though confidence is medium rather than high due to the hedging language.",
+     "skipped": false
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 1402,
+    "gene_row": 207,
+    "source": "DRAM2_annotation",
+    "text": "K00587 | 2.1.1.100 | protein-S-isoprenylcysteine O-methyltransferase [EC:2.1.1.100]",
+    "candidates": [
+     {
+      "go_id": "GO:0004671",
+      "name": "protein C-terminal S-isoprenylcysteine carboxyl O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + protein C-terminal S-farnesyl-L-cysteine = S-adenosyl-L-homocysteine + protein C-terminal S-farnesyl-L-cysteine methyl ester.",
+      "score": 0.7232,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0051742",
+      "name": "2-methyl-6-solanyl-1,4-benzoquinone methyltransferase activity",
+      "def": "Catalysis of the reaction: 2-methyl-6-solanyl-1,4-benzoquinone + S-adenosyl-methionine = 2,3-dimethyl-6-solanyl-1,4-benzoquinone + S-adenosyl-homocysteine.",
+      "score": 0.3442,
+      "height": 0,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0051741",
+      "name": "2-methyl-6-phytyl-1,4-benzoquinone methyltransferase activity",
+      "def": "Catalysis of the reaction: 2-methyl-6-phytyl-1,4-benzoquinone + S-adenosyl-methionine = 2,3-dimethyl-6-phytyl-1,4-benzoquinone + S-adenosyl-homocysteine.",
+      "score": 0.2923,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0030793",
+      "name": "3'-demethylstaurosporine O-methyltransferase activity",
+      "def": "Catalysis of the reaction: 3'-demethylstaurosporine + S-adenosyl-L-methionine = S-adenosyl-L-homocysteine + H+ + staurosporine.",
+      "score": 0.327,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0008898",
+      "name": "S-adenosylmethionine-homocysteine S-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + L-homocysteine = S-adenosyl-L-homocysteine + L-methionine.",
+      "score": 0.2671,
+      "height": 0,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0035797",
+      "name": "tellurite methyltransferase activity",
+      "def": "Catalysis of the reaction: tellurite + S-adenosyl-L-methionine = methanetellurite + S-adenosyl-L-homocysteine.",
+      "score": 0.3135,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0102913",
+      "name": "3-aminomethylindole N-methyltransferase activity",
+      "def": "Catalysis of the reaction: 3-(aminomethyl)indole + 2 S-adenosyl-L-methionine = gramine + 2 S-adenosyl-L-homocysteine + 2 H+.",
+      "score": 0.2644,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0030731",
+      "name": "guanidinoacetate N-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + guanidinoacetate = S-adenosyl-L-homocysteine + creatine + H+.",
+      "score": 0.294,
+      "height": 0,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0030778",
+      "name": "columbamine O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + columbamine = S-adenosyl-L-homocysteine + H+ + palmatine.",
+      "score": 0.2576,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0030769",
+      "name": "macrocin O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine(1+) + macrocin = S-adenosyl-L-homocysteine + H+ + tylosin.",
+      "score": 0.252,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0030770",
+      "name": "demethylmacrocin O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine(1+) + demethylmacrocin = S-adenosyl-L-homocysteine + H+ + macrocin.",
+      "score": 0.2889,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0016300",
+      "name": "tRNA (uridine) methyltransferase activity",
+      "def": "Catalysis of the transfer of a methyl group from a donor to a uracil residue in a tRNA molecule.",
+      "score": 0.2449,
+      "height": 1,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0004790",
+      "name": "thioether S-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine(1+) + dimethyl sulfide = S-adenosyl-L-homocysteine + trimethylsulfonium.",
+      "score": 0.2828,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0030748",
+      "name": "amine N-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + an amine = S-adenosyl-L-homocysteine + a methylated amine. Acts on primary, secondary and tertiary amines.",
+      "score": 0.2828,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0050630",
+      "name": "(iso)eugenol O-methyltransferase activity",
+      "def": "Catalysis of the reaction: (E)-isoeugenol + S-adenosyl-L-methionine = (E)-isomethyleugenol + H+ + S-adenosyl-L-homocysteine.",
+      "score": 0.2399,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0042409",
+      "name": "caffeoyl-CoA O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + caffeoyl-CoA = S-adenosyl-L-homocysteine + feruloyl-CoA.",
+      "score": 0.2381,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0090486",
+      "name": "small RNA 2'-O-ribose methyltransferase activity",
+      "def": "Catalysis of the transfer of a methyl group from S-adenosyl-L-methionine to the oxygen atom of a nucleoside residue in a small RNA molecule. Reaction: S-adenosyl-L-methionine + small RNA = S-adenosyl-L-homocysteine + small RNA containing a 3'-terminal 2'-O-met",
+      "score": 0.2321,
+      "height": 1,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0061542",
+      "name": "3-demethylubiquinol 3-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: a 3-demethylubiquinol + S-adenosyl-L-methionine = a ubiquinol + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2575,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0047146",
+      "name": "sterigmatocystin 7-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: sterigmatocystin + S-adenosyl-L-methionine = 7-O-methylsterigmatocystin + S-adenosyl-homocysteine.",
+      "score": 0.2195,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0030772",
+      "name": "tryptophan 2-C-methyltransferase activity",
+      "def": "Catalysis of the reaction: L-tryptophan + S-adenosyl-L-methionine = 2-methyl-L-tryptophan + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2194,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0010420",
+      "name": "polyprenyldihydroxybenzoate methyltransferase activity",
+      "def": "Catalysis of the reaction: a 3,4-dihydroxy-5-all-trans-polyprenylbenzoate + S-adenosyl-L-methionine = a 3-methoxy,4-hydroxy-5-all-trans-polyprenylbenzoate + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2502,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0030777",
+      "name": "(S)-scoulerine 9-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: (S)-scoulerine + S-adenosyl-L-methionine(1+) = (S)-tetrahydrocolumbamine + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2471,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0033802",
+      "name": "isoliquiritigenin 2'-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + isoliquiritigenin = 2'-O-methylisoliquiritigenin + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2086,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0102766",
+      "name": "naringenin 7-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: (S)-naringenin(1-) + S-adenosyl-L-methionine = sakuranetin + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2449,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0004483",
+      "name": "methyltransferase cap1 activity",
+      "def": "Catalysis of the reaction: a 5'-end (N(7)-methyl 5'-triphosphoguanosine)-ribonucleoside in mRNA or snRNA + S-adenosyl-L-methionine = a 5'-end (N(7)-methyl 5'-triphosphoguanosine)-(2'-O-methyl-ribonucleoside) in mRNA or snRNA + S-adenosyl-L-homocysteine + H+. T",
+      "score": 0.2081,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0004603",
+      "name": "phenylethanolamine N-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + phenylethanolamine = S-adenosyl-L-homocysteine + N-methylphenylethanolamine.",
+      "score": 0.2435,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0097697",
+      "name": "tRNA (5-carboxymethoxyuridine(34)-5-O)-methyltransferase activity",
+      "def": "Catalysis of the reaction: 5-carboxymethoxyuridine34 in tRNA + S-adenosyl-L-methionine = 5-methoxycarbonylmethoxyuridine34 in tRNA + S-adenosyl-L-homocysteine. The methylation occurs on the modified base.",
+      "score": 0.2049,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0030732",
+      "name": "methionine S-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine + L-methionine = S-adenosyl-L-homocysteine + S-methyl-L-methionine.",
+      "score": 0.2418,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0046539",
+      "name": "histamine N-methyltransferase activity",
+      "def": "Catalysis of the reaction: S-adenosyl-L-methionine(1+) + histamine = N(tau)-methylhistamine + S-adenosyl-L-homocysteine + H+.",
+      "score": 0.2047,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0018064",
+      "name": "protein-L-histidine N-tele-methyltransferase activity",
+      "def": "Catalysis of the reaction: L-histidyl-[protein] + S-adenosyl-L-methionine = N(tele)-methyl-L-histidyl-[protein] + S-adenosyl-L-homocysteine.",
+      "score": 0.2408,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0070182",
+      "name": "DNA polymerase binding",
+      "def": "Binding to a DNA polymerase.",
+      "score": 0.5545,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0016884",
+      "name": "carbon-nitrogen ligase activity, with glutamine as amido-N-donor",
+      "def": "Catalysis of the transfer of the amide nitrogen of glutamine to a substrate. Usually composed of two subunits or domains, one that first hydrolyzes glutamine, and then transfers the resulting ammonia to the second subunit (or domain), where it acts as a source",
+      "score": 0.9398,
+      "height": 1,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0005154",
+      "name": "epidermal growth factor receptor binding",
+      "def": "Binding to an epidermal growth factor receptor.",
+      "score": 0.5526,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0004852",
+      "name": "uroporphyrinogen-III synthase activity",
+      "def": "Catalysis of the reaction: hydroxymethylbilane = H2O + uroporphyrinogen III.",
+      "score": 0.9464,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0010296",
+      "name": "prenylcysteine methylesterase activity",
+      "def": "Catalysis of the reaction: protein C-terminal S-farnesyl-L-cysteine methyl ester + H2O = protein C-terminal S-farnesyl-L-cysteine + methanol + H+.",
+      "score": 0.3516,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0070733",
+      "name": "AMPylase activity",
+      "def": "Catalysis of the reaction: ATP + protein = diphosphate + adenylyl-protein; mediates the addition of an adenylyl (adenosine 5'-monophosphate; AMP group) to L-serine, L-threonine, and L-tyrosine residues in target proteins.",
+      "score": 0.4049,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0072320",
+      "name": "volume-sensitive chloride channel activity",
+      "def": "Enables the transmembrane transfer of a chloride ion by a volume-sensitive channel. A volume-sensitive channel is a channel that responds to changes in the volume of a cell.",
+      "score": 0.5887,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0035312",
+      "name": "5'-3' DNA exonuclease activity",
+      "def": "Catalysis of the sequential cleavage of mononucleotides from a free 5' terminus of a DNA molecule.",
+      "score": 0.928,
+      "height": 1,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0043803",
+      "name": "hydroxyneurosporene-O-methyltransferase activity",
+      "def": "Catalysis of the reaction: demethylspheroidene + S-adenosyl-L-methionine = H+ + S-adenosyl-L-homocysteine + spheroidene.",
+      "score": 0.2128,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0160105",
+      "name": "tRNA (adenine(22)-N1)-methyltransferase activity",
+      "def": "Catalysis of the reaction: adenosine(22) in tRNA + S-adenosyl-L-methionine = H+ + N(1)-methyladenosine(22) in tRNA + S-adenosyl-L-homocysteine.",
+      "score": 0.249,
+      "height": 0,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 1402,
+      "source": "DRAM2_annotation",
+      "row": 207
+     }
+    ]
+   },
+   "result": {
+    "input_id": 1402,
+    "gene_row": 207,
+    "source": "DRAM2_annotation",
+    "text": "K00587 | 2.1.1.100 | protein-S-isoprenylcysteine O-methyltransferase [EC:2.1.1.100]",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0004671": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0004671",
+        "confidence": "high",
+        "why": "The annotation specifically names protein-S-isoprenylcysteine O-methyltransferase with EC 2.1.1.100, which directly corresponds to GO:0004671."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The EC number 2.1.1.100 matches GO:0004671."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0004671",
+        "confidence": "high",
+        "why": "The annotation explicitly names protein-S-isoprenylcysteine O-methyltransferase (EC 2.1.1.100), which matches protein C-terminal S-isoprenylcysteine carboxyl O-methyltransferase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The EC number 2.1.1.100 specifically supports the methyltransferase activity on protein C-terminal isoprenylcysteine, not the methylesterase reverse reaction."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0004671",
+        "confidence": "high",
+        "why": "The annotation names protein-S-isoprenylcysteine O-methyltransferase EC:2.1.1.100, matching protein C-terminal S-isoprenylcysteine carboxyl O-methyltransferase activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "Other methyltransferase candidates have different substrates, and prenylcysteine methylesterase is the reverse hydrolysis activity."
+     }
+    },
+    "critic": {
+     "verdict": "strongly_consistent",
+     "reason": "The annotation explicitly matches EC 2.1.1.100, protein-S-isoprenylcysteine O-methyltransferase, which corresponds directly to GO:0004671 by both name and enzymatic meaning, not just superficial wording overlap.",
+     "overpicked": [],
+     "missed": [],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0004671"
+     ],
+     "final_confidence": "high",
+     "no_functional_content": false,
+     "reasoning": "meta skipped: council agreed and the critic raised nothing.",
+     "skipped": true
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 1465,
+    "gene_row": 216,
+    "source": "DRAM2_annotation",
+    "text": "K25143 | linearmycin/streptolysin S transport system permease protein",
+    "candidates": [
+     {
+      "go_id": "GO:0071916",
+      "name": "dipeptide transmembrane transporter activity",
+      "def": "Enables the transfer of a dipeptide from one side of a membrane to the other. A dipeptide is a combination of two amino acids linked together by a peptide (-CO-NH-) bond.",
+      "score": 0.6178,
+      "height": 1,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0001406",
+      "name": "glycerophosphodiester transmembrane transporter activity",
+      "def": "Enables the transfer of glycerophosphodiesters from one side of a membrane to the other. Glycerophosphodiesters are small molecules composed of glycerol-3-phosphate and an alcohol, for example, glycerophosphoinositol.",
+      "score": 0.5428,
+      "height": 0,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0015640",
+      "name": "peptidoglycan peptide transmembrane transporter activity",
+      "def": "Enables the transfer of peptidoglycan peptides from one side of a membrane to the other. Peptidoglycan peptides are the oligopeptides found in peptidoglycan networks which cross-link the polysaccharide chains.",
+      "score": 0.6084,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0015169",
+      "name": "glycerol-3-phosphate transmembrane transporter activity",
+      "def": "Enables the transfer of glycerol-3-phosphate from one side of a membrane to the other. Glycerol-3-phosphate is a phosphoric monoester of glycerol.",
+      "score": 0.5428,
+      "height": 1,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0015098",
+      "name": "molybdate ion transmembrane transporter activity",
+      "def": "Enables the transfer of molybdate (MoO4 2-) ions from one side of a membrane to the other. Molybdate is the bivalent anion derived from molybdic acid.",
+      "score": 0.5309,
+      "height": 1,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0015419",
+      "name": "ABC-type sulfate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + sulfate(out) = ADP + phosphate + sulfate(in).",
+      "score": 0.5069,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0015489",
+      "name": "putrescine transmembrane transporter activity",
+      "def": "Enables the transfer of putrescine from one side of a membrane to the other. Putrescine is 1,4-diaminobutane, the polyamine formed by decarboxylation of ornithine and the metabolic precursor of spermidine and spermine.",
+      "score": 0.3348,
+      "height": 1,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0015099",
+      "name": "nickel cation transmembrane transporter activity",
+      "def": "Enables the transfer of nickel (Ni) cations from one side of a membrane to the other.",
+      "score": 0.4374,
+      "height": 1,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0015418",
+      "name": "ABC-type quaternary ammonium compound transporting activity",
+      "def": "Catalysis of the reaction: ATP + H2O + quaternary ammonium(out) = ADP + H+ + phosphate + quaternary ammonium(in).",
+      "score": 0.3322,
+      "height": 1,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0015625",
+      "name": "ABC-type ferric hydroxamate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + ferric-hydroxamate(out) = ADP + phosphate + ferric-hydroxamate(in).",
+      "score": 0.3319,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0015417",
+      "name": "ABC-type polyamine transporter activity",
+      "def": "Catalysis of the reaction: ATP + H2O + polyamine(out) = ADP + phosphate + polyamine(in).",
+      "score": 0.4103,
+      "height": 1,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0103116",
+      "name": "ABC-type D-galactofuranose transporter",
+      "def": "Catalysis of the reaction: alpha-D-galactofuranose + ATP + H2O = alpha-D-galactofuranose + hydrogenphosphate + ADP + H+.",
+      "score": 0.3306,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0015416",
+      "name": "ABC-type phosphonate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + phosphonate(out) = ADP + phosphate + phosphonate(in). A phosphonate is any salt, anion, or ester of phosphonic acid (HPO(OH)2).",
+      "score": 0.3446,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0015407",
+      "name": "ABC-type monosaccharide transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + monosaccharide(out) = ADP + phosphate + monosaccharide(in). Ribose, xylose, arabinose, galactose and methylgalactoside are imported.",
+      "score": 0.3239,
+      "height": 1,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0015658",
+      "name": "branched-chain amino acid transmembrane transporter activity",
+      "def": "Enables the transfer of branched-chain amino acids from one side of a membrane to the other. Branched-chain amino acids are amino acids with a branched carbon skeleton without rings.",
+      "score": 0.3262,
+      "height": 1,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0102014",
+      "name": "beta-D-galactose-importing ATPase activity",
+      "def": "Catalysis of the reaction: ATP(4-) + beta-D-galactoside + H2O = ADP(3-) + hydrogenphosphate + beta-D-galactoside + H+.",
+      "score": 0.3106,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0015615",
+      "name": "ABC-type D-allose transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + D-allose(out) = ADP + phosphate + D-allose(in).",
+      "score": 0.3073,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0005291",
+      "name": "high-affinity L-histidine transmembrane transporter activity",
+      "def": "Enables the transfer of L-histidine from one side of a membrane to the other. L-histidine is 2-amino-3-(1H-imidazol-4-yl)propanoic acid. In high-affinity transport the transporter is able to bind the solute even if it is only present at very low concentrations",
+      "score": 0.3213,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0015426",
+      "name": "ATPase-coupled polar amino acid-transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + polar amino acid(out) = ADP + phosphate + polar amino acid(in).",
+      "score": 0.284,
+      "height": 1,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0015624",
+      "name": "ABC-type ferric-enterobactin transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + ferric-enterobactin(out) = ADP + phosphate + ferric-enterobactin(in).",
+      "score": 0.2687,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0042907",
+      "name": "xanthine transmembrane transporter activity",
+      "def": "Enables the transfer of xanthine from one side of a membrane to the other. Xanthine (2,6-dihydroxypurine) is a purine formed in the metabolic breakdown of guanine, but is not present in nucleic acids.",
+      "score": 0.3028,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0015208",
+      "name": "guanine transmembrane transporter activity",
+      "def": "Enables the transfer of guanine, 2-amino-6-hydroxypurine, from one side of a membrane to the other.",
+      "score": 0.2992,
+      "height": 1,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0005415",
+      "name": "nucleoside:sodium symporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: nucleoside(out) + Na+(out) = nucleoside(in) + Na+(in).",
+      "score": 0.2473,
+      "height": 1,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0015421",
+      "name": "ABC-type oligopeptide transporter activity",
+      "def": "Catalysis of the reaction: ATP + H2O + oligopeptide(out) = ADP + phosphate + oligopeptide(in).",
+      "score": 0.2787,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0015410",
+      "name": "ABC-type manganese transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + Mn2+(out) = ADP + phosphate + Mn2+(in).",
+      "score": 0.2435,
+      "height": 0,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0015412",
+      "name": "ABC-type molybdate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + molybdate(out) = ADP + phosphate + molybdate(in).",
+      "score": 0.2783,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0015436",
+      "name": "ABC-type capsular-polysaccharide transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + capsular polysaccharide(in) = ADP + phosphate + capsular polysaccharide(out).",
+      "score": 0.2658,
+      "height": 0,
+      "rank": 27
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 1465,
+      "source": "DRAM2_annotation",
+      "row": 216
+     },
+     {
+      "parsed_input_id": 2345,
+      "source": "DRAM2_annotation",
+      "row": 337
+     },
+     {
+      "parsed_input_id": 10119,
+      "source": "DRAM2_annotation",
+      "row": 1405
+     }
+    ]
+   },
+   "result": {
+    "input_id": 1465,
+    "gene_row": 216,
+    "source": "DRAM2_annotation",
+    "text": "K25143 | linearmycin/streptolysin S transport system permease protein",
+    "status": "ok",
+    "decline_reason": "no_candidate_matched",
+    "n_candidates": 27,
+    "n_valid": 3,
+    "votes": {
+     "GO:0015421": 2
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0015421",
+        "confidence": "medium",
+        "why": "The annotation describes a permease for the streptolysin S transport system, which is an ABC-type transporter for the streptolysin S peptide, matching ABC-type oligopeptide transporter activity."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "Streptolysin S is a peptide toxin transported by an ABC transporter system, making GO:0015421 the most appropriate candidate."
+     },
+     "gpt54": {
+      "picked": [],
+      "overall_confidence": "low",
+      "no_functional_content": false,
+      "notes": "The annotation supports a permease component of a linearmycin/streptolysin S transport system, but none of the candidate GO terms matches this specific transporter substrate or system."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0015421",
+        "confidence": "medium",
+        "why": "The annotation describes a linearmycin/streptolysin S transport system permease, and these substrates are peptide natural products, supporting an ABC-type oligopeptide transporter activity among the available candidates."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "No candidate specifically represents linearmycin or streptolysin S export, so the closest supported peptide-transport term was selected."
+     }
+    },
+    "critic": {
+     "verdict": "inconsistent",
+     "reason": "Streptolysin S and linearmycin are secondary-metabolite toxins/antibiotics exported by a specialized ABC permease, not oligopeptide nutrients; the council's pick of GO:0015421 (ABC-type oligopeptide transporter) rests on the superficial 'peptide-like' wording of streptolysin S rather than actual substrate specificity, while a more fitting complex-molecule exporter (e.g., capsular-polysaccharide type) was overlooked.",
+     "overpicked": [
+      "GO:0015421"
+     ],
+     "missed": [
+      "GO:0015436"
+     ],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [],
+     "final_confidence": "low",
+     "no_functional_content": false,
+     "reasoning": "The annotation describes a permease protein for the linearmycin/streptolysin S transport system. These are secondary metabolite toxins/antibiotics that are exported by specialized ABC transporters. The council's pick of GO:0015421 (ABC-type oligopeptide transporter activity) is problematic because that term refers to import of oligopeptide nutrients, not export of complex secondary metabolites. The critic suggested GO:0015436 (ABC-type capsular-polysaccharide transporter activity), but this is also not appropriate since streptolysin S and linearmycin are not polysaccharides. The annotation clearly indicates transport/permease function, but none of the candidate GO terms accurately capture the specific molecular function of transporting these particular secondary metabolite substrates. Since the permease is part of a specialized export system for bacteriocin-like toxins, and no appropriate GO term for this specific substrate class is available among the candidates, assigning any of these terms would be speculative and potentially misleading. A defensible smaller set (empty) is preferable to an inaccurate assignment.",
+     "skipped": false
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 1497,
+    "gene_row": 220,
+    "source": "KOFAMSCAN_annotation",
+    "text": "polar amino acid transport system permease protein | abc.pa.s",
+    "candidates": [
+     {
+      "go_id": "GO:0071916",
+      "name": "dipeptide transmembrane transporter activity",
+      "def": "Enables the transfer of a dipeptide from one side of a membrane to the other. A dipeptide is a combination of two amino acids linked together by a peptide (-CO-NH-) bond.",
+      "score": 0.5346,
+      "height": 1,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0015658",
+      "name": "branched-chain amino acid transmembrane transporter activity",
+      "def": "Enables the transfer of branched-chain amino acids from one side of a membrane to the other. Branched-chain amino acids are amino acids with a branched carbon skeleton without rings.",
+      "score": 0.4906,
+      "height": 1,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0001406",
+      "name": "glycerophosphodiester transmembrane transporter activity",
+      "def": "Enables the transfer of glycerophosphodiesters from one side of a membrane to the other. Glycerophosphodiesters are small molecules composed of glycerol-3-phosphate and an alcohol, for example, glycerophosphoinositol.",
+      "score": 0.4678,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0015640",
+      "name": "peptidoglycan peptide transmembrane transporter activity",
+      "def": "Enables the transfer of peptidoglycan peptides from one side of a membrane to the other. Peptidoglycan peptides are the oligopeptides found in peptidoglycan networks which cross-link the polysaccharide chains.",
+      "score": 0.536,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0015169",
+      "name": "glycerol-3-phosphate transmembrane transporter activity",
+      "def": "Enables the transfer of glycerol-3-phosphate from one side of a membrane to the other. Glycerol-3-phosphate is a phosphoric monoester of glycerol.",
+      "score": 0.4678,
+      "height": 1,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0015098",
+      "name": "molybdate ion transmembrane transporter activity",
+      "def": "Enables the transfer of molybdate (MoO4 2-) ions from one side of a membrane to the other. Molybdate is the bivalent anion derived from molybdic acid.",
+      "score": 0.4597,
+      "height": 1,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0015419",
+      "name": "ABC-type sulfate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + sulfate(out) = ADP + phosphate + sulfate(in).",
+      "score": 0.4546,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0015426",
+      "name": "ATPase-coupled polar amino acid-transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + polar amino acid(out) = ADP + phosphate + polar amino acid(in).",
+      "score": 0.4033,
+      "height": 1,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0015099",
+      "name": "nickel cation transmembrane transporter activity",
+      "def": "Enables the transfer of nickel (Ni) cations from one side of a membrane to the other.",
+      "score": 0.3931,
+      "height": 1,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0015489",
+      "name": "putrescine transmembrane transporter activity",
+      "def": "Enables the transfer of putrescine from one side of a membrane to the other. Putrescine is 1,4-diaminobutane, the polyamine formed by decarboxylation of ornithine and the metabolic precursor of spermidine and spermine.",
+      "score": 0.302,
+      "height": 1,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0015625",
+      "name": "ABC-type ferric hydroxamate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + ferric-hydroxamate(out) = ADP + phosphate + ferric-hydroxamate(in).",
+      "score": 0.2953,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0015417",
+      "name": "ABC-type polyamine transporter activity",
+      "def": "Catalysis of the reaction: ATP + H2O + polyamine(out) = ADP + phosphate + polyamine(in).",
+      "score": 0.36,
+      "height": 1,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0015407",
+      "name": "ABC-type monosaccharide transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + monosaccharide(out) = ADP + phosphate + monosaccharide(in). Ribose, xylose, arabinose, galactose and methylgalactoside are imported.",
+      "score": 0.2902,
+      "height": 1,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0015184",
+      "name": "L-cystine transmembrane transporter activity",
+      "def": "Enables the transfer of L-cystine from one side of a membrane to the other.",
+      "score": 0.3536,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0008718",
+      "name": "D-amino-acid dehydrogenase activity",
+      "def": "Catalysis of the reaction: a D-alpha-amino acid + a quinone + H2O = a 2-oxocarboxylate + a quinol + NH4+.",
+      "score": 0.2895,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0042907",
+      "name": "xanthine transmembrane transporter activity",
+      "def": "Enables the transfer of xanthine from one side of a membrane to the other. Xanthine (2,6-dihydroxypurine) is a purine formed in the metabolic breakdown of guanine, but is not present in nucleic acids.",
+      "score": 0.3225,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0015418",
+      "name": "ABC-type quaternary ammonium compound transporting activity",
+      "def": "Catalysis of the reaction: ATP + H2O + quaternary ammonium(out) = ADP + H+ + phosphate + quaternary ammonium(in).",
+      "score": 0.2827,
+      "height": 1,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0015416",
+      "name": "ABC-type phosphonate transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + phosphonate(out) = ADP + phosphate + phosphonate(in). A phosphonate is any salt, anion, or ester of phosphonic acid (HPO(OH)2).",
+      "score": 0.3165,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0103116",
+      "name": "ABC-type D-galactofuranose transporter",
+      "def": "Catalysis of the reaction: alpha-D-galactofuranose + ATP + H2O = alpha-D-galactofuranose + hydrogenphosphate + ADP + H+.",
+      "score": 0.2817,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0005291",
+      "name": "high-affinity L-histidine transmembrane transporter activity",
+      "def": "Enables the transfer of L-histidine from one side of a membrane to the other. L-histidine is 2-amino-3-(1H-imidazol-4-yl)propanoic acid. In high-affinity transport the transporter is able to bind the solute even if it is only present at very low concentrations",
+      "score": 0.2745,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0102014",
+      "name": "beta-D-galactose-importing ATPase activity",
+      "def": "Catalysis of the reaction: ATP(4-) + beta-D-galactoside + H2O = ADP(3-) + hydrogenphosphate + beta-D-galactoside + H+.",
+      "score": 0.2726,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0010178",
+      "name": "IAA-amino acid conjugate hydrolase activity",
+      "def": "Catalysis of the cleavage of the amide bond between IAA (auxin) and the conjugated amino acid.",
+      "score": 0.2943,
+      "height": 1,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0015615",
+      "name": "ABC-type D-allose transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + D-allose(out) = ADP + phosphate + D-allose(in).",
+      "score": 0.2724,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0015425",
+      "name": "ATPase-coupled nonpolar-amino acid transporter activity",
+      "def": "Enables the transfer of a solute or solutes from one side of a membrane to the other according to the reaction: ATP + H2O + nonpolar amino acid(out) = ADP + phosphate + nonpolar amino acid(in).",
+      "score": 0.2563,
+      "height": 0,
+      "rank": 24
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 1497,
+      "source": "KOFAMSCAN_annotation",
+      "row": 220
+     },
+     {
+      "parsed_input_id": 5135,
+      "source": "KOFAMSCAN_annotation",
+      "row": 732
+     }
+    ]
+   },
+   "result": {
+    "input_id": 1497,
+    "gene_row": 220,
+    "source": "KOFAMSCAN_annotation",
+    "text": "polar amino acid transport system permease protein | abc.pa.s",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 24,
+    "n_valid": 3,
+    "votes": {
+     "GO:0015426": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0015426",
+        "confidence": "high",
+        "why": "The annotation describes a permease protein of a polar amino acid transport system, which corresponds to ATPase-coupled polar amino acid-transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The term GO:0015426 directly matches the 'polar amino acid transport system' described in the annotation."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0015426",
+        "confidence": "high",
+        "why": "The annotation explicitly describes a permease component of a polar amino acid ABC transport system, matching ATPase-coupled polar amino acid transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The string supports polar amino acid transport specificity, but as a permease subunit annotation it does not justify unrelated amino acid, peptide, ion, or sugar transporter terms."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0015426",
+        "confidence": "high",
+        "why": "The annotation explicitly describes a polar amino acid transport system permease, matching ATPase-coupled polar amino acid transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "Other candidates describe different substrates not supported by the annotation."
+     }
+    },
+    "critic": {
+     "verdict": "strongly_consistent",
+     "reason": "The annotation explicitly identifies a polar amino acid ABC transport system permease, and GO:0015426 (ATPase-coupled polar amino acid-transporter activity) is the standard GO term used for components of such polar-amino-acid ABC transporters, matching the annotation's actual meaning rather than superficial wording.",
+     "overpicked": [],
+     "missed": [],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0015426"
+     ],
+     "final_confidence": "high",
+     "no_functional_content": false,
+     "reasoning": "meta skipped: council agreed and the critic raised nothing.",
+     "skipped": true
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 1711,
+    "gene_row": 247,
+    "source": "RAST_annotation",
+    "text": "PTS system, ascorbate-specific IIA component",
+    "candidates": [
+     {
+      "go_id": "GO:0090585",
+      "name": "protein-phosphocysteine-L-ascorbate-phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + L-ascorbate(out) = protein cysteine + L-ascorbate-6-phosphate(in).",
+      "score": 0.5752,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0090563",
+      "name": "protein-phosphocysteine-sugar phosphotransferase activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + sugar(out) = protein cysteine + sugar phosphate(in). This differs from primary",
+      "score": 0.5703,
+      "height": 1,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0008982",
+      "name": "protein-N(PI)-phosphohistidine-carbohydrate phosphotransferase activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein N-phosphohistidine + sugar(out) = protein histidine + sugar phosphate(in). This differs from prima",
+      "score": 0.5452,
+      "height": 1,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0022877",
+      "name": "protein-N(PI)-phosphohistidine-fructose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein N-phosphohistidine + fructose(out) = protein histidine + fructose phosphate(in). This differs from",
+      "score": 0.4339,
+      "height": 0,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0022878",
+      "name": "protein-N(PI)-phosphohistidine-sucrose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein N-phosphohistidine + sucrose(out) = protein histidine + sucrose phosphate(in). This differs from p",
+      "score": 0.421,
+      "height": 0,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0090582",
+      "name": "protein-phosphocysteine-D-fructose-phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + D-fructose(out) = protein cysteine + D-fructose-1-phosphate(in).",
+      "score": 0.4484,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0090589",
+      "name": "protein-phosphocysteine-trehalose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + trehalose (out) = protein cysteine + trehalose-6-phosphate (in).",
+      "score": 0.421,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0090564",
+      "name": "protein-phosphocysteine-glucose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + glucose(out) = protein cysteine + glucose phosphate(in). This differs from pri",
+      "score": 0.412,
+      "height": 0,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0090588",
+      "name": "protein-phosphocysteine-N-acetylmuramate phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + N-acetylmuramate (out) = protein cysteine + N-acetylmuramate-6-phosphate (in).",
+      "score": 0.3875,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0022870",
+      "name": "protein-N(PI)-phosphohistidine-mannose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane according to the reaction: D-mannose(out) + N(pros)-phospho-L-histidyl-[protein] = D-mannose 6-phosphate(in) + L-histidyl-[protein]. This differs from primary ",
+      "score": 0.3662,
+      "height": 0,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0008447",
+      "name": "L-ascorbate oxidase activity",
+      "def": "Catalysis of the reaction: 4 L-ascorbate + O2 = 4 monodehydroascorbate + 2 H2O.",
+      "score": 0.3538,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0090566",
+      "name": "protein-phosphocysteine-N,N'-diacetylchitobiose phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + N,N'-diacetylchitobiose(out) = protein cysteine + N,N'-diacetylchitobiose phos",
+      "score": 0.3148,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0090584",
+      "name": "protein-phosphocysteine-galactitol-phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + galactitol(out) = protein cysteine + galactitol-6-phosphate(in).",
+      "score": 0.3336,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0022872",
+      "name": "protein-N(PI)-phosphohistidine-mannitol phosphotransferase system transmembrane transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein N-phosphohistidine + mannitol(out) = protein histidine + mannitol phosphate(in). This differs from",
+      "score": 0.3031,
+      "height": 0,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0016688",
+      "name": "L-ascorbate peroxidase activity",
+      "def": "Catalysis of the reaction: L-ascorbate + H2O2 = dehydroascorbate + 2 H2O.",
+      "score": 0.3062,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0090565",
+      "name": "protein-phosphocysteine-mannitol phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + mannitol(out) = protein cysteine + mannitol phosphate(in). This differs from p",
+      "score": 0.3031,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0035460",
+      "name": "L-ascorbate 6-phosphate lactonase activity",
+      "def": "Catalysis of the reaction: L-ascorbate 6-phosphate + H2O = 3-keto-L-gulonate 6-phosphate.",
+      "score": 0.2989,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0090586",
+      "name": "protein-phosphocysteine-N-acetylglucosamine phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + N-acetylglucosamine (out) = protein cysteine + N-acetylglucosamine-6-phosphate",
+      "score": 0.2914,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0090581",
+      "name": "protein-phosphocysteine-mannosylglycerate-phosphotransferase system transporter activity",
+      "def": "Catalysis of the PEP-dependent, phosphoryl transfer-driven transport of substances across a membrane. The transport happens by catalysis of the reaction: protein S-phosphocysteine + mannosylglycerate(out) = protein cysteine + mannosylglycerate phosphate(in).",
+      "score": 0.2729,
+      "height": 0,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0033204",
+      "name": "ribonuclease P RNA binding",
+      "def": "Binding to RNA subunit of ribonuclease P.",
+      "score": 0.1887,
+      "height": 0,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0016929",
+      "name": "deSUMOylase activity",
+      "def": "An thiol-dependent isopeptidase activity that cleaves SUMO from a target protein to which it is conjugated.",
+      "score": 0.2208,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0004526",
+      "name": "ribonuclease P activity",
+      "def": "Catalysis of the endonucleolytic cleavage of RNA, removing 5' extra nucleotides from tRNA precursor.",
+      "score": 0.1779,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0071567",
+      "name": "deUFMylase activity",
+      "def": "A thiol-dependent isopeptidase activity that cleaves UFM1 from a target protein to which it is conjugated.",
+      "score": 0.209,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0034015",
+      "name": "L-ribulose-5-phosphate 3-epimerase activity",
+      "def": "Catalysis of the reaction: L-ribulose 5-phosphate = L-xylulose 5-phosphate.",
+      "score": 0.0485,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0016861",
+      "name": "intramolecular oxidoreductase activity, interconverting aldoses and ketoses",
+      "def": "Catalysis of an oxidation-reduction (redox) reaction in which the hydrogen donor and acceptor, which is an aldose or a ketose, are the same molecule, and no oxidized product appears.",
+      "score": 0.0355,
+      "height": 1,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0030371",
+      "name": "translation repressor activity",
+      "def": "Antagonizes ribosome-mediated translation of mRNA into a polypeptide.",
+      "score": 0.0353,
+      "height": 1,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0004435",
+      "name": "phosphatidylinositol-4,5-bisphosphate phospholipase C activity",
+      "def": "Catalysis of the reaction: a 1,2-diacyl-sn-glycero-3-phospho-(1D-myo-inositol-4,5-bisphosphate) + H2O = 1D-myo-inositol 1,4,5-trisphosphate + a 1,2-diacyl-sn-glycerol + H+.",
+      "score": 0.0335,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0001070",
+      "name": "RNA-binding transcription regulator activity",
+      "def": "A transcription regulator activity that modulates the transcription of specific gene sets via selective and non-covalent binding to a specific RNA sequence. This function is known to occur in phages and viruses, for example the lambda N and the HIV tat protein",
+      "score": 0.0353,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0008965",
+      "name": "phosphoenolpyruvate-protein phosphotransferase activity",
+      "def": "Catalysis of the reaction: phosphoenolpyruvate + protein L-histidine = pyruvate + protein N(pi)-phospho-L-histidine.",
+      "score": 0.1823,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0004972",
+      "name": "NMDA glutamate receptor activity",
+      "def": "A cation channel that opens in response to binding by extracellular glutmate, but only if glycine or D-serine is also bound and the membrane is depolarized. Voltage gating is indirect, due to ejection of bound magnesium from the pore at permissive voltages.",
+      "score": 0.0327,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0050044",
+      "name": "galactose-6-phosphate isomerase activity",
+      "def": "Catalysis of the reaction: D-galactose 6-phosphate = D-tagatose 6-phosphate.",
+      "score": 0.0274,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0050394",
+      "name": "viomycin kinase activity",
+      "def": "Catalysis of the reaction: ATP + viomycin = ADP + O-phosphoviomycin.",
+      "score": 0.2514,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0061860",
+      "name": "DNA clamp unloader activity",
+      "def": "Facilitating the opening of the ring structure of the PCNA complex, or any of the related sliding clamp complexes, and their removal from the DNA duplex, driven by ATP hydrolysis.",
+      "score": 0.0313,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0004970",
+      "name": "glutamate-gated receptor activity",
+      "def": "Catalysis of the transmembrane transfer of an ion by a channel that opens when glutamate has been bound by the channel complex or one of its constituent parts.",
+      "score": 0.0246,
+      "height": 1,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0004335",
+      "name": "galactokinase activity",
+      "def": "Catalysis of the reaction: D-galactose + ATP = alpha-D-galactose 1-phosphate + ADP + 2 H+.",
+      "score": 0.0238,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0003688",
+      "name": "DNA replication origin binding",
+      "def": "Binding to a DNA replication origin, a unique DNA sequence of a replicon at which DNA replication is initiated and proceeds bidirectionally or unidirectionally.",
+      "score": 0.0282,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0043751",
+      "name": "polyphosphate:AMP phosphotransferase activity",
+      "def": "Catalysis of the reaction: (polyphosphate)n + AMP = (polyphosphate)n-1 + ADP.",
+      "score": 0.1859,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0004925",
+      "name": "prolactin receptor activity",
+      "def": "Combining with prolactin and transmitting the signal from one side of the membrane to the other to initiate a change in cell activity.",
+      "score": 0.0213,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0060698",
+      "name": "endoribonuclease inhibitor activity",
+      "def": "Binds to and stops, prevents or reduces the activity of endoribonuclease.",
+      "score": 0.0257,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0005354",
+      "name": "galactose transmembrane transporter activity",
+      "def": "Enables the transfer of galactose from one side of a membrane to the other. D-galactose is widely distributed in combined form in plants, animals and microorganisms as a constituent of oligo- and polysaccharides; it also occurs in galactolipids and as its gluc",
+      "score": 0.021,
+      "height": 1,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 1711,
+      "source": "RAST_annotation",
+      "row": 247
+     }
+    ]
+   },
+   "result": {
+    "input_id": 1711,
+    "gene_row": 247,
+    "source": "RAST_annotation",
+    "text": "PTS system, ascorbate-specific IIA component",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0090585": 3
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0090585",
+        "confidence": "high",
+        "why": "The annotation describes a component of the ascorbate-specific PTS system, which corresponds to the protein-phosphocysteine-L-ascorbate-phosphotransferase system transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The IIA component is part of the multi-subunit PTS transporter system specific for L-ascorbate."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0090585",
+        "confidence": "high",
+        "why": "The annotation specifies a PTS system ascorbate-specific IIA component, supporting L-ascorbate-specific phosphotransferase system transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "IIA is a phosphotransfer component of the ascorbate-specific PTS, and the candidate list offers the matching substrate-specific PTS activity."
+     },
+     "gpt55": {
+      "picked": [
+       {
+        "go_id": "GO:0090585",
+        "confidence": "high",
+        "why": "The annotation specifies an ascorbate-specific component of the PTS system, matching L-ascorbate phosphotransferase system transporter activity."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "More general sugar/carbohydrate PTS terms were not selected because the substrate is specifically ascorbate."
+     }
+    },
+    "critic": {
+     "verdict": "inconsistent",
+     "reason": "The annotation specifies a PTS IIA component, which transfers phosphate via a phosphohistidine (not phosphocysteine) mechanism, but GO:0090585 describes a phosphocysteine-based ascorbate PTS transporter activity typically associated with IIB/IIBC domains; the council appears to have matched on the word 'ascorbate' rather than the mechanistic fit.",
+     "overpicked": [
+      "GO:0090585"
+     ],
+     "missed": [
+      "GO:0008982"
+     ],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0090585"
+     ],
+     "final_confidence": "medium",
+     "reasoning": "The annotation explicitly describes an 'ascorbate-specific IIA component' of the PTS system. While the critic raises a valid mechanistic concern that IIA components typically use phosphohistidine rather than phosphocysteine chemistry, the ascorbate-specific PTS system (UlaABC/SgaTBA) in bacteria is known to use a phosphocysteine mechanism throughout its phosphoryl transfer chain, including the IIA domain. The IIA component (UlaC/SgaA) in this system does use a cysteine residue for phosphoryl transfer, not histidine, which is characteristic of the mannose-class PTS systems. GO:0090585 specifically describes the ascorbate PTS transporter activity with phosphocysteine chemistry, which is the correct mechanistic description for this system. GO:0008982 (protein-N(PI)-phosphohistidine-carbohydrate phosphotransferase activity) would be incorrect as it describes histidine-based phosphoryl transfer. The council's unanimous selection of GO:0090585 is defensible based on the substrate specificity (ascorbate) and the actual biochemistry of the ascorbate PTS system. Confidence is medium rather than high because the IIA component alone does not catalyze the complete transport reaction but participates in the phosphoryl relay.",
+     "skipped": false
+    }
+   }
+  },
+  {
+   "input": {
+    "input_id": 2029,
+    "gene_row": 294,
+    "source": "DRAM2_annotation",
+    "text": "MER0272122 | VOG00081 | K04485 | MER0272122 - DNA repair protein RadA ({Escherichia coli}) (Streptococcus pseudopneumoniae) [S16.A04]#S16#{peptidase unit: 93-395}~source YP_004767402~ | DNA repair protein RadA/Sms",
+    "candidates": [
+     {
+      "go_id": "GO:0017125",
+      "name": "deoxycytidyl transferase activity",
+      "def": "Catalysis of the insertion of a dCMP residue opposite a template abasic site in DNA.",
+      "score": 0.4259,
+      "height": 0,
+      "rank": 1
+     },
+     {
+      "go_id": "GO:0140664",
+      "name": "ATP-dependent DNA damage sensor activity",
+      "def": "A molecule that recognises toxic DNA structures, and initiates a signaling response, driven by ATP hydrolysis.",
+      "score": 0.2601,
+      "height": 0,
+      "rank": 2
+     },
+     {
+      "go_id": "GO:0070579",
+      "name": "DNA 5-methylcytosine dioxygenase activity",
+      "def": "Catalysis of the reaction: 5-methylcytosine (5mC) in DNA + 2-oxoglutarate + O2 = 5-hydroxymethylcytosine (5hmC) in DNA + succinate + CO2. This reaction is the first step in the removal of cytosine methylated on position 5 in double-stranded DNA. This activity ",
+      "score": 0.2455,
+      "height": 0,
+      "rank": 3
+     },
+     {
+      "go_id": "GO:0031491",
+      "name": "nucleosome binding",
+      "def": "Binding to a nucleosome, a complex comprised of DNA wound around a multisubunit core and associated proteins, which forms the primary packing unit of DNA into higher order structures.",
+      "score": 0.3421,
+      "height": 1,
+      "rank": 4
+     },
+     {
+      "go_id": "GO:0045027",
+      "name": "DNA end binding",
+      "def": "Binding to DNA ends exposed by the creation of double-strand breaks (DSBs).",
+      "score": 0.2993,
+      "height": 0,
+      "rank": 5
+     },
+     {
+      "go_id": "GO:0045148",
+      "name": "tripeptide aminopeptidase activity",
+      "def": "Catalysis of the hydrolysis of a single N-terminal amino acid residue from a tripeptide.",
+      "score": 0.1755,
+      "height": 0,
+      "rank": 6
+     },
+     {
+      "go_id": "GO:0000403",
+      "name": "Y-form DNA binding",
+      "def": "Binding to a DNA segment shaped like a Y. This shape occurs when DNA contains a region of paired double-stranded DNA on one end and a region of unpaired DNA strands on the opposite end.",
+      "score": 0.2993,
+      "height": 0,
+      "rank": 7
+     },
+     {
+      "go_id": "GO:0016805",
+      "name": "dipeptidase activity",
+      "def": "Catalysis of the hydrolysis of a dipeptide.",
+      "score": 0.1696,
+      "height": 1,
+      "rank": 8
+     },
+     {
+      "go_id": "GO:0070012",
+      "name": "oligopeptidase activity",
+      "def": "Catalysis of the hydrolysis of a peptide bond in an oligopeptide, i.e. a molecule containing a small number (2 to 20) of amino acid residues connected by peptide bonds.",
+      "score": 0.1738,
+      "height": 0,
+      "rank": 9
+     },
+     {
+      "go_id": "GO:0004190",
+      "name": "aspartic-type endopeptidase activity",
+      "def": "Catalysis of the hydrolysis of internal, alpha-peptide bonds in a polypeptide chain by a mechanism in which a water molecule bound by the side chains of aspartic residues at the active center acts as a nucleophile.",
+      "score": 0.162,
+      "height": 1,
+      "rank": 10
+     },
+     {
+      "go_id": "GO:0009003",
+      "name": "signal peptidase activity",
+      "def": "An endopeptidase that cleaves a hydrophobic, N-terminal signal or leader sequences from mitochondrial, secreted and periplasmic proteins.",
+      "score": 0.109,
+      "height": 0,
+      "rank": 11
+     },
+     {
+      "go_id": "GO:0003908",
+      "name": "methylated-DNA-[protein]-cysteine S-methyltransferase activity",
+      "def": "Catalysis of the reaction: DNA (containing 6-O-methylguanine) + (protein)-L-cysteine = DNA (without 6-O-methylguanine) + protein S-methyl-L-cysteine.",
+      "score": 0.1567,
+      "height": 0,
+      "rank": 12
+     },
+     {
+      "go_id": "GO:0008239",
+      "name": "dipeptidyl-peptidase activity",
+      "def": "Catalysis of the hydrolysis of N-terminal dipeptides from a polypeptide chain.",
+      "score": 0.1023,
+      "height": 0,
+      "rank": 13
+     },
+     {
+      "go_id": "GO:0017116",
+      "name": "single-stranded DNA helicase activity",
+      "def": "Catalysis of the reaction: ATP + H2O = ADP + phosphate, in the presence of single-stranded DNA; drives the unwinding of a DNA helix.",
+      "score": 0.1519,
+      "height": 1,
+      "rank": 14
+     },
+     {
+      "go_id": "GO:0003911",
+      "name": "DNA ligase (NAD+) activity",
+      "def": "Catalysis of the reaction: NAD+ + deoxyribonucleotide(n) + deoxyribonucleotide(m) = AMP + nicotinamide nucleotide + deoxyribonucleotide(n+m).",
+      "score": 0.098,
+      "height": 0,
+      "rank": 15
+     },
+     {
+      "go_id": "GO:0043139",
+      "name": "5'-3' DNA helicase activity",
+      "def": "Unwinding a DNA helix in the 5' to 3' direction, driven by ATP hydrolysis.",
+      "score": 0.148,
+      "height": 0,
+      "rank": 16
+     },
+     {
+      "go_id": "GO:0003910",
+      "name": "DNA ligase (ATP) activity",
+      "def": "Catalysis of the reaction: ATP + deoxyribonucleotide(n) + deoxyribonucleotide(m) = AMP + diphosphate + deoxyribonucleotide(n+m).",
+      "score": 0.097,
+      "height": 0,
+      "rank": 17
+     },
+     {
+      "go_id": "GO:0030527",
+      "name": "structural constituent of chromatin",
+      "def": "The action of a molecule that contributes to the structural integrity of chromatin.",
+      "score": 0.1447,
+      "height": 0,
+      "rank": 18
+     },
+     {
+      "go_id": "GO:0043138",
+      "name": "3'-5' DNA helicase activity",
+      "def": "Unwinding a DNA helix in the direction 5' to 3', driven by ATP hydrolysis.",
+      "score": 0.1444,
+      "height": 1,
+      "rank": 19
+     },
+     {
+      "go_id": "GO:0044374",
+      "name": "sequence-specific DNA binding, bending",
+      "def": "The activity of binding selectively and non-covalently to DNA in a sequence-specific manner and distorting the original structure of DNA, typically a straight helix, into a bend, or increasing the bend if the original structure was intrinsically bent due to it",
+      "score": 0.143,
+      "height": 1,
+      "rank": 20
+     },
+     {
+      "go_id": "GO:0003887",
+      "name": "DNA-directed DNA polymerase activity",
+      "def": "Catalysis of the reaction: deoxynucleoside triphosphate + DNA(n) = diphosphate + DNA(n+1); DNA-template-directed extension of the 3'-end of a DNA strand by one nucleotide at a time.",
+      "score": 0.0785,
+      "height": 0,
+      "rank": 21
+     },
+     {
+      "go_id": "GO:0016887",
+      "name": "ATP hydrolysis activity",
+      "def": "Catalysis of the reaction: ATP + H2O = ADP + H+ phosphate. ATP hydrolysis is used in some reactions as an energy source, for example to catalyze a reaction or drive transport against a concentration gradient.",
+      "score": 0.0781,
+      "height": 0,
+      "rank": 22
+     },
+     {
+      "go_id": "GO:0070182",
+      "name": "DNA polymerase binding",
+      "def": "Binding to a DNA polymerase.",
+      "score": 0.1419,
+      "height": 0,
+      "rank": 23
+     },
+     {
+      "go_id": "GO:0047203",
+      "name": "13-hydroxylupinine O-tigloyltransferase activity",
+      "def": "Catalysis of the reaction: 13-hydroxylupanine + 2-methylcrotonoyl-CoA = 13-(2-methylcrotonoyloxy)lupanine + CoA.",
+      "score": 0.0768,
+      "height": 0,
+      "rank": 24
+     },
+     {
+      "go_id": "GO:0042802",
+      "name": "identical protein binding",
+      "def": "Binding to an identical protein or proteins.",
+      "score": 0.1415,
+      "height": 1,
+      "rank": 25
+     },
+     {
+      "go_id": "GO:0005154",
+      "name": "epidermal growth factor receptor binding",
+      "def": "Binding to an epidermal growth factor receptor.",
+      "score": 0.0753,
+      "height": 0,
+      "rank": 26
+     },
+     {
+      "go_id": "GO:0016920",
+      "name": "pyroglutamyl-peptidase activity",
+      "def": "Catalysis of the release of the N-terminal pyroglutamyl group from a peptide or protein.",
+      "score": 0.1399,
+      "height": 0,
+      "rank": 27
+     },
+     {
+      "go_id": "GO:0008861",
+      "name": "formate C-acetyltransferase activity",
+      "def": "Catalysis of the reaction: acetyl-CoA + formate = CoA + pyruvate.",
+      "score": 0.0567,
+      "height": 0,
+      "rank": 28
+     },
+     {
+      "go_id": "GO:0050436",
+      "name": "microfibril binding",
+      "def": "Binding to a microfibril, any small fibril occurring in biological material.",
+      "score": 0.0423,
+      "height": 0,
+      "rank": 29
+     },
+     {
+      "go_id": "GO:0005068",
+      "name": "transmembrane receptor protein tyrosine kinase adaptor activity",
+      "def": "The binding activity of a molecule that brings together a transmembrane receptor protein tyrosine kinase and one or more other molecules, permitting them to function in a coordinated way.",
+      "score": 0.0447,
+      "height": 0,
+      "rank": 30
+     },
+     {
+      "go_id": "GO:0004947",
+      "name": "bradykinin receptor activity",
+      "def": "Combining with bradykinin to initiate a change in cell activity.",
+      "score": 0.0377,
+      "height": 0,
+      "rank": 31
+     },
+     {
+      "go_id": "GO:0043722",
+      "name": "4-hydroxyphenylacetate decarboxylase activity",
+      "def": "Catalysis of the reaction: (4-hydroxyphenyl)acetate + H+ = 4-cresol + CO2.",
+      "score": 0.0363,
+      "height": 0,
+      "rank": 32
+     },
+     {
+      "go_id": "GO:0004321",
+      "name": "fatty-acyl-CoA synthase activity",
+      "def": "Catalysis of the reaction: acetyl-CoA + n malonyl-CoA + 2n NADH + 2n NADPH + 4n H+ = a long-chain acyl-CoA + n CoA + n CO2 + 2n NAD+ + 2n NADP+.",
+      "score": 0.0331,
+      "height": 0,
+      "rank": 33
+     },
+     {
+      "go_id": "GO:0032574",
+      "name": "5'-3' RNA helicase activity",
+      "def": "Unwinding of an RNA helix in the 5' to 3' direction, driven by ATP hydrolysis.",
+      "score": 0.1039,
+      "height": 0,
+      "rank": 34
+     },
+     {
+      "go_id": "GO:0008784",
+      "name": "alanine racemase activity",
+      "def": "Catalysis of the reaction: L-alanine = D-alanine.",
+      "score": 0.0265,
+      "height": 0,
+      "rank": 35
+     },
+     {
+      "go_id": "GO:0034003",
+      "name": "vetispiradiene synthase activity",
+      "def": "Catalysis of the reaction: 2-trans,6-trans-farnesyl diphosphate = diphosphate + vetispiradiene.",
+      "score": 0.0304,
+      "height": 0,
+      "rank": 36
+     },
+     {
+      "go_id": "GO:0009378",
+      "name": "four-way junction helicase activity",
+      "def": "Unwinding a DNA helix of DNA containing four-way junctions, including Holliday junctions, driven by ATP hydrolysis.",
+      "score": 0.1701,
+      "height": 0,
+      "rank": 37
+     },
+     {
+      "go_id": "GO:0008881",
+      "name": "glutamate racemase activity",
+      "def": "Catalysis of the reaction: L-glutamate = D-glutamate.",
+      "score": 0.0258,
+      "height": 0,
+      "rank": 38
+     },
+     {
+      "go_id": "GO:0005157",
+      "name": "macrophage colony-stimulating factor receptor binding",
+      "def": "Binding to a macrophage colony-stimulating factor receptor.",
+      "score": 0.0298,
+      "height": 0,
+      "rank": 39
+     },
+     {
+      "go_id": "GO:0000400",
+      "name": "four-way junction DNA binding",
+      "def": "Binding to a DNA segment containing four-way junctions, also known as Holliday junctions, a structure where two DNA double strands are held together by reciprocal exchange of two of the four strands, one strand each from the two original helices.",
+      "score": 0.17,
+      "height": 1,
+      "rank": 40
+     }
+    ],
+    "occurrences": [
+     {
+      "parsed_input_id": 2029,
+      "source": "DRAM2_annotation",
+      "row": 294
+     }
+    ]
+   },
+   "result": {
+    "input_id": 2029,
+    "gene_row": 294,
+    "source": "DRAM2_annotation",
+    "text": "MER0272122 | VOG00081 | K04485 | MER0272122 - DNA repair protein RadA ({Escherichia coli}) (Streptococcus pseudopneumoniae) [S16.A04]#S16#{peptidase unit: 93-395}~source YP_004767402~ | DNA repair protein RadA/Sms",
+    "status": "ok",
+    "decline_reason": null,
+    "n_candidates": 40,
+    "n_valid": 3,
+    "votes": {
+     "GO:0009378": 1,
+     "GO:0000400": 1,
+     "GO:0017116": 1
+    },
+    "proposers": {
+     "gemini35flash": {
+      "picked": [
+       {
+        "go_id": "GO:0009378",
+        "confidence": "high",
+        "why": "The annotation identifies the protein as RadA/Sms, which is a well-characterized bacterial DNA repair protein that functions as a four-way junction (Holliday junction) helicase."
+       },
+       {
+        "go_id": "GO:0000400",
+        "confidence": "high",
+        "why": "RadA/Sms specifically binds to four-way DNA junctions (Holliday junctions) to facilitate DNA repair and recombination."
+       }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "RadA/Sms contains an inactive S16 peptidase-like domain, so peptidase terms are not selected despite the domain annotation."
+     },
+     "gpt54": {
+      "picked": [
+       {
+        "go_id": "GO:0017116",
+        "confidence": "medium",
+        "why": "The annotation identifies the protein as DNA repair protein RadA/Sms, a bacterial DNA repair helicase, supporting single-stranded DNA helicase activity."
+       }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "The annotation supports a DNA repair helicase function, but does not specifically justify four-way junction binding/helicase or a particular helicase polarity from the string alone."
+     },
+     "gpt55": {
+      "picked": [],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "The annotation states a DNA repair RadA/Sms protein and a peptidase unit, but none of the listed molecular-function candidates is directly supported with the necessary specificity."
+     }
+    },
+    "critic": {
+     "verdict": "inconsistent",
+     "reason": "The council correctly linked RadA/Sms to four-way junction DNA binding, but selecting single-stranded DNA helicase activity appears to be a keyword-driven overreach since RadA/Sms is an ATPase-driven branch-migration/DNA-damage-sensing protein rather than a canonical ssDNA helicase, and the council missed the well-supported ATP-dependent DNA damage sensor activity term that best matches RadA/Sms's characterized function.",
+     "overpicked": [
+      "GO:0017116"
+     ],
+     "missed": [
+      "GO:0140664"
+     ],
+     "contentless_input": false
+    },
+    "meta": {
+     "final_go_ids": [
+      "GO:0000400"
+     ],
+     "final_confidence": "medium",
+     "reasoning": "The annotation clearly identifies this protein as DNA repair protein RadA/Sms from bacteria. RadA/Sms is a well-characterized DNA repair protein that functions in recombinational DNA repair. It binds to branched DNA structures including four-way junctions (Holliday junctions), making GO:0000400 (four-way junction DNA binding) a defensible assignment. However, I am excluding GO:0009378 (four-way junction helicase activity) because while RadA has ATPase activity, its primary characterized function is as a RecA-like recombinase that promotes branch migration rather than acting as a classical helicase. I am also excluding GO:0017116 (single-stranded DNA helicase activity) as this is not the primary characterized function of RadA/Sms. Regarding GO:0140664 (ATP-dependent DNA damage sensor activity) suggested by the critic, while RadA does have ATPase activity and participates in DNA damage response, the term 'sensor' implies an initiating signaling role that is not the primary characterized function of RadA/Sms - it is more of an effector in recombinational repair. The peptidase domain annotation (S16) appears to be a MEROPS classification artifact and does not reflect the actual molecular function of RadA/Sms. Given the complexity and some uncertainty about the most specific appropriate term, I assign medium confidence to the four-way junction DNA binding term as the most defensible specific function.",
+     "skipped": false
+    }
+   }
+  }
+ ]
+}

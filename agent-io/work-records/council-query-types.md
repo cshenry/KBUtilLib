@@ -11,7 +11,7 @@ b084561 (`docs(work-record): fill in the record's own commit sha`)
 
 ## commit_shas
 - cf02ceb — feat(council): query types, the template renderer and the two builtins
-- (this record) — docs(work-record): record the council query-types milestone
+- 55dcbdd — docs(work-record): record the council query-types milestone
 
 ## summary
 Adds `src/kbutillib/domains/ai/council/queries/` — the only place in the

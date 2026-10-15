@@ -15,7 +15,7 @@ d8a8573 (`docs(work-record): fill in the record's own commit sha`)
 - e477948 — test(council): halts, budgets, shared-account limits and the real GO council
 - e5e5fc1 — test(council): cancellation, stale claims, priority, stale digests, order
 - bb02502 — test(council): cover both halves of the answer-schema check
-- (this record)
+- 401420b — docs(work-record): record the council engine milestone
 
 ## summary
 

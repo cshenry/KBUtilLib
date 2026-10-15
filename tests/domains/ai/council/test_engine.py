@@ -30,6 +30,7 @@ from kbutillib.domains.ai.council.engine.decide import (
     critic_approves,
     decide,
 )
+from kbutillib.domains.ai.council.store.errors import StaleClaim
 from kbutillib.domains.ai.council.types import (
     AuthError,
     BillingGuardRefused,
@@ -1671,3 +1672,504 @@ class TestTheBuiltinGoCouncil:
         assert [(e["stage"], e["message"].split("'")[1]) for e in off_menu] == [
             ("meta", "GO:9999999")
         ]
+
+
+class TestCancellation:
+    """A cancelled job is terminal, and a reply that beats the cancel is kept."""
+
+    def test_a_reply_arriving_after_a_cancel_is_stored_and_changes_nothing(
+        self, store: Any
+    ) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+
+        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)
+        assert len(claimed) == 1
+        store.cancel_job(job_id, "alice")
+
+        # The claimed call is already being paid for, so its reply is stored.
+        assert run(worker.execute(claimed[0])) == "ok"
+
+        row = next(
+            r for r in calls_of(store, job_id) if r["call_id"] == claimed[0]["call_id"]
+        )
+        assert row["status"] == "ok"
+        assert row["reply_parsed"]["picked"][0]["id"] == "A:1"
+        # And it stays reusable for everyone else's future jobs.
+        assert store.find_reusable(row["prompt_hash"])["call_id"] == row["call_id"]
+
+        # Nothing else moved: no critic call, no verdict, job still cancelled.
+        assert calls_of(store, job_id, "critic") == []
+        assert store.get_job(job_id)["status"] == "cancelled"
+        assert item_of(store, job_id)["status"] == "cancelled"
+        assert item_of(store, job_id)["verdict"] is None
+        superseded = [r for r in calls_of(store, job_id) if r["status"] == "superseded"]
+        assert len(superseded) == 2
+        assert all(row["live"] is False for row in superseded)
+
+    def test_a_cancelled_job_is_not_claimed_from(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        store.cancel_job(job_id, "alice")
+
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+        assert summary["claimed"] == 0
+        assert backend.calls == []
+
+
+class TestStaleClaims:
+    """A reply may only be written by the worker that currently holds the call."""
+
+    def test_completing_with_a_stale_token_is_refused_by_the_store(
+        self, store: Any
+    ) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)[0]
+
+        with pytest.raises(StaleClaim):
+            store.complete_call(claimed["call_id"], "not-the-token", "ok")
+
+    def test_the_worker_discards_a_reply_it_no_longer_owns(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)[0]
+
+        # The call is taken back from under this worker -- which is what
+        # reclaim_stale does to a worker that looked dead.
+        store.release_call(claimed["call_id"], claimed["claim_token"])
+
+        assert run(worker.execute(claimed)) == "stale"
+        row = next(
+            r for r in calls_of(store, job_id) if r["call_id"] == claimed["call_id"]
+        )
+        assert row["status"] == "pending"
+        assert row["reply_parsed"] is None
+        assert row["reply_text"] is None
+        assert item_of(store, job_id)["status"] == "pending"
+
+
+class TestOneLiveCallPerSeatAndUpstream:
+    """advance() is idempotent, and the store refuses a second live call."""
+
+    def test_advancing_twice_creates_one_critic_call(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(split_script())})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+            run(worker.execute(row))
+
+        assert len(calls_of(store, job_id, "critic")) == 1
+        for _ in range(3):
+            assert worker.advance(job_id, "item-1") == "need_critic"
+        assert len(calls_of(store, job_id, "critic")) == 1
+
+    def test_the_store_refuses_a_duplicate_live_call(self, store: Any) -> None:
+        import sqlalchemy as sa
+
+        worker = worker_for(store, {"fake1": fake(split_script())})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+            run(worker.execute(row))
+        critic = calls_of(store, job_id, "critic")[0]
+
+        duplicate = {
+            key: critic[key]
+            for key in (
+                "job_id",
+                "item_id",
+                "role",
+                "seat_name",
+                "endpoint",
+                "endpoint_kind",
+                "upstream_digest",
+                "prompt_hash",
+            )
+        }
+        with pytest.raises(sa.exc.IntegrityError):
+            store.add_calls([duplicate])
+
+
+class TestPriority:
+    """A later, higher-priority job is served first."""
+
+    def test_a_high_priority_job_is_claimed_before_an_earlier_one(
+        self, store: Any
+    ) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(
+            store,
+            {"fake1": backend},
+            config=endpoint_config(fake1={"max_concurrency": 1}),
+        )
+        query, roster = make_query(), make_roster(3)
+        low = worker.submit(
+            query,
+            [make_task("lo-1", text="the low priority protein")],
+            roster,
+            label="low",
+            priority=1,
+        )
+        high = worker.submit(
+            query,
+            [make_task("hi-1", text="the urgent protein")],
+            roster,
+            label="high",
+            priority=500,
+        )
+        assert store.get_job(low)["submitted_at"] <= store.get_job(high)["submitted_at"]
+
+        # No job scope: the worker takes whatever the queue offers next.
+        run(worker.work(until_idle=True))
+
+        order = [req.trace_id.split("|")[0] for req in backend.calls]
+        assert set(order) == {"hi-1", "lo-1"}
+        last_high = max(index for index, item in enumerate(order) if item == "hi-1")
+        first_low = min(index for index, item in enumerate(order) if item == "lo-1")
+        assert last_high < first_low, f"claim order was {order}"
+        assert store.get_job(low)["status"] == "done"
+        assert store.get_job(high)["status"] == "done"
+
+
+class TestStaleUpstreamDigest:
+    """A downstream answer whose upstream changed is ignored, not counted."""
+
+    def test_a_critic_answer_is_dropped_when_a_proposer_reply_changes(
+        self, store: Any
+    ) -> None:
+        import sqlalchemy as sa
+
+        from kbutillib.domains.ai.council.store import schema as sch
+
+        worker = worker_for(store, {"fake1": fake(split_script())})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        # Proposers, then the critic: a split vote, so the item needs meta and
+        # is therefore NOT settled yet.
+        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+            run(worker.execute(row))
+        critic_rows = store.claim_calls("alice", "w-1", {"fake1"}, 1)
+        assert [row["role"] for row in critic_rows] == ["critic"]
+        run(worker.execute(critic_rows[0]))
+
+        critic = calls_of(store, job_id, "critic")[0]
+        assert critic["status"] == "ok"
+        old_digest = critic["upstream_digest"]
+        assert len(calls_of(store, job_id, "meta")) == 1
+        assert item_of(store, job_id)["status"] == "pending"
+
+        # A proposer is reclaimed and answers differently -- so the table the
+        # critic audited no longer exists.  Written directly because the
+        # store has no "unsettle this call" verb; the point under test is what
+        # the ENGINE does with the digest, not how the row got that way.
+        target = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_3"
+        )
+        with store.engine.begin() as conn:
+            conn.execute(
+                sa.update(sch.calls)
+                .where(sch.calls.c.call_id == target["call_id"])
+                .values(reply_parsed=proposer_answer("C:3"))
+            )
+
+        assert worker.advance(job_id, "item-1") == "need_critic"
+
+        critics = calls_of(store, job_id, "critic")
+        assert len(critics) == 2, "the stale critic answer was reused"
+        fresh = [row for row in critics if row["upstream_digest"] != old_digest]
+        assert len(fresh) == 1
+        assert fresh[0]["status"] == "pending"
+        # Still undecided: decide() saw no critic for the CURRENT table.
+        assert item_of(store, job_id)["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Order independence
+# ---------------------------------------------------------------------------
+#
+# The same script, the same items, three completely different orders of
+# execution.  If any of the engine's state lived in the order calls happen to
+# be worked in rather than in the store, this is what finds it.
+
+#: Seven items covering the skip path, the meta path, a failed seat, the
+#: deterministic empty menu and an off-menu pick.
+ORDER_ANSWERS: Dict[str, Dict[Any, Any]] = {
+    "skip-unanimous": {
+        "proposer": proposer_answer("A:1"),
+        "critic": critic_answer(),
+    },
+    "skip-contentless": {
+        "proposer": proposer_answer(no_content=True),
+        "critic": critic_answer(contentless=True),
+    },
+    "meta-split": {
+        ("proposer", "proposer_1"): proposer_answer("A:1", "B:2"),
+        ("proposer", "proposer_2"): proposer_answer("A:1", "B:2"),
+        ("proposer", "proposer_3"): proposer_answer("A:1"),
+        "critic": critic_answer(),
+        "meta": meta_answer("B:2"),
+    },
+    "meta-critic-objects": {
+        "proposer": proposer_answer("A:1"),
+        "critic": critic_answer(verdict="ambiguous"),
+        "meta": meta_answer("C:3", "A:1"),
+    },
+    "fail-seat": {
+        ("proposer", "proposer_2"): InvalidOutput("the model answered in prose"),
+        "proposer": proposer_answer("A:1"),
+        "critic": critic_answer(),
+    },
+    "offmenu": {
+        ("proposer", "proposer_1"): proposer_answer("A:1", "ZZ:9"),
+        "proposer": proposer_answer("A:1"),
+        "critic": critic_answer(),
+    },
+    # No answers at all: an empty menu is decided at submit.
+    "empty-menu": {},
+}
+
+#: What every strategy must produce, item by item.  Asserted against, not
+#: just compared across runs: three runs agreeing on the wrong answer is not
+#: order independence, it is a consistent bug.
+EXPECTED_VERDICTS: Dict[str, Dict[str, Any]] = {
+    "skip-unanimous": {
+        "status": "ok",
+        "selected_ids": ["A:1"],
+        "decline_reason": None,
+        "decided_by": "unanimous",
+        "votes": {"A:1": 3},
+        "meta_skipped": True,
+        "errors": [],
+    },
+    "skip-contentless": {
+        "status": "ok",
+        "selected_ids": [],
+        "decline_reason": "contentless",
+        "decided_by": "unanimous",
+        "votes": {},
+        "meta_skipped": True,
+        "errors": [],
+    },
+    "meta-split": {
+        "status": "ok",
+        "selected_ids": ["B:2"],
+        "decline_reason": None,
+        "decided_by": "meta",
+        "votes": {"A:1": 3, "B:2": 2},
+        "meta_skipped": False,
+        "errors": [],
+    },
+    "meta-critic-objects": {
+        "status": "ok",
+        "selected_ids": ["C:3", "A:1"],
+        "decline_reason": None,
+        "decided_by": "meta",
+        "votes": {"A:1": 3},
+        "meta_skipped": False,
+        "errors": [],
+    },
+    "fail-seat": {
+        "status": "error",
+        "selected_ids": [],
+        "decline_reason": None,
+        "decided_by": None,
+        "votes": {"A:1": 2},
+        "meta_skipped": True,
+        "errors": [("proposer_2", "invalid_output")],
+    },
+    "offmenu": {
+        "status": "ok",
+        "selected_ids": ["A:1"],
+        "decline_reason": None,
+        "decided_by": "unanimous",
+        "votes": {"A:1": 3},
+        "meta_skipped": True,
+        "errors": [("proposer_1", "off_menu")],
+    },
+    "empty-menu": {
+        "status": "ok",
+        "selected_ids": [],
+        "decline_reason": "no_candidates",
+        "decided_by": "deterministic_empty",
+        "votes": {},
+        "meta_skipped": True,
+        "errors": [],
+    },
+}
+
+
+def order_tasks() -> list:
+    """The seven items, each with its own evidence so nothing is reused."""
+    tasks = []
+    for item_id in ORDER_ANSWERS:
+        entries = [] if item_id == "empty-menu" else menu()
+        tasks.append(make_task(item_id, text=f"protein for {item_id}", menu=entries))
+    return tasks
+
+
+def order_script(request: Any) -> Any:
+    """Answer by (item, role, seat), from :data:`ORDER_ANSWERS`."""
+    item_id, role, seat = request.trace_id.split("|")
+    table = ORDER_ANSWERS[item_id]
+    answer = table.get((role, seat), table.get(role))
+    if answer is None:
+        raise AssertionError(f"no scripted answer for {request.trace_id}")
+    return answer
+
+
+def verdict_summary(store: Any, job_id: str) -> Dict[str, Dict[str, Any]]:
+    """The facts a verdict must agree on whatever order it was reached in."""
+    summary: Dict[str, Dict[str, Any]] = {}
+    for row in store.get_items(job_id):
+        assert row["status"] in ("ok", "error"), (
+            f"item {row['item_id']} is {row['status']}"
+        )
+        verdict = CouncilVerdict.model_validate(row["verdict"])
+        summary[row["item_id"]] = {
+            "status": verdict.status,
+            "selected_ids": verdict.selected_ids,
+            "decline_reason": verdict.decline_reason,
+            "decided_by": verdict.decided_by,
+            "votes": verdict.votes,
+            "meta_skipped": verdict.meta_skipped,
+            "errors": sorted((e["seat"], e["kind"]) for e in verdict.errors),
+        }
+    return summary
+
+
+def split_roster() -> Roster:
+    """A roster whose seats straddle two endpoints."""
+    return Roster(
+        proposers=[
+            fake_seat("proposer_1", "p1", endpoint="fake1"),
+            fake_seat("proposer_2", "p2", endpoint="fake1"),
+            fake_seat("proposer_3", "p3", endpoint="fake2"),
+        ],
+        critic=fake_seat("critic", "critic-model", endpoint="fake2"),
+        meta=fake_seat("meta", "meta-model", endpoint="fake1"),
+    )
+
+
+class TestOrderIndependence:
+    """One script, seven items, three orders of execution, one answer."""
+
+    def _prepare(self, make_store: Any, name: str) -> tuple:
+        from kbutillib.domains.ai.council.queries import QueryRegistry
+
+        store = make_store(name)
+        query = make_query()
+        # Registered so that a worker which did not submit the job can render
+        # it -- strategy B uses two of those.
+        QueryRegistry(store).register(query, created_by="test")
+        return store, query
+
+    def test_one_call_at_a_time_in_queue_order(self, make_store: Any) -> None:
+        store, query = self._prepare(make_store, "serial")
+        backend = InstrumentedBackend(order_script)
+        worker = worker_for(
+            store,
+            {"fake1": backend, "fake2": backend},
+            config=endpoint_config(
+                fake1={"account": "one", "max_concurrency": 1},
+                fake2={"account": "one", "max_concurrency": 1},
+            ),
+        )
+        job_id = worker.submit(query, order_tasks(), split_roster())
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        assert backend.monitor.peak == 1
+        assert verdict_summary(store, job_id) == EXPECTED_VERDICTS
+        assert store.get_job(job_id)["status"] == "done"
+
+    def test_one_endpoint_at_a_time(self, make_store: Any) -> None:
+        """Seat by seat: each worker may only claim for its own endpoint."""
+        store, query = self._prepare(make_store, "by-endpoint")
+        first = InstrumentedBackend(order_script)
+        second = InstrumentedBackend(order_script)
+        workers = [
+            (
+                worker_for(store, {"fake1": first}, worker_id="w-fake1"),
+                {"fake1"},
+            ),
+            (
+                worker_for(store, {"fake2": second}, worker_id="w-fake2"),
+                {"fake2"},
+            ),
+        ]
+        job_id = workers[0][0].submit(query, order_tasks(), split_roster())
+
+        for _ in range(400):
+            progressed = False
+            for worker, endpoints in workers:
+                worker.register()
+                rows = store.claim_calls("alice", worker.worker_id, endpoints, 1)
+                for row in rows:
+                    run(worker.execute(row))
+                    progressed = True
+            if not progressed:
+                break
+        else:  # pragma: no cover - a runaway loop is a bug, not a slow test
+            raise AssertionError("the job never drained")
+
+        assert verdict_summary(store, job_id) == EXPECTED_VERDICTS
+
+    def test_shuffled(self, make_store: Any) -> None:
+        """Every claimable call at once, executed in a shuffled order."""
+        import random as _random
+
+        store, query = self._prepare(make_store, "shuffled")
+        backend = InstrumentedBackend(order_script, delay=0.002)
+        worker = worker_for(
+            store,
+            {"fake1": backend, "fake2": backend},
+            config=endpoint_config(fake1={}, fake2={}),
+        )
+        job_id = worker.submit(query, order_tasks(), split_roster())
+        worker.register()
+        rng = _random.Random(20261015)
+
+        async def drain() -> None:
+            for _ in range(400):
+                rows = store.claim_calls("alice", worker.worker_id, {"fake1", "fake2"}, 50)
+                if not rows:
+                    return
+                rng.shuffle(rows)
+                await asyncio.gather(*(worker.execute(row) for row in rows))
+            raise AssertionError("the job never drained")  # pragma: no cover
+
+        run(drain())
+        assert verdict_summary(store, job_id) == EXPECTED_VERDICTS
+
+    def test_the_three_orders_agree(self, make_store: Any) -> None:
+        """The comparison the other three tests make possible.
+
+        Each strategy is asserted against ``EXPECTED_VERDICTS`` above, so
+        this is the same fact stated as the task states it: the verdicts are
+        identical whichever way the calls were worked.
+        """
+        store_a, query_a = self._prepare(make_store, "cmp-serial")
+        backend_a = InstrumentedBackend(order_script)
+        worker_a = worker_for(
+            store_a,
+            {"fake1": backend_a, "fake2": backend_a},
+            config=endpoint_config(
+                fake1={"account": "one", "max_concurrency": 1},
+                fake2={"account": "one", "max_concurrency": 1},
+            ),
+        )
+        job_a = worker_a.submit(query_a, order_tasks(), split_roster())
+        run(worker_a.work(job_id=job_a, until_idle=True))
+
+        store_b, query_b = self._prepare(make_store, "cmp-parallel")
+        backend_b = InstrumentedBackend(order_script, delay=0.002)
+        worker_b = worker_for(
+            store_b,
+            {"fake1": backend_b, "fake2": backend_b},
+            config=endpoint_config(fake1={}, fake2={}),
+        )
+        job_b = worker_b.submit(query_b, order_tasks(), split_roster())
+        run(worker_b.work(job_id=job_b, until_idle=True))
+
+        assert verdict_summary(store_a, job_a) == verdict_summary(store_b, job_b)
+        assert len(verdict_summary(store_a, job_a)) == 7

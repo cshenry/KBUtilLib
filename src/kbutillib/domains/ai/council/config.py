@@ -1,0 +1,801 @@
+"""Loading and validating a council configuration.
+
+A council configuration declares three tables and two scalars:
+
+* ``endpoints`` -- WHERE models are reached (ARGO, an OpenAI-compatible
+  server, the Claude CLI, the Codex CLI) plus the billing and concurrency
+  facts that belong to the place rather than the model.
+* ``models`` -- an ALIAS bound to one endpoint and one served name, with its
+  canonical identity and generation params.
+* ``profiles`` -- named seatings (proposers / critic / meta).
+* ``default_profile`` and ``store``.
+
+Two rules here exist because of specific ways this goes wrong:
+
+1. **An alias named in a profile but absent from ``models`` is a
+   ``ConfigError``.** It must never fall through to a same-named ARGO model:
+   that turns a typo into a silent charge against a different model than the
+   one the profile meant to seat.
+2. **Canonical identity is required before a seat is taken.** It comes from
+   the model's ``canonical`` key or from the versioned built-in
+   :data:`DEFAULT_CANONICAL` table -- there is no
+   ``"<endpoint>:<served_name>"`` fallback, because a synthesised identity
+   makes two seats on the same real model look independent, which is exactly
+   the comparison the council's independence invariant rests on.
+
+Annotation note: pydantic evaluates field annotations, and this repo's CI
+matrix still includes Python 3.9, so model fields use ``Optional[...]``
+rather than PEP 604 unions (see the same note in :mod:`.types`).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union
+
+from pydantic import BaseModel, model_validator
+
+from .types import (
+    CLI_KINDS,
+    ConfigError,
+    Roster,
+    RosterError,
+    SeatSpec,
+)
+
+__all__ = [
+    "DEFAULT_CANONICAL",
+    "DEFAULT_CANONICAL_BY_KIND",
+    "DEFAULT_CANONICAL_VERSION",
+    "DEFAULT_MAX_CONCURRENCY",
+    "DEFAULT_STORE_URL",
+    "EndpointConfig",
+    "ModelConfig",
+    "ProfileConfig",
+    "CouncilConfig",
+    "default_canonical",
+    "expand_vars",
+    "load_council_config",
+    "load_legacy_model_inference",
+]
+
+logger = logging.getLogger(__name__)
+
+#: Bump when :data:`DEFAULT_CANONICAL` changes meaning.  Jobs record it so a
+#: later reader can tell which built-in identity table a verdict was decided
+#: under; reuse across a version bump is the reader's decision, not ours.
+DEFAULT_CANONICAL_VERSION = "1"
+
+#: Built-in canonical identities, keyed by the alias (or served name) in
+#: common use.  A canonical id is ``vendor/model``: it is what makes "the same
+#: model via ARGO" and "the same model via the Claude CLI" compare equal.
+DEFAULT_CANONICAL: Dict[str, str] = {
+    "gemini35flash": "google/gemini-3.5-flash",
+    "gemini31flashlite": "google/gemini-3.1-flash-lite",
+    "gemini25flash": "google/gemini-2.5-flash",
+    "gemini25pro": "google/gemini-2.5-pro",
+    "gpt54": "openai/gpt-5.4",
+    "gpt55": "openai/gpt-5.5",
+    "claudesonnet5": "anthropic/claude-sonnet-5",
+    "claudeopus45": "anthropic/claude-opus-4.5",
+    "claudeopus5": "anthropic/claude-opus-5",
+}
+
+#: Identities that only hold on a particular endpoint kind.  ``sonnet`` and
+#: ``opus`` are the Claude CLI's moving aliases for its current models; the
+#: same two words mean nothing in particular anywhere else, so they are
+#: resolved only on a ``claude_cli`` endpoint.
+DEFAULT_CANONICAL_BY_KIND: Dict[str, Dict[str, str]] = {
+    "claude_cli": {
+        "sonnet": "anthropic/claude-sonnet-5",
+        "opus": "anthropic/claude-opus-5",
+    },
+}
+
+#: How many calls may be in flight per endpoint when the config is silent.
+#: The CLIs are 1 because each call is a subprocess against a single
+#: interactive subscription, not a pooled API.
+DEFAULT_MAX_CONCURRENCY: Dict[str, int] = {
+    "argo": 8,
+    "openai": 16,
+    "claude_cli": 1,
+    "codex_cli": 1,
+}
+
+DEFAULT_STORE_URL = "sqlite:///~/.kbutillib/council/council.sqlite"
+
+_ENDPOINT_KEYS = frozenset(
+    {
+        "kind",
+        "base_url",
+        "executable",
+        "user_env",
+        "api_key",
+        "api_key_env",
+        "timeout",
+        "extra_body",
+        "supervisor",
+        "public_url",
+        "proxy",
+        "billing",
+        "account",
+        "max_concurrency",
+        "max_total_tokens",
+        "reuse_namespace",
+        "deployment_revision",
+    }
+)
+_MODEL_KEYS = frozenset({"endpoint", "served_name", "canonical", "params", "verified"})
+_PROFILE_KEYS = frozenset({"proposers", "critic", "meta", "allow_meta_overlap"})
+_TOP_KEYS = frozenset({"endpoints", "models", "profiles", "default_profile", "store"})
+
+_CLI_DEFAULT_EXECUTABLE = {"claude_cli": "claude", "codex_cli": "codex"}
+
+# ${VAR} and ${VAR:-default}
+_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+# Keys whose VALUE is a credential.  Matched by exact name or by suffix, NOT
+# by substring: a substring test on "token" also eats ``max_total_tokens``,
+# which is a budget and belongs in a snapshot.  ``*_env`` keys name an
+# environment variable rather than holding its contents, so they are not
+# secrets and are kept -- a snapshot has to stay diagnosable.
+_SECRET_EXACT = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "credentials",
+        "authorization",
+    }
+)
+_SECRET_SUFFIXES = (
+    "_api_key",
+    "_apikey",
+    "_key",
+    "_password",
+    "_passwd",
+    "_secret",
+    "_token",
+    "_credential",
+    "_credentials",
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def expand_vars(value: Any) -> Any:
+    """Expand ``${VAR}`` / ``${VAR:-default}`` in every string in *value*.
+
+    Walks dicts and lists.  An unset variable with no default expands to the
+    empty string, matching shell behaviour -- that is what lets
+    ``proxy: ${KBU_ARGO_PROXY:-}`` mean "no proxy unless the operator sets
+    one" in the shipped default config.
+    """
+    if isinstance(value, str):
+
+        def _sub(match: "re.Match[str]") -> str:
+            name, default = match.group(1), match.group(2)
+            env = os.environ.get(name)
+            if env is not None:
+                return env
+            if default is not None:
+                return default
+            logger.debug("council config: ${%s} is unset and has no default", name)
+            return ""
+
+        return _VAR_RE.sub(_sub, value)
+    if isinstance(value, Mapping):
+        return {k: expand_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_vars(v) for v in value]
+    return value
+
+
+def _warn_unknown(section: str, name: str, raw: Mapping[str, Any], known: frozenset) -> Dict[str, Any]:
+    """Drop keys of *raw* that are not in *known*, with a logged warning.
+
+    Unknown keys are ignored rather than rejected so a config written for a
+    newer KBUtilLib still loads on an older one.
+    """
+    kept: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in known:
+            kept[key] = value
+        else:
+            logger.warning(
+                "council config: ignoring unknown key %r in %s %r", key, section, name
+            )
+    return kept
+
+
+def default_canonical(
+    alias: str,
+    served_name: Optional[str] = None,
+    endpoint_kind: Optional[str] = None,
+) -> Optional[str]:
+    """Look an alias (or served name) up in the built-in identity tables.
+
+    Tries the kind-specific table first so ``sonnet`` on a ``claude_cli``
+    endpoint resolves, then the global table.  Returns ``None`` when nothing
+    matches -- the caller decides whether that is fatal, which it is as soon
+    as the alias is actually seated.
+    """
+    by_kind = DEFAULT_CANONICAL_BY_KIND.get(endpoint_kind or "", {})
+    for key in (alias, served_name):
+        if not key:
+            continue
+        if key in by_kind:
+            return by_kind[key]
+        if key in DEFAULT_CANONICAL:
+            return DEFAULT_CANONICAL[key]
+    return None
+
+
+def _redact(value: Any) -> Any:
+    """Recursively drop credential-bearing keys from *value*."""
+    if isinstance(value, Mapping):
+        out = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if not name.endswith("_env") and (
+                name in _SECRET_EXACT or name.endswith(_SECRET_SUFFIXES)
+            ):
+                continue
+            out[key] = _redact(item)
+        return out
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _resolve_store_url(url: Optional[str]) -> str:
+    """Expand ``~`` in a sqlite store URL and refuse a synced location.
+
+    A live SQLite database is a file plus a write-ahead log that a file
+    syncer will happily upload mid-transaction and then "resolve" into a
+    corrupt pair.  Dropbox is the syncer on this fleet, so a sqlite store
+    inside a Dropbox directory is refused at load time rather than
+    discovered as a corrupted council database later.
+    """
+    url = (url or DEFAULT_STORE_URL).strip()
+    if not url.lower().startswith("sqlite"):
+        return url
+
+    scheme, sep, rest = url.partition(":///")
+    if not sep:
+        return url
+
+    path_str = rest
+    if path_str.startswith("/~"):
+        path_str = path_str[1:]
+    if path_str.startswith("~"):
+        path_str = str(Path(path_str).expanduser())
+
+    for part in Path(path_str).parts:
+        lowered = part.lower()
+        if lowered == "dropbox" or lowered.startswith("dropbox ("):
+            raise ConfigError(
+                f"refusing a sqlite council store inside a synced directory: {path_str!r} "
+                f"(component {part!r}). Live SQLite WAL files corrupt under file sync; "
+                "put the store outside Dropbox, or use a PostgreSQL URL."
+            )
+
+    return f"{scheme}:///{path_str}"
+
+
+# ---------------------------------------------------------------------------
+# Config records
+# ---------------------------------------------------------------------------
+
+
+class EndpointConfig(BaseModel):
+    """One place models are reached from, and the rules of that place."""
+
+    name: str
+    kind: Literal["argo", "openai", "claude_cli", "codex_cli"]
+    base_url: Optional[str] = None
+    executable: Optional[str] = None
+    user_env: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_env: Optional[str] = None
+    timeout: Optional[float] = None
+    extra_body: Dict[str, Any] = {}
+    supervisor: bool = False
+    public_url: Optional[str] = None
+    proxy: Optional[str] = None
+    billing: Literal["subscription", "api"] = "subscription"
+    account: Optional[str] = None
+    max_concurrency: Optional[int] = None
+    max_total_tokens: Optional[int] = None
+    reuse_namespace: Optional[str] = None
+    deployment_revision: str = ""
+
+    @model_validator(mode="after")
+    def _check(self) -> "EndpointConfig":
+        """Fill per-kind defaults and refuse combinations that cannot work."""
+        if self.kind in CLI_KINDS:
+            if self.billing == "api":
+                raise ConfigError(
+                    f"endpoint {self.name!r} is {self.kind} with billing: api. "
+                    "v1 drives the CLIs headless against an interactive subscription only; "
+                    "there is no API-billed CLI path, so this would silently bill nothing "
+                    "or bill the wrong account."
+                )
+            if self.kind == "codex_cli" and self.max_total_tokens is not None:
+                raise ConfigError(
+                    f"endpoint {self.name!r} sets max_total_tokens, but the Codex CLI "
+                    "reports no token usage. An unmeasurable budget is unenforceable; "
+                    "drop the key or use max_concurrency instead."
+                )
+            if not self.executable:
+                self.executable = _CLI_DEFAULT_EXECUTABLE[self.kind]
+        elif not self.base_url:
+            raise ConfigError(f"endpoint {self.name!r} is {self.kind} but declares no base_url")
+
+        if self.max_concurrency is None:
+            self.max_concurrency = DEFAULT_MAX_CONCURRENCY[self.kind]
+        return self
+
+
+class ModelConfig(BaseModel):
+    """An alias bound to one endpoint and one served model name."""
+
+    alias: str
+    endpoint: str
+    served_name: str = ""
+    canonical: Optional[str] = None
+    params: Dict[str, Any] = {}
+    verified: bool = True
+
+    @model_validator(mode="after")
+    def _default_served_name(self) -> "ModelConfig":
+        """Default the served name to the alias (the common case)."""
+        if not self.served_name:
+            self.served_name = self.alias
+        return self
+
+
+class ProfileConfig(BaseModel):
+    """A named seating.
+
+    ``proposers`` is normalised to ``{seat_name: alias}``: the list form in
+    YAML yields ``proposer_1..n``, and the mapping form keeps the author's own
+    seat names so overrides can address them.
+    """
+
+    name: str
+    proposers: Dict[str, str] = {}
+    critic: str
+    meta: str
+    allow_meta_overlap: bool = False
+
+
+class CouncilConfig(BaseModel):
+    """A validated council configuration.
+
+    Loaded by :func:`load_council_config`; everything downstream reads seats
+    out of :meth:`roster` and never re-interprets the raw YAML.
+    """
+
+    endpoints: Dict[str, EndpointConfig] = {}
+    models: Dict[str, ModelConfig] = {}
+    profiles: Dict[str, ProfileConfig] = {}
+    default_profile: Optional[str] = None
+    store: str = DEFAULT_STORE_URL
+    source: str = ""
+
+    # -- accessors ----------------------------------------------------------
+
+    def endpoint(self, name: str) -> Dict[str, Any]:
+        """Return endpoint *name* as a plain dict.
+
+        Dict rather than the model because this is what the hash helpers in
+        :mod:`.types` and the backends consume.
+        """
+        try:
+            return self.endpoints[name].model_dump()
+        except KeyError:
+            raise ConfigError(
+                f"unknown endpoint {name!r}; declared: {sorted(self.endpoints)}"
+            ) from None
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return the configuration with every credential removed.
+
+        This is what a job stores, so a verdict can be explained months later
+        without the store ever holding a key.  ``*_env`` keys survive (they
+        name a variable, not a secret), which is what makes a snapshot useful
+        for diagnosis.
+        """
+        data = self.model_dump()
+        data["default_canonical_version"] = DEFAULT_CANONICAL_VERSION
+        return _redact(data)
+
+    # -- seating ------------------------------------------------------------
+
+    def roster(
+        self,
+        profile: Optional[str] = None,
+        overrides: Optional[Mapping[str, Union[str, Sequence[str]]]] = None,
+    ) -> Roster:
+        """Resolve a profile (plus *overrides*) into a validated :class:`Roster`.
+
+        *overrides* is keyed by SEAT NAME, not by model: ``{"critic": alias}``,
+        ``{"proposer_2": alias}``.  The one special key is ``"proposers"``,
+        whose list value replaces the proposer bench entirely.
+
+        Raises:
+            ConfigError: unknown profile, or an override naming a seat the
+                profile does not have.
+            RosterError: a seated alias has no canonical identity, or the
+                resulting seating is not independent.
+        """
+        name = profile or self.default_profile
+        if not name:
+            raise ConfigError("no profile requested and no default_profile is configured")
+        prof = self.profiles.get(name)
+        if prof is None:
+            raise ConfigError(
+                f"unknown profile {name!r}; configured: {sorted(self.profiles)}"
+            )
+
+        bench: Dict[str, str] = dict(prof.proposers)
+        critic_alias = prof.critic
+        meta_alias = prof.meta
+
+        remaining = dict(overrides or {})
+        if "proposers" in remaining:
+            value = remaining.pop("proposers")
+            aliases = [value] if isinstance(value, str) else list(value)
+            bench = {f"proposer_{i}": alias for i, alias in enumerate(aliases, 1)}
+        for key, value in remaining.items():
+            if not isinstance(value, str):
+                raise ConfigError(
+                    f"override {key!r} must name a single model alias, got {value!r}"
+                )
+            if key == "critic":
+                critic_alias = value
+            elif key == "meta":
+                meta_alias = value
+            elif key in bench:
+                bench[key] = value
+            else:
+                raise ConfigError(
+                    f"override key {key!r} is not a seat in profile {name!r}; "
+                    f"seats are {sorted(bench) + ['critic', 'meta']}"
+                )
+
+        proposers = [self._seat(seat, alias) for seat, alias in bench.items()]
+        return Roster(
+            proposers=proposers,
+            critic=self._seat("critic", critic_alias),
+            meta=self._seat("meta", meta_alias),
+            allow_meta_overlap=prof.allow_meta_overlap,
+        )
+
+    def _seat(self, seat_name: str, alias: str) -> SeatSpec:
+        """Resolve one ``(seat_name, alias)`` pair into a :class:`SeatSpec`."""
+        model = self.models.get(alias)
+        if model is None:
+            raise ConfigError(
+                f"seat {seat_name!r} names model alias {alias!r}, which is not declared "
+                f"in `models`; declared: {sorted(self.models)}"
+            )
+        endpoint = self.endpoints.get(model.endpoint)
+        if endpoint is None:
+            raise ConfigError(
+                f"model {alias!r} points at endpoint {model.endpoint!r}, which is not declared"
+            )
+
+        canonical = model.canonical or default_canonical(
+            alias, model.served_name, endpoint.kind
+        )
+        if not canonical:
+            raise RosterError(
+                f"model alias {alias!r} (seat {seat_name!r}) has no canonical identity: "
+                f"it declares no `canonical` and is not in the built-in table "
+                f"(DEFAULT_CANONICAL v{DEFAULT_CANONICAL_VERSION}). Declare "
+                f"canonical: <vendor>/<model> for it -- a council cannot check that two "
+                "seats are different models without it."
+            )
+
+        params = dict(model.params)
+        temperature = params.pop("temperature", 0)
+        max_output_tokens = params.pop("max_output_tokens", None)
+        legacy_max = params.pop("max_tokens", None)
+        if max_output_tokens is None:
+            max_output_tokens = legacy_max
+        extra: Dict[str, Any] = {}
+        if endpoint.extra_body:
+            extra["extra_body"] = dict(endpoint.extra_body)
+        extra.update(params)
+
+        return SeatSpec(
+            seat_name=seat_name,
+            endpoint=endpoint.name,
+            endpoint_kind=endpoint.kind,
+            model=model.served_name,
+            canonical_model=canonical,
+            max_output_tokens=4000 if max_output_tokens is None else int(max_output_tokens),
+            temperature=temperature,
+            timeout_s=180.0 if endpoint.timeout is None else float(endpoint.timeout),
+            extra=extra,
+            verified=model.verified,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+
+def _read_yaml(path: Path) -> Dict[str, Any]:
+    """Load *path* as a YAML mapping."""
+    import yaml
+
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise ConfigError(f"cannot read council config {path}: {exc}") from exc
+    data = yaml.safe_load(text)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"council config {path} must be a mapping, got {type(data).__name__}")
+    return data
+
+
+def _packaged_default() -> Dict[str, Any]:
+    """Load the ``default_config.yaml`` shipped inside this package."""
+    from importlib.resources import files
+
+    resource = files(__package__).joinpath("default_config.yaml")
+    import yaml
+
+    data = yaml.safe_load(resource.read_text())
+    return data or {}
+
+
+def _user_overlay() -> Dict[str, Any]:
+    """Read the ``ai_council`` section of the user's KBUtilLib config.
+
+    Absent section, absent config file and an unreadable config all mean the
+    same thing here -- no overlay -- because a fresh machine with no config at
+    all must still get a working default council.
+    """
+    try:
+        from ....core.shared_env_utils import SharedEnvUtils
+
+        value = SharedEnvUtils().get_config_value("ai_council", default={})
+    except Exception as exc:  # noqa: BLE001 - never let config discovery be fatal
+        logger.warning("council config: could not read the user config section: %s", exc)
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "council config: config section `ai_council` is %s, expected a mapping; ignoring",
+            type(value).__name__,
+        )
+        return {}
+    return value
+
+
+def _merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
+    """Overlay a user config onto the packaged default.
+
+    Merged per entry inside ``endpoints`` / ``models`` / ``profiles``: the
+    user's keys win within an entry they name, and entries they do not name
+    are untouched.  Scalars are replaced outright.
+    """
+    merged: Dict[str, Any] = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+    for key, value in overlay.items():
+        if key in ("endpoints", "models", "profiles") and isinstance(value, Mapping):
+            section = dict(merged.get(key) or {})
+            for name, entry in value.items():
+                if isinstance(entry, Mapping) and isinstance(section.get(name), Mapping):
+                    combined = dict(section[name])
+                    combined.update(entry)
+                    section[name] = combined
+                else:
+                    section[name] = entry
+            merged[key] = section
+        else:
+            merged[key] = value
+    return merged
+
+
+def _normalise_proposers(name: str, raw: Any) -> Dict[str, str]:
+    """Normalise a profile's ``proposers`` into ``{seat_name: alias}``."""
+    if isinstance(raw, Mapping):
+        return {str(seat): str(alias) for seat, alias in raw.items()}
+    if isinstance(raw, (list, tuple)):
+        return {f"proposer_{i}": str(alias) for i, alias in enumerate(raw, 1)}
+    if isinstance(raw, str):
+        return {"proposer_1": raw}
+    raise ConfigError(
+        f"profile {name!r}: proposers must be a list or a mapping, got {type(raw).__name__}"
+    )
+
+
+def _legacy_argo_endpoint(endpoints: Mapping[str, EndpointConfig]) -> Optional[EndpointConfig]:
+    """Return the endpoint a legacy file's undeclared aliases belong to.
+
+    Filipe Liu's ``model_inference.yaml`` names ARGO aliases in its profiles
+    without declaring them in ``models`` -- the service looked them up live
+    against ARGO's model list.  They all live on its one ``argo`` endpoint.
+    """
+    named = endpoints.get("argo")
+    if named is not None and named.kind == "argo":
+        return named
+    argo = [ep for ep in endpoints.values() if ep.kind == "argo"]
+    return argo[0] if len(argo) == 1 else None
+
+
+def load_council_config(
+    path_or_dict: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    *,
+    legacy: Optional[bool] = None,
+) -> CouncilConfig:
+    """Load, expand, validate and return a :class:`CouncilConfig`.
+
+    Args:
+        path_or_dict: A path to a YAML file, an already-parsed mapping, or
+            ``None`` to load the packaged default overlaid with the user's
+            KBUtilLib config section ``ai_council`` (user keys win per
+            endpoint / model / profile entry).
+        legacy: Whether to apply the legacy ``model_inference.yaml``
+            compatibility rules (endpoints default to kind ``openai``;
+            profile aliases that are not declared in ``models`` are declared
+            on the file's ARGO endpoint).  ``None`` auto-detects: a config
+            with any endpoint that omits ``kind`` is a legacy file, since the
+            native format always states it.  The design prompt did not say
+            how legacy mode is selected; auto-detection on the missing-``kind``
+            marker is used so that reading Filipe's real file needs no flag,
+            while a native config keeps strict alias validation.
+
+    Raises:
+        ConfigError: the configuration cannot be used as written.
+    """
+    source = ""
+    if path_or_dict is None:
+        raw = _merge(_packaged_default(), _user_overlay())
+        source = "packaged default + user ai_council section"
+    elif isinstance(path_or_dict, Mapping):
+        raw = dict(path_or_dict)
+        source = "<dict>"
+    else:
+        path = Path(path_or_dict).expanduser()
+        raw = _read_yaml(path)
+        source = str(path)
+
+    raw = expand_vars(raw)
+
+    for key in list(raw):
+        if key not in _TOP_KEYS:
+            logger.warning("council config (%s): ignoring unknown top-level key %r", source, key)
+            raw.pop(key)
+
+    raw_endpoints = raw.get("endpoints") or {}
+    raw_models = raw.get("models") or {}
+    raw_profiles = raw.get("profiles") or {}
+    if legacy is None:
+        legacy = any(
+            isinstance(entry, Mapping) and not entry.get("kind")
+            for entry in raw_endpoints.values()
+        )
+
+    # -- endpoints ----------------------------------------------------------
+    endpoints: Dict[str, EndpointConfig] = {}
+    for name, entry in raw_endpoints.items():
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"endpoint {name!r} must be a mapping, got {type(entry).__name__}")
+        fields = _warn_unknown("endpoint", name, entry, _ENDPOINT_KEYS)
+        if not fields.get("kind"):
+            if not legacy:
+                raise ConfigError(f"endpoint {name!r} declares no kind")
+            # Legacy: an endpoint with no kind is one of Filipe's local
+            # OpenAI-compatible model_service containers.
+            fields["kind"] = "openai"
+        endpoints[name] = EndpointConfig(name=name, **fields)
+
+    # -- models -------------------------------------------------------------
+    models: Dict[str, ModelConfig] = {}
+    for alias, entry in raw_models.items():
+        if entry is None:
+            entry = {}
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"model {alias!r} must be a mapping, got {type(entry).__name__}")
+        fields = _warn_unknown("model", alias, entry, _MODEL_KEYS)
+        if not fields.get("endpoint"):
+            raise ConfigError(f"model {alias!r} declares no endpoint")
+        if fields["endpoint"] not in endpoints:
+            raise ConfigError(
+                f"model {alias!r} points at endpoint {fields['endpoint']!r}, which is not "
+                f"declared; declared: {sorted(endpoints)}"
+            )
+        models[alias] = ModelConfig(alias=alias, **fields)
+
+    # -- profiles -----------------------------------------------------------
+    profiles: Dict[str, ProfileConfig] = {}
+    for name, entry in raw_profiles.items():
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"profile {name!r} must be a mapping, got {type(entry).__name__}")
+        fields = _warn_unknown("profile", name, entry, _PROFILE_KEYS)
+        for required in ("critic", "meta"):
+            if not fields.get(required):
+                raise ConfigError(f"profile {name!r} declares no {required}")
+        profiles[name] = ProfileConfig(
+            name=name,
+            proposers=_normalise_proposers(name, fields.get("proposers") or []),
+            critic=fields["critic"],
+            meta=fields["meta"],
+            allow_meta_overlap=bool(fields.get("allow_meta_overlap", False)),
+        )
+
+    # -- legacy backfill, then STRICT alias validation ----------------------
+    referenced: List[str] = []
+    for prof in profiles.values():
+        referenced.extend(prof.proposers.values())
+        referenced.extend([prof.critic, prof.meta])
+
+    if legacy:
+        argo_endpoint = _legacy_argo_endpoint(endpoints)
+        if argo_endpoint is not None:
+            for alias in referenced:
+                if alias in models:
+                    continue
+                models[alias] = ModelConfig(
+                    alias=alias,
+                    endpoint=argo_endpoint.name,
+                    served_name=alias,
+                    canonical=default_canonical(alias, alias, argo_endpoint.kind),
+                )
+                logger.info(
+                    "council config (%s): legacy import declared undeclared alias %r on "
+                    "endpoint %r",
+                    source,
+                    alias,
+                    argo_endpoint.name,
+                )
+
+    missing = sorted({alias for alias in referenced if alias not in models})
+    if missing:
+        raise ConfigError(
+            f"profiles reference model aliases that are not declared in `models`: {missing}. "
+            "Declare them explicitly -- an undeclared alias is never resolved against ARGO "
+            "by name, because a typo would then silently seat a different model."
+        )
+
+    default_profile = raw.get("default_profile")
+    if default_profile is not None and default_profile not in profiles:
+        raise ConfigError(
+            f"default_profile {default_profile!r} is not a configured profile; "
+            f"configured: {sorted(profiles)}"
+        )
+
+    return CouncilConfig(
+        endpoints=endpoints,
+        models=models,
+        profiles=profiles,
+        default_profile=default_profile,
+        store=_resolve_store_url(raw.get("store")),
+        source=source,
+    )
+
+
+def load_legacy_model_inference(path: Union[str, Path]) -> CouncilConfig:
+    """Load a legacy ``model_inference.yaml`` with the compatibility rules on.
+
+    Equivalent to ``load_council_config(path, legacy=True)``; named so the
+    legacy path is greppable from the call site.
+    """
+    return load_council_config(path, legacy=True)

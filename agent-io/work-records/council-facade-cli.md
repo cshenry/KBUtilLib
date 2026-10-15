@@ -12,7 +12,7 @@ maestro/developer/background-reference-only-agent--council-facade-cli
 ## commit_shas
 - `9db04bf` — feat(council): CouncilUtils facade, toolkit property and the kbu council CLI
 - `1c431fe` — docs(council): README section, plus blocked-run and parquet coverage
-- `__RECORD_SHA__` — docs(work-record): record the council facade/CLI milestone
+- `662b05a` — docs(work-record): record the council facade/CLI milestone
 
 ## summary
 Wired the council (M1, local SQLite store) into KBUtilLib's three public

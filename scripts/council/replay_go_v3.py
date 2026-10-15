@@ -48,6 +48,12 @@ USAGE
 
 Run it from the repository root with the ``council`` extra installed
 (``pip install -e '.[council]'``).
+
+EXIT CODE. ``0`` only when every scored row agrees. It currently exits
+``1``, and that is the accurate signal rather than a bug: eight recorded
+replies fail ``go_mf@1``'s answer schema, which Jose's runner did not
+enforce. See the report's "What caused them" section -- the decision rule
+itself agrees on all 99 scored rows.
 """
 
 from __future__ import annotations
@@ -720,7 +726,7 @@ def render_report(
             "schema per role (`required`, plus `additionalProperties: false`) "
             "and the worker enforces it on every reply "
             "(`engine/worker.py:966` → `_validate_answer`). **Jose's V3 "
-            "runner enforced no schema at all** — `go_council.py:164 "
+            "runner enforced no schema at all** — `go_council.py:162 "
             "parse_json` only requires that the text parse as JSON. So the "
             "transcript contains replies that a `go_mf@1` run would have "
             "rejected on arrival, and the replay rejects them."

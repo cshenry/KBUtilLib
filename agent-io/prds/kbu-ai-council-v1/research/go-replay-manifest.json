@@ -48,7 +48,7 @@
       "v3_kit_critic_keys": "100 of 100 present",
       "v3_kit_meta_keys": "34 of 34 present",
       "v3_kit_total": "433 of 434 reconstructed keys present -- i.e. EVERY one of the 433 cache rows is accounted for",
-      "the_single_miss": "input_id 5540, seat gemini35flash, role proposer. That call raised (ValueError: no JSON object in: ...) and go_council.py:273-293 only writes the cache AFTER a successful parse, so it was never cached. The miss is explained by the record itself, not by a prompt difference.",
+      "the_single_miss": "input_id 5540, seat gemini35flash, role proposer. That call raised (ValueError: no JSON object in: ...) and go_council.py:291-292 only writes the cache AFTER a successful parse, so it was never cached. The miss is explained by the record itself, not by a prompt difference.",
       "pilot_cross_check": "0 of 300 -- the 09-18 LIVE pilot /scratch/jplfaria/CONCORDIA-live/scripts/go_council_pilot.py (PROPOSER_SYSTEM carrying the extra candidate-provenance rules) matches NOTHING in this cache.",
       "corroborating": "The results rows carry exactly the 12 keys go_council.py:482-491 `run_one` returns, and the cache's per-(model, phase) row counts -- gpt54/gpt55 proposer 100 each, gemini35flash proposer 99, claudesonnet5 critic 100, claudeopus45 meta 34 -- match the roster at go_council.py:46-48 and the 34 meta-run rows in the results file."
     },
@@ -94,7 +94,7 @@
       "predicate": "for each non-errored proposer reply, any picked go_id absent from that row's candidate menu, or any go_id appearing twice in one reply",
       "input_ids": [],
       "count": 0,
-      "note": "EMPTY, and structurally so for the off-menu half: go_council.py:311-315 already filters each proposer's picks to the offered set before recording, so an off-menu id cannot survive into the record. The duplicate half is not filtered by the kit (go_council.py:337 increments once per pick, so a repeat would count twice where the council counts once) -- it simply did not occur in these 100 rows."
+      "note": "EMPTY, and structurally so for the off-menu half: go_council.py:314-318 already filters each proposer's picks to the offered set before recording, so an off-menu id cannot survive into the record. The duplicate half is not filtered by the kit (go_council.py:337 increments once per pick, so a repeat would count twice where the council counts once) -- it simply did not occur in these 100 rows."
     }
   },
 

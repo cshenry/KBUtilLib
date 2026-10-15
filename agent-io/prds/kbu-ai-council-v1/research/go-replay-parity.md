@@ -27,7 +27,7 @@ Established cryptographically, not inferred. The V3 kit caches every reply under
 | **V3 kit, total** | **433 of 434 reconstructed keys present -- i.e. EVERY one of the 433 cache rows is accounted for** |
 | 09-18 live pilot, proposer | 0 of 300 -- the 09-18 LIVE pilot /scratch/jplfaria/CONCORDIA-live/scripts/go_council_pilot.py (PROPOSER_SYSTEM carrying the extra candidate-provenance rules) matches NOTHING in this cache. |
 
-The single proposer miss: input_id 5540, seat gemini35flash, role proposer. That call raised (ValueError: no JSON object in: ...) and go_council.py:273-293 only writes the cache AFTER a successful parse, so it was never cached. The miss is explained by the record itself, not by a prompt difference.
+The single proposer miss: input_id 5540, seat gemini35flash, role proposer. That call raised (ValueError: no JSON object in: ...) and go_council.py:291-292 only writes the cache AFTER a successful parse, so it was never cached. The miss is explained by the record itself, not by a prompt difference.
 
 **Consequence.** results_strat100_jose_v3.jsonl was produced by the V3 KIT, which is the same file go_mf@1 ports. The oracle and the implementation under test share a prompt lineage, so this replay is a genuine parity check rather than a comparison across two different queries. No change to go_mf@1 is warranted. The oracle was NOT produced by the 09-18 live pilot, whose proposer system prompt carries the candidate-provenance rules and whose candidate rendering differs.
 
@@ -47,7 +47,7 @@ Not a second row: the only recorded proposer error is the one in the only record
 
 Predicate: `for each non-errored proposer reply, any picked go_id absent from that row's candidate menu, or any go_id appearing twice in one reply`
 
-EMPTY, and structurally so for the off-menu half: go_council.py:311-315 already filters each proposer's picks to the offered set before recording, so an off-menu id cannot survive into the record. The duplicate half is not filtered by the kit (go_council.py:337 increments once per pick, so a repeat would count twice where the council counts once) -- it simply did not occur in these 100 rows.
+EMPTY, and structurally so for the off-menu half: go_council.py:314-318 already filters each proposer's picks to the offered set before recording, so an off-menu id cannot survive into the record. The duplicate half is not filtered by the kit (go_council.py:337 increments once per pick, so a repeat would count twice where the council counts once) -- it simply did not occur in these 100 rows.
 
 How each excused row actually differed:
 
@@ -74,7 +74,7 @@ On the one error row the vote table also differs, exactly as the class (b) note 
 
 ### What caused them
 
-Every mismatch above is the SAME failure, and it is not a disagreement about the decision: `go_mf@1` declares an answer schema per role (`required`, plus `additionalProperties: false`) and the worker enforces it on every reply (`engine/worker.py:966` → `_validate_answer`). **Jose's V3 runner enforced no schema at all** — `go_council.py:164 parse_json` only requires that the text parse as JSON. So the transcript contains replies that a `go_mf@1` run would have rejected on arrival, and the replay rejects them.
+Every mismatch above is the SAME failure, and it is not a disagreement about the decision: `go_mf@1` declares an answer schema per role (`required`, plus `additionalProperties: false`) and the worker enforces it on every reply (`engine/worker.py:966` → `_validate_answer`). **Jose's V3 runner enforced no schema at all** — `go_council.py:162 parse_json` only requires that the text parse as JSON. So the transcript contains replies that a `go_mf@1` run would have rejected on arrival, and the replay rejects them.
 
 | input id | the recorded reply the schema refuses |
 |---|---|

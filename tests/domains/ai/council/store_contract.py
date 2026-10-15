@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -36,10 +37,6 @@ import pytest
 
 #: Operator sets this to a libpq DSN / SQLAlchemy URL to switch PostgreSQL on.
 PG_DSN_ENV = "KBU_COUNCIL_TEST_PG_DSN"
-
-#: The exception message every not-yet-implemented queue method carries.
-QUEUE_OPS_MARKER = "store-queue-ops"
-
 
 def pg_dsn() -> str:
     """The configured PostgreSQL DSN, or an empty string."""
@@ -224,3 +221,61 @@ def call_row(
     }
     row.update(overrides)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Concurrency harness
+# ---------------------------------------------------------------------------
+
+
+def claim_in_subprocess(url, user, worker_id, endpoints, limit, barrier, results):
+    """Drain the queue from a store THIS process opened, and report what it got.
+
+    The entry point of the no-double-claim test's child processes.  It lives
+    in this module rather than in the test module because
+    ``multiprocessing``'s ``spawn`` start method pickles the target by
+    qualified name and re-imports it in a brand new interpreter -- which is
+    the point of the test: the children share nothing with the parent but the
+    database file's URL, so the locking they rely on is the store's own and
+    not some artefact of a shared Python object.
+
+    Nothing is monkeypatched, no store object crosses the process boundary,
+    and no lock of this harness's own serialises the claims.  The barrier only
+    lines the children up so that they contend; it is released before the
+    first claim.
+
+    The outcome goes back as ``(worker_id, [call_id, ...], error_or_None)``.
+    A failure is REPORTED rather than raised, because a child that dies
+    silently leaves its sibling blocked on the barrier and the parent reading
+    a hang instead of a reason.
+    """
+    claimed = []
+    error = None
+    try:
+        from kbutillib.domains.ai.council.store import open_store
+
+        store = open_store(url)
+        try:
+            if barrier is not None:
+                barrier.wait(timeout=120)
+            while True:
+                rows = store.claim_calls(user, worker_id, set(endpoints), limit)
+                if not rows:
+                    # Empty means drained, not "busy": a claim that collides
+                    # with the other process WAITS for the write lock
+                    # (busy_timeout) rather than coming back empty.
+                    break
+                claimed.extend(str(row["call_id"]) for row in rows)
+                # Yield the writer lock between batches.  Without this one
+                # child wins the lock back so consistently that it drains
+                # nearly the whole queue alone, and the select-then-stamp
+                # window -- the only place a double claim could happen -- is
+                # contended once instead of on every batch.
+                time.sleep(0.002)
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+    except BaseException as exc:  # noqa: BLE001 - reported, see docstring
+        error = f"{type(exc).__name__}: {exc}"
+    results.put((worker_id, claimed, error))

@@ -23,11 +23,12 @@ Three SQLite-specific things are handled here and nowhere else:
   component is refused at open time rather than discovered as a corrupted
   council database weeks later.
 
-Queue operations (claiming, completing and settling calls, and the job
-control built on them) are deliberately absent: they raise
-``NotImplementedError("store-queue-ops")`` and land in the next milestone.
-Everything the submit path and the CLI need -- schema, query types, job and
-item CRUD, endpoint budget state, workers, leases and search -- is here.
+The queue half -- claiming, completing, releasing and reclaiming calls, and
+the job control built on them -- is here too, but its SQL is not: every
+statement it runs is built in :mod:`.queries`, which is dialect-neutral, so
+``PostgresStore`` reuses the queue's meaning verbatim and this module
+contributes only the lock (``BEGIN IMMEDIATE``, above) that makes a claim
+atomic on SQLite.
 """
 
 from __future__ import annotations
@@ -44,19 +45,21 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set
 
 import sqlalchemy as sa
 
+from . import queries as q
 from . import schema as sch
 from .errors import (
     JobCancelled,
+    NotOwner,
     QueryTypeExists,
     SchemaVersionMismatch,
+    StaleClaim,
     StorePathRefused,
 )
 
 __all__ = ["SqliteStore"]
 
-#: Raised by every method the next milestone fills in, with this exact
-#: message so a partially-built store is obvious in a traceback.
-_QUEUE_OPS = "store-queue-ops"
+#: Window ``job_status`` reports throughput over.
+_THROUGHPUT_WINDOW = timedelta(minutes=10)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +169,27 @@ def _version_sort_key(version: str) -> tuple:
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _stale_claim(call_id: str, because: str) -> StaleClaim:
+    return StaleClaim(
+        f"refusing to settle call {call_id}: {because}. The reply is discarded "
+        "rather than written over the current claimant's work."
+    )
+
+
+def _serves(worker: Mapping[str, Any], endpoint: str) -> bool:
+    """Does *worker* serve *endpoint*?
+
+    ``workers.endpoints`` is the list a worker registered with.  An empty or
+    absent list means "did not say", which is read as serving everything: the
+    worker IS running, so reporting ``no_daemon`` against it would send the
+    user to start a second one for no reason.
+    """
+    declared = worker.get("endpoints")
+    if not declared:
+        return True
+    return endpoint in set(declared)
 
 
 # ---------------------------------------------------------------------------
@@ -1074,11 +1098,12 @@ class SqliteStore:
         with self._read() as conn:
             return _dicts(conn.execute(stmt))
 
-    # -- queue operations: the next milestone ------------------------------
+    # -- the queue --------------------------------------------------------
     #
-    # Declared here so the class satisfies the CouncilStore protocol and so a
-    # caller that reaches one gets a named, searchable failure instead of an
-    # AttributeError from somewhere deep in the worker loop.
+    # Call rows ARE the queue.  Every statement below is built in
+    # :mod:`.queries` so PostgresStore reuses the same SQL; the only thing
+    # this class adds is the SQLite locking strategy, which is
+    # ``transaction()``'s BEGIN IMMEDIATE.
 
     def claim_calls(
         self,
@@ -1088,8 +1113,74 @@ class SqliteStore:
         limit: int,
         now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        """Atomically claim due pending calls for this worker."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Atomically claim up to *limit* due pending calls for this worker.
+
+        The select and the stamping happen inside one ``BEGIN IMMEDIATE``
+        transaction, which is what makes the claim atomic on SQLite: the
+        write lock is taken before the first read, so two workers cannot both
+        see the same pending row.  PostgreSQL gets the same guarantee from
+        ``FOR UPDATE OF calls SKIP LOCKED`` (see
+        :func:`.queries.select_claimable`).
+
+        Returns:
+            The claimed rows, each carrying the ``claim_token`` its completion
+            must quote.  Empty when there is nothing due -- which is the
+            worker's signal to sleep, not an error.
+        """
+        if limit <= 0 or not endpoints:
+            return []
+        now = now or _utcnow()
+
+        with self.transaction() as conn:
+            rows = _dicts(
+                conn.execute(q.select_claimable(user, endpoints, now, limit))
+            )
+            if not rows:
+                return []
+            generation = self._claim_generation(conn, user, worker_id)
+
+            params: List[Dict[str, Any]] = []
+            claimed: List[Dict[str, Any]] = []
+            for row in rows:
+                # One token per call: a token shared across the batch would
+                # let a worker settle a call it no longer holds by quoting a
+                # sibling's.
+                token = uuid.uuid4().hex
+                params.append(
+                    {
+                        "b_call_id": row["call_id"],
+                        "b_claim_token": token,
+                        "b_claimed_by": worker_id,
+                        "b_claimed_at": now,
+                        "b_lease_generation": generation,
+                    }
+                )
+                claimed.append(
+                    {
+                        **row,
+                        "status": "claimed",
+                        "claim_token": token,
+                        "claimed_by": worker_id,
+                        "claimed_at": now,
+                        "lease_generation": generation,
+                    }
+                )
+            conn.execute(q.claim_update(), params)
+        return claimed
+
+    @staticmethod
+    def _claim_generation(
+        conn: sa.Connection, user: str, worker_id: str
+    ) -> Optional[int]:
+        """The daemon lease generation to stamp on this worker's claims.
+
+        ``None`` for a foreground worker.  ``claim_calls`` takes no generation
+        argument, so it is derived from the lease table: a worker that holds
+        the user's daemon lease claims under its generation, which is what
+        lets :meth:`complete_call` refuse a superseded daemon's late reply.
+        """
+        row = conn.execute(q.select_held_daemon_generation(user, worker_id)).first()
+        return int(row[0]) if row is not None and row[0] is not None else None
 
     def complete_call(
         self,
@@ -1102,8 +1193,44 @@ class SqliteStore:
         error: Optional[Mapping[str, Any]] = None,
         reused_from: Optional[str] = None,
     ) -> None:
-        """Record a claimed call's outcome."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Record a claimed call's outcome.
+
+        ``reply_parsed`` is the ORIGINAL schema-valid reply, before
+        postprocessing or menu filtering: the post-processed shape would be
+        useless to a later query-type version that maps the same answer
+        differently, and the reply is the thing that was paid for.
+
+        Raises:
+            StaleClaim: the row was reclaimed and re-handed out (its token
+                changed), or the completing daemon's lease generation has
+                since been superseded.  Either way the reply is discarded
+                rather than written over whatever the current claimant is
+                doing.
+            ValueError: no such call, or *status* is not ``ok``/``error``.
+        """
+        if status not in ("ok", "error"):
+            raise ValueError(
+                f"complete_call status must be 'ok' or 'error', got {status!r}"
+            )
+
+        with self.transaction() as conn:
+            call = self._claimed_call(conn, call_id, claim_token)
+            self._assert_lease_current(conn, call)
+            result = conn.execute(
+                q.complete_call_update(
+                    call_id,
+                    claim_token,
+                    status=status,
+                    reply_text=reply_text,
+                    reply_parsed=_jsonify(reply_parsed),
+                    fresh_usage=_jsonify(fresh_usage),
+                    error=_jsonify(error),
+                    reused_from=reused_from,
+                    finished_at=_utcnow(),
+                )
+            )
+            if not result.rowcount:  # pragma: no cover - the token check caught it
+                raise _stale_claim(call_id, "the claim was lost mid-completion")
 
     def release_call(
         self,
@@ -1112,8 +1239,75 @@ class SqliteStore:
         not_before: Optional[datetime] = None,
         increment_attempt: bool = True,
     ) -> None:
-        """Put a claimed call back on the queue."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Put a claimed call back to pending, clearing its token.
+
+        This is the retry path: a transport error or a timeout releases the
+        call with a *not_before* backoff so the next claim does not hit the
+        same endpoint immediately.  *increment_attempt* is False when the
+        release is not the call's fault -- a worker shutting down, or an
+        endpoint halting -- so it does not burn the retry budget.
+
+        Raises:
+            StaleClaim: the token is not the row's current one.
+            ValueError: no such call.
+        """
+        with self.transaction() as conn:
+            self._claimed_call(conn, call_id, claim_token)
+            result = conn.execute(
+                q.release_call_update(
+                    call_id,
+                    claim_token,
+                    not_before=not_before,
+                    increment_attempt=increment_attempt,
+                )
+            )
+            if not result.rowcount:  # pragma: no cover - the token check caught it
+                raise _stale_claim(call_id, "the claim was lost mid-release")
+
+    @staticmethod
+    def _claimed_call(
+        conn: sa.Connection, call_id: str, claim_token: str
+    ) -> Dict[str, Any]:
+        """Return the call row, asserting *claim_token* is still its live one.
+
+        A cleared token (the row was completed, released or reclaimed) is a
+        stale claim just as much as a different one, which is also what makes
+        completing the same call twice an error rather than a double write.
+        """
+        row = conn.execute(q.select_call(call_id)).first()
+        if row is None:
+            raise ValueError(f"no such call: {call_id}")
+        call = _dict(row)
+        current = call["claim_token"]
+        if current is None or current != claim_token:
+            raise _stale_claim(
+                call_id,
+                f"its claim token is {'cleared' if current is None else 'different'} "
+                f"(the call is {call['status']!r})",
+            )
+        return call
+
+    @staticmethod
+    def _assert_lease_current(conn: sa.Connection, call: Mapping[str, Any]) -> None:
+        """Refuse a completion from a daemon whose lease has been superseded.
+
+        A foreground claim carries no generation and is never refused on this
+        ground: there is no lease behind it to supersede.  A daemon claim is
+        refused once a NEWER generation exists, because that means another
+        daemon took over and is entitled to the call.
+        """
+        generation = call.get("lease_generation")
+        if generation is None:
+            return
+        row = conn.execute(q.select_daemon_generation(call["submitted_by"])).first()
+        if row is None or row[0] is None:
+            return
+        if int(row[0]) > int(generation):
+            raise _stale_claim(
+                call["call_id"],
+                f"it was claimed under daemon lease generation {int(generation)} "
+                f"but generation {int(row[0])} now holds the lease",
+            )
 
     def record_attempt(
         self,
@@ -1125,34 +1319,282 @@ class SqliteStore:
         usage: Optional[Mapping[str, Any]] = None,
         worker_id: Optional[str] = None,
     ) -> None:
-        """Record one try at a call.  Refuses any argument carrying prompt text."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Record one try at a call.
+
+        Raises:
+            ValueError: any argument carries prompt text -- a dict, at any
+                depth, with a ``system`` or ``user`` key.  The attempts table
+                is the audit trail and is readable by every user of a shared
+                store; see :func:`.queries.refuse_prompt_text`.
+        """
+        q.refuse_prompt_text(
+            call_id=call_id,
+            attempt_no=attempt_no,
+            started_at=started_at,
+            finished_at=finished_at,
+            outcome_kind=outcome_kind,
+            usage=usage,
+            worker_id=worker_id,
+        )
+        with self.transaction() as conn:
+            conn.execute(
+                sch.attempts.insert(),
+                _filled(
+                    sch.attempts,
+                    {
+                        "call_id": call_id,
+                        "attempt_no": int(attempt_no),
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "outcome_kind": outcome_kind,
+                        "usage": usage,
+                        "worker_id": worker_id,
+                    },
+                ),
+            )
 
     def find_reusable(self, prompt_hash: str) -> Optional[Dict[str, Any]]:
-        """Return an already-answered call with this prompt hash, from any user."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Return an already-answered call with this prompt hash, or None.
+
+        Crosses jobs AND users, including tombstoned jobs: the prompt hash is
+        built from the reuse namespace and the canonical model rather than
+        from an endpoint alias, so a question one user has already paid for is
+        not asked again by the next, and deleting a job does not throw the
+        answer away.
+        """
+        if not prompt_hash:
+            return None
+        with self._read() as conn:
+            row = conn.execute(q.select_reusable(prompt_hash)).first()
+        return _dict(row) if row is not None else None
 
     def reclaim_stale(
         self, now: Optional[datetime] = None, max_age: timedelta = timedelta(minutes=10)
     ) -> int:
-        """Return calls claimed by dead workers to the queue."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Return calls held by dead workers to the queue; return how many.
+
+        A claim is abandoned when it is older than *max_age* and its worker
+        has no heartbeat newer than ``now - max_age``.  The token is cleared,
+        so the dead worker's process -- if it is somehow still alive -- gets a
+        ``StaleClaim`` rather than overwriting the reply of whoever picked the
+        call up next.
+        """
+        now = now or _utcnow()
+        with self.transaction() as conn:
+            result = conn.execute(q.reclaim_stale_update(now, max_age))
+        return int(result.rowcount or 0)
+
+    # -- job control ------------------------------------------------------
 
     def job_status(self, job_id: str) -> Dict[str, Any]:
-        """Progress, pending work and blockers for one job."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Progress, outstanding work and blockers for one job.
 
-    def results(self, job_id: str, include_pending: bool = False) -> List[Dict[str, Any]]:
-        """Decided items with their verdicts."""
-        raise NotImplementedError(_QUEUE_OPS)
+        Keys:
+            ``job_id``, ``status``: the job's own identity and state, so a
+                caller does not need a second ``get_job``.
+            ``n_items``: the job's stored item count.
+            ``by_status``: item counts keyed by item status.
+            ``percent_complete``: settled items / ``n_items`` * 100, to one
+                decimal.  A job with no items reads 100.0 -- there is nothing
+                outstanding, and 0.0 would make it look stuck forever.
+            ``pending_calls_by_role_endpoint``: ``{role: {endpoint: count}}``
+                over PENDING calls only.  A claimed call is work in flight,
+                not work waiting.
+            ``blockers``: see :meth:`_blockers`.
+            ``throughput_last_10min``: calls of this job that finished in the
+                last ten minutes.
+
+        Raises:
+            ValueError: no such job.
+        """
+        now = _utcnow()
+        with self._read() as conn:
+            row = conn.execute(
+                sa.select(sch.jobs).where(sch.jobs.c.job_id == job_id)
+            ).first()
+            if row is None:
+                raise ValueError(f"no such job: {job_id}")
+            job = _dict(row)
+            by_status = {
+                str(r[0]): int(r[1])
+                for r in conn.execute(q.select_item_status_counts(job_id))
+            }
+            pending = _dicts(conn.execute(q.select_pending_call_facets(job_id)))
+            throughput = int(
+                conn.execute(
+                    q.count_calls_finished_since(job_id, now - _THROUGHPUT_WINDOW)
+                ).scalar()
+                or 0
+            )
+
+        n_items = int(job["n_items"] or 0)
+        settled = sum(n for s, n in by_status.items() if s in q.SETTLED_ITEM_STATUSES)
+        by_role_endpoint: Dict[str, Dict[str, int]] = {}
+        for call in pending:
+            per_endpoint = by_role_endpoint.setdefault(str(call["role"]), {})
+            endpoint = str(call["endpoint"])
+            per_endpoint[endpoint] = per_endpoint.get(endpoint, 0) + 1
+
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "n_items": n_items,
+            "by_status": by_status,
+            "percent_complete": round(settled / n_items * 100, 1) if n_items else 100.0,
+            "pending_calls_by_role_endpoint": by_role_endpoint,
+            "blockers": self._blockers(job, pending, now),
+            "throughput_last_10min": throughput,
+        }
+
+    def _blockers(
+        self,
+        job: Mapping[str, Any],
+        pending: Sequence[Mapping[str, Any]],
+        now: datetime,
+    ) -> List[Dict[str, Any]]:
+        """Why a job with outstanding work is not progressing.
+
+        Each blocker is ``{"kind", "endpoint", "detail"}``.  Three kinds come
+        from three different places, and they are reported INDEPENDENTLY --
+        an endpoint can be both halted and unserved, and suppressing either
+        fact would send the user to fix the wrong thing:
+
+        * ``halted`` -- ``endpoint_state`` says this user's endpoint is
+          halted (quota, auth, billing or budget).
+        * ``waiting_for_model`` / ``configuration_mismatch`` -- pending calls
+          whose LAST error names that kind (see
+          :data:`.queries.BLOCKER_BY_ERROR_KIND`).
+        * ``no_daemon`` -- the endpoint has pending calls and no live worker
+          of this user serves it, so nothing is going to run them.
+        """
+        user = job["submitted_by"]
+        endpoints = sorted({str(c["endpoint"]) for c in pending})
+        if not endpoints:
+            return []
+
+        blockers: List[Dict[str, Any]] = []
+
+        # Halts.  One lookup per endpoint rather than one query: the endpoints
+        # of a job are its roster's, so this is a handful of rows, and reusing
+        # the contract method keeps the halt semantics in one place.
+        for endpoint in endpoints:
+            state = self.get_endpoint_state(user, endpoint)
+            if state["halt_kind"]:
+                detail = state["halt_kind"]
+                if state["halt_message"]:
+                    detail = f"{detail}: {state['halt_message']}"
+                blockers.append(
+                    {"kind": "halted", "endpoint": endpoint, "detail": detail}
+                )
+
+        # Last-error blockers, counted per (blocker kind, endpoint, error kind).
+        tallies: Dict[tuple, int] = {}
+        for call in pending:
+            kind = q.error_kind(call["error"])
+            blocker = q.BLOCKER_BY_ERROR_KIND.get(kind or "")
+            if blocker is None:
+                continue
+            key = (blocker, str(call["endpoint"]), kind)
+            tallies[key] = tallies.get(key, 0) + 1
+        for (blocker, endpoint, kind), count in sorted(tallies.items()):
+            blockers.append(
+                {
+                    "kind": blocker,
+                    "endpoint": endpoint,
+                    "detail": f"{count} pending call(s) last failed with {kind}",
+                }
+            )
+
+        # No worker.  A worker that declared no endpoints is treated as
+        # serving all of them: it is running, so "no daemon" would be a lie.
+        live = self.live_workers(user, now)
+        for endpoint in endpoints:
+            if any(_serves(worker, endpoint) for worker in live):
+                continue
+            blockers.append(
+                {
+                    "kind": "no_daemon",
+                    "endpoint": endpoint,
+                    "detail": (
+                        f"no live worker of {user!r} serves {endpoint!r}; start "
+                        "one with `kbu council run` or the council daemon"
+                    ),
+                }
+            )
+        return blockers
+
+    def results(
+        self, job_id: str, include_pending: bool = False
+    ) -> List[Dict[str, Any]]:
+        """A job's items with their verdicts, in submission order.
+
+        Settled items only by default: a pending item has no verdict, and
+        returning it with a null one invites a caller to treat "not decided
+        yet" as "decided nothing".
+        """
+        with self._read() as conn:
+            return _dicts(conn.execute(q.select_results(job_id, include_pending)))
 
     def cancel_job(self, job_id: str, user: str) -> None:
-        """Stop a job: terminal, and it supersedes every pending call."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Cancel a job in ONE transaction.  Terminal and idempotent.
+
+        The job goes to ``cancelled``, every unsettled item to ``cancelled``
+        and every PENDING call to ``superseded`` (``live`` false).  Claimed
+        calls are left alone: a worker is already paying for them and their
+        replies are stored and stay reusable, which is the cheapest outcome
+        available once the money is spent.  ``add_calls`` and ``settle_item``
+        refuse the job from here on.
+
+        Raises:
+            NotOwner: *user* did not submit this job.
+            ValueError: no such job.
+        """
+        now = _utcnow()
+        with self.transaction() as conn:
+            job = self._owned_job(conn, job_id, user)
+            if job["status"] == "cancelled":
+                return
+            conn.execute(q.cancel_job_update(job_id))
+            conn.execute(q.cancel_unsettled_items_update(job_id, now))
+            conn.execute(q.supersede_pending_calls_update(job_id))
 
     def delete_job(self, job_id: str, user: str) -> None:
-        """Tombstone a cancelled or finished job; no row is removed."""
-        raise NotImplementedError(_QUEUE_OPS)
+        """Tombstone a cancelled or done job.  No row is physically removed.
+
+        Only ``deleted_at`` is set, so the job's calls stay in the store and
+        stay reusable: in a shared store somebody else's future job may be
+        the one that benefits from an answer this user paid for.
+        ``list_jobs`` hides it unless asked.
+
+        Raises:
+            NotOwner: *user* did not submit this job.
+            ValueError: no such job, or it is still running/queued/paused --
+                cancel it first, so there is no worker still writing to it.
+        """
+        with self.transaction() as conn:
+            job = self._owned_job(conn, job_id, user)
+            if job["status"] not in ("cancelled", "done"):
+                raise ValueError(
+                    f"job {job_id} is {job['status']!r}; only a cancelled or done "
+                    "job may be deleted -- cancel it first"
+                )
+            conn.execute(q.tombstone_job_update(job_id, _utcnow()))
+
+    @staticmethod
+    def _owned_job(conn: sa.Connection, job_id: str, user: str) -> Dict[str, Any]:
+        """Return the job row, asserting *user* submitted it."""
+        row = conn.execute(
+            sa.select(sch.jobs).where(sch.jobs.c.job_id == job_id)
+        ).first()
+        if row is None:
+            raise ValueError(f"no such job: {job_id}")
+        job = _dict(row)
+        if job["submitted_by"] != user:
+            raise NotOwner(
+                f"job {job_id} was submitted by {job['submitted_by']!r}, not "
+                f"{user!r}; only its submitter may cancel or delete it"
+            )
+        return job
 
 
 # ---------------------------------------------------------------------------

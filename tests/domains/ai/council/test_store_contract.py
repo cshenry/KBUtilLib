@@ -1,14 +1,16 @@
-"""The CRUD half of the council store contract, run against every backend.
+"""The council store contract, run against every backend.
 
 Covered here: schema init and version handling, query-type immutability,
 atomic job creation, endpoint budget/halt state, workers, the daemon and GPU
-leases, tombstones, the one-live-call index, search and the refusal of a
-synced database path.
+leases, tombstones, the one-live-call index, search, the refusal of a synced
+database path, and the queue -- claiming, completing, releasing, reclaiming
+and the job control (status, results, cancel, delete) built on them.
 
-NOT covered here: claiming, completing and settling calls, and the job
-control built on them.  Those methods raise
-``NotImplementedError("store-queue-ops")`` in this milestone; the test at the
-bottom pins that so the next milestone's suite has something to replace.
+The queue's central claim is that two workers never get the same call.
+``TestNoDoubleClaim`` tests that with two real ``spawn`` processes against one
+database file rather than with threads, because threads in one interpreter
+would share the store's connection pool and could pass for correct while the
+locking was broken.
 
 Fixtures come from :mod:`.store_contract`, which parametrises every test over
 SQLite (always) and PostgreSQL (when ``KBU_COUNCIL_TEST_PG_DSN`` is set).  No
@@ -18,6 +20,7 @@ GPU.
 
 from __future__ import annotations
 
+import multiprocessing
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -34,8 +37,10 @@ from kbutillib.domains.ai.council.store import open_store  # noqa: E402
 from kbutillib.domains.ai.council.store import schema as sch  # noqa: E402
 from kbutillib.domains.ai.council.store.errors import (  # noqa: E402
     JobCancelled,
+    NotOwner,
     QueryTypeExists,
     SchemaVersionMismatch,
+    StaleClaim,
     StorePathRefused,
 )
 from kbutillib.domains.ai.council.store.sqlite import SqliteStore  # noqa: E402
@@ -43,7 +48,13 @@ from kbutillib.domains.ai.council.store.sqlite import SqliteStore  # noqa: E402
 # Only the plain helpers are imported here.  The `store`, `make_store`,
 # `store_url` and `store_backend` fixtures come from conftest.py, which
 # re-exports them from the same contract module -- see its docstring.
-from .store_contract import QUEUE_OPS_MARKER, call_row, item_row, job_row, utcnow  # noqa: E402
+from .store_contract import (  # noqa: E402
+    call_row,
+    claim_in_subprocess,
+    item_row,
+    job_row,
+    utcnow,
+)
 
 T0 = datetime(2026, 10, 15, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -752,29 +763,1278 @@ class TestTransaction:
 
 
 # ---------------------------------------------------------------------------
-# Queue operations: the next milestone
+# The queue: claiming
 # ---------------------------------------------------------------------------
 
 
-QUEUE_METHODS = [
-    ("claim_calls", ("alice", "w1", {"argo"}, 5)),
-    ("complete_call", ("c1", "token", "ok")),
-    ("release_call", ("c1", "token")),
-    ("record_attempt", ("c1", 1, T0, T0, "ok")),
-    ("find_reusable", ("d" * 64,)),
-    ("reclaim_stale", ()),
-    ("job_status", ("j1",)),
-    ("results", ("j1",)),
-    ("cancel_job", ("j1", "alice")),
-    ("delete_job", ("j1", "alice")),
-]
+class TestClaimCalls:
+    def test_claim_order_is_priority_then_submission_then_item_then_role(self, store):
+        """Every tier of the claim order at once, deliberately mis-inserted.
+
+        The rows are created in an order that disagrees with all four tiers,
+        so a claim that happened to return insertion order would fail.
+        """
+        store.create_job(
+            job_row(job_id="low", priority=50, submitted_at=T0),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="later", priority=100, submitted_at=T0 + timedelta(minutes=2)
+            ),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="first", priority=100, submitted_at=T0 + timedelta(minutes=1)
+            ),
+            [item_row("item-b", item_order=1), item_row("item-a", item_order=0)],
+            [
+                call_row("item-b", "proposer_1"),
+                call_row("item-a", "meta", role="meta"),
+                call_row("item-a", "critic", role="critic"),
+                call_row("item-a", "proposer_1"),
+            ],
+        )
+
+        claimed = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
+
+        assert [(c["job_id"], c["item_id"], c["role"]) for c in claimed] == [
+            # Highest priority, earliest of the two at that priority ...
+            ("first", "item-a", "proposer"),  # ... item order 0, then by role
+            ("first", "item-a", "critic"),
+            ("first", "item-a", "meta"),
+            ("first", "item-b", "proposer"),  # ... then item order 1
+            ("later", "item-1", "proposer"),  # same priority, submitted later
+            ("low", "item-1", "proposer"),  # lowest priority last
+        ]
+
+    def test_a_claim_stamps_status_worker_and_a_distinct_token_per_call(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1"), call_row("item-1", "proposer_2")],
+        )
+        claimed = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+
+        assert [c["status"] for c in claimed] == ["claimed", "claimed"]
+        assert {c["claimed_by"] for c in claimed} == {"w1"}
+        assert {c["claimed_at"] for c in claimed} == {T0}
+        # One token per call: a batch-wide token would let a worker settle a
+        # call it no longer holds by quoting a sibling's.
+        tokens = [c["claim_token"] for c in claimed]
+        assert len(set(tokens)) == 2 and all(tokens)
+
+        stored = store.get_calls(job_id)
+        assert all(c["status"] == "claimed" for c in stored)
+        assert {c["claim_token"] for c in stored} == set(tokens)
+
+    def test_a_claimed_call_is_not_claimed_again(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 1
+        assert store.claim_calls("alice", "w2", {"argo"}, 10, now=T0) == []
+
+    def test_limit_is_honoured(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", f"proposer_{n}") for n in range(1, 5)],
+        )
+        assert len(store.claim_calls("alice", "w1", {"argo"}, 2, now=T0)) == 2
+        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 2
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_a_non_positive_limit_claims_nothing(self, store, limit):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        assert store.claim_calls("alice", "w1", {"argo"}, limit, now=T0) == []
+
+    def test_not_before_in_the_future_is_skipped_until_it_is_due(self, store):
+        due = T0 + timedelta(minutes=5)
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "proposer_1", not_before=due),
+                call_row("item-1", "proposer_2"),  # null not_before: due now
+            ],
+        )
+        assert [c["seat_name"] for c in store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)] == [
+            "proposer_2"
+        ]
+        assert [
+            c["seat_name"] for c in store.claim_calls("alice", "w1", {"argo"}, 10, now=due)
+        ] == ["proposer_1"]
+
+    def test_only_the_named_endpoints_are_claimed(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "proposer_1", endpoint="argo"),
+                call_row("item-1", "proposer_2", endpoint="poplar"),
+            ],
+        )
+        assert [c["endpoint"] for c in store.claim_calls("alice", "w1", {"poplar"}, 10, now=T0)] == [
+            "poplar"
+        ]
+
+    def test_an_empty_endpoint_set_claims_nothing(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        assert store.claim_calls("alice", "w1", set(), 10, now=T0) == []
+
+    def test_a_halted_endpoint_is_skipped_for_that_user_only(self, store):
+        """A halt is per (user, endpoint): one user's exhausted quota on a
+        shared gateway must not stop everybody else's calls."""
+        store.create_job(
+            job_row(job_id="a", submitted_by="alice"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(job_id="b", submitted_by="bob"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.set_halt("alice", "argo", "quota_exhausted", "out of tokens")
+
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        assert len(store.claim_calls("bob", "w2", {"argo"}, 10, now=T0)) == 1
+
+        # And the halt is only for that endpoint.
+        store.create_job(
+            job_row(job_id="c", submitted_by="alice"),
+            [item_row("item-9")],
+            [call_row("item-9", "proposer_1", endpoint="poplar")],
+        )
+        assert len(store.claim_calls("alice", "w1", {"argo", "poplar"}, 10, now=T0)) == 1
+
+    def test_reset_halt_makes_the_calls_claimable_again(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.set_halt("alice", "argo", "auth", "token expired")
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        store.reset_halt("alice", "argo")
+        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 1
+
+    def test_another_users_job_is_never_claimed(self, store):
+        """The claiming user runs the call through THEIR OWN backends and
+        credentials, so claiming across users would spend the wrong money."""
+        store.create_job(
+            job_row(job_id="bobs", submitted_by="bob"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        assert len(store.claim_calls("bob", "w1", {"argo"}, 10, now=T0)) == 1
+
+    @pytest.mark.parametrize("job_status", ["cancelled", "paused"])
+    def test_a_cancelled_or_paused_job_is_skipped(self, store, job_status):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        with store.transaction() as conn:
+            conn.execute(
+                sch.jobs.update()
+                .where(sch.jobs.c.job_id == job_id)
+                .values(status=job_status)
+            )
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+
+    def test_a_tombstoned_jobs_calls_are_skipped(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.cancel_job(job_id, "alice")
+        store.delete_job(job_id, "alice")
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+
+    def test_a_daemon_claims_under_its_lease_generation(self, store):
+        """How a late reply from a superseded daemon is later recognised."""
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        generation = store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
+        assert generation == 1
+        assert claim["lease_generation"] == generation
+
+    def test_a_foreground_worker_claims_under_no_generation(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        (claim,) = store.claim_calls("alice", "foreground-1", {"argo"}, 10, now=T0)
+        assert claim["lease_generation"] is None
 
 
-@pytest.mark.parametrize("method_name,args", QUEUE_METHODS, ids=[m for m, _ in QUEUE_METHODS])
-def test_queue_methods_are_declared_but_not_yet_implemented(store, method_name, args):
-    """Named, searchable failures rather than AttributeErrors from the worker."""
-    with pytest.raises(NotImplementedError, match=QUEUE_OPS_MARKER):
-        getattr(store, method_name)(*args)
+# ---------------------------------------------------------------------------
+# The queue: no double claim, across two real OS processes
+# ---------------------------------------------------------------------------
+
+
+class TestNoDoubleClaim:
+    """Two OS processes, one database, 200 calls, every call claimed once.
+
+    This is the test the whole locking strategy exists for, so it is written
+    to be unfakeable: the children are real ``spawn`` processes, each opens
+    its OWN store through ``open_store`` on the same URL, nothing is
+    monkeypatched in them, no store object crosses the process boundary, and
+    the harness holds no lock of its own.  See
+    :func:`.store_contract.claim_in_subprocess`.
+
+    Contention is arranged (a barrier releases both children together, and a
+    small claim limit makes them interleave) but NOT asserted: how the
+    scheduler splits 200 calls between two processes is not a property of the
+    store, and asserting it would make a correct store fail intermittently.
+    What is asserted is the invariant -- the union of what the two children
+    were handed is exactly the 200 calls, with no duplicate.
+    """
+
+    N_CALLS = 200
+    CLAIM_LIMIT = 7
+
+    def _seed(self, store):
+        """One job of ``N_CALLS`` pending calls: two proposer seats per item."""
+        n_items = self.N_CALLS // 2
+        items = [item_row(f"item-{i:03d}", item_order=i) for i in range(n_items)]
+        calls = [
+            call_row(f"item-{i:03d}", seat)
+            for i in range(n_items)
+            for seat in ("proposer_1", "proposer_2")
+        ]
+        job_id = store.create_job(
+            job_row(job_id="contended", submitted_at=T0), items, calls
+        )
+        return {c["call_id"] for c in store.get_calls(job_id)}
+
+    def test_two_processes_never_claim_the_same_call(self, make_store, store_url):
+        seeder = make_store()
+        expected = self._seed(seeder)
+        assert len(expected) == self.N_CALLS
+        # Nothing of the parent's is left holding the database: from here the
+        # only connections are the ones the children open themselves.
+        seeder.close()
+
+        url = store_url()
+        ctx = multiprocessing.get_context("spawn")
+        results = ctx.Queue()
+        barrier = ctx.Barrier(2)
+        children = [
+            ctx.Process(
+                target=claim_in_subprocess,
+                args=(url, "alice", worker_id, ["argo"], self.CLAIM_LIMIT, barrier, results),
+                daemon=True,
+            )
+            for worker_id in ("worker-1", "worker-2")
+        ]
+        for child in children:
+            child.start()
+        try:
+            # Drained BEFORE join: a child blocked writing to a full pipe
+            # would never exit, and the join would read as a store deadlock.
+            collected = [results.get(timeout=180) for _ in children]
+        finally:
+            for child in children:
+                child.join(timeout=60)
+                if child.is_alive():  # pragma: no cover - only on a real hang
+                    child.terminate()
+
+        for worker_id, _ids, error in collected:
+            assert error is None, f"{worker_id} failed: {error}"
+        for child in children:
+            assert child.exitcode == 0
+
+        handed_out = [call_id for _w, ids, _e in collected for call_id in ids]
+        assert len(handed_out) == len(set(handed_out)), "a call was claimed twice"
+        assert set(handed_out) == expected, "a call was claimed zero times"
+        assert len(handed_out) == self.N_CALLS
+
+        # And the database agrees: every call claimed, by one of the two
+        # workers, under its own token.
+        reopened = make_store()
+        rows = reopened.get_calls("contended")
+        assert {r["status"] for r in rows} == {"claimed"}
+        assert {r["claimed_by"] for r in rows} <= {"worker-1", "worker-2"}
+        assert len({r["claim_token"] for r in rows}) == self.N_CALLS
+
+
+# ---------------------------------------------------------------------------
+# The queue: completing
+# ---------------------------------------------------------------------------
+
+
+class TestCompleteCall:
+    @pytest.fixture
+    def claimed(self, store):
+        """One claimed call, ready to be settled."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        return job_id, claim
+
+    def test_an_ok_completion_stores_the_reply_and_clears_the_token(self, store, claimed):
+        job_id, claim = claimed
+        parsed = {"picked": [{"id": "GO:0003674", "confidence": "high", "why": "x"}]}
+        store.complete_call(
+            claim["call_id"],
+            claim["claim_token"],
+            "ok",
+            reply_text='{"picked": []}',
+            reply_parsed=parsed,
+            fresh_usage={"prompt_tokens": 11, "completion_tokens": 3},
+        )
+
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "ok"
+        assert call["reply_text"] == '{"picked": []}'
+        # The ORIGINAL schema-valid reply, not a post-processed shape.
+        assert call["reply_parsed"] == parsed
+        assert call["fresh_usage"]["prompt_tokens"] == 11
+        assert call["finished_at"] is not None
+        assert call["finished_at"].tzinfo is not None
+        assert call["claim_token"] is None
+        assert call["error"] is None
+
+    def test_an_error_completion_stores_the_error(self, store, claimed):
+        job_id, claim = claimed
+        error = {"kind": "invalid_output", "message": "not JSON", "retryable": False}
+        store.complete_call(claim["call_id"], claim["claim_token"], "error", error=error)
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "error"
+        assert call["error"] == error
+
+    def test_reused_from_records_where_the_answer_came_from(self, store, claimed):
+        job_id, claim = claimed
+        store.complete_call(
+            claim["call_id"], claim["claim_token"], "ok", reply_text="x", reused_from="other-call"
+        )
+        (call,) = store.get_calls(job_id)
+        assert call["reused_from"] == "other-call"
+
+    @pytest.mark.parametrize("bad", ["pending", "claimed", "superseded", "OK", ""])
+    def test_only_ok_or_error_may_be_recorded(self, store, claimed, bad):
+        _job_id, claim = claimed
+        with pytest.raises(ValueError, match="must be 'ok' or 'error'"):
+            store.complete_call(claim["call_id"], claim["claim_token"], bad)
+
+    def test_an_unknown_call_is_a_value_error(self, store):
+        with pytest.raises(ValueError, match="no such call"):
+            store.complete_call("ghost", "token", "ok")
+
+    def test_the_wrong_token_is_refused_and_changes_nothing(self, store, claimed):
+        job_id, claim = claimed
+        with pytest.raises(StaleClaim):
+            store.complete_call(claim["call_id"], "not-the-token", "ok", reply_text="x")
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "claimed"
+        assert call["reply_text"] is None
+
+    def test_completing_twice_is_refused(self, store, claimed):
+        """The token is cleared on completion, so a double write cannot land."""
+        job_id, claim = claimed
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="first")
+        with pytest.raises(StaleClaim):
+            store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="second")
+        (call,) = store.get_calls(job_id)
+        assert call["reply_text"] == "first"
+
+    def test_a_token_invalidated_by_reclaim_stale_is_refused(self, store):
+        """End to end: claim, the worker dies, reclaim_stale, then a late reply.
+
+        This is the race the claim token exists for.  The dead worker's reply
+        must not overwrite the row that has already gone back on the queue for
+        somebody else to run.
+        """
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.register_worker(
+            {"worker_id": "w1", "user": "alice", "kind": "daemon", "endpoints": ["argo"]}
+        )
+        long_ago = utcnow() - timedelta(minutes=30)
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=long_ago)
+        # The worker stops heartbeating: back-date it past the staleness window.
+        assert store.heartbeat_worker("w1", long_ago) is True
+
+        assert store.reclaim_stale() == 1
+
+        with pytest.raises(StaleClaim):
+            store.complete_call(
+                claim["call_id"], claim["claim_token"], "ok", reply_text="too late"
+            )
+
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "pending"
+        assert call["reply_text"] is None
+        assert call["reply_parsed"] is None
+        assert call["claim_token"] is None
+
+    def test_a_superseded_daemon_generation_is_refused(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        first = store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
+        # daemon-1's lease lapses and daemon-2 takes over.
+        second = store.acquire_daemon_lease("alice", "daemon-2", now=T0 + timedelta(hours=1))
+        assert second == first + 1
+
+        with pytest.raises(StaleClaim, match="generation"):
+            store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="late")
+
+    def test_the_current_daemon_generation_may_complete(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="in time")
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "ok"
+
+    def test_a_foreground_claim_is_not_refused_by_a_later_lease(self, store):
+        """A foreground claim carries no generation, so there is no lease
+        behind it that a new daemon could supersede."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "foreground", {"argo"}, 10, now=T0)
+        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="fine")
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "ok"
+
+    def test_a_claimed_call_of_a_cancelled_job_may_still_complete(self, store):
+        """Its tokens are already spent, so the reply is stored and stays
+        reusable even though the job it was for is gone."""
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="e" * 64)],
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.cancel_job(job_id, "alice")
+
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="paid for")
+
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "ok"
+        assert store.find_reusable("e" * 64)["call_id"] == claim["call_id"]
+
+
+# ---------------------------------------------------------------------------
+# The queue: releasing
+# ---------------------------------------------------------------------------
+
+
+class TestReleaseCall:
+    @pytest.fixture
+    def claimed(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        return job_id, claim
+
+    def test_release_returns_the_call_to_pending_and_counts_the_attempt(self, store, claimed):
+        job_id, claim = claimed
+        store.release_call(claim["call_id"], claim["claim_token"])
+
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "pending"
+        assert call["claim_token"] is None
+        assert call["claimed_by"] is None
+        assert call["claimed_at"] is None
+        assert call["lease_generation"] is None
+        assert call["attempt_count"] == 1
+        # And it is claimable again.
+        assert len(store.claim_calls("alice", "w2", {"argo"}, 10, now=T0)) == 1
+
+    def test_release_without_incrementing_leaves_the_attempt_count_alone(self, store, claimed):
+        """For a release that is not the call's fault -- a worker shutting
+        down, an endpoint halting -- so it does not burn the retry budget."""
+        job_id, claim = claimed
+        store.release_call(claim["call_id"], claim["claim_token"], increment_attempt=False)
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "pending"
+        assert call["attempt_count"] == 0
+
+    def test_attempts_accumulate_across_releases(self, store, claimed):
+        job_id, claim = claimed
+        store.release_call(claim["call_id"], claim["claim_token"])
+        (again,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.release_call(again["call_id"], again["claim_token"])
+        (call,) = store.get_calls(job_id)
+        assert call["attempt_count"] == 2
+
+    def test_a_backoff_holds_the_call_until_it_is_due(self, store, claimed):
+        job_id, claim = claimed
+        due = T0 + timedelta(minutes=5)
+        store.release_call(claim["call_id"], claim["claim_token"], not_before=due)
+
+        (call,) = store.get_calls(job_id)
+        assert call["not_before"] == due
+        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=due)) == 1
+
+    def test_releasing_with_no_backoff_clears_an_earlier_one(self, store, claimed):
+        job_id, claim = claimed
+        store.release_call(claim["call_id"], claim["claim_token"], not_before=T0 + timedelta(hours=1))
+        (again,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
+        store.release_call(again["call_id"], again["claim_token"])
+        (call,) = store.get_calls(job_id)
+        assert call["not_before"] is None
+
+    def test_the_wrong_token_is_refused(self, store, claimed):
+        job_id, claim = claimed
+        with pytest.raises(StaleClaim):
+            store.release_call(claim["call_id"], "not-the-token")
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "claimed"
+        assert call["claim_token"] == claim["claim_token"]
+
+    def test_releasing_an_unclaimed_call_is_refused(self, store, claimed):
+        _job_id, claim = claimed
+        store.release_call(claim["call_id"], claim["claim_token"])
+        with pytest.raises(StaleClaim):
+            store.release_call(claim["call_id"], claim["claim_token"])
+
+    def test_an_unknown_call_is_a_value_error(self, store):
+        with pytest.raises(ValueError, match="no such call"):
+            store.release_call("ghost", "token")
+
+
+# ---------------------------------------------------------------------------
+# The queue: attempts
+# ---------------------------------------------------------------------------
+
+
+class TestRecordAttempt:
+    def _attempts(self, store):
+        with store.transaction() as conn:
+            return [
+                dict(row._mapping)
+                for row in conn.execute(
+                    sa.select(sch.attempts).order_by(sch.attempts.c.attempt_no)
+                )
+            ]
+
+    def test_records_one_row_per_try(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            T0,
+            T0 + timedelta(seconds=3),
+            "timeout",
+            usage={"prompt_tokens": 7, "completion_tokens": 0},
+            worker_id="w1",
+        )
+        store.record_attempt(claim["call_id"], 2, T0, T0, "ok", worker_id="w1")
+
+        rows = self._attempts(store)
+        assert [r["attempt_no"] for r in rows] == [1, 2]
+        assert rows[0]["outcome_kind"] == "timeout"
+        assert rows[0]["usage"]["prompt_tokens"] == 7
+        assert rows[0]["started_at"].tzinfo is not None
+        assert rows[0]["worker_id"] == "w1"
+        assert rows[1]["usage"] is None
+
+    def test_an_attempt_for_an_unknown_call_is_refused(self, store):
+        """Foreign keys are on: the audit trail cannot outlive its call."""
+        with pytest.raises(IntegrityError):
+            store.record_attempt("ghost", 1, T0, T0, "ok")
+
+    def test_the_same_attempt_number_cannot_be_recorded_twice(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.record_attempt(claim["call_id"], 1, T0, T0, "ok")
+        with pytest.raises(IntegrityError):
+            store.record_attempt(claim["call_id"], 1, T0, T0, "ok")
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            {"system": "You are a careful curator."},
+            {"user": "Map this protein: ..."},
+            {"request": {"system": "...", "user": "..."}},
+            {"messages": [{"user": "..."}]},
+            {"a": {"b": {"c": {"system": "buried"}}}},
+        ],
+        ids=["system", "user", "nested-request", "in-a-list", "deeply-nested"],
+    )
+    def test_prompt_text_is_refused_at_any_depth(self, store, usage):
+        """The attempts table is readable by every user of a shared store, so
+        the evidence text a job was built from must never reach it."""
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        with pytest.raises(ValueError, match="prompt text"):
+            store.record_attempt(claim["call_id"], 1, T0, T0, "ok", usage=usage)
+        assert self._attempts(store) == []
+
+    def test_a_usage_dict_without_prompt_keys_is_accepted(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"], 1, T0, T0, "ok", usage={"prompt_tokens": 3, "users": 1}
+        )
+        assert len(self._attempts(store)) == 1
+
+
+# ---------------------------------------------------------------------------
+# The queue: reuse lookup
+# ---------------------------------------------------------------------------
+
+
+class TestFindReusable:
+    def test_finds_an_answer_across_jobs_and_users(self, store):
+        """The whole point of a shared store: a question one user has paid
+        for is not asked again by the next."""
+        job_id = store.create_job(
+            job_row(job_id="bobs", submitted_by="bob"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="1" * 64)],
+        )
+        (claim,) = store.claim_calls("bob", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(
+            claim["call_id"], claim["claim_token"], "ok", reply_text="bob paid for this"
+        )
+
+        found = store.find_reusable("1" * 64)
+        assert found["call_id"] == claim["call_id"]
+        assert found["reply_text"] == "bob paid for this"
+        assert found["submitted_by"] == "bob"
+        assert found["job_id"] == job_id
+
+    def test_an_unanswered_call_is_not_reusable(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="2" * 64)],
+        )
+        assert store.find_reusable("2" * 64) is None
+
+    def test_a_failed_call_is_not_reusable(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="3" * 64)],
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(
+            claim["call_id"], claim["claim_token"], "error", error={"kind": "transport"}
+        )
+        assert store.find_reusable("3" * 64) is None
+
+    def test_an_unknown_hash_is_none(self, store):
+        assert store.find_reusable("4" * 64) is None
+
+    @pytest.mark.parametrize("empty", ["", None])
+    def test_an_empty_hash_is_none(self, store, empty):
+        assert store.find_reusable(empty) is None
+
+    def test_the_newest_answer_wins(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1"), item_row("item-2")],
+            [
+                call_row("item-1", "proposer_1", prompt_hash="5" * 64),
+                call_row("item-2", "proposer_1", prompt_hash="5" * 64),
+            ],
+        )
+        first, second = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(first["call_id"], first["claim_token"], "ok", reply_text="older")
+        store.complete_call(second["call_id"], second["claim_token"], "ok", reply_text="newer")
+
+        assert store.find_reusable("5" * 64)["call_id"] == second["call_id"]
+        assert store.get_job(job_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# The queue: reclaiming abandoned work
+# ---------------------------------------------------------------------------
+
+
+class TestReclaimStale:
+    def _claim_long_ago(self, store, worker_id="w1", endpoints=("argo",), heartbeat=None):
+        """Register a worker and have it claim everything, half an hour ago.
+
+        *heartbeat* defaults to equally long ago, i.e. a worker that has since
+        died; pass ``utcnow()`` for one that is still alive.
+        """
+        store.register_worker(
+            {
+                "worker_id": worker_id,
+                "user": "alice",
+                "kind": "daemon",
+                "endpoints": list(endpoints),
+                "heartbeat_at": heartbeat or (utcnow() - timedelta(minutes=30)),
+            }
+        )
+        return store.claim_calls(
+            "alice", worker_id, set(endpoints), 10, now=utcnow() - timedelta(minutes=30)
+        )
+
+    def test_an_abandoned_claim_goes_back_on_the_queue(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._claim_long_ago(store)
+
+        assert store.reclaim_stale() == 1
+
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "pending"
+        assert call["claim_token"] is None
+        assert call["claimed_by"] is None
+        assert call["claimed_at"] is None
+        assert call["lease_generation"] is None
+        assert len(store.claim_calls("alice", "w2", {"argo"}, 10, now=utcnow())) == 1
+
+    def test_the_reclaimed_call_keeps_its_attempt_count(self, store):
+        """Nothing was learned -- the worker died -- so charging it an attempt
+        would exhaust the retry budget of a call that was never tried."""
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", attempt_count=2)],
+        )
+        self._claim_long_ago(store)
+        store.reclaim_stale()
+        (call,) = store.get_calls(job_id)
+        assert call["attempt_count"] == 2
+
+    def test_a_live_workers_claim_is_left_alone(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._claim_long_ago(store, heartbeat=utcnow())
+
+        assert store.reclaim_stale() == 0
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "claimed"
+
+    def test_a_fresh_claim_is_left_alone_even_with_no_worker_row(self, store):
+        """The age guard: a claim younger than max_age is work in flight, and
+        reclaiming it would run the same call twice."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.claim_calls("alice", "never-registered", {"argo"}, 10, now=utcnow())
+        assert store.reclaim_stale() == 0
+        (call,) = store.get_calls(job_id)
+        assert call["status"] == "claimed"
+
+    def test_max_age_is_honoured(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.claim_calls(
+            "alice", "never-registered", {"argo"}, 10, now=utcnow() - timedelta(minutes=5)
+        )
+        assert store.reclaim_stale(max_age=timedelta(minutes=10)) == 0
+        assert store.reclaim_stale(max_age=timedelta(minutes=1)) == 1
+
+    def test_pending_and_settled_calls_are_untouched(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1"), call_row("item-1", "proposer_2")],
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 1, now=T0)
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="x")
+
+        assert store.reclaim_stale() == 0
+        assert {c["status"] for c in store.get_calls(job_id)} == {"ok", "pending"}
+
+    def test_reclaim_counts_every_abandoned_claim(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", f"proposer_{n}") for n in range(1, 4)],
+        )
+        self._claim_long_ago(store)
+        assert store.reclaim_stale() == 3
+
+    def test_reclaim_on_an_empty_store_is_zero(self, store):
+        assert store.reclaim_stale() == 0
+
+
+# ---------------------------------------------------------------------------
+# Job control: status
+# ---------------------------------------------------------------------------
+
+
+class TestJobStatus:
+    def _live_worker(self, store, endpoints=("argo",)):
+        store.register_worker(
+            {
+                "worker_id": "live-1",
+                "user": "alice",
+                "kind": "daemon",
+                "endpoints": list(endpoints),
+                "heartbeat_at": utcnow(),
+            }
+        )
+
+    def test_counts_items_and_reports_percent_complete(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row(f"item-{n}") for n in range(1, 5)],
+            [],
+        )
+        status = store.job_status(job_id)
+        assert status["job_id"] == job_id
+        assert status["status"] == "queued"
+        assert status["n_items"] == 4
+        assert status["by_status"] == {"pending": 4}
+        assert status["percent_complete"] == 0.0
+
+        store.settle_item(job_id, "item-1", "ok", {"selected_ids": []})
+        store.settle_item(job_id, "item-2", "error", None)
+        status = store.job_status(job_id)
+        assert status["by_status"] == {"pending": 2, "ok": 1, "error": 1}
+        assert status["percent_complete"] == 50.0
+
+    def test_percent_complete_is_rounded_to_one_decimal(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row(f"item-{n}") for n in range(3)], []
+        )
+        store.settle_item(job_id, "item-0", "ok", {})
+        assert store.job_status(job_id)["percent_complete"] == 33.3
+
+    def test_a_job_with_no_items_reads_complete_rather_than_stuck(self, store):
+        job_id = store.create_job(job_row(), [], [])
+        status = store.job_status(job_id)
+        assert status["n_items"] == 0
+        assert status["percent_complete"] == 100.0
+        assert status["blockers"] == []
+
+    def test_pending_calls_are_grouped_by_role_then_endpoint(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1"), item_row("item-2")],
+            [
+                call_row("item-1", "proposer_1", endpoint="argo"),
+                call_row("item-1", "proposer_2", endpoint="poplar"),
+                call_row("item-2", "proposer_1", endpoint="argo"),
+                call_row("item-1", "critic", role="critic", endpoint="argo"),
+            ],
+        )
+        self._live_worker(store, endpoints=("argo", "poplar"))
+        assert store.job_status(job_id)["pending_calls_by_role_endpoint"] == {
+            "proposer": {"argo": 2, "poplar": 1},
+            "critic": {"argo": 1},
+        }
+
+    def test_a_claimed_call_is_work_in_flight_not_work_waiting(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        status = store.job_status(job_id)
+        assert status["pending_calls_by_role_endpoint"] == {}
+        assert status["blockers"] == []
+
+    def test_a_halted_endpoint_is_a_blocker(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._live_worker(store)
+        store.set_halt("alice", "argo", "quota_exhausted", "daily cap reached")
+
+        (blocker,) = store.job_status(job_id)["blockers"]
+        assert blocker["kind"] == "halted"
+        assert blocker["endpoint"] == "argo"
+        assert "quota_exhausted" in blocker["detail"]
+        assert "daily cap reached" in blocker["detail"]
+
+    def test_a_halt_on_another_users_endpoint_is_not_this_jobs_blocker(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._live_worker(store)
+        store.set_halt("bob", "argo", "auth", "bob's token expired")
+        assert store.job_status(job_id)["blockers"] == []
+
+    @pytest.mark.parametrize(
+        "error_kind,blocker_kind",
+        [
+            ("model_unavailable", "waiting_for_model"),
+            ("configuration_mismatch", "configuration_mismatch"),
+        ],
+    )
+    def test_a_pending_calls_last_error_is_a_blocker(self, store, error_kind, blocker_kind):
+        """The error is written straight onto the pending row here because
+        ``release_call`` takes no error argument: the engine milestone records
+        it in the same transaction as the release.  What is under test is that
+        ``job_status`` reads it, not how it got there."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._live_worker(store)
+        with store.transaction() as conn:
+            conn.execute(
+                sch.calls.update()
+                .where(sch.calls.c.job_id == job_id)
+                .values(error={"kind": error_kind, "message": "no capacity"})
+            )
+
+        (blocker,) = store.job_status(job_id)["blockers"]
+        assert blocker["kind"] == blocker_kind
+        assert blocker["endpoint"] == "argo"
+        assert error_kind in blocker["detail"]
+        assert blocker["detail"].startswith("1 pending call")
+
+    def test_a_retryable_error_is_not_a_blocker(self, store):
+        """A transport error is what retries are for, not something a human
+        has to go and fix."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        self._live_worker(store)
+        with store.transaction() as conn:
+            conn.execute(
+                sch.calls.update()
+                .where(sch.calls.c.job_id == job_id)
+                .values(error={"kind": "transport", "message": "reset by peer"})
+            )
+        assert store.job_status(job_id)["blockers"] == []
+
+    def test_no_live_worker_for_an_endpoint_is_a_blocker(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (blocker,) = store.job_status(job_id)["blockers"]
+        assert blocker["kind"] == "no_daemon"
+        assert blocker["endpoint"] == "argo"
+
+    def test_a_worker_serving_another_endpoint_does_not_clear_no_daemon(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", endpoint="poplar")],
+        )
+        self._live_worker(store, endpoints=("argo",))
+        (blocker,) = store.job_status(job_id)["blockers"]
+        assert blocker["kind"] == "no_daemon"
+        assert blocker["endpoint"] == "poplar"
+
+    def test_a_stale_worker_does_not_count_as_live(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.register_worker(
+            {
+                "worker_id": "sleepy",
+                "user": "alice",
+                "endpoints": ["argo"],
+                "heartbeat_at": utcnow() - timedelta(minutes=10),
+            }
+        )
+        assert [b["kind"] for b in store.job_status(job_id)["blockers"]] == ["no_daemon"]
+
+    def test_another_users_worker_does_not_clear_no_daemon(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.register_worker(
+            {
+                "worker_id": "bobs",
+                "user": "bob",
+                "endpoints": ["argo"],
+                "heartbeat_at": utcnow(),
+            }
+        )
+        assert [b["kind"] for b in store.job_status(job_id)["blockers"]] == ["no_daemon"]
+
+    def test_halted_and_unserved_are_reported_independently(self, store):
+        """Suppressing either fact would send the user to fix the wrong thing."""
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.set_halt("alice", "argo", "budget_exhausted", "")
+        assert sorted(b["kind"] for b in store.job_status(job_id)["blockers"]) == [
+            "halted",
+            "no_daemon",
+        ]
+
+    def test_throughput_counts_calls_finished_in_the_last_ten_minutes(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1"), call_row("item-1", "proposer_2")],
+        )
+        assert store.job_status(job_id)["throughput_last_10min"] == 0
+
+        first, second = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(first["call_id"], first["claim_token"], "ok", reply_text="x")
+        assert store.job_status(job_id)["throughput_last_10min"] == 1
+        store.complete_call(second["call_id"], second["claim_token"], "error", error={})
+        assert store.job_status(job_id)["throughput_last_10min"] == 2
+
+    def test_throughput_ignores_an_older_completion(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="x")
+        with store.transaction() as conn:
+            conn.execute(
+                sch.calls.update()
+                .where(sch.calls.c.call_id == claim["call_id"])
+                .values(finished_at=utcnow() - timedelta(minutes=30))
+            )
+        assert store.job_status(job_id)["throughput_last_10min"] == 0
+
+    def test_an_unknown_job_is_a_value_error(self, store):
+        with pytest.raises(ValueError, match="no such job"):
+            store.job_status("ghost")
+
+
+# ---------------------------------------------------------------------------
+# Job control: results
+# ---------------------------------------------------------------------------
+
+
+class TestResults:
+    @pytest.fixture
+    def decided(self, store):
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1"), item_row("item-2"), item_row("item-3")],
+            [],
+        )
+        store.settle_item(
+            job_id, "item-2", "ok", {"item_id": "item-2", "selected_ids": ["GO:0003674"]}
+        )
+        store.settle_item(job_id, "item-1", "error", {"item_id": "item-1", "status": "error"})
+        return job_id
+
+    def test_only_settled_items_by_default(self, store, decided):
+        rows = store.results(decided)
+        # Submission order, not settlement order.
+        assert [r["item_id"] for r in rows] == ["item-1", "item-2"]
+        assert rows[1]["verdict"]["selected_ids"] == ["GO:0003674"]
+        assert rows[0]["status"] == "error"
+
+    def test_include_pending_returns_the_undecided_items_too(self, store, decided):
+        rows = store.results(decided, include_pending=True)
+        assert [r["item_id"] for r in rows] == ["item-1", "item-2", "item-3"]
+        assert rows[2]["status"] == "pending"
+        assert rows[2]["verdict"] is None
+
+    def test_cancelled_items_are_settled_results(self, store, decided):
+        store.cancel_job(decided, "alice")
+        rows = store.results(decided)
+        assert [r["item_id"] for r in rows] == ["item-1", "item-2", "item-3"]
+        assert rows[2]["status"] == "cancelled"
+
+    def test_an_unknown_job_has_no_results(self, store):
+        assert store.results("ghost") == []
+
+
+# ---------------------------------------------------------------------------
+# Job control: cancel
+# ---------------------------------------------------------------------------
+
+
+class TestCancelJob:
+    @pytest.fixture
+    def mixed(self, store):
+        """A job with one settled item, one pending call, one claimed call."""
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1", item_order=0), item_row("item-2", item_order=1)],
+            [
+                call_row("item-1", "proposer_1"),
+                call_row("item-2", "proposer_1"),
+            ],
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 1, now=T0)
+        store.settle_item(job_id, "item-1", "ok", {"selected_ids": []})
+        return job_id, claim
+
+    def test_cancel_supersedes_pending_calls_and_leaves_claimed_ones(self, store, mixed):
+        job_id, claim = mixed
+        store.cancel_job(job_id, "alice")
+
+        by_id = {c["call_id"]: c for c in store.get_calls(job_id)}
+        still_claimed = by_id.pop(claim["call_id"])
+        assert still_claimed["status"] == "claimed"
+        assert still_claimed["live"] is True
+        assert still_claimed["claim_token"] == claim["claim_token"]
+
+        (superseded,) = by_id.values()
+        assert superseded["status"] == "superseded"
+        assert superseded["live"] is False
+
+    def test_cancel_settles_the_unsettled_items_and_keeps_the_rest(self, store, mixed):
+        job_id, _claim = mixed
+        store.cancel_job(job_id, "alice")
+
+        items = {i["item_id"]: i for i in store.get_items(job_id)}
+        assert items["item-1"]["status"] == "ok"  # already settled: untouched
+        assert items["item-1"]["verdict"] == {"selected_ids": []}
+        assert items["item-2"]["status"] == "cancelled"
+        assert items["item-2"]["decided_at"] is not None
+
+    def test_the_job_goes_to_cancelled(self, store, mixed):
+        job_id, _claim = mixed
+        store.cancel_job(job_id, "alice")
+        assert store.get_job(job_id)["status"] == "cancelled"
+        assert store.job_status(job_id)["status"] == "cancelled"
+
+    def test_nothing_is_claimed_from_a_cancelled_job(self, store, mixed):
+        job_id, _claim = mixed
+        store.cancel_job(job_id, "alice")
+        assert store.claim_calls("alice", "w2", {"argo"}, 10, now=T0) == []
+
+    def test_cancel_is_idempotent_and_terminal(self, store, mixed):
+        job_id, _claim = mixed
+        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id, "alice")
+        assert store.get_job(job_id)["status"] == "cancelled"
+
+    def test_a_cancelled_job_refuses_further_work(self, store, mixed):
+        job_id, _claim = mixed
+        store.cancel_job(job_id, "alice")
+        with pytest.raises(JobCancelled):
+            store.add_calls([dict(call_row("item-2", "critic", role="critic"), job_id=job_id)])
+        with pytest.raises(JobCancelled):
+            store.settle_item(job_id, "item-2", "ok", {})
+
+    def test_cancel_touches_no_other_job(self, store):
+        keep = store.create_job(
+            job_row(job_id="keep"), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        drop = store.create_job(
+            job_row(job_id="drop"), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.cancel_job(drop, "alice")
+        assert store.get_job(keep)["status"] == "queued"
+        assert [c["status"] for c in store.get_calls(keep)] == ["pending"]
+
+    def test_another_user_may_not_cancel(self, store, mixed):
+        job_id, _claim = mixed
+        with pytest.raises(NotOwner, match="alice"):
+            store.cancel_job(job_id, "bob")
+        assert store.get_job(job_id)["status"] == "queued"
+
+    def test_cancelling_an_unknown_job_is_a_value_error(self, store):
+        with pytest.raises(ValueError, match="no such job"):
+            store.cancel_job("ghost", "alice")
+
+
+# ---------------------------------------------------------------------------
+# Job control: delete
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteJob:
+    @pytest.mark.parametrize("status", ["queued", "running", "paused"])
+    def test_delete_refuses_a_job_that_is_not_finished(self, store, status):
+        """Cancel first: a tombstoned job a worker is still writing to would
+        keep spending tokens on results nobody can see."""
+        job_id = store.create_job(job_row(status=status), [item_row("item-1")], [])
+        with pytest.raises(ValueError, match="cancel it first"):
+            store.delete_job(job_id, "alice")
+        assert store.get_job(job_id)["deleted_at"] is None
+
+    @pytest.mark.parametrize("status", ["cancelled", "done"])
+    def test_delete_tombstones_a_finished_job(self, store, status):
+        job_id = store.create_job(job_row(status=status), [item_row("item-1")], [])
+        store.delete_job(job_id, "alice")
+
+        job = store.get_job(job_id)
+        assert job is not None, "a tombstone removes no row"
+        assert job["deleted_at"] is not None
+        assert job["deleted_at"].tzinfo is not None
+        assert job["status"] == status, "delete changes nothing but deleted_at"
+
+        assert store.list_jobs() == []
+        assert [j["job_id"] for j in store.list_jobs(include_deleted=True)] == [job_id]
+
+    def test_a_cancelled_then_deleted_jobs_items_and_calls_remain(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        store.cancel_job(job_id, "alice")
+        store.delete_job(job_id, "alice")
+        assert len(store.get_items(job_id)) == 1
+        assert len(store.get_calls(job_id)) == 1
+
+    def test_delete_keeps_the_calls_a_later_job_reused(self, store):
+        """A shared store's answers outlive the job that paid for them --
+        including the job that cited one via ``reused_from``."""
+        paid = store.create_job(
+            job_row(job_id="paid"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="7" * 64)],
+        )
+        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.complete_call(
+            claim["call_id"], claim["claim_token"], "ok", reply_text="the answer"
+        )
+
+        borrower = store.create_job(
+            job_row(job_id="borrower", submitted_by="bob"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1", prompt_hash="7" * 64)],
+        )
+        (borrowed,) = store.claim_calls("bob", "w2", {"argo"}, 10, now=T0)
+        store.complete_call(
+            borrowed["call_id"],
+            borrowed["claim_token"],
+            "ok",
+            reply_text="the answer",
+            reused_from=claim["call_id"],
+        )
+
+        store.cancel_job(paid, "alice")
+        store.delete_job(paid, "alice")
+
+        assert store.find_reusable("7" * 64) is not None
+        (original,) = store.get_calls(paid)
+        assert original["reply_text"] == "the answer"
+        (citing,) = store.get_calls(borrower)
+        assert citing["reused_from"] == claim["call_id"]
+
+    def test_another_user_may_not_delete(self, store):
+        job_id = store.create_job(job_row(status="done"), [], [])
+        with pytest.raises(NotOwner, match="alice"):
+            store.delete_job(job_id, "bob")
+        assert store.get_job(job_id)["deleted_at"] is None
+
+    def test_deleting_twice_does_not_move_the_tombstone(self, store):
+        job_id = store.create_job(job_row(status="done"), [], [])
+        store.delete_job(job_id, "alice")
+        first = store.get_job(job_id)["deleted_at"]
+        store.delete_job(job_id, "alice")
+        assert store.get_job(job_id)["deleted_at"] == first
+
+    def test_deleting_an_unknown_job_is_a_value_error(self, store):
+        with pytest.raises(ValueError, match="no such job"):
+            store.delete_job("ghost", "alice")
 
 
 # ---------------------------------------------------------------------------

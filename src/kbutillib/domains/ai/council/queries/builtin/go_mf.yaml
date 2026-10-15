@@ -1,0 +1,232 @@
+name: go_mf
+version: '1'
+description: Assign Gene Ontology molecular-function terms to one protein annotation string, choosing from a closed menu of retrieved GO terms.
+entity_field: text
+evidence_fields:
+- text
+- source
+menu_fields: []
+id_field: go_id
+renderer: go_mf_v3@1
+adapter: go_mf_v3@1
+critic_truncate_chars: 1200
+candidate_templates: {}
+roles:
+  proposer:
+    system: |-
+      You assign Gene Ontology molecular-function terms to protein annotation strings.
+
+      You are given one annotation string produced by an automated annotation tool, and a ranked list of candidate GO molecular-function terms retrieved for it. Choose the candidates the annotation actually supports.
+
+      Rules:
+      - Pick ONLY from the candidate list. Never invent a GO id.
+      - Prefer the most specific candidate the annotation genuinely supports. Do not pick a broader term merely because it is safer.
+      - More than one candidate can be correct when a protein has several molecular functions, or when the annotation names a multi-domain or multifunctional protein. Pick all that apply, usually one or two, rarely more than three.
+      - The retrieval score reflects text similarity only. It is evidence, not an answer. A high-scoring candidate whose meaning does not match the annotation should be rejected.
+      - Some annotation strings are bare gene symbols or otherwise carry no functional claim. If the string does not state what the protein does, pick nothing and say so. Guessing from a gene symbol you happen to recognise is not acceptable, because the caller cannot tell that apart from evidence in the string.
+      - A transporter annotation should map to the specific substrate transport activity where the candidates offer one.
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Annotation string: "{text}"
+      Produced by: {source}
+
+      Candidate GO molecular-function terms (rank | GO id | retrieval score | name | definition):
+      {candidates}
+
+      Return JSON exactly matching:
+      {{
+        "picked": [
+          {{"go_id": "<one of the candidate ids>",
+            "confidence": "high|medium|low",
+            "why": "<one sentence tying the annotation to the term>"}}
+        ],
+        "overall_confidence": "high|medium|low",
+        "no_functional_content": <true if the string states no function, else false>,
+        "notes": "<optional, one sentence>"
+      }}
+
+      Return ONLY the JSON object.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: council proposer answer
+      type: object
+      additionalProperties: false
+      required:
+      - picked
+      - overall_confidence
+      - no_functional_content
+      properties:
+        picked:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - go_id
+            - confidence
+            - why
+            properties:
+              confidence:
+                enum:
+                - high
+                - medium
+                - low
+              why:
+                type: string
+              go_id:
+                type: string
+                description: one of the ids offered on the closed menu
+        overall_confidence:
+          enum:
+          - high
+          - medium
+          - low
+        no_functional_content:
+          type: boolean
+        notes:
+          type: string
+  critic:
+    system: |-
+      You audit a council's GO molecular-function assignments. You do not assign terms yourself.
+
+      For the annotation string and the council's vote table, judge whether the votes are justified, and flag two specific failures:
+      - a term picked that the annotation does not support, especially one chosen because its wording overlaps rather than its meaning
+      - a clearly correct candidate the council overlooked
+      - a bare gene symbol or contentless string that the council assigned terms to anyway
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Annotation string: "{text}"
+      Produced by: {source}
+
+      Candidates offered (rank | GO id | name):
+      {candidates}
+
+      Council votes (GO id : how many of {n} proposers picked it):
+      {votes}
+
+      Per-proposer reasoning:
+      {reasoning}
+
+      Return JSON exactly matching:
+      {{
+        "verdict": "strongly_consistent|consistent|ambiguous|inconsistent",
+        "reason": "<one to two sentences>",
+        "overpicked": ["<go_id the council should not have picked>"],
+        "missed": ["<candidate go_id the council should have picked>"],
+        "contentless_input": <true if the string states no function>
+      }}
+
+      Return ONLY the JSON object.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: council critic answer
+      type: object
+      additionalProperties: false
+      required:
+      - verdict
+      - reason
+      - overpicked
+      - missed
+      - contentless_input
+      properties:
+        verdict:
+          enum:
+          - strongly_consistent
+          - consistent
+          - ambiguous
+          - inconsistent
+        reason:
+          type: string
+        overpicked:
+          type: array
+          items:
+            type: string
+        missed:
+          type: array
+          items:
+            type: string
+        contentless_input:
+          type: boolean
+  meta:
+    system: |-
+      You are the final arbiter for GO molecular-function assignment. The council disagreed, so you decide.
+
+      You see the annotation string, the candidates, every proposer's picks and reasoning, and the critic's audit. Issue the final set.
+
+      You are not bound by majority vote. Prefer the most specific defensible term. Assign nothing when the string carries no functional claim. A biologist reviews these, so a defensible smaller set beats a speculative larger one.
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Annotation string: "{text}"
+      Produced by: {source}
+
+      Candidates (rank | GO id | name | definition):
+      {candidates}
+
+      Council votes (GO id : count of {n}):
+      {votes}
+
+      Per-proposer reasoning:
+      {reasoning}
+
+      Critic audit:
+      {critic}
+
+      Return JSON exactly matching:
+      {{
+        "final_go_ids": ["<go_id>", ...],
+        "final_confidence": "high|medium|low",
+        "no_functional_content": <true or false>,
+        "reasoning": "<paragraph explaining the call and how the disagreement was resolved>"
+      }}
+
+      Return ONLY the JSON object.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: council meta answer
+      type: object
+      additionalProperties: false
+      required:
+      - final_go_ids
+      - final_confidence
+      - no_functional_content
+      - reasoning
+      properties:
+        final_confidence:
+          enum:
+          - high
+          - medium
+          - low
+        no_functional_content:
+          type: boolean
+        reasoning:
+          type: string
+        final_go_ids:
+          type: array
+          items:
+            type: string
+attribution: |
+  Ported VERBATIM from Jose Faria's CONCORDIA GO molecular-function council V3.
+
+  source: /scratch/chenry/go_council_v3/go_council_kit/go_council.py
+  sha256: 7a567823a1765f7fee93dd29a7a73a5c7f3c9509952cc72f36f43a1f26ca5ea1
+  lines:
+    50-147  PROPOSER_SYSTEM, PROPOSER_USER, CRITIC_SYSTEM, CRITIC_USER,
+            META_SYSTEM, META_USER -- the six prompt strings below, byte for byte
+    152-159 render_candidates() -- the full and short candidate blocks
+    296-362 run_one() -- candidate blocks, vote table and per-proposer reasoning
+    364-379 run_one() -- the critic prompt assembly
+    431-448 run_one() -- the meta prompt assembly, including the 1200-character
+            JSON truncation of the critic payload
+
+  cross-check: /scratch/jplfaria/CONCORDIA-live/scripts/go_council_pilot.py
+  sha256: 3563e97c9b32dce7934da341ce5b3ad2d072a215eabbfa5b4ff9306bc804559d
+    Matches the SHA-256 the task pinned. Its PROPOSER_USER, CRITIC_SYSTEM,
+    CRITIC_USER, META_SYSTEM and META_USER are byte-identical to the V3 kit's.
+    Its PROPOSER_SYSTEM is NOT: the live pilot has moved past V3 and carries
+    four extra lines about candidate provenance ("retrieval" / "EC <n> lookup" /
+    "name match"), matched by a render_candidates() that labels each candidate
+    with its origin. That is a later generation of the query, not V3, so this
+    query type ports the V3 kit -- the file the task names as the source.

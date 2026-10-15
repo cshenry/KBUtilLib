@@ -1,0 +1,87 @@
+{
+  "task": {
+    "item_id": "Ac3H11_0042",
+    "evidence": {
+      "gene_id": "Ac3H11_0042",
+      "description": "adenine phosphoribosyltransferase",
+      "ec": "2.4.2.7"
+    },
+    "menu": [
+      {
+        "id": "rxn09001",
+        "label": "phosphoribosyltransferase variant 1",
+        "description": null,
+        "rank": 1,
+        "score": 0.67,
+        "metadata": {
+          "ec": "2.4.2.7",
+          "equation": "(1) cpd00021[c0] + (1) cpd00062[c0] <=> (1) cpd00031[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn09002",
+        "label": "phosphoribosyltransferase variant 2",
+        "description": null,
+        "rank": 2,
+        "score": 0.62,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00022[c0] + (1) cpd00062[c0] <=> (1) cpd00032[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn09003",
+        "label": "phosphoribosyltransferase variant 3",
+        "description": null,
+        "rank": 3,
+        "score": 0.57,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00023[c0] + (1) cpd00062[c0] <=> (1) cpd00033[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn09004",
+        "label": "phosphoribosyltransferase variant 4",
+        "description": null,
+        "rank": 4,
+        "score": 0.52,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00024[c0] + (1) cpd00062[c0] <=> (1) cpd00034[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn09005",
+        "label": "phosphoribosyltransferase variant 5",
+        "description": null,
+        "rank": 5,
+        "score": 0.47,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00025[c0] + (1) cpd00062[c0] <=> (1) cpd00035[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn09006",
+        "label": "phosphoribosyltransferase variant 6",
+        "description": null,
+        "rank": 6,
+        "score": 0.42,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00026[c0] + (1) cpd00062[c0] <=> (1) cpd00036[c0] + (1) cpd00012[c0]",
+          "skos": "skos:closeMatch"
+        }
+      }
+    ]
+  },
+  "votes": {},
+  "ballots": [],
+  "critic_raw": {}
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kbase.us/kbutillib/council/querytype.schema.json",
+  "title": "council query type",
+  "description": "The saved form of one council query type. This is what `kbu council query register` validates a YAML against, and what the `spec` column of the store's query_types table holds. A query type is IMMUTABLE once saved under a (name, version): edit it by registering a new version, because a finished job's verdicts only mean anything against the exact spec that produced them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "entity_field", "id_field", "roles"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier, e.g. go_mf."
+    },
+    "version": {
+      "type": "string",
+      "default": "1",
+      "description": "A string, not a number: versions sort naturally but are compared as written."
+    },
+    "description": {"type": "string"},
+    "entity_field": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Which evidence field IS the item -- the one entity_hash() is taken over, so two spellings of it are the same question. Must be one of evidence_fields."
+    },
+    "evidence_fields": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"},
+      "description": "Every evidence key an item may carry. Each becomes a $binding in the template renderer."
+    },
+    "menu_fields": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The metadata keys a menu entry carries, exposed to a candidate template as $meta_<key>."
+    },
+    "id_field": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What an id is called in THIS domain's answers (go_id, rxn_id). postprocess renames it to the generic 'id', and final_<id_field>s to 'final_ids'."
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposer", "critic", "meta"],
+      "properties": {
+        "proposer": {"$ref": "#/$defs/role"},
+        "critic": {"$ref": "#/$defs/role"},
+        "meta": {"$ref": "#/$defs/role"}
+      }
+    },
+    "candidate_templates": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "How one menu entry is rendered. Required (both 'full' and 'short') unless the spec names a builtin renderer, which renders candidates in code. Bindings: $rank, $id, $label, $description, $score and $meta_<key>.",
+      "properties": {
+        "full": {"type": "string"},
+        "short": {"type": "string"}
+      }
+    },
+    "critic_truncate_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1200,
+      "description": "How much of the critic's JSON the meta prompt is shown. A byte cut, as in the reference council."
+    },
+    "renderer": {
+      "type": ["string", "null"],
+      "description": "A builtin renderer as '<name>' or '<name>@<version>'. Unset means the string.Template renderer. An installation that does not ship the named version REFUSES the query rather than rendering it with another."
+    },
+    "adapter": {
+      "type": ["string", "null"],
+      "description": "A builtin answer adapter, same spelling as renderer. Unset means the default id rename."
+    },
+    "attribution": {
+      "type": "string",
+      "description": "Where these prompts came from. The shipped builtins record the source file, the line range ported and the SHA-256 of each file."
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "user", "schema"],
+      "properties": {
+        "system": {"type": "string"},
+        "user": {"type": "string"},
+        "schema": {
+          "type": "object",
+          "description": "JSON Schema the answer must satisfy. A spec with no renderer must use the package's generic schema for the role (generic_schemas.json) with only the id field renamed."
+        },
+        "fragments": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "Named prompt text a BUILTIN renderer splices in conditionally, e.g. reaction_pickup's promiscuity_hint."
+        }
+      }
+    }
+  }
+}

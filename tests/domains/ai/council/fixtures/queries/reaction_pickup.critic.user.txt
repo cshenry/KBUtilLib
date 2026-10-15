@@ -1,0 +1,82 @@
+Gene: Ac3H11_1623
+Description: "aldehyde dehydrogenase (NAD+) family protein"
+EC: 1.2.1.3
+
+Top-20 ranked candidates (rank | rxn_id | name | EC | fused_score | skos | equation):
+    1 | rxn05001 | aldehyde dehydrogenase (NAD+) variant 1 | 1.2.1.3 | 0.920 | exactMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+    2 | rxn05002 | aldehyde dehydrogenase (NAD+) variant 2 | 1.2.1.3 | 0.890 | exactMatch | (1) cpd00001[c0] + (1) cpd00002[c0] + (1) cpd00067[c0] + (1) cpd00009[c0] + (2) cpd00013[c0] + (1) cpd00011[c0] + (3) cpd00012[c0] <=> (1) cpd00008[c0] + (1) cpd00010[c0] + (2) cpd00020[c0] + (1) cpd00023[c0] + (1) cp...
+    3 | rxn05003 | long-chain acyl-CoA dehydrogenase / very-long-chain specific acyl-CoA dehydrogenase, mitochondrial precursor, electron-transfer-flavoprot... | - | 0.860 | exactMatch | (1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]
+    4 | rxn05004 | aldehyde dehydrogenase (NAD+) variant 4 | 1.2.1.3 | 0.830 | closeMatch | (1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]
+    5 | rxn05005 | aldehyde dehydrogenase (NAD+) variant 5 | 1.1.1.1;1.2.1.5 | 0.800 | closeMatch | (1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]
+    6 | rxn05006 | aldehyde dehydrogenase (NAD+) variant 6 | - | 0.770 | closeMatch | (1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]
+    7 | rxn05007 | aldehyde dehydrogenase (NAD+) variant 7 | 1.2.1.3 | 0.740 | closeMatch | (1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]
+    8 | rxn05008 | aldehyde dehydrogenase (NAD+) variant 8 | - | 0.710 | closeMatch | (1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]
+    9 | rxn05009 | aldehyde dehydrogenase (NAD+) variant 9 | - | 0.680 | closeMatch | (1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]
+   10 | rxn05010 | aldehyde dehydrogenase (NAD+) variant 10 | 1.1.1.1;1.2.1.5 | 0.650 | closeMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+   11 | rxn05011 | aldehyde dehydrogenase (NAD+) variant 11 | 1.2.1.3 | 0.620 | relatedMatch | (1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]
+   12 | rxn05012 | aldehyde dehydrogenase (NAD+) variant 12 | - | 0.590 | relatedMatch | (1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]
+   13 | rxn05013 | aldehyde dehydrogenase (NAD+) variant 13 | - | 0.560 | relatedMatch | (1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]
+   14 | rxn05014 | aldehyde dehydrogenase (NAD+) variant 14 | - | 0.530 | relatedMatch | (1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]
+   15 | rxn05015 | aldehyde dehydrogenase (NAD+) variant 15 | 1.1.1.1;1.2.1.5 | 0.500 | relatedMatch | (1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]
+   16 | rxn05016 | aldehyde dehydrogenase (NAD+) variant 16 | - | 0.470 | relatedMatch | (1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]
+   17 | rxn05017 | aldehyde dehydrogenase (NAD+) variant 17 | - | 0.440 | relatedMatch | (1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]
+   18 | rxn05018 | aldehyde dehydrogenase (NAD+) variant 18 | - | 0.410 | relatedMatch | (1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]
+   19 | rxn05019 | aldehyde dehydrogenase (NAD+) variant 19 | - | 0.380 | relatedMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+   20 | rxn05020 | aldehyde dehydrogenase (NAD+) variant 20 | 1.1.1.1;1.2.1.5 | 0.350 | relatedMatch | (1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]
+
+Council vote table (rxn_id : count out of 5 models that returned a valid result):
+  rxn05001: 5
+  rxn05002: 3
+  rxn05003: 0
+  rxn05004: 1
+  rxn05005: 0
+  rxn05006: 0
+  rxn05007: 0
+  rxn05008: 0
+  rxn05009: 0
+  rxn05010: 0
+  rxn05011: 0
+  rxn05012: 0
+  rxn05013: 0
+  rxn05014: 0
+  rxn05015: 0
+  rxn05016: 0
+  rxn05017: 0
+  rxn05018: 0
+  rxn05019: 0
+  rxn05020: 0
+
+Council per-pick rationales (model -> overall_confidence, picks):
+  - claudeopus48 [overall=high]:
+      rxn05001 [high] -- EC 1.2.1.3 matches the annotation exactly and the equation is the canonical NAD+-dependent aldehyde oxidation.
+      rxn05002 [medium] -- Same EC, longer-chain substrate; a promiscuous aldehyde dehydrogenase would catalyse it.
+  - claudesonnet46 [overall=medium]:
+      rxn05001 [high] -- Direct EC and equation match.
+      rxn05002 [low] -- Plausible chain-length variant.
+      rxn05021 [low] -- Score is low and the EC is absent, but the chemistry is the same oxidation.
+  - gpt55 [overall=medium]:
+      rxn05001 [high] -- Canonical reaction for the annotated EC.
+      rxn05004 [medium] -- Shares the input EC and the equation is chemically reasonable.
+      rxn05021 [low] -- Included on chemistry alone.
+  - gpt54 [overall=high]:
+      rxn05001 [high] -- Unambiguous EC match.
+  - gemini35flash [overall=high]:
+      rxn05001 [high] -- EC 1.2.1.3 and the equation agree.
+      rxn05002 [medium] -- Same EC cluster.
+
+Return JSON exactly matching:
+{
+  "per_reaction_critique": [
+    {"rxn_id": "<one of the candidate ids>",
+      "council_vote_count": <int 0..5>,
+      "critic_verdict": "strongly_consistent|consistent|ambiguous|inconsistent",
+      "critic_reason": "<one sentence>"}
+  ],
+  "missed_picks": [
+    {"rxn_id": "<a top-20 candidate id with 0 votes>",
+      "reason": "<one sentence>"}
+  ],
+  "overall_note": "<one to two sentences>"
+}
+
+Cover EVERY candidate rxn_id offered above in per_reaction_critique. Return ONLY the JSON object.

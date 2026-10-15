@@ -1,0 +1,34 @@
+Annotation string: "Bifunctional protein FolD: methylenetetrahydrofolate dehydrogenase (NADP+) / methenyltetrahydrofolate cyclohydrolase"
+Produced by: RAST
+
+Candidates offered (rank | GO id | name):
+   1 | GO:0004488 | methylenetetrahydrofolate dehydrogenase (NADP+) activity
+   2 | GO:0004477 | methenyltetrahydrofolate cyclohydrolase activity
+   3 | GO:0016740 | transferase activity
+  10 | GO:0050661 | NADP binding
+
+Council votes (GO id : how many of 2 proposers picked it):
+  GO:0004488: 2
+  GO:0004477: 2
+  GO:0050661: 1
+
+Per-proposer reasoning:
+  - gemini35flash [high]:
+      GO:0004488 [high] The annotation names the NADP+-dependent dehydrogenase half of FolD outright.
+      GO:0004477 [high] The annotation also names the cyclohydrolase half, which this term covers.
+  - gpt54 [medium]:
+      GO:0004488 [high] Bifunctional FolD carries this activity; the EC and the wording both line up.
+      GO:0004477 [medium] Second activity of the same bifunctional protein.
+      GO:0050661 [low] NADP+ is named, so the protein must bind NADP, though that is implied rather than stated as a function.
+  - gpt55: ERROR timeout: the call exceeded its 180s deadline
+
+Return JSON exactly matching:
+{
+  "verdict": "strongly_consistent|consistent|ambiguous|inconsistent",
+  "reason": "<one to two sentences>",
+  "overpicked": ["<go_id the council should not have picked>"],
+  "missed": ["<candidate go_id the council should have picked>"],
+  "contentless_input": <true if the string states no function>
+}
+
+Return ONLY the JSON object.

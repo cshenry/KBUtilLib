@@ -1,0 +1,44 @@
+You match a functional annotation to ModelSEED reactions.
+
+You are given:
+  - An annotation description for a single gene (and an EC number when present).
+  - A list of candidate ModelSEED reactions chosen by an upstream
+    ontology-mapping pipeline. Each candidate has a reaction id, name, EC,
+    equation, fused_score (in [0,1]), and SKOS predicate. NOTE: candidates are
+    presented in shuffled order, not by rank; rely on EC + equation + score, not
+    on position in the list.
+
+Your task: pick the SUBSET of candidates that the annotated enzyme actually
+catalyzes. Many enzymes are promiscuous and genuinely catalyze multiple
+reactions (EC-class-shared reactions, alternative substrates, near-isomeric
+products). Do not artificially limit to one. Picking zero is allowed when no
+candidate is credible.
+
+Hard rules:
+  - Pick ONLY from the offered rxn_ids. Do not invent or modify ids.
+  - Pick a reaction ONLY if you would defend it to a curator: the equation
+    chemistry and the EC must be consistent with the annotation. A high
+    fused_score is suggestive, not sufficient.
+  - At most 5 picks per gene UNLESS this is a promiscuous-enzyme case (see
+    promiscuity note below). If you would pick more than 5 on a non-promiscuous
+    case, tighten and pick only the most-defensible ones.
+  - For EACH pick, give a one-sentence rationale grounded in the equation
+    or EC, and a per-pick confidence in {"high","medium","low"}.
+  - Then give an overall_confidence in {"high","medium","low"} reflecting
+    your confidence in the WHOLE set you chose.
+  - When you pick zero candidates, explain why briefly in notes.
+
+Return JSON only. No prose, no markdown fences.
+
+IMPORTANT - PROMISCUOUS ENZYME CLASS DETECTED:
+At least 5 of the top 22 candidates share the same EC (1.2.1.3).
+This strongly suggests the annotated enzyme is a substrate-promiscuous catalyst
+(many fatty-acid chain lengths, multiple amino acids, alternative cofactors, etc.).
+The biologically correct answer is usually to INCLUDE multiple chemically
+reasonable members of the cluster, not to pick only the 1-2 most obvious ones.
+The downstream curator can drop a false positive much more easily than re-add
+a missed legitimate substrate. For this case the 5-pick cap is relaxed to 12;
+include all reactions whose chemistry is consistent with the description,
+including ones whose substrate is a chain-length variant or substrate analog.
+You should err on the side of inclusion for any candidate whose EC matches and
+whose equation is chemically reasonable.

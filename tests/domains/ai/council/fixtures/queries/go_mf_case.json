@@ -1,0 +1,118 @@
+{
+  "task": {
+    "item_id": "folD-1",
+    "evidence": {
+      "text": "Bifunctional protein FolD: methylenetetrahydrofolate dehydrogenase (NADP+) / methenyltetrahydrofolate cyclohydrolase",
+      "source": "RAST"
+    },
+    "menu": [
+      {
+        "id": "GO:0004488",
+        "label": "methylenetetrahydrofolate dehydrogenase (NADP+) activity",
+        "description": "Catalysis of the reaction: 5,10-methylenetetrahydrofolate + NADP+ = 5,10-methenyltetrahydrofolate + NADPH + H+.",
+        "rank": 1,
+        "score": 0.8123456,
+        "metadata": {}
+      },
+      {
+        "id": "GO:0004477",
+        "label": "methenyltetrahydrofolate cyclohydrolase activity",
+        "description": "Catalysis of the reaction: 5,10-methenyltetrahydrofolate + H2O = 10-formyltetrahydrofolate + H+.",
+        "rank": 2,
+        "score": 0.7749,
+        "metadata": {}
+      },
+      {
+        "id": "GO:0016740",
+        "label": "transferase activity",
+        "description": null,
+        "rank": 3,
+        "score": 0.5102,
+        "metadata": {}
+      },
+      {
+        "id": "GO:0050661",
+        "label": "NADP binding",
+        "description": "Binding to nicotinamide-adenine dinucleotide phosphate.",
+        "rank": 10,
+        "score": 0.489,
+        "metadata": {}
+      }
+    ]
+  },
+  "votes": {
+    "GO:0004488": 2,
+    "GO:0004477": 2,
+    "GO:0050661": 1
+  },
+  "ballots": [
+    {
+      "seat": "gemini35flash",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "GO:0004488",
+          "confidence": "high",
+          "why": "The annotation names the NADP+-dependent dehydrogenase half of FolD outright."
+        },
+        {
+          "id": "GO:0004477",
+          "confidence": "high",
+          "why": "The annotation also names the cyclohydrolase half, which this term covers."
+        }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "",
+      "error": null
+    },
+    {
+      "seat": "gpt54",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "GO:0004488",
+          "confidence": "high",
+          "why": "Bifunctional FolD carries this activity; the EC and the wording both line up."
+        },
+        {
+          "id": "GO:0004477",
+          "confidence": "medium",
+          "why": "Second activity of the same bifunctional protein."
+        },
+        {
+          "id": "GO:0050661",
+          "confidence": "low",
+          "why": "NADP+ is named, so the protein must bind NADP, though that is implied rather than stated as a function."
+        }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "NADP binding is inferred, not asserted.",
+      "error": null
+    },
+    {
+      "seat": "gpt55",
+      "status": "error",
+      "picks": [],
+      "overall_confidence": null,
+      "no_functional_content": false,
+      "notes": "",
+      "error": {
+        "kind": "timeout",
+        "message": "the call exceeded its 180s deadline",
+        "retryable": true,
+        "halts_endpoint": false
+      }
+    }
+  ],
+  "critic": {
+    "verdict": "ambiguous",
+    "reason": "Both catalytic terms are clearly supported. GO:0050661 is a binding term inferred from the cofactor named in the dehydrogenase activity, not an independently stated function.",
+    "overpicked": [
+      "GO:0050661"
+    ],
+    "missed": [],
+    "contentless_input": false
+  }
+}

@@ -257,6 +257,17 @@ kbutillib = [
     # lookup on a fresh machine would fail, which is precisely the machine the
     # default exists for.
     "domains/ai/council/*.yaml",
+    # The council's query types. The two builtin YAMLs ARE the prompts
+    # go_mf@1 and reaction_pickup@1 ask -- QueryRegistry.seed_builtins reads
+    # them through importlib.resources -- and generic_schemas.json is the
+    # authority a user-registered query type's answer schemas are compared
+    # against, so a wheel without them can neither seed the builtins nor
+    # validate a user spec. querytype.schema.json and the worked
+    # examples/custom_example.yaml travel for the same reason `kbu council
+    # query register --help` has to be able to point at something real.
+    "domains/ai/council/queries/*.json",
+    "domains/ai/council/queries/builtin/*.yaml",
+    "domains/ai/council/queries/examples/*.yaml",
 ]
 
 [tool.uv]

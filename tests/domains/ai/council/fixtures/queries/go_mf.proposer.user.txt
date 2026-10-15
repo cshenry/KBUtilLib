@@ -1,0 +1,22 @@
+Annotation string: "Bifunctional protein FolD: methylenetetrahydrofolate dehydrogenase (NADP+) / methenyltetrahydrofolate cyclohydrolase"
+Produced by: RAST
+
+Candidate GO molecular-function terms (rank | GO id | retrieval score | name | definition):
+   1 | GO:0004488 | 0.812 | methylenetetrahydrofolate dehydrogenase (NADP+) activity | Catalysis of the reaction: 5,10-methylenetetrahydrofolate + NADP+ = 5,10-methenyltetrahydrofolate + NADPH + H+.
+   2 | GO:0004477 | 0.775 | methenyltetrahydrofolate cyclohydrolase activity | Catalysis of the reaction: 5,10-methenyltetrahydrofolate + H2O = 10-formyltetrahydrofolate + H+.
+   3 | GO:0016740 | 0.510 | transferase activity
+  10 | GO:0050661 | 0.489 | NADP binding | Binding to nicotinamide-adenine dinucleotide phosphate.
+
+Return JSON exactly matching:
+{
+  "picked": [
+    {"go_id": "<one of the candidate ids>",
+      "confidence": "high|medium|low",
+      "why": "<one sentence tying the annotation to the term>"}
+  ],
+  "overall_confidence": "high|medium|low",
+  "no_functional_content": <true if the string states no function, else false>,
+  "notes": "<optional, one sentence>"
+}
+
+Return ONLY the JSON object.

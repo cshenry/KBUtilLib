@@ -1,0 +1,418 @@
+name: reaction_pickup
+version: '1'
+description: Pick the subset of candidate ModelSEED reactions an annotated enzyme actually catalyses, from a closed menu produced by the upstream ontology-mapping pipeline.
+entity_field: description
+evidence_fields:
+- description
+- ec
+- gene_id
+menu_fields:
+- ec
+- equation
+- skos
+id_field: rxn_id
+renderer: reaction_pickup_v4@1
+adapter: reaction_pickup_v4@1
+critic_truncate_chars: 1200
+candidate_templates: {}
+roles:
+  proposer:
+    system: |-
+      You match a functional annotation to ModelSEED reactions.
+
+      You are given:
+        - An annotation description for a single gene (and an EC number when present).
+        - A list of candidate ModelSEED reactions chosen by an upstream
+          ontology-mapping pipeline. Each candidate has a reaction id, name, EC,
+          equation, fused_score (in [0,1]), and SKOS predicate. NOTE: candidates are
+          presented in shuffled order, not by rank; rely on EC + equation + score, not
+          on position in the list.
+
+      Your task: pick the SUBSET of candidates that the annotated enzyme actually
+      catalyzes. Many enzymes are promiscuous and genuinely catalyze multiple
+      reactions (EC-class-shared reactions, alternative substrates, near-isomeric
+      products). Do not artificially limit to one. Picking zero is allowed when no
+      candidate is credible.
+
+      Hard rules:
+        - Pick ONLY from the offered rxn_ids. Do not invent or modify ids.
+        - Pick a reaction ONLY if you would defend it to a curator: the equation
+          chemistry and the EC must be consistent with the annotation. A high
+          fused_score is suggestive, not sufficient.
+        - At most 5 picks per gene UNLESS this is a promiscuous-enzyme case (see
+          promiscuity note below). If you would pick more than 5 on a non-promiscuous
+          case, tighten and pick only the most-defensible ones.
+        - For EACH pick, give a one-sentence rationale grounded in the equation
+          or EC, and a per-pick confidence in {"high","medium","low"}.
+        - Then give an overall_confidence in {"high","medium","low"} reflecting
+          your confidence in the WHOLE set you chose.
+        - When you pick zero candidates, explain why briefly in notes.
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Gene: {gene_id}
+      Description: "{description}"
+      EC: {ec}
+
+      Candidates (presented in upstream rank order; rank reflects fused_score retrieval+rerank confidence).
+      Format: rank | rxn_id | name | EC | fused_score | skos | equation
+      {candidates}
+
+      Return JSON conforming to this schema:
+      {{
+        "picked_reactions": [
+          {{"rxn_id": "<one of the offered ids>",
+            "confidence": "high|medium|low",
+            "rationale": "<one sentence grounded in the equation or EC>"}}
+        ],
+        "overall_confidence": "high|medium|low",
+        "notes": "<optional, used when picked_reactions is empty or to flag ambiguity>"
+      }}
+
+      Pick 0 to {pick_cap} reactions. Return ONLY the JSON object, no prose.
+    fragments:
+      promiscuity_hint: |2-
+
+
+        IMPORTANT - PROMISCUOUS ENZYME CLASS DETECTED:
+        At least {n_same_ec} of the top {top_k} candidates share the same EC ({ec}).
+        This strongly suggests the annotated enzyme is a substrate-promiscuous catalyst
+        (many fatty-acid chain lengths, multiple amino acids, alternative cofactors, etc.).
+        The biologically correct answer is usually to INCLUDE multiple chemically
+        reasonable members of the cluster, not to pick only the 1-2 most obvious ones.
+        The downstream curator can drop a false positive much more easily than re-add
+        a missed legitimate substrate. For this case the 5-pick cap is relaxed to 12;
+        include all reactions whose chemistry is consistent with the description,
+        including ones whose substrate is a chain-length variant or substrate analog.
+        You should err on the side of inclusion for any candidate whose EC matches and
+        whose equation is chemically reasonable.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: reaction pickup proposer answer
+      type: object
+      additionalProperties: false
+      required:
+      - picked_reactions
+      - overall_confidence
+      properties:
+        picked_reactions:
+          type: array
+          maxItems: 15
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - rxn_id
+            - confidence
+            - rationale
+            properties:
+              rxn_id:
+                type: string
+                minLength: 1
+                maxLength: 64
+              confidence:
+                enum: &id001
+                - high
+                - medium
+                - low
+              rationale:
+                type: string
+                minLength: 1
+                maxLength: 600
+        overall_confidence:
+          enum: *id001
+        notes:
+          type: string
+          maxLength: 1000
+  critic:
+    system: |-
+      You are a scientific critic auditing a 5-model LLM council's reaction picks for one gene.
+
+      You are given:
+        - The gene description and its EC number.
+        - The top-20 ranked candidate ModelSEED reactions (each with rxn_id, name, EC,
+          fused_score, SKOS predicate, and equation).
+        - A vote table: for every candidate rxn_id, how many of the 5 council models
+          picked it (0..5).
+        - Each council model's per-pick rationale and overall confidence.
+
+      Your job is NOT to pick reactions. Your job is to AUDIT the council:
+
+        1. For EVERY candidate rxn_id present in the vote table, judge whether the
+           council's vote count is justified by the equation chemistry and the EC,
+           using one of these four verdicts:
+             - "strongly_consistent": vote count is clearly the right call (e.g. 5/5
+               on a perfect EC + equation match, or 0/5 on an obvious wrong match).
+             - "consistent": vote count is defensible; minor reservations.
+             - "ambiguous": vote count could plausibly have been one higher or one
+               lower; the evidence is genuinely mixed.
+             - "inconsistent": vote count looks wrong; either too many or too few
+               models picked this. Explain in critic_reason.
+           Give a critic_reason in one sentence, grounded in the equation or EC.
+
+        2. Identify any candidates from the top-20 that NO council model picked but
+           that you believe SHOULD have been picked (a missed pick). For each, give
+           the rxn_id and a one-sentence reason grounded in the equation or EC.
+           If none, return an empty list.
+
+        3. Give an overall_note (one to two sentences) summarising whether the
+           council's set looks complete, too generous, or too conservative for this
+           gene.
+
+      Be specific. Quote substrate / product names from equations when relevant. Do
+      not hedge. Do not propose your own subset; you only judge.
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Gene: {gene_id}
+      Description: "{description}"
+      EC: {ec}
+
+      Top-{n_cands} ranked candidates (rank | rxn_id | name | EC | fused_score | skos | equation):
+      {candidates_block}
+
+      Council vote table (rxn_id : count out of {n_valid} models that returned a valid result):
+      {vote_block}
+
+      Council per-pick rationales (model -> overall_confidence, picks):
+      {rationale_block}
+
+      Return JSON exactly matching:
+      {{
+        "per_reaction_critique": [
+          {{"rxn_id": "<one of the candidate ids>",
+            "council_vote_count": <int 0..5>,
+            "critic_verdict": "strongly_consistent|consistent|ambiguous|inconsistent",
+            "critic_reason": "<one sentence>"}}
+        ],
+        "missed_picks": [
+          {{"rxn_id": "<a top-20 candidate id with 0 votes>",
+            "reason": "<one sentence>"}}
+        ],
+        "overall_note": "<one to two sentences>"
+      }}
+
+      Cover EVERY candidate rxn_id offered above in per_reaction_critique. Return ONLY the JSON object.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: reaction pickup critic answer
+      type: object
+      additionalProperties: false
+      required:
+      - per_reaction_critique
+      - missed_picks
+      - overall_note
+      properties:
+        per_reaction_critique:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - rxn_id
+            - council_vote_count
+            - critic_verdict
+            - critic_reason
+            properties:
+              rxn_id:
+                type: string
+                minLength: 1
+                maxLength: 64
+              council_vote_count:
+                type: integer
+                minimum: 0
+              critic_verdict:
+                enum:
+                - strongly_consistent
+                - consistent
+                - ambiguous
+                - inconsistent
+              critic_reason:
+                type: string
+                maxLength: 600
+        missed_picks:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - rxn_id
+            - reason
+            properties:
+              rxn_id:
+                type: string
+                minLength: 1
+                maxLength: 64
+              reason:
+                type: string
+                maxLength: 600
+        overall_note:
+          type: string
+          maxLength: 800
+  meta:
+    system: |-
+      You are the META-REVIEWER for an ontomap reaction-pickup task. A 5-model LLM council has picked subsets of candidate ModelSEED reactions for one gene; a separate critic has audited every candidate.
+
+      You are given:
+        - The gene description and EC.
+        - The top-20 ranked candidate ModelSEED reactions.
+        - A council vote table: how many of the council's 5 models picked each rxn_id.
+        - Each council model's per-pick rationale and overall confidence.
+        - The critic's per-reaction verdict (strongly_consistent | consistent | ambiguous | inconsistent) and reasoning, plus any candidates the critic believes the council missed.
+
+      Your job: ISSUE THE FINAL PICKED SET for this gene.
+
+      You are NOT bound by majority vote. You may:
+        - Accept the unanimous picks (5/5).
+        - Adjudicate partial picks (3/5 or 2/5) by weighing the critic's verdict, the strength of the rationales, and the equation/EC fit.
+        - Include a reaction the council mostly rejected, if the critic exposes a flaw in their reasoning.
+        - Add a "missed pick" the critic flagged, if you concur.
+        - Exclude reactions the council picked, if the critic's "inconsistent" verdict is convincing.
+
+      Hard rules:
+        - Pick ONLY from the candidate rxn_ids shown. Do not invent ids.
+        - Keep the final set defensible: a biologist reviews these manually. False negatives are cheaper than false positives.
+        - At most 5 final picks (the per-gene cap from the upstream schema).
+        - For every partial-agreement case (2/5, 3/5, or 4/5 votes) you MUST appear in partial_agreement_resolutions with an explicit include/exclude decision and a one-sentence reason.
+        - For each critic missed_pick you MUST appear in partial_agreement_resolutions with include/exclude and a reason.
+
+      Confidence rubric (overall):
+        - high: council unanimous or near-unanimous and critic confirmed; equation + EC line up cleanly.
+        - medium: best-supported set but at least one reasonable alternative was excluded.
+        - low: genuinely ambiguous; you took the least-bad set.
+
+      Return JSON only. No prose, no markdown fences.
+    user: |-
+      Gene: {gene_id}
+      Description: "{description}"
+      EC: {ec}
+
+      Top-{n_cands} ranked candidates (rank | rxn_id | name | EC | fused_score | skos | equation):
+      {candidates_block}
+
+      Council vote table (rxn_id : count out of {n_valid} models that returned a valid result):
+      {vote_block}
+
+      Council per-pick rationales (model -> overall_confidence, picks):
+      {rationale_block}
+
+      Critic's structured audit:
+      {critic_block}
+
+      Return JSON exactly matching:
+      {{
+        "final_picked_rxn_ids": ["<rxn_id>", ...],
+        "final_picked_reasons": ["<one-sentence reason per pick, same order>", ...],
+        "final_confidence": "high|medium|low",
+        "meta_reasoning": "<paragraph explaining how partial-agreement and missed_picks cases were adjudicated>",
+        "partial_agreement_resolutions": [
+          {{"rxn_id": "<id>",
+            "council_votes": <int>,
+            "critic_verdict": "<one of the critic's verdicts, or 'missed_pick'>",
+            "meta_decision": "include|exclude",
+            "why": "<one sentence>"}}
+        ]
+      }}
+
+      final_picked_rxn_ids and final_picked_reasons MUST be the same length, max 5. Return ONLY the JSON object.
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: reaction pickup meta answer
+      type: object
+      additionalProperties: false
+      required:
+      - final_picked_rxn_ids
+      - final_picked_reasons
+      - final_confidence
+      - meta_reasoning
+      properties:
+        final_picked_rxn_ids:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        final_picked_reasons:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            maxLength: 600
+        final_confidence:
+          enum: *id001
+        meta_reasoning:
+          type: string
+          maxLength: 3000
+        partial_agreement_resolutions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - rxn_id
+            - council_votes
+            - critic_verdict
+            - meta_decision
+            - why
+            properties:
+              rxn_id:
+                type: string
+                minLength: 1
+                maxLength: 64
+              council_votes:
+                type: integer
+                minimum: 0
+              critic_verdict:
+                type: string
+                maxLength: 60
+              meta_decision:
+                enum:
+                - include
+                - exclude
+              why:
+                type: string
+                maxLength: 600
+attribution: |
+  Ported VERBATIM from Jose Faria's CONCORDIA ontomap reaction-pickup council V4.
+
+  source: /scratch/jplfaria/CONCORDIA-live/concord/pickup_labeler_v4.py
+  sha256: a6ecbe25217ae60fd01bd0227c70578797914999a79b5f4393328d01b364f36a
+  lines:
+    29-95   SYSTEM_PROMPT_BASE, PROMISCUITY_HINT, USER_TEMPLATE -- the proposer
+            prompts below, byte for byte
+    98-130  _is_promiscuous() (EC threshold 4), _shuffled_candidates() (V4
+            preserves upstream rank order) and _render_candidates()
+    133-158 _call_one() -- the proposer prompt assembly and the 5 -> 12 pick cap
+
+  source: /scratch/jplfaria/CONCORDIA-live/concord/pickup_critic.py
+  sha256: 6d5d84440f5a4b9391bf7bf56378d4bae6ed4610497b69a9b8006058007ce6e4
+  lines:
+    47-113  SYSTEM_PROMPT, USER_TEMPLATE -- the critic prompts below
+    116-169 _render_candidates_block() (top 20 by rank, FULL rendering with
+            equations, EC and scores), _render_vote_block(), _render_rationale_block()
+    249-265 council_critique() -- the critic prompt assembly
+
+  source: /scratch/jplfaria/CONCORDIA-live/concord/pickup_meta.py
+  sha256: f35ec296e045719fd600355ccfa94df004f4c6c61692cec2c2456cba972c2d97
+  lines:
+    26-89   SYSTEM_PROMPT, USER_TEMPLATE -- the meta prompts below
+    92-174  _render_candidates_block(), _render_vote_block(),
+            _render_rationale_block(), _render_critic_block()
+    267-280 meta_reviewer() -- the meta prompt assembly
+
+  source: /scratch/jplfaria/CONCORDIA-live/concord/pickup_schema.py
+  sha256: 4e18d27d908dcc98f09522b210d013b7768561f88e42d6aca68aeb611762cfe4
+  lines:
+    29-81   Candidate, PickupInput, PickedReaction, PickupOutput -- the field
+            names, enums and length caps the answer schemas below encode.
+            PickupOutput caps picked_reactions at 15; the 5-pick cap (12 when
+            four or more candidates share the input's EC) is a PROMPT
+            instruction only, exactly as it is in the reference.
+
+  source: /scratch/jplfaria/CONCORDIA-live/scripts/run_concordia_pickup_council_v4.py
+  sha256: 84101d14655502fcd991c5add772f615e0e8981d8531a25558e3785188e06951
+  lines:
+    93-151  council_pick_v2() -- the vote table (every candidate id, zero
+            included), n_council_valid, and the council_picks payload shape the
+            critic and meta rationale blocks are rendered from

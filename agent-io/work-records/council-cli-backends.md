@@ -11,7 +11,7 @@ maestro/developer/background-reference-only-agent--council-cli-backends
 
 ## commit_shas
 - cc97f3d — feat(council): headless Claude and Codex CLI backends
-- (this record's own commit, added after it)
+- 1eac30d — docs(work-record): record the council CLI backend milestone
 
 ## CLI versions found on this machine (success criterion 3)
 

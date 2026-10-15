@@ -103,8 +103,21 @@ def config_dict(**overrides) -> dict:
 
 
 def run(coro):
-    """Run one coroutine to completion (no pytest-asyncio dependency)."""
-    return asyncio.run(coro)
+    """Run one coroutine to completion (no pytest-asyncio dependency).
+
+    Deliberately NOT ``asyncio.run``: that sets the thread's current event
+    loop to ``None`` on the way out, after which the deprecated
+    ``asyncio.get_event_loop()`` raises instead of creating a loop. Other
+    modules in this suite still call it (tests/interfaces/test_mcp_server.py
+    does), and since ``tests/domains`` collects first, ``asyncio.run`` here
+    broke three of their tests from a distance. Owning the loop locally keeps
+    the process-global asyncio state exactly as it was found.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def request_for(seat_spec: SeatSpec, **kwargs) -> CompletionRequest:

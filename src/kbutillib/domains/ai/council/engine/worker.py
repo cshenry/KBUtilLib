@@ -828,12 +828,9 @@ class CouncilWorker:
         call = dict(call)
         token = call.get("claim_token")
         job = self.store.get_job(call["job_id"])
-        query = self._query_for(job)
         roster = self._roster_for(job)
-        seat = self._seat_for(roster, str(call["role"]), str(call["seat_name"]))
-        item = self._item_for(call["job_id"], call["item_id"])
-        task = self._task_for(item)
         role = str(call["role"])
+        seat = self._seat_for(roster, role, str(call["seat_name"]))
 
         # 1. Is this call still OUR call?  A route fingerprint that no longer
         #    matches means the config changed under a queued call: running it
@@ -859,6 +856,14 @@ class CouncilWorker:
             raise ValueError(
                 f"this worker has no backend for endpoint {call['endpoint']!r}"
             )
+
+        # Only now is the query type needed.  A worker whose route no longer
+        # matches parks the call above without it, which is what lets a
+        # misconfigured machine hand work back rather than fail on a query
+        # type it was never going to render.
+        query = self._query_for(job)
+        item = self._item_for(call["job_id"], call["item_id"])
+        task = self._task_for(item)
 
         # 2. Has anybody, anywhere, already answered this exact question?
         hash_key = str(call.get("prompt_hash") or "")

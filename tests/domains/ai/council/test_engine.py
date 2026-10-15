@@ -18,6 +18,7 @@ GPU.  Every seat is a ``fake`` endpoint and every answer comes from a script.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pytest
@@ -30,10 +31,15 @@ from kbutillib.domains.ai.council.engine.decide import (
     decide,
 )
 from kbutillib.domains.ai.council.types import (
+    AuthError,
     BillingGuardRefused,
     CouncilError,
+    CouncilTask,
     CouncilVerdict,
     InvalidOutput,
+    MenuEntry,
+    ModelUnavailable,
+    QuotaExhausted,
     Roster,
     RosterError,
     SeatSpec,
@@ -41,6 +47,7 @@ from kbutillib.domains.ai.council.types import (
 )
 
 from .engine_support import (
+    InFlight,
     InstrumentedBackend,
     critic_answer,
     endpoint_config,
@@ -1164,3 +1171,503 @@ class TestBackoff:
             store, None, {}, "alice", "w-1", retry_backoff_s=(3.0,), retry_jitter=0.0
         )
         assert worker._backoff(1) == 3.0
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def blockers_of(store: Any, job_id: str) -> list:
+    return store.job_status(job_id)["blockers"]
+
+
+def blocker_kinds(store: Any, job_id: str) -> set:
+    return {b["kind"] for b in blockers_of(store, job_id)}
+
+
+class TestHaltsPauseRatherThanFail:
+    """A shut endpoint pauses a job; it does not fail its items."""
+
+    @pytest.mark.parametrize(
+        "failure, kind",
+        [
+            (QuotaExhausted("over quota for today"), "quota_exhausted"),
+            (AuthError("the token expired"), "auth"),
+            (BillingGuardRefused("wrong billing mode"), "billing_guard"),
+        ],
+    )
+    def test_a_halting_failure_stops_the_endpoint_and_keeps_the_call(
+        self, store: Any, failure: Any, kind: str
+    ) -> None:
+        script = {
+            ("proposer", "proposer_1"): [failure, proposer_answer("A:1")],
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+
+        assert store.get_endpoint_state("alice", "fake1")["halt_kind"] == kind
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "pending", "the call was failed instead of paused"
+        assert row["error"]["kind"] == kind
+        assert row["attempt_count"] == 0, "a halt charged the call an attempt"
+        assert row["claim_token"] is None
+
+        # The item is NOT in error: nothing is wrong with it.
+        assert item_of(store, job_id)["status"] == "pending"
+        assert "halted" in blocker_kinds(store, job_id)
+        assert any(b["kind"] == "halted" for b in summary["blockers"])
+
+        # Clearing the halt and running again finishes the job, with no
+        # re-submission of anything.
+        store.reset_halt("alice", "fake1")
+        run(worker.work(job_id=job_id, until_idle=True))
+        assert store.get_job(job_id)["status"] == "done"
+        assert verdict_of(store, job_id).selected_ids == ["A:1"]
+        assert blockers_of(store, job_id) == []
+
+    def test_a_halted_endpoint_is_not_claimed_from(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        store.set_halt("alice", "fake1", "quota_exhausted", "manually halted")
+
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+        assert backend.calls == []
+        assert summary["claimed"] == 0
+        assert [b["kind"] for b in summary["blockers"]] == ["halted"]
+
+
+class TestBudgets:
+    """The soft token budget, and what happens when it cannot be measured."""
+
+    def test_passing_the_budget_halts_the_endpoint_and_reports_the_overshoot(
+        self, store: Any
+    ) -> None:
+        backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")),
+            usage={"prompt_tokens": 4, "completion_tokens": 4},
+        )
+        worker = worker_for(
+            store,
+            {"fake1": backend},
+            config=endpoint_config(fake1={"max_total_tokens": 5}),
+        )
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        state = store.get_endpoint_state("alice", "fake1")
+        assert state["halt_kind"] == "budget_exhausted"
+        assert "overshoot" in state["halt_message"]
+        # One call of 8 tokens against a 5-token budget: the threshold is
+        # soft, so the overshoot is real and is reported.
+        assert state["epoch_tokens"] >= 8
+        assert f"overshoot {state['epoch_tokens'] - 5}" in state["halt_message"]
+        assert "halted" in blocker_kinds(store, job_id)
+        assert item_of(store, job_id)["status"] == "pending"
+
+    def test_reset_budget_resumes_the_job_and_keeps_the_lifetime_total(
+        self, store: Any
+    ) -> None:
+        backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")),
+            usage={"prompt_tokens": 4, "completion_tokens": 4},
+        )
+        worker = worker_for(
+            store,
+            {"fake1": backend},
+            config=endpoint_config(fake1={"max_total_tokens": 5}),
+        )
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+        spent = store.get_endpoint_state("alice", "fake1")["epoch_tokens"]
+        assert spent
+
+        state = store.reset_budget("alice", "fake1")
+        assert state["halt_kind"] is None
+        assert state["epoch_tokens"] == 0
+        assert state["lifetime_tokens"] >= spent
+        assert state["budget_epoch"] == 1
+
+        run(worker.work(job_id=job_id, until_idle=True))
+        # The new epoch is spent again at once, which is the budget working.
+        assert store.get_endpoint_state("alice", "fake1")["lifetime_tokens"] > spent
+        assert store.get_items(job_id)[0]["status"] in ("ok", "pending")
+
+    def test_an_unmeasurable_budget_halts_the_endpoint(self, store: Any) -> None:
+        backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")), drop_usage=True
+        )
+        worker = worker_for(
+            store,
+            {"fake1": backend},
+            config=endpoint_config(fake1={"max_total_tokens": 1000}),
+        )
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        state = store.get_endpoint_state("alice", "fake1")
+        assert state["halt_kind"] == "budget_usage_unknown"
+        assert "no usage" in state["halt_message"]
+        # The answer that arrived is still stored -- it was paid for.
+        answered = [r for r in calls_of(store, job_id) if r["status"] == "ok"]
+        assert answered
+        assert answered[0]["fresh_usage"] is None
+
+    def test_an_unbudgeted_endpoint_is_never_halted_by_tokens(self, store: Any) -> None:
+        backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")),
+            usage={"prompt_tokens": 10_000, "completion_tokens": 10_000},
+        )
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+        assert store.get_endpoint_state("alice", "fake1")["halt_kind"] is None
+        assert store.get_job(job_id)["status"] == "done"
+        assert store.get_endpoint_state("alice", "fake1")["lifetime_tokens"] == 80_000
+
+
+class TestConcurrency:
+    """Two endpoints, one account, one limit."""
+
+    def test_endpoints_sharing_an_account_share_one_limit(self, store: Any) -> None:
+        monitor = InFlight()
+        first = InstrumentedBackend(
+            scripted(agreeing_script("A:1")), delay=0.01, monitor=monitor
+        )
+        second = InstrumentedBackend(
+            scripted(agreeing_script("A:1")), delay=0.01, monitor=monitor
+        )
+        config = endpoint_config(
+            fake1={"account": "one-subscription", "max_concurrency": 3},
+            fake2={"account": "one-subscription", "max_concurrency": 2},
+        )
+        worker = worker_for(store, {"fake1": first, "fake2": second}, config=config)
+        roster = Roster(
+            proposers=[
+                fake_seat("proposer_1", "p1", endpoint="fake1"),
+                fake_seat("proposer_2", "p2", endpoint="fake1"),
+                fake_seat("proposer_3", "p3", endpoint="fake2"),
+                fake_seat("proposer_4", "p4", endpoint="fake2"),
+            ],
+            critic=fake_seat("critic", "critic-model", endpoint="fake1"),
+            meta=fake_seat("meta", "meta-model", endpoint="fake2"),
+        )
+        # Distinct evidence per item, so nothing is reused and every seat is
+        # really asked: 3 items x 4 proposers.
+        tasks = [make_task(f"item-{n}", text=f"protein {n}") for n in (1, 2, 3)]
+        job_id = worker.submit(make_query(), tasks, roster)
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        assert store.get_job(job_id)["status"] == "done"
+        assert monitor.total == 15  # 12 proposer calls plus 3 critics
+        assert monitor.peak <= 2, (
+            "the shared account ran "
+            f"{monitor.peak} calls at once against a limit of 2"
+        )
+        assert monitor.current == 0
+
+    def test_the_shared_limit_is_the_smallest_declared(self, store: Any) -> None:
+        config = endpoint_config(
+            fake1={"account": "acct", "max_concurrency": 7},
+            fake2={"account": "acct", "max_concurrency": 2},
+            fake3={"max_concurrency": 5},
+        )
+        worker = worker_for(
+            store,
+            {"fake1": fake({}), "fake2": fake({}), "fake3": fake({})},
+            config=config,
+        )
+        shared = worker._limit_by_endpoint["fake1"]
+        assert shared is worker._limit_by_endpoint["fake2"]
+        assert shared.capacity == 2
+        assert worker._limit_by_endpoint["fake3"].capacity == 5
+        # Free slots are the sum over the GROUPS, not over the endpoints.
+        assert worker._free_slots() == 7
+
+
+class TestBlockersTheWorkerWrites:
+    """The two blockers that only exist because the worker records them.
+
+    ``job_status`` reads both off ``calls.error`` on a PENDING row.  Nothing
+    in the store contract can write that column, so these two tests are the
+    proof that the worker does -- no test here touches the column.
+    """
+
+    def test_model_unavailable_leaves_the_call_pending_and_waiting(
+        self, store: Any
+    ) -> None:
+        script = {
+            ("proposer", "proposer_1"): ModelUnavailable("vllm has not loaded p1 yet"),
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        worker = worker_for(store, {"fake1": fake(script)})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "pending"
+        assert row["error"]["kind"] == "model_unavailable"
+        assert row["attempt_count"] == 0, "waiting for a model is not an attempt"
+        assert row["not_before"] is not None
+        assert row["not_before"] > utcnow()
+
+        blockers = blockers_of(store, job_id)
+        waiting = [b for b in blockers if b["kind"] == "waiting_for_model"]
+        assert waiting, f"job_status reported {blockers}"
+        assert waiting[0]["endpoint"] == "fake1"
+        assert any(b["kind"] == "waiting_for_model" for b in summary["blockers"])
+        assert item_of(store, job_id)["status"] == "pending"
+        assert store.get_job(job_id)["status"] == "running"
+
+    def test_a_route_that_no_longer_matches_parks_the_call(self, store: Any) -> None:
+        """A second worker whose config routes the seat elsewhere."""
+        submitter = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = submitter.submit(make_query(), [make_task()], make_roster(3))
+
+        moved = worker_for(
+            store,
+            {"fake1": fake(agreeing_script("A:1"))},
+            worker_id="w-2",
+            config=endpoint_config(fake1={"account": "somebody-elses-account"}),
+        )
+        summary = run(moved.work(job_id=job_id, until_idle=True))
+
+        rows = calls_of(store, job_id)
+        assert all(row["status"] == "pending" for row in rows)
+        assert all(row["error"]["kind"] == "configuration_mismatch" for row in rows)
+        assert all(row["attempt_count"] == 0 for row in rows)
+        assert all(row["not_before"] > utcnow() + timedelta(minutes=4) for row in rows)
+
+        blockers = blockers_of(store, job_id)
+        mismatched = [b for b in blockers if b["kind"] == "configuration_mismatch"]
+        assert mismatched, f"job_status reported {blockers}"
+        assert mismatched[0]["endpoint"] == "fake1"
+        assert any(
+            b["kind"] == "configuration_mismatch" for b in summary["blockers"]
+        )
+        # Nothing was asked of any model, and no item failed.
+        assert item_of(store, job_id)["status"] == "pending"
+
+    def test_the_submitting_worker_still_matches_its_own_routes(
+        self, store: Any
+    ) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+        assert blockers_of(store, job_id) == []
+        assert verdict_of(store, job_id).status == "ok"
+
+
+class TestASecondWorkerReadsTheQueryTypeBack:
+    """A worker that did not submit the job renders from the STORE's spec."""
+
+    def test_a_second_worker_finishes_a_job_it_did_not_submit(
+        self, store: Any
+    ) -> None:
+        from kbutillib.domains.ai.council.queries import QueryRegistry
+
+        query = make_query()
+        QueryRegistry(store).register(query, created_by="test")
+        submitter = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = submitter.submit(query, [make_task()], make_roster(3))
+
+        # A brand-new worker, with no memory of the query type at all.
+        second = worker_for(
+            store, {"fake1": fake(agreeing_script("A:1"))}, worker_id="w-2"
+        )
+        assert second._queries == {}
+        run(second.work(job_id=job_id, until_idle=True))
+
+        assert verdict_of(store, job_id).selected_ids == ["A:1"]
+        assert verdict_of(store, job_id).query == {"name": "engine_test", "version": "1"}
+
+
+# ---------------------------------------------------------------------------
+# The real builtin query type, end to end
+# ---------------------------------------------------------------------------
+
+#: A plausible GO menu, deliberately NOT in id order: the verdict must come
+#: back in MENU order, and an id-sorted menu would hide a bug that sorted.
+GO_MENU = [
+    MenuEntry(
+        id="GO:0004565",
+        label="beta-galactosidase activity",
+        description="Catalysis of the hydrolysis of terminal non-reducing "
+        "beta-D-galactose residues in beta-D-galactosides.",
+        rank=1,
+        score=0.91,
+    ),
+    MenuEntry(
+        id="GO:0016787",
+        label="hydrolase activity",
+        description="Catalysis of the hydrolysis of various bonds.",
+        rank=2,
+        score=0.62,
+    ),
+    MenuEntry(
+        id="GO:0030246",
+        label="carbohydrate binding",
+        description="Binding to a carbohydrate.",
+        rank=3,
+        score=0.41,
+    ),
+]
+
+
+def go_proposer_answer(*go_ids: str) -> Dict[str, Any]:
+    """A reply in the BUILTIN's own vocabulary: ``go_id``, not ``id``."""
+    return {
+        "picked": [
+            {
+                "go_id": go_id,
+                "confidence": "high",
+                "why": "the annotation names the activity",
+            }
+            for go_id in go_ids
+        ],
+        "overall_confidence": "high",
+        "no_functional_content": False,
+        "notes": "",
+    }
+
+
+class TestTheBuiltinGoCouncil:
+    """One item through the SHIPPED go_mf query type, read back from a store.
+
+    No in-test query type, no monkeypatch, no injected renderer: the spec is
+    seeded with ``QueryRegistry.seed_builtins()``, read back with
+    ``get("go_mf")``, and what the backend receives is asserted to be the
+    builtin's own prompt text.
+    """
+
+    def test_a_go_item_is_decided_with_the_builtin_prompts(self, store: Any) -> None:
+        from kbutillib.domains.ai.council.queries import QueryRegistry
+
+        registry = QueryRegistry(store)
+        registry.seed_builtins()
+        go = registry.get("go_mf")
+        assert go.name == "go_mf"
+        assert go.renderer == "go_mf_v3@1"
+        assert go.id_field == "go_id"
+        assert go.entity_field == "text"
+
+        # The council agrees on the specific activity; the critic approves.
+        script = {
+            "proposer": go_proposer_answer("GO:0004565"),
+            "critic": critic_answer(verdict="strongly_consistent"),
+            "meta": {
+                "final_go_ids": ["GO:0004565"],
+                "final_confidence": "high",
+                "no_functional_content": False,
+                "reasoning": "not reached",
+            },
+        }
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        task = CouncilTask(
+            item_id="prot-1",
+            evidence={
+                "text": "beta-galactosidase (EC 3.2.1.23)",
+                "source": "prokka",
+            },
+            menu=GO_MENU,
+        )
+        job_id = worker.submit(go, [task], make_roster(3), label="go batch")
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        # -- the verdict ---------------------------------------------------
+        verdict = verdict_of(store, job_id, item_id="prot-1")
+        assert verdict.status == "ok"
+        assert verdict.selected_ids == ["GO:0004565"]
+        assert verdict.votes == {"GO:0004565": 3}
+        assert verdict.decided_by == "unanimous"
+        assert verdict.meta_skipped is True
+        assert verdict.query == {"name": "go_mf", "version": "1"}
+        assert [row["role"] for row in calls_of(store, job_id)] == [
+            "proposer",
+            "proposer",
+            "proposer",
+            "critic",
+        ]
+
+        # -- the prompts the models actually received ----------------------
+        proposer_request = next(req for req in backend.calls if req.role == "proposer")
+        assert proposer_request.system == go.roles["proposer"].system
+        assert proposer_request.system.startswith(
+            "You assign Gene Ontology molecular-function terms"
+        )
+        assert 'Annotation string: "beta-galactosidase (EC 3.2.1.23)"' in (
+            proposer_request.user
+        )
+        assert "Produced by: prokka" in proposer_request.user
+        # The builtin renderer's candidate block: rank | id | score | name.
+        assert (
+            "   1 | GO:0004565 | 0.910 | beta-galactosidase activity"
+            in proposer_request.user
+        )
+        assert proposer_request.json_schema == go.answer_schema("proposer")
+        assert "go_id" in str(proposer_request.json_schema)
+
+        critic_request = next(req for req in backend.calls if req.role == "critic")
+        assert critic_request.system == go.roles["critic"].system
+        assert "GO:0004565: 3" in critic_request.user
+        # The critic's menu block drops the score and the definition.
+        assert "   1 | GO:0004565 | beta-galactosidase activity" in critic_request.user
+
+        # -- the domain vocabulary never reached the engine ----------------
+        # The stored reply is the ORIGINAL, in the builtin's own field names;
+        # the ballot is generic.
+        answered = next(r for r in calls_of(store, job_id) if r["role"] == "proposer")
+        assert answered["reply_parsed"]["picked"][0]["go_id"] == "GO:0004565"
+        assert [pick.id for pick in verdict.ballots[0].picks] == ["GO:0004565"]
+
+    def test_the_builtin_meta_round_reads_final_go_ids(self, store: Any) -> None:
+        """The meta path, where the adapter's rename actually matters."""
+        from kbutillib.domains.ai.council.queries import QueryRegistry
+
+        registry = QueryRegistry(store)
+        registry.seed_builtins()
+        go = registry.get("go_mf")
+
+        script = {
+            ("proposer", "proposer_1"): go_proposer_answer(
+                "GO:0004565", "GO:0030246"
+            ),
+            ("proposer", "proposer_2"): go_proposer_answer("GO:0004565"),
+            ("proposer", "proposer_3"): go_proposer_answer("GO:0004565"),
+            "critic": critic_answer(verdict="consistent"),
+            "meta": {
+                # Out of menu order, and naming an id that is not on the menu.
+                "final_go_ids": ["GO:0030246", "GO:0004565", "GO:9999999"],
+                "final_confidence": "medium",
+                "no_functional_content": False,
+                "reasoning": "both functions are supported",
+            },
+        }
+        worker = worker_for(store, {"fake1": fake(script)})
+        task = CouncilTask(
+            item_id="prot-2",
+            evidence={"text": "beta-galactosidase, lectin domain", "source": "prokka"},
+            menu=GO_MENU,
+        )
+        job_id = worker.submit(go, [task], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id, item_id="prot-2")
+        assert verdict.decided_by == "meta"
+        # MENU order, not the order meta named them, and the off-menu id gone.
+        assert verdict.selected_ids == ["GO:0004565", "GO:0030246"]
+        assert verdict.final_confidence == "medium"
+        off_menu = [e for e in verdict.errors if e["kind"] == "off_menu"]
+        assert [(e["stage"], e["message"].split("'")[1]) for e in off_menu] == [
+            ("meta", "GO:9999999")
+        ]

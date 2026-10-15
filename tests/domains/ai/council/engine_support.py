@@ -127,8 +127,19 @@ def make_roster(n_proposers: int = 3, **kwargs: Any) -> Roster:
 _PROPOSER_USER = (
     "Annotation: $text (from $source)\nCandidates:\n$candidates_short\nPick ids."
 )
-_CRITIC_USER = "Votes:\n$votes\nBallots:\n$ballots\nAudit the table."
-_META_USER = "Votes:\n$votes\nBallots:\n$ballots\nCritic: $critic_json\nDecide."
+# The critic and meta prompts name the annotation as well as the vote table,
+# exactly as the builtin GO prompts do.  It matters for more than fidelity: a
+# critic prompt built only from votes and ballots is BYTE-IDENTICAL for two
+# different items that happened to vote the same way, so the engine would
+# (correctly) reuse one critic answer for both and a test counting calls would
+# be measuring the wrong thing.
+_CRITIC_USER = (
+    "Annotation: $text\nVotes:\n$votes\nBallots:\n$ballots\nAudit the table."
+)
+_META_USER = (
+    "Annotation: $text\nVotes:\n$votes\nBallots:\n$ballots\n"
+    "Critic: $critic_json\nDecide."
+)
 
 
 def make_query(name: str = "engine_test", version: str = "1") -> QueryType:

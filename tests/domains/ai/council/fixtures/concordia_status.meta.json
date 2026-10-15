@@ -1,0 +1,13 @@
+{
+  "bytes": 2851,
+  "captured_at": "2026-10-15T20:57:07Z",
+  "captured_by": "maestro developer task council-service-client",
+  "captured_from": "http://poplar.cels.anl.gov:8300/concordia_go_council",
+  "concordia_commit": "8e8b05f",
+  "http_status": 200,
+  "method": "GET",
+  "note": "GET /concordia_go_council -- the council's availability, rosters/profiles and credentials-PRESENT flags. Checked for secrets before saving: the payload carries only booleans (endpoints[*].has_key, auth.key_configured) and non-secret base URLs, so NOTHING was redacted and the capture is byte-for-byte the response body.",
+  "redacted": false,
+  "service": "mfgopredict-service 0.1.0 (FastAPI), poplar.cels.anl.gov:8300",
+  "sha256": "2d50cd75f55063704f879b13995b8daa1d262c830b744d06cbda90f4a639e3a7"
+}

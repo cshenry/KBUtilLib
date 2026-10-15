@@ -8,7 +8,7 @@ maestro/developer/background-reference-only-agent--council-http-backends
 
 ## commit_shas
 - 7f07fbe — feat(council): ARGO and OpenAI-compatible HTTP backends
-- (this record) — docs(work-record): record the council HTTP backend milestone
+- 5141c0a — docs(work-record): record the council HTTP backend milestone
 
 ## summary
 Implemented the council's two HTTP backends on top of a shared helper module,
@@ -38,9 +38,9 @@ empty). No test makes a network call beyond a refused connection to a closed
 `127.0.0.1` port, spends a token, needs a CLI login or needs a GPU.
 
 ## files_touched
-- `src/kbutillib/domains/ai/council/backends/http_common.py` (new, 1–577:
+- `src/kbutillib/domains/ai/council/backends/http_common.py` (new, 606 lines:
   `HttpBackend` + helpers)
-- `src/kbutillib/domains/ai/council/backends/http.py` (new, 1–340:
+- `src/kbutillib/domains/ai/council/backends/http.py` (new, 344 lines:
   `ArgoBackend`, `OpenAICompatibleBackend`, `argo_model_kwargs`,
   `argo_refusal_error`, `ARGO_REFUSAL_SIGNATURES`)
 - `tests/domains/ai/council/test_http_backends.py` (new — 89 tests)

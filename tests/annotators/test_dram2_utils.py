@@ -47,6 +47,8 @@ from kbutillib.domains.genome.annotation.dram2_utils import (
     _DEFAULT_NXF_VER,
     _parse_annotations_tsv,
     _parse_dram2_version,
+    _parse_nextflow_engine_version,
+    _pipeline_manifest_version,
 )
 
 # ---------------------------------------------------------------------------
@@ -356,9 +358,19 @@ class TestParseDram2Version:
         )
         assert _parse_dram2_version(text) == "v2.0.0-beta17"
 
-    def test_nextflow_version_extracted(self):
+    def test_the_engine_banner_is_no_longer_a_tool_version(self):
+        """Was `== "24.10.5"`. Changed deliberately 2026-10-15.
+
+        Returning the Nextflow ENGINE version from a function whose result
+        becomes AnnotationResult.tool_version meant every DRAM2 annotation on
+        poplar recorded `24.10.5` -- and since DRAM2Utils pins NXF_VER, that
+        value could never change when DRAM2 did. The engine version is still
+        reported, by _parse_nextflow_engine_version, labelled `nextflow/...`
+        so the two cannot be confused.
+        """
         text = "N E X T F L O W  ~  version 24.10.5\nLaunching ...\n"
-        assert _parse_dram2_version(text) == "24.10.5"
+        assert _parse_dram2_version(text) is None
+        assert _parse_nextflow_engine_version(text) == "nextflow/24.10.5"
 
     def test_none_when_no_match(self):
         assert _parse_dram2_version("nothing recognisable here") is None
@@ -1485,7 +1497,11 @@ class TestRunNextflow:
                 databases=("kofam",), threads=1,
             )
         assert "query_id" in tsv
-        assert ver == "24.10.5"
+        # Was "24.10.5" -- the Nextflow engine version. _run_nextflow now goes
+        # through _resolve_tool_version, and this fixture's pipeline path has
+        # no nextflow.config and no revision tag, so the labelled engine
+        # fallback is what remains. See TestParseDram2Version.
+        assert ver == "nextflow/24.10.5"
         assert "nextflow" in cmd or utils._nextflow_exe in cmd
 
     def test_missing_output_file_yields_empty_tsv(self, tmp_path: Path):
@@ -1583,3 +1599,101 @@ class TestDram2LiveIntegration:
         # Even with zero hits, the structure must be intact
         for rec in result.records:
             assert rec.gene_id in proteins
+
+
+# ---------------------------------------------------------------------------
+# Version resolution.
+#
+# _parse_dram2_version used to fall back to the Nextflow ENGINE banner, and
+# on poplar that fallback was the only one that ever fired: the pipeline is
+# launched by absolute path, so the revision-tag regex never matches. Every
+# DRAM2 annotation therefore recorded tool_version="24.10.5" -- the Nextflow
+# version -- which reads as a DRAM2 version, is not one, and (because
+# DRAM2Utils pins NXF_VER) is CONSTANT across every DRAM2 upgrade. Measured
+# in the first production ARC rows, 2026-10-15.
+# ---------------------------------------------------------------------------
+
+import textwrap as _textwrap  # noqa: E402
+
+
+_ENGINE_BANNER = "N E X T F L O W  ~  version 24.10.5"
+
+
+def _pipeline_with_manifest(tmp_path, version: str):
+    (tmp_path / "nextflow.config").write_text(
+        _textwrap.dedent(
+            f"""
+            params {{
+                custom_config_version = 'master'
+            }}
+            manifest {{
+                name = 'DRAM2'
+                version = '{version}'
+            }}
+            """
+        ),
+        encoding="utf-8",
+    )
+    main_nf = tmp_path / "main.nf"
+    main_nf.write_text("// pipeline\n", encoding="utf-8")
+    return str(main_nf)
+
+
+def test_manifest_version_is_read_from_the_pipelines_own_config(tmp_path):
+    assert _pipeline_manifest_version(_pipeline_with_manifest(tmp_path, "2.0.0-beta17")) == (
+        "2.0.0-beta17"
+    )
+
+
+def test_manifest_read_does_not_match_custom_config_version(tmp_path):
+    """`custom_config_version = 'master'` sits above it and must not win."""
+    assert _pipeline_manifest_version(_pipeline_with_manifest(tmp_path, "2.0.0-beta17")) != (
+        "master"
+    )
+
+
+def test_manifest_version_is_none_for_absent_or_unreadable_config(tmp_path):
+    assert _pipeline_manifest_version(str(tmp_path / "nope" / "main.nf")) is None
+    assert _pipeline_manifest_version(None) is None
+    assert _pipeline_manifest_version("") is None
+
+
+def test_engine_banner_is_never_returned_bare_as_the_tool_version():
+    """The regression that motivated the split."""
+    assert _parse_dram2_version(_ENGINE_BANNER) is None
+
+
+def test_engine_banner_is_labelled_when_it_is_reported_at_all():
+    assert _parse_nextflow_engine_version(_ENGINE_BANNER) == "nextflow/24.10.5"
+
+
+def test_pipeline_revision_tag_is_still_parsed():
+    assert _parse_dram2_version("revision: 756904df [v2.0.0-beta17]") == "v2.0.0-beta17"
+
+
+def test_resolver_prefers_the_manifest_over_both_banners(tmp_path, monkeypatch):
+    from kbutillib.domains.genome.annotation.dram2_utils import DRAM2Utils
+
+    utils = DRAM2Utils.__new__(DRAM2Utils)
+    utils._pipeline = _pipeline_with_manifest(tmp_path, "2.0.0-beta17")
+    output = f"{_ENGINE_BANNER}\nrevision: abc1234 [v9.9.9]"
+
+    assert utils._resolve_tool_version(output) == "2.0.0-beta17"
+
+
+def test_resolver_falls_back_to_the_labelled_engine_as_a_last_resort(tmp_path):
+    from kbutillib.domains.genome.annotation.dram2_utils import DRAM2Utils
+
+    utils = DRAM2Utils.__new__(DRAM2Utils)
+    utils._pipeline = str(tmp_path / "absent" / "main.nf")
+
+    assert utils._resolve_tool_version(_ENGINE_BANNER) == "nextflow/24.10.5"
+
+
+def test_resolver_returns_none_when_nothing_identifies_the_tool(tmp_path):
+    from kbutillib.domains.genome.annotation.dram2_utils import DRAM2Utils
+
+    utils = DRAM2Utils.__new__(DRAM2Utils)
+    utils._pipeline = str(tmp_path / "absent" / "main.nf")
+
+    assert utils._resolve_tool_version("nothing identifiable here") is None

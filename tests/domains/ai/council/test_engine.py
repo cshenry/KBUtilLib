@@ -30,6 +30,7 @@ from kbutillib.domains.ai.council.engine.decide import (
     critic_approves,
     decide,
 )
+from kbutillib.domains.ai.council.engine.worker import _validate_answer
 from kbutillib.domains.ai.council.store.errors import StaleClaim
 from kbutillib.domains.ai.council.types import (
     AuthError,
@@ -2173,3 +2174,53 @@ class TestOrderIndependence:
 
         assert verdict_summary(store_a, job_a) == verdict_summary(store_b, job_b)
         assert len(verdict_summary(store_a, job_a)) == 7
+
+
+class TestAnswerValidation:
+    """Both halves of the schema check, including the no-jsonschema fallback."""
+
+    def test_a_good_answer_validates(self) -> None:
+        schema = make_query().answer_schema("proposer")
+        assert _validate_answer(proposer_answer("A:1"), schema) is None
+
+    def test_a_missing_required_key_is_reported(self) -> None:
+        schema = make_query().answer_schema("proposer")
+        reply = proposer_answer("A:1")
+        del reply["no_functional_content"]
+        complaint = _validate_answer(reply, schema)
+        assert complaint and "no_functional_content" in complaint
+
+    def test_a_wrong_type_is_reported(self) -> None:
+        schema = make_query().answer_schema("proposer")
+        complaint = _validate_answer({**proposer_answer("A:1"), "picked": "A:1"}, schema)
+        assert complaint and "schema" in complaint
+
+    def test_a_non_object_answer_is_reported(self) -> None:
+        complaint = _validate_answer(["A:1"], make_query().answer_schema("proposer"))
+        assert complaint and "not a JSON object" in complaint
+
+    def test_the_fallback_check_runs_without_jsonschema(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``import jsonschema`` raises when sys.modules holds None for it."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "jsonschema", None)
+        with pytest.raises(ImportError):
+            import jsonschema  # noqa: F401
+
+        schema = make_query().answer_schema("proposer")
+        assert _validate_answer(proposer_answer("A:1"), schema) is None
+
+        reply = proposer_answer("A:1")
+        del reply["picked"]
+        assert "picked" in (_validate_answer(reply, schema) or "")
+
+        wrong = {**proposer_answer("A:1"), "picked": "A:1"}
+        assert "expected an array" in (_validate_answer(wrong, schema) or "")
+
+        flag = {**proposer_answer("A:1"), "no_functional_content": "yes"}
+        assert "expected a boolean" in (_validate_answer(flag, schema) or "")
+
+        notes = {**proposer_answer("A:1"), "notes": 7}
+        assert "expected a string" in (_validate_answer(notes, schema) or "")

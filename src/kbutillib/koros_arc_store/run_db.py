@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -68,6 +69,26 @@ _OBJ_URI_RE = re.compile(r"^obj://([A-Za-z0-9._-]+)$")
 
 # Payload size smell threshold (S29): logged, never rejected.
 _PAYLOAD_WARN_BYTES = 64 * 1024
+
+#: Seconds a connection waits for a write lock before giving up.
+#:
+#: WAL permits one writer at a time, and sqlite3.connect defaults to
+#: timeout=5.0 only for the module default -- but the value that matters here
+#: is that a record write is SOFT-FAIL: record_analysis swallows the exception
+#: and logs a warning, so a "database is locked" is a record LOST IN SILENCE,
+#: not an error anyone sees. The producers are a pool of up to 80 kbdl-worker@
+#: processes on one host sharing one file (KBDLSKANI alone has run 106,745
+#: jobs at 40-way concurrency), so overlap is expected rather than
+#: exceptional. 30s is far longer than any single INSERT here needs and is
+#: bounded, so a pathological lock still fails rather than hanging a job.
+_BUSY_TIMEOUT_S = 30.0
+
+#: Bounded retry for the cold-start schema race -- see
+#: :meth:`RunDatabase._ensure_initialized_for_write`. Six attempts with
+#: exponential backoff from 50 ms tops out at ~1.6 s of waiting, which is
+#: ample for a CREATE TABLE IF NOT EXISTS and a journal-mode flip.
+_SCHEMA_INIT_ATTEMPTS = 6
+_SCHEMA_INIT_BACKOFF_S = 0.05
 
 # unknown_kind flag values (S43).
 KIND_KNOWN = 0
@@ -147,7 +168,7 @@ class RunDatabase:
         callers on the read path (which let it propagate).
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -194,9 +215,41 @@ class RunDatabase:
         conn.commit()
 
     def _ensure_initialized_for_write(self, conn: sqlite3.Connection) -> None:
-        if not self._initialized:
-            self._ensure_schema(conn)
-            self._initialized = True
+        """Create the schema once per instance, retrying a COLD-START race.
+
+        ``PRAGMA journal_mode=WAL`` needs a brief exclusive lock, and it is
+        NOT covered by the busy handler the way an ordinary write is. When
+        several processes open a database that does not yet exist, they race
+        to create it and flip the journal mode, and the losers get
+        ``database is locked`` -- which, on the soft-fail write path, is a
+        record lost in silence.
+
+        Measured (4 threads x 15 writes, this host, 2026-10-15): against a
+        database that already exists, 8/8 trials wrote all 60 records; against
+        a cold one, 2 of 8 trials dropped a record. Steady state was never the
+        problem -- the first instants are. A pool of 80 kbdl-worker@ processes
+        starting together is exactly that case.
+
+        The retry is bounded and narrow: only ``sqlite3.OperationalError``,
+        only here, and the last attempt is allowed to raise so a genuinely
+        unopenable database still takes the soft-fail route with its real
+        error rather than being swallowed by a retry loop.
+        """
+        if self._initialized:
+            return
+        last: Optional[sqlite3.OperationalError] = None
+        for attempt in range(_SCHEMA_INIT_ATTEMPTS):
+            try:
+                self._ensure_schema(conn)
+                self._initialized = True
+                return
+            except sqlite3.OperationalError as exc:
+                last = exc
+                if attempt == _SCHEMA_INIT_ATTEMPTS - 1:
+                    raise
+                time.sleep(_SCHEMA_INIT_BACKOFF_S * (2**attempt))
+        if last is not None:  # pragma: no cover - loop always returns or raises
+            raise last
 
     # ── validation ──────────────────────────────────────────────────────────
 
@@ -386,6 +439,18 @@ class RunDatabase:
         try:
             conn = self._connect()
             self._ensure_initialized_for_write(conn)
+            # BEGIN IMMEDIATE, matching delete_record below -- NOT a style
+            # choice. This method reads (the immutability guard's SELECT) and
+            # then writes. Left implicit, sqlite3 opens a DEFERRED transaction
+            # on the SELECT and must UPGRADE it to a write lock at the INSERT;
+            # under WAL, an upgrade that races another writer's commit returns
+            # SQLITE_BUSY_SNAPSHOT *immediately* and the busy handler is never
+            # consulted, so _BUSY_TIMEOUT_S does not apply to it. Because this
+            # whole method is soft-fail, that surfaced as a record silently
+            # lost: measured 1 drop in 8 runs of 60 writes across 4 threads
+            # WITH the timeout in place, and 45 of 60 without it. Taking the
+            # write lock up front puts the wait under the busy handler.
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT analysis_id, run_uid, created_at FROM runs WHERE record_id = ?",
                 (record.record_id,),
@@ -537,7 +602,7 @@ class RunDatabase:
         and distinct from "unopenable".
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         self._ensure_schema(conn)
         return conn

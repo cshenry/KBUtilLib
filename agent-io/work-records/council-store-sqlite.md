@@ -11,7 +11,7 @@ maestro/developer/background-reference-only-agent--council-store-sqlite
 
 ## commit_shas
 - e6102eb — feat(council): store schema, SqliteStore and the CouncilStore contract
-- (this record is committed separately, see below)
+- eafb5cb — docs(work-record): record the council store milestone
 
 ## summary
 Part 1 of 2 of the council store. Adds

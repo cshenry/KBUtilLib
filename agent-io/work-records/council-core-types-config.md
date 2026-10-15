@@ -8,7 +8,7 @@ maestro/developer/background-reference-only-agent--council-core-types-config
 
 ## commit_shas
 - 8b30684 — feat(council): core types, protocols, config and test backends
-- (second commit, this record + the asyncio-neutral test helper — sha below)
+- a324c9e — test(council): keep asyncio loop state as found, and record the work
 
 ## summary
 Created the foundation of the domain-neutral LLM council at

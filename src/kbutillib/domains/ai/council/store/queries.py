@@ -48,6 +48,8 @@ __all__ = [
     "select_daemon_generation",
     "complete_call_update",
     "release_call_update",
+    "note_call_error_update",
+    "set_job_status_update",
     "reclaim_stale_update",
     "select_reusable",
     "select_item_status_counts",
@@ -366,6 +368,40 @@ def release_call_update(
         .where(calls.c.call_id == call_id, calls.c.claim_token == claim_token)
         .values(**values)
     )
+
+
+def note_call_error_update(call_id: str, error: Any) -> sa.Update:
+    """Write a call's LAST error, leaving its status and claim alone.
+
+    The one column the queue could not write for itself.  ``job_status``
+    reads ``calls.error`` on PENDING rows to report the
+    ``waiting_for_model`` and ``configuration_mismatch`` blockers, but
+    ``release_call``'s contract signature takes no error argument and
+    ``complete_call`` moves the row out of ``pending`` -- so the worker
+    writes the column itself, inside the same transaction as the release.
+    Narrow on purpose: it touches exactly one column and can neither settle a
+    call nor change whose claim it is under.
+    """
+    calls = sch.calls
+    return calls.update().where(calls.c.call_id == call_id).values(error=error)
+
+
+def set_job_status_update(
+    job_id: str, status: str, only_if: Optional[Iterable[str]] = None
+) -> sa.Update:
+    """Move a job to *status*, optionally only from one of *only_if*.
+
+    The guard is what keeps the transition safe: ``queued -> running`` on the
+    first claim and ``-> done`` when the last item settles must both refuse
+    to touch a job that has since been cancelled, and cancellation is
+    terminal.  A caller that passes no guard is saying it has already
+    established the current status inside this transaction.
+    """
+    jobs = sch.jobs
+    stmt = jobs.update().where(jobs.c.job_id == job_id)
+    if only_if is not None:
+        stmt = stmt.where(jobs.c.status.in_(sorted(only_if)))
+    return stmt.values(status=status)
 
 
 def reclaim_stale_update(now: datetime, max_age: timedelta) -> sa.Update:

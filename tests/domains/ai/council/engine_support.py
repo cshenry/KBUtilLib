@@ -25,6 +25,11 @@ from kbutillib.domains.ai.council.types import (
 
 __all__ = [
     "MENU",
+    "InFlight",
+    "InstrumentedBackend",
+    "critic_answer",
+    "meta_answer",
+    "proposer_answer",
     "endpoint_config",
     "fake_seat",
     "make_query",
@@ -270,3 +275,87 @@ def scripted(
 def as_text(parsed: Mapping[str, Any]) -> str:
     """The JSON a backend would have returned for *parsed*."""
     return json.dumps(parsed, sort_keys=True)
+
+
+class InFlight:
+    """A shared in-flight counter, so two backends can prove one limit.
+
+    Two endpoint aliases on the same ``account`` share ONE concurrency
+    semaphore in the worker; the only way a test can see that is to count
+    calls in flight across BOTH backends at once, which is what this is for.
+    """
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.peak = 0
+        self.total = 0
+
+    def enter(self) -> None:
+        self.current += 1
+        self.total += 1
+        self.peak = max(self.peak, self.current)
+
+    def exit(self) -> None:
+        self.current -= 1
+
+
+class InstrumentedBackend:
+    """A ``FakeBackend`` that can be slow, counted, and usage-blind.
+
+    Wraps rather than subclasses so the delegate stays the shipped
+    ``FakeBackend`` -- the thing whose contract ("never raises for a call
+    failure") the engine relies on.
+
+    Args:
+        script: as ``FakeBackend``.
+        delay: seconds to await before answering.  A nonzero delay is what
+            makes two identical questions genuinely overlap, which is the only
+            way to exercise in-process single-flight rather than store reuse.
+        monitor: an :class:`InFlight` to count against (shared, optionally).
+        drop_usage: answer successfully but report ``usage=None``, which is
+            how a budgeted endpoint becomes unmeasurable.
+    """
+
+    def __init__(
+        self,
+        script: Callable[[Any], Any],
+        kind: str = "fake",
+        *,
+        delay: float = 0.0,
+        monitor: Optional[InFlight] = None,
+        drop_usage: bool = False,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        from kbutillib.domains.ai.council.backends.testing import FakeBackend
+
+        self._inner = FakeBackend(script, kind, usage=usage)
+        self.kind = kind
+        self.delay = delay
+        self.monitor = monitor or InFlight()
+        self.drop_usage = drop_usage
+
+    @property
+    def calls(self) -> List[Any]:
+        """Every request this backend was asked, in order."""
+        return self._inner.calls
+
+    async def complete(self, req: Any) -> Any:
+        self.monitor.enter()
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            result = await self._inner.complete(req)
+        finally:
+            self.monitor.exit()
+        if self.drop_usage and result.ok:
+            return result.model_copy(update={"usage": None})
+        return result
+
+    async def models(self) -> List[Dict[str, Any]]:
+        return []
+
+    def effective_params(self, seat: Any) -> Dict[str, Any]:
+        return self._inner.effective_params(seat)
+
+    async def aclose(self) -> None:
+        return None

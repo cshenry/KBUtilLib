@@ -16,11 +16,16 @@ registry is imported inside the one method that needs it.
 
 from __future__ import annotations
 
-from .decide import APPROVING_VERDICTS, SettledCall, critic_approves, decide
+from .decide import APPROVING_VERDICTS, SettledCall, critic_approves, decide, tally
+from .worker import CouncilWorker, aevaluate, evaluate
 
 __all__ = [
     "decide",
     "critic_approves",
     "SettledCall",
     "APPROVING_VERDICTS",
+    "tally",
+    "CouncilWorker",
+    "evaluate",
+    "aevaluate",
 ]

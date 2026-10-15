@@ -1264,6 +1264,59 @@ class SqliteStore:
             if not result.rowcount:  # pragma: no cover - the token check caught it
                 raise _stale_claim(call_id, "the claim was lost mid-release")
 
+    def note_call_error(
+        self, call_id: str, error: Optional[Mapping[str, Any]]
+    ) -> None:
+        """Record a call's last error WITHOUT changing its status.
+
+        The engine's way of putting a reason on a call it is about to RELEASE
+        rather than settle: ``job_status`` reports ``waiting_for_model`` and
+        ``configuration_mismatch`` off ``calls.error`` on pending rows, and
+        neither ``release_call`` (whose signature takes no error) nor
+        ``complete_call`` (which settles the row) can write it.  Call it
+        inside the same ``transaction()`` as the release -- ``transaction()``
+        is re-entrant, so the two are one unit.
+
+        Passing ``None`` clears the column, which is how a call that has
+        stopped failing stops reporting a blocker.
+
+        Raises:
+            ValueError: no such call.
+        """
+        with self.transaction() as conn:
+            result = conn.execute(q.note_call_error_update(call_id, _jsonify(error)))
+            if not result.rowcount:
+                raise ValueError(f"no such call: {call_id}")
+
+    def set_job_status(
+        self,
+        job_id: str,
+        status: str,
+        only_if: Optional[Sequence[str]] = None,
+    ) -> bool:
+        """Move a job's status, optionally only from one of *only_if*.
+
+        The queue itself never changes a job's status: ``queued -> running``
+        on the first claim and ``-> done`` when the last item settles are the
+        worker's calls, and it makes them inside the transaction that settles
+        the call or the item.  *only_if* is how those transitions refuse a job
+        that has since been cancelled, cancellation being terminal.
+
+        Returns:
+            True if a row was moved; False if the guard refused it.
+
+        Raises:
+            ValueError: no such job.
+        """
+        with self.transaction() as conn:
+            exists = conn.execute(
+                sa.select(sch.jobs.c.job_id).where(sch.jobs.c.job_id == job_id)
+            ).first()
+            if exists is None:
+                raise ValueError(f"no such job: {job_id}")
+            result = conn.execute(q.set_job_status_update(job_id, status, only_if))
+        return bool(result.rowcount)
+
     @staticmethod
     def _claimed_call(
         conn: sa.Connection, call_id: str, claim_token: str

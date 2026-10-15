@@ -61,6 +61,7 @@ __all__ = [
     "SettledCall",
     "decide",
     "critic_approves",
+    "tally",
 ]
 
 #: The critic verdicts that count as approval.  Everything else -- including
@@ -148,6 +149,90 @@ def critic_approves(critic: Optional[Mapping[str, Any]]) -> bool:
     )
 
 
+def tally(
+    task: CouncilTask,
+    roster: Roster,
+    proposer_calls: Sequence[Optional[SettledCall]],
+) -> Tuple[List[Ballot], Dict[str, int], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Turn settled proposer calls into ballots, the vote table and the notes.
+
+    Public because the WORKER needs exactly this to render the critic and meta
+    prompts: those prompts show the vote table and the per-seat reasoning, and
+    a prompt built from a second, slightly different tally would audit a
+    council that never sat.  One computation, two consumers.
+
+    Returns ``(ballots, votes, errors, usage)``:
+
+    * ``ballots`` -- one per seat, in ``roster.proposers`` order.  A seat that
+      failed gets an ``error`` ballot with no picks.
+    * ``votes`` -- ``{id: count}`` in FIRST-VOTE order, which is the order the
+      renderers' vote block prints ties in.
+    * ``errors`` -- the ``off_menu`` notes and the failed seats.
+    * ``usage`` -- per-seat token usage, including a reused seat's zeroes.
+    """
+    menu_ids = [str(entry.id) for entry in (task.menu or [])]
+    ballots: List[Ballot] = []
+    votes: Dict[str, int] = {}
+    errors: List[Dict[str, Any]] = []
+    usage: Dict[str, Dict[str, Any]] = {}
+
+    for seat, call in zip(roster.proposers, proposer_calls):
+        if call is None:  # pragma: no cover - decide() checks this first
+            continue
+        _record_usage(usage, seat.seat_name, call)
+        shape_error = _proposer_shape_error(call) if call.status == "ok" else None
+        if call.status != "ok" or shape_error is not None:
+            error = shape_error or call.error or CouncilError(
+                kind="invalid_output", message="the seat returned no usable answer"
+            )
+            ballots.append(Ballot(seat=seat.seat_name, status="error", error=error))
+            errors.append(_error_entry("proposer", seat.seat_name, error))
+            continue
+
+        reply = call.parsed or {}
+        picks: List[Pick] = []
+        seen: set = set()
+        for raw in reply.get("picked") or ():
+            pick = dict(raw) if isinstance(raw, Mapping) else {}
+            pick_id = str(pick.get("id") or "")
+            if not pick_id or pick_id in seen:
+                # A repeat is one opinion, not two.  First occurrence wins so
+                # the proposer's own ordering survives.
+                continue
+            seen.add(pick_id)
+            if pick_id not in menu_ids:
+                errors.append(
+                    {
+                        "stage": "proposer",
+                        "seat": seat.seat_name,
+                        "kind": "off_menu",
+                        "message": f"{pick_id!r} is not on the closed menu; dropped",
+                    }
+                )
+                continue
+            picks.append(
+                Pick(
+                    id=pick_id,
+                    confidence=_confidence(pick.get("confidence")),
+                    why=str(pick.get("why") or ""),
+                )
+            )
+        ballots.append(
+            Ballot(
+                seat=seat.seat_name,
+                status="ok",
+                picks=picks,
+                overall_confidence=reply.get("overall_confidence"),
+                no_functional_content=bool(reply.get("no_functional_content")),
+                notes=reply.get("notes") or None,
+            )
+        )
+        for pick in picks:
+            votes[pick.id] = votes.get(pick.id, 0) + 1
+
+    return ballots, votes, errors, usage
+
+
 def decide(
     task: CouncilTask,
     roster: Roster,
@@ -204,71 +289,12 @@ def decide(
     # 2. Proposers.  Every seat must be terminal before anything is written,
     #    including when one has already failed: the error verdict names every
     #    seat, so writing it early would hide the sibling that was still live.
-    settled: List[SettledCall] = []
-    for seat, call in zip(roster.proposers, _aligned(roster, proposer_calls)):
-        if call is None:
-            return ("waiting", None)
-        settled.append(call)
+    aligned = _aligned(roster, proposer_calls)
+    if any(call is None for call in aligned):
+        return ("waiting", None)
 
-    ballots: List[Ballot] = []
-    errors: List[Dict[str, Any]] = []
-    usage: Dict[str, Dict[str, Any]] = {}
-    votes: Dict[str, int] = {}
     n_proposers = len(roster.proposers)
-
-    for seat, call in zip(roster.proposers, settled):
-        _record_usage(usage, seat.seat_name, call)
-        reply = call.parsed if call.status == "ok" else None
-        shape_error = _proposer_shape_error(call) if call.status == "ok" else None
-        if call.status != "ok" or shape_error is not None:
-            error = shape_error or call.error or CouncilError(
-                kind="invalid_output", message="the seat returned no usable answer"
-            )
-            ballots.append(Ballot(seat=seat.seat_name, status="error", error=error))
-            errors.append(_error_entry("proposer", seat.seat_name, error))
-            continue
-
-        picks: List[Pick] = []
-        seen: set = set()
-        for raw in (reply or {}).get("picked") or ():
-            pick = dict(raw) if isinstance(raw, Mapping) else {}
-            pick_id = str(pick.get("id") or "")
-            if not pick_id or pick_id in seen:
-                # A repeat is one opinion, not two.  First occurrence wins so
-                # the proposer's own ordering survives.
-                continue
-            seen.add(pick_id)
-            if pick_id not in menu_ids:
-                errors.append(
-                    {
-                        "stage": "proposer",
-                        "seat": seat.seat_name,
-                        "kind": "off_menu",
-                        "message": f"{pick_id!r} is not on the closed menu; dropped",
-                    }
-                )
-                continue
-            picks.append(
-                Pick(
-                    id=pick_id,
-                    confidence=_confidence(pick.get("confidence")),
-                    why=str(pick.get("why") or ""),
-                )
-            )
-        ballots.append(
-            Ballot(
-                seat=seat.seat_name,
-                status="ok",
-                picks=picks,
-                overall_confidence=(reply or {}).get("overall_confidence"),
-                no_functional_content=bool(
-                    (reply or {}).get("no_functional_content")
-                ),
-                notes=(reply or {}).get("notes") or None,
-            )
-        )
-        for pick in picks:
-            votes[pick.id] = votes.get(pick.id, 0) + 1
+    ballots, votes, errors, usage = tally(task, roster, aligned)
 
     # 3. One failed proposer fails the item.  No critic, no meta: auditing a
     #    vote table that is missing a seat would audit a different council.

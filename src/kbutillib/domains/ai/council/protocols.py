@@ -276,6 +276,27 @@ class CouncilStore(Protocol):
         """Put a claimed call back to pending, clearing its token."""
         ...
 
+    def note_call_error(self, call_id: str, error: Optional[Dict[str, Any]]) -> None:
+        """Record a call's last error without changing its status.
+
+        The engine calls this inside the same transaction as a
+        ``release_call``, because ``job_status``'s ``waiting_for_model`` and
+        ``configuration_mismatch`` blockers read ``calls.error`` on PENDING
+        rows and nothing else in the contract can write it there.
+        """
+        ...
+
+    def set_job_status(
+        self, job_id: str, status: str, only_if: Optional[List[str]] = None
+    ) -> bool:
+        """Move a job's status, optionally only from one of *only_if*.
+
+        The worker owns the ``queued -> running`` and ``-> done``
+        transitions and makes them inside the transaction that settles the
+        call or the item; the guard is what keeps them off a cancelled job.
+        """
+        ...
+
     def transaction(self, immediate: bool = True) -> ContextManager[Any]:
         """Run a block as one transaction, yielding the connection."""
         ...

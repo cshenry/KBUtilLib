@@ -17,25 +17,42 @@ GPU.  Every seat is a ``fake`` endpoint and every answer comes from a script.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+import asyncio
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pytest
 
+from kbutillib.domains.ai.council.engine import CouncilWorker, evaluate
 from kbutillib.domains.ai.council.engine.decide import (
     APPROVING_VERDICTS,
     SettledCall,
     critic_approves,
     decide,
 )
-from kbutillib.domains.ai.council.types import CouncilError
+from kbutillib.domains.ai.council.types import (
+    BillingGuardRefused,
+    CouncilError,
+    CouncilVerdict,
+    InvalidOutput,
+    Roster,
+    RosterError,
+    SeatSpec,
+    TransportError,
+)
 
 from .engine_support import (
+    InstrumentedBackend,
     critic_answer,
+    endpoint_config,
+    fake_seat,
     make_query,
     make_roster,
     make_task,
+    menu,
     meta_answer,
     proposer_answer,
+    run,
+    scripted,
 )
 
 # ---------------------------------------------------------------------------
@@ -575,3 +592,575 @@ class TestSettledCallFromRow:
         assert call.status == "error"
         assert call.error.kind == "invalid_output"
         assert "cannot read this answer" in call.error.message
+
+
+# ---------------------------------------------------------------------------
+# The worker
+# ---------------------------------------------------------------------------
+
+WORKER_DEFAULTS: Dict[str, Any] = {
+    # Fast but not instant: the engine's real backoff is 2 s then 8 s (pinned
+    # by TestBackoff below), which would make the retry test wait for it.
+    "heartbeat_interval_s": 0.0,
+    "poll_interval_s": 0.01,
+    "retry_backoff_s": (0.02, 0.05),
+    "retry_jitter": 0.0,
+    "idle_grace_s": 0.3,
+    "max_idle_s": 15.0,
+}
+
+
+def worker_for(
+    store: Any,
+    backends: Mapping[str, Any],
+    *,
+    user: str = "alice",
+    worker_id: str = "w-1",
+    config: Any = None,
+    **kwargs: Any,
+) -> CouncilWorker:
+    """A worker over *backends*, with test-fast timings."""
+    settings = dict(WORKER_DEFAULTS)
+    settings.update(kwargs)
+    if config is None:
+        config = endpoint_config(**{name: {} for name in backends})
+    return CouncilWorker(store, config, backends, user, worker_id, **settings)
+
+
+def fake(script: Any, **kwargs: Any) -> InstrumentedBackend:
+    """An instrumented fake backend driven by a ``(role, seat)`` table."""
+    return InstrumentedBackend(scripted(script), **kwargs)
+
+
+def agreeing_script(*ids: str, **critic_kwargs: Any) -> Dict[Any, Any]:
+    """Every proposer picks *ids*; the critic approves."""
+    return {
+        "proposer": proposer_answer(*ids),
+        "critic": critic_answer(**critic_kwargs),
+        "meta": meta_answer(*ids),
+    }
+
+
+def split_script() -> Dict[Any, Any]:
+    """A vote table of {A:3, B:2}: unanimous on A, split on B."""
+    return {
+        ("proposer", "proposer_1"): proposer_answer("A:1", "B:2"),
+        ("proposer", "proposer_2"): proposer_answer("A:1", "B:2"),
+        ("proposer", "proposer_3"): proposer_answer("A:1"),
+        "critic": critic_answer(),
+        "meta": meta_answer("A:1"),
+    }
+
+
+def calls_of(store: Any, job_id: str, role: Optional[str] = None) -> list:
+    rows = store.get_calls(job_id)
+    return [r for r in rows if role is None or r["role"] == role]
+
+
+def item_of(store: Any, job_id: str, item_id: str = "item-1") -> Dict[str, Any]:
+    return next(r for r in store.get_items(job_id) if r["item_id"] == item_id)
+
+
+def verdict_of(store: Any, job_id: str, item_id: str = "item-1") -> CouncilVerdict:
+    row = item_of(store, job_id, item_id)
+    assert row["verdict"] is not None, f"item {item_id} is {row['status']}, not decided"
+    return CouncilVerdict.model_validate(row["verdict"])
+
+
+class TestSubmit:
+    """What a job looks like the instant it exists, and what is refused."""
+
+    def test_a_job_lands_with_one_pending_call_per_proposer(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        roster = make_roster(3)
+        job_id = worker.submit(make_query(), [make_task()], roster, label="a batch")
+
+        job = store.get_job(job_id)
+        assert job["status"] == "queued"
+        assert job["submitted_by"] == "alice"
+        assert job["roster_fingerprint"] == roster.fingerprint()
+        assert job["n_items"] == 1
+        assert sorted(job["roster"]["route_fingerprints"]) == [
+            "critic",
+            "meta",
+            "proposer_1",
+            "proposer_2",
+            "proposer_3",
+        ]
+
+        items = store.get_items(job_id)
+        assert [row["status"] for row in items] == ["pending"]
+        assert items[0]["entity_hash"] and items[0]["data_hash"]
+
+        calls = calls_of(store, job_id)
+        assert [row["role"] for row in calls] == ["proposer"] * 3
+        assert all(row["status"] == "pending" for row in calls)
+        assert all(row["upstream_digest"] == "" for row in calls)
+        # One prompt hash per seat: same question, different model.
+        assert len({row["prompt_hash"] for row in calls}) == 3
+        assert all(row["route_fingerprint"] for row in calls)
+        # Nothing was asked of any model yet.
+        assert backend.calls == []
+
+    def test_an_empty_menu_is_settled_at_submit_with_no_calls(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(
+            make_query(), [make_task(menu=[])], make_roster(3), label="empty"
+        )
+
+        assert calls_of(store, job_id) == []
+        assert backend.calls == []
+        verdict = verdict_of(store, job_id)
+        assert verdict.decline_reason == "no_candidates"
+        assert verdict.decided_by == "deterministic_empty"
+        # Every item is settled, so the job is done on arrival rather than
+        # queued behind calls that will never exist.
+        assert store.get_job(job_id)["status"] == "done"
+
+    def test_an_identical_repeat_of_an_item_is_collapsed(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        task = make_task()
+        job_id = worker.submit(make_query(), [task, task], make_roster(3))
+        assert len(store.get_items(job_id)) == 1
+        assert store.get_job(job_id)["n_items"] == 1
+        assert len(calls_of(store, job_id)) == 3
+
+    def test_a_repeated_item_id_with_different_content_is_refused(
+        self, store: Any
+    ) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        with pytest.raises(ValueError, match="DIFFERENT content"):
+            worker.submit(
+                make_query(),
+                [make_task(text="one"), make_task(text="two")],
+                make_roster(3),
+            )
+        assert store.list_jobs(user="alice") == []
+
+    def test_a_duplicate_menu_id_is_refused(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        duplicated = menu("A:1", "B:2", "A:1")
+        with pytest.raises(ValueError, match="more than once"):
+            worker.submit(make_query(), [make_task(menu=duplicated)], make_roster(3))
+        assert store.list_jobs(user="alice") == []
+
+    def test_an_unverified_seat_is_refused(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        roster = make_roster(3)
+        roster.proposers[1] = fake_seat("proposer_2", "p2", verified=False)
+        with pytest.raises(RosterError, match="verified"):
+            worker.submit(make_query(), [make_task()], roster)
+        assert store.list_jobs(user="alice") == []
+
+    def test_an_unverified_seat_may_be_allowed_explicitly(self, store: Any) -> None:
+        worker = worker_for(
+            store, {"fake1": fake(agreeing_script("A:1"))}, allow_unverified=True
+        )
+        roster = make_roster(3)
+        roster.proposers[1] = fake_seat("proposer_2", "p2", verified=False)
+        job_id = worker.submit(make_query(), [make_task()], roster)
+        assert len(calls_of(store, job_id)) == 3
+
+    def test_a_non_independent_roster_is_refused_at_submit(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        roster = make_roster(3)
+        # Mutating a built Roster skips pydantic's validator; submit re-runs it.
+        roster.proposers[1] = fake_seat("proposer_2", "p1")
+        with pytest.raises(RosterError, match="independent"):
+            worker.submit(make_query(), [make_task()], roster)
+
+    def test_a_refusing_cli_billing_preflight_stops_the_job(self, store: Any) -> None:
+        class RefusingCli(InstrumentedBackend):
+            async def preflight(self) -> Dict[str, Any]:
+                return {"state": "refused", "detail": "would bill the API, not the plan"}
+
+        backend = RefusingCli(scripted(agreeing_script("A:1")), kind="claude_cli")
+        worker = worker_for(store, {"cli": backend})
+        roster = Roster(
+            proposers=[
+                fake_seat("proposer_1", "p1"),
+                SeatSpec(
+                    seat_name="proposer_2",
+                    endpoint="cli",
+                    endpoint_kind="claude_cli",
+                    model="sonnet",
+                    canonical_model="anthropic/claude-sonnet-5",
+                ),
+            ],
+            critic=fake_seat("critic", "critic-model"),
+            meta=fake_seat("meta", "meta-model"),
+        )
+        with pytest.raises(BillingGuardRefused, match="would bill the API"):
+            worker.submit(make_query(), [make_task()], roster)
+        assert store.list_jobs(user="alice") == []
+
+    def test_an_unknown_cli_billing_state_stops_the_job_unless_allowed(
+        self, store: Any
+    ) -> None:
+        class UnsureCli(InstrumentedBackend):
+            async def preflight(self) -> Dict[str, Any]:
+                return {"state": "unknown", "detail": "no login file"}
+
+        backend = UnsureCli(scripted(agreeing_script("A:1")), kind="codex_cli")
+        roster = Roster(
+            proposers=[
+                fake_seat("proposer_1", "p1"),
+                SeatSpec(
+                    seat_name="proposer_2",
+                    endpoint="cli",
+                    endpoint_kind="codex_cli",
+                    model="gpt",
+                    canonical_model="openai/gpt-5.5",
+                ),
+            ],
+            critic=fake_seat("critic", "critic-model"),
+            meta=fake_seat("meta", "meta-model"),
+        )
+        with pytest.raises(BillingGuardRefused, match="could not confirm"):
+            worker_for(store, {"cli": backend}).submit(
+                make_query(), [make_task()], roster
+            )
+        job_id = worker_for(
+            store, {"cli": backend}, allow_unverified=True
+        ).submit(make_query(), [make_task()], roster)
+        assert len(calls_of(store, job_id)) == 2
+
+
+class TestWorkToVerdict:
+    """The happy paths, end to end over a real store."""
+
+    def test_a_unanimous_item_is_decided_without_a_meta_call(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+
+        assert summary["idle"] is True
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "ok"
+        assert verdict.selected_ids == ["A:1"]
+        assert verdict.decided_by == "unanimous"
+        assert verdict.meta_skipped is True
+        assert [row["role"] for row in calls_of(store, job_id)] == [
+            "proposer",
+            "proposer",
+            "proposer",
+            "critic",
+        ]
+        assert [req.role for req in backend.calls].count("meta") == 0
+        assert store.get_job(job_id)["status"] == "done"
+        assert item_of(store, job_id)["status"] == "ok"
+
+    def test_a_split_vote_runs_the_meta_round(self, store: Any) -> None:
+        backend = fake(split_script())
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.decided_by == "meta"
+        assert verdict.votes == {"A:1": 3, "B:2": 2}
+        assert verdict.selected_ids == ["A:1"]
+        roles = [row["role"] for row in calls_of(store, job_id)]
+        assert roles == ["proposer"] * 3 + ["critic", "meta"]
+        assert store.get_job(job_id)["status"] == "done"
+
+    def test_the_critic_and_meta_prompts_carry_the_vote_table(self, store: Any) -> None:
+        backend = fake(split_script())
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        critic_request = next(req for req in backend.calls if req.role == "critic")
+        assert "A:1: 3" in critic_request.user
+        assert "B:2: 2" in critic_request.user
+        assert "proposer_1 [high]" in critic_request.user
+        meta_request = next(req for req in backend.calls if req.role == "meta")
+        assert "A:1: 3" in meta_request.user
+        # The critic's own audit is shown to meta, as JSON.
+        assert '"verdict": "consistent"' in meta_request.user or (
+            '"verdict":"consistent"' in meta_request.user
+        )
+
+    def test_the_job_becomes_running_on_the_first_claim(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"), delay=0.05)
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+
+        async def drive() -> str:
+            task = asyncio.ensure_future(worker.work(job_id=job_id, until_idle=True))
+            seen = "queued"
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                seen = store.get_job(job_id)["status"]
+                if seen == "running":
+                    break
+            await task
+            return seen
+
+        assert run(drive()) == "running"
+        assert store.get_job(job_id)["status"] == "done"
+
+    def test_a_foreground_worker_registers_and_heartbeats(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        workers = store.live_workers("alice")
+        assert [row["worker_id"] for row in workers] == ["w-1"]
+        row = workers[0]
+        assert row["kind"] == "foreground"
+        assert row["endpoints"] == ["fake1"]
+        assert row["heartbeat_at"] is not None
+        first = row["heartbeat_at"]
+
+        beats = []
+        run(
+            worker.work(
+                job_id=job_id, until_idle=True, heartbeat=lambda: beats.append(1)
+            )
+        )
+        assert beats, "the heartbeat callback was never invoked"
+        assert store.live_workers("alice")[0]["heartbeat_at"] >= first
+
+    def test_evaluate_decides_one_item_in_the_foreground(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        verdict = evaluate(
+            make_task(),
+            make_query(),
+            make_roster(3),
+            store,
+            {"fake1": backend},
+            user="alice",
+            config=endpoint_config(fake1={}),
+            **WORKER_DEFAULTS,
+        )
+        assert verdict.selected_ids == ["A:1"]
+        assert verdict.decided_by == "unanimous"
+        assert len(store.list_jobs(user="alice")) == 1
+
+
+class TestReuseAndSingleFlight:
+    """The two ways the worker avoids paying twice for one question."""
+
+    def test_a_second_job_asking_the_same_question_makes_no_calls(
+        self, store: Any
+    ) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        query, roster = make_query(), make_roster(3)
+
+        first = worker.submit(query, [make_task()], roster, label="first")
+        run(worker.work(job_id=first, until_idle=True))
+        spent = len(backend.calls)
+        assert spent == 4  # three proposers and a critic
+
+        second = worker.submit(query, [make_task()], roster, label="second")
+        run(worker.work(job_id=second, until_idle=True))
+
+        assert len(backend.calls) == spent, "the second job asked a model something"
+        assert verdict_of(store, second).selected_ids == ["A:1"]
+        rows = calls_of(store, second)
+        assert len(rows) == 4
+        assert all(row["reused_from"] for row in rows)
+        assert all(row["status"] == "ok" for row in rows)
+        assert all(
+            row["fresh_usage"] == {"prompt_tokens": 0, "completion_tokens": 0}
+            for row in rows
+        )
+        # The reuse is recorded in the verdict too.
+        assert all(seat["reused"] for seat in verdict_of(store, second).usage.values())
+
+    def test_two_items_with_identical_prompts_make_one_call_per_seat(
+        self, store: Any
+    ) -> None:
+        """Single-flight, not store reuse: nothing has been answered yet.
+
+        Both items' calls are claimed in one batch and the backend holds each
+        answer for 50 ms, so every follower is waiting on a leader that has
+        not completed -- there is no ``ok`` row for ``find_reusable`` to find.
+        """
+        backend = fake(agreeing_script("A:1"), delay=0.05)
+        worker = worker_for(store, {"fake1": backend})
+        tasks = [make_task("item-1"), make_task("item-2")]
+        job_id = worker.submit(make_query(), tasks, make_roster(3))
+        assert len(calls_of(store, job_id)) == 6
+        hashes = {row["prompt_hash"] for row in calls_of(store, job_id)}
+        assert len(hashes) == 3, "the two items must ask identical questions"
+
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        proposer_requests = [req for req in backend.calls if req.role == "proposer"]
+        assert len(proposer_requests) == 3
+        assert backend.monitor.peak <= 3
+        for item_id in ("item-1", "item-2"):
+            assert verdict_of(store, item_id=item_id, job_id=job_id).selected_ids == [
+                "A:1"
+            ]
+        # Four calls were paid for in total: three proposer seats and one
+        # critic.  The second item's critic asks an identical question too --
+        # same votes, same ballots -- so it reuses the first item's answer.
+        assert len(backend.calls) == 4
+        reused = [row for row in calls_of(store, job_id) if row["reused_from"]]
+        assert len(reused) == 4
+
+
+class TestFailuresAndRetries:
+    """Transport retries, terminal failures, and the sibling rule."""
+
+    def test_a_transport_error_is_retried_and_then_succeeds(self, store: Any) -> None:
+        script = {
+            ("proposer", "proposer_1"): [
+                TransportError("the socket went away"),
+                proposer_answer("A:1"),
+            ],
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "ok"
+        assert verdict.selected_ids == ["A:1"]
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "ok"
+        assert row["attempt_count"] == 1, "exactly one failed attempt was charged"
+        asked = [
+            req for req in backend.calls if req.seat.seat_name == "proposer_1"
+        ]
+        assert len(asked) == 2
+
+    def test_three_transport_failures_fail_the_call_and_the_item(
+        self, store: Any
+    ) -> None:
+        script = {
+            ("proposer", "proposer_1"): TransportError("still down"),
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "error"
+        assert [e["kind"] for e in verdict.errors] == ["transport"]
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "error"
+        assert row["error"]["kind"] == "transport"
+        assert row["attempt_count"] == 2  # two releases, then a terminal failure
+        assert (
+            len([req for req in backend.calls if req.seat.seat_name == "proposer_1"])
+            == 3
+        )
+        # No critic was ever created for a council that lost a seat.
+        assert calls_of(store, job_id, "critic") == []
+
+    def test_an_answer_that_fails_the_schema_fails_its_seat(self, store: Any) -> None:
+        script = {
+            ("proposer", "proposer_1"): {"picked": "A:1"},  # not an array
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        worker = worker_for(store, {"fake1": fake(script)})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "error"
+        assert [e["kind"] for e in verdict.errors] == ["invalid_output"]
+        assert calls_of(store, job_id, "critic") == [], "a critic call was created"
+        assert calls_of(store, job_id, "meta") == []
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "error"
+        assert "answer schema" in row["error"]["message"]
+
+    def test_a_truncated_answer_fails_its_seat(self, store: Any) -> None:
+        class Truncating(InstrumentedBackend):
+            async def complete(self, req: Any) -> Any:
+                result = await super().complete(req)
+                if req.seat.seat_name == "proposer_2" and result.ok:
+                    return result.model_copy(update={"truncated": True})
+                return result
+
+        backend = Truncating(scripted(agreeing_script("A:1")))
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "error"
+        assert [(e["seat"], e["kind"]) for e in verdict.errors] == [
+            ("proposer_2", "invalid_output")
+        ]
+
+    def test_a_failed_seat_waits_for_its_slow_sibling(self, store: Any) -> None:
+        """The error verdict is written only once every seat is terminal."""
+        script = {
+            ("proposer", "proposer_1"): InvalidOutput("nonsense"),
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        worker = worker_for(store, {"fake1": fake(script)})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+
+        # All three seats are claimed, as one in-flight batch.  Two of them
+        # settle -- the failing proposer_1 and one sibling -- and the third
+        # stays claimed, which is exactly what a slow seat looks like.
+        claimed = {row["seat_name"]: row for row in store.claim_calls(
+            "alice", "w-1", {"fake1"}, 3
+        )}
+        assert sorted(claimed) == ["proposer_1", "proposer_2", "proposer_3"]
+        run(worker.execute(claimed["proposer_1"]))
+        run(worker.execute(claimed["proposer_2"]))
+
+        assert item_of(store, job_id)["status"] == "pending"
+        assert worker.advance(job_id, "item-1") == "waiting"
+        assert calls_of(store, job_id, "critic") == []
+        slow_row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_3"
+        )
+        assert slow_row["status"] == "claimed"
+
+        run(worker.execute(claimed["proposer_3"]))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "error"
+        # Both the failure and the sibling that finished later are recorded.
+        assert [(b.seat, b.status) for b in verdict.ballots] == [
+            ("proposer_1", "error"),
+            ("proposer_2", "ok"),
+            ("proposer_3", "ok"),
+        ]
+        assert verdict.votes == {"A:1": 2}
+
+
+class TestBackoff:
+    """The shipped backoff values, independent of the fast test timings."""
+
+    def test_the_default_backoff_is_two_then_eight_seconds(self, store: Any) -> None:
+        worker = CouncilWorker(store, None, {}, "alice", "w-1")
+        assert worker.retry_backoff_s == (2.0, 8.0)
+        assert worker.max_attempts == 3
+        # +-25% jitter, and the last value repeats for any further attempt.
+        assert 1.5 <= worker._backoff(1) <= 2.5
+        assert 6.0 <= worker._backoff(2) <= 10.0
+        assert 6.0 <= worker._backoff(3) <= 10.0
+
+    def test_jitter_can_be_switched_off(self, store: Any) -> None:
+        worker = CouncilWorker(
+            store, None, {}, "alice", "w-1", retry_backoff_s=(3.0,), retry_jitter=0.0
+        )
+        assert worker._backoff(1) == 3.0

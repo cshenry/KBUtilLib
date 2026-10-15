@@ -2067,6 +2067,11 @@ CONTRACT_METHODS = {
     "claim_calls",
     "complete_call",
     "release_call",
+    # Added by the engine milestone: the two columns the queue could not
+    # write for itself (a PENDING call's last error, and a job reaching
+    # 'running' or 'done').  See note_call_error / set_job_status.
+    "note_call_error",
+    "set_job_status",
     "transaction",
     "record_attempt",
     "find_reusable",

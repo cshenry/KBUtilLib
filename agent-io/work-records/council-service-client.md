@@ -8,7 +8,7 @@ maestro/developer/background-reference-only-agent--council-service-client
 
 ## commit_shas
 - `7ae94aa` — feat(council): client for Filipe's deployed GO council on poplar
-- (this record) — docs(work-record): record the council service-client milestone
+- `b9767a2` — docs(work-record): record the council service-client milestone
 
 ## summary
 Added `ConcordiaServiceClient`, the optional comparison-only client for Filipe

@@ -103,6 +103,7 @@ from .annotator_utils import (
     Term,
     _guard_protein,
     describe_or_accession,
+    docker_image_identity,
 )
 from .ontology_dictionary import OntologyDictionary
 
@@ -600,9 +601,21 @@ class KofamscanUtils(AnnotatorUtils):
         if "KO" in self._ontology_dictionary.degraded_namespaces:
             parameters["ontology_ko"] = "absent"
 
+        # `exec_annotation` has no --version flag, so there is no version
+        # string to parse out of the tool itself. The honest identity is the
+        # image's content hash: docker_image_identity pins the tag to a
+        # RepoDigest or, for a locally built image, to its Id. Recording the
+        # bare tag (the previous behaviour) named nothing -- `latest` is a
+        # different set of bytes after every rebuild. Native mode has no
+        # digest to pin to, so it still records the executable path.
         return AnnotationResult(
             tool=_TOOL,
-            tool_version=(self._docker_image or self._kofamscan_exe) or None,
+            tool_version=(
+                docker_image_identity(self._docker_image)
+                if self._docker_image
+                else self._kofamscan_exe
+            )
+            or None,
             db_version=self.profile_set,
             run_id=run_id,
             command=command,

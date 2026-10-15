@@ -84,6 +84,7 @@ from .annotator_utils import (
     AnnotatorUtils,
     Term,
     _guard_protein,
+    docker_image_identity,
 )
 
 # ---------------------------------------------------------------------------
@@ -673,13 +674,12 @@ class TransytUtils(AnnotatorUtils):
             self._stage_inputs(indir, proteins, tax_id, reference_database, metabolites)
             cmd, exit_code = self._run_docker(indir)
 
-            tool_version = f"{self._docker_image}"
-            try:
-                digest = self._get_image_digest()
-                if digest:
-                    tool_version = f"{self._docker_image}@{digest}"
-            except Exception:  # pragma: no cover
-                pass
+            # Was: _get_image_digest(), which read only RepoDigests[0].
+            # kbutillib/transyt:latest is built locally and never pushed, so
+            # its RepoDigests is empty and that template errored every time --
+            # this silently recorded the bare tag `kbutillib/transyt:latest`
+            # for every run. docker_image_identity falls back to the image Id.
+            tool_version = docker_image_identity(self._docker_image)
 
             records: list[AnnotationRecord] = []
             if exit_code != _EXIT_NO_TAXONOMY:
@@ -893,36 +893,6 @@ class TransytUtils(AnnotatorUtils):
             rxn_to_msrxn_cpds, input_protein_ids,
         )
 
-    # ------------------------------------------------------------------
-    # Provenance helper
-    # ------------------------------------------------------------------
-
-    def _get_image_digest(self) -> str:
-        """Return the Docker image digest for the configured image.
-
-        Returns:
-            Image digest string (e.g. ``"sha256:abc123..."``), or empty
-            string on failure.
-        """
-        try:
-            result = subprocess.run(
-                [
-                    "docker",
-                    "image",
-                    "inspect",
-                    "--format",
-                    "{{index .RepoDigests 0}}",
-                    self._docker_image,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
-        return ""
 
 
 # ---------------------------------------------------------------------------

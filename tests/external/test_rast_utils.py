@@ -178,14 +178,32 @@ class TestAnnotateResultParsing:
         ):
             result = ru.annotate({"g1": "MKTAY", "g2": "MNFST", "g3": "MPQRS"})
         assert result.tool == "rast"
-        assert result.tool_version is None
-        assert result.db_version is None
+        # Was `is None`. The tutorial service still exposes no version, but
+        # None made KBDL record its OWN service version in the annotator's
+        # version field. The kmer dataset id is reported instead -- see
+        # rast_utils._DEFAULT_KMER_DATASET for why it is operator-supplied.
+        assert result.tool_version == "2018-0531"
+        assert result.db_version == "2018-0531"
+        assert result.parameters["kmer_dataset"] == "2018-0531"
         gene_ids = {rec.gene_id for rec in result.records}
         # g2 (empty function) and g3 (no function key) are zero-hit and absent.
         assert gene_ids == {"g1"}
         [rec] = result.records
         assert [t.value for t in rec.terms] == ["Some enzyme (EC 1.1.1.1)"]
         assert all(t.namespace == "RAST" for t in rec.terms)
+
+    def test_kmer_dataset_is_config_overridable(self):
+        """A deployment pointed at a different kmer dataset must be able to
+        say so, because this value cannot be discovered at run time."""
+        ru = _make_utils()
+        ru._kmer_dataset = "2099-0101"
+        with patch(
+            "modelseedpy.core.rpcclient.RPCClient.call",
+            return_value=_rpc_result([{"id": "g1", "function": "Some enzyme"}]),
+        ):
+            result = ru.annotate({"g1": "MKTAY"})
+        assert result.tool_version == "2099-0101"
+        assert result.parameters["kmer_dataset"] == "2099-0101"
 
     def test_multi_role_function_splits_into_separate_rast_terms(self):
         ru = _make_utils()

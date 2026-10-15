@@ -473,3 +473,87 @@ class TestExports:
         assert kbutillib.AnnotationRecord is AR
         assert kbutillib.AnnotationResult is ARes
         assert kbutillib.ToolUnavailableError is TUE
+
+
+# ---------------------------------------------------------------------------
+# docker_image_identity
+#
+# These tests exist because the behaviour they pin was previously untested in
+# exactly the way that mattered: TransytUtils._get_image_digest read only
+# `{{index .RepoDigests 0}}`, and every test of it patched the method out, so
+# the suite was green while the real call failed 100% of the time on poplar
+# (every kbutillib/* image is built locally and never pushed, so RepoDigests
+# is empty and the template errors). The fixtures below reproduce DOCKER's
+# behaviour, not the adapter's -- that is the criterion a stub of the seam
+# could not have satisfied.
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+
+from kbutillib.domains.genome.annotation.annotator_utils import (  # noqa: E402
+    docker_image_identity,
+)
+
+_IDENT_RUN = "kbutillib.domains.genome.annotation.annotator_utils.subprocess.run"
+
+
+def _completed(returncode, stdout="", stderr=""):
+    return _subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def test_identity_falls_back_to_image_id_when_repodigests_is_empty():
+    """The poplar case: locally built, never pushed.
+
+    Docker does not return an empty string here -- it EXITS NON-ZERO with
+    "error calling index: reflect: slice index out of range" (measured
+    2026-10-15 against kbutillib/transyt:latest). Reproducing the exit code,
+    not an empty stdout, is the point of this test.
+    """
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[-2])
+        if "RepoDigests" in cmd[-2]:
+            return _completed(1, stderr="error calling index: slice index out of range")
+        return _completed(0, stdout="sha256:92f6e78fbdb8\n")
+
+    with _patch(_IDENT_RUN, side_effect=fake_run):
+        got = docker_image_identity("kbutillib/transyt:latest")
+
+    assert got == "kbutillib/transyt:latest@sha256:92f6e78fbdb8"
+    assert len(calls) == 2, "must fall through to {{.Id}}, not stop at RepoDigests"
+
+
+def test_identity_prefers_repodigest_when_present():
+    """A pulled/pushed image: the registry digest already carries the repo."""
+    with _patch(
+        _IDENT_RUN,
+        return_value=_completed(0, stdout="oschwengers/bakta@sha256:033df943\n"),
+    ):
+        got = docker_image_identity("oschwengers/bakta:v1.11.4")
+    assert got == "oschwengers/bakta@sha256:033df943"
+    assert got.count("@") == 1, "must not double up repo@repo@digest"
+
+
+def test_identity_returns_bare_tag_when_docker_is_absent():
+    with _patch(_IDENT_RUN, side_effect=FileNotFoundError):
+        assert docker_image_identity("kbutillib/kofamscan:latest") == (
+            "kbutillib/kofamscan:latest"
+        )
+
+
+def test_identity_returns_bare_tag_on_timeout():
+    with _patch(_IDENT_RUN, side_effect=_subprocess.TimeoutExpired("docker", 10)):
+        assert docker_image_identity("x:latest") == "x:latest"
+
+
+def test_identity_returns_bare_tag_when_every_field_is_blank():
+    with _patch(_IDENT_RUN, return_value=_completed(0, stdout="\n")):
+        assert docker_image_identity("x:latest") == "x:latest"
+
+
+def test_identity_of_empty_image_is_empty():
+    assert docker_image_identity("") == ""

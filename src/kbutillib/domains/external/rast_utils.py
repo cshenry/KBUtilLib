@@ -115,6 +115,29 @@ _ROLE_SPLIT_RE = re.compile(r"; | / | @")
 # RPCClient's own default timeout (modelseedpy/core/rpcclient.py).
 _DEFAULT_TIMEOUT_S = 30 * 60
 
+# The kmer dataset the SEED tutorial server annotates against.
+#
+# PROVENANCE -- READ BEFORE CHANGING. This is an OPERATOR ASSERTION (Chris
+# Henry, 2026-10-15), not a value this code can observe. It is recorded here
+# because the alternative was worse: `tool_version=None` made KBDL fall back to
+# its OWN service version, which reads like an annotator version and is not one.
+#
+# Measured 2026-10-12 against the live service, for anyone tempted to derive it:
+#   * `GenomeAnnotation.version` returns "0.1.0" -- the SDK module's version,
+#     constant across kmer dataset changes and meaningless as provenance.
+#   * `run_pipeline`'s `analysis_events` expose only the server-side dataset
+#     PATH (`-d /opt/patric-common/data/kmer_metadata_v2`, host `pecan`,
+#     `-u http://redwood.cels.anl.gov:6100/query`). No release number; the "v2"
+#     is the kmer SCHEME, not a dataset release.
+#   * `redwood.cels.anl.gov:6100` is unreachable from poplar, so the kmer
+#     server cannot be asked either.
+#
+# The consequence: this constant CANNOT drift-check itself. If the SEED
+# tutorial server is repointed at a newer kmer dataset, nothing here changes
+# and nothing notices. Pair it with the call-date window when it matters.
+# Override per-deployment with the `rast.kmer_dataset` config key.
+_DEFAULT_KMER_DATASET = "2018-0531"
+
 
 class RastServiceError(Exception):
     """Raised when the RAST JSON-RPC call fails or returns a malformed result.
@@ -176,6 +199,10 @@ class RastUtils(AnnotatorUtils):
     Config keys (read via ``get_config_value``):
         ``rast.timeout`` — Max seconds to wait for one RPC call (default
             1800, matching ``RPCClient``'s own default).
+        ``rast.kmer_dataset`` — The kmer dataset id reported as
+            ``AnnotationResult.tool_version`` (default ``"2018-0531"``). See
+            :data:`_DEFAULT_KMER_DATASET` for why this is operator-supplied
+            rather than queried.
 
     Example::
 
@@ -202,6 +229,9 @@ class RastUtils(AnnotatorUtils):
         super().__init__(**kwargs)
         self._timeout: int = int(
             self.get_config_value("rast.timeout", default=_DEFAULT_TIMEOUT_S)
+        )
+        self._kmer_dataset: str = str(
+            self.get_config_value("rast.kmer_dataset", default=_DEFAULT_KMER_DATASET)
         )
 
     # ------------------------------------------------------------------
@@ -259,9 +289,11 @@ class RastUtils(AnnotatorUtils):
         Returns:
             An ``AnnotationResult`` with:
             - ``tool = "rast"``
-            - ``tool_version = None`` / ``db_version = None`` — the
-              tutorial RPC service exposes no version endpoint via
-              ``GenomeAnnotation.run_pipeline``.
+            - ``tool_version`` / ``db_version`` = the configured kmer
+              dataset id (``rast.kmer_dataset``, default ``"2018-0531"``).
+              The tutorial RPC service exposes no version endpoint via
+              ``GenomeAnnotation.run_pipeline``, so this is operator-supplied
+              — see :data:`_DEFAULT_KMER_DATASET`.
             - ``records`` keyed by the caller's original ids. Genes RAST
               returned with no ``"function"`` (i.e. it found nothing to
               call) are absent from ``records`` — this is RAST reporting
@@ -310,14 +342,18 @@ class RastUtils(AnnotatorUtils):
             "num_calls": len(batches),
             "split_terms": split_terms,
             "stages": [stage["name"] for stage in _STAGES],
+            "kmer_dataset": self._kmer_dataset,
             "timeout": self._timeout,
             "analysis_events": analysis_events,
         }
 
+        # The kmer dataset, not a software version: for RAST that is the
+        # thing that determines the annotation. `None` here used to make
+        # KBDL record its own service version in this field.
         return AnnotationResult(
             tool=_TOOL,
-            tool_version=None,
-            db_version=None,
+            tool_version=self._kmer_dataset or None,
+            db_version=self._kmer_dataset or None,
             run_id=uuid.uuid4().hex,
             command=(
                 f"RPC {_RPC_METHOD} to {rast_client.rpc_client.url} "

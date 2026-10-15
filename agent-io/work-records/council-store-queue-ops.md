@@ -11,7 +11,7 @@ maestro/developer/background-reference-only-agent--council-store-queue-ops
 
 ## commit_shas
 - c94d2bd — feat(council): the store's queue and job control
-- (this record's own commit — see the end of this file)
+- 1a216cc — docs(work-record): record the council store's queue milestone
 
 ## summary
 Part 2 of 2 of the council store. Fills in the ten methods `SqliteStore` left

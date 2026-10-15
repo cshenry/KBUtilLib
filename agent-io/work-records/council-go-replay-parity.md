@@ -11,7 +11,7 @@ maestro/developer/background-reference-only-agent--council-go-replay-parity
 
 ## commit_shas
 - 33d8151 — test(council): replay Jose's V3 GO council through the worker, zero tokens
-- (this record's own commit — see the final line)
+- 4f05c0f — docs(council): correct three go_council.py line citations, add work record
 
 ## summary
 

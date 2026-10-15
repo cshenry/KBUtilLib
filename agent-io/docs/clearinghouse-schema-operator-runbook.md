@@ -263,6 +263,13 @@ print("berdl_notebook_utils:", getattr(berdl_notebook_utils, "__version__", "unk
 print("data_lakehouse_ingest:", getattr(data_lakehouse_ingest, "__version__", "unknown"), data_lakehouse_ingest.__file__)
 ```
 
+**MEASURED ANSWER, 2026-10-13: `~/king/backend/.venv/bin/python` is the
+interpreter that worked** -- all three import there, and it is what the live
+acceptance below was run with. `~/venvs/kbu-modeling` is NOT usable for this:
+inside the pod it reports `locus() == "off_pod"`, so every write refuses
+(dev 1534, second half). `/opt/conda/bin/python3.13` is the other candidate
+worth trying if the `king` venv is gone.
+
 **All three imports must succeed in the same interpreter, in the same
 cell.** If any one of them raises `ModuleNotFoundError`, OP2 and OP3 cannot
 run -- do not skip ahead and improvise a partial workaround (e.g. calling
@@ -2078,6 +2085,35 @@ kinds, and the difference is what you act on:
 
 A skip reason you cannot account for is a **stop**, not a rounding error. That
 is the whole reason they are enumerated by reason instead of totalled.
+
+### Acceptance: the live in-pod test
+
+The acceptance for PRD `clearinghouse-backfill-v1` is
+`tests/berdl/test_clearinghouse_live.py`. It is **attended, in-pod only**, and
+every test in it SKIPS (never errors) with `KBUTILLIB_LIVE_BERDL` unset, so it
+is safe to collect anywhere. It writes only to a per-run scratch namespace
+`kbaseincubator.clh_live_<8 hex>` / `kbaseincubator.clh_bf_live_<8 hex>` and
+drops it on the way out; **production `kbaseincubator.clearinghouse` is never
+named by any statement it issues.**
+
+Run it from a `kbhub` terminal, in the KBUtilLib checkout:
+
+```bash
+cd ~/projects/KBUtilLib          # or wherever this tree is checked out on the pod
+KBUTILLIB_LIVE_BERDL=1 ~/king/backend/.venv/bin/python -m pytest \
+    tests/berdl/test_clearinghouse_live.py -v
+```
+
+**Use `~/king/backend/.venv/bin/python`** -- that is the interpreter measured
+working on 2026-10-13 (see [OP1](#op1-blocking----verify-the-three-package-import)).
+A run under `~/venvs/kbu-modeling` reports `locus() == "off_pod"` from inside
+the pod and every live test skips for the wrong reason, which reads as a pass.
+
+Expect **8 collected, 8 passed, 0 skipped**. Any `skipped` means the gate or
+the locus did not take -- check the skip reason before reporting a result. If
+teardown cannot drop a scratch namespace it emits a `UserWarning` naming the
+namespace and the exact `DROP` to run by hand; **read the warnings summary**,
+because that is the only signal a scratch namespace leaked.
 
 ---
 

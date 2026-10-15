@@ -13,13 +13,23 @@ pass here is a sanity check, not a contract proof.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from datetime import datetime, timedelta
+from typing import (
+    Any,
+    ContextManager,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    Tuple,
+    runtime_checkable,
+)
 
 from .types import (
     CompletionRequest,
     CompletionResult,
     CouncilTask,
-    CouncilVerdict,
     SeatSpec,
 )
 
@@ -111,74 +121,321 @@ class QueryRenderer(Protocol):
 
 @runtime_checkable
 class CouncilStore(Protocol):
-    """Where jobs, items, call rows and verdicts live.
+    """Where jobs, items, call rows, verdicts and leases live.
 
     Call rows ARE the queue: a worker claims pending calls, runs them through
     the submitting user's own backends, and advances each item through
-    proposers -> critic -> meta -> verdict.  One implementation is a local
-    SQLite file, another a shared PostgreSQL database used by every KBUtilLib
-    installation, which is why reuse lookup is keyed on the content hashes
-    from :mod:`.types` rather than on anything user-local.
+    proposers -> critic -> meta -> verdict.  Two implementations satisfy this
+    protocol -- a local SQLite file and a shared PostgreSQL database every
+    KBUtilLib installation can point at -- which is why reuse lookup is keyed
+    on the content hashes from :mod:`.types` rather than on anything
+    user-local: a question one user has already paid for is not asked again.
 
-    PROVISIONAL: the task prompt that created this module referred to a
-    "STORE CONTRACT" section that was not included in it, so the member list
-    below is reconstructed from the queue behaviour the rest of the prompt
-    describes.  The store milestone is expected to refine these signatures;
-    the engine should treat this as the minimum surface, not a frozen one.
+    Row shapes are plain dicts keyed by the column names in
+    :mod:`.store.schema`, not models, because the store is also read by the
+    CLI and by operators with a SQL prompt.
+
+    Methods are grouped below in contract order: schema, query types,
+    jobs/items/calls, the queue, endpoint state, job control, workers and
+    leases, search.
     """
+
+    # -- schema -----------------------------------------------------------
+
+    def init_schema(self) -> None:
+        """Create every table and stamp the current schema version."""
+        ...
+
+    def schema_version(self) -> int:
+        """Return the stored schema version (0 if not initialised)."""
+        ...
+
+    def migrate(self) -> int:
+        """Bring the database up to the current schema version."""
+        ...
+
+    # -- query types ------------------------------------------------------
+
+    def put_query_type(
+        self,
+        name: str,
+        version: str,
+        spec: Dict[str, Any],
+        source: str = "user",
+        created_by: Optional[str] = None,
+    ) -> None:
+        """Save a query type.
+
+        Immutable: re-putting a DIFFERENT spec under an existing
+        ``(name, version)`` raises ``QueryTypeExists``; re-putting an
+        identical one is a no-op.
+        """
+        ...
+
+    def get_query_type(
+        self, name: str, version: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return one query type, or the latest active version."""
+        ...
+
+    def list_query_types(self, include_retired: bool = False) -> List[Dict[str, Any]]:
+        """Return the saved query types."""
+        ...
+
+    def retire_query_type(self, name: str, version: str) -> bool:
+        """Mark a query type retired without removing it."""
+        ...
+
+    # -- jobs, items, calls -----------------------------------------------
 
     def create_job(
         self,
-        query_name: str,
-        query_version: str,
-        roster: Dict[str, Any],
-        config_snapshot: Dict[str, Any],
-        submitted_by: str,
-        tasks: Optional[List[CouncilTask]] = None,
+        job: Dict[str, Any],
+        items: List[Dict[str, Any]],
+        proposer_calls: List[Dict[str, Any]],
     ) -> str:
-        """Create a job with its items and return the job id."""
+        """Write a job, its items and its proposer calls in ONE transaction."""
         ...
 
-    def get_job(self, job_id: str) -> Dict[str, Any]:
-        """Return the job row, including its stored roster and snapshot."""
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return one job row."""
         ...
 
-    def list_jobs(self, submitted_by: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Return job rows, newest first, optionally for one user only."""
+    def list_jobs(
+        self,
+        user: Optional[str] = None,
+        status: Optional[str] = None,
+        include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return job rows, excluding tombstoned jobs by default."""
         ...
 
-    def enqueue_calls(self, job_id: str, calls: List[Dict[str, Any]]) -> int:
-        """Append pending call rows for *job_id*; return how many were added."""
+    def get_items(self, job_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return a job's items."""
         ...
 
-    def claim_calls(self, worker_id: str, limit: int = 1) -> List[Dict[str, Any]]:
-        """Atomically claim up to *limit* pending calls for *worker_id*."""
+    def get_calls(self, job_id: str, item_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return a job's call rows."""
         ...
 
-    def record_result(self, call_id: str, result: CompletionResult) -> None:
-        """Persist the outcome of a claimed call."""
+    def add_calls(self, calls: List[Dict[str, Any]]) -> List[str]:
+        """Append call rows -- the critic and meta rounds."""
+        ...
+
+    def settle_item(
+        self, job_id: str, item_id: str, status: str, verdict: Any = None
+    ) -> None:
+        """Record an item's final status and verdict."""
+        ...
+
+    # -- the queue --------------------------------------------------------
+
+    def claim_calls(
+        self,
+        user: str,
+        worker_id: str,
+        endpoints: Set[str],
+        limit: int,
+        now: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Atomically claim up to *limit* due pending calls.
+
+        Only calls whose job was submitted by *user*, whose job is neither
+        cancelled nor paused nor tombstoned, whose endpoint is in *endpoints*
+        and is not halted for that user, and which are due
+        (``not_before`` null or past).  Ordered by job priority then
+        submission time then item order then role.
+        """
+        ...
+
+    def complete_call(
+        self,
+        call_id: str,
+        claim_token: str,
+        status: str,
+        reply_text: Optional[str] = None,
+        reply_parsed: Optional[Dict[str, Any]] = None,
+        fresh_usage: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+        reused_from: Optional[str] = None,
+    ) -> None:
+        """Record a claimed call's outcome.
+
+        Raises ``StaleClaim`` if the row was reclaimed, or if a daemon's
+        lease generation has since been superseded.
+        """
+        ...
+
+    def release_call(
+        self,
+        call_id: str,
+        claim_token: str,
+        not_before: Optional[datetime] = None,
+        increment_attempt: bool = True,
+    ) -> None:
+        """Put a claimed call back to pending, clearing its token."""
+        ...
+
+    def transaction(self, immediate: bool = True) -> ContextManager[Any]:
+        """Run a block as one transaction, yielding the connection."""
+        ...
+
+    def record_attempt(
+        self,
+        call_id: str,
+        attempt_no: int,
+        started_at: datetime,
+        finished_at: datetime,
+        outcome_kind: str,
+        usage: Optional[Dict[str, Any]] = None,
+        worker_id: Optional[str] = None,
+    ) -> None:
+        """Record one try at a call.
+
+        Raises ``ValueError`` if any argument is a dict containing a
+        ``system`` or ``user`` key: prompt text never enters this table.
+        """
         ...
 
     def find_reusable(self, prompt_hash: str) -> Optional[Dict[str, Any]]:
-        """Return a prior successful call with this prompt hash, if any."""
+        """Return an already-answered call with this prompt hash, from any user."""
         ...
 
-    def record_verdict(self, job_id: str, verdict: CouncilVerdict) -> None:
-        """Persist the decided verdict for one item."""
+    def reclaim_stale(
+        self, now: Optional[datetime] = None, max_age: timedelta = timedelta(minutes=10)
+    ) -> int:
+        """Return calls held by dead workers to the queue; return how many."""
         ...
 
-    def get_verdicts(self, job_id: str) -> List[CouncilVerdict]:
-        """Return every decided verdict for *job_id*."""
+    # -- endpoint state ---------------------------------------------------
+
+    def get_endpoint_state(self, user: str, endpoint: str) -> Dict[str, Any]:
+        """Return the (user, endpoint) budget and halt state."""
         ...
 
-    def halt_endpoint(self, endpoint: str, reason: str) -> None:
-        """Mark *endpoint* unusable for this store's pending work."""
+    def add_tokens(self, user: str, endpoint: str, n: int) -> Dict[str, Any]:
+        """Add *n* tokens to the current epoch and the lifetime total."""
         ...
 
-    def halted_endpoints(self) -> Dict[str, str]:
-        """Return ``{endpoint: reason}`` for every currently halted endpoint."""
+    def set_halt(self, user: str, endpoint: str, kind: str, message: str = "") -> Dict[str, Any]:
+        """Halt an endpoint for one user."""
         ...
 
-    def close(self) -> None:
-        """Release the store's connections."""
+    def reset_halt(self, user: str, endpoint: str) -> Dict[str, Any]:
+        """Clear a halt.  Never changes the token counters."""
+        ...
+
+    def reset_budget(self, user: str, endpoint: str) -> Dict[str, Any]:
+        """Start a new budget epoch, keeping the lifetime total."""
+        ...
+
+    # -- job control ------------------------------------------------------
+
+    def job_status(self, job_id: str) -> Dict[str, Any]:
+        """Progress, pending work by role and endpoint, blockers, throughput."""
+        ...
+
+    def results(self, job_id: str, include_pending: bool = False) -> List[Dict[str, Any]]:
+        """Decided items with their verdicts."""
+        ...
+
+    def cancel_job(self, job_id: str, user: str) -> None:
+        """Cancel a job: terminal, and it supersedes every pending call."""
+        ...
+
+    def delete_job(self, job_id: str, user: str) -> None:
+        """Tombstone a cancelled or done job.  No row is physically removed."""
+        ...
+
+    # -- workers and leases -----------------------------------------------
+
+    def register_worker(self, row: Dict[str, Any]) -> str:
+        """Insert or refresh a worker row."""
+        ...
+
+    def heartbeat_worker(self, worker_id: str, now: Optional[datetime] = None) -> bool:
+        """Stamp a worker as alive."""
+        ...
+
+    def live_workers(
+        self,
+        user: Optional[str] = None,
+        now: Optional[datetime] = None,
+        max_age: timedelta = timedelta(minutes=2),
+    ) -> List[Dict[str, Any]]:
+        """Return workers that have heartbeated within *max_age*."""
+        ...
+
+    def remove_worker(self, worker_id: str) -> bool:
+        """Delete a worker row."""
+        ...
+
+    def request_stop(self, user: str) -> bool:
+        """Ask the holder of the user's daemon lease to stop."""
+        ...
+
+    def stop_requested(self, worker_id: str) -> bool:
+        """Has this worker been asked to stop?"""
+        ...
+
+    def acquire_daemon_lease(
+        self,
+        user: str,
+        worker_id: str,
+        now: Optional[datetime] = None,
+        ttl: timedelta = timedelta(minutes=2),
+    ) -> Optional[int]:
+        """Take the user's single-daemon lease; return its generation or None."""
+        ...
+
+    def renew_daemon_lease(
+        self,
+        user: str,
+        worker_id: str,
+        generation: int,
+        now: Optional[datetime] = None,
+        ttl: timedelta = timedelta(minutes=2),
+    ) -> bool:
+        """Extend the lease; False once the generation is superseded."""
+        ...
+
+    def release_daemon_lease(self, user: str, worker_id: str, generation: int) -> bool:
+        """Give the lease up, keeping the generation."""
+        ...
+
+    def acquire_gpu_lease(
+        self,
+        worker_id: str,
+        now: Optional[datetime] = None,
+        ttl: timedelta = timedelta(minutes=2),
+    ) -> Optional[int]:
+        """Take the fleet-wide GPU residency lease."""
+        ...
+
+    def renew_gpu_lease(
+        self,
+        worker_id: str,
+        generation: int,
+        now: Optional[datetime] = None,
+        ttl: timedelta = timedelta(minutes=2),
+    ) -> bool:
+        """Extend the GPU lease."""
+        ...
+
+    def release_gpu_lease(self, worker_id: str, generation: int) -> bool:
+        """Give the GPU lease up."""
+        ...
+
+    # -- search -----------------------------------------------------------
+
+    def search_calls(
+        self,
+        query_name: Optional[str] = None,
+        canonical_model: Optional[str] = None,
+        entity_hash: Optional[str] = None,
+        data_hash: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Find call rows across every job and user."""
         ...

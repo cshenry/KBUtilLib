@@ -23,6 +23,7 @@ The published envelope (from ``council.py``'s docstring)::
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sqlite3
 import stat
@@ -797,3 +798,140 @@ class TestDoctorWithNothingPatched:
         assert argv == ["--version"]
         assert "-p" not in argv
         assert states["critic"]["cli_version"] == "9.9.9 (Fake Claude)"
+
+
+# ---------------------------------------------------------------------------
+# daemon
+# ---------------------------------------------------------------------------
+
+
+class TestDaemonVerbs:
+    """``kbu council daemon start | stop | status`` -- the command surface.
+
+    The daemon's own behaviour (the lock, the loop, the drain, the deadline)
+    is tested against real processes in
+    ``tests/domains/ai/council/test_daemon.py``.  What is checked HERE is what
+    this module is for: that each verb emits the one published envelope, that
+    the human rendering is a rendering of that same dict, and that a refusal
+    arrives as a clean CLI error naming the holder rather than a traceback.
+
+    Nothing is spawned: the competing holder is this process, holding the real
+    execution lock, which is all three verbs need to answer.
+    """
+
+    @staticmethod
+    def _lock(tmp_path: Path) -> Any:
+        """The execution lock these verbs will find, built the facade's way."""
+        return CouncilUtils(
+            council_config=_fake_council_config(tmp_path),
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        ).execution_lock()
+
+    def test_status_reports_a_free_lock_and_no_workers(
+        self, runner: CliRunner, fake_council: List[str]
+    ) -> None:
+        result = runner.invoke(main, fake_council + ["daemon", "status", "--json"])
+        envelope = _envelope(result)
+        assert result.exit_code == 0
+        assert envelope["verb"] == "daemon status"
+        assert envelope["data"]["running"] is False
+        assert envelope["data"]["holder"] is None
+        assert envelope["data"]["workers"] == []
+        assert envelope["data"]["lock"].endswith("daemon.lock")
+
+    def test_status_names_the_holder_and_its_worker_row(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        store_url = fake_council[fake_council.index("--store") + 1]
+        from kbutillib.domains.ai.council.store import open_store
+
+        store = open_store(store_url)
+        try:
+            store.register_worker(
+                {"worker_id": "w1", "user": "tester", "kind": "daemon", "pid": os.getpid()}
+            )
+            with self._lock(tmp_path).acquire("daemon") as record:
+                result = runner.invoke(main, fake_council + ["daemon", "status", "--json"])
+            envelope = _envelope(result)
+            assert envelope["data"]["running"] is True
+            assert envelope["data"]["holder"]["pid"] == record["pid"]
+            assert envelope["data"]["holder"]["kind"] == "daemon"
+            rows = envelope["data"]["workers"]
+            assert [row["worker_id"] for row in rows] == ["w1"]
+            assert rows[0]["state"] == "live"
+        finally:
+            store.close()
+
+    def test_start_refuses_while_the_lock_is_held_and_names_the_holder(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        with self._lock(tmp_path).acquire("run") as record:
+            result = runner.invoke(main, fake_council + ["daemon", "start"])
+        assert result.exit_code != 0
+        assert "LockHeld" in result.output
+        assert "council run" in result.output
+        assert str(record["pid"]) in result.output
+
+    def test_stop_reports_that_nothing_is_running(
+        self, runner: CliRunner, fake_council: List[str]
+    ) -> None:
+        result = runner.invoke(main, fake_council + ["daemon", "stop", "--json"])
+        envelope = _envelope(result)
+        assert result.exit_code == 0
+        assert envelope["data"]["stopped"] is False
+        assert "no daemon is running" in envelope["data"]["detail"]
+
+    def test_stop_refuses_a_holder_that_is_not_a_daemon(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        """Only a daemon is signalled: a `migrate` in the way is not this
+        verb's to kill."""
+        with self._lock(tmp_path).acquire("migrate"):
+            result = runner.invoke(main, fake_council + ["daemon", "stop"])
+        assert result.exit_code != 0
+        assert "council migrate" in result.output
+        assert "only signals a daemon" in result.output
+
+    def test_the_bare_group_is_status(
+        self, runner: CliRunner, fake_council: List[str]
+    ) -> None:
+        result = runner.invoke(main, fake_council + ["daemon"])
+        assert result.exit_code == 0
+        assert "holder: (none" in result.output
+
+    def test_the_human_rendering_is_a_rendering_of_the_same_dict(
+        self, runner: CliRunner, fake_council: List[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rule 1 of the output contract, for the daemon's verbs too."""
+        seen: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            "kbutillib.interfaces.cli.council._render", lambda envelope: seen.append(envelope)
+        )
+        result = runner.invoke(main, fake_council + ["daemon", "status"])
+        assert result.exit_code == 0
+        assert len(seen) == 1
+        assert set(seen[0]) == ENVELOPE_KEYS
+        assert seen[0]["verb"] == "daemon status"
+        assert seen[0]["data"]["lock"].endswith("daemon.lock")
+
+    def test_schemaless_store_sends_the_user_to_db_init(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Nothing creates a schema implicitly -- not even the daemon."""
+        config_path = _write_config(tmp_path, _fake_council_config(tmp_path))
+        result = runner.invoke(
+            main,
+            [
+                "council",
+                "--config",
+                str(config_path),
+                "--store",
+                f"sqlite:///{tmp_path}/never-made.sqlite",
+                "daemon",
+                "status",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "kbu council db init" in result.output

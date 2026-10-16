@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -267,31 +268,105 @@ class CouncilUtils(SharedEnvUtils):
     def db_migrate(self) -> Dict[str, Any]:
         """Bring the store up to the current schema version.
 
-        Opened with ``check_version=False``, because the databases a migration
-        exists for are precisely the ones a version check refuses to open.
+        Three things guard this, because a migration is the one verb that
+        changes the shape of a store somebody else may be reading:
+
+        * The store is opened with ``check_version=False``, because the
+          databases a migration exists for are precisely the ones a version
+          check refuses to open.
+        * The EXECUTION LOCK is held for the whole migration (kind
+          ``migrate``), so it cannot run beside a daemon, a ``run`` or an
+          ``evaluate``. Held, not waited for: if something else is running
+          this raises and names it.
+        * The store file (and its ``-wal`` / ``-shm`` siblings) are copied to
+          ``council.sqlite.bak-<UTC timestamp>`` BEFORE anything is altered.
+          A v1 -> v2 migration drops tables, which is not reversible, so the
+          user keeps the file they had.
+
+        Returns a report including ``backup`` -- the path of the copy, or
+        ``None`` for an in-memory store or a store file that does not exist
+        yet (there is nothing to lose).
+
+        Raises:
+            LockHeld: another council process is executing against this store.
         """
-        store = self.store(check_version=False)
-        try:
-            before = int(store.schema_version())
-            # An ALREADY-STAMPED store may still be missing a column added to
-            # the same schema version later (see schema.ADDITIVE_COLUMNS).
-            # Asked for here, BEFORE migrate() does it silently, so the report
-            # can name what it added rather than saying "migrated: false"
-            # about a file it just altered.
-            adder = getattr(store, "add_missing_columns", None)
-            added = list(adder()) if before and callable(adder) else []
-            version = int(store.migrate())
-        finally:
-            closer = getattr(store, "close", None)
-            if callable(closer) and store is not self._store:
-                closer()
+        from .council.execlock import ExecutionLock
+
+        path = self._store_file()
+        directory = path.parent if path is not None else Path.cwd()
+        lock = ExecutionLock(directory, path)
+        with lock.acquire("migrate"):
+            backup = self._backup_store_file(path)
+            store = self.store(check_version=False)
+            try:
+                before = int(store.schema_version())
+                # An ALREADY-STAMPED store may still be missing a column added
+                # to the same schema version later (see
+                # schema.ADDITIVE_COLUMNS).  Asked for here, BEFORE migrate()
+                # does it silently, so the report can name what it added
+                # rather than saying "migrated: false" about a file it just
+                # altered.
+                adder = getattr(store, "add_missing_columns", None)
+                added = list(adder()) if before and callable(adder) else []
+                version = int(store.migrate())
+            finally:
+                closer = getattr(store, "close", None)
+                if callable(closer) and store is not self._store:
+                    closer()
         return {
             "store": _safe_store_url(self.store_url()),
             "schema_version_before": before,
             "schema_version": version,
             "columns_added": added,
             "migrated": before != version or bool(added),
+            "backup": str(backup) if backup is not None else None,
         }
+
+    def _store_file(self) -> Optional[Path]:
+        """The store's path on disk, or None when there is not one.
+
+        Resolved through the store layer's own URL normalisation rather than
+        by parsing the URL here, so ``~``, a bare path and ``sqlite:///...``
+        all land in the same place the store itself would use -- and an
+        in-memory store answers None.
+        """
+        from .council.store.sqlite import _resolve_sqlite_url
+
+        try:
+            _url, path = _resolve_sqlite_url(self.store_url())
+        except Exception:  # noqa: BLE001 - open_store raises the real refusal
+            return None
+        return path
+
+    @staticmethod
+    def _backup_store_file(path: Optional[Path]) -> Optional[Path]:
+        """Copy *path* and its WAL siblings aside; return the copy's path.
+
+        ``None`` when there is nothing to copy -- an in-memory store, or a
+        file that does not exist yet because this migration is really a
+        create.  The ``-wal`` and ``-shm`` files go too: a WAL database is
+        that trio, and a copy of only the main file can be missing the most
+        recent committed transactions.
+
+        The timestamp is UTC to the second with a counter, so two migrations
+        in the same second do not overwrite each other's backup.
+        """
+        if path is None or not path.exists():
+            return None
+        import shutil
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = path.with_name(f"{path.name}.bak-{stamp}")
+        counter = 1
+        while target.exists():
+            target = path.with_name(f"{path.name}.bak-{stamp}-{counter}")
+            counter += 1
+        shutil.copy2(path, target)
+        for suffix in ("-wal", "-shm"):
+            sibling = path.with_name(path.name + suffix)
+            if sibling.exists():
+                shutil.copy2(sibling, target.with_name(target.name + suffix))
+        return target
 
     def db_check(self) -> Dict[str, Any]:
         """Report the store's reachability and schema version.

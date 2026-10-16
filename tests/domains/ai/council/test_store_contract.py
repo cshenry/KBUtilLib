@@ -1961,7 +1961,7 @@ class TestDeleteJob:
 #: Every method of the STORE CONTRACT, verbatim and in contract order.  If a
 #: method is renamed, added or dropped in protocols.py without this list being
 #: updated deliberately, the test below fails -- which is the point: the
-#: protocol is what the engine, the CLI and PostgresStore are written against.
+#: protocol is what the engine and the CLI are written against.
 CONTRACT_METHODS = {
     # schema
     "init_schema",

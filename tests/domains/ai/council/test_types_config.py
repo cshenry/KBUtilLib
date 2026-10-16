@@ -516,6 +516,20 @@ class TestFilipeLegacyConfig:
         assert cfg.endpoints["gpt-oss-120b"].kind == "openai"
         assert cfg.default_profile == "argo"
 
+    def test_its_now_unknown_supervisor_key_is_dropped_not_fatal(self, caplog):
+        """His real file declares `supervisor: true`, which no longer exists.
+
+        Review round 2 removed the flag with the rest of model management.
+        A key a config file carries that this build does not know is WARNED
+        about and dropped -- never fatal -- because somebody's working file
+        must not stop loading when a field is retired.
+        """
+        with caplog.at_level("WARNING"):
+            cfg = load_council_config(FILIPE_CONFIG)
+        assert not hasattr(cfg.endpoints["gpt-oss-120b"], "supervisor")
+        assert "supervisor" not in cfg.endpoints["gpt-oss-120b"].model_dump()
+        assert any("supervisor" in record.message for record in caplog.records)
+
     def test_expands_the_vllm_host_variable(self, monkeypatch):
         monkeypatch.delenv("VLLM_HOST", raising=False)
         cfg = load_council_config(FILIPE_CONFIG)

@@ -17,7 +17,9 @@ would pass against a convenient test spec and fail against the product.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
+import socket
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -218,10 +220,135 @@ class TestEndToEnd:
         assert verdict["decided_by"] == "deterministic_empty"
 
 
+class TestProvenance:
+    """``submitted_by`` is a LABEL: config ``user``, else the OS account.
+
+    There is no identity in the council (review round 2): this grants nothing
+    and gates nothing, which is why the tests below check what gets WRITTEN
+    and then check that changing it takes nothing away.
+    """
+
+    def _util(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **extra):
+        config = dict(_config(tmp_path))
+        config.update(extra)
+        council = CouncilUtils(
+            council_config=config,
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+        )
+        council.db_init()
+        backend = FakeBackend(unanimous_script)
+        monkeypatch.setattr(
+            CouncilUtils,
+            "build_backends",
+            lambda self, roster, allow_unverified=None: {"local": backend},
+        )
+        return council
+
+    def test_submitted_by_honours_the_config_user_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        council = self._util(tmp_path, monkeypatch, user="filipe")
+        try:
+            assert council.user() == "filipe"
+            job_id = council.submit("go_mf", _items()[:1])
+            assert council.store().get_job(job_id)["submitted_by"] == "filipe"
+        finally:
+            council.close()
+
+    def test_without_the_key_it_falls_back_to_the_os_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(getpass, "getuser", lambda: "os-account")
+        council = self._util(tmp_path, monkeypatch)
+        try:
+            assert council.user() == "os-account"
+        finally:
+            council.close()
+
+    def test_the_config_key_wins_over_the_os_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(getpass, "getuser", lambda: "os-account")
+        council = self._util(tmp_path, monkeypatch, user="declared")
+        try:
+            assert council.user() == "declared"
+        finally:
+            council.close()
+
+    def test_no_kbase_token_is_consulted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Identity used to resolve a KBase token.  It must not any more."""
+        monkeypatch.setattr(getpass, "getuser", lambda: "os-account")
+        council = self._util(tmp_path, monkeypatch)
+
+        def _refuse(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("council identity must not read a token")
+
+        monkeypatch.setattr(CouncilUtils, "get_token", _refuse, raising=False)
+        try:
+            assert council.user() == "os-account"
+        finally:
+            council.close()
+
+    def test_submitted_host_is_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        council = self._util(tmp_path, monkeypatch, user="filipe")
+        try:
+            job_id = council.submit("go_mf", _items()[:1])
+            assert council.store().get_job(job_id)["submitted_host"] == socket.gethostname()
+        finally:
+            council.close()
+
+    def test_changing_the_label_strands_no_pending_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A job submitted as "before" is still run by a council called "after"."""
+        first = self._util(tmp_path, monkeypatch, user="before")
+        try:
+            job_id = first.submit("go_mf", _items()[:1])
+        finally:
+            first.close()
+
+        second = self._util(tmp_path, monkeypatch, user="after")
+        try:
+            assert second.user() == "after"
+            assert [row["job_id"] for row in second.jobs()] == [job_id]
+            summary = second.run(job_id=job_id)
+            assert summary["status"] == "done"
+            assert second.job_status(job_id)["status"] == "done"
+        finally:
+            second.close()
+
+    def test_changing_the_label_resets_no_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The spend is the store's, so a rename cannot clear it."""
+        first = self._util(tmp_path, monkeypatch, user="before")
+        try:
+            first.store().add_tokens("local", 1_234)
+            first.store().set_halt("local", "quota_exhausted", "out of quota")
+        finally:
+            first.close()
+
+        second = self._util(tmp_path, monkeypatch, user="after")
+        try:
+            (state,) = [
+                row for row in second.endpoint_status() if row["endpoint"] == "local"
+            ]
+            assert state["lifetime_tokens"] == 1_234
+            assert state["halted"] is True
+        finally:
+            second.close()
+
+
 class TestJobControl:
     """``jobs``, ``cancel``, ``delete`` and ``rerun``."""
 
-    def test_jobs_lists_this_user_and_hides_tombstones(self, util: CouncilUtils) -> None:
+    def test_jobs_lists_every_job_and_hides_tombstones(self, util: CouncilUtils) -> None:
         job_id = util.submit("go_mf", _items()[:1], label="mine")
         rows = util.jobs()
         assert [row["job_id"] for row in rows] == [job_id]

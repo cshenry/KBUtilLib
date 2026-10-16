@@ -17,7 +17,8 @@ What the migration must do (review rounds 2 and 3):
 * re-key ``endpoint_state`` onto the store-local identity, summing the token
   counters across historical user labels, keeping the HIGHEST budget epoch,
   and keeping every halt (combining the messages when there are several);
-* stamp version 2;
+* stamp version 2, refuse to run under a held execution lock, and leave a
+  backup of the file it is about to change;
 * be a no-op the second time.
 
 No test here makes a network call, spends a token, needs a CLI login or needs
@@ -37,6 +38,7 @@ sa = pytest.importorskip(
     reason="the council store needs the `council` extra: pip install 'kbutillib[council]'",
 )
 
+from kbutillib.domains.ai.council.execlock import ExecutionLock  # noqa: E402
 from kbutillib.domains.ai.council.store import open_store  # noqa: E402
 from kbutillib.domains.ai.council.store import schema as sch  # noqa: E402
 from kbutillib.domains.ai.council.store.sqlite import STORE_IDENTITY  # noqa: E402
@@ -346,6 +348,73 @@ class TestEndpointStateMerge:
         build_v1_store(path)
         assert migrate(path)["schema_version"] == 2
         assert self._state(path) == {}
+
+
+# ---------------------------------------------------------------------------
+# The execution lock and the backup
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateUnderTheLock:
+    @pytest.fixture
+    def v1_path(self, tmp_path: Path) -> Path:
+        path = tmp_path / "council" / "council.sqlite"
+        build_v1_store(path, endpoint_state=[("alice", "argo", 0, 100, 400, None, None)])
+        return path
+
+    def test_migrate_refuses_while_the_lock_is_held(self, v1_path: Path) -> None:
+        """A migration that ran beside a worker would drop tables under it."""
+        lock = ExecutionLock(v1_path.parent)
+        with lock.acquire("run"):
+            with pytest.raises(RuntimeError) as excinfo:
+                migrate(v1_path)
+        message = str(excinfo.value)
+        assert "run" in message
+        assert str(v1_path.parent / "daemon.lock") in message
+
+    def test_a_refused_migration_changes_nothing(self, v1_path: Path) -> None:
+        lock = ExecutionLock(v1_path.parent)
+        with lock.acquire("daemon"):
+            with pytest.raises(RuntimeError):
+                migrate(v1_path)
+        assert set(V1_ONLY_TABLES) <= table_names(v1_path)
+        store = open_store(f"sqlite:///{v1_path}", check_version=False)
+        try:
+            assert store.schema_version() == 1
+        finally:
+            store.close()
+
+    def test_migrate_writes_a_backup_before_touching_the_file(self, v1_path: Path) -> None:
+        report = migrate(v1_path)
+        backups = sorted(v1_path.parent.glob("council.sqlite.bak-*"))
+        assert len(backups) == 1
+        assert report["backup"] == str(backups[0])
+        # The backup is the PRE-migration file: it still has the five tables.
+        assert set(V1_ONLY_TABLES) <= table_names(backups[0])
+
+    def test_the_backup_is_a_usable_v1_database(self, v1_path: Path) -> None:
+        migrate(v1_path)
+        (backup,) = sorted(v1_path.parent.glob("council.sqlite.bak-*"))
+        conn = sqlite3.connect(backup)
+        try:
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0] == 3
+        finally:
+            conn.close()
+
+    def test_migrating_an_already_current_store_takes_the_lock_too(
+        self, tmp_path: Path
+    ) -> None:
+        """Even the no-op path must not run beside a worker."""
+        path = tmp_path / "current" / "council.sqlite"
+        store = open_store(f"sqlite:///{path}")
+        store.init_schema()
+        store.close()
+
+        lock = ExecutionLock(path.parent)
+        with lock.acquire("evaluate"):
+            with pytest.raises(RuntimeError, match="evaluate"):
+                migrate(path)
 
 
 def _T0() -> datetime:

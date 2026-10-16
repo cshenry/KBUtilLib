@@ -1284,29 +1284,37 @@ class SqliteStore:
             )
         return call
 
-    def next_attempt_no(self, call_id: str) -> int:
-        """The lowest ``attempts.attempt_no`` not yet used for *call_id*.
+    def next_uncharged_attempt_no(self, call_id: str) -> int:
+        """A free NEGATIVE ``attempts.attempt_no`` for *call_id*: -1, -2, ...
 
         ``attempts`` is keyed ``(call_id, attempt_no)`` and the engine derives
-        that number from ``calls.attempt_count`` -- which is correct for every
-        outcome that charges the call an attempt.  The council daemon's stop
-        deadline records an ``interrupted`` attempt WITHOUT charging one
-        (review round 3: a daemon being stopped is not the call's fault), so
-        it has no number of its own to file the row under, and reusing
-        ``attempt_count + 1`` would collide with the attempt the call's next
-        real try is going to write.
+        that number from ``calls.attempt_count`` -- correct for every outcome
+        that CHARGES the call an attempt, which is every outcome but one.  The
+        council daemon's stop deadline records an ``interrupted`` attempt
+        without charging one (review round 3: a daemon being stopped is not
+        the call's fault), so ``attempt_count`` does not move and the number
+        the call's NEXT real try will use is still ``attempt_count + 1``.
+        Filing the interrupted row there would collide with that try -- and a
+        collision inside the settle transaction would lose the answer the call
+        eventually gave.
+
+        So an uncharged attempt is filed below zero.  The engine's sequence is
+        1, 2, 3...; this one hands out -1, -2, ... in order, so a call
+        interrupted twice gets two rows, nothing ever collides, and the SIGN
+        is the record of which attempts cost the call a retry and which did
+        not.
 
         NOT part of the :class:`~..protocols.CouncilStore` contract: it is a
-        convenience over a table the contract already owns, and the one caller
-        falls back to ``attempt_count + 1`` for a store that lacks it.
+        convenience over a table the contract already owns, and its one caller
+        has a fallback for a store that lacks it.
         """
         with self._read() as conn:
-            highest = conn.execute(
-                sa.select(sa.func.max(sch.attempts.c.attempt_no)).where(
+            lowest = conn.execute(
+                sa.select(sa.func.min(sch.attempts.c.attempt_no)).where(
                     sch.attempts.c.call_id == call_id
                 )
             ).scalar()
-        return int(highest or 0) + 1
+        return min(int(lowest or 0), 0) - 1
 
     def record_attempt(
         self,

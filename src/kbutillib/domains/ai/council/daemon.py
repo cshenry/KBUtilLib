@@ -56,6 +56,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -340,6 +341,12 @@ class CouncilDaemon:
         self._last_wall: Optional[float] = None
         self._last_mono: Optional[float] = None
         self._worker: Optional[_DaemonWorker] = None
+        #: Set by the signal handler.  A plain threading event rather than an
+        #: ``asyncio.Event`` because the handler is installed before the loop
+        #: exists (see :meth:`run_foreground`).
+        self._stop_flag = threading.Event()
+        self._loop: Optional[Any] = None
+        self._async_stop: Optional[asyncio.Event] = None
 
     # -- where the daemon lives -------------------------------------------
 
@@ -485,6 +492,19 @@ class CouncilDaemon:
         """
         argv = [sys.executable, "-m", "kbutillib", "council"]
         source = getattr(self.council, "council_config_source", None)
+        if isinstance(source, Mapping):
+            # An in-memory configuration cannot be handed to another process,
+            # and spawning a child that would silently load a DIFFERENT
+            # configuration -- the packaged default -- is the worst available
+            # answer: it would probe endpoints nobody asked for and work a
+            # store nobody named.  Refused rather than approximated.
+            raise DaemonError(
+                "this council was built from an in-memory configuration, which "
+                "cannot be passed to a detached child: the child would load the "
+                "packaged default instead and work a different store. Use "
+                "run_foreground() (`kbu council daemon start --foreground`), or "
+                "build the council from a configuration FILE."
+            )
         if isinstance(source, (str, Path)):
             argv += ["--config", str(source)]
         override = getattr(self.council, "store_url_override", None)
@@ -549,6 +569,7 @@ class CouncilDaemon:
         deadline = self._mono() + self.timings.stop_wait_s
         while self._mono() < deadline:
             if self.lock.probe() is None:
+                _reap(pid)
                 return {
                     "stopped": True,
                     "running": False,
@@ -581,25 +602,45 @@ class CouncilDaemon:
         Raises:
             LockHeld: another council process holds the execution lock.
         """
-        with self.lock.acquire("daemon") as record:
-            # Before ANYTHING is served: both CLI backends read project
-            # context out of the cwd, and a daemon inheriting the directory it
-            # was launched from would answer council questions with somebody's
-            # repository in scope.  The council directory holds the store, the
-            # lock and the log and nothing a CLI would read as context.
-            os.chdir(self.directory)
-            return _run_loop(self._serve(record))
+        # The handlers go on FIRST, before the lock and before the loop.  A
+        # ``SIGTERM`` in the window between taking the lock and installing
+        # them would get the default action -- death -- and a daemon that dies
+        # with the lock held and calls claimed is exactly what the drain and
+        # the interrupt pass exist to prevent.  The handler sets a plain
+        # threading flag until there is a loop to wake; :meth:`_serve` reads
+        # that flag on the way in, so a signal that arrived early is honoured
+        # rather than lost.
+        self._stop_flag.clear()
+        with _signals(self):
+            with self.lock.acquire("daemon") as record:
+                # Before ANYTHING is served: both CLI backends read project
+                # context out of the cwd, and a daemon inheriting the
+                # directory it was launched from would answer council
+                # questions with somebody's repository in scope.  The council
+                # directory holds the store, the lock and the log and nothing
+                # a CLI would read as context.
+                os.chdir(self.directory)
+                return _run_loop(self._serve(record))
 
     async def _serve(self, record: Mapping[str, Any]) -> Dict[str, Any]:
         """The loop, with the lock already held and the cwd already moved."""
         store = self.council.require_schema()
-        loop = asyncio.get_running_loop()
         stop = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
+        self._async_stop = stop
+        if self._stop_flag.is_set():
+            # A signal arrived before this loop existed.  Honour it: one pass
+            # with nothing claimed, then a clean shutdown.
+            stop.set()
         summary: Dict[str, Any] = {
             "worker_id": self.worker_id,
             "pid": os.getpid(),
             "store": self.council.store_url(),
             "lock": str(self.lock.path),
+            # Reported because "the daemon is not running in the directory it
+            # was launched from" is the whole point of the chdir above, and a
+            # property nobody can observe is a property nobody can keep.
+            "cwd": os.getcwd(),
             "passes": 0,
             "claimed": 0,
             "finished": 0,
@@ -608,7 +649,7 @@ class CouncilDaemon:
             "started_at": str(record.get("started_at") or ""),
         }
 
-        with _signals(loop, stop):
+        try:
             try:
                 last_probe = 0.0
                 while not stop.is_set():
@@ -644,6 +685,13 @@ class CouncilDaemon:
                     await _wait_for(stop, self.timings.idle_poll_s)
             finally:
                 summary["interrupted"] = self._shutdown(store)
+        finally:
+            # The loop is about to be closed, so the handler must stop
+            # reaching for it: a ``call_soon_threadsafe`` on a closed loop
+            # raises inside a signal handler, where nothing can report it.
+            self._loop = None
+            self._async_stop = None
+        summary["resumes"] = max(int(summary["resumes"]), self.resumes)
         return summary
 
     async def _work_once(self, worker: _DaemonWorker, stop: asyncio.Event) -> Dict[str, Any]:
@@ -698,9 +746,16 @@ class CouncilDaemon:
         what owns those children; no council module reaches into
         ``llm.apis`` itself.
         """
-        from ... import llm
+        from .. import llm
 
-        return int(await llm.kill_cli_children())
+        try:
+            return int(await llm.kill_cli_children())
+        except Exception as exc:  # noqa: BLE001 - the drain must still finish
+            # Whatever went wrong here, the interrupt pass that puts the
+            # claimed calls back is still owed to the queue, so this is
+            # reported and not raised.
+            logger.warning("council daemon: could not kill the CLI children: %s", exc)
+            return 0
 
     # -- shutdown ----------------------------------------------------------
 
@@ -739,10 +794,12 @@ class CouncilDaemon:
         * the claim token invalidated and the call back to pending with its
           retry count UNCHANGED.  Being stopped is not the call's fault.
 
-        The attempt number is the next unused one rather than
-        ``attempt_count + 1``: the retry count deliberately does not move, so
-        the number the call's next real try will use is still free and filing
-        this row under it would collide.
+        The attempt row is filed under a NEGATIVE attempt number (see
+        ``SqliteStore.next_uncharged_attempt_no``): the retry count
+        deliberately does not move, so ``attempt_count + 1`` is still the
+        number the call's next real try will use, and filing this row there
+        would make that try's settle transaction fail on a duplicate key --
+        losing the answer the call eventually gave.
         """
         rows = self._claimed_by_me(store)
         if not rows:
@@ -759,7 +816,7 @@ class CouncilDaemon:
                 with store.transaction():
                     store.record_attempt(
                         row["call_id"],
-                        self._next_attempt_no(store, row),
+                        self._uncharged_attempt_no(store, row),
                         started,
                         now,
                         INTERRUPTED_OUTCOME,
@@ -834,12 +891,14 @@ class CouncilDaemon:
             return 0
 
     @staticmethod
-    def _next_attempt_no(store: Any, row: Mapping[str, Any]) -> int:
-        """The next free ``attempts.attempt_no`` for this call."""
-        nxt = getattr(store, "next_attempt_no", None)
+    def _uncharged_attempt_no(store: Any, row: Mapping[str, Any]) -> int:
+        """A free attempt number that no CHARGED attempt will ever use."""
+        nxt = getattr(store, "next_uncharged_attempt_no", None)
         if callable(nxt):
             return int(nxt(row["call_id"]))
-        return int(row.get("attempt_count") or 0) + 1  # pragma: no cover - SqliteStore has it
+        # pragma: no cover - SqliteStore has it; a store that does not gets
+        # the same below-zero convention without the uniqueness guarantee.
+        return -(int(row.get("attempt_count") or 0) + 1)
 
     # -- the worker --------------------------------------------------------
 
@@ -1149,6 +1208,31 @@ class CouncilDaemon:
                 )
         return routes
 
+    # -- signals -----------------------------------------------------------
+
+    def request_stop(self, signum: int = 0, _frame: Any = None) -> None:
+        """Stop claiming and start draining.  Safe from a signal handler.
+
+        Two steps because the handler may run before there is a loop to wake:
+        the flag is always set (``_serve`` reads it on the way in), and the
+        loop is woken only if one is running.  Going through
+        ``call_soon_threadsafe`` both sets the ``asyncio`` event and WAKES the
+        loop, so a daemon idling on a ten-second poll reacts at once instead
+        of in ten seconds.
+        """
+        if signum:
+            logger.info(
+                "council daemon: %s received; no new claims, draining in-flight calls",
+                signal.Signals(signum).name,
+            )
+        self._stop_flag.set()
+        loop, stop = self._loop, self._async_stop
+        if loop is not None and stop is not None:
+            try:
+                loop.call_soon_threadsafe(stop.set)
+            except RuntimeError:  # pragma: no cover - the loop closed first
+                pass
+
     # -- clocks ------------------------------------------------------------
 
     def _tick_clock(self) -> bool:
@@ -1204,8 +1288,37 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _reap(pid: int, timeout: float = 5.0) -> None:
+    """Reap *pid* if it is this process's own child; ignore it if not.
+
+    A ``stop`` issued from the process that did the ``start`` (a test, a
+    notebook, a script that starts a daemon and stops it again) is the parent
+    of the daemon it just signalled, and an unreaped child is a zombie that
+    still answers ``kill(pid, 0)`` -- so "is it gone?" would read as "no" for
+    ever.  In the normal case -- ``kbu council daemon stop`` in a different
+    process -- the daemon is not our child at all, ``waitpid`` says so at
+    once, and there is nothing to do: it was reparented to init when its own
+    starter exited, and init reaps it.
+
+    Polled rather than done once, because the lock comes free a moment BEFORE
+    the process is gone: the kernel drops the ``flock`` when the descriptor
+    closes, which is during interpreter shutdown, so the first ``waitpid``
+    usually finds the child still alive.  Bounded rather than blocking, so a
+    daemon stuck in its own shutdown cannot hang ``stop``.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            reaped, _status = os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            return
+        if reaped == pid or time.monotonic() >= deadline:
+            return
+        time.sleep(0.02)
+
+
 class _signals:
-    """``SIGTERM``/``SIGINT`` set *stop*, and the previous handlers come back.
+    """``SIGTERM``/``SIGINT`` ask *daemon* to stop; the old handlers come back.
 
     ``signal.signal`` rather than ``loop.add_signal_handler`` because the
     daemon's loop is created and closed inside one call: an asyncio signal
@@ -1215,15 +1328,14 @@ class _signals:
     pytest's own handlers with it.
     """
 
-    def __init__(self, loop: Any, stop: asyncio.Event) -> None:
-        self._loop = loop
-        self._stop = stop
+    def __init__(self, daemon: "CouncilDaemon") -> None:
+        self._daemon = daemon
         self._previous: Dict[int, Any] = {}
 
     def __enter__(self) -> "_signals":
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
-                self._previous[sig] = signal.signal(sig, self._handle)
+                self._previous[sig] = signal.signal(sig, self._daemon.request_stop)
             except ValueError:  # pragma: no cover - not the main thread
                 logger.debug("council daemon: cannot install a %s handler here", sig)
         return self
@@ -1234,18 +1346,6 @@ class _signals:
                 signal.signal(sig, handler)
             except ValueError:  # pragma: no cover - see __enter__
                 pass
-
-    def _handle(self, signum: int, _frame: Any) -> None:
-        logger.info(
-            "council daemon: %s received; no new claims, draining in-flight calls",
-            signal.Signals(signum).name,
-        )
-        # The handler runs on the main thread between bytecodes, which may be
-        # anywhere -- including inside the loop's own select().  Going through
-        # call_soon_threadsafe both sets the event and WAKES the loop, so a
-        # daemon idling on a ten-second poll reacts at once instead of in ten
-        # seconds.
-        self._loop.call_soon_threadsafe(self._stop.set)
 
 
 async def _wait_for(stop: asyncio.Event, seconds: float) -> None:

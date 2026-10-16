@@ -779,3 +779,674 @@ class TestClientCaching:
 
         run(llm.aclose_all())
         assert closed == ["polite"]
+
+
+# ---------------------------------------------------------------------------
+# What a configuration may say
+# ---------------------------------------------------------------------------
+
+
+def config_dict(**endpoints: Mapping[str, Any]) -> Dict[str, Any]:
+    """A loadable council config over *endpoints*, with one seatable model each."""
+    models = {
+        f"m{index}": {"endpoint": alias, "canonical": f"test/m{index}"}
+        for index, alias in enumerate(endpoints, start=1)
+    }
+    first = sorted(models)[0]
+    return {
+        "endpoints": dict(endpoints),
+        "models": models,
+        "profiles": {
+            "test": {"proposers": sorted(models), "critic": first, "meta": first}
+        },
+    }
+
+
+class TestConfigAcceptsRegisteredKindsOnly:
+    """``kind`` is no longer a Literal, so the registry is what validates it."""
+
+    def test_an_unregistered_kind_fails_at_load(self) -> None:
+        """At LOAD, before a token is spent -- not at the first call."""
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import ConfigError
+
+        with pytest.raises(ConfigError) as excinfo:
+            load_council_config(
+                config_dict(weird={"kind": "no_such_gateway", "base_url": "http://x/v1"})
+            )
+        message = str(excinfo.value)
+        assert "no_such_gateway" in message
+        for name in llm.BUILTIN_API_TYPES:
+            assert name in message, "the message lists what IS registered"
+
+    def test_a_registered_fake_kind_loads(self) -> None:
+        """``fake``/``replay`` work where a test registers them, and only there."""
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("fake", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(fake1={"kind": "fake", "reuse_namespace": "test:fake1"})
+        )
+        assert cfg.endpoints["fake1"].kind == "fake"
+        # And the default per-endpoint concurrency for an unknown kind is the
+        # fallback, not a KeyError out of DEFAULT_MAX_CONCURRENCY.
+        assert cfg.endpoints["fake1"].max_concurrency == 4
+
+    def test_the_four_builtin_kinds_still_load(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        cfg = load_council_config()  # the packaged default
+        assert {ep.kind for ep in cfg.endpoints.values()} <= set(llm.BUILTIN_API_TYPES)
+
+
+class TestReuseNamespaceForBaseUrllessKinds:
+    """A kind with no URL has to say how its answers may be reused."""
+
+    def test_a_base_urlless_plugin_kind_without_reuse_namespace_is_refused(
+        self,
+    ) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import ConfigError
+
+        llm.register_api_type("local_socket", ScriptedApi)
+        with pytest.raises(ConfigError, match="reuse_namespace"):
+            load_council_config(config_dict(sock={"kind": "local_socket"}))
+
+    def test_declaring_one_is_enough(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("local_socket", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(sock={"kind": "local_socket", "reuse_namespace": "sock:v1"})
+        )
+        assert cfg.endpoints["sock"].reuse_namespace == "sock:v1"
+
+    def test_a_base_url_is_the_other_way_to_satisfy_it(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("local_socket", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(sock={"kind": "local_socket", "base_url": "http://x/v1"})
+        )
+        assert cfg.endpoints["sock"].reuse_namespace is None
+
+    def test_the_two_builtin_cli_kinds_are_exempt(self) -> None:
+        """Their namespace is ``<kind>:<served model>``, which is a real identity.
+
+        Exempting them is not a loophole: ``default_reuse_namespace`` has
+        something to build from for a CLI and nothing for an unknown kind.
+        """
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import default_reuse_namespace
+
+        cfg = load_council_config(
+            config_dict(
+                claude={"kind": "claude_cli"},
+                codex={"kind": "codex_cli"},
+            )
+        )
+        assert cfg.endpoints["claude"].reuse_namespace is None
+        assert (
+            default_reuse_namespace(cfg.endpoint("claude"), "sonnet")
+            == "claude_cli:sonnet"
+        )
+
+    def test_an_http_kind_still_requires_a_base_url(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import ConfigError
+
+        with pytest.raises(ConfigError, match="no base_url"):
+            load_council_config(config_dict(broken={"kind": "openai"}))
+
+
+class TestPluginOptions:
+    """``options:`` reaches the factory unchanged, and enters the fingerprint."""
+
+    def test_options_survive_the_endpoint_key_allowlist(self) -> None:
+        """The loader filters endpoint keys; ``options`` must not be filtered.
+
+        A plug-in's own fields cannot be in this repository's allowlist by
+        name -- nobody here wrote the plug-in -- so they live under one key
+        that is.
+        """
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("gw", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(
+                gw1={
+                    "kind": "gw",
+                    "base_url": "http://x/v1",
+                    "options": {"region": "us-east", "retries": 3, "nested": {"a": 1}},
+                }
+            )
+        )
+        assert cfg.endpoint("gw1")["options"] == {
+            "region": "us-east",
+            "retries": 3,
+            "nested": {"a": 1},
+        }
+
+    def test_options_are_passed_to_the_factory_unchanged(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("gw", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(
+                gw1={
+                    "kind": "gw",
+                    "base_url": "http://x/v1",
+                    "options": {"region": "us-east", "nested": {"a": 1}},
+                }
+            )
+        )
+        api = llm.get_api("gw", cfg.endpoint("gw1"))
+        assert api.endpoint["options"] == {"region": "us-east", "nested": {"a": 1}}
+
+    def test_options_appear_in_the_snapshot_because_they_are_not_secret(
+        self,
+    ) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        llm.register_api_type("gw", ScriptedApi)
+        cfg = load_council_config(
+            config_dict(
+                gw1={"kind": "gw", "base_url": "http://x/v1", "options": {"region": "us"}}
+            )
+        )
+        assert cfg.snapshot()["endpoints"]["gw1"]["options"] == {"region": "us"}
+
+    def test_options_change_the_route_fingerprint(self) -> None:
+        """An option that changes the answer must change the route's identity."""
+        from kbutillib.domains.ai.council.types import SeatSpec, route_fingerprint
+
+        seat = SeatSpec(
+            seat_name="proposer_1",
+            endpoint="gw1",
+            endpoint_kind="openai",
+            model="m",
+            canonical_model="test/m",
+        )
+        plain = {"kind": "openai", "base_url": "http://x/v1"}
+        with_options = dict(plain, options={"region": "us-east"})
+        other_options = dict(plain, options={"region": "eu-west"})
+
+        assert route_fingerprint(seat, plain) != route_fingerprint(seat, with_options)
+        assert route_fingerprint(seat, with_options) != route_fingerprint(
+            seat, other_options
+        )
+
+    def test_an_empty_options_block_does_not_change_an_existing_fingerprint(
+        self,
+    ) -> None:
+        """Every call row written before M2.1 has to keep matching.
+
+        A route fingerprint is stored on each queued call and compared when
+        the call runs; a fingerprint that changed for every endpoint on
+        upgrade would make every queued call report
+        ``configuration_mismatch`` and park itself.
+        """
+        from kbutillib.domains.ai.council.types import SeatSpec, route_fingerprint
+
+        seat = SeatSpec(
+            seat_name="proposer_1",
+            endpoint="gw1",
+            endpoint_kind="openai",
+            model="m",
+            canonical_model="test/m",
+        )
+        plain = {"kind": "openai", "base_url": "http://x/v1"}
+        assert route_fingerprint(seat, plain) == route_fingerprint(
+            seat, dict(plain, options={})
+        )
+
+
+class TestCredentialsAreNamesNotValues:
+    """A credential-shaped value under a secret key name is a ConfigError."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "sk-proj-AAAABBBBCCCCDDDDEEEEFFFF",
+            "ghp_0123456789abcdefghijklmnopqrstuvwx",
+            "AIzaSyB1234567890abcdefghijklmnopqrstu",
+            "Bearer abcdef123456",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.x",
+            "k" * 40,
+        ],
+    )
+    def test_a_live_looking_key_is_refused_at_load(self, value: str) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import ConfigError
+
+        with pytest.raises(ConfigError) as excinfo:
+            load_council_config(
+                config_dict(
+                    local={"kind": "openai", "base_url": "http://x/v1", "api_key": value}
+                )
+            )
+        message = str(excinfo.value)
+        assert "api_key_env" in message, "the message says what to do instead"
+        assert value not in message, "and does not echo the secret back"
+
+    def test_the_same_value_under_an_env_key_is_fine(self) -> None:
+        """A ``*_env`` key names a variable; that is the point of the rule."""
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        cfg = load_council_config(
+            config_dict(
+                local={
+                    "kind": "openai",
+                    "base_url": "http://x/v1",
+                    "api_key_env": "OPENAI_API_KEY",
+                }
+            )
+        )
+        assert cfg.endpoints["local"].api_key_env == "OPENAI_API_KEY"
+
+    @pytest.mark.parametrize("value", ["EMPTY", "REDACTED", "sekrit", "", "unused"])
+    def test_a_placeholder_is_not_refused(self, value: str) -> None:
+        """``EMPTY`` is vLLM's documented placeholder and ``REDACTED`` is how a
+        config gets shared for diagnosis; refusing either would break working
+        setups while protecting nobody.  This is why the rule is a heuristic
+        on the VALUE and not a ban on the key.
+        """
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        cfg = load_council_config(
+            config_dict(
+                local={"kind": "openai", "base_url": "http://x/v1", "api_key": value}
+            )
+        )
+        assert cfg.endpoints["local"].api_key == value
+
+    def test_a_credential_hidden_inside_options_is_also_refused(self) -> None:
+        """``options`` is non-secret by contract, so this is where it is enforced."""
+        from kbutillib.domains.ai.council.config import load_council_config
+        from kbutillib.domains.ai.council.types import ConfigError
+
+        llm.register_api_type("gw", ScriptedApi)
+        with pytest.raises(ConfigError, match="options.auth.token"):
+            load_council_config(
+                config_dict(
+                    gw1={
+                        "kind": "gw",
+                        "base_url": "http://x/v1",
+                        "options": {"auth": {"token": "sk-live-AAAABBBBCCCCDDDDEEEE"}},
+                    }
+                )
+            )
+
+    def test_a_budget_is_not_a_credential_however_its_name_reads(self) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        cfg = load_council_config(
+            config_dict(
+                local={
+                    "kind": "openai",
+                    "base_url": "http://x/v1",
+                    "max_total_tokens": 1_000_000,
+                }
+            )
+        )
+        assert cfg.endpoints["local"].max_total_tokens == 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# A whole council job, through the wrapper itself
+# ---------------------------------------------------------------------------
+#
+# These are the "no injection" checks.  Every other council test drives a
+# backend instance handed straight to CouncilWorker, which proves the engine
+# works but says nothing about whether the call went through llm.acomplete.
+# Here the worker is given endpoint ALIASES ONLY, so there is nothing to
+# dispatch to but the wrapper, and the api type is reached the way a real one
+# is: resolved by name from the endpoint's `kind`.
+
+
+@pytest.fixture()
+def sqlite_store(tmp_path: Path) -> Iterator[Any]:
+    """A real, initialised SQLite council store in ``tmp_path``."""
+    from kbutillib.domains.ai.council.store.sqlite import SqliteStore
+
+    store = SqliteStore(f"sqlite:///{tmp_path}/council/council.sqlite")
+    store.init_schema()
+    try:
+        yield store
+    finally:
+        close = getattr(store, "close", None)
+        if close is not None:
+            close()
+
+
+def council_scaffolding() -> Any:
+    """The engine suite's own roster/query/task builders.
+
+    Imported from ``tests.domains.ai.council.engine_support`` rather than
+    re-written here on purpose: a council assembled slightly differently
+    would not prove that THE council runs through the wrapper.
+    """
+    from ..council import engine_support
+
+    return engine_support
+
+
+WORKER_TIMINGS: Dict[str, Any] = {
+    "heartbeat_interval_s": 0.0,
+    "poll_interval_s": 0.01,
+    "retry_backoff_s": (0.02, 0.05),
+    "retry_jitter": 0.0,
+    "idle_grace_s": 0.3,
+    "max_idle_s": 15.0,
+}
+
+
+class TestACouncilJobEndToEndThroughTheWrapper:
+    """Submit and work a real job with nothing injected anywhere."""
+
+    def test_the_default_callable_IS_llm_acomplete(self) -> None:
+        """Identity, not behaviour: there is nothing else it could be.
+
+        A worker handed endpoint aliases has no api type instance to dispatch
+        to, so if this were anything but ``llm.acomplete`` the council would
+        not be going through the wrapper at all.
+        """
+        from kbutillib.domains.ai.council.engine.worker import CouncilWorker
+
+        worker = CouncilWorker(object(), None, ["fake1"], "alice", "w-1")
+        assert worker._acomplete is llm.acomplete
+
+    def test_a_job_runs_to_a_verdict_through_llm_acomplete(
+        self, sqlite_store: Any
+    ) -> None:
+        from kbutillib.domains.ai.council.engine.worker import CouncilWorker
+
+        support = council_scaffolding()
+        llm.register_api_type("fake", ScriptedApi)
+
+        worker = CouncilWorker(
+            sqlite_store,
+            support.endpoint_config(fake1={}),
+            ["fake1"],  # ALIASES ONLY: nothing to dispatch to but the wrapper
+            "alice",
+            "w-1",
+            **WORKER_TIMINGS,
+        )
+        assert worker._acomplete is llm.acomplete
+
+        query = support.make_query()
+        roster = support.make_roster(3)
+        job_id = worker.submit(query, [support.make_task()], roster)
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+
+        results = sqlite_store.results(job_id)
+        assert len(results) == 1, summary
+        verdict = results[0]["verdict"]
+        assert verdict["status"] == "ok"
+        assert verdict["selected_ids"] == ["A:1"]
+        assert verdict["decided_by"] == "unanimous"
+
+        # And it really went through the registered api type: four calls, one
+        # per proposer plus the critic, with meta skipped on a unanimous vote.
+        assert len(ScriptedApi.seen) == 4
+        assert all(isinstance(req, LLMRequest) for req in ScriptedApi.seen)
+        # The three proposers run concurrently, so the ORDER they arrive in is
+        # the scheduler's business; the SET of traces is the claim.
+        assert {req.trace_id for req in ScriptedApi.seen} == {
+            "item-1|proposer|proposer_1",
+            "item-1|proposer|proposer_2",
+            "item-1|proposer|proposer_3",
+            "item-1|critic|critic",
+        }
+        # The rendered prompts survived the trip, menu and all.
+        proposals = [r for r in ScriptedApi.seen if "proposer" in (r.trace_id or "")]
+        assert "Candidates:" in proposals[0].user
+        assert "A:1" in proposals[0].user
+        assert proposals[0].max_output_tokens == 256
+        assert proposals[0].temperature == 0
+
+    def test_patching_the_injected_callable_counts_every_model_call(
+        self, sqlite_store: Any
+    ) -> None:
+        """A 3-item job makes 12 model calls, and every one is countable here.
+
+        This is the proof that there is exactly ONE call site: if any council
+        module reached an api type directly, its calls would be missing from
+        this count.  The substitute delegates to ``llm.acomplete``, so the
+        job still really runs -- a stub that answered by itself would prove
+        only that the stub was called.
+        """
+        from kbutillib.domains.ai.council.engine.worker import CouncilWorker
+
+        support = council_scaffolding()
+        llm.register_api_type("fake", ScriptedApi)
+
+        counted: List[Dict[str, Any]] = []
+
+        async def counting(request: Any, *, api_type: str, endpoint: Any) -> Any:
+            counted.append({"api_type": api_type, "endpoint": dict(endpoint)})
+            return await llm.acomplete(request, api_type=api_type, endpoint=endpoint)
+
+        worker = CouncilWorker(
+            sqlite_store,
+            support.endpoint_config(fake1={}),
+            ["fake1"],
+            "alice",
+            "w-1",
+            complete=counting,
+            **WORKER_TIMINGS,
+        )
+        assert worker._acomplete is counting
+
+        tasks = [
+            support.make_task(item_id=f"item-{n}", text=f"annotation number {n}")
+            for n in (1, 2, 3)
+        ]
+        job_id = worker.submit(support.make_query(), tasks, support.make_roster(3))
+        summary = run(worker.work(job_id=job_id, until_idle=True))
+
+        assert len(sqlite_store.results(job_id)) == 3, summary
+        # 3 items x (3 proposers + 1 critic); meta is skipped on unanimity.
+        assert len(counted) == 12
+        assert len(ScriptedApi.seen) == 12, "every counted call really reached the api"
+        assert {entry["api_type"] for entry in counted} == {"fake"}
+        # The endpoint mapping names the alias, which is what keeps two
+        # aliases from sharing one cached client.
+        assert {entry["endpoint"]["name"] for entry in counted} == {"fake1"}
+
+    def test_the_route_fingerprint_uses_the_api_types_effective_params(
+        self, sqlite_store: Any
+    ) -> None:
+        """Round 3: the prompt hash and the fingerprint come from the api type.
+
+        Proved with an api type that reports something the SEAT never asked
+        for -- the way ARGO forces ``temperature: 1`` on some models -- so a
+        fingerprint built from the seat's own parameters cannot pass.
+        """
+        from kbutillib.domains.ai.council.engine.worker import CouncilWorker
+
+        class Opinionated(ScriptedApi):
+            def effective_params(self, request: Any) -> Dict[str, Any]:
+                params = llm.generation_params(request)
+                params["temperature"] = 1  # not what any seat asked for
+                return params
+
+        support = council_scaffolding()
+        llm.register_api_type("fake", Opinionated)
+
+        worker = CouncilWorker(
+            sqlite_store,
+            support.endpoint_config(fake1={}),
+            ["fake1"],
+            "alice",
+            "w-1",
+            **WORKER_TIMINGS,
+        )
+        seat = support.make_roster(3).proposers[0]
+        assert seat.temperature == 0
+        assert worker._effective_params(seat)["temperature"] == 1
+
+        # And the api type is asked with an LLMRequest, not with the seat.
+        asked: List[Any] = []
+
+        class Recording(ScriptedApi):
+            def effective_params(self, request: Any) -> Dict[str, Any]:
+                asked.append(request)
+                return llm.generation_params(request)
+
+        llm.register_api_type("fake", Recording, replace=True)
+        worker._effective_params(seat)
+        assert len(asked) == 1
+        assert isinstance(asked[0], LLMRequest)
+        assert asked[0].model == seat.model
+        assert asked[0].system == "", "effective_params needs no prompts"
+
+
+class TestNoCouncilModuleReachesAProviderDirectly:
+    """The structural half of the same claim, checked by reading the source."""
+
+    #: The four re-export shims.  They exist precisely to import from
+    #: ``llm.apis``, so they are the only files allowed to.
+    SHIMS = {"http.py", "http_common.py", "cli.py", "cli_common.py"}
+
+    def test_no_module_under_council_imports_an_api_type_module(self) -> None:
+        import kbutillib.domains.ai.council as council_pkg
+
+        root = Path(council_pkg.__file__).parent
+        offenders: List[str] = []
+        for path in sorted(root.rglob("*.py")):
+            if path.parent.name == "backends" and path.name in self.SHIMS:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                # Only real import statements.  A docstring that NAMES
+                # ``llm.apis`` to say "this is a shim over it" is documentation,
+                # and a grep that failed on prose would be unmaintainable.
+                if not stripped.startswith(("from ", "import ")):
+                    continue
+                if "llm.apis" in stripped or "llm import apis" in stripped:
+                    offenders.append(f"{path.relative_to(root)}:{line_no}: {stripped}")
+        assert offenders == [], (
+            "a council module reached into llm/apis directly; go through "
+            "llm.get_api / llm.acomplete instead:\n" + "\n".join(offenders)
+        )
+
+    def test_no_module_under_council_names_a_provider_class(self) -> None:
+        """Not even by name: ``_backend_for``'s dispatch is gone for good."""
+        import kbutillib.domains.ai.council as council_pkg
+
+        root = Path(council_pkg.__file__).parent
+        classes = (
+            "ArgoBackend",
+            "OpenAICompatibleBackend",
+            "ClaudeCliBackend",
+            "CodexCliBackend",
+            "HttpBackend",
+            "CliBackend",
+        )
+        offenders: List[str] = []
+        for path in sorted(root.rglob("*.py")):
+            if path.parent.name == "backends" and path.name in self.SHIMS:
+                continue
+            for line_no, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("#") or ":mod:" in stripped:
+                    continue
+                for name in classes:
+                    if name in stripped and (
+                        stripped.startswith(("from ", "import "))
+                        or f"{name}(" in stripped
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(root)}:{line_no}: {stripped}"
+                        )
+        assert offenders == [], "\n".join(offenders)
+
+    def test_council_utils_no_longer_has_a_backend_dispatch(self) -> None:
+        from kbutillib.domains.ai.council_utils import CouncilUtils
+
+        assert not hasattr(CouncilUtils, "_backend_for")
+
+
+# ---------------------------------------------------------------------------
+# The CLI billing preflight, through the wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestTheCliBillingGateFollowsItsFiles:
+    """Round 3: cached per instance, invalidated by the files it read.
+
+    Covered from this side as well as from the CLI api type's own suite,
+    because what a caller actually sees is ``llm.preflight`` /
+    ``llm.preflight_api`` -- and the question the invalidation answers is a
+    caller's question: "is the answer I was given still true?"
+    """
+
+    @staticmethod
+    def _backend(home: Path) -> Any:
+        from kbutillib.domains.ai.llm.apis.cli import ClaudeCliBackend
+
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"env": {}}), encoding="utf-8"
+        )
+        return ClaudeCliBackend("claude", _home=home, _parent_env={})
+
+    def test_preflight_reports_which_files_it_read(self, tmp_path: Path) -> None:
+        """``checked`` is what the invalidation is built on, so it is contract."""
+        backend = self._backend(tmp_path / "home")
+        report = run(llm.preflight_api(backend))
+        assert report["state"] == "ready"
+        assert str(tmp_path / "home" / ".claude" / "settings.json") in report["checked"]
+
+    def test_the_gate_re_runs_once_a_file_it_read_changes(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        backend = self._backend(home)
+
+        # First call: ready, and the verdict is cached with the file's stamp.
+        assert run(backend._billing_check()) is None
+        assert backend._billing_stamps, "the verdict records what it was read from"
+
+        # Unchanged: still cached, no re-read.
+        assert run(backend._billing_check()) is None
+
+        # A `claude login` (or an edit) mid-batch changes how the NEXT call
+        # bills.  M1 cached the verdict for the life of the instance and would
+        # have kept spending on the old answer.
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"apiKeyHelper": "/usr/bin/get-a-key"}), encoding="utf-8"
+        )
+        gate = run(backend._billing_check())
+        assert gate is not None
+        assert gate.kind == "billing_guard"
+        assert gate.halts_endpoint is True
+
+    def test_a_file_appearing_also_invalidates_it(self, tmp_path: Path) -> None:
+        """"There is no settings.local.json" is a fact the verdict rests on."""
+        home = tmp_path / "home"
+        backend = self._backend(home)
+        assert run(backend._billing_check()) is None
+
+        local = home / ".claude" / "settings.local.json"
+        assert str(local) in backend._billing_stamps
+        assert backend._billing_stamps[str(local)] is None, "recorded as absent"
+
+        local.write_text(
+            json.dumps({"env": {"ANTHROPIC_API_KEY": "sk-whatever"}}), encoding="utf-8"
+        )
+        gate = run(backend._billing_check())
+        assert gate is not None
+        assert gate.kind == "billing_guard"
+
+    def test_an_api_type_with_no_preflight_is_ready_through_the_wrapper(self) -> None:
+        """So "nothing to check" is never reported as "could not check".
+
+        ``CouncilWorker._preflight`` refuses a job on anything but ``ready``,
+        so an HTTP endpoint (which has no billing preflight at all) must not
+        answer ``unknown`` here or no job would ever be submittable.
+        """
+        llm.register_api_type("scripted", ScriptedApi)
+        assert run(llm.preflight("scripted", {}))["state"] == "ready"

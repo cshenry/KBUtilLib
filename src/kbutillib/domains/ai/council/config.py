@@ -47,6 +47,7 @@ from .types import (
 )
 
 __all__ = [
+    "BASE_URL_KINDS",
     "DEFAULT_CANONICAL",
     "DEFAULT_CANONICAL_BY_KIND",
     "DEFAULT_CANONICAL_VERSION",
@@ -58,6 +59,7 @@ __all__ = [
     "CouncilConfig",
     "default_canonical",
     "expand_vars",
+    "looks_like_credential",
     "load_council_config",
     "load_legacy_model_inference",
 ]
@@ -107,6 +109,12 @@ DEFAULT_MAX_CONCURRENCY: Dict[str, int] = {
 
 DEFAULT_STORE_URL = "sqlite:///~/.kbutillib/council/council.sqlite"
 
+#: Built-in kinds whose endpoints are a URL, and so must declare ``base_url``.
+#: Any OTHER kind -- a CLI, or a plug-in api type -- has no URL, which is why
+#: it has to say how its answers may be reused (see
+#: :meth:`EndpointConfig._check`).
+BASE_URL_KINDS = ("argo", "openai")
+
 _ENDPOINT_KEYS = frozenset(
     {
         "kind",
@@ -126,6 +134,7 @@ _ENDPOINT_KEYS = frozenset(
         "max_total_tokens",
         "reuse_namespace",
         "deployment_revision",
+        "options",
     }
 )
 _MODEL_KEYS = frozenset({"endpoint", "served_name", "canonical", "params", "verified"})
@@ -166,6 +175,93 @@ _SECRET_SUFFIXES = (
     "_credential",
     "_credentials",
 )
+
+
+#: Prefixes that only ever start a real credential.  Short, concrete and
+#: vendor-specific on purpose: the question this answers is "has somebody
+#: pasted a live key into a config file", and a heuristic wide enough to
+#: catch ``api_key: EMPTY`` (vLLM's documented placeholder) or
+#: ``api_key: REDACTED`` (how a config is shared) would refuse configurations
+#: that are perfectly correct.
+_CREDENTIAL_PREFIXES = (
+    "sk-",
+    "sk_",
+    "pk-",
+    "pk_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "AKIA",
+    "ASIA",
+    "ya29.",
+    "AIza",
+    "hf_",
+    "Bearer ",
+    "eyJ",  # the base64 of a JWT header
+)
+
+#: The other shape a credential comes in: one long opaque token.  32 is the
+#: shortest length any of the vendors above issues, and the character class
+#: excludes ``:`` and whitespace so a URL or a sentence cannot match.
+_OPAQUE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-+/=.]{32,}$")
+
+
+def looks_like_credential(value: Any) -> bool:
+    """Does *value* look like a live credential rather than a placeholder?
+
+    Used to refuse a config that carries a secret's VALUE under a key that
+    should only ever carry an environment variable's NAME (review round 3).
+    Deliberately a value heuristic and not a key rule: ``api_key: EMPTY`` is
+    vLLM's own placeholder, ``api_key: REDACTED`` is how a config gets shared
+    for diagnosis, and refusing either would break working setups while
+    protecting nobody.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    if text.startswith(_CREDENTIAL_PREFIXES):
+        return True
+    return bool(_OPAQUE_TOKEN_RE.match(text))
+
+
+def _refuse_credential_values(section: str, name: str, value: Any, path: str = "") -> None:
+    """Raise :class:`ConfigError` for a credential-shaped value in *value*.
+
+    Walks the whole entry, ``options`` included, because a plug-in field is
+    exactly where somebody would put a key without thinking about it.  A
+    ``*_env`` key is fine at any depth: it names a variable, and that is the
+    whole point of the rule it is the answer to.
+    """
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            here = f"{path}{key}"
+            if (
+                not lowered.endswith("_env")
+                and (lowered in _SECRET_EXACT or lowered.endswith(_SECRET_SUFFIXES))
+                and looks_like_credential(item)
+            ):
+                raise ConfigError(
+                    f"{section} {name!r} sets {here!r} to what looks like a live "
+                    "credential. A council configuration holds the NAME of an "
+                    f"environment variable, never a secret's value: use "
+                    f"{key}_env: <VARIABLE NAME> instead. (The store keeps a "
+                    "snapshot of this configuration so a verdict can be "
+                    "explained months later, and that snapshot must never be "
+                    "able to hold a key.)"
+                )
+            _refuse_credential_values(section, name, item, f"{here}.")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _refuse_credential_values(section, name, item, f"{path}{index}.")
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +395,19 @@ def _resolve_store_url(url: Optional[str]) -> str:
 
 
 class EndpointConfig(BaseModel):
-    """One place models are reached from, and the rules of that place."""
+    """One place models are reached from, and the rules of that place.
+
+    ``kind`` is a plain string rather than a ``Literal`` over the four
+    shipped kinds (M1): since M2.1 an api type can arrive from another
+    distribution through the ``kbutillib.llm_api_types`` entry-point group,
+    and a Literal here would make a correctly installed plug-in unusable.
+    The set of ACCEPTABLE kinds is therefore not a fact about this class --
+    it is whatever is registered when the config is read, which is why the
+    check lives in :func:`load_council_config`.
+    """
 
     name: str
-    kind: Literal["argo", "openai", "claude_cli", "codex_cli"]
+    kind: str
     base_url: Optional[str] = None
     executable: Optional[str] = None
     user_env: Optional[str] = None
@@ -319,6 +424,13 @@ class EndpointConfig(BaseModel):
     max_total_tokens: Optional[int] = None
     reuse_namespace: Optional[str] = None
     deployment_revision: str = ""
+    #: Fields a PLUG-IN api type defines for itself.  Preserved verbatim and
+    #: handed to its factory, because this module cannot know what an api type
+    #: nobody here wrote needs.  Non-secret by contract (a credential belongs
+    #: in a ``*_env`` key, enforced in :func:`load_council_config`), and part
+    #: of the route fingerprint, because an option that changes the answer has
+    #: to change the identity of the route that produced it.
+    options: Dict[str, Any] = {}
 
     @model_validator(mode="after")
     def _check(self) -> "EndpointConfig":
@@ -339,11 +451,28 @@ class EndpointConfig(BaseModel):
                 )
             if not self.executable:
                 self.executable = _CLI_DEFAULT_EXECUTABLE[self.kind]
-        elif not self.base_url:
-            raise ConfigError(f"endpoint {self.name!r} is {self.kind} but declares no base_url")
+        elif self.kind in BASE_URL_KINDS:
+            if not self.base_url:
+                raise ConfigError(
+                    f"endpoint {self.name!r} is {self.kind} but declares no base_url"
+                )
+        elif not self.base_url and not self.reuse_namespace:
+            # A plug-in kind with no URL.  ``default_reuse_namespace`` has
+            # nothing to build a namespace from -- it would return the same
+            # string for every such endpoint -- so two unrelated deployments
+            # would share one answer cache and reuse each other's votes.  The
+            # two built-in CLI kinds are exempt above because their namespace
+            # is "<kind>:<served model>", which is a real identity.
+            raise ConfigError(
+                f"endpoint {self.name!r} is {self.kind}, which declares no base_url, "
+                "so it must declare reuse_namespace: a reuse namespace is how two "
+                "users' identical questions are recognised as the same question, and "
+                "an endpoint with neither a URL nor a declared namespace would share "
+                "one with every other endpoint of its kind."
+            )
 
         if self.max_concurrency is None:
-            self.max_concurrency = DEFAULT_MAX_CONCURRENCY[self.kind]
+            self.max_concurrency = DEFAULT_MAX_CONCURRENCY.get(self.kind, 4)
         return self
 
 
@@ -640,6 +769,28 @@ def _legacy_argo_endpoint(endpoints: Mapping[str, EndpointConfig]) -> Optional[E
     return argo[0] if len(argo) == 1 else None
 
 
+def _require_registered_kind(name: str, kind: str) -> None:
+    """Refuse an endpoint whose ``kind`` no installed api type answers to.
+
+    Asked of the wrapper rather than of a list in this module, and asked
+    AFTER entry-point discovery, so a kind that arrived from another
+    distribution is accepted and a typo is still caught -- at load, before a
+    token is spent, which is the whole reason this is not discovered at the
+    first call.
+    """
+    from ...ai import llm
+
+    registered = llm.api_types()
+    if kind in registered:
+        return
+    raise ConfigError(
+        f"endpoint {name!r} is kind {kind!r}, which no installed api type "
+        f"answers to; registered kinds are {registered}. Declare one in the "
+        f"{llm.ENTRY_POINT_GROUP!r} entry-point group, or call "
+        "llm.register_api_type()."
+    )
+
+
 def load_council_config(
     path_or_dict: Optional[Union[str, Path, Mapping[str, Any]]] = None,
     *,
@@ -705,6 +856,8 @@ def load_council_config(
             # Legacy: an endpoint with no kind is one of Filipe's local
             # OpenAI-compatible model_service containers.
             fields["kind"] = "openai"
+        _refuse_credential_values("endpoint", name, fields)
+        _require_registered_kind(name, str(fields["kind"]))
         endpoints[name] = EndpointConfig(name=name, **fields)
 
     # -- models -------------------------------------------------------------

@@ -317,20 +317,31 @@ def route_fingerprint(
 
     *effective_params* defaults to :func:`seat_generation_params`, so the
     two-argument form in the design prompt works unchanged.
+
+    An endpoint's ``options`` (a plug-in api type's own non-secret fields)
+    are included when present; see the comment in the body for why only then.
     """
     cfg = dict(endpoint_config or {})
     if effective_params is None:
         effective_params = seat_generation_params(seat)
-    return canonical_sha256(
-        {
-            "endpoint": seat.endpoint,
-            "kind": seat.endpoint_kind,
-            "target": cfg.get("base_url") or cfg.get("executable") or "",
-            "model": seat.model,
-            "account": cfg.get("account") or "",
-            "effective_params": _jsonable(dict(effective_params)),
-        }
-    )
+    payload: Dict[str, Any] = {
+        "endpoint": seat.endpoint,
+        "kind": seat.endpoint_kind,
+        "target": cfg.get("base_url") or cfg.get("executable") or "",
+        "model": seat.model,
+        "account": cfg.get("account") or "",
+        "effective_params": _jsonable(dict(effective_params)),
+    }
+    # A plug-in api type's own non-secret ``options`` change where and how a
+    # call lands, so they belong in "where did this come from" (review round
+    # 3).  Added only when there ARE options, so every endpoint configured
+    # before M2.1 keeps the fingerprint already stored on its call rows --
+    # an unconditional key would change every one of them and make every
+    # queued call look like a configuration mismatch.
+    options = cfg.get("options")
+    if options:
+        payload["options"] = _jsonable(dict(options))
+    return canonical_sha256(payload)
 
 
 # ---------------------------------------------------------------------------

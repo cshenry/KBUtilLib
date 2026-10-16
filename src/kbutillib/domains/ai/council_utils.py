@@ -14,8 +14,9 @@ Three properties of this module are load-bearing:
 ``httpx`` client and may ping the gateway, which would make
 ``KBUtilLib().council`` cost a network round trip (and, on a bad day, a
 token) just to read a config file.  The council reaches ARGO the same way it
-reaches every other endpoint -- through a ``Backend`` built from one endpoint
-config mapping -- so there is nothing to inherit.
+reaches every other endpoint -- through ``llm.get_api("argo", <endpoint
+mapping>)``, the same wrapper a plug-in kind arrives by -- so there is nothing
+to inherit.
 
 **Every asynchronous operation has both forms.**  ``submit``/``submit_async``,
 ``run``/``run_async``, ``evaluate``/``evaluate_async``, ``doctor``/
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from ...core.shared_env_utils import SharedEnvUtils
+from . import llm
 
 __all__ = ["CouncilUtils", "CouncilUtilsImpl"]
 
@@ -366,11 +368,18 @@ class CouncilUtils(SharedEnvUtils):
         return self.config().roster(profile, overrides=seat_overrides or None)
 
     def build_backends(self, roster: Any, allow_unverified: Optional[bool] = None) -> Dict[str, Any]:
-        """One backend per DISTINCT endpoint the roster seats.
+        """One api type instance per DISTINCT endpoint the roster seats.
 
         Keyed by endpoint alias, which is what ``CouncilWorker`` claims calls
-        for: a worker serves exactly the endpoints it was handed a backend
+        for: a worker serves exactly the endpoints it was handed something
         for, and no others.
+
+        There is no dispatch from ``kind`` to a provider class here any more
+        (``_backend_for``, M1): :func:`llm.get_api` owns it, which is what
+        makes a plug-in kind reachable through this facade without a line
+        changing in the council.  Built once per verb rather than per call
+        because an ``httpx.AsyncClient`` is worth reusing across a 20k-item
+        batch.
         """
         unverified = self.allow_unverified if allow_unverified is None else bool(allow_unverified)
         config = self.config()
@@ -378,44 +387,55 @@ class CouncilUtils(SharedEnvUtils):
         for _role, seat in roster.seats():
             if seat.endpoint in backends:
                 continue
-            backends[seat.endpoint] = self._backend_for(
-                seat.endpoint, config.endpoint(seat.endpoint), unverified
-            )
+            mapping = self._endpoint_mapping(seat.endpoint, config, unverified)
+            backends[seat.endpoint] = self._get_api(seat.endpoint, mapping)
         return backends
 
-    def _backend_for(self, endpoint: str, cfg: Mapping[str, Any], unverified: bool) -> Any:
-        """The backend one endpoint config asks for.
+    def _endpoint_mapping(
+        self, endpoint: str, config: Any, unverified: bool
+    ) -> Dict[str, Any]:
+        """The endpoint mapping :func:`llm.get_api` is given for *endpoint*.
 
-        The single dispatch from endpoint ``kind`` to backend class, so
-        :meth:`build_backends` and :meth:`models_async` cannot disagree about
-        how an endpoint is reached.
+        The endpoint's own configuration, plus ``name`` (part of the wrapper's
+        client cache key, so two aliases are two clients) and
+        ``allow_unverified`` -- which the CLI api types read, and which belongs
+        in the key: "spend against an endpoint whose billing mode could not be
+        confirmed" is a different client from one that would refuse.
+        """
+        cfg = dict(config.endpoint(endpoint))
+        cfg.setdefault("name", endpoint)
+        cfg["allow_unverified"] = bool(unverified)
+        return cfg
+
+    def _get_api(self, endpoint: str, mapping: Mapping[str, Any]) -> Any:
+        """Resolve one endpoint through the wrapper, reporting a bad kind well.
+
+        ``llm.get_api`` raises ``KeyError`` for an unregistered kind, which is
+        correct for a programming error but reads badly for what this almost
+        always is -- a ``kind:`` typo in a YAML file.  ``ConfigError`` is what
+        the CLI already knows how to print.
         """
         from .council.config import ConfigError
 
-        kind = str(cfg.get("kind") or "")
-        if kind == "argo":
-            from .council.backends.http import ArgoBackend
-
-            return ArgoBackend(cfg)
-        if kind == "openai":
-            from .council.backends.http import OpenAICompatibleBackend
-
-            return OpenAICompatibleBackend(cfg)
-        if kind == "claude_cli":
-            from .council.backends.cli import ClaudeCliBackend
-
-            return ClaudeCliBackend(config=cfg, allow_unverified=unverified)
-        if kind == "codex_cli":
-            from .council.backends.cli import CodexCliBackend
-
-            return CodexCliBackend(config=cfg, allow_unverified=unverified)
-        raise ConfigError(
-            f"endpoint {endpoint!r} is kind {kind!r}, which this installation has no "
-            "backend for; declared kinds are argo, openai, claude_cli and codex_cli"
-        )
+        kind = str(dict(mapping).get("kind") or "")
+        try:
+            return llm.get_api(kind, mapping)
+        except KeyError as exc:
+            raise ConfigError(
+                f"endpoint {endpoint!r} is kind {kind!r}, which this installation "
+                f"has no api type for; registered kinds are {llm.api_types()}"
+            ) from exc
 
     async def _aclose_backends(self, backends: Mapping[str, Any]) -> None:
-        """Release every backend's client/process resources."""
+        """Release every api type's client/process resources.
+
+        Closes what it was handed -- which is what a test that monkeypatched
+        :meth:`build_backends` hands over, and which is not in the wrapper's
+        cache -- and then clears the wrapper's cache, so a client this verb
+        closed can never be handed to the next one.  A double close on an
+        instance that is in both sets is harmless and swallowed; leaving a
+        closed client cached would not be.
+        """
         for backend in backends.values():
             closer = getattr(backend, "aclose", None)
             if closer is None:
@@ -423,7 +443,8 @@ class CouncilUtils(SharedEnvUtils):
             try:
                 await closer()
             except Exception as exc:  # noqa: BLE001 - a close never fails a verb
-                self.log_debug(f"council: backend close failed: {exc}")
+                self.log_debug(f"council: api type close failed: {exc}")
+        await llm.aclose_all()
 
     def _worker(
         self,
@@ -822,12 +843,14 @@ class CouncilUtils(SharedEnvUtils):
 
         probe: Dict[str, Any] = {"endpoint": endpoint, "kind": kind, "backend": backend}
         if kind in CLI_KINDS:
+            # ``version()`` is CLI-specific and deliberately not part of the
+            # ApiType contract -- an HTTP gateway has no ``--version``.
             probe["version"] = await backend.version()
             probe["billing"] = (
-                dict(await backend.preflight() or {}) if probe["version"] else {}
+                await llm.preflight_api(backend) if probe["version"] else {}
             )
             return probe
-        listing = await backend.models()
+        listing = await llm.models_api(backend)
         probe["models"] = {
             str(entry.get("id") or entry.get("name") or "")
             for entry in listing
@@ -1013,12 +1036,19 @@ class CouncilUtils(SharedEnvUtils):
                 for alias, model in sorted(config.models.items())
             ]
 
-        backend = self._backend_for(endpoint, config.endpoint(endpoint), True)
+        mapping = self._endpoint_mapping(endpoint, config, True)
         try:
-            listing = await backend.models()
+            return await llm.models(
+                str(mapping.get("kind") or ""),
+                mapping,
+            )
+        except KeyError:
+            # An unregistered kind: same mistake, same message as everywhere
+            # else, rather than a bare KeyError out of the registry.
+            self._get_api(endpoint, mapping)
+            raise  # pragma: no cover - _get_api always raises first
         finally:
-            await self._aclose_backends({endpoint: backend})
-        return [dict(entry) for entry in listing if isinstance(entry, Mapping)]
+            await llm.aclose_all()
 
     def models(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
         """List models.  The synchronous :meth:`models_async`."""

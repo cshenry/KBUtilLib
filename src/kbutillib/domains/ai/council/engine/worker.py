@@ -35,15 +35,25 @@ call's last error, which is what ``job_status`` reports its
 job reaching ``running`` or ``done``.  Both happen inside the same
 transaction as the release or the settle they belong to.
 
-Nothing here imports SQLAlchemy, a backend implementation or a query type: the
-store, the backends and the renderer are the protocols in
-:mod:`..protocols`, which is what lets the whole of this module be tested
-against a SQLite file and a scripted fake.
+Nothing here imports SQLAlchemy, a provider class or a query type.  The store
+and the renderer are the protocols in :mod:`..protocols`; the model call goes
+through the ONE public wrapper, :mod:`kbutillib.domains.ai.llm` -- the worker
+names a ``kind`` and an endpoint mapping and never learns a provider's
+constructor.  That is what lets the whole of this module be tested against a
+SQLite file and a scripted fake, and it is also what makes a plug-in api type
+usable by a council without a line changing here.
+
+The wrapper makes exactly ONE attempt per call.  Everything that decides
+whether to try again -- retries and backoff, the endpoint budget, the halt,
+the per-endpoint and per-account concurrency limits, single-flight collapsing
+and cross-user answer reuse -- stays here, because only this module knows what
+a second attempt would cost.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import socket
@@ -63,6 +73,10 @@ from typing import (
     Tuple,
 )
 
+from ...llm import acomplete as llm_acomplete
+from ...llm import get_api as llm_get_api
+from ...llm import preflight_api as llm_preflight_api
+from ...llm.types import LLMRequest
 from ..config import DEFAULT_MAX_CONCURRENCY
 from ..store.errors import StaleClaim
 from ..types import (
@@ -86,6 +100,8 @@ from ..types import (
 )
 from .decide import SettledCall, decide, tally
 from .normalise import normalise
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["CouncilWorker", "aevaluate", "evaluate", "renderer_id_version"]
 
@@ -137,6 +153,37 @@ def renderer_id_version(query: Any) -> str:
     return f"{renderer}|{adapter}|{id_field}"
 
 
+def _as_endpoint_table(backends: Optional[Any]) -> Dict[str, Any]:
+    """Normalise a ``backends`` argument into ``{alias: instance or None}``.
+
+    Three shapes go in (see :class:`CouncilWorker`) and one comes out, so
+    everything downstream can keep using ``set(self.backends)`` for "which
+    endpoints do I claim calls for" and ``self.backends.get(alias)`` for "did
+    somebody hand me an api type for this one".
+
+    A mapping value that is not an api type at all is rejected here rather
+    than at the first call: handing the worker the wrong thing is a
+    programming mistake, and discovering it mid-batch would cost a claimed
+    call and a confusing typed failure.
+    """
+    if backends is None:
+        return {}
+    if isinstance(backends, Mapping):
+        table: Dict[str, Any] = {}
+        for alias, api in backends.items():
+            if api is not None and not callable(getattr(api, "complete", None)):
+                raise TypeError(
+                    f"backends[{alias!r}] is a {type(api).__name__}, which has no "
+                    "complete(); pass an api type instance, None, or just the "
+                    "endpoint aliases"
+                )
+            table[str(alias)] = api
+        return table
+    if isinstance(backends, str):
+        return {backends: None}
+    return {str(alias): None for alias in backends}
+
+
 class _AccountLimit:
     """One concurrency budget, shared by every endpoint on the same account.
 
@@ -186,8 +233,24 @@ class CouncilWorker:
             the four real ones, and the engine's own tests are built on
             exactly those.  ``None`` means "no endpoint facts", which is
             usable but gives up budgets and shared-account concurrency.
-        backends: ``{endpoint alias: Backend}`` -- the endpoints THIS worker
-            serves.  It claims calls for no others.
+        backends: the endpoints THIS worker serves.  It claims calls for no
+            others.  Three accepted shapes:
+
+            * an ITERABLE of endpoint aliases -- the normal M2 form.  Every
+              call then goes through ``llm.acomplete``, which resolves the
+              endpoint's ``kind`` to an api type.
+            * a MAPPING ``{alias: None}`` -- the same thing, spelled as a
+              mapping.
+            * a MAPPING ``{alias: api type instance}`` -- an explicitly
+              injected api type for that alias, used instead of resolving one.
+              This is how the test suites drive a scripted fake, and how
+              ``CouncilUtils`` hands over the clients it built once for a
+              whole job rather than per call.
+        complete: the callable every model call is made through.  Defaults to
+            ``llm.acomplete`` itself when no api type instance was injected,
+            and otherwise to this worker's adapter over the injected ones.
+            Substituting it is how a test counts model calls without touching
+            a council module.
         user: the submitting user.  A worker only ever claims its own user's
             calls; the store enforces it.
         worker_id: this worker's id in the ``workers`` table.  Generated from
@@ -204,10 +267,11 @@ class CouncilWorker:
         self,
         store: Any,
         config: Any = None,
-        backends: Optional[Mapping[str, Any]] = None,
+        backends: Optional[Any] = None,
         user: str = "",
         worker_id: Optional[str] = None,
         *,
+        complete: Optional[Callable[..., Any]] = None,
         allow_unverified: bool = False,
         worker_kind: str = "foreground",
         heartbeat_interval_s: float = 30.0,
@@ -225,7 +289,16 @@ class CouncilWorker:
             raise ValueError("a council worker must know which user it works for")
         self.store = store
         self.config = config
-        self.backends: Dict[str, Any] = dict(backends or {})
+        self.backends: Dict[str, Any] = _as_endpoint_table(backends)
+        #: The one callable every model call is made through.  ``llm.acomplete``
+        #: itself when nothing was injected -- identity a test can assert on,
+        #: which is what makes "the worker goes through the wrapper" checkable
+        #: rather than merely claimed.
+        self._acomplete: Callable[..., Any] = complete or (
+            self._acomplete_injected
+            if any(api is not None for api in self.backends.values())
+            else llm_acomplete
+        )
         self.user = user
         self.worker_id = worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.allow_unverified = bool(allow_unverified)
@@ -298,11 +371,98 @@ class CouncilWorker:
                 limit.capacity = min(limit.capacity, max(1, capacity))
             self._limit_by_endpoint[endpoint] = limit
 
+    def endpoint_mapping(self, endpoint: str) -> Dict[str, Any]:
+        """The endpoint mapping the wrapper is given for *endpoint*.
+
+        :meth:`endpoint_config` plus the two keys the wrapper needs that a
+        bare mapping-form config may omit: ``kind`` (which api type to
+        resolve) and ``name``.  ``name`` matters more than it looks: it is
+        part of the wrapper's client cache key, so without it two aliases
+        whose configs happened to be identical -- two ``fake`` endpoints in a
+        test, two vLLM ports behind one URL -- would share ONE client, and the
+        shared-account concurrency tests would silently be measuring one
+        endpoint twice.
+        """
+        cfg = dict(self.endpoint_config(endpoint))
+        cfg.setdefault("name", endpoint)
+        return cfg
+
+    def _api_for(self, seat: SeatSpec) -> Optional[Any]:
+        """The api type instance serving *seat*, or ``None`` if there is none.
+
+        An explicitly injected instance wins; otherwise the wrapper resolves
+        the endpoint's ``kind``.  ``None`` means "this worker cannot describe
+        that endpoint" -- an unregistered kind, or no config for it at all --
+        which is not an error here: a worker that cannot reach an endpoint
+        simply never claims calls for it, and the two callers below both have
+        a defined answer for ``None``.
+        """
+        injected = self.backends.get(seat.endpoint)
+        if injected is not None:
+            return injected
+        cfg = self.endpoint_mapping(seat.endpoint)
+        kind = str(cfg.get("kind") or seat.endpoint_kind or "")
+        cfg.setdefault("kind", kind)
+        try:
+            return llm_get_api(kind, cfg)
+        except (KeyError, TypeError) as exc:
+            logger.debug(
+                "council worker %s: no api type for endpoint %r (kind %r): %s",
+                self.worker_id,
+                seat.endpoint,
+                kind,
+                exc,
+            )
+            return None
+
+    async def _acomplete_injected(
+        self, request: Any, *, api_type: str, endpoint: Mapping[str, Any]
+    ) -> Any:
+        """``llm.acomplete``'s signature, served from the injected api types.
+
+        The default :attr:`_acomplete` when a caller handed this worker api
+        type instances instead of bare aliases.  It exists for two reasons
+        that are really one: a caller that has already built its clients for
+        a whole job should not have them rebuilt per call, and the test suites
+        drive scripted fakes that way.  Anything the table has no instance for
+        falls through to ``llm.acomplete``, so a worker holding a mixture
+        behaves as if it held neither.
+        """
+        api = self.backends.get(str(dict(endpoint).get("name") or ""))
+        if api is None:
+            return await llm_acomplete(request, api_type=api_type, endpoint=endpoint)
+        return await api.complete(request)
+
+    def _seat_request(self, seat: SeatSpec) -> LLMRequest:
+        """A prompt-less :class:`LLMRequest` carrying *seat*'s call parameters.
+
+        ``effective_params`` is a function of the generation parameters only,
+        and it is needed at SUBMIT time for the route fingerprint -- which is
+        computed per seat, before any role's prompts exist.  So the request
+        handed to it carries the parameters and no prompts, which is exactly
+        the information it reads.
+        """
+        return LLMRequest(
+            model=seat.model,
+            max_output_tokens=seat.max_output_tokens,
+            temperature=seat.temperature,
+            params=dict(seat.extra or {}),
+            timeout_s=seat.timeout_s,
+        )
+
     def _effective_params(self, seat: SeatSpec) -> Dict[str, Any]:
-        """What this worker's backend would actually send for *seat*."""
-        backend = self.backends.get(seat.endpoint)
-        if backend is not None:
-            return dict(backend.effective_params(seat))
+        """What the api type serving *seat* would actually send for it.
+
+        Not the seat's REQUESTED parameters: ARGO forces ``temperature: 1`` on
+        some models whatever was asked for, and a prompt hash keyed on the
+        request would hand one cached answer to two materially different
+        questions.  Falls back to the provider-independent parameters when no
+        api type can be resolved, which keeps a worker built with no config at
+        all (``CouncilWorker(store, None, [], user)``) usable.
+        """
+        api = self._api_for(seat)
+        if api is not None:
+            return dict(api.effective_params(self._seat_request(seat)))
         return seat_generation_params(seat)
 
     def _reuse_namespace(self, seat: SeatSpec) -> str:
@@ -459,24 +619,30 @@ class CouncilWorker:
             )
 
     async def _preflight(self, roster: Roster) -> None:
-        """Run each CLI backend's billing preflight once, before any spend.
+        """Run each CLI endpoint's billing preflight once, before any spend.
 
         A CLI call is billed against an interactive subscription, so "which
         account is this going to charge?" is a question that must be answered
         before a batch runs, not discovered in the middle of one.  A refusal
         always raises; an ``unknown`` raises unless *allow_unverified*, since
         an unverifiable billing mode is exactly the case the guard exists for.
+
+        Asked through ``llm.preflight_api``, so an api type with no preflight
+        of its own reports ``ready`` rather than ``unknown`` -- there is
+        nothing about it that could refuse, and treating "nothing to check" as
+        "could not check" would refuse every job on a fake endpoint.
         """
         seen: set = set()
         for _role, seat in roster.seats():
             if seat.endpoint_kind not in CLI_KINDS or seat.endpoint in seen:
                 continue
             seen.add(seat.endpoint)
-            backend = self.backends.get(seat.endpoint)
-            preflight = getattr(backend, "preflight", None)
-            if preflight is None:
+            api = self._api_for(seat)
+            if api is None:
+                # Nothing to ask: this worker cannot even build an api type
+                # for that endpoint, so it will never claim a call for it.
                 continue
-            report = dict(await preflight() or {})
+            report = await llm_preflight_api(api)
             state = str(report.get("state") or "unknown")
             if state == "ready":
                 continue
@@ -853,10 +1019,11 @@ class CouncilWorker:
                 wait_s=self.mismatch_wait_s,
             )
 
-        backend = self.backends.get(str(call["endpoint"]))
-        if backend is None:  # pragma: no cover - claim_calls filters these out
+        if str(call["endpoint"]) not in self.backends:
+            # pragma: no cover - claim_calls filters these out
             raise ValueError(
-                f"this worker has no backend for endpoint {call['endpoint']!r}"
+                f"this worker does not serve endpoint {call['endpoint']!r}; it "
+                f"serves {sorted(self.backends)}"
             )
 
         # Only now is the query type needed.  A worker whose route no longer
@@ -893,7 +1060,7 @@ class CouncilWorker:
 
         try:
             outcome = await self._invoke(
-                call, token, backend, query, roster, seat, task, role
+                call, token, query, roster, seat, task, role
             )
         except BaseException:
             if leader:
@@ -927,30 +1094,63 @@ class CouncilWorker:
         self,
         call: Mapping[str, Any],
         token: Optional[str],
-        backend: Any,
         query: Any,
         roster: Roster,
         seat: SeatSpec,
         task: CouncilTask,
         role: str,
     ) -> str:
-        """Render, call the backend, and route the outcome."""
+        """Render, call the model through the wrapper, and route the outcome.
+
+        This is the ONLY place in the council that spends a token, and the
+        only place that calls :attr:`_acomplete`.  The call is one attempt:
+        everything that might lead to a second one -- the backoff, the halt,
+        the budget, the model-unavailable park -- happens after it returns,
+        from the taxonomy on the result.
+        """
         context = self._context_for(role, call, query, roster)
         system, user = query.render(role, task, context)
         schema = query.answer_schema(role)
-        request = CompletionRequest(
-            seat=seat,
-            role=role,
+        trace_id = f"{call['item_id']}|{role}|{seat.seat_name}"
+        endpoint = str(call["endpoint"])
+        mapping = self.endpoint_mapping(endpoint)
+        api_type = str(mapping.get("kind") or seat.endpoint_kind or "")
+
+        request: Any = LLMRequest(
+            model=seat.model,
             system=system,
             user=user,
-            json_schema=schema,
-            trace_id=f"{call['item_id']}|{role}|{seat.seat_name}",
-            deadline_s=seat.timeout_s,
+            json_schema=dict(schema or {}),
+            max_output_tokens=seat.max_output_tokens,
+            temperature=seat.temperature,
+            params=dict(seat.extra or {}),
+            timeout_s=seat.timeout_s,
+            trace_id=trace_id,
         )
+        if self.backends.get(endpoint) is not None:
+            # An explicitly injected api type is handed the council's own
+            # CompletionRequest instead.  It carries the SEAT and the ROLE,
+            # which an LLMRequest deliberately does not (the wrapper is
+            # domain-neutral), and the api types a caller injects are the ones
+            # that may read them -- every scripted fake in these suites keys
+            # its answer on (role, seat_name).  The two records are
+            # interchangeable to anything that only reads the request:
+            # llm.types.as_llm_request converts one to the other.
+            request = CompletionRequest(
+                seat=seat,
+                role=role,
+                system=system,
+                user=user,
+                json_schema=schema,
+                trace_id=trace_id,
+                deadline_s=seat.timeout_s,
+            )
 
         started = _utcnow()
-        async with self._slot(str(call["endpoint"])):
-            result = await backend.complete(request)
+        async with self._slot(endpoint):
+            result = await self._acomplete(
+                request, api_type=api_type, endpoint=mapping
+            )
         finished = _utcnow()
 
         if result.ok:
@@ -1631,7 +1831,7 @@ async def aevaluate(
     query: Any,
     roster: Roster,
     store: Any,
-    backends: Mapping[str, Any],
+    backends: Any,
     *,
     user: str = "local",
     config: Any = None,
@@ -1677,7 +1877,7 @@ def evaluate(
     query: Any,
     roster: Roster,
     store: Any,
-    backends: Mapping[str, Any],
+    backends: Any,
     **kwargs: Any,
 ) -> CouncilVerdict:
     """Decide one item in the foreground.  The synchronous :func:`aevaluate`."""

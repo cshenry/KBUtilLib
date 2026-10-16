@@ -541,6 +541,9 @@ class KBDLServiceUtils(SharedEnvUtils):
         genome: Optional[Any] = None,
         genome_ref: Optional[Any] = None,
         tax_id: Optional[Any] = None,
+        bakta_db: Optional[Any] = None,
+        kofam_profiles: Optional[Any] = None,
+        kofam_profile_set: Optional[Any] = None,
     ) -> str:
         """Submit a ``KBDLGenomeAnnotation`` job. Returns the job id.
 
@@ -549,6 +552,19 @@ class KBDLServiceUtils(SharedEnvUtils):
         ``genome`` (a built-genome JSON, typically the result of a
         ``KBDLBuildGenome`` job) or ``genome_ref`` (an object ref), plus
         ``tools``, with ``tax_id`` as an optional override.
+
+        ``bakta_db``, ``kofam_profiles`` and ``kofam_profile_set`` are the
+        tool inputs ``BAKTA`` and ``KOFAMSCAN`` need: ``bakta_db`` and
+        ``kofam_profiles`` are object refs (``{"object_id": ...}``) to a
+        registered ``BaktaDB``/``KofamProfiles`` object, ``kofam_profile_set``
+        a bare profile-set name such as ``"2025-11-03"``. The service falls
+        back to its deployment defaults (``KBDL_DEFAULT_BAKTA_DB`` et al.)
+        for any left ``None``, and rejects the request at submit time if a
+        requested tool still has no value after that. Supplying one without
+        requesting its tool is accepted and ignored server-side. These were
+        unreachable through this wrapper between the 2026-09-02 narrowing
+        (which dropped ``**params``) and their reinstatement here, even
+        though the service accepted them throughout.
 
         Deliberately has no catch-all ``**params``: the service narrowed
         this contract to drop ``fasta``/``gff``/``genbank``/``features``/
@@ -581,6 +597,12 @@ class KBDLServiceUtils(SharedEnvUtils):
             payload["genome_ref"] = genome_ref
         if tax_id is not None:
             payload["tax_id"] = tax_id
+        if bakta_db is not None:
+            payload["bakta_db"] = bakta_db
+        if kofam_profiles is not None:
+            payload["kofam_profiles"] = kofam_profiles
+        if kofam_profile_set is not None:
+            payload["kofam_profile_set"] = kofam_profile_set
         return self._submit(JOB_TYPE_GENOME_ANNOTATION, payload)
 
     def submit_build_genome(

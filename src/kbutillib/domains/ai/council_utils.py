@@ -271,6 +271,13 @@ class CouncilUtils(SharedEnvUtils):
         store = self.store(check_version=False)
         try:
             before = int(store.schema_version())
+            # An ALREADY-STAMPED store may still be missing a column added to
+            # the same schema version later (see schema.ADDITIVE_COLUMNS).
+            # Asked for here, BEFORE migrate() does it silently, so the report
+            # can name what it added rather than saying "migrated: false"
+            # about a file it just altered.
+            adder = getattr(store, "add_missing_columns", None)
+            added = list(adder()) if before and callable(adder) else []
             version = int(store.migrate())
         finally:
             closer = getattr(store, "close", None)
@@ -280,7 +287,8 @@ class CouncilUtils(SharedEnvUtils):
             "store": _safe_store_url(self.store_url()),
             "schema_version_before": before,
             "schema_version": version,
-            "migrated": before != version,
+            "columns_added": added,
+            "migrated": before != version or bool(added),
         }
 
     def db_check(self) -> Dict[str, Any]:

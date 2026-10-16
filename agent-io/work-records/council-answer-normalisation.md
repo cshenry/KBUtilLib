@@ -54,6 +54,7 @@ Modified:
   `add_missing_columns()`, called from `migrate()`.
 - `store/queries.py` — `complete_call_update` writes the new column.
 - `protocols.py` — the store contract's `complete_call` signature.
+- `council_utils.py` — `db_migrate()` reports `columns_added` (see below).
 - `scripts/council/replay_go_v3.py` — `normalised_rows()`; `diagnose(...,
   also=)`; the report's new normalisation section, the kept rule-only column,
   the `repaired` column, and the run's command/host/UTC/interpreter/commit.
@@ -127,6 +128,14 @@ remedy, which is where the existing mismatch message already sends people.
 `TestTheAdditiveColumn` drops the column from a live store, migrates, and
 replays a job through the repaired file.
 
+One small addition beyond the task's named files follows from that, and it is
+deliberate: `CouncilUtils.db_migrate()` now asks `add_missing_columns()` for
+itself on an already-stamped store and reports `columns_added`, counting it
+as `migrated`. Without it `kbu council db migrate` on an M1 store would print
+`migrated: false` about a file it had just altered. `columns_added` is a new
+key on an existing report dict; both `db_migrate` tests (facade and CLI)
+assert named keys and still pass.
+
 What goes where, on a settled call:
 
 | column | holds |
@@ -166,7 +175,7 @@ single call was 82 s.
 | same, on the branch | 0 | **752 passed, 243 skipped** (= 726 + the 25 new `test_normalise.py` tests + 1 net in `test_go_replay.py`, where two tests became three) |
 | `python -m pytest tests/domains/ai/council/test_normalise.py -q` | 0 | **25 passed** |
 | `python -m pytest tests/domains/ai/council/test_go_replay.py -q` | 0 | **22 passed** (was 21; one test became three) |
-| `python -m pytest tests/cli/test_council_cli.py -q` | 0 | 24 passed |
+| `python -m pytest tests/domains/ai/council/test_council_utils.py tests/cli/test_council_cli.py -q` | 0 | 57 passed (after the `db_migrate` change) |
 | `python -m ruff check src/kbutillib/domains/ai/council tests/domains/ai/council scripts/council` | 0 | All checks passed |
 | suite slice A, branch | 1 | 26 failed — `test_kind.py` 17, `test_clearinghouse.py` 6, `test_clearinghouse_operator.py` 2, `test_composition_smoke.py` 1 |
 | suite slice B, branch | 0 | **1019 passed, 329 skipped** |

@@ -1,13 +1,22 @@
-"""In-process backends for tests: no network, no tokens, no CLI login.
+"""In-process API types for tests: no network, no tokens, no CLI login.
 
 :class:`FakeBackend` answers from a caller-supplied script, so a test can
 drive any sequence of agreements, disagreements and typed failures.
 :class:`ReplayBackend` answers from a recorded table keyed by the call's
 trace, so a real council transcript can be replayed deterministically.
 
-Neither backend ever raises for a call failure -- that is the
-:class:`~kbutillib.domains.ai.council.protocols.Backend` contract, and tests
+Both implement :class:`~kbutillib.domains.ai.llm.protocol.ApiType` (and so
+also the council's older ``Backend`` protocol, which is the same shape), and
+neither ever raises for a call failure -- that is the contract, and the tests
 that depend on it are the reason it holds.
+
+These two stay in the COUNCIL rather than moving to ``llm/apis`` with
+the four real ones, and they are deliberately NOT registered as api types:
+``fake`` and ``replay`` are not kinds a shipped configuration may name, so a
+test that wants them registers them itself (see
+``tests/domains/ai/llm/test_llm_wrapper.py``).  That is what makes it
+impossible for a packaged config to name an endpoint that silently answers
+from a script instead of from a model.
 """
 
 from __future__ import annotations
@@ -16,14 +25,13 @@ import json
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from ...llm.types import as_llm_request, generation_params
 from ..types import (
     CompletionRequest,
     CompletionResult,
     CouncilError,
     InvalidOutput,
-    SeatSpec,
     as_council_error,
-    seat_generation_params,
 )
 
 __all__ = ["FakeBackend", "ReplayBackend"]
@@ -32,14 +40,14 @@ _DEFAULT_USAGE: Dict[str, Optional[int]] = {"prompt_tokens": 0, "completion_toke
 
 
 def _result_from_parsed(
-    req: CompletionRequest, parsed: Mapping[str, Any], elapsed: float, usage: Dict[str, Optional[int]]
+    req: Any, parsed: Mapping[str, Any], elapsed: float, usage: Dict[str, Optional[int]]
 ) -> CompletionResult:
     """Build a successful :class:`CompletionResult` carrying *parsed*."""
     return CompletionResult(
         ok=True,
         text=json.dumps(parsed, sort_keys=True),
         parsed=dict(parsed),
-        resolved_model=req.seat.model,
+        resolved_model=as_llm_request(req).model,
         usage=dict(usage),
         elapsed_s=elapsed,
         finish_reason="stop",
@@ -52,12 +60,12 @@ def _result_from_parsed(
 
 
 def _result_from_error(
-    req: CompletionRequest, error: CouncilError, elapsed: float
+    req: Any, error: CouncilError, elapsed: float
 ) -> CompletionResult:
     """Build a failed :class:`CompletionResult` carrying *error*."""
     return CompletionResult(
         ok=False,
-        resolved_model=req.seat.model,
+        resolved_model=as_llm_request(req).model,
         elapsed_s=elapsed,
         error=error,
     )
@@ -94,8 +102,14 @@ class FakeBackend:
         self._usage = dict(usage) if usage is not None else dict(_DEFAULT_USAGE)
         self.calls: List[CompletionRequest] = []
 
-    async def complete(self, req: CompletionRequest) -> CompletionResult:
-        """Record *req*, run the script, and return its answer as a result."""
+    async def complete(self, req: Any) -> CompletionResult:
+        """Record *req*, run the script, and return its answer as a result.
+
+        The request is recorded AS GIVEN -- a ``CompletionRequest`` stays one
+        -- because the engine tests assert on ``req.role`` and
+        ``req.seat.seat_name``, which an ``LLMRequest`` does not carry.  Only
+        the result builders normalise.
+        """
         self.calls.append(req)
         started = time.monotonic()
         try:
@@ -122,9 +136,14 @@ class FakeBackend:
         """Return ``[]`` -- a fake enumerates nothing."""
         return []
 
-    def effective_params(self, seat: SeatSpec) -> Dict[str, Any]:
-        """Return the seat's own generation params unchanged."""
-        return seat_generation_params(seat)
+    def effective_params(self, request: Any) -> Dict[str, Any]:
+        """Return the request's own generation params unchanged.
+
+        A fake applies no provider mapping, so what it would "send" is what it
+        was asked for.  Accepts an ``LLMRequest`` or a ``SeatSpec``, which is
+        why the engine tests can keep passing a seat.
+        """
+        return generation_params(request)
 
     async def aclose(self) -> None:
         """No resources to release."""
@@ -154,7 +173,7 @@ class ReplayBackend:
         self._table = {tuple(k): dict(v) for k, v in dict(table).items()}
         self.calls: List[CompletionRequest] = []
 
-    async def complete(self, req: CompletionRequest) -> CompletionResult:
+    async def complete(self, req: Any) -> CompletionResult:
         """Look *req*'s trace up in the table and replay its recorded answer."""
         self.calls.append(req)
         started = time.monotonic()
@@ -180,9 +199,9 @@ class ReplayBackend:
         """Return ``[]`` -- a replay enumerates nothing."""
         return []
 
-    def effective_params(self, seat: SeatSpec) -> Dict[str, Any]:
-        """Return the seat's own generation params unchanged."""
-        return seat_generation_params(seat)
+    def effective_params(self, request: Any) -> Dict[str, Any]:
+        """Return the request's own generation params unchanged."""
+        return generation_params(request)
 
     async def aclose(self) -> None:
         """No resources to release."""

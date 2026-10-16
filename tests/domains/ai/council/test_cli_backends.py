@@ -950,17 +950,51 @@ class TestTheBillingGate:
         assert report["detail"], "the worker reports this; empty means 'no reason given'"
         assert "apiKeyHelper" in report["detail"]
 
-    def test_the_gate_is_evaluated_once_per_backend(
+    def test_the_gate_is_cached_until_a_config_file_it_read_changes(
         self, tmp_path: Path, ready_home: Path
     ) -> None:
-        """A config fact cannot change mid-batch, so it is not re-read per call."""
+        """Cached per backend, invalidated by the FILES it was read from.
+
+        M1 ran this gate exactly once per backend instance, on the reasoning
+        that a billing fact cannot change mid-batch.  Review round 3
+        (2026-10-15) retracted that: a user who runs ``claude login`` -- or
+        edits ``settings.json`` -- while a long batch is running HAS changed
+        how the next call bills, and a verdict cached for the life of the
+        process would keep spending against the old answer.  So the gate now
+        keeps the mtime/size of every path the preflight reported inspecting
+        and re-runs as soon as one of them moves.
+
+        Both halves matter and both are asserted here: an unchanged
+        filesystem must NOT re-read anything (that was the point of caching),
+        and a changed one must.
+        """
         fake = make_fake(tmp_path, "claude", stdout=envelope())
         backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
 
+        preflights: list = []
+        inner = backend.preflight
+
+        async def counting_preflight() -> Dict[str, Any]:
+            preflights.append(1)
+            return await inner()
+
+        backend.preflight = counting_preflight  # type: ignore[method-assign]
+
         assert run(backend.complete(request())).ok is True
-        # Make the settings hostile AFTER the gate has cleared.
+        assert len(preflights) == 1
+
+        # Nothing on disk moved: the second call must not stat-and-read again.
+        assert run(backend.complete(request())).ok is True
+        assert len(preflights) == 1
+
+        # Make the settings hostile AFTER the gate has cleared.  The file it
+        # read has changed, so the verdict it cached is no longer current.
         write_claude_settings(ready_home, {"apiKeyHelper": "x"})
-        assert run(backend.complete(request())).ok is True
+        refused = run(backend.complete(request()))
+        assert refused.ok is False
+        assert refused.error is not None
+        assert refused.error.kind == "billing_guard"
+        assert len(preflights) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,14 @@ class Backend(Protocol):
     failure.  The council runs N seats per item and a raise would abort the
     whole item over one bad seat, so every failure comes back as a
     ``CompletionResult`` with ``ok=False`` and ``error`` set.
+
+    This is the council's M1 name for what M2.1 generalised into
+    :class:`kbutillib.domains.ai.llm.protocol.ApiType`.  The shape is the
+    same and the two ``runtime_checkable`` protocols accept the same objects;
+    the only difference is vocabulary -- an ``ApiType`` takes an ``LLMRequest``
+    and knows nothing about seats or roles, which is what lets a plug-in
+    provider be written without the council.  Nothing in the council
+    constructs a backend any more: it asks ``llm.get_api(kind, endpoint)``.
     """
 
     kind: str

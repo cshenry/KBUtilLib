@@ -36,7 +36,32 @@ from typing import (
 
 from pydantic import BaseModel, model_validator
 
-from ....core.errors import KBUtilLibError
+from ..llm.types import (
+    AuthError,
+    BillingGuardRefused,
+    CallError,
+    CallTimeout,
+    InvalidOutput,
+    LLMError,
+    LLMException,
+    LLMResult,
+    ModelUnavailable,
+    QuotaExhausted,
+    TransportError,
+    as_llm_error,
+)
+
+#: The serialisable failure record and the invocation RESULT now live in the
+#: domain-neutral wrapper (M2.1, ``kbutillib.domains.ai.llm``), because every
+#: LLM call in KBUtilLib goes through it and not all of them are councils.
+#: These aliases are not deprecation shims to be deleted later: they are the
+#: council's own names for the same objects, and ``isinstance`` /
+#: ``except`` relations are identical either way because they ARE the same
+#: classes.
+CouncilError = LLMError
+CouncilException = LLMException
+CompletionResult = LLMResult
+as_council_error = as_llm_error
 
 __all__ = [
     # Failure taxonomy
@@ -313,23 +338,6 @@ def route_fingerprint(
 # ---------------------------------------------------------------------------
 
 
-class CouncilError(BaseModel):
-    """Serialisable form of a council failure.
-
-    Call rows and verdicts persist this, not an exception, so a failure
-    survives a round trip through the store and across machines.
-    """
-
-    kind: str
-    message: str = ""
-    retryable: bool = False
-    halts_endpoint: bool = False
-
-
-class CouncilException(KBUtilLibError):
-    """Base class for every council-specific exception."""
-
-
 class ConfigError(CouncilException):
     """The council configuration is unusable (and no default can be guessed).
 
@@ -345,83 +353,14 @@ class RosterError(CouncilException):
     """
 
 
-class CallError(CouncilException):
-    """Base class for the typed failures of a single model invocation.
-
-    Subclasses carry the three facts the worker needs to route a failure:
-    its ``kind`` (what to persist), ``retryable`` (try this call again) and
-    ``halts_endpoint`` (stop using this endpoint for every call, not just
-    this one).
-    """
-
-    kind: ClassVar[str] = "invalid_output"
-    retryable: ClassVar[bool] = False
-    halts_endpoint: ClassVar[bool] = False
-
-    def to_error(self) -> CouncilError:
-        """Return the serialisable :class:`CouncilError` for this exception."""
-        return CouncilError(
-            kind=self.kind,
-            message=str(self),
-            retryable=self.retryable,
-            halts_endpoint=self.halts_endpoint,
-        )
-
-
-class TransportError(CallError):
-    """Network or protocol failure reaching the endpoint; retry the call."""
-
-    kind: ClassVar[str] = "transport"
-    retryable: ClassVar[bool] = True
-
-
-class CallTimeout(CallError):
-    """The call exceeded its deadline; retry the call."""
-
-    kind: ClassVar[str] = "timeout"
-    retryable: ClassVar[bool] = True
-
-
-class QuotaExhausted(CallError):
-    """The provider refused for quota/rate reasons; halt the endpoint."""
-
-    kind: ClassVar[str] = "quota_exhausted"
-    halts_endpoint: ClassVar[bool] = True
-
-
-class AuthError(CallError):
-    """Credentials are missing, expired or rejected; halt the endpoint."""
-
-    kind: ClassVar[str] = "auth"
-    halts_endpoint: ClassVar[bool] = True
-
-
-class BillingGuardRefused(CallError):
-    """The billing guard refused the call (wrong billing mode or account).
-
-    Halts the endpoint: a guard refusal is a configuration fact, so every
-    other call to the same endpoint would be refused identically.
-    """
-
-    kind: ClassVar[str] = "billing_guard"
-    halts_endpoint: ClassVar[bool] = True
-
-
-class ModelUnavailable(CallError):
-    """The model is not loaded/serving yet; the call WAITS rather than fails.
-
-    ``retryable`` is true but this is not a transport retry: the worker
-    re-queues the call for a later sweep instead of burning an attempt.
-    """
-
-    kind: ClassVar[str] = "model_unavailable"
-    retryable: ClassVar[bool] = True
-
-
-class InvalidOutput(CallError):
-    """The model answered, but not in the shape the schema requires."""
-
-    kind: ClassVar[str] = "invalid_output"
+# ``CallError`` and the seven provider-call failures it heads
+# (``TransportError``, ``CallTimeout``, ``QuotaExhausted``, ``AuthError``,
+# ``BillingGuardRefused``, ``ModelUnavailable``, ``InvalidOutput``) are
+# imported from ``..llm.types`` at the top of this module: a provider failure
+# is not a council concept, and the wrapper every call now goes through has to
+# be able to report one without importing the council.  The two BUDGET
+# failures below stay here, because a token budget is the council's own
+# accounting and no API type knows about one.
 
 
 class BudgetExhausted(CallError):
@@ -440,25 +379,6 @@ class BudgetUsageUnknown(CallError):
 
     kind: ClassVar[str] = "budget_usage_unknown"
     halts_endpoint: ClassVar[bool] = True
-
-
-def as_council_error(exc: BaseException) -> CouncilError:
-    """Coerce any exception into a :class:`CouncilError`.
-
-    Known :class:`CallError` subclasses keep their taxonomy; anything else is
-    reported as a retryable transport failure, which is the safe reading of an
-    unexpected exception from a backend.
-    """
-    if isinstance(exc, CallError):
-        return exc.to_error()
-    if isinstance(exc, CouncilError):  # pragma: no cover - defensive
-        return exc
-    return CouncilError(
-        kind="transport",
-        message=f"{type(exc).__name__}: {exc}",
-        retryable=True,
-        halts_endpoint=False,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -613,26 +533,6 @@ class CompletionRequest(BaseModel):
     json_schema: Dict[str, Any] = {}
     trace_id: str = ""
     deadline_s: float = 180
-
-
-class CompletionResult(BaseModel):
-    """The outcome of one model invocation.
-
-    A backend NEVER raises for a call failure; it returns ``ok=False`` with
-    ``error`` set, so a single bad seat cannot abort a batch.
-    """
-
-    ok: bool
-    text: Optional[str] = None
-    parsed: Optional[Dict[str, Any]] = None
-    resolved_model: Optional[str] = None
-    usage: Optional[Dict[str, Optional[int]]] = None
-    elapsed_s: float = 0.0
-    finish_reason: Optional[str] = None
-    truncated: bool = False
-    schema_enforced: Optional[bool] = None
-    error: Optional[CouncilError] = None
-    from_cache: bool = False
 
 
 # ---------------------------------------------------------------------------

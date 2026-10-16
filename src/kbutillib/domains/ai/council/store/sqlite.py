@@ -35,15 +35,27 @@ IMMEDIATE``, above) that makes a claim atomic.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import socket
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+)
 
 import sqlalchemy as sa
 
@@ -57,7 +69,17 @@ from .errors import (
     StorePathRefused,
 )
 
-__all__ = ["SqliteStore", "STORE_IDENTITY"]
+__all__ = [
+    "SqliteStore",
+    "STORE_IDENTITY",
+    "NETWORK_FILESYSTEMS",
+    "ALLOW_NETWORK_FS_ENV",
+    "filesystem_type_of",
+    "nearest_existing_ancestor",
+    "refuse_network_filesystem",
+]
+
+logger = logging.getLogger(__name__)
 
 #: Re-exported from :mod:`.queries`: the fixed ``endpoint_state.user`` value
 #: every row in a store is keyed under.  See that module for why.
@@ -1573,12 +1595,24 @@ def _canonical(value: Any) -> str:
     return canonical_json(value)
 
 
-def _resolve_sqlite_url(url: str) -> tuple:
-    """Return ``(sqlalchemy_url, path)`` for *url*, refusing synced locations.
+def _resolve_sqlite_url(
+    url: str, *, filesystem_type: Callable[[Path], Optional[str]] = None
+) -> tuple:
+    """Return ``(sqlalchemy_url, path)`` for *url*, refusing bad locations.
 
     Accepts a SQLAlchemy URL or a bare filesystem path, because a config file
     and a ``--store`` flag disagree about which they hold and neither caller
     should have to care.  ``path`` is None for an in-memory database.
+
+    Two refusals, in this order: a Dropbox path component (never overridable),
+    then a network filesystem (see :func:`refuse_network_filesystem`).
+
+    Args:
+        filesystem_type: the injection seam for the second refusal -- a
+            callable taking a path and returning its filesystem type.
+            Defaults to :func:`filesystem_type_of`.  Tests substitute THIS
+            and nothing else, so the path normalisation above it is the
+            shipped code either way.
     """
     text = (url or "").strip()
     if not text:
@@ -1616,14 +1650,183 @@ def _resolve_sqlite_url(url: str) -> tuple:
                     f"refusing a sqlite council store inside a synced directory: "
                     f"{str(candidate)!r} (component {part!r}). A live SQLite "
                     "database is a file plus a write-ahead log, and file sync "
-                    "corrupts the pair; put the store outside Dropbox, or use a "
-                    "PostgreSQL URL."
+                    "corrupts the pair; set `store:` to a path on local disk."
                 )
+
+    refuse_network_filesystem(
+        path, filesystem_type=filesystem_type or filesystem_type_of
+    )
 
     # Deliberately NOT resolve()d: the caller's own spelling of the path is what
     # goes back in the URL, so a test (or a user) that asks where the file is
     # gets the place they named rather than a symlink's target.
     return f"sqlite:///{path}", path
+
+
+# ---------------------------------------------------------------------------
+# The network-filesystem refusal
+# ---------------------------------------------------------------------------
+
+#: Filesystem types a SQLite council store may not live on.  Every one of them
+#: either does not implement the POSIX advisory locks SQLite's WAL mode relies
+#: on, or implements them in a way that silently does not hold across clients
+#: -- which does not fail loudly, it corrupts the database.
+NETWORK_FILESYSTEMS = frozenset(
+    {
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "smb2",
+        "smb3",
+        "afpfs",
+        "webdav",
+        "fuse.sshfs",
+        "sshfs",
+        "9p",
+        "lustre",
+        "gpfs",
+        "beegfs",
+        "ceph",
+        "fuse.ceph",
+    }
+)
+
+#: Set this to ``1`` to open a store on a network filesystem anyway.  It exists
+#: because an operator who knows their NFS mount is single-client is entitled
+#: to that call; the Dropbox refusal has no such escape, because no spelling of
+#: "I know what I am doing" makes a file syncer safe for a WAL pair.
+ALLOW_NETWORK_FS_ENV = "KBU_COUNCIL_ALLOW_NETWORK_FS"
+
+
+def nearest_existing_ancestor(path: Path) -> Optional[Path]:
+    """The closest existing directory at or above *path*.
+
+    The store file itself usually does not exist yet -- creating it is the
+    point -- so the filesystem question has to be asked of the directory it
+    will land in, or of that directory's parent if it is also still to be
+    created.
+    """
+    candidate = path if path.is_absolute() else Path(os.path.abspath(path))
+    for ancestor in [candidate, *candidate.parents]:
+        if ancestor.exists():
+            return ancestor
+    return None
+
+
+def filesystem_type_of(path: Path) -> Optional[str]:
+    """The filesystem type of *path*, which must EXIST, lowercased.
+
+    This is the whole injection seam for :func:`refuse_network_filesystem`:
+    one small function, platform-specific, that answers one question about one
+    existing directory.  Everything else in the refusal -- which types are
+    refused, the override, finding the directory to ask about -- is
+    platform-neutral and sits above it.
+
+    ``None`` means "could not tell", not "fine": the caller treats it as
+    allowed-with-a-warning, because refusing a store because this function
+    could not answer would break a perfectly good local disk on a platform
+    nobody tested.
+
+    Linux reads ``/proc/self/mounts`` and takes the LONGEST matching mount
+    point, which is what makes a store under a network mount nested inside a
+    local one report the network type rather than the local one.  macOS asks
+    ``stat -f %T``, which is ``statfs``'s ``f_fstypename`` (see
+    :func:`_macos_fstype` for why not :mod:`ctypes`).
+    """
+    if sys.platform == "darwin":
+        return _macos_fstype(path)
+    return _linux_fstype(path)
+
+
+def _linux_fstype(path: Path) -> Optional[str]:
+    """The type of the longest mount point in ``/proc/self/mounts`` under *path*."""
+    try:
+        mounts = Path("/proc/self/mounts").read_text()
+    except OSError:
+        return None
+    target = os.path.realpath(path)
+    best: Optional[str] = None
+    best_len = -1
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        # The kernel octal-escapes spaces and tabs in mount points.
+        point = fields[1].replace("\\040", " ").replace("\\011", "\t")
+        if target == point or target.startswith(point.rstrip("/") + "/"):
+            if len(point) > best_len:
+                best, best_len = fields[2].lower(), len(point)
+    return best
+
+
+def _macos_fstype(path: Path) -> Optional[str]:
+    """``statfs(2)``'s ``f_fstypename`` for *path*, read via ``stat -f %T``.
+
+    ``stat -f %T`` is exactly ``f_fstypename`` -- "nfs", "smbfs", "apfs" --
+    and is the sanctioned way to ask for it from outside C.  Deliberately NOT
+    ``ctypes`` into ``libc.statfs``: that means hard-coding the byte offset of
+    that field inside ``struct statfs``, whose preceding fields vary by
+    architecture and SDK, and a wrong offset would return plausible-looking
+    rubbish rather than nothing -- which would refuse a good local disk or
+    admit a network mount.  A subprocess once per store open is cheap enough
+    to be worth not guessing.
+    """
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["stat", "-f", "%T", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if out.returncode != 0:
+            return None
+        value = (out.stdout or "").strip().lower()
+        return value or None
+    except Exception:  # noqa: BLE001 - "could not tell" is an allowed answer
+        return None
+
+
+def refuse_network_filesystem(
+    path: Path,
+    *,
+    filesystem_type: Callable[[Path], Optional[str]] = filesystem_type_of,
+) -> None:
+    """Refuse *path* if it is on a filesystem in :data:`NETWORK_FILESYSTEMS`.
+
+    Overridable with :data:`ALLOW_NETWORK_FS_ENV`, unlike the Dropbox refusal.
+    An UNDETERMINABLE type is allowed with a logged warning: the check exists
+    to catch the mistake users actually make, and failing closed on a platform
+    whose filesystem type this code cannot read would refuse good local disks.
+    """
+    if os.environ.get(ALLOW_NETWORK_FS_ENV, "").strip() == "1":
+        return
+    # The store file usually does not exist yet, and nor may its directory --
+    # creating them is what the caller is about to do -- so the question goes
+    # to the nearest ancestor that IS there.
+    ancestor = nearest_existing_ancestor(path)
+    found = (filesystem_type(ancestor) or "").strip().lower() if ancestor else ""
+    if not found:
+        logger.warning(
+            "council store: could not determine the filesystem type of %s; "
+            "opening it anyway. A SQLite store on a network filesystem (NFS, "
+            "SMB, sshfs, ...) can be corrupted by locks that do not hold.",
+            ancestor or path,
+        )
+        return
+    if found in NETWORK_FILESYSTEMS:
+        raise StorePathRefused(
+            f"refusing a sqlite council store on a {found!r} filesystem: "
+            f"{str(path)!r}. SQLite's WAL mode needs POSIX locks that a "
+            "network filesystem either does not implement or does not honour "
+            "across clients, which corrupts the database rather than failing. "
+            "Set `store:` to a path on local disk (for example "
+            "~/.kbutillib/council/council.sqlite). If you know this mount is "
+            f"used by one machine only, set {ALLOW_NETWORK_FS_ENV}=1."
+        )
 
 
 def _install_sqlite_pragmas(engine: sa.Engine) -> None:

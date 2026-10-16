@@ -1,10 +1,11 @@
-"""The council store contract, run against every backend.
+"""The council store contract.
 
-Covered here: schema init and version handling, query-type immutability,
-atomic job creation, endpoint budget/halt state, workers, the daemon and GPU
-leases, tombstones, the one-live-call index, search, the refusal of a synced
-database path, and the queue -- claiming, completing, releasing, reclaiming
-and the job control (status, results, cancel, delete) built on them.
+Covered here: schema init, version handling and the v1 -> v2 migration,
+query-type immutability, atomic job creation, endpoint budget/halt state,
+workers, tombstones, the one-live-call index, search, the refusal of a synced
+or network-filesystem database path, and the queue -- claiming, completing,
+releasing, reclaiming and the job control (status, results, cancel, delete)
+built on them.
 
 The queue's central claim is that two workers never get the same call.
 ``TestNoDoubleClaim`` tests that with two real ``spawn`` processes against one
@@ -12,10 +13,8 @@ database file rather than with threads, because threads in one interpreter
 would share the store's connection pool and could pass for correct while the
 locking was broken.
 
-Fixtures come from :mod:`.store_contract`, which parametrises every test over
-SQLite (always) and PostgreSQL (when ``KBU_COUNCIL_TEST_PG_DSN`` is set).  No
-test here makes a network call, spends a token, needs a CLI login or needs a
-GPU.
+Fixtures come from :mod:`.store_contract`.  No test here makes a network call,
+spends a token, needs a CLI login or needs a GPU.
 """
 
 from __future__ import annotations
@@ -37,13 +36,16 @@ from kbutillib.domains.ai.council.store import open_store  # noqa: E402
 from kbutillib.domains.ai.council.store import schema as sch  # noqa: E402
 from kbutillib.domains.ai.council.store.errors import (  # noqa: E402
     JobCancelled,
-    NotOwner,
     QueryTypeExists,
     SchemaVersionMismatch,
     StaleClaim,
+    StoreError,
     StorePathRefused,
 )
-from kbutillib.domains.ai.council.store.sqlite import SqliteStore  # noqa: E402
+from kbutillib.domains.ai.council.store.sqlite import (  # noqa: E402
+    STORE_IDENTITY,
+    SqliteStore,
+)
 
 # Only the plain helpers are imported here.  The `store`, `make_store`,
 # `store_url` and `store_backend` fixtures come from conftest.py, which
@@ -65,15 +67,19 @@ T0 = datetime(2026, 10, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class TestSchema:
-    def test_init_creates_every_table_and_stamps_version_1(self, store):
-        assert store.schema_version() == 1
+    def test_init_creates_every_table_and_stamps_version_2(self, store):
+        assert store.schema_version() == 2
         present = set(sa.inspect(store.engine).get_table_names())
         assert set(sch.TABLE_NAMES) <= present
+
+    def test_init_creates_none_of_the_tables_v2_removed(self, store):
+        present = set(sa.inspect(store.engine).get_table_names())
+        assert present.isdisjoint(sch.REMOVED_IN_V2)
 
     def test_init_schema_is_idempotent(self, store):
         store.init_schema()
         store.init_schema()
-        assert store.schema_version() == 1
+        assert store.schema_version() == 2
 
     def test_version_is_0_before_init(self, make_store):
         fresh = make_store("uninitialised", init=False)
@@ -81,11 +87,11 @@ class TestSchema:
 
     def test_migrate_initialises_an_empty_database(self, make_store):
         fresh = make_store("needs-migrate", init=False)
-        assert fresh.migrate() == 1
-        assert fresh.schema_version() == 1
+        assert fresh.migrate() == 2
+        assert fresh.schema_version() == 2
 
     def test_migrate_is_a_noop_at_the_current_version(self, store):
-        assert store.migrate() == 1
+        assert store.migrate() == 2
 
     def test_opening_a_different_version_raises_and_names_the_fix(
         self, store, make_store
@@ -409,39 +415,50 @@ class TestListJobs:
 
 class TestEndpointState:
     def test_an_unseen_endpoint_reads_as_zeroed_and_unhalted(self, store):
-        state = store.get_endpoint_state("alice", "argo")
+        state = store.get_endpoint_state("argo")
         assert state["epoch_tokens"] == 0
         assert state["lifetime_tokens"] == 0
         assert state["budget_epoch"] == 0
         assert state["halt_kind"] is None
 
     def test_add_tokens_accumulates_in_both_counters(self, store):
-        store.add_tokens("alice", "argo", 100)
-        store.add_tokens("alice", "argo", 250)
-        state = store.get_endpoint_state("alice", "argo")
+        store.add_tokens("argo", 100)
+        store.add_tokens("argo", 250)
+        state = store.get_endpoint_state("argo")
         assert state["epoch_tokens"] == 350
         assert state["lifetime_tokens"] == 350
 
-    def test_counters_are_per_user_and_per_endpoint(self, store):
-        store.add_tokens("alice", "argo", 100)
-        store.add_tokens("bob", "argo", 7)
-        store.add_tokens("alice", "poplar", 3)
-        assert store.get_endpoint_state("alice", "argo")["epoch_tokens"] == 100
-        assert store.get_endpoint_state("bob", "argo")["epoch_tokens"] == 7
-        assert store.get_endpoint_state("alice", "poplar")["epoch_tokens"] == 3
+    def test_counters_are_per_endpoint_and_not_per_user(self, store):
+        """One store, one ledger per endpoint -- whatever label is passed."""
+        store.add_tokens("argo", 100)
+        store.add_tokens("argo", 7, user="somebody-else")
+        store.add_tokens("poplar", 3)
+        # The deprecated `user` keyword is a no-op: both additions land on the
+        # same row, because the spend is the machine's and not a person's.
+        assert store.get_endpoint_state("argo")["epoch_tokens"] == 107
+        assert store.get_endpoint_state("poplar")["epoch_tokens"] == 3
+
+    def test_every_row_is_keyed_on_the_store_local_identity(self, store):
+        store.add_tokens("argo", 5)
+        with store.engine.connect() as conn:
+            keys = [
+                row[0]
+                for row in conn.execute(sa.select(sch.endpoint_state.c.user))
+            ]
+        assert keys == [STORE_IDENTITY]
 
     def test_set_halt_records_kind_and_message(self, store):
-        store.set_halt("alice", "argo", "quota_exhausted", "429 from the gateway")
-        state = store.get_endpoint_state("alice", "argo")
+        store.set_halt("argo", "quota_exhausted", "429 from the gateway")
+        state = store.get_endpoint_state("argo")
         assert state["halt_kind"] == "quota_exhausted"
         assert state["halt_message"] == "429 from the gateway"
 
     def test_reset_halt_clears_the_halt_and_keeps_the_tokens(self, store):
-        store.add_tokens("alice", "argo", 500)
-        store.set_halt("alice", "argo", "auth", "expired key")
+        store.add_tokens("argo", 500)
+        store.set_halt("argo", "auth", "expired key")
 
-        store.reset_halt("alice", "argo")
-        state = store.get_endpoint_state("alice", "argo")
+        store.reset_halt("argo")
+        state = store.get_endpoint_state("argo")
         assert state["halt_kind"] is None
         assert state["halt_message"] is None
         # "The problem is fixed" is not "the tokens were not spent".
@@ -449,26 +466,26 @@ class TestEndpointState:
         assert state["lifetime_tokens"] == 500
 
     def test_reset_budget_starts_a_new_epoch_and_keeps_the_lifetime(self, store):
-        store.add_tokens("alice", "argo", 500)
-        store.reset_budget("alice", "argo")
-        state = store.get_endpoint_state("alice", "argo")
+        store.add_tokens("argo", 500)
+        store.reset_budget("argo")
+        state = store.get_endpoint_state("argo")
         assert state["budget_epoch"] == 1
         assert state["epoch_tokens"] == 0
         assert state["lifetime_tokens"] == 500
 
-        store.add_tokens("alice", "argo", 20)
-        state = store.get_endpoint_state("alice", "argo")
+        store.add_tokens("argo", 20)
+        state = store.get_endpoint_state("argo")
         assert state["epoch_tokens"] == 20
         assert state["lifetime_tokens"] == 520
 
     def test_reset_budget_clears_a_budget_halt(self, store):
-        store.set_halt("alice", "argo", "budget_exhausted", "ceiling reached")
-        assert store.reset_budget("alice", "argo")["halt_kind"] is None
+        store.set_halt("argo", "budget_exhausted", "ceiling reached")
+        assert store.reset_budget("argo")["halt_kind"] is None
 
     def test_reset_budget_leaves_a_non_budget_halt_alone(self, store):
         """A new epoch does not fix an expired credential."""
-        store.set_halt("alice", "argo", "auth", "expired key")
-        state = store.reset_budget("alice", "argo")
+        store.set_halt("argo", "auth", "expired key")
+        state = store.reset_budget("argo")
         assert state["halt_kind"] == "auth"
         assert state["budget_epoch"] == 1
 
@@ -529,126 +546,8 @@ class TestWorkers:
         assert store.remove_worker("w1") is False
         assert store.live_workers("alice") == []
 
-    def test_request_stop_reaches_the_daemon_lease_holder(self, store):
-        store.register_worker({"worker_id": "w1", "user": "alice", "kind": "daemon"})
-        store.register_worker({"worker_id": "w2", "user": "alice"})
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-
-        assert store.stop_requested("w1") is False
-        assert store.request_stop("alice") is True
-        assert store.stop_requested("w1") is True
-        # Only the lease holder is asked to stop, not every worker of the user.
-        assert store.stop_requested("w2") is False
-
-    def test_request_stop_without_a_lease_holder_reports_false(self, store):
-        assert store.request_stop("alice") is False
-
     def test_stop_requested_for_an_unknown_worker_is_false(self, store):
         assert store.stop_requested("ghost") is False
-
-
-# ---------------------------------------------------------------------------
-# Leases
-# ---------------------------------------------------------------------------
-
-
-class TestDaemonLease:
-    def test_first_acquire_is_generation_1(self, store):
-        assert store.acquire_daemon_lease("alice", "w1", now=T0) == 1
-
-    def test_acquire_is_refused_while_the_lease_is_unexpired(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert (
-            store.acquire_daemon_lease(
-                "alice", "w2", now=T0 + timedelta(seconds=30)
-            )
-            is None
-        )
-
-    def test_the_holder_itself_must_renew_rather_than_reacquire(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert store.acquire_daemon_lease("alice", "w1", now=T0) is None
-
-    def test_takeover_after_expiry_increments_the_generation(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0, ttl=timedelta(minutes=2))
-        later = T0 + timedelta(minutes=5)
-        assert store.acquire_daemon_lease("alice", "w2", now=later) == 2
-        assert store.acquire_daemon_lease(
-            "alice", "w3", now=later + timedelta(minutes=5)
-        ) == 3
-
-    def test_renew_extends_the_lease(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0, ttl=timedelta(minutes=2))
-        assert (
-            store.renew_daemon_lease(
-                "alice", "w1", 1, now=T0 + timedelta(minutes=1), ttl=timedelta(minutes=2)
-            )
-            is True
-        )
-        # Renewed at T0+1m for 2m, so a rival at T0+2.5m is still shut out.
-        assert (
-            store.acquire_daemon_lease(
-                "alice", "w2", now=T0 + timedelta(minutes=2, seconds=30)
-            )
-            is None
-        )
-
-    def test_renew_with_a_superseded_generation_returns_false(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0, ttl=timedelta(minutes=2))
-        store.acquire_daemon_lease("alice", "w2", now=T0 + timedelta(minutes=5))
-        # w1 woke up from a long GC pause; its generation is history.
-        assert store.renew_daemon_lease("alice", "w1", 1, now=T0 + timedelta(minutes=6)) is False
-
-    def test_renew_by_the_wrong_worker_returns_false(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert store.renew_daemon_lease("alice", "w2", 1, now=T0) is False
-
-    def test_renew_without_a_lease_returns_false(self, store):
-        assert store.renew_daemon_lease("alice", "w1", 1, now=T0) is False
-
-    def test_release_frees_the_lease_but_keeps_the_generation(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert store.release_daemon_lease("alice", "w1", 1) is True
-        # Immediately available, and the counter does NOT go back to 1.
-        assert store.acquire_daemon_lease("alice", "w2", now=T0) == 2
-
-    def test_release_with_the_wrong_generation_is_refused(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert store.release_daemon_lease("alice", "w1", 7) is False
-
-    def test_leases_are_per_user(self, store):
-        assert store.acquire_daemon_lease("alice", "w1", now=T0) == 1
-        assert store.acquire_daemon_lease("bob", "w2", now=T0) == 1
-
-
-class TestGpuLease:
-    """The GPU lease is fleet-wide: one row, no user key, same semantics."""
-
-    def test_first_acquire_is_generation_1(self, store):
-        assert store.acquire_gpu_lease("w1", now=T0) == 1
-
-    def test_acquire_is_refused_while_unexpired(self, store):
-        store.acquire_gpu_lease("w1", now=T0)
-        assert store.acquire_gpu_lease("w2", now=T0 + timedelta(seconds=30)) is None
-
-    def test_takeover_after_expiry_increments_the_generation(self, store):
-        store.acquire_gpu_lease("w1", now=T0, ttl=timedelta(minutes=2))
-        assert store.acquire_gpu_lease("w2", now=T0 + timedelta(minutes=5)) == 2
-
-    def test_renew_and_superseded_renew(self, store):
-        store.acquire_gpu_lease("w1", now=T0, ttl=timedelta(minutes=2))
-        assert store.renew_gpu_lease("w1", 1, now=T0 + timedelta(minutes=1)) is True
-        store.acquire_gpu_lease("w2", now=T0 + timedelta(minutes=10))
-        assert store.renew_gpu_lease("w1", 1, now=T0 + timedelta(minutes=11)) is False
-
-    def test_release_keeps_the_generation(self, store):
-        store.acquire_gpu_lease("w1", now=T0)
-        assert store.release_gpu_lease("w1", 1) is True
-        assert store.acquire_gpu_lease("w2", now=T0) == 2
-
-    def test_the_gpu_lease_is_independent_of_a_daemon_lease(self, store):
-        store.acquire_daemon_lease("alice", "w1", now=T0)
-        assert store.acquire_gpu_lease("w1", now=T0) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -748,17 +647,17 @@ class TestTransaction:
         """Re-entrancy is what lets the worker settle a call as one unit."""
         with store.transaction():
             store.put_query_type("go", "1", {"a": 1})
-            store.add_tokens("alice", "argo", 5)
+            store.add_tokens("argo", 5)
         assert len(store.list_query_types()) == 1
-        assert store.get_endpoint_state("alice", "argo")["epoch_tokens"] == 5
+        assert store.get_endpoint_state("argo")["epoch_tokens"] == 5
 
     def test_a_nested_failure_rolls_back_the_whole_unit(self, store):
         with pytest.raises(RuntimeError):
             with store.transaction():
-                store.add_tokens("alice", "argo", 5)
+                store.add_tokens("argo", 5)
                 store.put_query_type("go", "1", {"a": 1})
                 raise RuntimeError("boom")
-        assert store.get_endpoint_state("alice", "argo")["epoch_tokens"] == 0
+        assert store.get_endpoint_state("argo")["epoch_tokens"] == 0
         assert store.list_query_types() == []
 
 
@@ -799,7 +698,7 @@ class TestClaimCalls:
             ],
         )
 
-        claimed = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
 
         assert [(c["job_id"], c["item_id"], c["role"]) for c in claimed] == [
             # Highest priority, earliest of the two at that priority ...
@@ -817,7 +716,7 @@ class TestClaimCalls:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1"), call_row("item-1", "proposer_2")],
         )
-        claimed = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0)
 
         assert [c["status"] for c in claimed] == ["claimed", "claimed"]
         assert {c["claimed_by"] for c in claimed} == {"w1"}
@@ -835,8 +734,8 @@ class TestClaimCalls:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 1
-        assert store.claim_calls("alice", "w2", {"argo"}, 10, now=T0) == []
+        assert len(store.claim_calls("w1", {"argo"}, 10, now=T0)) == 1
+        assert store.claim_calls("w2", {"argo"}, 10, now=T0) == []
 
     def test_limit_is_honoured(self, store):
         store.create_job(
@@ -844,15 +743,15 @@ class TestClaimCalls:
             [item_row("item-1")],
             [call_row("item-1", f"proposer_{n}") for n in range(1, 5)],
         )
-        assert len(store.claim_calls("alice", "w1", {"argo"}, 2, now=T0)) == 2
-        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 2
+        assert len(store.claim_calls("w1", {"argo"}, 2, now=T0)) == 2
+        assert len(store.claim_calls("w1", {"argo"}, 10, now=T0)) == 2
 
     @pytest.mark.parametrize("limit", [0, -1])
     def test_a_non_positive_limit_claims_nothing(self, store, limit):
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        assert store.claim_calls("alice", "w1", {"argo"}, limit, now=T0) == []
+        assert store.claim_calls("w1", {"argo"}, limit, now=T0) == []
 
     def test_not_before_in_the_future_is_skipped_until_it_is_due(self, store):
         due = T0 + timedelta(minutes=5)
@@ -864,11 +763,11 @@ class TestClaimCalls:
                 call_row("item-1", "proposer_2"),  # null not_before: due now
             ],
         )
-        assert [c["seat_name"] for c in store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)] == [
+        assert [c["seat_name"] for c in store.claim_calls("w1", {"argo"}, 10, now=T0)] == [
             "proposer_2"
         ]
         assert [
-            c["seat_name"] for c in store.claim_calls("alice", "w1", {"argo"}, 10, now=due)
+            c["seat_name"] for c in store.claim_calls("w1", {"argo"}, 10, now=due)
         ] == ["proposer_1"]
 
     def test_only_the_named_endpoints_are_claimed(self, store):
@@ -880,7 +779,7 @@ class TestClaimCalls:
                 call_row("item-1", "proposer_2", endpoint="poplar"),
             ],
         )
-        assert [c["endpoint"] for c in store.claim_calls("alice", "w1", {"poplar"}, 10, now=T0)] == [
+        assert [c["endpoint"] for c in store.claim_calls("w1", {"poplar"}, 10, now=T0)] == [
             "poplar"
         ]
 
@@ -888,11 +787,15 @@ class TestClaimCalls:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        assert store.claim_calls("alice", "w1", set(), 10, now=T0) == []
+        assert store.claim_calls("w1", set(), 10, now=T0) == []
 
-    def test_a_halted_endpoint_is_skipped_for_that_user_only(self, store):
-        """A halt is per (user, endpoint): one user's exhausted quota on a
-        shared gateway must not stop everybody else's calls."""
+    def test_a_halted_endpoint_is_skipped_whatever_label_the_job_carries(self, store):
+        """A halt is the store's, so it stops every job on that endpoint.
+
+        Two jobs with different ``submitted_by`` labels, one halted endpoint:
+        neither is claimable, because there is one machine and one quota
+        behind the gateway however many labels were used to submit.
+        """
         store.create_job(
             job_row(job_id="a", submitted_by="alice"),
             [item_row("item-1")],
@@ -903,10 +806,10 @@ class TestClaimCalls:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1")],
         )
-        store.set_halt("alice", "argo", "quota_exhausted", "out of tokens")
+        store.set_halt("argo", "quota_exhausted", "out of tokens")
 
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
-        assert len(store.claim_calls("bob", "w2", {"argo"}, 10, now=T0)) == 1
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
+        assert store.claim_calls("w2", {"argo"}, 10, now=T0) == []
 
         # And the halt is only for that endpoint.
         store.create_job(
@@ -914,27 +817,56 @@ class TestClaimCalls:
             [item_row("item-9")],
             [call_row("item-9", "proposer_1", endpoint="poplar")],
         )
-        assert len(store.claim_calls("alice", "w1", {"argo", "poplar"}, 10, now=T0)) == 1
+        assert len(store.claim_calls("w1", {"argo", "poplar"}, 10, now=T0)) == 1
 
     def test_reset_halt_makes_the_calls_claimable_again(self, store):
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.set_halt("alice", "argo", "auth", "token expired")
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
-        store.reset_halt("alice", "argo")
-        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)) == 1
+        store.set_halt("argo", "auth", "token expired")
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
+        store.reset_halt("argo")
+        assert len(store.claim_calls("w1", {"argo"}, 10, now=T0)) == 1
 
-    def test_another_users_job_is_never_claimed(self, store):
-        """The claiming user runs the call through THEIR OWN backends and
-        credentials, so claiming across users would spend the wrong money."""
+    def test_claims_ignore_submitted_by(self, store):
+        """The queue is the STORE's, and ``submitted_by`` is only a label.
+
+        A store is one machine's single-user file, so a worker claims every
+        due call in it.  Filtering on the label would strand the whole queue
+        the moment somebody edited config ``user`` (review round 3).
+        """
         store.create_job(
-            job_row(job_id="bobs", submitted_by="bob"),
+            job_row(job_id="theirs", submitted_by="somebody-else"),
             [item_row("item-1")],
             [call_row("item-1", "proposer_1")],
         )
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
-        assert len(store.claim_calls("bob", "w1", {"argo"}, 10, now=T0)) == 1
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        assert len(claimed) == 1
+        assert claimed[0]["submitted_by"] == "somebody-else"
+
+    def test_changing_the_label_strands_no_pending_call(self, store):
+        """Three jobs, three different labels, one worker: it gets all three."""
+        for index, label in enumerate(("old-name", "new-name", "")):
+            store.create_job(
+                job_row(job_id=f"j{index}", submitted_by=label or "unknown"),
+                [item_row("item-1")],
+                [call_row("item-1", "proposer_1")],
+            )
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        assert len(claimed) == 3
+
+    def test_changing_the_label_resets_no_budget(self, store):
+        """The budget is keyed on the store, so a rename cannot clear it."""
+        store.add_tokens("argo", 500)
+        store.set_halt("argo", "budget_exhausted", "ceiling reached")
+        # A later job submitted under a brand-new label sees the same halt.
+        store.create_job(
+            job_row(job_id="after-rename", submitted_by="renamed"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        assert store.get_endpoint_state("argo")["lifetime_tokens"] == 500
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
 
     @pytest.mark.parametrize("job_status", ["cancelled", "paused"])
     def test_a_cancelled_or_paused_job_is_skipped(self, store, job_status):
@@ -947,32 +879,22 @@ class TestClaimCalls:
                 .where(sch.jobs.c.job_id == job_id)
                 .values(status=job_status)
             )
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
 
     def test_a_tombstoned_jobs_calls_are_skipped(self, store):
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.cancel_job(job_id, "alice")
-        store.delete_job(job_id, "alice")
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
+        store.cancel_job(job_id)
+        store.delete_job(job_id)
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
 
-    def test_a_daemon_claims_under_its_lease_generation(self, store):
-        """How a late reply from a superseded daemon is later recognised."""
+    def test_a_claim_carries_no_lease_generation(self, store):
+        """The daemon lease is gone: exclusion is the execlock's job now."""
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        generation = store.acquire_daemon_lease("alice", "daemon-1", now=T0)
-        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
-        assert generation == 1
-        assert claim["lease_generation"] == generation
-
-    def test_a_foreground_worker_claims_under_no_generation(self, store):
-        store.create_job(
-            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
-        )
-        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
-        (claim,) = store.claim_calls("alice", "foreground-1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("daemon-1", {"argo"}, 10, now=T0)
         assert claim["lease_generation"] is None
 
 
@@ -1031,7 +953,7 @@ class TestNoDoubleClaim:
         children = [
             ctx.Process(
                 target=claim_in_subprocess,
-                args=(url, "alice", worker_id, ["argo"], self.CLAIM_LIMIT, barrier, results),
+                args=(url, worker_id, ["argo"], self.CLAIM_LIMIT, barrier, results),
                 daemon=True,
             )
             for worker_id in ("worker-1", "worker-2")
@@ -1079,7 +1001,7 @@ class TestCompleteCall:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         return job_id, claim
 
     def test_an_ok_completion_stores_the_reply_and_clears_the_token(self, store, claimed):
@@ -1162,7 +1084,7 @@ class TestCompleteCall:
             {"worker_id": "w1", "user": "alice", "kind": "daemon", "endpoints": ["argo"]}
         )
         long_ago = utcnow() - timedelta(minutes=30)
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=long_ago)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=long_ago)
         # The worker stops heartbeating: back-date it past the staleness window.
         assert store.heartbeat_worker("w1", long_ago) is True
 
@@ -1179,37 +1101,16 @@ class TestCompleteCall:
         assert call["reply_parsed"] is None
         assert call["claim_token"] is None
 
-    def test_a_superseded_daemon_generation_is_refused(self, store):
-        store.create_job(
-            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
-        )
-        first = store.acquire_daemon_lease("alice", "daemon-1", now=T0)
-        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
-        # daemon-1's lease lapses and daemon-2 takes over.
-        second = store.acquire_daemon_lease("alice", "daemon-2", now=T0 + timedelta(hours=1))
-        assert second == first + 1
+    def test_a_claim_is_refused_only_on_its_token(self, store):
+        """The ONE ground for StaleClaim now: the row was reclaimed.
 
-        with pytest.raises(StaleClaim, match="generation"):
-            store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="late")
-
-    def test_the_current_daemon_generation_may_complete(self, store):
+        There is no daemon lease generation to supersede a claim any more, so
+        a claim that still holds its token always completes.
+        """
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
-        (claim,) = store.claim_calls("alice", "daemon-1", {"argo"}, 10, now=T0)
-        store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="in time")
-        (call,) = store.get_calls(job_id)
-        assert call["status"] == "ok"
-
-    def test_a_foreground_claim_is_not_refused_by_a_later_lease(self, store):
-        """A foreground claim carries no generation, so there is no lease
-        behind it that a new daemon could supersede."""
-        job_id = store.create_job(
-            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
-        )
-        (claim,) = store.claim_calls("alice", "foreground", {"argo"}, 10, now=T0)
-        store.acquire_daemon_lease("alice", "daemon-1", now=T0)
+        (claim,) = store.claim_calls("foreground", {"argo"}, 10, now=T0)
         store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="fine")
         (call,) = store.get_calls(job_id)
         assert call["status"] == "ok"
@@ -1222,8 +1123,8 @@ class TestCompleteCall:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1", prompt_hash="e" * 64)],
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
-        store.cancel_job(job_id, "alice")
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.cancel_job(job_id)
 
         store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="paid for")
 
@@ -1243,7 +1144,7 @@ class TestReleaseCall:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         return job_id, claim
 
     def test_release_returns_the_call_to_pending_and_counts_the_attempt(self, store, claimed):
@@ -1258,7 +1159,7 @@ class TestReleaseCall:
         assert call["lease_generation"] is None
         assert call["attempt_count"] == 1
         # And it is claimable again.
-        assert len(store.claim_calls("alice", "w2", {"argo"}, 10, now=T0)) == 1
+        assert len(store.claim_calls("w2", {"argo"}, 10, now=T0)) == 1
 
     def test_release_without_incrementing_leaves_the_attempt_count_alone(self, store, claimed):
         """For a release that is not the call's fault -- a worker shutting
@@ -1272,7 +1173,7 @@ class TestReleaseCall:
     def test_attempts_accumulate_across_releases(self, store, claimed):
         job_id, claim = claimed
         store.release_call(claim["call_id"], claim["claim_token"])
-        (again,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (again,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.release_call(again["call_id"], again["claim_token"])
         (call,) = store.get_calls(job_id)
         assert call["attempt_count"] == 2
@@ -1284,13 +1185,13 @@ class TestReleaseCall:
 
         (call,) = store.get_calls(job_id)
         assert call["not_before"] == due
-        assert store.claim_calls("alice", "w1", {"argo"}, 10, now=T0) == []
-        assert len(store.claim_calls("alice", "w1", {"argo"}, 10, now=due)) == 1
+        assert store.claim_calls("w1", {"argo"}, 10, now=T0) == []
+        assert len(store.claim_calls("w1", {"argo"}, 10, now=due)) == 1
 
     def test_releasing_with_no_backoff_clears_an_earlier_one(self, store, claimed):
         job_id, claim = claimed
         store.release_call(claim["call_id"], claim["claim_token"], not_before=T0 + timedelta(hours=1))
-        (again,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
+        (again,) = store.claim_calls("w1", {"argo"}, 10, now=T0 + timedelta(hours=1))
         store.release_call(again["call_id"], again["claim_token"])
         (call,) = store.get_calls(job_id)
         assert call["not_before"] is None
@@ -1333,7 +1234,7 @@ class TestRecordAttempt:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.record_attempt(
             claim["call_id"],
             1,
@@ -1362,7 +1263,7 @@ class TestRecordAttempt:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.record_attempt(claim["call_id"], 1, T0, T0, "ok")
         with pytest.raises(IntegrityError):
             store.record_attempt(claim["call_id"], 1, T0, T0, "ok")
@@ -1384,7 +1285,7 @@ class TestRecordAttempt:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         with pytest.raises(ValueError, match="prompt text"):
             store.record_attempt(claim["call_id"], 1, T0, T0, "ok", usage=usage)
         assert self._attempts(store) == []
@@ -1393,7 +1294,7 @@ class TestRecordAttempt:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.record_attempt(
             claim["call_id"], 1, T0, T0, "ok", usage={"prompt_tokens": 3, "users": 1}
         )
@@ -1414,7 +1315,7 @@ class TestFindReusable:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1", prompt_hash="1" * 64)],
         )
-        (claim,) = store.claim_calls("bob", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(
             claim["call_id"], claim["claim_token"], "ok", reply_text="bob paid for this"
         )
@@ -1439,7 +1340,7 @@ class TestFindReusable:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1", prompt_hash="3" * 64)],
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(
             claim["call_id"], claim["claim_token"], "error", error={"kind": "transport"}
         )
@@ -1461,7 +1362,7 @@ class TestFindReusable:
                 call_row("item-2", "proposer_1", prompt_hash="5" * 64),
             ],
         )
-        first, second = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        first, second = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(first["call_id"], first["claim_token"], "ok", reply_text="older")
         store.complete_call(second["call_id"], second["claim_token"], "ok", reply_text="newer")
 
@@ -1490,8 +1391,7 @@ class TestReclaimStale:
                 "heartbeat_at": heartbeat or (utcnow() - timedelta(minutes=30)),
             }
         )
-        return store.claim_calls(
-            "alice", worker_id, set(endpoints), 10, now=utcnow() - timedelta(minutes=30)
+        return store.claim_calls(worker_id, set(endpoints), 10, now=utcnow() - timedelta(minutes=30)
         )
 
     def test_an_abandoned_claim_goes_back_on_the_queue(self, store):
@@ -1508,7 +1408,7 @@ class TestReclaimStale:
         assert call["claimed_by"] is None
         assert call["claimed_at"] is None
         assert call["lease_generation"] is None
-        assert len(store.claim_calls("alice", "w2", {"argo"}, 10, now=utcnow())) == 1
+        assert len(store.claim_calls("w2", {"argo"}, 10, now=utcnow())) == 1
 
     def test_the_reclaimed_call_keeps_its_attempt_count(self, store):
         """Nothing was learned -- the worker died -- so charging it an attempt
@@ -1539,7 +1439,7 @@ class TestReclaimStale:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.claim_calls("alice", "never-registered", {"argo"}, 10, now=utcnow())
+        store.claim_calls("never-registered", {"argo"}, 10, now=utcnow())
         assert store.reclaim_stale() == 0
         (call,) = store.get_calls(job_id)
         assert call["status"] == "claimed"
@@ -1548,8 +1448,7 @@ class TestReclaimStale:
         store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.claim_calls(
-            "alice", "never-registered", {"argo"}, 10, now=utcnow() - timedelta(minutes=5)
+        store.claim_calls("never-registered", {"argo"}, 10, now=utcnow() - timedelta(minutes=5)
         )
         assert store.reclaim_stale(max_age=timedelta(minutes=10)) == 0
         assert store.reclaim_stale(max_age=timedelta(minutes=1)) == 1
@@ -1560,7 +1459,7 @@ class TestReclaimStale:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1"), call_row("item-1", "proposer_2")],
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 1, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 1, now=T0)
         store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="x")
 
         assert store.reclaim_stale() == 0
@@ -1650,7 +1549,7 @@ class TestJobStatus:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        store.claim_calls("w1", {"argo"}, 10, now=T0)
         status = store.job_status(job_id)
         assert status["pending_calls_by_role_endpoint"] == {}
         assert status["blockers"] == []
@@ -1660,7 +1559,7 @@ class TestJobStatus:
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
         self._live_worker(store)
-        store.set_halt("alice", "argo", "quota_exhausted", "daily cap reached")
+        store.set_halt("argo", "quota_exhausted", "daily cap reached")
 
         (blocker,) = store.job_status(job_id)["blockers"]
         assert blocker["kind"] == "halted"
@@ -1668,13 +1567,17 @@ class TestJobStatus:
         assert "quota_exhausted" in blocker["detail"]
         assert "daily cap reached" in blocker["detail"]
 
-    def test_a_halt_on_another_users_endpoint_is_not_this_jobs_blocker(self, store):
+    def test_a_halt_blocks_a_job_submitted_under_any_label(self, store):
+        """Halts are the store's: the job's label does not exempt it."""
         job_id = store.create_job(
-            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+            job_row(submitted_by="somebody-else"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
         )
         self._live_worker(store)
-        store.set_halt("bob", "argo", "auth", "bob's token expired")
-        assert store.job_status(job_id)["blockers"] == []
+        store.set_halt("argo", "auth", "the token expired")
+        (blocker,) = store.job_status(job_id)["blockers"]
+        assert blocker["kind"] == "halted"
 
     @pytest.mark.parametrize(
         "error_kind,blocker_kind",
@@ -1753,26 +1656,33 @@ class TestJobStatus:
         )
         assert [b["kind"] for b in store.job_status(job_id)["blockers"]] == ["no_daemon"]
 
-    def test_another_users_worker_does_not_clear_no_daemon(self, store):
+    def test_any_live_worker_in_the_store_clears_no_daemon(self, store):
+        """A worker registered under a different label is still draining it.
+
+        Scoping ``no_daemon`` by the label would tell the user to start a
+        worker while one was already running their calls.
+        """
         job_id = store.create_job(
-            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+            job_row(submitted_by="alice"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
         )
         store.register_worker(
             {
-                "worker_id": "bobs",
-                "user": "bob",
+                "worker_id": "other-label",
+                "user": "somebody-else",
                 "endpoints": ["argo"],
                 "heartbeat_at": utcnow(),
             }
         )
-        assert [b["kind"] for b in store.job_status(job_id)["blockers"]] == ["no_daemon"]
+        assert store.job_status(job_id)["blockers"] == []
 
     def test_halted_and_unserved_are_reported_independently(self, store):
         """Suppressing either fact would send the user to fix the wrong thing."""
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.set_halt("alice", "argo", "budget_exhausted", "")
+        store.set_halt("argo", "budget_exhausted", "")
         assert sorted(b["kind"] for b in store.job_status(job_id)["blockers"]) == [
             "halted",
             "no_daemon",
@@ -1786,7 +1696,7 @@ class TestJobStatus:
         )
         assert store.job_status(job_id)["throughput_last_10min"] == 0
 
-        first, second = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        first, second = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(first["call_id"], first["claim_token"], "ok", reply_text="x")
         assert store.job_status(job_id)["throughput_last_10min"] == 1
         store.complete_call(second["call_id"], second["claim_token"], "error", error={})
@@ -1796,7 +1706,7 @@ class TestJobStatus:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(claim["call_id"], claim["claim_token"], "ok", reply_text="x")
         with store.transaction() as conn:
             conn.execute(
@@ -1844,7 +1754,7 @@ class TestResults:
         assert rows[2]["verdict"] is None
 
     def test_cancelled_items_are_settled_results(self, store, decided):
-        store.cancel_job(decided, "alice")
+        store.cancel_job(decided)
         rows = store.results(decided)
         assert [r["item_id"] for r in rows] == ["item-1", "item-2", "item-3"]
         assert rows[2]["status"] == "cancelled"
@@ -1870,13 +1780,13 @@ class TestCancelJob:
                 call_row("item-2", "proposer_1"),
             ],
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 1, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 1, now=T0)
         store.settle_item(job_id, "item-1", "ok", {"selected_ids": []})
         return job_id, claim
 
     def test_cancel_supersedes_pending_calls_and_leaves_claimed_ones(self, store, mixed):
         job_id, claim = mixed
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
 
         by_id = {c["call_id"]: c for c in store.get_calls(job_id)}
         still_claimed = by_id.pop(claim["call_id"])
@@ -1890,7 +1800,7 @@ class TestCancelJob:
 
     def test_cancel_settles_the_unsettled_items_and_keeps_the_rest(self, store, mixed):
         job_id, _claim = mixed
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
 
         items = {i["item_id"]: i for i in store.get_items(job_id)}
         assert items["item-1"]["status"] == "ok"  # already settled: untouched
@@ -1900,24 +1810,24 @@ class TestCancelJob:
 
     def test_the_job_goes_to_cancelled(self, store, mixed):
         job_id, _claim = mixed
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
         assert store.get_job(job_id)["status"] == "cancelled"
         assert store.job_status(job_id)["status"] == "cancelled"
 
     def test_nothing_is_claimed_from_a_cancelled_job(self, store, mixed):
         job_id, _claim = mixed
-        store.cancel_job(job_id, "alice")
-        assert store.claim_calls("alice", "w2", {"argo"}, 10, now=T0) == []
+        store.cancel_job(job_id)
+        assert store.claim_calls("w2", {"argo"}, 10, now=T0) == []
 
     def test_cancel_is_idempotent_and_terminal(self, store, mixed):
         job_id, _claim = mixed
-        store.cancel_job(job_id, "alice")
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
+        store.cancel_job(job_id)
         assert store.get_job(job_id)["status"] == "cancelled"
 
     def test_a_cancelled_job_refuses_further_work(self, store, mixed):
         job_id, _claim = mixed
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
         with pytest.raises(JobCancelled):
             store.add_calls([dict(call_row("item-2", "critic", role="critic"), job_id=job_id)])
         with pytest.raises(JobCancelled):
@@ -1930,19 +1840,25 @@ class TestCancelJob:
         drop = store.create_job(
             job_row(job_id="drop"), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.cancel_job(drop, "alice")
+        store.cancel_job(drop)
         assert store.get_job(keep)["status"] == "queued"
         assert [c["status"] for c in store.get_calls(keep)] == ["pending"]
 
-    def test_another_user_may_not_cancel(self, store, mixed):
-        job_id, _claim = mixed
-        with pytest.raises(NotOwner, match="alice"):
-            store.cancel_job(job_id, "bob")
-        assert store.get_job(job_id)["status"] == "queued"
+    def test_a_job_submitted_under_another_label_may_still_be_cancelled(
+        self, store
+    ):
+        """There is no ownership to enforce; a rename must not lock you out."""
+        job_id = store.create_job(
+            job_row(submitted_by="somebody-else"),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.cancel_job(job_id)
+        assert store.get_job(job_id)["status"] == "cancelled"
 
     def test_cancelling_an_unknown_job_is_a_value_error(self, store):
         with pytest.raises(ValueError, match="no such job"):
-            store.cancel_job("ghost", "alice")
+            store.cancel_job("ghost")
 
 
 # ---------------------------------------------------------------------------
@@ -1957,13 +1873,13 @@ class TestDeleteJob:
         keep spending tokens on results nobody can see."""
         job_id = store.create_job(job_row(status=status), [item_row("item-1")], [])
         with pytest.raises(ValueError, match="cancel it first"):
-            store.delete_job(job_id, "alice")
+            store.delete_job(job_id)
         assert store.get_job(job_id)["deleted_at"] is None
 
     @pytest.mark.parametrize("status", ["cancelled", "done"])
     def test_delete_tombstones_a_finished_job(self, store, status):
         job_id = store.create_job(job_row(status=status), [item_row("item-1")], [])
-        store.delete_job(job_id, "alice")
+        store.delete_job(job_id)
 
         job = store.get_job(job_id)
         assert job is not None, "a tombstone removes no row"
@@ -1978,8 +1894,8 @@ class TestDeleteJob:
         job_id = store.create_job(
             job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
         )
-        store.cancel_job(job_id, "alice")
-        store.delete_job(job_id, "alice")
+        store.cancel_job(job_id)
+        store.delete_job(job_id)
         assert len(store.get_items(job_id)) == 1
         assert len(store.get_calls(job_id)) == 1
 
@@ -1991,7 +1907,7 @@ class TestDeleteJob:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1", prompt_hash="7" * 64)],
         )
-        (claim,) = store.claim_calls("alice", "w1", {"argo"}, 10, now=T0)
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
         store.complete_call(
             claim["call_id"], claim["claim_token"], "ok", reply_text="the answer"
         )
@@ -2001,7 +1917,7 @@ class TestDeleteJob:
             [item_row("item-1")],
             [call_row("item-1", "proposer_1", prompt_hash="7" * 64)],
         )
-        (borrowed,) = store.claim_calls("bob", "w2", {"argo"}, 10, now=T0)
+        (borrowed,) = store.claim_calls("w2", {"argo"}, 10, now=T0)
         store.complete_call(
             borrowed["call_id"],
             borrowed["claim_token"],
@@ -2010,8 +1926,8 @@ class TestDeleteJob:
             reused_from=claim["call_id"],
         )
 
-        store.cancel_job(paid, "alice")
-        store.delete_job(paid, "alice")
+        store.cancel_job(paid)
+        store.delete_job(paid)
 
         assert store.find_reusable("7" * 64) is not None
         (original,) = store.get_calls(paid)
@@ -2019,22 +1935,23 @@ class TestDeleteJob:
         (citing,) = store.get_calls(borrower)
         assert citing["reused_from"] == claim["call_id"]
 
-    def test_another_user_may_not_delete(self, store):
-        job_id = store.create_job(job_row(status="done"), [], [])
-        with pytest.raises(NotOwner, match="alice"):
-            store.delete_job(job_id, "bob")
-        assert store.get_job(job_id)["deleted_at"] is None
+    def test_a_job_submitted_under_another_label_may_still_be_deleted(self, store):
+        job_id = store.create_job(
+            job_row(status="done", submitted_by="somebody-else"), [], []
+        )
+        store.delete_job(job_id)
+        assert store.get_job(job_id)["deleted_at"] is not None
 
     def test_deleting_twice_does_not_move_the_tombstone(self, store):
         job_id = store.create_job(job_row(status="done"), [], [])
-        store.delete_job(job_id, "alice")
+        store.delete_job(job_id)
         first = store.get_job(job_id)["deleted_at"]
-        store.delete_job(job_id, "alice")
+        store.delete_job(job_id)
         assert store.get_job(job_id)["deleted_at"] == first
 
     def test_deleting_an_unknown_job_is_a_value_error(self, store):
         with pytest.raises(ValueError, match="no such job"):
-            store.delete_job("ghost", "alice")
+            store.delete_job("ghost")
 
 
 # ---------------------------------------------------------------------------
@@ -2087,19 +2004,12 @@ CONTRACT_METHODS = {
     "results",
     "cancel_job",
     "delete_job",
-    # workers and leases
+    # workers
     "register_worker",
     "heartbeat_worker",
     "live_workers",
     "remove_worker",
-    "request_stop",
     "stop_requested",
-    "acquire_daemon_lease",
-    "renew_daemon_lease",
-    "release_daemon_lease",
-    "acquire_gpu_lease",
-    "renew_gpu_lease",
-    "release_gpu_lease",
     # search
     "search_calls",
 }
@@ -2142,14 +2052,14 @@ class TestSqliteEntryPoint:
                 assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
                 assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
                 assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 30000
-            assert store.schema_version() == 1
+            assert store.schema_version() == sch.SCHEMA_VERSION
         finally:
             store.close()
 
         # A SECOND store object on the same URL reads what the first wrote.
         reopened = open_store(f"sqlite:///{db_path}")
         try:
-            assert reopened.schema_version() == 1
+            assert reopened.schema_version() == sch.SCHEMA_VERSION
             assert isinstance(reopened, SqliteStore)
         finally:
             reopened.close()
@@ -2184,8 +2094,16 @@ class TestSqliteEntryPoint:
             open_store(f"sqlite:///{target}")
         assert not target.parent.exists()
 
-    def test_an_unknown_scheme_is_a_value_error(self):
-        with pytest.raises(ValueError, match="unsupported council store URL"):
+    def test_a_postgresql_url_names_the_round_that_removed_the_shared_store(self):
+        """The retired design has to say so, not merely fail to connect."""
+        with pytest.raises(StoreError) as excinfo:
+            open_store("postgresql+psycopg://x")
+        message = str(excinfo.value)
+        assert "round 2" in message
+        assert "sqlite" in message
+
+    def test_any_other_scheme_is_refused_the_same_way(self):
+        with pytest.raises(StoreError, match="round 2"):
             open_store("mysql://localhost/council")
 
     def test_a_naive_timestamp_is_refused(self, store):

@@ -1,28 +1,20 @@
-"""Dialect-neutral SQL for the council's queue and job control.
+"""SQL for the council's queue and job control, separated from the locking.
 
 Every statement here is built with SQLAlchemy Core against the one
-:mod:`.schema` metadata and compiles unchanged on SQLite and PostgreSQL, so
-the two store implementations share the queue's *meaning* and differ only in
-how they take the lock around it:
+:mod:`.schema` metadata and says only WHAT the queue means -- which calls are
+claimable, in what order, what settles a call, what a blocker is.  Taking the
+lock around a select-then-update is the store's job and not this module's:
+:class:`~.sqlite.SqliteStore` wraps one in ``BEGIN IMMEDIATE`` (see its
+``transaction()``), which takes SQLite's single writer lock before the first
+read.
 
-* :class:`~.sqlite.SqliteStore` wraps select-then-update in ``BEGIN
-  IMMEDIATE`` (see its ``transaction()``), which takes SQLite's single writer
-  lock before the first read.
-* ``PostgresStore`` will pass ``for_update=True`` to
-  :func:`select_claimable`, which adds ``FOR UPDATE OF calls SKIP LOCKED`` so
-  concurrent workers step over each other's rows instead of queueing behind
-  them.
-
-That is the whole dialect difference.  Keeping it to one keyword argument is
-the reason this module exists: a claim-ordering or blocker rule fixed here is
-fixed for both stores at once, and the two cannot drift into claiming the
-same work twice in different ways.
+Keeping the two apart is the reason this module exists: a claim-ordering or
+blocker rule is a rule about the queue, and it is readable and testable here
+without a connection, a transaction or a file.
 
 Two non-SQL helpers live here as well -- :func:`refuse_prompt_text` and
 :data:`BLOCKER_BY_ERROR_KIND`.  They are queue *rules* rather than queries,
-but they are equally dialect-neutral and equally mandatory for both stores,
-and putting them here is what stops ``PostgresStore`` having to import from
-the SQLite module to get them right.
+but they belong with the rest of the queue's meaning for the same reason.
 """
 
 from __future__ import annotations
@@ -34,7 +26,14 @@ import sqlalchemy as sa
 
 from . import schema as sch
 
+#: The ``endpoint_state.user`` value every row in a store is keyed under.
+#: A store belongs to one machine, so budgets and halts are the machine's and
+#: not a per-person ledger; the provenance label on a job (``submitted_by``)
+#: has nothing to do with them.  Also re-exported by :mod:`.sqlite`.
+STORE_IDENTITY = "local"
+
 __all__ = [
+    "STORE_IDENTITY",
     "ROLE_ORDER",
     "SETTLED_ITEM_STATUSES",
     "BLOCKER_BY_ERROR_KIND",
@@ -44,8 +43,6 @@ __all__ = [
     "select_claimable",
     "claim_update",
     "select_call",
-    "select_held_daemon_generation",
-    "select_daemon_generation",
     "complete_call_update",
     "release_call_update",
     "note_call_error_update",
@@ -165,38 +162,41 @@ def error_kind(error: Any) -> Optional[str]:
 
 
 def select_claimable(
-    user: str,
     endpoints: Iterable[str],
     now: datetime,
     limit: int,
     *,
-    for_update: bool = False,
+    identity: str = STORE_IDENTITY,
 ) -> sa.Select:
-    """The calls *user*'s worker may claim, in claim order.
+    """The calls a worker on this store may claim, in claim order.
 
     A call is claimable when it is ``pending``, due (``not_before`` null or
-    past), its endpoint is one this worker serves and is not halted for this
-    user, and its job is this user's, not cancelled or paused, and not
-    tombstoned.
+    past), its endpoint is one this worker serves and is not halted, and its
+    job is neither cancelled nor paused nor tombstoned.
+
+    There is NO filter on ``jobs.submitted_by``.  A store is one machine's and
+    its queue is one queue: ``submitted_by`` is a provenance label, so
+    filtering on it would strand every pending call the moment a user edited
+    config ``user`` (review round 3).
 
     Order: job priority descending, then submission time, then item order,
     then role (:data:`ROLE_ORDER`), then ``call_id`` so the order is total
     and two workers scanning at once see the same queue.
 
     Args:
-        for_update: add ``FOR UPDATE OF calls SKIP LOCKED``.  PostgreSQL only
-            -- it is how that dialect gets what ``BEGIN IMMEDIATE`` gets
-            SQLite, and SQLite's driver does not implement it.
+        identity: the ``endpoint_state`` key the halt is looked up under.
+            Store-local and fixed; a parameter only so a caller can be
+            explicit about it.
     """
     calls, jobs, items = sch.calls, sch.jobs, sch.items
 
-    # Per (user, endpoint): one user's exhausted quota must not stop another
-    # user's calls on the same gateway, which is why the halt is looked up
-    # against the claiming user rather than against the endpoint alone.
+    # A halt is a fact about the endpoint as this store sees it, which is why
+    # it is looked up under the fixed store-local identity rather than under
+    # whatever label happens to be on the job.
     halted = (
         sa.select(sa.literal(1))
         .where(
-            sch.endpoint_state.c.user == user,
+            sch.endpoint_state.c.user == identity,
             sch.endpoint_state.c.endpoint == calls.c.endpoint,
             sch.endpoint_state.c.halt_kind.is_not(None),
         )
@@ -204,7 +204,7 @@ def select_claimable(
         .exists()
     )
 
-    stmt = (
+    return (
         sa.select(calls)
         .join(jobs, calls.c.job_id == jobs.c.job_id)
         .join(
@@ -218,7 +218,6 @@ def select_claimable(
             calls.c.status == "pending",
             sa.or_(calls.c.not_before.is_(None), calls.c.not_before <= now),
             calls.c.endpoint.in_(sorted(endpoints)),
-            jobs.c.submitted_by == user,
             jobs.c.status.not_in(("cancelled", "paused")),
             jobs.c.deleted_at.is_(None),
             ~halted,
@@ -232,9 +231,6 @@ def select_claimable(
         )
         .limit(limit)
     )
-    if for_update:
-        stmt = stmt.with_for_update(skip_locked=True, of=calls)
-    return stmt
 
 
 def claim_update() -> sa.Update:
@@ -268,33 +264,9 @@ def claim_update() -> sa.Update:
     )
 
 
-def select_call(call_id: str, *, for_update: bool = False) -> sa.Select:
-    """One call row by id, optionally locked for the rest of the transaction."""
-    stmt = sa.select(sch.calls).where(sch.calls.c.call_id == call_id)
-    if for_update:
-        stmt = stmt.with_for_update(of=sch.calls)
-    return stmt
-
-
-def select_held_daemon_generation(user: str, worker_id: str) -> sa.Select:
-    """The generation of *user*'s daemon lease, if *worker_id* holds it.
-
-    ``claim_calls`` takes no generation argument, so the one it stamps on a
-    claim is derived: a worker holding the lease claims under its generation
-    and a foreground worker claims under none.  That is what lets
-    ``complete_call`` tell a superseded daemon's late reply from a live one.
-    """
-    return sa.select(sch.daemon_lease.c.generation).where(
-        sch.daemon_lease.c.user == user,
-        sch.daemon_lease.c.holder_worker_id == worker_id,
-    )
-
-
-def select_daemon_generation(user: str) -> sa.Select:
-    """The current generation of *user*'s daemon lease, whoever holds it."""
-    return sa.select(sch.daemon_lease.c.generation).where(
-        sch.daemon_lease.c.user == user
-    )
+def select_call(call_id: str) -> sa.Select:
+    """One call row by id."""
+    return sa.select(sch.calls).where(sch.calls.c.call_id == call_id)
 
 
 # ---------------------------------------------------------------------------

@@ -34,12 +34,14 @@ class StoreError(CouncilException):
 class StorePathRefused(StoreError, ValueError):
     """The requested database location is one the store will not open.
 
-    Currently the only refusal is a SQLite file inside a synced directory: a
+    There are two refusals.  A SQLite file inside a synced directory: a
     live SQLite database is a file plus a write-ahead log, and a file syncer
     will upload them mid-transaction and later "resolve" the pair into a
-    corrupt database.  Mirrors the identical refusal in
-    :func:`..config._resolve_store_url`, so a store is refused whether its URL
-    came from the config file or straight from a caller.
+    corrupt database -- and the same for a store path on a network filesystem,
+    whose POSIX locks SQLite either cannot use or cannot trust.  Mirrors the
+    identical Dropbox refusal in :func:`..config._resolve_store_url`, so a
+    store is refused whether its URL came from the config file or straight
+    from a caller.
     """
 
 
@@ -60,15 +62,20 @@ class QueryTypeExists(StoreError):
 class StaleClaim(StoreError):
     """The call was completed under a claim that is no longer the live one.
 
-    Either the row was reclaimed and re-handed to another worker (its
-    ``claim_token`` changed), or the completing worker holds a daemon lease
-    generation that has since been superseded.  The reply is discarded rather
-    than written over whatever the current claimant is doing.
+    The row was reclaimed and re-handed to another worker, so its
+    ``claim_token`` no longer matches.  The reply is discarded rather than
+    written over whatever the current claimant is doing.
     """
 
 
 class NotOwner(StoreError):
-    """The caller is not the user who submitted this job."""
+    """The caller is not the user who submitted this job.
+
+    NOTHING raises this any more.  A store is single-user and ``submitted_by``
+    is a provenance label, so review round 2 removed every ownership refusal;
+    the class is kept because it is part of this module's published surface
+    and callers catch it.
+    """
 
 
 class JobCancelled(StoreError):

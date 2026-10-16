@@ -1,19 +1,15 @@
-"""Relational schema for the council store -- one :class:`MetaData` for both
-dialects.
+"""Relational schema for the council store -- one :class:`MetaData`, one
+dialect.
 
 The store is where jobs, items, call rows and verdicts live, and the call rows
-ARE the queue.  Two implementations sit on this one schema: a local SQLite
-file (:mod:`.sqlite`) and a shared PostgreSQL database that every KBUtilLib
-installation can point at (:mod:`.postgres`).  Because reuse lookup crosses
-users -- a question already answered by the same deployment is not asked again
--- the two must agree on column names and types exactly, which is why there is
-a single module of table definitions rather than one per dialect.
+ARE the queue.  There is one implementation, a local SQLite file
+(:mod:`.sqlite`), one per machine; review round 2 removed the shared
+PostgreSQL store, so nothing here has to compile on a second dialect any more.
 
-Dialect portability rules followed here:
+Conventions followed here:
 
-* JSON columns are :data:`sqlalchemy.JSON`, never a dialect JSONB, so SQLite
-  stores them as TEXT and PostgreSQL as ``json`` without any branch in the
-  table definitions.
+* JSON columns are :data:`sqlalchemy.JSON`, so SQLite stores them as TEXT and
+  the table definitions carry no serialisation code.
 * Hashes and ids are ``String(64)``: every hash in :mod:`..types` is a SHA-256
   hex digest and every generated id is a ``uuid4().hex``, both 64 and 32
   characters respectively.
@@ -21,10 +17,12 @@ Dialect portability rules followed here:
   ``DateTime(timezone=True)``, because the SQLite dialect silently discards
   ``tzinfo`` on the way in and returns naive datetimes on the way out.
 
-Every table the council will ever need is defined here, including the ones
-only later milestones write to (``local_models``, ``model_resources``,
-``model_loads``, ``gpu_lease``).  That is deliberate: creating them now costs
-nothing and means those milestones ship without a schema migration.
+Schema version 2 is the LOCAL-ONLY schema.  Version 1 additionally carried
+five tables for designs that no longer exist -- ``daemon_lease`` (replaced by
+the file lock in :mod:`..execlock`), and ``local_models``,
+``model_resources``, ``model_loads`` and ``gpu_lease`` (self-hosted model
+management, now out of the product).  They are named in
+:data:`REMOVED_IN_V2`, which is what ``SqliteStore.migrate()`` drops.
 """
 
 from __future__ import annotations
@@ -47,17 +45,25 @@ __all__ = [
     "attempts",
     "endpoint_state",
     "workers",
-    "daemon_lease",
-    "local_models",
-    "model_resources",
-    "model_loads",
-    "gpu_lease",
+    "REMOVED_IN_V2",
     "TABLE_NAMES",
 ]
 
 #: Version of this schema.  Bumped only by a migration; a store file carrying
 #: a different number refuses to open (see ``SqliteStore.__init__``).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Tables version 1 defined and version 2 does not.  ``SqliteStore.migrate()``
+#: issues one ``DROP TABLE IF EXISTS`` per name, in one transaction, and
+#: touches nothing else -- every job, item, call, attempt, endpoint_state,
+#: workers and query_types row survives a v1 -> v2 migration intact.
+REMOVED_IN_V2 = (
+    "daemon_lease",
+    "local_models",
+    "model_resources",
+    "model_loads",
+    "gpu_lease",
+)
 
 #: Columns added to this schema AFTER stores had been created at the same
 #: SCHEMA_VERSION.  Each is nullable with no default and is written by code
@@ -74,9 +80,8 @@ class UtcDateTime(sa.types.TypeDecorator):
     SQLAlchemy's SQLite ``DATETIME`` formats a datetime field by field and
     simply ignores ``tzinfo``, so an aware timestamp goes in and a naive one
     comes back -- and on this fleet local time is not UTC, so that silently
-    shifts the instant by hours.  PostgreSQL's ``timestamptz`` has no such
-    problem.  This decorator makes the two behave the same: everything is
-    converted to UTC on the way in and re-tagged as UTC on the way out.
+    shifts the instant by hours.  This decorator closes that hole: everything
+    is converted to UTC on the way in and re-tagged as UTC on the way out.
 
     A naive datetime is REJECTED rather than assumed to be UTC.  Assuming
     would turn a caller's ``datetime.now()`` into a wrong instant with no
@@ -163,8 +168,8 @@ jobs = sa.Table(
     sa.Column("job_id", _ID, primary_key=True, nullable=False),
     sa.Column("label", sa.Text, nullable=True),
     # Tombstone.  delete_job() sets this and removes nothing: the job's calls
-    # stay reusable for everyone else's future jobs, which is the whole point
-    # of a shared store.
+    # stay reusable by this machine's future jobs, which is the point of
+    # keeping a deleted job's answers at all.
     sa.Column("deleted_at", UtcDateTime, nullable=True),
     sa.Column("query_name", _NAME, nullable=False),
     sa.Column("query_version", sa.String(64), nullable=False),
@@ -174,7 +179,8 @@ jobs = sa.Table(
     sa.Column("priority", sa.Integer, nullable=False, default=100),
     sa.Column("status", _ENUM, nullable=False, default="queued"),
     # Seat names, endpoint kinds, served + canonical models and generation
-    # params.  NEVER credentials: a shared store is readable by every user.
+    # params.  NEVER credentials: a store is a plain file a user may hand to
+    # somebody else to explain a verdict.
     sa.Column("roster", sa.JSON, nullable=True),
     sa.Column("roster_fingerprint", _HASH, nullable=True),
     sa.Column("profile_name", _NAME, nullable=True),
@@ -225,7 +231,7 @@ calls = sa.Table(
     sa.Column("entity_hash", _HASH, nullable=True),
     sa.Column("data_hash", _HASH, nullable=True),
     # The reuse key.  Built from the reuse namespace and the canonical model,
-    # not the endpoint alias, so two users asking the same deployment the same
+    # not the endpoint alias, so two jobs asking the same deployment the same
     # question share one answer.
     sa.Column("prompt_hash", _HASH, nullable=True),
     sa.Column("upstream_digest", sa.String(64), nullable=False, default=""),
@@ -268,8 +274,7 @@ calls = sa.Table(
     # constraint as UNIQUE over six columns including `live`; `live` is the
     # index PREDICATE rather than a key column, which is what a partial unique
     # index WHERE live means -- superseded rows (live false) are exempt and
-    # any number of them may pile up behind the one live row.  Both SQLite and
-    # PostgreSQL support partial indexes, so this is portable as written.
+    # any number of them may pile up behind the one live row.
     sa.Index(
         "ux_calls_one_live",
         "job_id",
@@ -279,7 +284,6 @@ calls = sa.Table(
         "upstream_digest",
         unique=True,
         sqlite_where=sa.text("live"),
-        postgresql_where=sa.text("live"),
     ),
 )
 
@@ -299,15 +303,18 @@ attempts = sa.Table(
 
 
 # ---------------------------------------------------------------------------
-# Per-user endpoint state: budget and halts
+# Endpoint state: budget and halts
 # ---------------------------------------------------------------------------
 
 endpoint_state = sa.Table(
     "endpoint_state",
     metadata,
-    # Keyed on (user, endpoint) and not on endpoint alone: a shared store
-    # holds several users' spend against the same gateway, and one user's
-    # exhausted quota must not halt everybody.
+    # The `user` column is the store-local IDENTITY, always the literal
+    # "local" (see sqlite.STORE_IDENTITY) -- not the provenance label on a
+    # job.  A store is one machine's, so its spend against a gateway is one
+    # number; keying it on the provenance label instead would reset a budget
+    # the moment somebody edited config `user`.  The column itself stays
+    # because v1 stores have rows in it and the migration re-keys them.
     sa.Column("user", _NAME, primary_key=True),
     sa.Column("endpoint", _NAME, primary_key=True),
     sa.Column("budget_epoch", sa.Integer, nullable=False, default=0),
@@ -320,7 +327,7 @@ endpoint_state = sa.Table(
 
 
 # ---------------------------------------------------------------------------
-# Workers and leases
+# Workers
 # ---------------------------------------------------------------------------
 
 workers = sa.Table(
@@ -337,80 +344,6 @@ workers = sa.Table(
     sa.Column("endpoints", sa.JSON, nullable=True),
     sa.Column("stop_requested_at", UtcDateTime, nullable=True),
     sa.Index("ix_workers_user_heartbeat", "user", "heartbeat_at"),
-)
-
-daemon_lease = sa.Table(
-    "daemon_lease",
-    metadata,
-    # One daemon per user.  `generation` is monotonic and NEVER reset: a call
-    # claimed under generation 3 is refused at completion once generation 4
-    # exists, which is how a superseded daemon's late reply is rejected.
-    sa.Column("user", _NAME, primary_key=True),
-    sa.Column("holder_worker_id", _ID, nullable=True),
-    sa.Column("generation", sa.Integer, nullable=False, default=0),
-    sa.Column("expires_at", UtcDateTime, nullable=True),
-)
-
-
-# ---------------------------------------------------------------------------
-# Local model registry (poplar) -- written by later milestones
-# ---------------------------------------------------------------------------
-
-local_models = sa.Table(
-    "local_models",
-    metadata,
-    sa.Column("alias", _NAME, primary_key=True),
-    sa.Column("served_name", _NAME, nullable=True),
-    sa.Column("canonical_model", _NAME, nullable=True),
-    sa.Column("endpoint_url", sa.Text, nullable=True),
-    sa.Column("control_url", sa.Text, nullable=True),
-    sa.Column("gpu_mem_gib", sa.Float, nullable=True),
-    sa.Column("gpu_count", sa.Integer, nullable=True),
-    sa.Column("default_gpus", sa.JSON, nullable=True),
-    sa.Column("registered_by", _NAME, nullable=True),
-    sa.Column("registered_at", UtcDateTime, nullable=True),
-    sa.Column("notes", sa.Text, nullable=True),
-)
-
-model_resources = sa.Table(
-    "model_resources",
-    metadata,
-    # Operator-measured.  An ABSENT row means "never auto-load this model":
-    # the council will not guess how many GPUs something needs on a shared
-    # host, so the absence is the safety interlock, not a missing default.
-    sa.Column("alias", _NAME, primary_key=True),
-    sa.Column("min_gpu_count", sa.Integer, nullable=True),
-    sa.Column("per_gpu_peak_gib", sa.Float, nullable=True),
-    sa.Column("startup_settings", sa.JSON, nullable=True),
-    sa.Column("measured_by", _NAME, nullable=True),
-    sa.Column("measured_at", UtcDateTime, nullable=True),
-    sa.Column("notes", sa.Text, nullable=True),
-)
-
-model_loads = sa.Table(
-    "model_loads",
-    metadata,
-    sa.Column("alias", _NAME, primary_key=True),
-    sa.Column("loaded_at", UtcDateTime, primary_key=True),
-    sa.Column("gpus", sa.JSON, nullable=True),
-    sa.Column("loaded_by_user", _NAME, nullable=True),
-    sa.Column("by_council", sa.Boolean, nullable=False, default=False),
-    sa.Column("instance_started_at", UtcDateTime, nullable=True),
-    sa.Column("instance_pid", sa.Integer, nullable=True),
-    sa.Column("last_used_at", UtcDateTime, nullable=True),
-    sa.Column("dropped_at", UtcDateTime, nullable=True),
-)
-
-gpu_lease = sa.Table(
-    "gpu_lease",
-    metadata,
-    # Fleet-wide GPU residency lease: exactly one row, id 1.  The singleton is
-    # modelled as a one-row table rather than a file lock so it lives in the
-    # same transaction as the model_loads row it guards.
-    sa.Column("id", sa.Integer, primary_key=True),
-    sa.Column("holder_worker_id", _ID, nullable=True),
-    sa.Column("generation", sa.Integer, nullable=False, default=0),
-    sa.Column("expires_at", UtcDateTime, nullable=True),
 )
 
 #: Every table name this schema defines, in creation order.

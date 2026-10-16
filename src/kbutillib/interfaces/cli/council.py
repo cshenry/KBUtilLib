@@ -369,7 +369,8 @@ def _json_option(function: Any) -> Any:
     "store_url",
     envvar="KBU_COUNCIL_STORE",
     default=None,
-    help="Override the store URL the configuration names (sqlite:/// or postgresql://).",
+    help="Override the store URL the configuration names (a sqlite:/// URL or "
+    "a plain path; the store is always a local SQLite file).",
 )
 @click.pass_context
 def council_cmd(ctx: click.Context, config_path: Optional[str], store_url: Optional[str]) -> None:
@@ -605,31 +606,33 @@ def run_cmd(
 
 
 @council_cmd.group(name="jobs", invoke_without_command=True)
-@click.option("--all-users", "all_users", is_flag=True, default=False, help="Every user's jobs.")
 @click.option("--status", default=None, help="Only jobs in this status.")
 @click.option("--include-deleted", is_flag=True, default=False, help="Include tombstoned jobs.")
 @_json_option
 @click.pass_context
 def jobs_cmd(
     ctx: click.Context,
-    all_users: bool,
     status: Optional[str],
     include_deleted: bool,
     as_json: bool,
 ) -> None:
-    """List jobs; with a subcommand, act on one."""
+    """List every job in the store; with a subcommand, act on one.
+
+    There is no ``--all-users``: a store is one machine's single-user file, so
+    every job in it is already yours.
+    """
     if ctx.invoked_subcommand is not None:
         return
     util = _ready(ctx)
     try:
-        rows = util.jobs(all_users=all_users, status=status, include_deleted=include_deleted)
+        rows = util.jobs(status=status, include_deleted=include_deleted)
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
     _emit(
         _envelope(
             "jobs",
             data={
-                "user": None if all_users else util.user(),
+                "user": util.user(),
                 "status": status,
                 "include_deleted": include_deleted,
                 "n_jobs": len(rows),

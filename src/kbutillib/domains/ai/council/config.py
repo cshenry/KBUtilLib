@@ -125,7 +125,6 @@ _ENDPOINT_KEYS = frozenset(
         "api_key_env",
         "timeout",
         "extra_body",
-        "supervisor",
         "public_url",
         "proxy",
         "billing",
@@ -139,7 +138,9 @@ _ENDPOINT_KEYS = frozenset(
 )
 _MODEL_KEYS = frozenset({"endpoint", "served_name", "canonical", "params", "verified"})
 _PROFILE_KEYS = frozenset({"proposers", "critic", "meta", "allow_meta_overlap"})
-_TOP_KEYS = frozenset({"endpoints", "models", "profiles", "default_profile", "store"})
+_TOP_KEYS = frozenset(
+    {"endpoints", "models", "profiles", "default_profile", "store", "user"}
+)
 
 _CLI_DEFAULT_EXECUTABLE = {"claude_cli": "claude", "codex_cli": "codex"}
 
@@ -383,7 +384,7 @@ def _resolve_store_url(url: Optional[str]) -> str:
             raise ConfigError(
                 f"refusing a sqlite council store inside a synced directory: {path_str!r} "
                 f"(component {part!r}). Live SQLite WAL files corrupt under file sync; "
-                "put the store outside Dropbox, or use a PostgreSQL URL."
+                "set `store:` to a path on local disk."
             )
 
     return f"{scheme}:///{path_str}"
@@ -415,7 +416,6 @@ class EndpointConfig(BaseModel):
     api_key_env: Optional[str] = None
     timeout: Optional[float] = None
     extra_body: Dict[str, Any] = {}
-    supervisor: bool = False
     public_url: Optional[str] = None
     proxy: Optional[str] = None
     billing: Literal["subscription", "api"] = "subscription"
@@ -521,6 +521,12 @@ class CouncilConfig(BaseModel):
     profiles: Dict[str, ProfileConfig] = {}
     default_profile: Optional[str] = None
     store: str = DEFAULT_STORE_URL
+    #: PROVENANCE label written to ``jobs.submitted_by``, nothing more.  It
+    #: grants no access and gates nothing: there is no identity in the
+    #: council (review round 2), budgets and the queue are the store's and
+    #: not a person's, so changing this affects only the label on jobs
+    #: submitted afterwards.  Empty means "use the OS user".
+    user: Optional[str] = None
     source: str = ""
 
     # -- accessors ----------------------------------------------------------
@@ -941,6 +947,7 @@ def load_council_config(
         profiles=profiles,
         default_profile=default_profile,
         store=_resolve_store_url(raw.get("store")),
+        user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
         source=source,
     )
 

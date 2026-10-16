@@ -276,7 +276,6 @@ class HttpBackend:
         # An empty proxy string is how the packaged config spells "no proxy"
         # (``proxy: ${KBU_ARGO_PROXY:-}``), so falsy means None, not "".
         self.proxy: Optional[str] = str(cfg.get("proxy")).strip() if cfg.get("proxy") else None
-        self.supervisor = bool(cfg.get("supervisor"))
         self.timeout = float(cfg.get("timeout") or DEFAULT_TIMEOUT_S)
         self.endpoint_extra_body = dict(cfg.get("extra_body") or {})
         #: The exact kwargs the client was built with; no credentials among them.
@@ -343,7 +342,6 @@ class HttpBackend:
                 self.base_url,
                 redact(f"{type(exc).__name__}: {exc}"),
             )
-            await self._note_listing_failure()
             return []
 
         entries = payload.get("data") if isinstance(payload, Mapping) else payload
@@ -412,7 +410,7 @@ class HttpBackend:
             )
 
         if response.status_code >= 400:
-            return self._failed(self._status_error(response), started)
+            return self._failed(self._status_error(response, req), started)
 
         try:
             payload: Any = response.json()
@@ -589,8 +587,16 @@ class HttpBackend:
             f"({type(exc).__name__}: {redact(str(exc))})"
         ).to_error()
 
-    def _status_error(self, response: httpx.Response) -> LLMError:
-        """Map an HTTP error status onto the council's failure taxonomy."""
+    def _status_error(
+        self, response: httpx.Response, req: Optional[LLMRequest] = None
+    ) -> LLMError:
+        """Map an HTTP error status onto the council's failure taxonomy.
+
+        *req* is the request that produced *response*, for a subclass that
+        needs to know which model was asked for -- the OpenAI-compatible
+        server answers 404 naming the model when it is not loaded.  Optional
+        so a caller (or a test) may ask what a bare status means.
+        """
         status = response.status_code
         excerpt = redact(response.text[:BODY_EXCERPT_CHARS])
         if status in (401, 403):
@@ -614,6 +620,3 @@ class HttpBackend:
             f"rejected, not the credential: {excerpt!r}"
         ).to_error()
 
-    async def _note_listing_failure(self) -> None:
-        """Optional follow-up after ``/models`` failed.  Nothing by default."""
-        return None

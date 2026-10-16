@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 import pytest
 
 from kbutillib.domains.ai.council.backends.testing import FakeBackend
+from kbutillib.domains.ai.council.store.schema import SCHEMA_VERSION
 from kbutillib.domains.ai.council_utils import CouncilUtils, CouncilUtilsImpl
 
 #: The closed menu every item here picks from.  Deliberately not in id order.
@@ -247,7 +248,7 @@ class TestJobControl:
         on the returned status and not merely in a log line.
         """
         job_id = util.submit("go_mf", _items()[:1])
-        util.store().set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+        util.store().set_halt("local", "quota_exhausted", "out of quota")
         status = util.run(job_id)
         assert status["status"] != "done"
         assert status["blockers"]
@@ -318,7 +319,7 @@ class TestStoreDiscipline:
         )
         try:
             first = council.db_init()
-            assert first["schema_version"] == 1
+            assert first["schema_version"] == SCHEMA_VERSION
             assert sorted(first["query_types"]) == ["go_mf@1", "reaction_pickup@1"]
             assert council.db_init()["query_types"] == first["query_types"]
             check = council.db_check()
@@ -338,7 +339,7 @@ class TestStoreDiscipline:
         try:
             report = council.db_migrate()
             assert report["schema_version_before"] == 0
-            assert report["schema_version"] == 1
+            assert report["schema_version"] == SCHEMA_VERSION
             assert report["migrated"] is True
             assert council.db_migrate()["migrated"] is False
         finally:
@@ -394,8 +395,8 @@ class TestEndpointState:
         self, util: CouncilUtils
     ) -> None:
         store = util.store()
-        store.add_tokens(util.user(), "local", 100)
-        store.set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+        store.add_tokens("local", 100)
+        store.set_halt("local", "quota_exhausted", "out of quota")
         assert util.endpoint_status()[0]["halted"] is True
 
         state = util.reset_halt("local")
@@ -697,7 +698,7 @@ class TestToolkitWiring:
             kbase_token_file=None,
         )
         assert impl.env is env
-        assert impl.db_init()["schema_version"] == 1
+        assert impl.db_init()["schema_version"] == SCHEMA_VERSION
         assert isinstance(impl._delegate, CouncilUtils)
         impl.close()
 

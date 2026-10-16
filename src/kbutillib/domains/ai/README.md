@@ -44,12 +44,12 @@ from kbutillib.domains.ai.kb_plm_utils import KBPLMUtils
 | `torch` | PLM inference | `pip install torch` |
 | `transformers` | HuggingFace PLM models | `pip install transformers` |
 | `httpx` | Council HTTP backends (ARGO, OpenAI-compatible) | `pip install 'kbutillib[ai]'` |
-| `SQLAlchemy`, `psycopg` | Council store (SQLite / shared PostgreSQL) | `pip install 'kbutillib[council]'` |
+| `SQLAlchemy` | Council store (a local SQLite file) | `pip install 'kbutillib[council]'` |
 
 `ArgoUtils`, `AiCurationUtils` and `KBPLMUtils` degrade gracefully: `available` returns
 `False` and `unavailable_reason` explains which package is missing. No import errors occur at
 module load time. The council is lazy rather than degrading — nothing under `council/` is
-imported until a name from it is touched, and a missing driver then raises one clean
+imported until a name from it is touched, and a missing query layer then raises one clean
 `ImportError` naming the extra to install.
 
 The Argo LLM gateway is internal to Argonne National Laboratory. `ArgoUtils.available` returns
@@ -126,13 +126,12 @@ wondered why their key had no effect is told.
 ### Profiles
 
 A **profile** is a named seating: which model alias sits in each proposer seat, which is the
-critic, which is meta. Three ship in the packaged default configuration:
+critic, which is meta. Two ship in the packaged default configuration:
 
 | Profile | Seating |
 |---|---|
 | `argo` | Every seat on ARGO — one API key's worth of billing, frontier models throughout |
 | `mixed-subscription` (default) | Proposers and adjudicators spread across an ARGO key and two interactive subscriptions, so a batch costs almost nothing in API tokens |
-| `poplar-local` | Entirely self-hosted: no external billing, no data leaving the lab |
 
 A seating must be **independent**: two seats on the same canonical model are one opinion
 counted twice, and the roster refuses to be constructed. Override any seat per call
@@ -161,14 +160,18 @@ only mean anything against the exact spec that produced them.
 
 Work is organised as **jobs**: a batch of items against one saved query type. Every model
 invocation is a **call row** in the store, and those rows *are* the queue — a worker claims
-pending calls, runs them through the submitting user's own backends, and advances each item
+pending calls, runs them through the configured backends, and advances each item
 `proposers → critic → meta (only if needed) → verdict`. Submitting therefore spends nothing;
 `run` is what spends.
 
-The store is a local SQLite file by default (`~/.kbutillib/council/council.sqlite`) or a
-shared PostgreSQL database every KBUtilLib installation can point at — in which case a
-question one user has already paid for is not asked again by the next, because reuse is keyed
-on content hashes rather than on anything user-local.
+The store is **a single SQLite file on local disk**, one per machine
+(`~/.kbutillib/council/council.sqlite` by default). There is no shared store and no database
+server: queues on two machines are independent and nothing coordinates across hosts. Within
+one store, reuse is keyed on content hashes rather than on who asked, so a question this store
+has already paid for is not asked again by a later job. A store path inside a Dropbox
+directory is refused outright, and so is one on a network filesystem — set `store:` to a local
+path (`KBU_COUNCIL_ALLOW_NETWORK_FS=1` overrides the network-filesystem refusal; nothing
+overrides the Dropbox one).
 
 **The schema is never created implicitly.** Run `kbu council db init` once per store; every
 other verb refuses an unstamped store and says so, so a mistyped `--store` cannot quietly
@@ -209,13 +212,13 @@ thread rather than refusing.
 ### Start with `doctor`
 
 ```bash
-kbu council doctor                 # or: --profile poplar-local, --json
+kbu council doctor                 # or: --profile argo, --json
 ```
 
 `doctor` **spends nothing and sends no prompt**: HTTP readiness is the free `/models` GET,
 CLI readiness is `--version` plus an offline billing preflight that only reads config files.
 It reports every seat as `ready`, `unknown` ("nobody has confirmed this") or `unavailable`
-("I checked, and no"), plus the store's reachability, the submitting user, and any dropped
+("I checked, and no"), plus the store's reachability, the provenance label jobs get, and any dropped
 billing variable names. It exits **1** if any seat is unavailable and **2** if none is but
 some are unknown — so it is usable as a gate before a batch that will cost money.
 
@@ -224,10 +227,10 @@ The rest of the surface:
 ```bash
 kbu council submit --query go_mf --input items.jsonl --label batch-1
 kbu council run --job <id>                    # or --query ... --input ... to do both
-kbu council jobs                              # --all-users, --status, --include-deleted
+kbu council jobs                              # --status, --include-deleted
 kbu council jobs status <id>
 kbu council jobs results <id> --out r.jsonl   # --format jsonl|parquet, --include-pending
-kbu council jobs rerun <id> --profile poplar-local
+kbu council jobs rerun <id> --profile argo
 kbu council query list | show go_mf@1 | register spec.yaml | retire go_mf@1
 kbu council calls search --query go_mf --entity "glutamine synthetase"
 kbu council endpoints status | reset-halt <endpoint> | reset-budget <endpoint>

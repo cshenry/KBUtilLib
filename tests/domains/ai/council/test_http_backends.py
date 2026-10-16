@@ -187,7 +187,6 @@ def openai(
         "name": "gpt-oss-120b",
         "kind": "openai",
         "base_url": POPLAR_BASE,
-        "supervisor": True,
     }
     cfg.update(config)
     return OpenAICompatibleBackend(cfg, transport=recorder.transport if recorder else None)
@@ -695,7 +694,7 @@ class TestReplyParsing:
 class TestOpenAICompatible:
     """Self-hosted vLLM ports: unavailability is waiting, not failure."""
 
-    def test_503_is_model_unavailable_and_names_where_to_look(self) -> None:
+    def test_503_is_model_unavailable_and_names_the_endpoint(self) -> None:
         recorder = Recorder(httpx.Response(503, text="no model loaded"))
         result = complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
         assert result.ok is False
@@ -704,7 +703,14 @@ class TestOpenAICompatible:
         assert result.error.retryable is True
         assert result.error.halts_endpoint is False
         assert "gpt-oss-120b" in result.error.message
-        assert "http://127.0.0.1:8301/service/status" in result.error.message
+
+    def test_503_names_no_control_plane(self) -> None:
+        """There is none to name: model management is out of the product."""
+        recorder = Recorder(httpx.Response(503, text="no model loaded"))
+        result = complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
+        assert result.error is not None
+        assert "/service/" not in result.error.message
+        assert "status" not in result.error.message
 
     def test_503_sends_no_request_to_any_service_path(self) -> None:
         """Lifecycle is another component's job; a seat must never provoke it."""
@@ -712,20 +718,37 @@ class TestOpenAICompatible:
         complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
         assert recorder.log == ["POST /v1/chat/completions"]
         assert not [r for r in recorder.requests if "/service/" in r.url.path]
-        assert not [
-            r
-            for r in recorder.requests
-            if r.method == "POST" and "/service/" in r.url.path
-        ]
 
-    def test_an_unsupervised_port_omits_the_control_url(self) -> None:
-        recorder = Recorder(httpx.Response(503, text="no model loaded"))
-        result = complete(
-            openai(recorder, supervisor=False),
-            request(seat("gpt-oss-120b", kind="openai")),
+    def test_a_404_naming_the_model_is_model_unavailable(self) -> None:
+        """vLLM's answer when the server is up but the model is not resident."""
+        recorder = Recorder(
+            httpx.Response(
+                404, json={"error": {"message": "The model `gpt-oss-120b` does not exist."}}
+            )
         )
+        result = complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
         assert result.error is not None
-        assert "/service/status" not in result.error.message
+        assert result.error.kind == "model_unavailable"
+        assert result.error.retryable is True
+
+    def test_a_404_not_naming_the_model_stays_a_request_error(self) -> None:
+        """A typo'd alias or a wrong path must not be parked for ever."""
+        recorder = Recorder(httpx.Response(404, text="Not Found"))
+        result = complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
+        assert result.error is not None
+        assert result.error.kind == "invalid_output"
+
+    def test_the_only_paths_it_ever_requests_are_the_two_allowed_ones(self) -> None:
+        """The whole surface of this backend, read off the request log."""
+        def _reply(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/models"):
+                return httpx.Response(200, json={"data": [{"id": "gpt-oss-120b"}]})
+            return httpx.Response(503, text="no model loaded")
+
+        recorder = Recorder(_reply)
+        complete(openai(recorder), request(seat("gpt-oss-120b", kind="openai")))
+        list_models(openai(recorder))
+        assert set(recorder.log) == {"POST /v1/chat/completions", "GET /v1/models"}
 
     def test_a_refused_connection_is_model_unavailable(self) -> None:
         def _refused(request: httpx.Request) -> httpx.Response:
@@ -824,7 +847,7 @@ class TestModelListing:
 
     def test_a_bare_list_body_is_parsed_too(self) -> None:
         reply = httpx.Response(200, json=[{"id": "qwen3-32b"}])
-        models = list_models(openai(Recorder(reply), supervisor=False))
+        models = list_models(openai(Recorder(reply)))
         assert models == [{"id": "qwen3-32b"}]
 
     def test_an_http_error_yields_an_empty_list(self) -> None:
@@ -835,7 +858,7 @@ class TestModelListing:
         def _refused(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("refused", request=request)
 
-        models = list_models(openai(Recorder(_refused), supervisor=False))
+        models = list_models(openai(Recorder(_refused)))
         assert models == []
 
     def test_a_missing_argo_username_yields_an_empty_list(
@@ -846,21 +869,10 @@ class TestModelListing:
         assert list_models(argo(recorder)) == []
         assert recorder.requests == []
 
-    def test_a_supervised_port_may_GET_service_status_but_never_POST_it(self) -> None:
-        """The one permitted ``/service/`` request in the whole backend."""
-        def _reply(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/service/status"):
-                return httpx.Response(200, json={"state": "stopped"})
-            return httpx.Response(503, text="no model loaded")
-
-        recorder = Recorder(_reply)
-        assert list_models(openai(recorder, supervisor=True)) == []
-        assert recorder.log == ["GET /v1/models", "GET /service/status"]
-        assert not [r for r in recorder.requests if r.method != "GET"]
-
-    def test_an_unsupervised_port_never_touches_service_status(self) -> None:
+    def test_a_failed_listing_provokes_no_second_request(self) -> None:
+        """No control plane to consult, so one GET and nothing else."""
         recorder = Recorder(httpx.Response(503, text="no model loaded"))
-        assert list_models(openai(recorder, supervisor=False)) == []
+        assert list_models(openai(recorder)) == []
         assert recorder.log == ["GET /v1/models"]
 
 
@@ -1022,7 +1034,6 @@ class TestNoInjection:
                 "name": "qwen3-32b",
                 "kind": "openai",
                 "base_url": f"http://127.0.0.1:{port}/v1",
-                "supervisor": True,
             }
         )
         assert "transport" not in backend.client_kwargs

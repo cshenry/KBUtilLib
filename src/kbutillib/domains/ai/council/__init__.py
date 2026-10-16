@@ -91,7 +91,6 @@ __all__ = [
     # store
     "open_store",
     "SqliteStore",
-    "PostgresStore",
     # queries / engine / runtime
     "QueryType",
     "QueryRegistry",
@@ -164,7 +163,6 @@ _MODULE_MAP: dict[str, str] = {
     # -- store ----------------------------------------------------------
     "open_store": "store",
     "SqliteStore": "store.sqlite",
-    "PostgresStore": "store.postgres",
     # -- queries --------------------------------------------------------
     "QueryType": "queries",
     "QueryRegistry": "queries",

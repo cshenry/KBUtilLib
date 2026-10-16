@@ -105,19 +105,18 @@ __all__ = [
     "HTTP_KINDS",
 ]
 
-# Endpoint kinds a seat may be served from.  ``poplar_registry`` is reserved
-# for the dynamic poplar model registry (a later milestone); ``fake`` and
-# ``replay`` exist for the test backends.
+# Endpoint kinds a seat may be served from.  A self-hosted model is just an
+# ``openai`` endpoint the user declared (review round 2 took model management
+# out of the product); ``fake`` and ``replay`` exist for the test backends.
 ENDPOINT_KINDS = (
     "argo",
     "openai",
     "claude_cli",
     "codex_cli",
-    "poplar_registry",
     "fake",
     "replay",
 )
-HTTP_KINDS = ("argo", "openai", "poplar_registry")
+HTTP_KINDS = ("argo", "openai")
 CLI_KINDS = ("claude_cli", "codex_cli")
 
 #: Every ``CouncilError.kind`` string the council may emit.  ``off_menu`` is a
@@ -431,7 +430,7 @@ class SeatSpec(BaseModel):
     seat_name: str
     endpoint: str
     endpoint_kind: Literal[
-        "argo", "openai", "claude_cli", "codex_cli", "poplar_registry", "fake", "replay"
+        "argo", "openai", "claude_cli", "codex_cli", "fake", "replay"
     ]
     model: str
     canonical_model: str

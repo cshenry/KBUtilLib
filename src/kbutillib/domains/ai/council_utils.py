@@ -325,30 +325,28 @@ class CouncilUtils(SharedEnvUtils):
     # -- identity ---------------------------------------------------------
 
     def user(self) -> str:
-        """Who is submitting: the KBase username, else the local account.
+        """The PROVENANCE label for jobs this object submits.
 
-        M1 identity rule.  A KBase token is only consulted when one is
-        actually configured, so a machine with no token never makes a network
-        call to find out its own name; an unresolvable token falls back the
-        same way a missing one does, because a council job must not fail over
-        the spelling of its owner.  A later milestone replaces this with
-        ``council.identity``.
+        The top-level ``user`` key of the ``ai_council`` config section, else
+        the OS account.  That is the whole rule: there is no identity in the
+        council (review round 2), so this grants nothing and gates nothing --
+        it is a string written to ``jobs.submitted_by`` so a verdict can be
+        attributed months later.  No token is read and no network call is
+        made to find out this machine's own name.
+
+        Changing it affects only jobs submitted AFTERWARDS.  The queue and
+        the endpoint budgets are the store's and are keyed on the store's own
+        fixed identity, so a rename strands no pending call and resets no
+        budget.
         """
         if self._user:
             return self._user
         name = ""
         try:
-            token = self.get_token("kbase")
-        except Exception:  # noqa: BLE001 - identity must never be fatal
-            token = None
-        if token:
-            try:
-                from ...installed_clients.authclient import KBaseAuth
-
-                name = str(KBaseAuth().get_user(token) or "").strip()
-            except Exception as exc:  # noqa: BLE001 - fall back, but say so
-                self.log_debug(f"council: could not resolve the KBase token to a user: {exc}")
-                name = ""
+            name = str(self.config().user or "").strip()
+        except Exception as exc:  # noqa: BLE001 - identity must never be fatal
+            self.log_debug(f"council: could not read the configured user: {exc}")
+            name = ""
         if not name:
             try:
                 name = getpass.getuser()
@@ -694,13 +692,13 @@ class CouncilUtils(SharedEnvUtils):
     def cancel(self, job_id: str) -> Dict[str, Any]:
         """Cancel a job.  Terminal, idempotent, and it supersedes its calls."""
         store = self.require_schema()
-        store.cancel_job(job_id, self.user())
+        store.cancel_job(job_id)
         return store.job_status(job_id)
 
     def delete(self, job_id: str) -> Dict[str, Any]:
         """Tombstone a cancelled or done job.  No row is physically removed."""
         store = self.require_schema()
-        store.delete_job(job_id, self.user())
+        store.delete_job(job_id)
         job = store.get_job(job_id) or {}
         return {
             "job_id": job_id,
@@ -770,13 +768,16 @@ class CouncilUtils(SharedEnvUtils):
 
     def jobs(
         self,
-        all_users: bool = False,
         status: Optional[str] = None,
         include_deleted: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Job rows -- this user's by default, tombstones hidden by default."""
+        """Every job in the store; tombstones hidden by default.
+
+        No per-user view and no ``--all-users``: a store is one machine's, so
+        every job in it is yours and ``submitted_by`` is a label on it rather
+        than a filter (review round 2).
+        """
         return self.require_schema().list_jobs(
-            user=None if all_users else self.user(),
             status=status,
             include_deleted=include_deleted,
         )
@@ -784,7 +785,7 @@ class CouncilUtils(SharedEnvUtils):
     # -- calls and endpoints ----------------------------------------------
 
     def search_calls(self, **filters: Any) -> List[Dict[str, Any]]:
-        """Find call rows across every job and user.
+        """Find call rows across every job in the store.
 
         Filters: ``query_name``, ``canonical_model``, ``entity_hash``,
         ``data_hash``, ``status``, ``limit``.  ``entity`` is a convenience --
@@ -799,18 +800,19 @@ class CouncilUtils(SharedEnvUtils):
         return self.require_schema().search_calls(**filters)
 
     def endpoint_status(self, user: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Per-endpoint budget and halt state for one user.
+        """This store's per-endpoint budget and halt state.
 
         Every CONFIGURED endpoint is reported, halted or not: "nothing is
         halted" is the answer an operator is usually looking for, and an
         endpoint with no state row has simply never been spent against.
+
+        *user* is a deprecated no-op: the rows are the store's, keyed on its
+        own fixed identity, not one person's ledger.
         """
         store = self.require_schema()
-        who = user or self.user()
         rows: List[Dict[str, Any]] = []
         for name, endpoint in sorted(self.config().endpoints.items()):
-            state = dict(store.get_endpoint_state(who, name))
-            state.setdefault("user", who)
+            state = dict(store.get_endpoint_state(name))
             state.setdefault("endpoint", name)
             state["kind"] = endpoint.kind
             state["halted"] = bool(state.get("halt_kind"))
@@ -819,11 +821,11 @@ class CouncilUtils(SharedEnvUtils):
 
     def reset_halt(self, endpoint: str, user: Optional[str] = None) -> Dict[str, Any]:
         """Clear an endpoint's halt.  Never touches the token counters."""
-        return self.require_schema().reset_halt(user or self.user(), endpoint)
+        return self.require_schema().reset_halt(endpoint)
 
     def reset_budget(self, endpoint: str, user: Optional[str] = None) -> Dict[str, Any]:
         """Start a new budget epoch, keeping the lifetime total."""
-        return self.require_schema().reset_budget(user or self.user(), endpoint)
+        return self.require_schema().reset_budget(endpoint)
 
     # -- doctor -----------------------------------------------------------
 

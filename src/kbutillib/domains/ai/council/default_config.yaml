@@ -28,49 +28,18 @@ endpoints:
     executable: codex
     account: codex-chatgpt
 
-  # Self-hosted vLLM servers on poplar, one port per model. `supervisor: true`
-  # means the port has a control plane that can report whether its model is
-  # loaded, starting, stopped or failed, so a seat can wait rather than fail.
+  # A SELF-HOSTED model is just an OpenAI-compatible endpoint you declare
+  # yourself -- the council manages no models and knows no GPUs (review round
+  # 2 took that out of the product). Nothing self-hosted is packaged here,
+  # because a port that is up on one machine is not up on another. Uncomment
+  # and edit, or put the same three lines in the `ai_council` section of
+  # ~/.kbutillib/config.yaml, then seat the alias in a profile:
   #
-  # STATIC for M1: these nine endpoints are hard-coded here. A later milestone
-  # adds a `poplar_registry` endpoint kind backed by the shared model registry,
-  # which discovers ports and lifecycle state instead of assuming them.
-  gpt-oss-120b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8301/v1
-    supervisor: true
-  qwen3-32b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8302/v1
-    supervisor: true
-  llama-3.3-70b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8303/v1
-    supervisor: true
-  mistral-small-3.2:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8304/v1
-    supervisor: true
-  qwen3-235b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8305/v1
-    supervisor: true
-  qwen3.8-27b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8306/v1
-    supervisor: true
-  gemma-4-31b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8307/v1
-    supervisor: true
-  nemotron-3-super:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8308/v1
-    supervisor: true
-  qwen3.5-122b:
-    kind: openai
-    base_url: http://poplar.cels.anl.gov:8309/v1
-    supervisor: true
+  # my-vllm:
+  #   kind: openai
+  #   base_url: http://127.0.0.1:8000/v1
+  #   api_key_env: MY_VLLM_API_KEY     # optional; vLLM ignores the value
+  #                                    # unless it was started with --api-key
 
 models:
   # ARGO aliases. served_name defaults to the alias (ARGO's own model names),
@@ -114,37 +83,6 @@ models:
     canonical: openai/gpt-5.5
     verified: false
 
-  # Poplar self-hosted models. canonical is declared explicitly: these are
-  # local deployments, so "poplar/<alias>" is their identity and nothing in
-  # the built-in vendor table applies.
-  gpt-oss-120b:
-    endpoint: gpt-oss-120b
-    canonical: poplar/gpt-oss-120b
-  qwen3-32b:
-    endpoint: qwen3-32b
-    canonical: poplar/qwen3-32b
-  llama-3.3-70b:
-    endpoint: llama-3.3-70b
-    canonical: poplar/llama-3.3-70b
-  mistral-small-3.2:
-    endpoint: mistral-small-3.2
-    canonical: poplar/mistral-small-3.2
-  qwen3-235b:
-    endpoint: qwen3-235b
-    canonical: poplar/qwen3-235b
-  qwen3.8-27b:
-    endpoint: qwen3.8-27b
-    canonical: poplar/qwen3.8-27b
-  gemma-4-31b:
-    endpoint: gemma-4-31b
-    canonical: poplar/gemma-4-31b
-  nemotron-3-super:
-    endpoint: nemotron-3-super
-    canonical: poplar/nemotron-3-super
-  qwen3.5-122b:
-    endpoint: qwen3.5-122b
-    canonical: poplar/qwen3.5-122b
-
 profiles:
   # All-ARGO: one API key's worth of billing, every seat a frontier model.
   argo:
@@ -160,15 +98,17 @@ profiles:
     critic: sonnet-cli
     meta: opus-cli
 
-  # Entirely self-hosted: no external billing and no data leaving the lab.
-  poplar-local:
-    proposers: [qwen3.8-27b, gemma-4-31b, nemotron-3-super]
-    critic: mistral-small-3.2
-    meta: qwen3.5-122b
-
 default_profile: mixed-subscription
 
-# Local SQLite by default. `~` is expanded at load time, and a sqlite store
-# inside a Dropbox directory is refused outright: live WAL files corrupt under
-# file sync. Point this at a PostgreSQL URL to share a store across the fleet.
+# The store is a single SQLite file on LOCAL disk, one per machine -- there is
+# no shared store and no database server. `~` is expanded at load time. A path
+# inside a Dropbox directory is refused outright, and so is one on a network
+# filesystem (NFS, SMB, sshfs, ...): live SQLite WAL files corrupt under file
+# sync, and network filesystems do not give SQLite locks it can trust.
 store: sqlite:///~/.kbutillib/council/council.sqlite
+
+# Optional. The PROVENANCE label written to `jobs.submitted_by`; defaults to
+# the OS user. It grants no access and gates nothing -- the queue and the
+# budgets belong to the store, not to a person -- so changing it affects only
+# the label on jobs submitted afterwards.
+# user: someone

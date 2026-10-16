@@ -1128,8 +1128,7 @@ class TestFailuresAndRetries:
         # All three seats are claimed, as one in-flight batch.  Two of them
         # settle -- the failing proposer_1 and one sibling -- and the third
         # stays claimed, which is exactly what a slow seat looks like.
-        claimed = {row["seat_name"]: row for row in store.claim_calls(
-            "alice", "w-1", {"fake1"}, 3
+        claimed = {row["seat_name"]: row for row in store.claim_calls("w-1", {"fake1"}, 3
         )}
         assert sorted(claimed) == ["proposer_1", "proposer_2", "proposer_3"]
         run(worker.execute(claimed["proposer_1"]))
@@ -1211,7 +1210,7 @@ class TestHaltsPauseRatherThanFail:
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         summary = run(worker.work(job_id=job_id, until_idle=True))
 
-        assert store.get_endpoint_state("alice", "fake1")["halt_kind"] == kind
+        assert store.get_endpoint_state("fake1")["halt_kind"] == kind
         row = next(
             r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
         )
@@ -1227,7 +1226,7 @@ class TestHaltsPauseRatherThanFail:
 
         # Clearing the halt and running again finishes the job, with no
         # re-submission of anything.
-        store.reset_halt("alice", "fake1")
+        store.reset_halt("fake1")
         run(worker.work(job_id=job_id, until_idle=True))
         assert store.get_job(job_id)["status"] == "done"
         assert verdict_of(store, job_id).selected_ids == ["A:1"]
@@ -1237,7 +1236,7 @@ class TestHaltsPauseRatherThanFail:
         backend = fake(agreeing_script("A:1"))
         worker = worker_for(store, {"fake1": backend})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        store.set_halt("alice", "fake1", "quota_exhausted", "manually halted")
+        store.set_halt("fake1", "quota_exhausted", "manually halted")
 
         summary = run(worker.work(job_id=job_id, until_idle=True))
         assert backend.calls == []
@@ -1263,7 +1262,7 @@ class TestBudgets:
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         run(worker.work(job_id=job_id, until_idle=True))
 
-        state = store.get_endpoint_state("alice", "fake1")
+        state = store.get_endpoint_state("fake1")
         assert state["halt_kind"] == "budget_exhausted"
         assert "overshoot" in state["halt_message"]
         # One call of 8 tokens against a 5-token budget: the threshold is
@@ -1287,10 +1286,10 @@ class TestBudgets:
         )
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         run(worker.work(job_id=job_id, until_idle=True))
-        spent = store.get_endpoint_state("alice", "fake1")["epoch_tokens"]
+        spent = store.get_endpoint_state("fake1")["epoch_tokens"]
         assert spent
 
-        state = store.reset_budget("alice", "fake1")
+        state = store.reset_budget("fake1")
         assert state["halt_kind"] is None
         assert state["epoch_tokens"] == 0
         assert state["lifetime_tokens"] >= spent
@@ -1298,7 +1297,7 @@ class TestBudgets:
 
         run(worker.work(job_id=job_id, until_idle=True))
         # The new epoch is spent again at once, which is the budget working.
-        assert store.get_endpoint_state("alice", "fake1")["lifetime_tokens"] > spent
+        assert store.get_endpoint_state("fake1")["lifetime_tokens"] > spent
         assert store.get_items(job_id)[0]["status"] in ("ok", "pending")
 
     def test_an_unmeasurable_budget_halts_the_endpoint(self, store: Any) -> None:
@@ -1313,7 +1312,7 @@ class TestBudgets:
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         run(worker.work(job_id=job_id, until_idle=True))
 
-        state = store.get_endpoint_state("alice", "fake1")
+        state = store.get_endpoint_state("fake1")
         assert state["halt_kind"] == "budget_usage_unknown"
         assert "no usage" in state["halt_message"]
         # The answer that arrived is still stored -- it was paid for.
@@ -1329,9 +1328,9 @@ class TestBudgets:
         worker = worker_for(store, {"fake1": backend})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         run(worker.work(job_id=job_id, until_idle=True))
-        assert store.get_endpoint_state("alice", "fake1")["halt_kind"] is None
+        assert store.get_endpoint_state("fake1")["halt_kind"] is None
         assert store.get_job(job_id)["status"] == "done"
-        assert store.get_endpoint_state("alice", "fake1")["lifetime_tokens"] == 80_000
+        assert store.get_endpoint_state("fake1")["lifetime_tokens"] == 80_000
 
 
 class TestConcurrency:
@@ -1685,9 +1684,9 @@ class TestCancellation:
         worker = worker_for(store, {"fake1": backend})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
 
-        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)
+        claimed = store.claim_calls("w-1", {"fake1"}, 1)
         assert len(claimed) == 1
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
 
         # The claimed call is already being paid for, so its reply is stored.
         assert run(worker.execute(claimed[0])) == "ok"
@@ -1713,7 +1712,7 @@ class TestCancellation:
         backend = fake(agreeing_script("A:1"))
         worker = worker_for(store, {"fake1": backend})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        store.cancel_job(job_id, "alice")
+        store.cancel_job(job_id)
 
         summary = run(worker.work(job_id=job_id, until_idle=True))
         assert summary["claimed"] == 0
@@ -1728,7 +1727,7 @@ class TestStaleClaims:
     ) -> None:
         worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)[0]
+        claimed = store.claim_calls("w-1", {"fake1"}, 1)[0]
 
         with pytest.raises(StaleClaim):
             store.complete_call(claimed["call_id"], "not-the-token", "ok")
@@ -1737,7 +1736,7 @@ class TestStaleClaims:
         backend = fake(agreeing_script("A:1"))
         worker = worker_for(store, {"fake1": backend})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        claimed = store.claim_calls("alice", "w-1", {"fake1"}, 1)[0]
+        claimed = store.claim_calls("w-1", {"fake1"}, 1)[0]
 
         # The call is taken back from under this worker -- which is what
         # reclaim_stale does to a worker that looked dead.
@@ -1759,7 +1758,7 @@ class TestOneLiveCallPerSeatAndUpstream:
     def test_advancing_twice_creates_one_critic_call(self, store: Any) -> None:
         worker = worker_for(store, {"fake1": fake(split_script())})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+        for row in store.claim_calls("w-1", {"fake1"}, 3):
             run(worker.execute(row))
 
         assert len(calls_of(store, job_id, "critic")) == 1
@@ -1772,7 +1771,7 @@ class TestOneLiveCallPerSeatAndUpstream:
 
         worker = worker_for(store, {"fake1": fake(split_script())})
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
-        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+        for row in store.claim_calls("w-1", {"fake1"}, 3):
             run(worker.execute(row))
         critic = calls_of(store, job_id, "critic")[0]
 
@@ -1848,9 +1847,9 @@ class TestStaleUpstreamDigest:
         job_id = worker.submit(make_query(), [make_task()], make_roster(3))
         # Proposers, then the critic: a split vote, so the item needs meta and
         # is therefore NOT settled yet.
-        for row in store.claim_calls("alice", "w-1", {"fake1"}, 3):
+        for row in store.claim_calls("w-1", {"fake1"}, 3):
             run(worker.execute(row))
-        critic_rows = store.claim_calls("alice", "w-1", {"fake1"}, 1)
+        critic_rows = store.claim_calls("w-1", {"fake1"}, 1)
         assert [row["role"] for row in critic_rows] == ["critic"]
         run(worker.execute(critic_rows[0]))
 
@@ -2104,7 +2103,7 @@ class TestOrderIndependence:
             progressed = False
             for worker, endpoints in workers:
                 worker.register()
-                rows = store.claim_calls("alice", worker.worker_id, endpoints, 1)
+                rows = store.claim_calls(worker.worker_id, endpoints, 1)
                 for row in rows:
                     run(worker.execute(row))
                     progressed = True
@@ -2132,7 +2131,7 @@ class TestOrderIndependence:
 
         async def drain() -> None:
             for _ in range(400):
-                rows = store.claim_calls("alice", worker.worker_id, {"fake1", "fake2"}, 50)
+                rows = store.claim_calls(worker.worker_id, {"fake1", "fake2"}, 50)
                 if not rows:
                     return
                 rng.shuffle(rows)

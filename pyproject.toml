@@ -80,23 +80,22 @@ ai = [
   "httpx[socks] >=0.28",
 ]
 # Store layer for the LLM council (domains/ai/council/store/*). SQLAlchemy
-# Core 2.x -- not the ORM -- is the only query layer the store uses, and
-# psycopg 3 is the driver for the shared PostgreSQL store that every
-# KBUtilLib installation can point at; a local SQLite store needs no driver
-# beyond the stdlib. Kept optional for the same reason as `ai`: the council
+# Core 2.x -- not the ORM -- is the only query layer the store uses, and it is
+# the only requirement here: the council store is a LOCAL SQLite file, one per
+# machine, so there is no database server and no driver to install beyond the
+# stdlib's sqlite3. Kept optional for the same reason as `ai`: the council
 # modules are reached through a lazy loader
 # (domains/ai/council/__init__.py), so a core install imports fine without
-# these and only fails -- with a clean ImportError -- if someone actually
+# this and only fails -- with a clean ImportError -- if someone actually
 # opens a store.
 #
 # Deliberately NOT in `all`, on the same rationale as `backfill`: `all` is
-# "every transport plus the docs build", and a database driver is neither.
-# The council's own protocol/types/config layer has no dependency here at all
-# (pydantic and PyYAML are core), so `kbu council` can render and validate a
-# configuration without this extra installed.
+# "every transport plus the docs build", and a query layer nothing else uses
+# is neither. The council's own protocol/types/config layer has no dependency
+# here at all (pydantic and PyYAML are core), so `kbu council` can render and
+# validate a configuration without this extra installed.
 council = [
   "SQLAlchemy >=2.0",
-  "psycopg[binary] >=3.1",
 ]
 # Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).
 # Deployed into a dedicated venv (~/venvs/lp-solver) per

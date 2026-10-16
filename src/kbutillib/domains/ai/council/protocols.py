@@ -129,23 +129,22 @@ class QueryRenderer(Protocol):
 
 @runtime_checkable
 class CouncilStore(Protocol):
-    """Where jobs, items, call rows, verdicts and leases live.
+    """Where jobs, items, call rows and verdicts live.
 
     Call rows ARE the queue: a worker claims pending calls, runs them through
-    the submitting user's own backends, and advances each item through
-    proposers -> critic -> meta -> verdict.  Two implementations satisfy this
-    protocol -- a local SQLite file and a shared PostgreSQL database every
-    KBUtilLib installation can point at -- which is why reuse lookup is keyed
-    on the content hashes from :mod:`.types` rather than on anything
-    user-local: a question one user has already paid for is not asked again.
+    the configured backends, and advances each item through
+    proposers -> critic -> meta -> verdict.  One implementation satisfies this
+    protocol, a single-user SQLite file on local disk; reuse lookup is keyed
+    on the content hashes from :mod:`.types`, so a question this store has
+    already paid for is not asked again by a later job.
 
     Row shapes are plain dicts keyed by the column names in
     :mod:`.store.schema`, not models, because the store is also read by the
     CLI and by operators with a SQL prompt.
 
     Methods are grouped below in contract order: schema, query types,
-    jobs/items/calls, the queue, endpoint state, job control, workers and
-    leases, search.
+    jobs/items/calls, the queue, endpoint state, job control, workers,
+    search.
     """
 
     # -- schema -----------------------------------------------------------
@@ -240,19 +239,21 @@ class CouncilStore(Protocol):
 
     def claim_calls(
         self,
-        user: str,
         worker_id: str,
         endpoints: Set[str],
         limit: int,
         now: Optional[datetime] = None,
+        *,
+        user: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Atomically claim up to *limit* due pending calls.
 
-        Only calls whose job was submitted by *user*, whose job is neither
-        cancelled nor paused nor tombstoned, whose endpoint is in *endpoints*
-        and is not halted for that user, and which are due
-        (``not_before`` null or past).  Ordered by job priority then
-        submission time then item order then role.
+        Every call in the store whose job is neither cancelled nor paused nor
+        tombstoned, whose endpoint is in *endpoints* and is not halted, and
+        which is due (``not_before`` null or past) -- with NO filter on
+        ``jobs.submitted_by``, which is a provenance label and not an owner.
+        Ordered by job priority then submission time then item order then
+        role.  *user* is a deprecated no-op.
         """
         ...
 
@@ -274,8 +275,8 @@ class CouncilStore(Protocol):
         this reply, or ``None`` when it needed none; ``reply_parsed`` is the
         repaired answer and ``reply_text`` the untouched original.
 
-        Raises ``StaleClaim`` if the row was reclaimed, or if a daemon's
-        lease generation has since been superseded.
+        Raises ``StaleClaim`` if the row was reclaimed and re-handed to
+        another worker since this claim was taken.
         """
         ...
 
@@ -342,24 +343,41 @@ class CouncilStore(Protocol):
         ...
 
     # -- endpoint state ---------------------------------------------------
+    #
+    # Keyed on the store's own fixed identity, never on a provenance label:
+    # a store is one machine's, so its spend against a gateway is one number.
+    # The ``user`` keyword on each of these is a deprecated no-op.
 
-    def get_endpoint_state(self, user: str, endpoint: str) -> Dict[str, Any]:
-        """Return the (user, endpoint) budget and halt state."""
+    def get_endpoint_state(
+        self, endpoint: str, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Return the endpoint's budget and halt state."""
         ...
 
-    def add_tokens(self, user: str, endpoint: str, n: int) -> Dict[str, Any]:
+    def add_tokens(
+        self, endpoint: str, n: int, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Add *n* tokens to the current epoch and the lifetime total."""
         ...
 
-    def set_halt(self, user: str, endpoint: str, kind: str, message: str = "") -> Dict[str, Any]:
-        """Halt an endpoint for one user."""
+    def set_halt(
+        self,
+        endpoint: str,
+        kind: str,
+        message: str = "",
+        *,
+        user: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Halt an endpoint: no further calls are claimed for it."""
         ...
 
-    def reset_halt(self, user: str, endpoint: str) -> Dict[str, Any]:
+    def reset_halt(self, endpoint: str, *, user: Optional[str] = None) -> Dict[str, Any]:
         """Clear a halt.  Never changes the token counters."""
         ...
 
-    def reset_budget(self, user: str, endpoint: str) -> Dict[str, Any]:
+    def reset_budget(
+        self, endpoint: str, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Start a new budget epoch, keeping the lifetime total."""
         ...
 
@@ -373,15 +391,18 @@ class CouncilStore(Protocol):
         """Decided items with their verdicts."""
         ...
 
-    def cancel_job(self, job_id: str, user: str) -> None:
-        """Cancel a job: terminal, and it supersedes every pending call."""
+    def cancel_job(self, job_id: str, user: Optional[str] = None) -> None:
+        """Cancel a job: terminal, and it supersedes every pending call.
+
+        *user* is a deprecated no-op: there is no ownership to enforce.
+        """
         ...
 
-    def delete_job(self, job_id: str, user: str) -> None:
+    def delete_job(self, job_id: str, user: Optional[str] = None) -> None:
         """Tombstone a cancelled or done job.  No row is physically removed."""
         ...
 
-    # -- workers and leases -----------------------------------------------
+    # -- workers ----------------------------------------------------------
 
     def register_worker(self, row: Dict[str, Any]) -> str:
         """Insert or refresh a worker row."""
@@ -404,60 +425,8 @@ class CouncilStore(Protocol):
         """Delete a worker row."""
         ...
 
-    def request_stop(self, user: str) -> bool:
-        """Ask the holder of the user's daemon lease to stop."""
-        ...
-
     def stop_requested(self, worker_id: str) -> bool:
         """Has this worker been asked to stop?"""
-        ...
-
-    def acquire_daemon_lease(
-        self,
-        user: str,
-        worker_id: str,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> Optional[int]:
-        """Take the user's single-daemon lease; return its generation or None."""
-        ...
-
-    def renew_daemon_lease(
-        self,
-        user: str,
-        worker_id: str,
-        generation: int,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> bool:
-        """Extend the lease; False once the generation is superseded."""
-        ...
-
-    def release_daemon_lease(self, user: str, worker_id: str, generation: int) -> bool:
-        """Give the lease up, keeping the generation."""
-        ...
-
-    def acquire_gpu_lease(
-        self,
-        worker_id: str,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> Optional[int]:
-        """Take the fleet-wide GPU residency lease."""
-        ...
-
-    def renew_gpu_lease(
-        self,
-        worker_id: str,
-        generation: int,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> bool:
-        """Extend the GPU lease."""
-        ...
-
-    def release_gpu_lease(self, worker_id: str, generation: int) -> bool:
-        """Give the GPU lease up."""
         ...
 
     # -- search -----------------------------------------------------------
@@ -471,5 +440,5 @@ class CouncilStore(Protocol):
         status: Optional[str] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Find call rows across every job and user."""
+        """Find call rows across every job in the store."""
         ...

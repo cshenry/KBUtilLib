@@ -405,12 +405,23 @@ class TestRouteIdentity:
 class TestPackagedDefaultConfig:
     """The shipped default must be a working council with no user setup."""
 
-    def test_all_three_profiles_build_rosters(self):
+    def test_every_packaged_profile_builds_a_roster(self):
         cfg = load_council_config()
-        for profile in ("argo", "mixed-subscription", "poplar-local"):
+        assert sorted(cfg.profiles) == ["argo", "mixed-subscription"]
+        for profile in cfg.profiles:
             roster = cfg.roster(profile)
             assert len(roster.proposers) == 3
             assert roster.fingerprint()
+
+    def test_the_packaged_config_declares_no_poplar_endpoint(self):
+        """Self-hosted models are the user's to declare (review round 2)."""
+        cfg = load_council_config()
+        assert sorted(cfg.endpoints) == ["argo", "claude", "codex"]
+        for name, endpoint in cfg.endpoints.items():
+            assert "poplar" not in name
+            assert "poplar" not in (endpoint.base_url or "")
+        for model in cfg.models.values():
+            assert not (model.canonical or "").startswith("poplar/")
 
     def test_default_profile_is_mixed_subscription(self):
         cfg = load_council_config()
@@ -424,7 +435,7 @@ class TestPackagedDefaultConfig:
         No ``SharedEnvUtils`` stub, no packaged-data stub, an empty HOME, and
         a cwd with no ``config.yaml`` anywhere above it -- so the ONLY source
         of configuration is the packaged default.  This is the state every
-        fresh machine starts in, and all three profiles must still seat.
+        fresh machine starts in, and every packaged profile must still seat.
         """
         home = tmp_path / "fresh-home"
         (home / "sub").mkdir(parents=True)
@@ -436,7 +447,7 @@ class TestPackagedDefaultConfig:
 
         cfg = load_council_config()
 
-        for profile in ("argo", "mixed-subscription", "poplar-local"):
+        for profile in cfg.profiles:
             roster = cfg.roster(profile)
             assert len(roster.proposers) == 3
             assert roster.critic.canonical_model not in {
@@ -458,7 +469,6 @@ class TestPackagedDefaultConfig:
         assert cfg.endpoint("claude")["max_concurrency"] == 1
         assert cfg.endpoint("codex")["max_concurrency"] == 1
         assert cfg.endpoint("argo")["max_concurrency"] == 8
-        assert cfg.endpoint("qwen3-32b")["max_concurrency"] == 16
 
     def test_snapshot_drops_credentials_but_keeps_env_var_names(self):
         cfg = load_council_config(
@@ -684,9 +694,22 @@ class TestConfigValidation:
         cfg = load_council_config(config_dict(store="sqlite:///~/.kbutillib/c.sqlite"))
         assert cfg.store == f"sqlite:///{tmp_path}/.kbutillib/c.sqlite"
 
-    def test_postgres_store_is_passed_through(self):
+    def test_a_non_sqlite_store_url_is_carried_verbatim(self):
+        """Config validation does not interpret the URL; ``open_store`` does.
+
+        So a ``postgresql+psycopg://`` URL left in somebody's config survives
+        load unchanged and is refused, naming review round 2, the moment the
+        store is actually opened -- see
+        ``test_store_contract.TestSqliteEntryPoint``.
+        """
         url = "postgresql+psycopg://user@db.example/council"
         assert load_council_config(config_dict(store=url)).store == url
+
+    def test_the_user_key_is_read_and_defaults_to_none(self):
+        assert load_council_config(config_dict(user="someone")).user == "someone"
+        assert load_council_config(config_dict()).user is None
+        # Blank is "nothing said", not a label of the empty string.
+        assert load_council_config(config_dict(user="   ")).user is None
 
     def test_unknown_endpoint_lookup_is_a_config_error(self):
         with pytest.raises(ConfigError, match="unknown endpoint"):

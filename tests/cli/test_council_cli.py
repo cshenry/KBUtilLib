@@ -35,6 +35,7 @@ from click.testing import CliRunner
 
 from kbutillib.cli import main
 from kbutillib.domains.ai.council.backends.testing import FakeBackend
+from kbutillib.domains.ai.council.store.schema import SCHEMA_VERSION
 from kbutillib.domains.ai.council_utils import CouncilUtils
 
 #: The envelope keys every verb emits.  Pinned as a set so an additive field
@@ -265,7 +266,7 @@ class TestSchemaGuard:
         config_path = _write_config(tmp_path, _fake_council_config(tmp_path))
         argv = ["council", "--config", str(config_path), "--store", f"sqlite:///{tmp_path}/m.sqlite"]
         envelope = _envelope(runner.invoke(main, argv + ["db", "migrate", "--json"]))
-        assert envelope["data"]["schema_version"] == 1
+        assert envelope["data"]["schema_version"] == SCHEMA_VERSION
         assert envelope["data"]["migrated"] is True
 
 
@@ -348,7 +349,7 @@ class TestJobLifecycle:
             kbase_token_file=None,
         )
         try:
-            util.store().set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+            util.store().set_halt("local", "quota_exhausted", "out of quota")
         finally:
             util.close()
 
@@ -560,8 +561,8 @@ class TestRegistryAndState:
             kbase_token_file=None,
         )
         try:
-            util.store().add_tokens(util.user(), "local", 42)
-            util.store().set_halt(util.user(), "local", "quota_exhausted", "out of quota")
+            util.store().add_tokens("local", 42)
+            util.store().set_halt("local", "quota_exhausted", "out of quota")
         finally:
             util.close()
 
@@ -593,7 +594,7 @@ class TestRegistryAndState:
             kbase_token_file=None,
         )
         try:
-            util.store().add_tokens(util.user(), "local", 7)
+            util.store().add_tokens("local", 7)
         finally:
             util.close()
         envelope = _envelope(

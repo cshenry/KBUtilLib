@@ -251,8 +251,10 @@ class CouncilWorker:
             and otherwise to this worker's adapter over the injected ones.
             Substituting it is how a test counts model calls without touching
             a council module.
-        user: the submitting user.  A worker only ever claims its own user's
-            calls; the store enforces it.
+        user: the PROVENANCE label written to ``jobs.submitted_by`` and to the
+            workers row.  It scopes nothing: the store's queue is the store's,
+            so this worker claims every due call in it whatever label the job
+            carries (review round 3).
         worker_id: this worker's id in the ``workers`` table.  Generated from
             the hostname when absent.
         allow_unverified: permit seats whose model is not verified, and let a
@@ -585,6 +587,11 @@ class CouncilWorker:
             "query_name": str(query.name),
             "query_version": str(query.version),
             "submitted_by": self.user,
+            # Provenance, like submitted_by: WHERE the job was entered.  A
+            # store is one machine's, so this is constant in practice -- it
+            # matters when a store file is copied off that machine to be read
+            # somewhere else, which is the only time the question is asked.
+            "submitted_host": socket.gethostname(),
             "submitted_at": now,
             "priority": int(priority),
             "status": "queued" if unsettled else "done",
@@ -894,7 +901,7 @@ class CouncilWorker:
     ) -> List[Dict[str, Any]]:
         """Claim up to *limit* calls, keeping only those in scope."""
         rows = self.store.claim_calls(
-            self.user, self.worker_id, set(self.backends), max(1, int(limit)), _utcnow()
+            self.worker_id, set(self.backends), max(1, int(limit)), _utcnow()
         )
         kept: List[Dict[str, Any]] = []
         for row in rows:
@@ -962,7 +969,7 @@ class CouncilWorker:
                     continue
                 if endpoint not in halted:
                     halted[endpoint] = bool(
-                        self.store.get_endpoint_state(self.user, endpoint)["halt_kind"]
+                        self.store.get_endpoint_state(endpoint)["halt_kind"]
                     )
                 if halted[endpoint]:
                     continue
@@ -978,9 +985,12 @@ class CouncilWorker:
     def _scope_jobs(self, job_id: Optional[str]) -> List[str]:
         if job_id is not None:
             return [job_id]
+        # Every job in the store, not this worker's label: the claim contract
+        # has no label filter either, so scoping the idle check by one would
+        # report "nothing left to do" while claimable calls sat in the queue.
         return [
             job["job_id"]
-            for job in self.store.list_jobs(user=self.user)
+            for job in self.store.list_jobs()
             if job["status"] not in ("done", "cancelled")
         ]
 
@@ -1250,7 +1260,7 @@ class CouncilWorker:
                 self._record_attempt(call, started, finished, "ok", usage)
                 spent = _token_total(usage)
                 if spent:
-                    self.store.add_tokens(self.user, endpoint, spent)
+                    self.store.add_tokens(endpoint, spent)
                 self._enforce_budget(endpoint, usage)
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:
@@ -1403,7 +1413,7 @@ class CouncilWorker:
             with self.store.transaction():
                 if halt:
                     self.store.set_halt(
-                        self.user, str(call["endpoint"]), error.kind, error.message
+                        str(call["endpoint"]), error.kind, error.message
                     )
                 self.store.note_call_error(call["call_id"], error.model_dump())
                 self.store.release_call(
@@ -1427,17 +1437,15 @@ class CouncilWorker:
         budget = int(budget)
         if usage is None:
             self.store.set_halt(
-                self.user,
                 endpoint,
                 "budget_usage_unknown",
                 f"endpoint has a {budget}-token budget but reported no usage for a "
                 "completed call; an unmeasurable budget is unenforceable",
             )
             return
-        spent = int(self.store.get_endpoint_state(self.user, endpoint)["epoch_tokens"])
+        spent = int(self.store.get_endpoint_state(endpoint)["epoch_tokens"])
         if spent >= budget:
             self.store.set_halt(
-                self.user,
                 endpoint,
                 "budget_exhausted",
                 f"spent {spent} of a {budget}-token budget "

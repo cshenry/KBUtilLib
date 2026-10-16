@@ -9,9 +9,10 @@ shared machinery in :mod:`.http_common`:
   parameter for almost every model family, and has a monthly spend breaker
   that answers HTTP 200 with a fake assistant message.  All three are handled
   here.
-* :class:`OpenAICompatibleBackend` -- self-hosted vLLM ports (the poplar
-  servers), where a 503 or a refused connection means "the model is not
-  loaded", not "the service is broken", so the call waits instead of failing.
+* :class:`OpenAICompatibleBackend` -- any OpenAI-compatible server a user
+  declared, typically a local vLLM port, where a refused connection, a 503 or
+  a 404 naming the model means "the model is not loaded", not "the service is
+  broken", so the call waits instead of failing.
 
 The ARGO parameter mapping in :func:`argo_model_kwargs` is a port of
 ``concord/argo_client.py::model_kwargs`` from Jose Faria's CONCORDIA project;
@@ -20,17 +21,16 @@ the per-family rules (which models take ``max_tokens`` versus
 token floor) are his findings against the live gateway, and the credit for
 them is his.
 
-Neither backend starts, stops or supervises a model, and neither ever sends a
-request to a ``/service/`` path except the single optional ``GET
-/service/status`` in :meth:`OpenAICompatibleBackend.models` -- lifecycle is a
-different component's job and a council seat must never provoke it.
+Neither backend starts, stops or supervises a model, and between them they
+request exactly two paths -- ``/v1/chat/completions`` and ``/v1/models``.
+There is no control plane to consult: review round 2 took model management out
+of the product, so a council seat reads a server and nothing more.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -240,37 +240,45 @@ class ArgoBackend(HttpBackend):
         return argo_refusal_error(text)
 
 
+def _names_model(body: str, req: Optional[LLMRequest]) -> bool:
+    """Does *body* mention the model *req* asked for?
+
+    The test for "404 because that model is not loaded" as opposed to "404
+    because the path or the alias is wrong".  Case-insensitive, and a
+    substring rather than a parse: the body is whatever the server chose to
+    say, and vLLM's own wording ("The model `qwen3-32b` does not exist") has
+    changed between releases.
+    """
+    model = str(getattr(req, "model", "") or "").strip()
+    if not model:
+        return False
+    return model.lower() in (body or "").lower()
+
+
 class OpenAICompatibleBackend(HttpBackend):
     """Seats served by any OpenAI-compatible server -- in practice vLLM.
 
     Two things set this apart from :class:`ArgoBackend`:
 
-    * **Unavailability is not failure.**  A self-hosted port whose model is
-      not loaded answers 503 or refuses the connection outright.  That is
-      ``model_unavailable``, so the engine parks the call and retries later
-      rather than burning an attempt or halting the endpoint.
+    * **Unavailability is not failure.**  A server whose model is not loaded
+      refuses the connection, answers 503, or answers 404 with the model name
+      in the body.  All three are ``model_unavailable``, so the engine parks
+      the call and retries later rather than burning an attempt or halting
+      the endpoint.
     * **Thinking models talk to themselves.**  ``<think>...</think>`` blocks
       are stripped before the answer object is located, since a scratchpad
       routinely contains draft JSON that would otherwise be parsed as the
       answer.
 
-    This backend never manages a model's lifecycle.  The only request it will
-    ever send to a ``/service/`` path is one optional ``GET /service/status``
-    from :meth:`models`, and only when the endpoint declares
-    ``supervisor: true``; it never starts or stops anything.
+    This backend requests exactly two paths and no others:
+    ``/v1/chat/completions`` and ``/v1/models``.  It has no notion of a
+    control plane and asks nothing about a model's lifecycle -- review round 2
+    took model management out of the product, so there is nothing for it to
+    ask and nobody to ask.  A self-hosted model is simply an endpoint the user
+    declared, which this reads and nothing more.
     """
 
     kind = "openai"
-
-    @property
-    def control_url(self) -> str:
-        """The port's control plane: the base URL without the trailing ``/v1``."""
-        return re.sub(r"/v1$", "", self.base_url)
-
-    @property
-    def status_url(self) -> str:
-        """The read-only lifecycle endpoint for a supervised port."""
-        return f"{self.control_url}/service/status"
 
     def _bearer(self) -> Tuple[Optional[str], Optional[LLMError]]:
         """An explicit key, else the key named by ``api_key_env``, else ``EMPTY``.
@@ -295,11 +303,10 @@ class OpenAICompatibleBackend(HttpBackend):
         return strip_think(content)
 
     def _unavailable(self, detail: str) -> LLMError:
-        """Build the ``model_unavailable`` error, naming where to look."""
-        where = f"; its lifecycle state is at {self.status_url}" if self.supervisor else ""
+        """Build the ``model_unavailable`` error, naming what was seen."""
         return ModelUnavailable(
             f"{self.name}: {self.base_url} is not serving a model right now "
-            f"({detail}){where}. The call waits rather than fails; this backend does "
+            f"({detail}). The call waits rather than fails; this backend does "
             "not start models."
         ).to_error()
 
@@ -309,36 +316,20 @@ class OpenAICompatibleBackend(HttpBackend):
             f"connection refused: {type(exc).__name__}: {redact(str(exc))}"
         )
 
-    def _status_error(self, response: httpx.Response) -> LLMError:
-        """503 means "model not loaded"; everything else is the shared mapping."""
-        if response.status_code == 503:
-            excerpt = redact(response.text[:BODY_EXCERPT_CHARS])
-            return self._unavailable(f"HTTP 503: {excerpt!r}")
-        return super()._status_error(response)
+    def _status_error(
+        self, response: httpx.Response, req: Optional[LLMRequest] = None
+    ) -> LLMError:
+        """503, and a 404 naming the model, mean "not loaded"; else the shared map.
 
-    async def _note_listing_failure(self) -> None:
-        """Log the port's lifecycle state after ``/models`` failed.
-
-        A read-only ``GET`` of the status endpoint, only for a supervised
-        port, purely so the log says *why* the listing failed (starting,
-        stopped, failed) instead of just that it did.  This is the one and
-        only ``/service/`` request this backend makes anywhere.
+        A 404 is otherwise a request error (a wrong path, a bad alias), which
+        is why it only counts as unavailability when the body actually names
+        the model that was asked for: vLLM answers exactly that when the
+        server is up but the model is not resident, and treating every 404 as
+        unavailability would park a typo'd alias for ever.
         """
-        if not self.supervisor:
-            return None
-        try:
-            response = await self.client.get(self.status_url)
-            logger.info(
-                "council openai backend %s: %s reports %s",
-                self.name,
-                self.status_url,
-                redact(response.text[:BODY_EXCERPT_CHARS]),
-            )
-        except Exception as exc:  # noqa: BLE001 - diagnostics never fail a call
-            logger.info(
-                "council openai backend %s: control plane %s is unreachable too (%s)",
-                self.name,
-                self.status_url,
-                redact(f"{type(exc).__name__}: {exc}"),
-            )
-        return None
+        excerpt = redact(response.text[:BODY_EXCERPT_CHARS])
+        if response.status_code == 503:
+            return self._unavailable(f"HTTP 503: {excerpt!r}")
+        if response.status_code == 404 and _names_model(response.text, req):
+            return self._unavailable(f"HTTP 404 naming the model: {excerpt!r}")
+        return super()._status_error(response, req)

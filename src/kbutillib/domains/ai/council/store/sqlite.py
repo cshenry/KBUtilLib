@@ -1,12 +1,10 @@
-"""Local SQLite implementation of the council store.
+"""The council store: one local SQLite file, and the only implementation.
 
-This is the default store: one file per user, on local disk, holding that
-user's jobs, items, call rows and verdicts plus the leases that stop two
-workers doing the same work.  :class:`~.postgres.PostgresStore` implements the
-same contract against a shared database; both sit on the single schema in
-:mod:`.schema`, so a call row written by one is readable by the other.
+One file per machine, on LOCAL disk, holding that machine's jobs, items, call
+rows and verdicts.  There is no shared store and no second dialect (review
+round 2), so this module and :mod:`.schema` are the whole persistence layer.
 
-Three SQLite-specific things are handled here and nowhere else:
+Four SQLite-specific things are handled here and nowhere else:
 
 * **Pragmas.**  ``journal_mode=WAL`` so a reader never blocks the worker's
   writes, ``foreign_keys=ON`` because SQLite leaves them off by default and
@@ -22,13 +20,17 @@ Three SQLite-specific things are handled here and nowhere else:
   "resolves" the pair into a corrupt database.  A path with a Dropbox
   component is refused at open time rather than discovered as a corrupted
   council database weeks later.
+* **Refusing a network filesystem.**  NFS, CIFS/SMB, sshfs and friends either
+  do not implement the POSIX locks SQLite needs or implement them in a way
+  that silently does not hold, which corrupts a WAL database under
+  concurrency.  The filesystem type of the store path's nearest existing
+  ancestor is checked at open time (see :func:`refuse_network_filesystem`).
 
 The queue half -- claiming, completing, releasing and reclaiming calls, and
 the job control built on them -- is here too, but its SQL is not: every
-statement it runs is built in :mod:`.queries`, which is dialect-neutral, so
-``PostgresStore`` reuses the queue's meaning verbatim and this module
-contributes only the lock (``BEGIN IMMEDIATE``, above) that makes a claim
-atomic on SQLite.
+statement it runs is built in :mod:`.queries`, which holds the queue's
+*meaning* without any locking, and this module contributes the lock (``BEGIN
+IMMEDIATE``, above) that makes a claim atomic.
 """
 
 from __future__ import annotations
@@ -49,14 +51,17 @@ from . import queries as q
 from . import schema as sch
 from .errors import (
     JobCancelled,
-    NotOwner,
     QueryTypeExists,
     SchemaVersionMismatch,
     StaleClaim,
     StorePathRefused,
 )
 
-__all__ = ["SqliteStore"]
+__all__ = ["SqliteStore", "STORE_IDENTITY"]
+
+#: Re-exported from :mod:`.queries`: the fixed ``endpoint_state.user`` value
+#: every row in a store is keyed under.  See that module for why.
+STORE_IDENTITY = q.STORE_IDENTITY
 
 #: Window ``job_status`` reports throughput over.
 _THROUGHPUT_WINDOW = timedelta(minutes=10)
@@ -325,11 +330,17 @@ class SqliteStore:
     def migrate(self) -> int:
         """Bring the database up to :data:`.schema.SCHEMA_VERSION`.
 
-        At version 1 there is nothing to migrate from, so this is
-        ``init_schema()`` for an unstamped database and, for a current one,
-        just :meth:`add_missing_columns`.  A database stamped NEWER than this
-        code is refused: downgrading would silently drop columns a newer
-        council wrote.
+        An unstamped database is simply created (``init_schema()``).  A
+        version 1 store -- the shared-store/self-hosted-models schema -- is
+        brought to version 2 by :meth:`_migrate_v1_to_v2`, which drops exactly
+        the five tables in :data:`.schema.REMOVED_IN_V2` and re-keys
+        ``endpoint_state`` onto :data:`STORE_IDENTITY`, inside ONE
+        transaction.  Every job, item, call, attempt, workers and query_types
+        row is kept untouched.  Running it twice is a no-op, because the
+        second run sees version 2 already.
+
+        A database stamped NEWER than this code is refused: downgrading would
+        silently drop columns a newer council wrote.
         """
         current = self.schema_version()
         if current == 0:
@@ -338,7 +349,87 @@ class SqliteStore:
         if current == sch.SCHEMA_VERSION:
             self.add_missing_columns()
             return current
+        if current == 1:
+            self._migrate_v1_to_v2()
+            self.add_missing_columns()
+            return sch.SCHEMA_VERSION
         raise _version_mismatch(current)
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Drop the five retired tables and re-key ``endpoint_state``.
+
+        One transaction, so a store is either fully v1 or fully v2 and never
+        half-migrated.  Three things happen in it, in this order:
+
+        1. ``endpoint_state`` rows are merged onto :data:`STORE_IDENTITY`.  A
+           v1 store keyed them on the submitting user, and the counters are
+           the same machine's spend however many labels it was recorded
+           under: epoch and lifetime tokens are SUMMED, the HIGHEST budget
+           epoch is kept (a lower one would resurrect a budget that was
+           already reset), and every halt is kept, each message prefixed with
+           the label it came from, because a halt is a live reason not to
+           call an endpoint and discarding any of them would resume a call
+           somebody stopped.
+        2. ``DROP TABLE IF EXISTS`` for each of
+           :data:`.schema.REMOVED_IN_V2`.  ``IF EXISTS`` because a store
+           created by one of the builds between them may be missing some.
+        3. The version stamp is replaced with 2.
+        """
+        with self.transaction() as conn:
+            self._merge_endpoint_state(conn)
+            for table_name in sch.REMOVED_IN_V2:
+                conn.execute(sa.text(f"DROP TABLE IF EXISTS {table_name}"))
+            conn.execute(sch.schema_version.delete())
+            conn.execute(
+                sch.schema_version.insert().values(version=sch.SCHEMA_VERSION)
+            )
+
+    @staticmethod
+    def _merge_endpoint_state(conn: sa.Connection) -> None:
+        """Collapse every ``endpoint_state`` row onto :data:`STORE_IDENTITY`."""
+        rows = _dicts(conn.execute(sa.select(sch.endpoint_state)))
+        by_endpoint: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_endpoint.setdefault(str(row["endpoint"]), []).append(row)
+
+        merged: List[Dict[str, Any]] = []
+        for endpoint, group in by_endpoint.items():
+            # Sorted so the merge is deterministic: the combined halt message
+            # must not depend on the order SQLite happened to return rows in.
+            group.sort(key=lambda r: str(r["user"]))
+            halted = [r for r in group if r["halt_kind"]]
+            halt_kind = halted[0]["halt_kind"] if halted else None
+            halt_message: Optional[str] = None
+            if len(halted) == 1:
+                halt_message = halted[0]["halt_message"]
+            elif halted:
+                halt_message = "; ".join(
+                    f"[{r['user']}] {r['halt_message'] or r['halt_kind']}"
+                    for r in halted
+                )
+            updated = [r["updated_at"] for r in group if r["updated_at"] is not None]
+            merged.append(
+                {
+                    "user": STORE_IDENTITY,
+                    "endpoint": endpoint,
+                    "budget_epoch": max(int(r["budget_epoch"] or 0) for r in group),
+                    "epoch_tokens": sum(int(r["epoch_tokens"] or 0) for r in group),
+                    "lifetime_tokens": sum(
+                        int(r["lifetime_tokens"] or 0) for r in group
+                    ),
+                    "halt_kind": halt_kind,
+                    "halt_message": halt_message,
+                    "updated_at": max(updated) if updated else None,
+                }
+            )
+
+        if not merged:
+            return
+        conn.execute(sch.endpoint_state.delete())
+        conn.execute(
+            sch.endpoint_state.insert(),
+            [_filled(sch.endpoint_state, row) for row in merged],
+        )
 
     def add_missing_columns(self) -> List[str]:
         """Add any of :data:`.schema.ADDITIVE_COLUMNS` this store lacks.
@@ -676,9 +767,17 @@ class SqliteStore:
                 raise ValueError(f"no such item: {job_id}/{item_id}")
 
     # -- endpoint state ---------------------------------------------------
+    #
+    # Every row is keyed on STORE_IDENTITY, never on a provenance label.  The
+    # `user` keyword on each of these methods is a DEPRECATED no-op kept so an
+    # older caller still runs; it is ignored, deliberately, because honouring
+    # it would split one machine's spend into per-label ledgers and let a
+    # rename reset a budget (review round 3).
 
-    def get_endpoint_state(self, user: str, endpoint: str) -> Dict[str, Any]:
-        """Return the (user, endpoint) budget/halt row.
+    def get_endpoint_state(
+        self, endpoint: str, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Return this store's budget/halt row for *endpoint*.
 
         A never-seen endpoint returns a zeroed, un-halted row rather than
         None: every caller asks "is this halted and how much have I spent?",
@@ -687,13 +786,13 @@ class SqliteStore:
         with self._read() as conn:
             row = conn.execute(
                 sa.select(sch.endpoint_state).where(
-                    sch.endpoint_state.c.user == user,
+                    sch.endpoint_state.c.user == STORE_IDENTITY,
                     sch.endpoint_state.c.endpoint == endpoint,
                 )
             ).first()
         if row is None:
             return {
-                "user": user,
+                "user": STORE_IDENTITY,
                 "endpoint": endpoint,
                 "budget_epoch": 0,
                 "epoch_tokens": 0,
@@ -704,34 +803,43 @@ class SqliteStore:
             }
         return _dict(row)
 
-    def add_tokens(self, user: str, endpoint: str, n: int) -> Dict[str, Any]:
+    def add_tokens(
+        self, endpoint: str, n: int, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Add *n* tokens to both the current epoch and the lifetime total."""
         n = int(n)
         with self.transaction() as conn:
-            row = self._endpoint_row(conn, user, endpoint)
+            row = self._endpoint_row(conn, endpoint)
             conn.execute(
-                self._endpoint_update(user, endpoint).values(
+                self._endpoint_update(endpoint).values(
                     epoch_tokens=row["epoch_tokens"] + n,
                     lifetime_tokens=row["lifetime_tokens"] + n,
                     updated_at=_utcnow(),
                 )
             )
-        return self.get_endpoint_state(user, endpoint)
+        return self.get_endpoint_state(endpoint)
 
     def set_halt(
-        self, user: str, endpoint: str, kind: str, message: str = ""
+        self,
+        endpoint: str,
+        kind: str,
+        message: str = "",
+        *,
+        user: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Halt an endpoint for one user: no further calls are claimed for it."""
+        """Halt an endpoint: no further calls are claimed for it."""
         with self.transaction() as conn:
-            self._endpoint_row(conn, user, endpoint)
+            self._endpoint_row(conn, endpoint)
             conn.execute(
-                self._endpoint_update(user, endpoint).values(
+                self._endpoint_update(endpoint).values(
                     halt_kind=kind, halt_message=message, updated_at=_utcnow()
                 )
             )
-        return self.get_endpoint_state(user, endpoint)
+        return self.get_endpoint_state(endpoint)
 
-    def reset_halt(self, user: str, endpoint: str) -> Dict[str, Any]:
+    def reset_halt(
+        self, endpoint: str, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Clear a halt.  Token counters are NEVER touched.
 
         Clearing a halt says "the problem is fixed, try again"; it does not
@@ -739,15 +847,17 @@ class SqliteStore:
         :meth:`reset_budget`, a separate and deliberate act.
         """
         with self.transaction() as conn:
-            self._endpoint_row(conn, user, endpoint)
+            self._endpoint_row(conn, endpoint)
             conn.execute(
-                self._endpoint_update(user, endpoint).values(
+                self._endpoint_update(endpoint).values(
                     halt_kind=None, halt_message=None, updated_at=_utcnow()
                 )
             )
-        return self.get_endpoint_state(user, endpoint)
+        return self.get_endpoint_state(endpoint)
 
-    def reset_budget(self, user: str, endpoint: str) -> Dict[str, Any]:
+    def reset_budget(
+        self, endpoint: str, *, user: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Start a new budget epoch: epoch tokens to 0, lifetime kept.
 
         Also clears a halt that was caused by the budget itself, since the
@@ -755,7 +865,7 @@ class SqliteStore:
         alone -- a new epoch does not fix an expired credential.
         """
         with self.transaction() as conn:
-            row = self._endpoint_row(conn, user, endpoint)
+            row = self._endpoint_row(conn, endpoint)
             values: Dict[str, Any] = {
                 "budget_epoch": row["budget_epoch"] + 1,
                 "epoch_tokens": 0,
@@ -764,16 +874,14 @@ class SqliteStore:
             if row["halt_kind"] in ("budget_exhausted", "budget_usage_unknown"):
                 values["halt_kind"] = None
                 values["halt_message"] = None
-            conn.execute(self._endpoint_update(user, endpoint).values(**values))
-        return self.get_endpoint_state(user, endpoint)
+            conn.execute(self._endpoint_update(endpoint).values(**values))
+        return self.get_endpoint_state(endpoint)
 
-    def _endpoint_row(
-        self, conn: sa.Connection, user: str, endpoint: str
-    ) -> Dict[str, Any]:
-        """Return the (user, endpoint) row, inserting a zeroed one if absent."""
+    def _endpoint_row(self, conn: sa.Connection, endpoint: str) -> Dict[str, Any]:
+        """Return the endpoint's row, inserting a zeroed one if absent."""
         row = conn.execute(
             sa.select(sch.endpoint_state).where(
-                sch.endpoint_state.c.user == user,
+                sch.endpoint_state.c.user == STORE_IDENTITY,
                 sch.endpoint_state.c.endpoint == endpoint,
             )
         ).first()
@@ -782,7 +890,7 @@ class SqliteStore:
         values = _filled(
             sch.endpoint_state,
             {
-                "user": user,
+                "user": STORE_IDENTITY,
                 "endpoint": endpoint,
                 "budget_epoch": 0,
                 "epoch_tokens": 0,
@@ -794,9 +902,9 @@ class SqliteStore:
         return values
 
     @staticmethod
-    def _endpoint_update(user: str, endpoint: str) -> Any:
+    def _endpoint_update(endpoint: str) -> Any:
         return sch.endpoint_state.update().where(
-            sch.endpoint_state.c.user == user,
+            sch.endpoint_state.c.user == STORE_IDENTITY,
             sch.endpoint_state.c.endpoint == endpoint,
         )
 
@@ -867,28 +975,6 @@ class SqliteStore:
             )
         return bool(result.rowcount)
 
-    def request_stop(self, user: str) -> bool:
-        """Ask the user's daemon to stop, via the holder of its lease.
-
-        Addressed through the lease rather than by worker id because the
-        caller is a CLI that knows the user, not which process currently holds
-        the daemon role.  Returns False if the user has no lease holder.
-        """
-        with self.transaction() as conn:
-            lease = conn.execute(
-                sa.select(sch.daemon_lease.c.holder_worker_id).where(
-                    sch.daemon_lease.c.user == user
-                )
-            ).first()
-            if lease is None or lease[0] is None:
-                return False
-            result = conn.execute(
-                sch.workers.update()
-                .where(sch.workers.c.worker_id == lease[0])
-                .values(stop_requested_at=_utcnow())
-            )
-        return bool(result.rowcount)
-
     def stop_requested(self, worker_id: str) -> bool:
         """Has this worker been asked to stop?"""
         with self._read() as conn:
@@ -898,206 +984,6 @@ class SqliteStore:
                 )
             ).first()
         return bool(row is not None and row[0] is not None)
-
-    # -- leases -----------------------------------------------------------
-
-    def acquire_daemon_lease(
-        self,
-        user: str,
-        worker_id: str,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> Optional[int]:
-        """Take the user's single-daemon lease, or return None if it is held.
-
-        Succeeds only when there is no row or the existing one has expired --
-        including for the CURRENT holder, which must use
-        :meth:`renew_daemon_lease` instead.  Each successful acquisition
-        increments ``generation``, which never resets: that is how a call
-        claimed by a superseded daemon is recognised and refused when its late
-        reply arrives.
-        """
-        now = now or _utcnow()
-        with self.transaction() as conn:
-            return self._acquire(
-                conn,
-                sch.daemon_lease,
-                sch.daemon_lease.c.user == user,
-                {"user": user},
-                worker_id,
-                now,
-                ttl,
-            )
-
-    def renew_daemon_lease(
-        self,
-        user: str,
-        worker_id: str,
-        generation: int,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> bool:
-        """Extend the lease.  False once the generation has been superseded."""
-        now = now or _utcnow()
-        with self.transaction() as conn:
-            return self._renew(
-                conn,
-                sch.daemon_lease,
-                sch.daemon_lease.c.user == user,
-                worker_id,
-                generation,
-                now,
-                ttl,
-            )
-
-    def release_daemon_lease(self, user: str, worker_id: str, generation: int) -> bool:
-        """Give the lease up.  The generation is kept, never rolled back."""
-        with self.transaction() as conn:
-            return self._release(
-                conn,
-                sch.daemon_lease,
-                sch.daemon_lease.c.user == user,
-                worker_id,
-                generation,
-            )
-
-    #: The gpu_lease table is a singleton; this is its only row id.
-    GPU_LEASE_ID = 1
-
-    def acquire_gpu_lease(
-        self,
-        worker_id: str,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> Optional[int]:
-        """Take the fleet-wide GPU residency lease, or None if it is held."""
-        now = now or _utcnow()
-        with self.transaction() as conn:
-            return self._acquire(
-                conn,
-                sch.gpu_lease,
-                sch.gpu_lease.c.id == self.GPU_LEASE_ID,
-                {"id": self.GPU_LEASE_ID},
-                worker_id,
-                now,
-                ttl,
-            )
-
-    def renew_gpu_lease(
-        self,
-        worker_id: str,
-        generation: int,
-        now: Optional[datetime] = None,
-        ttl: timedelta = timedelta(minutes=2),
-    ) -> bool:
-        """Extend the GPU lease.  False once the generation has been superseded."""
-        now = now or _utcnow()
-        with self.transaction() as conn:
-            return self._renew(
-                conn,
-                sch.gpu_lease,
-                sch.gpu_lease.c.id == self.GPU_LEASE_ID,
-                worker_id,
-                generation,
-                now,
-                ttl,
-            )
-
-    def release_gpu_lease(self, worker_id: str, generation: int) -> bool:
-        """Give the GPU lease up, keeping the generation."""
-        with self.transaction() as conn:
-            return self._release(
-                conn,
-                sch.gpu_lease,
-                sch.gpu_lease.c.id == self.GPU_LEASE_ID,
-                worker_id,
-                generation,
-            )
-
-    # The three lease primitives are shared because daemon_lease and gpu_lease
-    # differ only in their key column: one lease per user, one lease per fleet.
-    @staticmethod
-    def _acquire(
-        conn: sa.Connection,
-        table: sa.Table,
-        key: Any,
-        key_values: Mapping[str, Any],
-        worker_id: str,
-        now: datetime,
-        ttl: timedelta,
-    ) -> Optional[int]:
-        row = conn.execute(sa.select(table).where(key)).first()
-        expires_at = now + ttl
-        if row is None:
-            values = _filled(
-                table,
-                {
-                    **key_values,
-                    "holder_worker_id": worker_id,
-                    "generation": 1,
-                    "expires_at": expires_at,
-                },
-            )
-            conn.execute(table.insert(), values)
-            return 1
-        current = _dict(row)
-        if current["expires_at"] is not None and current["expires_at"] > now:
-            return None
-        generation = int(current["generation"] or 0) + 1
-        conn.execute(
-            table.update()
-            .where(key)
-            .values(
-                holder_worker_id=worker_id,
-                generation=generation,
-                expires_at=expires_at,
-            )
-        )
-        return generation
-
-    @staticmethod
-    def _renew(
-        conn: sa.Connection,
-        table: sa.Table,
-        key: Any,
-        worker_id: str,
-        generation: int,
-        now: datetime,
-        ttl: timedelta,
-    ) -> bool:
-        result = conn.execute(
-            table.update()
-            .where(
-                key,
-                table.c.holder_worker_id == worker_id,
-                table.c.generation == generation,
-            )
-            .values(expires_at=now + ttl)
-        )
-        return bool(result.rowcount)
-
-    @staticmethod
-    def _release(
-        conn: sa.Connection,
-        table: sa.Table,
-        key: Any,
-        worker_id: str,
-        generation: int,
-    ) -> bool:
-        # Expiring the row rather than deleting it is what keeps `generation`
-        # monotonic across a clean handover.  The expiry is the epoch and not
-        # "now": a released lease is free for a successor whose clock the
-        # releasing process does not share.
-        result = conn.execute(
-            table.update()
-            .where(
-                key,
-                table.c.holder_worker_id == worker_id,
-                table.c.generation == generation,
-            )
-            .values(holder_worker_id=None, expires_at=_EPOCH)
-        )
-        return bool(result.rowcount)
 
     # -- search -----------------------------------------------------------
 
@@ -1134,26 +1020,32 @@ class SqliteStore:
     # -- the queue --------------------------------------------------------
     #
     # Call rows ARE the queue.  Every statement below is built in
-    # :mod:`.queries` so PostgresStore reuses the same SQL; the only thing
-    # this class adds is the SQLite locking strategy, which is
+    # :mod:`.queries`, which holds the queue's meaning without any locking;
+    # the only thing this class adds is the locking strategy, which is
     # ``transaction()``'s BEGIN IMMEDIATE.
 
     def claim_calls(
         self,
-        user: str,
         worker_id: str,
         endpoints: Set[str],
         limit: int,
         now: Optional[datetime] = None,
+        *,
+        user: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Atomically claim up to *limit* due pending calls for this worker.
 
+        Claims across the WHOLE store: every non-cancelled, non-paused,
+        non-tombstoned job, whatever provenance label its ``submitted_by``
+        carries.  A store is one machine's and its queue is one queue, so
+        filtering on that label would strand every pending call the moment
+        somebody edited config ``user`` (review round 3).  *user* is a
+        deprecated no-op kept for older callers and is ignored.
+
         The select and the stamping happen inside one ``BEGIN IMMEDIATE``
-        transaction, which is what makes the claim atomic on SQLite: the
-        write lock is taken before the first read, so two workers cannot both
-        see the same pending row.  PostgreSQL gets the same guarantee from
-        ``FOR UPDATE OF calls SKIP LOCKED`` (see
-        :func:`.queries.select_claimable`).
+        transaction, which is what makes the claim atomic: the write lock is
+        taken before the first read, so two workers cannot both see the same
+        pending row.
 
         Returns:
             The claimed rows, each carrying the ``claim_token`` its completion
@@ -1165,12 +1057,9 @@ class SqliteStore:
         now = now or _utcnow()
 
         with self.transaction() as conn:
-            rows = _dicts(
-                conn.execute(q.select_claimable(user, endpoints, now, limit))
-            )
+            rows = _dicts(conn.execute(q.select_claimable(endpoints, now, limit)))
             if not rows:
                 return []
-            generation = self._claim_generation(conn, user, worker_id)
 
             params: List[Dict[str, Any]] = []
             claimed: List[Dict[str, Any]] = []
@@ -1185,7 +1074,10 @@ class SqliteStore:
                         "b_claim_token": token,
                         "b_claimed_by": worker_id,
                         "b_claimed_at": now,
-                        "b_lease_generation": generation,
+                        # No lease generation: a daemon is excluded by the
+                        # file lock in :mod:`..execlock`, not by a lease row,
+                        # so there is no generation to supersede.
+                        "b_lease_generation": None,
                     }
                 )
                 claimed.append(
@@ -1195,25 +1087,11 @@ class SqliteStore:
                         "claim_token": token,
                         "claimed_by": worker_id,
                         "claimed_at": now,
-                        "lease_generation": generation,
+                        "lease_generation": None,
                     }
                 )
             conn.execute(q.claim_update(), params)
         return claimed
-
-    @staticmethod
-    def _claim_generation(
-        conn: sa.Connection, user: str, worker_id: str
-    ) -> Optional[int]:
-        """The daemon lease generation to stamp on this worker's claims.
-
-        ``None`` for a foreground worker.  ``claim_calls`` takes no generation
-        argument, so it is derived from the lease table: a worker that holds
-        the user's daemon lease claims under its generation, which is what
-        lets :meth:`complete_call` refuse a superseded daemon's late reply.
-        """
-        row = conn.execute(q.select_held_daemon_generation(user, worker_id)).first()
-        return int(row[0]) if row is not None and row[0] is not None else None
 
     def complete_call(
         self,
@@ -1257,7 +1135,6 @@ class SqliteStore:
 
         with self.transaction() as conn:
             call = self._claimed_call(conn, call_id, claim_token)
-            self._assert_lease_current(conn, call)
             result = conn.execute(
                 q.complete_call_update(
                     call_id,
@@ -1384,28 +1261,6 @@ class SqliteStore:
                 f"(the call is {call['status']!r})",
             )
         return call
-
-    @staticmethod
-    def _assert_lease_current(conn: sa.Connection, call: Mapping[str, Any]) -> None:
-        """Refuse a completion from a daemon whose lease has been superseded.
-
-        A foreground claim carries no generation and is never refused on this
-        ground: there is no lease behind it to supersede.  A daemon claim is
-        refused once a NEWER generation exists, because that means another
-        daemon took over and is entitled to the call.
-        """
-        generation = call.get("lease_generation")
-        if generation is None:
-            return
-        row = conn.execute(q.select_daemon_generation(call["submitted_by"])).first()
-        if row is None or row[0] is None:
-            return
-        if int(row[0]) > int(generation):
-            raise _stale_claim(
-                call["call_id"],
-                f"it was claimed under daemon lease generation {int(generation)} "
-                f"but generation {int(row[0])} now holds the lease",
-            )
 
     def record_attempt(
         self,
@@ -1557,15 +1412,19 @@ class SqliteStore:
         an endpoint can be both halted and unserved, and suppressing either
         fact would send the user to fix the wrong thing:
 
-        * ``halted`` -- ``endpoint_state`` says this user's endpoint is
-          halted (quota, auth, billing or budget).
+        * ``halted`` -- ``endpoint_state`` says the endpoint is halted
+          (quota, auth, billing or budget).
         * ``waiting_for_model`` / ``configuration_mismatch`` -- pending calls
           whose LAST error names that kind (see
           :data:`.queries.BLOCKER_BY_ERROR_KIND`).
-        * ``no_daemon`` -- the endpoint has pending calls and no live worker
-          of this user serves it, so nothing is going to run them.
+        * ``no_daemon`` -- the endpoint has pending calls and NO live worker
+          in this store serves it, so nothing is going to run them.
+
+        None of the three is scoped by ``jobs.submitted_by``: halts and
+        workers belong to the store, not to a provenance label, and scoping
+        them by one would report ``no_daemon`` about an endpoint a running
+        worker was already draining.
         """
-        user = job["submitted_by"]
         endpoints = sorted({str(c["endpoint"]) for c in pending})
         if not endpoints:
             return []
@@ -1576,7 +1435,7 @@ class SqliteStore:
         # of a job are its roster's, so this is a handful of rows, and reusing
         # the contract method keeps the halt semantics in one place.
         for endpoint in endpoints:
-            state = self.get_endpoint_state(user, endpoint)
+            state = self.get_endpoint_state(endpoint)
             if state["halt_kind"]:
                 detail = state["halt_kind"]
                 if state["halt_message"]:
@@ -1605,7 +1464,7 @@ class SqliteStore:
 
         # No worker.  A worker that declared no endpoints is treated as
         # serving all of them: it is running, so "no daemon" would be a lie.
-        live = self.live_workers(user, now)
+        live = self.live_workers(None, now)
         for endpoint in endpoints:
             if any(_serves(worker, endpoint) for worker in live):
                 continue
@@ -1614,8 +1473,8 @@ class SqliteStore:
                     "kind": "no_daemon",
                     "endpoint": endpoint,
                     "detail": (
-                        f"no live worker of {user!r} serves {endpoint!r}; start "
-                        "one with `kbu council run` or the council daemon"
+                        f"no live worker serves {endpoint!r}; start one with "
+                        "`kbu council run` or the council daemon"
                     ),
                 }
             )
@@ -1633,7 +1492,7 @@ class SqliteStore:
         with self._read() as conn:
             return _dicts(conn.execute(q.select_results(job_id, include_pending)))
 
-    def cancel_job(self, job_id: str, user: str) -> None:
+    def cancel_job(self, job_id: str, user: Optional[str] = None) -> None:
         """Cancel a job in ONE transaction.  Terminal and idempotent.
 
         The job goes to ``cancelled``, every unsettled item to ``cancelled``
@@ -1643,34 +1502,39 @@ class SqliteStore:
         available once the money is spent.  ``add_calls`` and ``settle_item``
         refuse the job from here on.
 
+        *user* is a deprecated no-op.  A store is single-user and
+        ``submitted_by`` is a provenance label, so there is no ownership to
+        enforce (review round 2): refusing on it would lock a user out of
+        their own jobs after a rename.
+
         Raises:
-            NotOwner: *user* did not submit this job.
             ValueError: no such job.
         """
         now = _utcnow()
         with self.transaction() as conn:
-            job = self._owned_job(conn, job_id, user)
+            job = self._job(conn, job_id)
             if job["status"] == "cancelled":
                 return
             conn.execute(q.cancel_job_update(job_id))
             conn.execute(q.cancel_unsettled_items_update(job_id, now))
             conn.execute(q.supersede_pending_calls_update(job_id))
 
-    def delete_job(self, job_id: str, user: str) -> None:
+    def delete_job(self, job_id: str, user: Optional[str] = None) -> None:
         """Tombstone a cancelled or done job.  No row is physically removed.
 
         Only ``deleted_at`` is set, so the job's calls stay in the store and
-        stay reusable: in a shared store somebody else's future job may be
-        the one that benefits from an answer this user paid for.
-        ``list_jobs`` hides it unless asked.
+        stay reusable: a later job of yours may be the one that benefits from
+        an answer this one paid for.  ``list_jobs`` hides it unless asked.
+
+        *user* is a deprecated no-op, for the same reason as in
+        :meth:`cancel_job`.
 
         Raises:
-            NotOwner: *user* did not submit this job.
             ValueError: no such job, or it is still running/queued/paused --
                 cancel it first, so there is no worker still writing to it.
         """
         with self.transaction() as conn:
-            job = self._owned_job(conn, job_id, user)
+            job = self._job(conn, job_id)
             if job["status"] not in ("cancelled", "done"):
                 raise ValueError(
                     f"job {job_id} is {job['status']!r}; only a cancelled or done "
@@ -1679,20 +1543,14 @@ class SqliteStore:
             conn.execute(q.tombstone_job_update(job_id, _utcnow()))
 
     @staticmethod
-    def _owned_job(conn: sa.Connection, job_id: str, user: str) -> Dict[str, Any]:
-        """Return the job row, asserting *user* submitted it."""
+    def _job(conn: sa.Connection, job_id: str) -> Dict[str, Any]:
+        """Return the job row, or raise if there is no such job."""
         row = conn.execute(
             sa.select(sch.jobs).where(sch.jobs.c.job_id == job_id)
         ).first()
         if row is None:
             raise ValueError(f"no such job: {job_id}")
-        job = _dict(row)
-        if job["submitted_by"] != user:
-            raise NotOwner(
-                f"job {job_id} was submitted by {job['submitted_by']!r}, not "
-                f"{user!r}; only its submitter may cancel or delete it"
-            )
-        return job
+        return _dict(row)
 
 
 # ---------------------------------------------------------------------------

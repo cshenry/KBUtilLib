@@ -49,11 +49,17 @@ USAGE
 Run it from the repository root with the ``council`` extra installed
 (``pip install -e '.[council]'``).
 
-EXIT CODE. ``0`` only when every scored row agrees. It currently exits
-``1``, and that is the accurate signal rather than a bug: eight recorded
-replies fail ``go_mf@1``'s answer schema, which Jose's runner did not
-enforce. See the report's "What caused them" section -- the decision rule
-itself agrees on all 99 scored rows.
+NORMALISATION. Eight recorded replies do not satisfy ``go_mf@1``'s answer
+schema, which Jose's runner did not enforce: seven ``claudeopus45`` meta
+replies omit ``no_functional_content`` and one ``gemini35flash`` proposer
+reply carries ``"notes": null``. ``engine/normalise.py`` repairs exactly
+those two defects before the schema gate and records every repair on the
+call and the verdict, so the replay now scores them. The report lists each
+repaired row, keeps the rule-only control column beside it, and still prints
+the raw reply the schema refuses -- the transcript is unchanged, and so is
+what the schema says about it.
+
+EXIT CODE. ``0`` only when every scored row agrees.
 """
 
 from __future__ import annotations
@@ -61,8 +67,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
+import socket
+import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -112,6 +122,26 @@ ENDPOINT = "replay1"
 # ---------------------------------------------------------------------------
 # The manifest
 # ---------------------------------------------------------------------------
+
+
+def _repo_commit() -> str:
+    """The repository commit this run was made at, or ``"unknown"``.
+
+    Recorded in the report because the parity figure is a property of the
+    code as much as of the transcript: the same oracle through a different
+    engine is a different measurement.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except OSError:  # pragma: no cover - git is present on every machine here
+        return "unknown"
+    return out.stdout.strip() or "unknown"
 
 
 def sha256_file(path: Path) -> str:
@@ -492,8 +522,17 @@ def diagnose(
     inputs: Mapping[str, Mapping[str, Any]],
     results: Mapping[str, Mapping[str, Any]],
     store_url: str,
+    also: Sequence[str] = (),
 ) -> Dict[str, Dict[str, Any]]:
-    """Run :func:`rule_only_decision` over the mismatching rows."""
+    """Run :func:`rule_only_decision` over the rows that need explaining.
+
+    Those are the rows that still MISMATCH, plus *also* -- the rows a repair
+    carried (see :func:`normalised_rows`). The second group matters because
+    the rule-only figure is the control on normalisation: the rule agreed on
+    those rows before any repair existed, so a repair that changed a decision
+    rather than merely admitting one shows up here as the rule-only column
+    and the end-to-end column disagreeing.
+    """
     from kbutillib.domains.ai.council.queries import QueryRegistry
     from kbutillib.domains.ai.council.store import open_store
 
@@ -502,6 +541,8 @@ def diagnose(
         for r in rows
         if not r["agrees"] and not r["expected_difference_classes"]
     ]
+    targets.extend(item_id for item_id in also if item_id not in targets)
+    targets.sort(key=int)
     if not targets:
         return {}
 
@@ -548,6 +589,23 @@ def schema_complaint(
     return complaints
 
 
+def normalised_rows(verdicts: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``{item_id: {seat: [repair, ...]}}`` for every row a repair carried.
+
+    Read straight off the verdicts the worker wrote, so the report says what
+    the store says rather than what this script predicts.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for item_id in sorted(verdicts, key=int):
+        verdict = verdicts[item_id]
+        if getattr(verdict, "normalised", False):
+            out[item_id] = {
+                seat: [dict(entry) for entry in entries]
+                for seat, entries in dict(verdict.repairs or {}).items()
+            }
+    return out
+
+
 def failure_notes(verdict: Optional[Any]) -> List[str]:
     """The error messages a verdict carries, for the mismatch table."""
     if verdict is None:
@@ -580,8 +638,10 @@ def render_report(
     verdicts: Mapping[str, Any],
     diagnosis: Optional[Mapping[str, Mapping[str, Any]]] = None,
     complaints: Optional[Mapping[str, Sequence[str]]] = None,
+    run_info: Optional[Mapping[str, str]] = None,
 ) -> str:
     """The parity report, as Markdown."""
+    repaired = normalised_rows(verdicts)
     ok_rows = [r for r in rows if r["recorded"]["status"] == "ok"]
     excused = [r for r in rows if r["expected_difference_classes"]]
     excused_ids = {r["item_id"] for r in excused}
@@ -619,12 +679,27 @@ def render_report(
         f"set), status, decline_reason and meta-skipped"
     )
     add(f"- Mismatches: **{len(mismatched)}**")
-    add("")
     add(
-        "This count is over ALL recorded `ok` rows outside the excused "
-        "classes, not only the ten fixture rows."
+        f"- Rows whose agreement required an answer repair: "
+        f"**{len(repaired)}** "
+        f"({', '.join(sorted(repaired, key=int)) or 'none'})"
     )
     add("")
+    add(
+        "**The agreement figure is END TO END** -- measured through the "
+        "shipped `CouncilWorker`, including its answer-schema gate, over ALL "
+        "recorded `ok` rows outside the excused classes, not only the ten "
+        "fixture rows."
+    )
+    add("")
+    if run_info:
+        add("Measured by this run:")
+        add("")
+        add(f"- command: `{run_info.get('command', '')}`")
+        add(f"- host: `{run_info.get('host', '')}`")
+        add(f"- finished (UTC): `{run_info.get('utc', '')}`")
+        add(f"- interpreter: `{run_info.get('interpreter', '')}`")
+        add("")
 
     # -- provenance -------------------------------------------------------
     add("## Provenance of the oracle")
@@ -709,7 +784,7 @@ def render_report(
         add("| input id | fields | V3 recorded | this council | why |")
         add("|---|---|---|---|---|")
         for row in sorted(mismatched, key=lambda r: int(r["item_id"])):
-            notes = "; ".join(failure_notes(verdicts.get(row["item_id"]))) or "—"
+            notes = "; ".join(failure_notes(verdicts.get(row["item_id"]))) or "\u2014"
             add(
                 f"| {row['item_id']} | {', '.join(row['differing_fields'])} "
                 f"| {_fmt(row['recorded'])} | {_fmt(row['observed'])} "
@@ -717,105 +792,170 @@ def render_report(
             )
         add("")
 
-        # -- diagnosis ----------------------------------------------------
-        add("### What caused them")
-        add("")
+    # -- normalisation ----------------------------------------------------
+    add("## Normalisation: the eight replies the schema would refuse")
+    add("")
+    add(
+        "`go_mf@1` declares an answer schema per role (`required`, plus "
+        "`additionalProperties: false`) and the worker enforces it on every "
+        "reply (`engine/worker.py` \u2192 `_validate_answer`). **Jose's V3 "
+        "runner enforced no schema at all** \u2014 `go_council.py:162 "
+        "parse_json` only requires that the text parse as JSON \u2014 so the "
+        "transcript holds replies a `go_mf@1` run would have refused on "
+        "arrival. Two defects, both in what the models returned live: "
+        "`claudeopus45` omitted the required `no_functional_content` from "
+        "seven meta replies, and `gemini35flash` returned `\"notes\": null` "
+        "on one proposer reply where the schema says string."
+    )
+    add("")
+    add(
+        "`engine/normalise.py` repairs exactly those two defects BEFORE the "
+        "gate and records every repair on the call row (`calls.normalised`) "
+        "and on the verdict (`normalised`, plus a per-seat `repairs` list). "
+        "The raw reply text is untouched. Nothing else is repaired: a reply "
+        "missing a different required field is still `invalid_output`."
+    )
+    add("")
+
+    if repaired:
         add(
-            "Every mismatch above is the SAME failure, and it is not a "
-            "disagreement about the decision: `go_mf@1` declares an answer "
-            "schema per role (`required`, plus `additionalProperties: false`) "
-            "and the worker enforces it on every reply "
-            "(`engine/worker.py:966` → `_validate_answer`). **Jose's V3 "
-            "runner enforced no schema at all** — `go_council.py:162 "
-            "parse_json` only requires that the text parse as JSON. So the "
-            "transcript contains replies that a `go_mf@1` run would have "
-            "rejected on arrival, and the replay rejects them."
+            f"### The {len(repaired)} repaired rows, as the stored verdicts "
+            "record them"
         )
         add("")
-        if complaints:
-            add("| input id | the recorded reply the schema refuses |")
-            add("|---|---|")
-            for item_id in sorted(complaints, key=int):
-                for line in complaints[item_id]:
-                    add(f"| {item_id} | {line} |")
-            add("")
-        add(
-            "Two distinct defects, both in what the models returned live: "
-            "`claudeopus45` omitted the required `no_functional_content` from "
-            "seven meta replies, and `gemini35flash` returned "
-            "`\"notes\": null` on one proposer reply where the schema says "
-            "string."
-        )
+        add("| input id | seat | field | rule | original | repaired to |")
+        add("|---|---|---|---|---|---|")
+        for item_id in sorted(repaired, key=int):
+            for seat in sorted(repaired[item_id]):
+                for entry in repaired[item_id][seat]:
+                    add(
+                        f"| {item_id} | {seat} | `{entry.get('field')}` "
+                        f"| `{entry.get('rule')}` "
+                        f"| `{json.dumps(entry.get('original'))}` "
+                        f"| `{json.dumps(entry.get('value'))}` |"
+                    )
+        add("")
+        by_rule: Dict[str, List[str]] = {}
+        for item_id, seats in repaired.items():
+            for entries in seats.values():
+                for entry in entries:
+                    by_rule.setdefault(str(entry.get("rule")), []).append(item_id)
+        add("| rule | rows |")
+        add("|---|---|")
+        for rule in sorted(by_rule):
+            ids = sorted(set(by_rule[rule]), key=int)
+            add(f"| `{rule}` | {len(ids)}: {', '.join(ids)} |")
+        add("")
+    else:
+        add("No row needed a repair in this run.")
         add("")
 
-        if diagnosis:
-            agreeing_rule = [k for k, v in diagnosis.items() if v["agrees"]]
+    if complaints:
+        add("### What the schema says about the RAW recorded reply")
+        add("")
+        add(
+            "Measured by calling `_validate_answer` on the transcript "
+            "untouched, so this is a statement about the recording and not "
+            "about the repair."
+        )
+        add("")
+        add("| input id | the recorded reply the schema refuses |")
+        add("|---|---|")
+        for item_id in sorted(complaints, key=int):
+            for line in complaints[item_id]:
+                add(f"| {item_id} | {line} |")
+        add("")
+
+    if diagnosis:
+        agreeing_rule = [k for k, v in diagnosis.items() if v["agrees"]]
+        add("### Rule only, with the gate removed \u2014 the control")
+        add("")
+        add(
+            f"**The decision rule alone agrees on {len(agreeing_rule)}/"
+            f"{len(diagnosis)} of these rows.** Measured, not asserted: "
+            "`rule_only_decision()` calls the real `engine.decide()` on "
+            "`SettledCall`s built from the same recorded replies, with the "
+            "answer-schema gate as the only thing removed \u2014 and with no "
+            "normalisation, since the rule reads a reply the gate never saw. "
+            "It agreed on these rows BEFORE any repair existed, which is why "
+            "it is kept now that it does: a repair that changed a DECISION "
+            "rather than merely admitting one would show up as this column "
+            "and the end-to-end column disagreeing."
+        )
+        add("")
+        add("| input id | V3 recorded | rule only (gate removed) | end to end | agrees |")
+        add("|---|---|---|---|---|")
+        for item_id in sorted(diagnosis, key=int):
+            row = next(r for r in rows if r["item_id"] == item_id)
+            entry = diagnosis[item_id]
             add(
-                f"**The decision rule itself agrees on "
-                f"{len(agreeing_rule)}/{len(diagnosis)} of these rows.** "
-                "Measured, not asserted: `rule_only_decision()` calls the real "
-                "`engine.decide()` on `SettledCall`s built from the same "
-                "recorded replies, with the answer-schema gate as the only "
-                "thing removed. So across all "
-                f"{len(scored)} scored rows the RULE reproduces V3 "
-                f"{len(agreeing) + len(agreeing_rule)}/{len(scored)}, while the "
-                f"shipped worker END TO END reproduces it {len(agreeing)}/"
-                f"{len(scored)}; the difference between those two numbers is "
-                "the schema gate and nothing else."
+                f"| {item_id} | {_fmt(row['recorded'])} "
+                f"| {_fmt(entry['rule'])} "
+                f"| {_fmt(row['observed'])} "
+                f"| {'yes' if entry['agrees'] else '**NO**'} |"
             )
-            add("")
-            add("| input id | V3 recorded | rule only (gate removed) | agrees |")
-            add("|---|---|---|---|")
-            for item_id in sorted(diagnosis, key=int):
-                row = next(r for r in rows if r["item_id"] == item_id)
-                entry = diagnosis[item_id]
-                add(
-                    f"| {item_id} | {_fmt(row['recorded'])} "
-                    f"| {_fmt(entry['rule'])} "
-                    f"| {'yes' if entry['agrees'] else '**NO**'} |"
-                )
-            add("")
-            add(
-                "This diagnosis EXCUSES NOTHING. The headline figure above is "
-                "the end-to-end one, and these eight rows are counted as "
-                "mismatches there. It is recorded because the two numbers "
-                "answer different questions: whether the port of the V3 rule "
-                "is faithful (it is), and whether a `go_mf@1` run would have "
-                "reproduced V3's output byte for byte given V3's live replies "
-                "(it would not, because it would have refused eight of them)."
-            )
-            add("")
-            add(
-                "No change to `go_mf@1` follows from this. The schema is a "
-                "port of what `pickup_schema.py`/the V3 prompts specify, the "
-                "worker is right to enforce it, and a live run requests "
-                "structured output against that schema in the first place — "
-                "the defect is in a transcript recorded without one."
-            )
-            add("")
+        add("")
+        add(
+            "No change to `go_mf@1` follows from this. The schema is a port "
+            "of what the V3 prompts specify, the worker is right to enforce "
+            "it, and a live run requests structured output against that "
+            "schema in the first place \u2014 the defect is in a transcript "
+            "recorded without one."
+        )
+        add("")
 
     # -- the full table ---------------------------------------------------
     add("## Every replayed row")
     add("")
-    add("| input id | agrees | V3 recorded | this council |")
-    add("|---|---|---|---|")
+    add("| input id | agrees | repaired | V3 recorded | this council |")
+    add("|---|---|---|---|---|")
     for row in rows:
         mark = "yes" if row["agrees"] else (
             "excused" if row["expected_difference_classes"] else "**NO**"
         )
+        rules = sorted(
+            {
+                str(entry.get("rule"))
+                for entries in repaired.get(row["item_id"], {}).values()
+                for entry in entries
+            }
+        )
+        rule_cell = ", ".join("`" + rule + "`" for rule in rules) or "\u2014"
         add(
-            f"| {row['item_id']} | {mark} | {_fmt(row['recorded'])} "
-            f"| {_fmt(row['observed'])} |"
+            f"| {row['item_id']} | {mark} | {rule_cell} "
+            f"| {_fmt(row['recorded'])} | {_fmt(row['observed'])} |"
         )
     add("")
 
     add("## Files read")
+    add("")
+    add(
+        "Every digest below was re-measured by this run before anything else "
+        "happened (`verify_manifest`), against the SHA-256 the manifest pins."
+    )
     add("")
     add("| key | path | sha256 |")
     add("|---|---|---|")
     for key, entry in dict(manifest["files"]).items():
         add(f"| {key} | `{entry['path']}` | `{entry['sha256']}` |")
     add("")
+
+    if run_info:
+        add("## How this run was made")
+        add("")
+        add(f"- command: `{run_info.get('command', '')}`")
+        add(f"- host: `{run_info.get('host', '')}`")
+        add(f"- finished (UTC): `{run_info.get('utc', '')}`")
+        add(f"- interpreter: `{run_info.get('interpreter', '')}`")
+        add(f"- repository commit: `{run_info.get('commit', '')}`")
+        add(f"- rows replayed: `{run_info.get('rows', '')}`")
+        add("")
+        add(
+            "Zero tokens were spent: every reply came out of the transcript "
+            "through `ReplayBackend`, and no backend that can reach a network "
+            "was constructed."
+        )
+        add("")
     return "\n".join(out)
 
 
@@ -991,8 +1131,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="go-v3-replay-") as tmp:
         comparison, verdicts = replay_rows(rows_in, f"sqlite:///{tmp}/replay.sqlite")
+        repaired = normalised_rows(verdicts)
         diagnosis = diagnose(
-            comparison, inputs, results, f"sqlite:///{tmp}/diagnose.sqlite"
+            comparison,
+            inputs,
+            results,
+            f"sqlite:///{tmp}/diagnose.sqlite",
+            also=sorted(repaired, key=int),
         )
         complaints = _complaints_for(diagnosis, inputs, results, f"sqlite:///{tmp}/q.sqlite")
 
@@ -1005,18 +1150,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     agreeing = [r for r in scored if r["agrees"]]
     print()
-    print(f"agreement: {len(agreeing)}/{len(scored)} scored ok rows")
+    print(f"agreement: {len(agreeing)}/{len(scored)} scored ok rows (end to end)")
+    if repaired:
+        print(
+            f"normalised: {len(repaired)} row(s) needed an answer repair: "
+            f"{', '.join(sorted(repaired, key=int))}"
+        )
+        for item_id in sorted(repaired, key=int):
+            for seat, entries in sorted(repaired[item_id].items()):
+                for entry in entries:
+                    print(
+                        f"  {item_id:>9}  {seat:<12} {entry.get('field')} "
+                        f"[{entry.get('rule')}] -> {entry.get('value')!r}"
+                    )
 
     if diagnosis:
         rule_ok = sum(1 for v in diagnosis.values() if v["agrees"])
         print(
-            f"diagnosis: the decision rule alone agrees on {rule_ok}/"
-            f"{len(diagnosis)} of the mismatching rows "
-            "(the answer-schema gate is the whole difference)"
+            f"control: the decision rule alone agrees on {rule_ok}/"
+            f"{len(diagnosis)} of the rows that needed a repair or still "
+            "mismatch (the answer-schema gate is the whole difference)"
         )
 
+    # The command as a reader would re-run it: this script's repo-relative
+    # path plus the arguments it was actually given.
+    invocation = " ".join(["python", "scripts/council/replay_go_v3.py", *sys.argv[1:]])
+    run_info = {
+        "command": invocation,
+        "host": socket.getfqdn(),
+        "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "interpreter": f"{platform.python_implementation()} {platform.python_version()}",
+        "commit": _repo_commit(),
+        "rows": str(len(rows_in)),
+    }
+
     if not args.no_report:
-        report = render_report(comparison, manifest, verdicts, diagnosis, complaints)
+        report = render_report(
+            comparison, manifest, verdicts, diagnosis, complaints, run_info
+        )
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(report)
         print(f"wrote {args.report}")

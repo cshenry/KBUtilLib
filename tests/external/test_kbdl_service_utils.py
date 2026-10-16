@@ -414,6 +414,47 @@ def test_submit_genome_annotation_no_longer_accepts_legacy_parameters():
     assert session.calls == []
 
 
+def test_submit_genome_annotation_forwards_reference_data_inputs():
+    """bakta_db/kofam_profiles/kofam_profile_set are tool inputs the
+    service still accepts on the request; the 2026-09-02 narrowing dropped
+    **params and left them unreachable, so BAKTA/KOFAMSCAN could not be run
+    through this wrapper on a deployment with no KBDL_DEFAULT_* configured.
+    They must be forwarded verbatim when given."""
+    session = FakeSession([FakeResponse(202, {"job_id": "job-xyz"})])
+    client = make_client(session)
+
+    job_id = client.submit_genome_annotation(
+        tools=["BAKTA", "KOFAMSCAN"],
+        genome_ref={"object_id": "genome-1"},
+        bakta_db={"object_id": "ref:bakta"},
+        kofam_profiles={"object_id": "ref:kofam"},
+        kofam_profile_set="2025-11-03",
+    )
+
+    assert job_id == "job-xyz"
+    assert session.calls[0]["json"]["params"] == {
+        "tools": ["BAKTA", "KOFAMSCAN"],
+        "genome_ref": {"object_id": "genome-1"},
+        "bakta_db": {"object_id": "ref:bakta"},
+        "kofam_profiles": {"object_id": "ref:kofam"},
+        "kofam_profile_set": "2025-11-03",
+    }
+
+
+def test_submit_genome_annotation_omits_unset_reference_data_inputs():
+    """Left None, none of the three keys appear in the payload -- the
+    service's own deployment-default fallback must see them as absent,
+    not as an explicit null."""
+    session = FakeSession([FakeResponse(202, {"job_id": "job-xyz"})])
+    client = make_client(session)
+
+    client.submit_genome_annotation(tools=["rast"], genome_ref={"object_id": "g1"})
+
+    params = session.calls[0]["json"]["params"]
+    for name in ("bakta_db", "kofam_profiles", "kofam_profile_set"):
+        assert name not in params
+
+
 # ---------------------------------------------------------------------------
 # Job lifecycle: list / check / result / clear
 # ---------------------------------------------------------------------------

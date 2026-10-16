@@ -112,3 +112,13 @@ store: sqlite:///~/.kbutillib/council/council.sqlite
 # budgets belong to the store, not to a person -- so changing it affects only
 # the label on jobs submitted afterwards.
 # user: someone
+
+# Optional. Directories of query-type YAML files. Every *.yaml / *.yml
+# DIRECTLY inside each one (non-recursive) is registered on every store open
+# and by `kbu council db init`: an identical spec is a no-op, the same
+# name@version with different content is refused naming the file, a missing
+# directory is only a warning, and nothing is ever written into these
+# directories -- they are expected to be in Dropbox. `~` and ${VAR} are
+# expanded at load time.
+# query_dirs:
+#   - ~/Dropbox/Projects/council-queries

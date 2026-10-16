@@ -33,6 +33,13 @@ Example::
 
 from __future__ import annotations
 
+from .directories import (
+    SOURCE_DIRECTORY,
+    annotate_sources,
+    expand_query_dirs,
+    register_query_dirs,
+    spec_files,
+)
 from .errors import (
     NonGenericSchema,
     QuerySpecError,
@@ -58,6 +65,11 @@ from .template import (
 )
 
 __all__ = [
+    "SOURCE_DIRECTORY",
+    "annotate_sources",
+    "expand_query_dirs",
+    "register_query_dirs",
+    "spec_files",
     "QueryType",
     "QueryRegistry",
     "RoleSpec",

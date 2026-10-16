@@ -198,7 +198,10 @@ def _render(envelope: Dict[str, Any]) -> None:
         return
 
     if verb == "query list":
-        _rows(data.get("query_types") or [], ("name", "version", "status", "source", "created_by"))
+        _rows(
+            data.get("query_types") or [],
+            ("name", "version", "status", "source", "source_file", "created_by"),
+        )
         return
 
     if verb == "query show":
@@ -433,8 +436,17 @@ def _submit(
     profile: Optional[str],
     seat: Sequence[str],
     allow_unverified: bool,
+    allow_unavailable: bool = False,
 ) -> Dict[str, Any]:
-    """Build the ``submit`` envelope: the new job's id and what it was seated with."""
+    """Build the ``submit`` envelope: the new job's id and what it was seated with.
+
+    The library refuses a seat this machine cannot serve
+    (``SeatUnavailable``); that arrives here as a clean CLI error naming the
+    seats.  With ``--allow-unavailable`` the job is created and its blockers
+    appear in the envelope's ``warnings``, because a job queued behind an
+    endpoint that does not work here has to say so at submit and not only
+    when somebody asks for its status.
+    """
     tasks = _read_tasks(input_file)
     try:
         job_id = util.submit(
@@ -444,6 +456,7 @@ def _submit(
             priority=priority,
             profile=profile,
             allow_unverified=allow_unverified,
+            allow_unavailable=allow_unavailable,
             **_parse_seats(seat),
         )
     except click.ClickException:
@@ -451,6 +464,11 @@ def _submit(
     except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
         raise _fail(exc) from exc
     status = util.job_status(job_id)
+    blockers = [
+        blocker
+        for blocker in status.get("blockers") or []
+        if blocker.get("kind") == "unservable"
+    ]
     return _envelope(
         "submit",
         data={
@@ -460,7 +478,12 @@ def _submit(
             "n_items": status.get("n_items"),
             "status": status.get("status"),
             "profile": profile,
+            "blockers": blockers,
         },
+        warnings=[
+            f"unservable: {blocker.get('endpoint')}: {blocker.get('detail')}"
+            for blocker in blockers
+        ],
     )
 
 
@@ -491,6 +514,13 @@ def _submit_options(function: Any) -> Any:
                 default=False,
                 help="Permit unverified seats and an unconfirmed CLI billing mode.",
             ),
+            click.option(
+                "--allow-unavailable",
+                is_flag=True,
+                default=False,
+                help="Queue the job even though an endpoint is unavailable HERE. Its "
+                "calls wait: the queue is per machine, so no other host works them.",
+            ),
         )
     ):
         function = decorator(function)
@@ -510,6 +540,7 @@ def submit_cmd(
     profile: Optional[str],
     seat: Sequence[str],
     allow_unverified: bool,
+    allow_unavailable: bool,
     as_json: bool,
 ) -> None:
     """Queue a batch of items against a saved query type. Prints the job id."""
@@ -522,6 +553,7 @@ def submit_cmd(
         profile=profile,
         seat=seat,
         allow_unverified=allow_unverified,
+        allow_unavailable=allow_unavailable,
     )
     _emit(envelope, as_json=as_json)
 
@@ -559,6 +591,12 @@ def _build_run(util: Any, job_id: str) -> Dict[str, Any]:
 @click.option("--profile", default=None, help="Seating profile.")
 @click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
 @click.option("--allow-unverified", is_flag=True, default=False, help="Permit unverified seats.")
+@click.option(
+    "--allow-unavailable",
+    is_flag=True,
+    default=False,
+    help="Submit even though an endpoint is unavailable here (its calls wait).",
+)
 @_json_option
 @click.pass_context
 def run_cmd(
@@ -571,6 +609,7 @@ def run_cmd(
     profile: Optional[str],
     seat: Sequence[str],
     allow_unverified: bool,
+    allow_unavailable: bool,
     as_json: bool,
 ) -> None:
     """Work a job in the foreground until it is idle.
@@ -593,6 +632,7 @@ def run_cmd(
             profile=profile,
             seat=seat,
             allow_unverified=allow_unverified,
+            allow_unavailable=allow_unavailable,
         )["data"]["job_id"]
     envelope = _build_run(util, job_id)
     _emit(envelope, as_json=as_json)

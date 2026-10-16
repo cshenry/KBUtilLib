@@ -47,14 +47,9 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from ...core.shared_env_utils import SharedEnvUtils
 from . import llm
+from .council.servable import SEAT_STATES, SeatUnavailable
 
-__all__ = ["CouncilUtils", "CouncilUtilsImpl"]
-
-#: What :meth:`CouncilUtils.doctor` may report for one seat.  ``unknown`` is
-#: deliberately distinct from ``unavailable``: "I could not tell" must never
-#: be rendered as "I checked and it is broken", and the two drive different
-#: exit codes out of ``kbu council doctor``.
-SEAT_STATES = ("ready", "unknown", "unavailable")
+__all__ = ["CouncilUtils", "CouncilUtilsImpl", "SEAT_STATES", "SeatUnavailable"]
 
 #: The message every verb that needs tables fails with.  Spelled once because
 #: it is a user-facing instruction the CLI test pins.
@@ -179,6 +174,12 @@ class CouncilUtils(SharedEnvUtils):
         self._config: Any = None
         self._store: Any = None
         self._user: Optional[str] = None
+        #: ``{"name@version": "/path/to/file.yaml"}`` for every query type
+        #: this object loaded from a configured ``query_dirs`` entry.  Rebuilt
+        #: on each store open, so it reports where a spec IS rather than where
+        #: it once was.
+        self.query_dir_sources: Dict[str, str] = {}
+        self._query_dirs_loaded = False
 
     # -- configuration ----------------------------------------------------
 
@@ -211,6 +212,12 @@ class CouncilUtils(SharedEnvUtils):
         Does NOT create the schema.  ``kwargs`` go to the implementation --
         ``check_version=False`` in particular, which is how ``db migrate``
         opens a database whose version this code would otherwise refuse.
+
+        Opening the store is also when the configured ``query_dirs`` are
+        loaded (:meth:`_load_query_dirs`), so a spec file a user edited is in
+        the store before any verb looks a query type up.  A one-off open
+        (``db migrate``) skips that: a migration must not be running
+        registrations against a schema it is in the middle of changing.
         """
         if self._store is None or kwargs:
             from .council.store import open_store
@@ -221,7 +228,37 @@ class CouncilUtils(SharedEnvUtils):
                 # the ones every other verb wants.
                 return store
             self._store = store
+            self._load_query_dirs(store)
         return self._store
+
+    def _load_query_dirs(self, store: Any) -> None:
+        """Register every spec file in the configured ``query_dirs``.  Once.
+
+        Deliberately NOT a no-op on a store with no schema: it returns
+        WITHOUT marking itself done, because ``db_init`` creates the tables
+        and then asks again.  Any other verb on a schemaless store is about
+        to be refused by :meth:`require_schema` anyway.
+
+        The "done" flag is set BEFORE the registrations run, because
+        registering goes through :class:`QueryRegistry` and a future change
+        there that re-entered :meth:`store` would otherwise recurse.  A load
+        that raises therefore does not retry on this object -- the caller saw
+        the error, and silently trying again would hide it.
+        """
+        if self._query_dirs_loaded:
+            return
+        dirs = list(getattr(self.config(), "query_dirs", ()) or ())
+        if not dirs:
+            self._query_dirs_loaded = True
+            return
+        if int(store.schema_version()) == 0:
+            return
+        from .council.queries import QueryRegistry, register_query_dirs
+
+        self._query_dirs_loaded = True
+        self.query_dir_sources = register_query_dirs(
+            QueryRegistry(store), dirs, created_by=self.user()
+        )
 
     def close(self) -> None:
         """Release the store's connection pool, if one was opened."""
@@ -253,16 +290,26 @@ class CouncilUtils(SharedEnvUtils):
         return store
 
     def db_init(self) -> Dict[str, Any]:
-        """Create the schema and seed the builtin query types.  Idempotent."""
+        """Create the schema, seed the builtins, load the query dirs.  Idempotent.
+
+        The query directories are loaded HERE as well as on every store open
+        because this is the one verb that runs against a store with no tables:
+        the open above found no schema to register anything into, so without
+        this a fresh machine's first ``db init`` would not pick up the user's
+        own query types.
+        """
         from .council.queries import QueryRegistry
 
         store = self.store()
         store.init_schema()
         seeded = QueryRegistry(store).seed_builtins()
+        self._load_query_dirs(store)
         return {
             "store": _safe_store_url(self.store_url()),
             "schema_version": int(store.schema_version()),
             "query_types": [f"{spec.name}@{spec.version}" for spec in seeded],
+            "query_dirs": list(self.config().query_dirs),
+            "query_dir_types": sorted(self.query_dir_sources),
         }
 
     def db_migrate(self) -> Dict[str, Any]:
@@ -519,6 +566,86 @@ class CouncilUtils(SharedEnvUtils):
                 self.log_debug(f"council: api type close failed: {exc}")
         await llm.aclose_all()
 
+    async def _servable_seats(
+        self,
+        roster: Any,
+        backends: Mapping[str, Any],
+        allow_unverified: bool,
+        allow_unavailable: bool,
+    ) -> Dict[str, str]:
+        """Refuse a job this machine cannot serve.  Returns the blockers.
+
+        Runs the SAME offline check ``kbu council doctor`` runs -- once per
+        DISTINCT endpoint in the roster, so five seats on one gateway cost one
+        free ``/models`` GET -- and then reads one state per seat off it.
+        Nothing here can spend a token: ``complete()`` is never called.
+
+        The reason this is at submit at all: **queues are per machine.**  A
+        store is one machine's single-user SQLite file and nothing coordinates
+        across hosts (review round 2), so no other machine will ever work a
+        seat this one cannot reach.  A call row for an unreachable endpoint is
+        not "work waiting for somebody"; it is a job that never finishes.
+
+        * ``unavailable`` (checked, and it is broken) raises
+          :class:`SeatUnavailable` naming every affected seat, its endpoint
+          and the doctor's detail -- unless *allow_unavailable*, in which case
+          the endpoint is returned and recorded on the job, where
+          ``job_status`` reports it as an ``unservable`` blocker.
+        * ``unknown`` (could not tell) follows the existing
+          ``allow_unverified`` rule, which is the same answer the billing
+          guard and the verified-seat rule already give for "unconfirmed".
+        * The ``verified: false`` rule is NOT applied here: that refusal is
+          ``CouncilWorker._check_roster``'s and raises ``RosterError``, so
+          the seat states are read with the verification short-circuit off
+          and this check reports only what the ENDPOINT said.
+
+        Returns:
+            ``{endpoint: detail}`` for each endpoint admitted by
+            *allow_unavailable*.  Empty when everything is servable.
+        """
+        from .council.servable import probe_roster, unservable_message
+
+        _probes, seats = await probe_roster(roster, backends, allow_unverified=True)
+        unavailable = [report for report in seats if report["state"] == "unavailable"]
+        if unavailable and not allow_unavailable:
+            raise SeatUnavailable(
+                unservable_message(unavailable, "allow_unavailable=True"), unavailable
+            )
+        unknown = [report for report in seats if report["state"] == "unknown"]
+        if unknown and not allow_unverified:
+            raise SeatUnavailable(
+                unservable_message(unknown, "allow_unverified=True"), unknown
+            )
+        blockers: Dict[str, str] = {}
+        for report in unavailable:
+            blockers.setdefault(str(report["endpoint"]), str(report["detail"]))
+        return blockers
+
+    @staticmethod
+    def _job_options(
+        allow_unverified: bool,
+        allow_unavailable: bool,
+        unservable: Mapping[str, str],
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        """The permissions a job carries, as its ``options``.
+
+        Persisted on the job because they are a property of THAT job and of
+        nothing else: a worker decides per call from the options of the call's
+        own job, so one job's ``--allow-unverified`` can never admit another
+        job's unknown calls (review round 3).  A flag on the worker object or
+        on a cached client would do exactly that, which is why neither is the
+        authority any more.
+        """
+        options: Dict[str, Any] = {
+            "allow_unverified": bool(allow_unverified),
+            "allow_unavailable": bool(allow_unavailable),
+        }
+        if unservable:
+            options["unservable_endpoints"] = dict(unservable)
+        options.update(extra)
+        return options
+
     def _worker(
         self,
         store: Any,
@@ -546,8 +673,19 @@ class CouncilUtils(SharedEnvUtils):
         return QueryRegistry(self.require_schema())
 
     def queries(self, include_retired: bool = False) -> List[Dict[str, Any]]:
-        """The saved query-type rows, active ones only by default."""
-        return self.registry().list(include_retired=include_retired)
+        """The saved query-type rows, active ones only by default.
+
+        Each row carries a ``source_file``: the path of the ``query_dirs``
+        file it came from, or ``""``.  The ``source`` column already records
+        ``builtin`` / ``user`` / ``directory``; the FILE is not in the
+        database (an absolute path is machine-specific and would make the same
+        spec compare unequal between machines), so it is reported from the
+        directory scan this object did when it opened the store.
+        """
+        from .council.queries import annotate_sources
+
+        rows = self.registry().list(include_retired=include_retired)
+        return annotate_sources(rows, self.query_dir_sources)
 
     def query(self, ref: str) -> Any:
         """One saved query type, by ``name`` or ``name@version``."""
@@ -590,13 +728,31 @@ class CouncilUtils(SharedEnvUtils):
         priority: int = 100,
         profile: Optional[str] = None,
         allow_unverified: bool = False,
+        allow_unavailable: bool = False,
         **seat_overrides: Any,
     ) -> str:
         """Create a job, its items and its first round of proposer calls.
 
+        Every seat's endpoint is checked first, offline and for free, by the
+        same probe ``doctor`` uses (:meth:`_servable_seats`): the queue is per
+        machine, so a seat this machine cannot reach is a job that would never
+        finish.  Both permissions are written into the job's ``options`` and
+        apply to THAT job's calls only.
+
+        Args:
+            allow_unverified: admit seats and endpoints whose state is
+                ``unknown`` -- unverified models, and an unconfirmed billing
+                mode.  Never bypasses a REFUSED billing check.
+            allow_unavailable: queue the job even though an endpoint is
+                unavailable on this machine.  Its calls WAIT: ``job_status``
+                reports the endpoint as an ``unservable`` blocker.
+
         Returns:
             The job id.  Nothing has been spent yet: the calls are pending
             rows, and ``run``/the daemon is what works them.
+
+        Raises:
+            SeatUnavailable: a seat's endpoint cannot be served here.
         """
         unverified = self.allow_unverified or bool(allow_unverified)
         store = self.require_schema()
@@ -604,6 +760,9 @@ class CouncilUtils(SharedEnvUtils):
         roster = self.roster(profile, **seat_overrides)
         backends = self.build_backends(roster, allow_unverified=unverified)
         try:
+            unservable = await self._servable_seats(
+                roster, backends, unverified, bool(allow_unavailable)
+            )
             worker = self._worker(store, backends, unverified)
             return await worker.asubmit(
                 spec,
@@ -612,6 +771,9 @@ class CouncilUtils(SharedEnvUtils):
                 label=label,
                 priority=priority,
                 profile_name=profile or self.config().default_profile,
+                options=self._job_options(
+                    unverified, bool(allow_unavailable), unservable
+                ),
             )
         finally:
             await self._aclose_backends(backends)
@@ -624,6 +786,7 @@ class CouncilUtils(SharedEnvUtils):
         priority: int = 100,
         profile: Optional[str] = None,
         allow_unverified: bool = False,
+        allow_unavailable: bool = False,
         **seat_overrides: Any,
     ) -> str:
         """Submit a job.  The synchronous :meth:`submit_async`."""
@@ -635,6 +798,7 @@ class CouncilUtils(SharedEnvUtils):
                 priority=priority,
                 profile=profile,
                 allow_unverified=allow_unverified,
+                allow_unavailable=allow_unavailable,
                 **seat_overrides,
             )
         )
@@ -666,8 +830,18 @@ class CouncilUtils(SharedEnvUtils):
             meta=SeatSpec(**raw["meta"]),
             allow_meta_overlap=bool(raw.get("allow_meta_overlap")),
         )
-        unverified = self.allow_unverified or any(
-            not seat.verified for _role, seat in roster.seats()
+        # The permission is the JOB's, read from the options it was submitted
+        # with (review round 3) -- not this object's and not the roster's
+        # alone.  ``run`` works exactly one job, so the clients it builds can
+        # safely carry that one job's permission; ``CouncilWorker`` decides
+        # again per call from the same options, which is what keeps a worker
+        # serving two jobs from letting one job's permission admit the
+        # other's calls.
+        options = dict(job.get("options") or {})
+        unverified = (
+            self.allow_unverified
+            or bool(options.get("allow_unverified"))
+            or any(not seat.verified for _role, seat in roster.seats())
         )
         backends = self.build_backends(roster, allow_unverified=unverified)
         try:
@@ -788,6 +962,7 @@ class CouncilUtils(SharedEnvUtils):
         query_version: Optional[str] = None,
         label: Optional[str] = None,
         allow_unverified: bool = False,
+        allow_unavailable: bool = False,
         **seat_overrides: Any,
     ) -> str:
         """Submit the SAME items again, optionally re-seated or re-versioned.
@@ -826,6 +1001,9 @@ class CouncilUtils(SharedEnvUtils):
 
         async def _submit() -> str:
             try:
+                unservable = await self._servable_seats(
+                    roster, backends, unverified, bool(allow_unavailable)
+                )
                 worker = self._worker(store, backends, unverified)
                 return await worker.asubmit(
                     spec,
@@ -834,7 +1012,12 @@ class CouncilUtils(SharedEnvUtils):
                     label=label or f"rerun of {job_id}",
                     priority=int(job.get("priority") or 100),
                     profile_name=profile or job.get("profile_name"),
-                    options={"rerun_of": job_id},
+                    options=self._job_options(
+                        unverified,
+                        bool(allow_unavailable),
+                        unservable,
+                        rerun_of=job_id,
+                    ),
                 )
             finally:
                 await self._aclose_backends(backends)
@@ -905,109 +1088,23 @@ class CouncilUtils(SharedEnvUtils):
     # -- doctor -----------------------------------------------------------
 
     async def _probe_endpoint(self, endpoint: str, kind: str, backend: Any) -> Dict[str, Any]:
-        """Everything that can be learned about ONE endpoint for free.
+        """One endpoint's free probe.  See :func:`.council.servable.probe_endpoint`.
 
-        Probed once per endpoint rather than once per seat: two seats on the
-        same endpoint would otherwise mean two ``/models`` GETs and two
-        ``--version`` subprocesses, which is wasted work and -- for a CLI --
-        two child processes a reader of the doctor's output cannot explain.
-
-        Nothing here can spend a token: ``models()`` is a free GET,
-        ``version()`` runs ``--version``, and ``preflight()`` reads config
-        files.  ``complete()`` is never called.
+        Kept as a method because that is what ``doctor`` reads and what the
+        facade's tests patch; the logic itself lives in
+        :mod:`.council.servable` because ``submit`` and ``CouncilWorker`` run
+        the very same check and a second copy of it could disagree about
+        whether a seat is usable.
         """
-        from .council.types import CLI_KINDS
+        from .council.servable import probe_endpoint
 
-        probe: Dict[str, Any] = {"endpoint": endpoint, "kind": kind, "backend": backend}
-        if kind in CLI_KINDS:
-            # ``version()`` is CLI-specific and deliberately not part of the
-            # ApiType contract -- an HTTP gateway has no ``--version``.
-            probe["version"] = await backend.version()
-            probe["billing"] = (
-                await llm.preflight_api(backend) if probe["version"] else {}
-            )
-            return probe
-        listing = await llm.models_api(backend)
-        probe["models"] = {
-            str(entry.get("id") or entry.get("name") or "")
-            for entry in listing
-            if isinstance(entry, Mapping)
-        }
-        probe["models"].discard("")
-        return probe
+        return await probe_endpoint(endpoint, kind, backend)
 
     def _seat_report(self, role: str, seat: Any, probe: Mapping[str, Any]) -> Dict[str, Any]:
-        """Readiness of ONE seat, read off its endpoint's probe.
+        """One seat's readiness.  See :func:`.council.servable.seat_state`."""
+        from .council.servable import seat_state
 
-        HTTP readiness is the endpoint answering ``/models`` AND the served
-        model appearing in that listing.  CLI readiness is ``--version``
-        having run plus the offline billing preflight saying ``ready``.  An
-        unverified seat is ``unknown`` whatever the endpoint says: nobody has
-        confirmed that endpoint serves the model the seat names, and a
-        reachable endpoint is not evidence that it does.
-        """
-        from .council.types import CLI_KINDS
-
-        backend = probe["backend"]
-        report: Dict[str, Any] = {
-            "role": role,
-            "seat": seat.seat_name,
-            "endpoint": seat.endpoint,
-            "endpoint_kind": seat.endpoint_kind,
-            "model": seat.model,
-            "canonical_model": seat.canonical_model,
-            "verified": bool(seat.verified),
-            "state": "unknown",
-            "detail": "",
-        }
-        if not seat.verified and not self.allow_unverified:
-            report["detail"] = (
-                "the model is marked verified: false -- nobody has confirmed this "
-                "endpoint serves it; confirm it and set verified: true"
-            )
-            return report
-
-        if seat.endpoint_kind in CLI_KINDS:
-            version = probe.get("version")
-            if not version:
-                report["state"] = "unavailable"
-                report["detail"] = (
-                    f"{getattr(backend, 'executable', seat.endpoint)} --version did not "
-                    "run; the CLI is not installed or not on PATH"
-                )
-                return report
-            report["cli_version"] = version
-            billing = dict(probe.get("billing") or {})
-            state = str(billing.get("state") or "unknown")
-            report["billing"] = state
-            report["detail"] = str(billing.get("detail") or "")
-            if state == "ready":
-                report["state"] = "ready"
-            elif state == "refused":
-                report["state"] = "unavailable"
-            else:
-                report["state"] = "unknown"
-            return report
-
-        names = set(probe.get("models") or ())
-        if not names:
-            report["state"] = "unavailable"
-            report["detail"] = (
-                f"{getattr(backend, 'base_url', seat.endpoint)} listed no models: it is "
-                "unreachable, refused the request, or does not implement /models"
-            )
-            return report
-        report["models_listed"] = len(names)
-        if seat.model in names:
-            report["state"] = "ready"
-            report["detail"] = f"{seat.model} is served by {seat.endpoint}"
-        else:
-            report["state"] = "unavailable"
-            report["detail"] = (
-                f"{seat.endpoint} is reachable but does not list {seat.model!r}; it "
-                f"lists {sorted(names)[:8]}"
-            )
-        return report
+        return seat_state(role, seat, probe, allow_unverified=self.allow_unverified)
 
     async def doctor_async(self, profile: Optional[str] = None) -> Dict[str, Any]:
         """Report whether every seat of a profile could actually be used.

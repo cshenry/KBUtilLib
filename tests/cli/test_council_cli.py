@@ -91,6 +91,18 @@ def _fake_council_config(tmp_path: Path) -> Dict[str, Any]:
     }
 
 
+class _ServingFake(FakeBackend):
+    """A :class:`FakeBackend` that lists the five models the config seats.
+
+    ``submit`` runs the same offline per-endpoint check ``doctor`` runs, so a
+    fake standing in for a reachable endpoint has to answer ``/models`` the
+    way a reachable one would; ``FakeBackend`` itself lists nothing.
+    """
+
+    async def models(self) -> List[Dict[str, Any]]:
+        return [{"id": alias} for alias in ("p1", "p2", "p3", "cr", "mt")]
+
+
 def _script(req: Any) -> Dict[str, Any]:
     """Unanimous ``go_mf`` answers: ``go_id`` / ``final_go_ids``, not ``id``."""
     if req.role == "proposer":
@@ -150,7 +162,7 @@ def fake_council(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[str]:
     """
     config_path = _write_config(tmp_path, _fake_council_config(tmp_path))
     store = f"sqlite:///{tmp_path}/council.sqlite"
-    backend = FakeBackend(_script)
+    backend = _ServingFake(_script)
     monkeypatch.setattr(
         CouncilUtils,
         "build_backends",

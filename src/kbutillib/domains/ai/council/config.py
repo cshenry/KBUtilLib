@@ -139,7 +139,15 @@ _ENDPOINT_KEYS = frozenset(
 _MODEL_KEYS = frozenset({"endpoint", "served_name", "canonical", "params", "verified"})
 _PROFILE_KEYS = frozenset({"proposers", "critic", "meta", "allow_meta_overlap"})
 _TOP_KEYS = frozenset(
-    {"endpoints", "models", "profiles", "default_profile", "store", "user"}
+    {
+        "endpoints",
+        "models",
+        "profiles",
+        "default_profile",
+        "store",
+        "user",
+        "query_dirs",
+    }
 )
 
 _CLI_DEFAULT_EXECUTABLE = {"claude_cli": "claude", "codex_cli": "codex"}
@@ -390,6 +398,34 @@ def _resolve_store_url(url: Optional[str]) -> str:
     return f"{scheme}:///{path_str}"
 
 
+def _resolve_query_dirs(raw: Any, source: str) -> List[str]:
+    """Normalise ``query_dirs`` into a list of expanded path strings.
+
+    A single string is accepted as a one-element list, because "one directory"
+    is the common case and a config that spelled it as a scalar should not
+    silently load nothing.  Expansion happens HERE rather than at use time so
+    that :meth:`CouncilConfig.snapshot` -- which is what a job records and
+    what a bug report quotes -- shows the paths that were really read.
+    """
+    from .queries.directories import expand_query_dirs
+
+    if raw is None:
+        return []
+    entries = [raw] if isinstance(raw, (str, Path)) else raw
+    if not isinstance(entries, (list, tuple)):
+        raise ConfigError(
+            f"query_dirs must be a list of directory paths, got "
+            f"{type(raw).__name__} ({source})"
+        )
+    for entry in entries:
+        if not isinstance(entry, (str, Path)):
+            raise ConfigError(
+                f"every query_dirs entry must be a path, got "
+                f"{type(entry).__name__}: {entry!r} ({source})"
+            )
+    return [str(path) for path in expand_query_dirs(entries)]
+
+
 # ---------------------------------------------------------------------------
 # Config records
 # ---------------------------------------------------------------------------
@@ -527,6 +563,13 @@ class CouncilConfig(BaseModel):
     #: not a person's, so changing this affects only the label on jobs
     #: submitted afterwards.  Empty means "use the OS user".
     user: Optional[str] = None
+    #: Directories of query-type YAML files, loaded on every store open and
+    #: by ``kbu council db init`` (see
+    #: :mod:`.queries.directories`).  Stored expanded (``~`` and ``${VAR}``)
+    #: so every consumer sees the same absolute paths.  NOTHING is ever
+    #: written into one: they are expected to be in Dropbox, where a sidecar
+    #: file would sync to the whole fleet.
+    query_dirs: List[str] = []
     source: str = ""
 
     # -- accessors ----------------------------------------------------------
@@ -948,6 +991,7 @@ def load_council_config(
         default_profile=default_profile,
         store=_resolve_store_url(raw.get("store")),
         user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
+        query_dirs=_resolve_query_dirs(raw.get("query_dirs"), source),
         source=source,
     )
 

@@ -29,6 +29,25 @@ from kbutillib.domains.ai.council.backends.testing import FakeBackend
 from kbutillib.domains.ai.council.store.schema import SCHEMA_VERSION
 from kbutillib.domains.ai.council_utils import CouncilUtils, CouncilUtilsImpl
 
+#: The five served model names ``_config`` seats.  ``submit`` runs the same
+#: offline per-endpoint check ``doctor`` runs, so a fake standing in for a
+#: WORKING endpoint has to list them: an endpoint that lists no models is
+#: unavailable on this machine and a submit against it is refused.
+SEATED_MODELS = ("p1", "p2", "p3", "cr", "mt")
+
+
+class ServingFake(FakeBackend):
+    """A :class:`FakeBackend` that lists the models this config seats.
+
+    ``FakeBackend`` itself lists nothing -- a fake enumerates nothing -- which
+    is the right default for a backend and the wrong one for a stand-in for a
+    reachable endpoint now that submit checks reachability.
+    """
+
+    async def models(self) -> List[Dict[str, Any]]:
+        return [{"id": name} for name in SEATED_MODELS]
+
+
 #: The closed menu every item here picks from.  Deliberately not in id order.
 MENU = [
     {"id": "GO:0003824", "label": "catalytic activity", "rank": 1, "score": 0.9},
@@ -120,7 +139,7 @@ def util(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CouncilUtils:
         kbase_token_file=None,
     )
     council.db_init()
-    backend = FakeBackend(unanimous_script)
+    backend = ServingFake(unanimous_script)
     council.fake_backend = backend  # type: ignore[attr-defined]
     monkeypatch.setattr(
         CouncilUtils,
@@ -238,7 +257,7 @@ class TestProvenance:
             kbase_token_file=None,
         )
         council.db_init()
-        backend = FakeBackend(unanimous_script)
+        backend = ServingFake(unanimous_script)
         monkeypatch.setattr(
             CouncilUtils,
             "build_backends",

@@ -322,6 +322,12 @@ class CouncilWorker:
 
         self._queries: Dict[Tuple[str, str], Any] = {}
         self._rosters: Dict[str, Roster] = {}
+        #: ``{endpoint: preflight report}`` and ``{endpoint: seat state}``.
+        #: Facts about THIS MACHINE, so they are cached for the worker's life;
+        #: the PERMISSION to act on them is read from each call's own job and
+        #: is never cached (see :meth:`_permission_gate`).
+        self._billing_states: Dict[str, Dict[str, Any]] = {}
+        self._endpoint_states: Dict[str, Dict[str, Any]] = {}
         self._single_flight: Dict[str, asyncio.Future] = {}
         self._registered = False
 
@@ -1070,7 +1076,7 @@ class CouncilWorker:
 
         try:
             outcome = await self._invoke(
-                call, token, query, roster, seat, task, role
+                call, token, query, roster, seat, task, role, job
             )
         except BaseException:
             if leader:
@@ -1109,6 +1115,7 @@ class CouncilWorker:
         seat: SeatSpec,
         task: CouncilTask,
         role: str,
+        job: Mapping[str, Any],
     ) -> str:
         """Render, call the model through the wrapper, and route the outcome.
 
@@ -1117,7 +1124,14 @@ class CouncilWorker:
         everything that might lead to a second one -- the backoff, the halt,
         the budget, the model-unavailable park -- happens after it returns,
         from the taxonomy on the result.
+
+        :meth:`_permission_gate` runs FIRST, before the prompts are even
+        rendered: whether this call may be made at all is decided from its own
+        job's options, and nothing about rendering changes that answer.
         """
+        gate = await self._permission_gate(call, token, seat, job)
+        if gate is not None:
+            return gate
         context = self._context_for(role, call, query, roster)
         system, user = query.render(role, task, context)
         schema = query.answer_schema(role)
@@ -1212,6 +1226,158 @@ class CouncilWorker:
                     call, token, error, failures, started, finished, result
                 )
         return self._fail_call(call, token, error, started, finished, result)
+
+    # -- the per-call permission gate -------------------------------------
+
+    @staticmethod
+    def job_permissions(job: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        """What the JOB was submitted with.  The only authority on its calls.
+
+        Read from ``jobs.options`` every time, for every call, because the
+        permission belongs to the job and to nothing else (review round 3):
+        a flag on this worker, or on a cached client, would let a job
+        submitted with ``--allow-unverified`` admit the unknown calls of a
+        job submitted without it -- a worker serves whatever is due in the
+        queue, and the two jobs can be in flight at the same moment.
+        """
+        options = dict((job or {}).get("options") or {})
+        return {
+            "allow_unverified": bool(options.get("allow_unverified")),
+            "allow_unavailable": bool(options.get("allow_unavailable")),
+            "unservable_endpoints": dict(options.get("unservable_endpoints") or {}),
+        }
+
+    async def _permission_gate(
+        self,
+        call: Mapping[str, Any],
+        token: Optional[str],
+        seat: SeatSpec,
+        job: Mapping[str, Any],
+    ) -> Optional[str]:
+        """May this call be made?  Returns an outcome if it settled it, else None.
+
+        Three rules, all decided from the call's OWN job (see
+        :meth:`job_permissions`):
+
+        * An endpoint the job was told was **unservable** and still is: the
+          call WAITS.  ``allow_unavailable`` let the job be created; it never
+          made the endpoint reachable, and spending against it would only
+          produce a transport failure.  Re-checked rather than taken on trust
+          from the options, so a job queued while a gateway was down finishes
+          once it is back.
+        * A **refused** billing preflight: refused, always, and the endpoint
+          is halted.  ``allow_unverified`` cannot reach this case -- "I know
+          this bills the wrong way" is not "I could not tell".
+        * An **unknown** billing state: admitted only if THIS job carries
+          ``allow_unverified``.  Refused WITHOUT halting the endpoint,
+          because the refusal is a fact about one job's permission and
+          halting would stop another job that does have it.
+        """
+        permissions = self.job_permissions(job)
+        endpoint = str(call["endpoint"])
+
+        if endpoint in permissions["unservable_endpoints"]:
+            state = await self._endpoint_state(endpoint, seat)
+            if state["state"] == "unavailable":
+                return self._park(
+                    call,
+                    token,
+                    CouncilError(
+                        kind="model_unavailable",
+                        message=(
+                            f"endpoint {endpoint!r} is unavailable on this machine, "
+                            f"as it was when this job was submitted with "
+                            f"allow_unavailable: {state['detail'] or 'no detail'}"
+                        ),
+                        retryable=True,
+                    ),
+                    wait_s=self.model_wait_s,
+                )
+
+        report = await self._billing_state(endpoint, seat)
+        state = str(report.get("state") or "unknown")
+        if state == "ready":
+            return None
+        detail = str(report.get("detail") or "no detail")
+        if state == "refused":
+            return self._halt_endpoint(
+                call,
+                token,
+                BillingGuardRefused(
+                    f"endpoint {endpoint!r} refused the billing preflight: {detail}"
+                ).to_error(),
+            )
+        if permissions["allow_unverified"]:
+            return None
+        now = _utcnow()
+        return self._fail_call(
+            call,
+            token,
+            CouncilError(
+                kind="billing_guard",
+                message=(
+                    f"endpoint {endpoint!r} could not confirm how it bills "
+                    f"({state}: {detail}), and job {call['job_id']} was not "
+                    "submitted with allow_unverified. Re-submit it with "
+                    "allow_unverified=True (or `--allow-unverified`) to spend "
+                    "against it."
+                ),
+                # NOT halting: another job in this store may legitimately
+                # carry the permission this one does not, and a halt is the
+                # whole endpoint's.
+                halts_endpoint=False,
+            ),
+            now,
+            now,
+        )
+
+    async def _billing_state(self, endpoint: str, seat: SeatSpec) -> Dict[str, Any]:
+        """The endpoint's offline preflight report.  Free, and cached.
+
+        Cached per endpoint for this worker's life: it is a fact about this
+        machine's configuration files, not about a job, and re-reading four
+        files per call in a 20k-item batch would be pure syscall overhead.
+        Caching it is safe because it is only ever used to decide whether an
+        UNKNOWN state is admitted -- the CLI api types re-run their own gate
+        whenever one of the files it read changes, so a ``refused`` that
+        appears mid-batch is still caught by the call itself.
+
+        An api type with no ``preflight`` reports ``ready`` (through
+        ``llm.preflight_api``): there is nothing about it that could refuse.
+        An endpoint this worker cannot build an api type for also reports
+        ``ready`` -- it will never be claimed for, and inventing a refusal
+        here would be a verdict on a call that cannot happen.
+        """
+        cached = self._billing_states.get(endpoint)
+        if cached is not None:
+            return cached
+        api = self._api_for(seat)
+        report = (
+            {"state": "ready", "detail": "no api type to ask", "reasons": []}
+            if api is None
+            else dict(await llm_preflight_api(api))
+        )
+        self._billing_states[endpoint] = report
+        return report
+
+    async def _endpoint_state(self, endpoint: str, seat: SeatSpec) -> Dict[str, Any]:
+        """Is *endpoint* servable from this machine, for *seat*'s model?
+
+        The same free check ``kbu council doctor`` and ``submit`` run
+        (:mod:`..servable`), so "unavailable" means one thing in the council
+        and not three.  Cached per endpoint for the worker's life, which makes
+        a recovered endpoint picked up by the NEXT ``run`` rather than
+        mid-sweep -- the alternative is a ``/models`` GET per parked call.
+        """
+        cached = self._endpoint_states.get(endpoint)
+        if cached is not None:
+            return cached
+        from ..servable import probe_endpoint, seat_state
+
+        probe = await probe_endpoint(endpoint, seat.endpoint_kind, self._api_for(seat))
+        state = seat_state("", seat, probe, allow_unverified=True)
+        self._endpoint_states[endpoint] = state
+        return state
 
     @asynccontextmanager
     async def _slot(self, endpoint: str) -> AsyncIterator[None]:

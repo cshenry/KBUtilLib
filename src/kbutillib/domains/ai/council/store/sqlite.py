@@ -1429,11 +1429,17 @@ class SqliteStore:
     ) -> List[Dict[str, Any]]:
         """Why a job with outstanding work is not progressing.
 
-        Each blocker is ``{"kind", "endpoint", "detail"}``.  Three kinds come
-        from three different places, and they are reported INDEPENDENTLY --
+        Each blocker is ``{"kind", "endpoint", "detail"}``.  Four kinds come
+        from four different places, and they are reported INDEPENDENTLY --
         an endpoint can be both halted and unserved, and suppressing either
         fact would send the user to fix the wrong thing:
 
+        * ``unservable`` -- the job was submitted with ``allow_unavailable``
+          against an endpoint this machine could not serve, and it has
+          outstanding calls on it.  Read from the JOB's own ``options``,
+          where submit recorded it: the queue is per machine, so until that
+          endpoint works here the calls wait, and nothing else in the store
+          records why.
         * ``halted`` -- ``endpoint_state`` says the endpoint is halted
           (quota, auth, billing or budget).
         * ``waiting_for_model`` / ``configuration_mismatch`` -- pending calls
@@ -1452,6 +1458,28 @@ class SqliteStore:
             return []
 
         blockers: List[Dict[str, Any]] = []
+
+        # Unservable endpoints, as recorded on the job at submit.  Reported
+        # for EVERY recorded endpoint, not only the ones with calls pending
+        # right now: a roster's critic and meta have no call rows until their
+        # item's proposers have answered, and "the endpoint this job's critic
+        # sits on does not work here" is a blocker from the moment the job is
+        # queued rather than a surprise two rounds later.  (A job with no
+        # outstanding work at all returned above.)
+        unservable = dict((job.get("options") or {}).get("unservable_endpoints") or {})
+        for endpoint in sorted(unservable):
+            blockers.append(
+                {
+                    "kind": "unservable",
+                    "endpoint": endpoint,
+                    "detail": (
+                        f"{unservable[endpoint] or 'unavailable on this machine'} "
+                        "(the job was submitted with allow_unavailable, so its calls "
+                        "wait until this endpoint works here; the queue is per "
+                        "machine, so no other host will pick them up)"
+                    ),
+                }
+            )
 
         # Halts.  One lookup per endpoint rather than one query: the endpoints
         # of a job are its roster's, so this is a handful of rows, and reusing

@@ -219,6 +219,36 @@ def _render(envelope: Dict[str, Any]) -> None:
         )
         return
 
+    if verb in ("daemon start", "daemon stop", "daemon status"):
+        holder = data.get("holder") or {}
+        click.echo(
+            f"store:  {data.get('store')}\nlock:   {data.get('lock')}\n"
+            f"log:    {data.get('log')}"
+        )
+        if holder:
+            click.echo(
+                f"holder: {holder.get('kind')} pid {holder.get('pid')} "
+                f"started {holder.get('started_at')}"
+            )
+        else:
+            click.echo("holder: (none -- no council process is executing)")
+        if data.get("detail"):
+            click.echo(str(data["detail"]))
+        if data.get("passes") is not None:
+            # A --foreground daemon that has finished: this is its own tally,
+            # and it is the only place the interrupted count is reported.
+            click.echo(
+                f"served: {data.get('passes')} pass(es), "
+                f"{data.get('claimed')} claimed, {data.get('finished')} finished, "
+                f"{data.get('interrupted')} interrupted, {data.get('resumes')} resume(s)"
+            )
+        if verb == "daemon status":
+            _rows(
+                data.get("workers") or [],
+                ("worker_id", "kind", "host", "pid", "state", "heartbeat_age_s", "endpoints"),
+            )
+        return
+
     if verb == "endpoints status":
         _rows(
             data.get("endpoints") or [],
@@ -638,6 +668,104 @@ def run_cmd(
     _emit(envelope, as_json=as_json)
     if envelope["data"].get("blockers"):
         raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# daemon
+# ---------------------------------------------------------------------------
+
+
+def _daemon(ctx: click.Context) -> Any:
+    """The :class:`CouncilDaemon` for this invocation's store.
+
+    Through the facade's own factory, so this module still constructs nothing
+    of the council's: ``start``, ``stop`` and ``status`` are three calls on one
+    object and the daemon's clocks stay the library's.
+    """
+    return _ready(ctx).daemon()
+
+
+@council_cmd.group(name="daemon", invoke_without_command=True)
+@click.pass_context
+def daemon_cmd(ctx: click.Context) -> None:
+    """Run ONE long-running worker for this machine's store.
+
+    The daemon drains every job in the store, not one, and holds the store's
+    execution lock for its whole life -- so `kbu council run`, `evaluate` and
+    `db migrate` refuse while it is up, and it refuses while one of them is.
+    With no subcommand this is `daemon status`.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(daemon_status_cmd, as_json=False)
+
+
+@daemon_cmd.command(name="start")
+@click.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help="Run the loop in THIS process (for systemd, launchd, tmux or nohup) "
+    "instead of spawning a detached child.",
+)
+@_json_option
+@click.pass_context
+def daemon_start_cmd(ctx: click.Context, foreground: bool, as_json: bool) -> None:
+    """Start the daemon. Detached by default; --foreground runs it here.
+
+    Exits 1 naming the holder's kind, pid and start time if another council
+    process (a daemon, a `run`, an `evaluate` or a `db migrate`) is already
+    executing against this store.
+    """
+    daemon = _daemon(ctx)
+    try:
+        data = dict(daemon.start(foreground=foreground))
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    data.setdefault("store", daemon.council.store_url())
+    data.setdefault("lock", str(daemon.lock.path))
+    data.setdefault("log", str(daemon.log_path))
+    _emit(_envelope("daemon start", data=data), as_json=as_json)
+
+
+@daemon_cmd.command(name="stop")
+@_json_option
+@click.pass_context
+def daemon_stop_cmd(ctx: click.Context, as_json: bool) -> None:
+    """Stop the daemon holding this store's lock, and wait for it to go.
+
+    Signals only a holder whose recorded kind is `daemon`: a `run` in
+    somebody's terminal and a half-finished `db migrate` are lock holders too,
+    and this verb reports them rather than killing them.
+    """
+    daemon = _daemon(ctx)
+    try:
+        data = dict(daemon.stop())
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+    data.setdefault("store", daemon.council.store_url())
+    data.setdefault("lock", str(daemon.lock.path))
+    data.setdefault("log", str(daemon.log_path))
+    warnings = [] if data.get("stopped") or not data.get("running") else [str(data.get("detail"))]
+    _emit(_envelope("daemon stop", data=data, warnings=warnings), as_json=as_json)
+
+
+@daemon_cmd.command(name="status")
+@_json_option
+@click.pass_context
+def daemon_status_cmd(ctx: click.Context, as_json: bool) -> None:
+    """Who holds this store's execution lock, and what its workers rows say."""
+    daemon = _daemon(ctx)
+    try:
+        data = dict(daemon.status())
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+    warnings = [
+        f"worker {row['worker_id']} is stale (last heartbeat "
+        f"{row.get('heartbeat_age_s')}s ago)"
+        for row in data.get("workers") or []
+        if row.get("state") == "stale"
+    ]
+    _emit(_envelope("daemon status", data=data, warnings=warnings), as_json=as_json)
 
 
 # ---------------------------------------------------------------------------

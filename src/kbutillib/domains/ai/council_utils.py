@@ -337,12 +337,8 @@ class CouncilUtils(SharedEnvUtils):
         Raises:
             LockHeld: another council process is executing against this store.
         """
-        from .council.execlock import ExecutionLock
-
         path = self._store_file()
-        directory = path.parent if path is not None else Path.cwd()
-        lock = ExecutionLock(directory, path)
-        with lock.acquire("migrate"):
+        with self.execution_lock().acquire("migrate"):
             backup = self._backup_store_file(path)
             store = self.store(check_version=False)
             try:
@@ -368,6 +364,75 @@ class CouncilUtils(SharedEnvUtils):
             "migrated": before != version or bool(added),
             "backup": str(backup) if backup is not None else None,
         }
+
+    def execution_lock(self) -> Any:
+        """The :class:`~.council.execlock.ExecutionLock` guarding this store.
+
+        ONE lock object per store, built the same way by every caller, so
+        ``db migrate``, ``run``, ``evaluate`` and the daemon cannot end up
+        excluding each other on three different files.  It lives in the store
+        FILE's own directory -- two stores on one machine do not exclude each
+        other -- and falls back to the current directory for an in-memory
+        store, which has no directory of its own but still must not have two
+        councils executing against it.
+        """
+        from .council.execlock import ExecutionLock
+
+        path = self._store_file()
+        directory = path.parent if path is not None else Path.cwd()
+        return ExecutionLock(directory, path)
+
+    def daemon(self, **kwargs: Any) -> Any:
+        """A :class:`~.council.daemon.CouncilDaemon` over this store.
+
+        The facade's factory for it, so the CLI (and a notebook) do not import
+        the daemon module directly and the daemon does not have to import this
+        one -- it needs ``config()``, ``store_url()``, ``user()``,
+        ``require_schema()``, ``endpoint_api()`` and ``execution_lock()``, and
+        takes them structurally.
+        """
+        from .council.daemon import CouncilDaemon
+
+        return CouncilDaemon(self, **kwargs)
+
+    def endpoint_api(self, endpoint: str, kind: str = "") -> Any:
+        """The api type instance serving ONE endpoint alias, or ``None``.
+
+        :meth:`build_backends` answers the same question for a ROSTER; the
+        daemon's readiness probe asks it per alias, because the routes it
+        keeps probed come from call rows and from several profiles at once
+        rather than from one roster.  Both go through :func:`llm.get_api`, so
+        there is still exactly one place that turns a ``kind`` into a client.
+
+        ``None`` rather than a raise for an endpoint this installation cannot
+        build: the probe's answer for that is ``unknown`` ("there is nothing
+        to ask it"), and an exception out of a readiness check would take the
+        daemon down over a config entry it was never going to use.
+
+        Args:
+            endpoint: the alias.
+            kind: the api type to use when the configuration does not declare
+                this endpoint at all -- which is the case for an endpoint that
+                only exists on an old call row, whose ``endpoint_kind`` column
+                is then the only thing that knows what it was.
+        """
+        config = self.config()
+        try:
+            mapping = self._endpoint_mapping(endpoint, config, self.allow_unverified)
+        except Exception:  # noqa: BLE001 - not a configured endpoint
+            mapping = {"name": endpoint, "allow_unverified": bool(self.allow_unverified)}
+        if not mapping.get("kind"):
+            mapping["kind"] = kind
+        if not mapping.get("kind"):
+            return None
+        try:
+            return llm.get_api(str(mapping["kind"]), mapping)
+        except Exception as exc:  # noqa: BLE001 - an unknown kind is not fatal
+            self.log_debug(
+                f"council: no api type for endpoint {endpoint!r} "
+                f"(kind {mapping.get('kind')!r}): {exc}"
+            )
+            return None
 
     def _store_file(self) -> Optional[Path]:
         """The store's path on disk, or None when there is not one.
@@ -845,8 +910,15 @@ class CouncilUtils(SharedEnvUtils):
         )
         backends = self.build_backends(roster, allow_unverified=unverified)
         try:
-            worker = self._worker(store, backends, unverified, **worker_kwargs)
-            summary = await worker.work(job_id=job_id, until_idle=True)
+            # The EXECUTION LOCK, held for the worker's whole lifetime (review
+            # round 3).  A foreground run beside a daemon would have two
+            # workers claiming out of one queue, and `kbu council run` is
+            # exactly what somebody types when they are wondering why the
+            # daemon is slow -- so it refuses, naming the holder's pid and
+            # kind, rather than quietly doubling the claim rate.
+            with self.execution_lock().acquire("run"):
+                worker = self._worker(store, backends, unverified, **worker_kwargs)
+                summary = await worker.work(job_id=job_id, until_idle=True)
         finally:
             await self._aclose_backends(backends)
         status = dict(store.job_status(job_id))
@@ -882,16 +954,19 @@ class CouncilUtils(SharedEnvUtils):
         roster = self.roster(profile, **seat_overrides)
         backends = self.build_backends(roster, allow_unverified=unverified)
         try:
-            return await aevaluate(
-                tasks[0],
-                spec,
-                roster,
-                store,
-                backends,
-                user=self.user(),
-                config=self.config(),
-                allow_unverified=unverified,
-            )
+            # Same lock, same reason (review round 3): evaluate() is a
+            # one-item job worked to idle, i.e. a worker on the same queue.
+            with self.execution_lock().acquire("evaluate"):
+                return await aevaluate(
+                    tasks[0],
+                    spec,
+                    roster,
+                    store,
+                    backends,
+                    user=self.user(),
+                    config=self.config(),
+                    allow_unverified=unverified,
+                )
         finally:
             await self._aclose_backends(backends)
 

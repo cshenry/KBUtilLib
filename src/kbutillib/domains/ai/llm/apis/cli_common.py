@@ -158,6 +158,8 @@ __all__ = [
     "billing_preflight",
     "classify_failure",
     "dropped_billing_vars",
+    "kill_cli_children",
+    "live_cli_children",
     "run_cli",
     "strip_fences",
 ]
@@ -633,6 +635,46 @@ async def _reap(proc: Any, timeout: float) -> bool:
     return True
 
 
+#: Every CLI child this process has spawned and not yet reaped, keyed by pid
+#: (which is also its process-group id, because :func:`run_cli` spawns with
+#: ``start_new_session=True``).
+#:
+#: It exists for ONE caller: the council daemon's stop deadline, which has to
+#: kill and reap whatever is still running when the drain window expires.
+#: ``asyncio`` cancellation alone cannot do that -- cancelling the task that
+#: awaits ``proc.communicate()`` abandons the child, and a Claude or Codex
+#: child abandoned mid-answer keeps its node runtime, its MCP servers and its
+#: subscription slot. Process-global because the children are the PROCESS's,
+#: not any one event loop's.
+_LIVE_CHILDREN: "Dict[int, Any]" = {}
+
+
+def live_cli_children() -> List[Any]:
+    """Every CLI child process this process has spawned and not yet reaped."""
+    return list(_LIVE_CHILDREN.values())
+
+
+async def kill_cli_children() -> int:
+    """Kill and reap every live CLI child's process GROUP.  Returns how many.
+
+    The council daemon's last act before it releases the execution lock: a
+    child still talking to a subscription when the drain deadline expires is
+    spending against that subscription for an answer nobody will read, and
+    ``SIGTERM`` to the daemon does not reach a child in its own session.
+
+    Reaping matters as much as killing. An unreaped child becomes a zombie
+    held by a process that is about to exit, and on a machine where the
+    daemon is restarted in a loop that accumulates.
+    """
+    killed = 0
+    for proc in list(_LIVE_CHILDREN.values()):
+        if proc.returncode is not None:
+            continue
+        await _kill_group(proc)
+        killed += 1
+    return killed
+
+
 async def _kill_group(proc: Any) -> None:
     """Kill the child's whole process group: ``SIGTERM``, then ``SIGKILL``.
 
@@ -713,17 +755,29 @@ async def run_cli(
             env=dict(env),
             start_new_session=True,
         )
+        _LIVE_CHILDREN[proc.pid] = proc
         try:
-            out, err = await asyncio.wait_for(
-                proc.communicate(str(stdin_text or "").encode("utf-8")),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            await _kill_group(proc)
-            raise CallTimeout(
-                f"{Path(command[0]).name}: no answer within {timeout_s:g}s "
-                "(process group killed)"
-            ) from None
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(str(stdin_text or "").encode("utf-8")),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                await _kill_group(proc)
+                raise CallTimeout(
+                    f"{Path(command[0]).name}: no answer within {timeout_s:g}s "
+                    "(process group killed)"
+                ) from None
+            except asyncio.CancelledError:
+                # The awaiting task was cancelled -- the council daemon's stop
+                # deadline, or a caller's timeout. Cancellation unwinds THIS
+                # coroutine; it does nothing to the child, which would carry
+                # on answering (and spending) with nobody listening. Kill its
+                # group before letting the cancellation through.
+                await _kill_group(proc)
+                raise
+        finally:
+            _LIVE_CHILDREN.pop(proc.pid, None)
 
         if collect is not None:
             collect(cwd)

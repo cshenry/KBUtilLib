@@ -119,6 +119,7 @@ __all__ = [
     "endpoint_key",
     "generation_params",
     "get_api",
+    "kill_cli_children",
     "models",
     "models_api",
     "preflight",
@@ -416,6 +417,28 @@ async def models_api(api: Any) -> List[Dict[str, Any]]:
         return []
     listing = await lister()
     return [dict(entry) for entry in (listing or []) if isinstance(entry, Mapping)]
+
+
+async def kill_cli_children() -> int:
+    """Kill and reap every CLI child process this PROCESS still has running.
+
+    Returns how many were killed.
+
+    The one operation that is about the wrapper's children rather than about
+    its clients, and it exists for the council daemon's stop deadline: a CLI
+    api type's child runs in a session of its own, so cancelling the task that
+    awaits it unwinds the coroutine and leaves the child answering (and
+    spending against a subscription) with nobody listening. Published here
+    because ``llm`` is the ONE public wrapper every model call goes through --
+    a caller that had to import ``llm.apis.cli_common`` to tidy up would be
+    reaching past it.
+
+    Safe to call when there are none, and safe to call for an installation
+    whose only endpoints are HTTP: it returns 0.
+    """
+    from .apis.cli_common import kill_cli_children as _kill_cli_children
+
+    return int(await _kill_cli_children())
 
 
 async def aclose_all() -> None:

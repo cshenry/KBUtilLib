@@ -1284,6 +1284,30 @@ class SqliteStore:
             )
         return call
 
+    def next_attempt_no(self, call_id: str) -> int:
+        """The lowest ``attempts.attempt_no`` not yet used for *call_id*.
+
+        ``attempts`` is keyed ``(call_id, attempt_no)`` and the engine derives
+        that number from ``calls.attempt_count`` -- which is correct for every
+        outcome that charges the call an attempt.  The council daemon's stop
+        deadline records an ``interrupted`` attempt WITHOUT charging one
+        (review round 3: a daemon being stopped is not the call's fault), so
+        it has no number of its own to file the row under, and reusing
+        ``attempt_count + 1`` would collide with the attempt the call's next
+        real try is going to write.
+
+        NOT part of the :class:`~..protocols.CouncilStore` contract: it is a
+        convenience over a table the contract already owns, and the one caller
+        falls back to ``attempt_count + 1`` for a store that lacks it.
+        """
+        with self._read() as conn:
+            highest = conn.execute(
+                sa.select(sa.func.max(sch.attempts.c.attempt_no)).where(
+                    sch.attempts.c.call_id == call_id
+                )
+            ).scalar()
+        return int(highest or 0) + 1
+
     def record_attempt(
         self,
         call_id: str,

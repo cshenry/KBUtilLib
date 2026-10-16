@@ -249,6 +249,17 @@ class ExecutionLock:
             "lock": str(self.path),
         }
 
+    def held_message(self, wanted: str, holder: Optional[Dict[str, Any]] = None) -> str:
+        """The refusal :meth:`acquire` would raise, for a caller that PROBED.
+
+        The council daemon's ``start`` probes before it spawns a child, so
+        that "something else is already running" is reported by the command
+        the user typed rather than by a detached child in a log file.  It
+        needs the same wording :meth:`acquire` raises -- two texts for one
+        refusal is how a user ends up reading the less helpful one.
+        """
+        return self._held_message(wanted, self.probe() if holder is None else holder)
+
     def _held_message(self, wanted: str, holder: Optional[Dict[str, Any]]) -> str:
         who = "another council process"
         if holder:

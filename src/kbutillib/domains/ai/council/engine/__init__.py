@@ -4,6 +4,9 @@ Two modules, split along the line between deciding and doing:
 
 * :mod:`.decide` -- ``decide()``, the pure adjudication rule.  No I/O, no
   backend, no store, no clock it does not take as an argument.
+* :mod:`.normalise` -- ``normalise()``, the two measured answer repairs the
+  worker applies before the answer-schema gate.  Pure, and typed by the
+  role's schema rather than by any domain's field names.
 * :mod:`.worker` -- ``CouncilWorker``, which submits jobs, claims call rows,
   runs them through the submitting user's own backends, and advances each
   item proposers -> critic -> meta -> verdict by asking ``decide()`` what the
@@ -16,7 +19,15 @@ registry is imported inside the one method that needs it.
 
 from __future__ import annotations
 
-from .decide import APPROVING_VERDICTS, SettledCall, critic_approves, decide, tally
+from .decide import (
+    APPROVING_VERDICTS,
+    SettledCall,
+    content_flag,
+    critic_approves,
+    decide,
+    tally,
+)
+from .normalise import normalise
 from .worker import CouncilWorker, aevaluate, evaluate
 
 __all__ = [
@@ -24,6 +35,8 @@ __all__ = [
     "critic_approves",
     "SettledCall",
     "APPROVING_VERDICTS",
+    "content_flag",
+    "normalise",
     "tally",
     "CouncilWorker",
     "evaluate",

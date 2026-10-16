@@ -326,17 +326,50 @@ class SqliteStore:
         """Bring the database up to :data:`.schema.SCHEMA_VERSION`.
 
         At version 1 there is nothing to migrate from, so this is
-        ``init_schema()`` for an unstamped database and a no-op for a current
-        one.  A database stamped NEWER than this code is refused: downgrading
-        would silently drop columns a newer council wrote.
+        ``init_schema()`` for an unstamped database and, for a current one,
+        just :meth:`add_missing_columns`.  A database stamped NEWER than this
+        code is refused: downgrading would silently drop columns a newer
+        council wrote.
         """
         current = self.schema_version()
         if current == 0:
             self.init_schema()
             return sch.SCHEMA_VERSION
         if current == sch.SCHEMA_VERSION:
+            self.add_missing_columns()
             return current
         raise _version_mismatch(current)
+
+    def add_missing_columns(self) -> List[str]:
+        """Add any of :data:`.schema.ADDITIVE_COLUMNS` this store lacks.
+
+        A store created by an earlier build of the SAME schema version has
+        every table and the right stamp but is missing a column added later
+        (``calls.normalised``).  ``metadata.create_all`` will not add a column
+        to an existing table, and the version stamp is not wrong, so the
+        version check cannot catch it -- hence this.
+
+        Every column in that list is nullable with no default, and the code
+        that reads it treats NULL as "nothing to say", so adding one is safe
+        on a live file and changes no existing row.  Idempotent; returns the
+        columns it added, which is what ``kbu council db migrate`` reports.
+        """
+        inspector = sa.inspect(self._engine)
+        added: List[str] = []
+        for table_name, column_name in sch.ADDITIVE_COLUMNS:
+            if not inspector.has_table(table_name):
+                continue
+            present = {col["name"] for col in inspector.get_columns(table_name)}
+            if column_name in present:
+                continue
+            column = sch.metadata.tables[table_name].c[column_name]
+            ddl = column.type.compile(self._engine.dialect)
+            with self.transaction() as conn:
+                conn.execute(
+                    sa.text(f'ALTER TABLE {table_name} ADD COLUMN "{column_name}" {ddl}')
+                )
+            added.append(f"{table_name}.{column_name}")
+        return added
 
     def _assert_schema_version(self) -> None:
         current = self.schema_version()
@@ -1192,13 +1225,22 @@ class SqliteStore:
         fresh_usage: Optional[Mapping[str, Any]] = None,
         error: Optional[Mapping[str, Any]] = None,
         reused_from: Optional[str] = None,
+        normalised: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         """Record a claimed call's outcome.
 
-        ``reply_parsed`` is the ORIGINAL schema-valid reply, before
-        postprocessing or menu filtering: the post-processed shape would be
-        useless to a later query-type version that maps the same answer
-        differently, and the reply is the thing that was paid for.
+        ``reply_parsed`` is the schema-valid reply in the query type's OWN
+        field names, before postprocessing or menu filtering: the
+        post-processed shape would be useless to a later query-type version
+        that maps the same answer differently, and the reply is the thing
+        that was paid for.
+
+        ``normalised`` is the repair record ``engine/normalise.py`` produced
+        for that reply, or ``None``/empty when the model answered in the
+        shape its role's schema asked for.  When it is non-empty,
+        ``reply_parsed`` is the REPAIRED answer -- the one the council read --
+        and ``reply_text`` is still the untouched original, so the pair plus
+        this record holds both.
 
         Raises:
             StaleClaim: the row was reclaimed and re-handed out (its token
@@ -1223,6 +1265,9 @@ class SqliteStore:
                     status=status,
                     reply_text=reply_text,
                     reply_parsed=_jsonify(reply_parsed),
+                    normalised=_jsonify(
+                        [dict(entry) for entry in normalised] if normalised else None
+                    ),
                     fresh_usage=_jsonify(fresh_usage),
                     error=_jsonify(error),
                     reused_from=reused_from,

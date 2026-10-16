@@ -36,6 +36,7 @@ import sqlalchemy as sa
 
 __all__ = [
     "SCHEMA_VERSION",
+    "ADDITIVE_COLUMNS",
     "UtcDateTime",
     "metadata",
     "schema_version",
@@ -57,6 +58,14 @@ __all__ = [
 #: Version of this schema.  Bumped only by a migration; a store file carrying
 #: a different number refuses to open (see ``SqliteStore.__init__``).
 SCHEMA_VERSION = 1
+
+#: Columns added to this schema AFTER stores had been created at the same
+#: SCHEMA_VERSION.  Each is nullable with no default and is written by code
+#: that treats its absence as "nothing to say", so adding one cannot change
+#: the meaning of an existing row -- which is why it does not need a version
+#: bump.  ``SqliteStore.migrate()`` adds any that a store is missing; nothing
+#: else in the store layer may use this list to skip a real migration.
+ADDITIVE_COLUMNS = (("calls", "normalised"),)
 
 
 class UtcDateTime(sa.types.TypeDecorator):
@@ -232,6 +241,12 @@ calls = sa.Table(
     # Storing the post-processed shape instead would make the row useless to a
     # later query-type version that maps the same answer differently.
     sa.Column("reply_parsed", sa.JSON, nullable=True),
+    # What ``engine/normalise.py`` repaired in that reply before the answer
+    # schema saw it: ``[{"field", "rule", "original", "value"}, ...]``, or
+    # NULL when the model answered in the shape its query type asked for.
+    # ``reply_text`` above is the untouched original either way, so the two
+    # columns together hold both what the model said and what was read.
+    sa.Column("normalised", sa.JSON, nullable=True),
     sa.Column("fresh_usage", sa.JSON, nullable=True),
     sa.Column("error", sa.JSON, nullable=True),
     sa.Column("reused_from", _ID, nullable=True),

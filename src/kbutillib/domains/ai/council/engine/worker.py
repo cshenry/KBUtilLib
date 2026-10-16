@@ -19,10 +19,11 @@ and stop when the scope is idle or everything left is blocked.
 ways not to: the route fingerprint must match this worker's own
 configuration, an identical question answered by ANY user is reused, and two
 identical questions in flight at once collapse into one call.  After spending
-it validates the answer, records the attempt, counts the tokens, enforces the
-endpoint's budget, and routes a typed failure to the one of five outcomes it
-belongs to (retry with backoff, halt the endpoint, wait for a model, fail the
-call, or settle it).
+it normalises the answer (:mod:`.normalise` -- two measured reply defects,
+repaired and recorded), validates it, records the attempt, counts the tokens,
+enforces the endpoint's budget, and routes a typed failure to the one of five
+outcomes it belongs to (retry with backoff, halt the endpoint, wait for a
+model, fail the call, or settle it).
 
 **advance** asks ``decide()`` what the item needs and does exactly that: add
 the critic call, add the meta call, settle the verdict, or nothing.
@@ -84,6 +85,7 @@ from ..types import (
     seat_generation_params,
 )
 from .decide import SettledCall, decide, tally
+from .normalise import normalise
 
 __all__ = ["CouncilWorker", "aevaluate", "evaluate", "renderer_id_version"]
 
@@ -870,7 +872,9 @@ class CouncilWorker:
         if hash_key:
             reusable = self.store.find_reusable(hash_key)
             if reusable is not None and reusable["call_id"] != call["call_id"]:
-                return self._settle_reused(call, token, reusable)
+                return self._settle_reused(
+                    call, token, reusable, query=query, roster=roster, role=role
+                )
 
         # 3. Is an identical question in flight right now, in this worker?
         leader = False
@@ -878,7 +882,9 @@ class CouncilWorker:
         if future is not None:
             source = await asyncio.shield(future)
             if source is not None:
-                return self._settle_reused(call, token, source)
+                return self._settle_reused(
+                    call, token, source, query=query, roster=roster, role=role
+                )
             # The leader failed; ask for ourselves rather than inherit it.
         elif hash_key:
             future = asyncio.get_running_loop().create_future()
@@ -963,7 +969,12 @@ class CouncilWorker:
                     finished,
                     result,
                 )
-            complaint = _validate_answer(result.parsed, schema)
+            # Two measured reply defects are repaired BEFORE the gate (see
+            # engine/normalise.py).  The context is the one already built for
+            # the prompt, so the flag a meta reply omitted is derived from
+            # exactly the vote table and critic audit that meta was shown.
+            parsed, repairs = normalise(role, result.parsed, schema, context)
+            complaint = _validate_answer(parsed, schema)
             if complaint is not None:
                 return self._fail_call(
                     call,
@@ -973,7 +984,9 @@ class CouncilWorker:
                     finished,
                     result,
                 )
-            return self._settle_ok(call, token, result, started, finished)
+            return self._settle_ok(
+                call, token, result, started, finished, parsed, repairs
+            )
 
         error = result.error or CouncilError(
             kind="transport", message="the backend reported failure with no error"
@@ -1009,8 +1022,17 @@ class CouncilWorker:
         result: Any,
         started: datetime,
         finished: datetime,
+        parsed: Optional[Any] = None,
+        repairs: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> str:
-        """Record a good answer, its tokens, its budget and its consequence."""
+        """Record a good answer, its tokens, its budget and its consequence.
+
+        *parsed* is the answer AFTER :func:`~.normalise.normalise` and
+        *repairs* is what it changed.  The repaired answer is what gets
+        stored, because it is the answer the council read; ``reply_text``
+        keeps the model's untouched original, and *repairs* records every
+        difference between the two.
+        """
         usage = dict(result.usage) if result.usage is not None else None
         endpoint = str(call["endpoint"])
         try:
@@ -1020,9 +1042,10 @@ class CouncilWorker:
                     token,
                     "ok",
                     reply_text=result.text,
-                    reply_parsed=result.parsed,
+                    reply_parsed=parsed if parsed is not None else result.parsed,
                     fresh_usage=usage,
                     error=None,
+                    normalised=list(repairs or ()) or None,
                 )
                 self._record_attempt(call, started, finished, "ok", usage)
                 spent = _token_total(usage)
@@ -1039,9 +1062,35 @@ class CouncilWorker:
         call: Mapping[str, Any],
         token: Optional[str],
         source: Mapping[str, Any],
+        *,
+        query: Any,
+        roster: Roster,
+        role: str,
     ) -> str:
-        """Settle a call from somebody else's identical, already-paid answer."""
+        """Settle a call from somebody else's identical, already-paid answer.
+
+        ``normalise`` is re-applied to the reused reply, so a reused answer
+        is repaired identically to a fresh one.  It is not merely copied,
+        because a reuse source may predate normalisation -- a row written by
+        an earlier build holds the raw reply, and inheriting it would give
+        this call an answer its own schema would have refused.  Re-applying
+        is safe either way: ``normalise`` is idempotent, so a source that has
+        already been through it is repaired by nothing and reports nothing,
+        and the source's OWN record is then carried across so that both calls
+        say the same thing about the same answer.
+        """
         started = _utcnow()
+        parsed = source.get("reply_parsed")
+        repairs: List[Mapping[str, Any]] = []
+        if isinstance(parsed, Mapping):
+            parsed, repairs = normalise(
+                role,
+                dict(parsed),
+                query.answer_schema(role),
+                self._context_for(role, call, query, roster),
+            )
+        if not repairs:
+            repairs = [dict(entry) for entry in (source.get("normalised") or ())]
         try:
             with self.store.transaction():
                 self.store.complete_call(
@@ -1049,10 +1098,11 @@ class CouncilWorker:
                     token,
                     "ok",
                     reply_text=source.get("reply_text"),
-                    reply_parsed=source.get("reply_parsed"),
+                    reply_parsed=parsed,
                     fresh_usage=dict(ZERO_USAGE),
                     error=None,
                     reused_from=source["call_id"],
+                    normalised=list(repairs) or None,
                 )
                 self._record_attempt(
                     call, started, _utcnow(), "reused", dict(ZERO_USAGE)

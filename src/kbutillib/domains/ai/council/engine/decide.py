@@ -59,6 +59,7 @@ from ..types import (
 __all__ = [
     "APPROVING_VERDICTS",
     "SettledCall",
+    "content_flag",
     "decide",
     "critic_approves",
     "tally",
@@ -79,6 +80,12 @@ class SettledCall(BaseModel):
     ``parsed`` is the POSTPROCESSED, generic-shaped reply (``picked`` /
     ``verdict`` / ``final_ids``), not the original the store holds: the rule
     is domain-neutral, and the rename is the query type's job.
+
+    ``normalised`` is what :mod:`.normalise` repaired in this seat's reply
+    before the answer schema saw it.  The rule does not read it -- the reply
+    it reads is already repaired -- but it travels with the call so the
+    verdict can say which seats were repaired and how, rather than leaving
+    that only in the store row nobody re-reads.
     """
 
     role: str
@@ -89,6 +96,7 @@ class SettledCall(BaseModel):
     error: Optional[CouncilError] = None
     usage: Optional[Dict[str, Any]] = None
     reused: bool = False
+    normalised: List[Dict[str, Any]] = []
 
     @classmethod
     def from_call_row(cls, row: Mapping[str, Any], query: Any) -> "SettledCall":
@@ -129,6 +137,7 @@ class SettledCall(BaseModel):
             error=error,
             usage=dict(row.get("fresh_usage") or {}) or None,
             reused=bool(row.get("reused_from")),
+            normalised=[dict(entry) for entry in (row.get("normalised") or ())],
         )
 
 
@@ -295,13 +304,18 @@ def decide(
 
     n_proposers = len(roster.proposers)
     ballots, votes, errors, usage = tally(task, roster, aligned)
+    repairs: Dict[str, List[Dict[str, Any]]] = {}
+    for seat, call in zip(roster.proposers, aligned):
+        _record_repairs(repairs, seat.seat_name, call)
 
     # 3. One failed proposer fails the item.  No critic, no meta: auditing a
     #    vote table that is missing a seat would audit a different council.
     if any(ballot.status != "ok" for ballot in ballots):
         return (
             "verdict",
-            _error_verdict(base, ballots, votes, n_proposers, errors, usage),
+            _error_verdict(
+                base, ballots, votes, n_proposers, errors, usage, repairs=repairs
+            ),
         )
 
     # 4. Every proposer is a valid vote.
@@ -311,6 +325,7 @@ def decide(
     if critic_call is None:
         return ("need_critic", None)
     _record_usage(usage, roster.critic.seat_name, critic_call)
+    _record_repairs(repairs, roster.critic.seat_name, critic_call)
     if critic_call.status != "ok" or not isinstance(critic_call.parsed, Mapping):
         error = critic_call.error or CouncilError(
             kind="invalid_output", message="the critic returned no usable answer"
@@ -318,7 +333,9 @@ def decide(
         errors.append(_error_entry("critic", roster.critic.seat_name, error))
         return (
             "verdict",
-            _error_verdict(base, ballots, votes, n_valid, errors, usage),
+            _error_verdict(
+                base, ballots, votes, n_valid, errors, usage, repairs=repairs
+            ),
         )
     critic = dict(critic_call.parsed)
     approved = critic_approves(critic)
@@ -329,7 +346,7 @@ def decide(
     unanimous = not votes or all(count == n_valid for count in votes.values())
     if approved and unanimous:
         selected = [mid for mid in menu_ids if votes.get(mid)]
-        contentless = _content_flag(ballots, n_proposers, critic)
+        contentless = content_flag(ballots, n_proposers, critic)
         return (
             "verdict",
             CouncilVerdict(
@@ -346,6 +363,8 @@ def decide(
                 meta_skipped=True,
                 errors=errors,
                 usage=usage,
+                normalised=bool(repairs),
+                repairs=repairs,
                 **base,
             ),
         )
@@ -354,6 +373,7 @@ def decide(
     if meta_call is None:
         return ("need_meta", None)
     _record_usage(usage, roster.meta.seat_name, meta_call)
+    _record_repairs(repairs, roster.meta.seat_name, meta_call)
     if meta_call.status != "ok" or not isinstance(meta_call.parsed, Mapping):
         error = meta_call.error or CouncilError(
             kind="invalid_output", message="meta returned no usable answer"
@@ -362,7 +382,14 @@ def decide(
         return (
             "verdict",
             _error_verdict(
-                base, ballots, votes, n_valid, errors, usage, meta_skipped=False
+                base,
+                ballots,
+                votes,
+                n_valid,
+                errors,
+                usage,
+                meta_skipped=False,
+                repairs=repairs,
             ),
         )
     meta = dict(meta_call.parsed)
@@ -400,6 +427,8 @@ def decide(
             meta_skipped=False,
             errors=errors,
             usage=usage,
+            normalised=bool(repairs),
+            repairs=repairs,
             **base,
         ),
     )
@@ -477,8 +506,8 @@ def _proposer_shape_error(call: SettledCall) -> Optional[CouncilError]:
     return None
 
 
-def _content_flag(
-    ballots: Sequence[Ballot], n_proposers: int, critic: Mapping[str, Any]
+def content_flag(
+    ballots: Sequence[Any], n_proposers: int, critic: Mapping[str, Any]
 ) -> bool:
     """The skip path's "the input states no function" decision.
 
@@ -486,13 +515,30 @@ def _content_flag(
     vote table does not enter it: an item every proposer declined because the
     string says nothing is contentless whether or not anything was picked,
     and an item with picks is not contentless however the flags fell.
+
+    Public because :mod:`.normalise` needs exactly this rule to supply a meta
+    reply that omitted the flag on an item that selected nothing: deriving it
+    there by a second, slightly different majority would mean the council
+    decided with one content rule and repaired with another.  One
+    computation, two consumers -- the same reason :func:`tally` is public.
+
+    *ballots* may be :class:`~..types.Ballot` objects or the mappings a
+    stored verdict holds, since the second consumer reads them back off a
+    rendering context rather than out of :func:`tally`.
     """
-    flagged = sum(1 for ballot in ballots if ballot.no_functional_content)
+    flagged = sum(1 for ballot in ballots if _ballot_flag(ballot))
     if 2 * flagged > n_proposers:
         return True
     if 2 * flagged < n_proposers:
         return False
     return bool(critic.get("contentless_input"))
+
+
+def _ballot_flag(ballot: Any) -> bool:
+    """One ballot's content flag, from a :class:`Ballot` or a mapping."""
+    if isinstance(ballot, Mapping):
+        return bool(ballot.get("no_functional_content"))
+    return bool(getattr(ballot, "no_functional_content", False))
 
 
 def _decline_reason(selected: Sequence[str], contentless: bool) -> Optional[str]:
@@ -523,6 +569,18 @@ def _record_usage(
     }
 
 
+def _record_repairs(
+    repairs: Dict[str, List[Dict[str, Any]]], seat_name: str, call: Optional[SettledCall]
+) -> None:
+    """Record one seat's answer repairs, if :mod:`.normalise` made any.
+
+    A seat that needed none is absent rather than present-and-empty, so
+    ``verdict.repairs`` lists exactly the seats whose reply was repaired.
+    """
+    if call is not None and call.normalised:
+        repairs[seat_name] = [dict(entry) for entry in call.normalised]
+
+
 def _error_verdict(
     base: Mapping[str, Any],
     ballots: Sequence[Ballot],
@@ -531,6 +589,7 @@ def _error_verdict(
     errors: Sequence[Mapping[str, Any]],
     usage: Mapping[str, Mapping[str, Any]],
     meta_skipped: bool = True,
+    repairs: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
 ) -> CouncilVerdict:
     """The verdict for an item a stage failed on.
 
@@ -552,5 +611,10 @@ def _error_verdict(
         meta_skipped=meta_skipped,
         errors=[dict(entry) for entry in errors],
         usage={k: dict(v) for k, v in usage.items()},
+        normalised=bool(repairs),
+        repairs={
+            seat: [dict(entry) for entry in entries]
+            for seat, entries in dict(repairs or {}).items()
+        },
         **dict(base),
     )

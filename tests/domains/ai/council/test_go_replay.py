@@ -19,17 +19,19 @@ everything else standing.
 
 No network call, no token, no CLI login, no GPU.
 
-THE EXPECTED OUTCOME IS NOT 10/10, AND THAT IS THE POINT
-========================================================
-Seven of the ten rows reproduce V3 exactly. Three (1250, 1711, 2029) do not,
-because ``claudeopus45`` omitted the required ``no_functional_content`` from
-those meta replies and ``go_mf@1``'s answer schema -- which Jose's V3 runner
-did not have, and this worker enforces -- refuses them. The decision RULE
-agrees on all ten.
+ALL TEN ROWS REPRODUCE V3 -- THREE OF THEM ONLY BECAUSE OF NORMALISATION
+========================================================================
+Seven rows reproduce V3 with nothing repaired. Three (1250, 1711, 2029) do so
+only because ``engine/normalise.py`` supplies the ``no_functional_content``
+that ``claudeopus45`` omitted from those meta replies, derived from each
+reply's own non-empty final id list. Before that repair existed the worker
+refused all three on ``go_mf@1``'s answer schema -- which Jose's V3 runner did
+not have, and this worker enforces -- and the offline figure was 7/10.
 
-Both numbers are pinned below. Pinning only the agreeing seven would let a
-regression that broke the schema gate pass unnoticed, and pinning 10/10
-would require pretending the three rows are fine.
+Both facts are pinned below, separately: the ten agreements, and that exactly
+three of them carry a ``derived_content_flag`` repair while the RECORDED reply
+is still schema-invalid on its own. Pinning only the agreements would let a
+regression that quietly widened normalisation pass unnoticed.
 """
 
 from __future__ import annotations
@@ -76,12 +78,13 @@ replay_script = _load_replay_script()
 #: The ten fixture rows, by the fixed selection rule recorded in the manifest.
 EXPECTED_IDS = ["148", "293", "631", "789", "1250", "1402", "1465", "1497", "1711", "2029"]
 
-#: Rows that reproduce V3 end to end, through the worker.
-EXPECTED_AGREE = ["148", "293", "631", "789", "1402", "1465", "1497"]
+#: Rows that reproduce V3 end to end, through the worker: all of them.
+EXPECTED_AGREE = EXPECTED_IDS
 
-#: Rows the worker refuses because the RECORDED reply fails ``go_mf@1``'s
-#: answer schema -- a defect in the transcript, not in the decision.
-EXPECTED_SCHEMA_GATE = ["1250", "1711", "2029"]
+#: Rows whose RECORDED reply fails ``go_mf@1``'s answer schema and which
+#: reproduce V3 only because ``normalise()`` repairs it first. The defect is
+#: in the transcript; the repair is what lets the decision through.
+EXPECTED_NORMALISED = ["1250", "1711", "2029"]
 
 
 @pytest.fixture(scope="module")
@@ -211,8 +214,11 @@ class TestTheReplayReproducesV3:
         assert picked == {
             "631": ["GO:0004332"],
             "789": ["GO:0046583"],
+            "1250": ["GO:0008745"],
             "1402": ["GO:0004671"],
             "1497": ["GO:0015426"],
+            "1711": ["GO:0090585"],
+            "2029": ["GO:0000400"],
         }
 
     def test_both_decline_reasons_are_reproduced(self, replayed: Any) -> None:
@@ -232,34 +238,63 @@ class TestTheReplayReproducesV3:
             assert row["recorded"]["meta_skipped"] == row["observed"]["meta_skipped"]
 
 
-class TestTheSchemaGateRows:
-    """The three rows that do NOT reproduce V3, and exactly why."""
+class TestTheNormalisedRows:
+    """The three rows that reproduce V3 only after a repair, and exactly why."""
 
-    def test_they_fail_and_are_not_excused(self, replayed: Any) -> None:
+    def test_nothing_fails_and_nothing_is_excused(self, replayed: Any) -> None:
         comparison, _verdicts = replayed
         failing = [
             row["item_id"]
             for row in comparison
             if not row["agrees"] and not row["expected_difference_classes"]
         ]
-        assert failing == EXPECTED_SCHEMA_GATE
+        assert failing == []
 
-    def test_each_one_fails_on_the_meta_answer_schema(self, replayed: Any) -> None:
-        """The cause is pinned, so a DIFFERENT failure cannot hide here."""
+    def test_exactly_these_rows_carry_a_repair(self, replayed: Any) -> None:
+        """Pinned so a widened rule shows up as a changed set, not a pass."""
         _comparison, verdicts = replayed
-        for item_id in EXPECTED_SCHEMA_GATE:
+        repaired = {
+            item_id: verdict.repairs
+            for item_id, verdict in verdicts.items()
+            if verdict.normalised
+        }
+        assert sorted(repaired, key=int) == EXPECTED_NORMALISED
+        for item_id in EXPECTED_NORMALISED:
+            assert list(repaired[item_id]) == ["meta"], item_id
+            assert repaired[item_id]["meta"] == [
+                {
+                    "field": "no_functional_content",
+                    "rule": "derived_content_flag",
+                    "original": None,
+                    "value": False,
+                }
+            ], item_id
+
+    def test_each_repaired_row_is_decided_by_meta_and_errors_on_nothing(
+        self, replayed: Any
+    ) -> None:
+        """The cause is pinned, so a DIFFERENT outcome cannot hide here."""
+        _comparison, verdicts = replayed
+        for item_id in EXPECTED_NORMALISED:
             verdict = verdicts[item_id]
-            assert verdict.status == "error"
-            notes = replay_script.failure_notes(verdict)
-            assert len(notes) == 1, notes
-            assert "meta/meta: invalid_output" in notes[0]
-            assert "'no_functional_content' is a required property" in notes[0]
+            assert verdict.status == "ok"
+            assert verdict.decided_by == "meta"
+            assert replay_script.failure_notes(verdict) == []
+            # The flag the model omitted is False, and the ids it named stand.
+            assert verdict.meta["no_functional_content"] is False
+            assert verdict.selected_ids
 
     def test_the_recorded_reply_really_is_schema_invalid(
         self, fixture_rows: List[Dict[str, Any]], tmp_path: Path
     ) -> None:
         """Independently of the replay: the transcript, versus the shipped
-        schema."""
+        schema.
+
+        ``schema_complaint`` validates the RAW recorded reply, with no
+        normalisation, which is what keeps this a statement about the
+        transcript: the reply really is invalid, and the repair is why the
+        row goes through anyway.
+        """
         from kbutillib.domains.ai.council.queries import QueryRegistry
         from kbutillib.domains.ai.council.store import open_store
 
@@ -270,7 +305,7 @@ class TestTheSchemaGateRows:
         query = registry.get("go_mf")
 
         by_id = {str(r["result"]["input_id"]): r for r in fixture_rows}
-        for item_id in EXPECTED_SCHEMA_GATE:
+        for item_id in EXPECTED_NORMALISED:
             row = by_id[item_id]
             complaints = replay_script.schema_complaint(
                 row["input"], row["result"], query
@@ -293,10 +328,11 @@ class TestTheSchemaGateRows:
     ) -> None:
         """With the schema gate as the only variable, parity is 10/10.
 
-        This is the measurement that makes the three failures diagnosable
-        rather than mysterious: the port of Jose's V3 rule is faithful on
-        every fixture row, and what the three rows expose is the gate in
-        front of it.
+        Kept after normalisation closed the end-to-end gap: it measures a
+        different thing, and it is the control. The rule agreed on all ten
+        rows BEFORE the repair existed, so a repair that changed a decision
+        rather than merely admitting one would show up as this test and the
+        end-to-end one disagreeing.
         """
         from kbutillib.domains.ai.council.queries import QueryRegistry
         from kbutillib.domains.ai.council.store import open_store

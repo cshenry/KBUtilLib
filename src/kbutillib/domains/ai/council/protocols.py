@@ -258,8 +258,13 @@ class CouncilStore(Protocol):
         fresh_usage: Optional[Dict[str, Any]] = None,
         error: Optional[Dict[str, Any]] = None,
         reused_from: Optional[str] = None,
+        normalised: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Record a claimed call's outcome.
+
+        ``normalised`` is the repair record ``engine/normalise.py`` made for
+        this reply, or ``None`` when it needed none; ``reply_parsed`` is the
+        repaired answer and ``reply_text`` the untouched original.
 
         Raises ``StaleClaim`` if the row was reclaimed, or if a daemon's
         lease generation has since been superseded.

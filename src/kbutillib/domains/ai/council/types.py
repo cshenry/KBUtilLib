@@ -665,7 +665,9 @@ class CouncilVerdict(BaseModel):
 
     Everything needed to explain or re-derive the decision travels with it:
     each ballot, the vote table, the critic and meta payloads, per-seat token
-    usage, the query identity and the roster fingerprint.
+    usage, the query identity, the roster fingerprint, and any answer
+    repairs :mod:`..council.engine.normalise` had to make for a reply to
+    satisfy its role's schema.
     """
 
     item_id: str
@@ -684,6 +686,15 @@ class CouncilVerdict(BaseModel):
     meta_skipped: bool = False
     errors: List[Dict[str, Any]] = []
     usage: Dict[str, Dict[str, Any]] = {}
+    #: Did any seat's reply have to be repaired before the answer schema
+    #: accepted it?  False on a council where every model answered in the
+    #: shape its query type asked for, which is the normal case.
+    normalised: bool = False
+    #: The repairs, per seat: ``{seat_name: [{"field", "rule", "original",
+    #: "value"}, ...]}``.  Only repaired seats appear.  The raw reply text in
+    #: the store is untouched, so this is the whole record of the difference
+    #: between what the model said and what the council read.
+    repairs: Dict[str, List[Dict[str, Any]]] = {}
     query: Dict[str, str] = {}
     roster_fingerprint: str = ""
     decided_at: str = ""

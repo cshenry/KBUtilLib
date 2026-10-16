@@ -392,6 +392,28 @@ class TestClaudeArgv:
         assert argv[argv.index("--tools") + 1] == ""
 
 
+def _argv_realpaths(argv: list) -> list:
+    """*argv* with every ABSOLUTE-PATH entry resolved through ``realpath``.
+
+    On macOS the per-test temporary directory is reached by two spellings:
+    ``/var/folders/...``, which is what ``tmp_path`` hands the backend, and
+    ``/private/var/folders/...``, which is what the child process reports as
+    its cwd -- ``/var`` is a symlink to ``/private/var``.  The argv the backend
+    built and the argv this test expects then differ only in that spelling,
+    and the comparison failed for a reason that has nothing to do with the
+    command line.
+
+    Resolving BOTH sides fixes it without touching backend behaviour: the
+    backend still passes whatever path it was given.  Only absolute paths are
+    resolved, so a flag or a model name is compared verbatim and a wrong one
+    still reads as itself in the failure output.  No-ops on Linux, where the
+    two spellings do not arise.
+    """
+    return [
+        os.path.realpath(entry) if os.path.isabs(entry) else entry for entry in argv
+    ]
+
+
 class TestCodexArgv:
     """The Codex command line, flag by flag."""
 
@@ -409,22 +431,24 @@ class TestCodexArgv:
         record = fake.record
         cwd = record["cwd"]
 
-        assert record["argv"] == [
-            str(fake),
-            "exec",
-            "--model",
-            MODEL,
-            "--output-schema",
-            str(Path(cwd) / CODEX_SCHEMA_NAME),
-            "-o",
-            str(Path(cwd) / CODEX_OUTPUT_NAME),
-            "--ephemeral",
-            "--ignore-user-config",
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "-",
-        ]
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(Path(cwd) / CODEX_SCHEMA_NAME),
+                "-o",
+                str(Path(cwd) / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
 
     def test_the_forbidden_flags_are_absent(
         self, tmp_path: Path, ready_home: Path

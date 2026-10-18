@@ -1,0 +1,142 @@
+{
+  "manifest_version": "1",
+  "written": "2026-10-15",
+  "written_by": "maestro task council-go-replay-parity, on h100 (poplar)",
+  "updated": "2026-10-16",
+  "updated_by": "maestro task council-answer-normalisation, on h100 (poplar) -- every digest re-measured, the rerun recorded under `latest_rerun`",
+  "purpose": "Names every file the go_mf@1 replay reads, with the SHA-256 the replay asserts before it runs. A hash mismatch means the oracle moved and the parity report is void.",
+
+  "files": {
+    "input_and_menu": {
+      "path": "/scratch/chenry/go_council_v3/go_council_kit/input_strat100_jose_v3.jsonl",
+      "sha256": "b4c5278c5ce65e6d7e4477f261676633bd754407b9a97aacacbdc8f95b9dc69c",
+      "sha256_verified": "2026-10-16T03:32:01+00:00 -- re-measured on poplar.cels.anl.gov by scripts/council/replay_go_v3.py (verify_manifest); UNCHANGED",
+      "rows": 100,
+      "role": "The CouncilTask inputs. Each row carries input_id, gene_row, source, text and candidates[] (go_id, name, def, score, height, rank) -- candidates[] IS the closed menu for that item.",
+      "how_identified": "README.md documents `python go_council.py --input <file> --output results.jsonl`; this is the only input_*.jsonl in the kit directory, its 100 input_id values are exactly the 100 input_id values of results_strat100_jose_v3.jsonl (set equality verified), and its name shares the `strat100_jose_v3` stem with the results file."
+    },
+    "per_role_replies": {
+      "path": "/scratch/chenry/go_council_v3/go_council_kit/results_strat100_jose_v3.jsonl",
+      "sha256": "bc965496507c6535e037008781058a105d62c003214b141d027143fcd1a753ef",
+      "sha256_verified": "2026-10-16T03:32:01+00:00 -- re-measured on poplar.cels.anl.gov by scripts/council/replay_go_v3.py (verify_manifest); UNCHANGED",
+      "rows": 100,
+      "role": "BOTH the per-role reply source and the final reference output. Each row carries proposers{seat: reply|{error}}, critic{...} and meta{...} (the recorded model replies the ReplayBackend serves), alongside the recorded decision: status, decline_reason, votes, n_valid and meta.final_go_ids / meta.skipped."
+    },
+    "reference_output": {
+      "path": "/scratch/chenry/go_council_v3/go_council_kit/results_strat100_jose_v3.jsonl",
+      "sha256": "bc965496507c6535e037008781058a105d62c003214b141d027143fcd1a753ef",
+      "sha256_verified": "2026-10-16T03:32:01+00:00 -- re-measured on poplar.cels.anl.gov by scripts/council/replay_go_v3.py (verify_manifest); UNCHANGED",
+      "role": "Same file as per_role_replies: the V3 runner writes the replies and the decision to one row. Named separately because the replay uses it in two distinct ways -- as the backend's script, and as the oracle it is scored against."
+    },
+    "generator": {
+      "path": "/scratch/chenry/go_council_v3/go_council_kit/go_council.py",
+      "sha256": "7a567823a1765f7fee93dd29a7a73a5c7f3c9509952cc72f36f43a1f26ca5ea1",
+      "sha256_verified": "2026-10-16T03:32:01+00:00 -- re-measured on poplar.cels.anl.gov by scripts/council/replay_go_v3.py (verify_manifest); UNCHANGED",
+      "role": "The V3 kit runner. Read for its decision rule and prompt constants; the source go_mf@1 was ported from (see agent-io/work-records/council-query-types.md)."
+    },
+    "reply_cache": {
+      "path": "/scratch/chenry/go_council_v3/go_council_kit/results_strat100_jose_v3.jsonl.cache.sqlite",
+      "sha256": "911919a3d14b36f136d423e526d69b38e98609baa9bc0bb47ebcbe3e0a0cd6d4",
+      "sha256_verified": "2026-10-16T03:32:01+00:00 -- re-measured on poplar.cels.anl.gov by scripts/council/replay_go_v3.py (verify_manifest); UNCHANGED",
+      "rows": 433,
+      "role": "NOT read by the replay. Used once, for provenance: its primary key is sha256(model \\0 max_tokens \\0 system \\0 user \\0), so the prompt text of the run that produced the results file is recoverable by reconstruction. See `provenance` below."
+    }
+  },
+
+  "provenance": {
+    "generator_verdict": "V3_KIT",
+    "generator_path": "/scratch/chenry/go_council_v3/go_council_kit/go_council.py",
+    "generator_sha256": "7a567823a1765f7fee93dd29a7a73a5c7f3c9509952cc72f36f43a1f26ca5ea1",
+    "confidence": "cryptographic -- not inferred from filenames, mtimes or README prose",
+    "method": "go_council.py:212 CallCache.key() hashes (model, str(max_tokens), system, user), each NUL-terminated, with SHA-256, and go_council.py:272 stores every reply under that key in the .cache.sqlite sidecar. The prompts of the ACTUAL run are therefore recoverable: reconstruct each call's (model, system, user) from a candidate generator's prompt constants plus the recorded input, hash it, and test membership in the sidecar's key set. A generator whose prompts differ by one byte produces a different key and matches nothing.",
+    "evidence": {
+      "cache_rows_total": 433,
+      "v3_kit_proposer_keys": "299 of 300 present",
+      "v3_kit_critic_keys": "100 of 100 present",
+      "v3_kit_meta_keys": "34 of 34 present",
+      "v3_kit_total": "433 of 434 reconstructed keys present -- i.e. EVERY one of the 433 cache rows is accounted for",
+      "the_single_miss": "input_id 5540, seat gemini35flash, role proposer. That call raised (ValueError: no JSON object in: ...) and go_council.py:291-292 only writes the cache AFTER a successful parse, so it was never cached. The miss is explained by the record itself, not by a prompt difference.",
+      "pilot_cross_check": "0 of 300 -- the 09-18 LIVE pilot /scratch/jplfaria/CONCORDIA-live/scripts/go_council_pilot.py (PROPOSER_SYSTEM carrying the extra candidate-provenance rules) matches NOTHING in this cache.",
+      "corroborating": "The results rows carry exactly the 12 keys go_council.py:482-491 `run_one` returns, and the cache's per-(model, phase) row counts -- gpt54/gpt55 proposer 100 each, gemini35flash proposer 99, claudesonnet5 critic 100, claudeopus45 meta 34 -- match the roster at go_council.py:46-48 and the 34 meta-run rows in the results file."
+    },
+    "consequence": "results_strat100_jose_v3.jsonl was produced by the V3 KIT, which is the same file go_mf@1 ports. The oracle and the implementation under test share a prompt lineage, so this replay is a genuine parity check rather than a comparison across two different queries. No change to go_mf@1 is warranted."
+  },
+
+  "row_selection": {
+    "rule": "The first ten `ok` rows by input_id, extended in input_id order until at least one meta-skipped and one meta-run row are included.",
+    "applied": "The first ten ok rows by input_id already contain 5 meta-skipped and 5 meta-run rows, so no extension was needed and the fixture is exactly ten rows.",
+    "ok_rows_total": 99,
+    "chosen_input_ids": [148, 293, 631, 789, 1250, 1402, 1465, 1497, 1711, 2029],
+    "meta_skipped": [148, 631, 789, 1402, 1497],
+    "meta_run": [293, 1250, 1465, 1711, 2029],
+    "decline_reasons": {
+      "148": "contentless",
+      "293": "no_candidate_matched",
+      "631": null,
+      "789": null,
+      "1250": null,
+      "1402": null,
+      "1465": "no_candidate_matched",
+      "1497": null,
+      "1711": null,
+      "2029": null
+    },
+    "fixture": "tests/domains/ai/council/fixtures/go_v3_replay_10.json"
+  },
+
+  "expected_differences": {
+    "note": "The ONLY permitted expected-difference predicates, each evaluated mechanically over all 100 recorded rows by scripts/council/replay_go_v3.py. A row not listed here is held to exact semantic parity.",
+    "a_recorded_status_error": {
+      "predicate": "row['status'] == 'error'",
+      "input_ids": [5540],
+      "count": 1
+    },
+    "b_proposer_error_then_critic_or_meta": {
+      "predicate": "any('error' in reply for reply in row['proposers'].values()) and (row['critic'] or row['meta'])",
+      "input_ids": [5540],
+      "count": 1,
+      "note": "Not a second row: the only recorded proposer error is the one in the only recorded error row. V3 continued to critic and meta after gemini35flash failed; the council stops at the failed proposer by design (engine/decide.py step 3)."
+    },
+    "c_off_menu_or_duplicate_pick": {
+      "predicate": "for each non-errored proposer reply, any picked go_id absent from that row's candidate menu, or any go_id appearing twice in one reply",
+      "input_ids": [],
+      "count": 0,
+      "note": "EMPTY, and structurally so for the off-menu half: go_council.py:314-318 already filters each proposer's picks to the offered set before recording, so an off-menu id cannot survive into the record. The duplicate half is not filtered by the kit (go_council.py:337 increments once per pick, so a repeat would count twice where the council counts once) -- it simply did not occur in these 100 rows."
+    }
+  },
+
+  "latest_rerun": {
+    "date_utc": "2026-10-16T03:32:01+00:00",
+    "host": "poplar.cels.anl.gov",
+    "command": "python scripts/council/replay_go_v3.py",
+    "interpreter": "CPython 3.12.3",
+    "repo_commit": "d27a5b63916790502fec0bdd4ce4c223aae4acca",
+    "rows_replayed": 100,
+    "agreement_end_to_end": "99 of 99 scored ok rows, measured through the shipped CouncilWorker including its answer-schema gate",
+    "mismatches": 0,
+    "report": "agent-io/prds/kbu-ai-council-v1/research/go-replay-parity.md",
+    "digests_rechecked": "all five file entries above; every SHA-256 re-measured before the replay started and equal to the value pinned here (see each entry's sha256_verified)",
+    "normalisation": {
+      "why": "Eight recorded replies do not satisfy go_mf@1's answer schema, which Jose's V3 runner did not enforce. engine/normalise.py repairs exactly those two defects before the gate and records every repair on calls.normalised and on the verdict (normalised + per-seat repairs). The raw reply text is unchanged and every other schema failure is still invalid_output.",
+      "derived_content_flag": {
+        "rule": "a meta reply missing no_functional_content gets it: False when its final ids list is non-empty, else the value decide()'s skip-path content rule gives (proposer majority 2t>n -> True, 2t<n -> False, tie -> the critic's contentless_input)",
+        "input_ids": [1250, 1711, 2029, 3728, 6788, 9871, 10482],
+        "seat": "meta (claudeopus45)",
+        "value_applied": false,
+        "note": "All seven name a non-empty final_go_ids, so all seven take the first branch; the skip-path branch is not reached by this transcript and is covered by tests/domains/ai/council/test_normalise.py instead."
+      },
+      "null_string": {
+        "rule": "a property the role's answer schema types as string whose value is None becomes \"\" (including inside picked[])",
+        "input_ids": [11938],
+        "seat": "proposer_1 (gemini35flash)",
+        "field": "notes"
+      },
+      "rule_only_control": "The decision rule alone agreed on all 8 of these rows BEFORE normalisation existed, and still does (the report keeps the rule-only column). A repair that changed a decision rather than merely admitting one would show as the rule-only and end-to-end columns disagreeing."
+    }
+  },
+  "comparison": {
+    "semantic_fields_only": ["selected_ids (as a SET)", "status", "decline_reason", "meta_skipped"],
+    "rationale": "Prompt text, reply wording, token usage and id ORDER are not compared. Order differs by design and not by disagreement: the V3 runner reports the skip path's ids in first-vote order (go_council.py:383) and the meta path's in the order meta named them (go_council.py:449-451), while engine/decide.py reports both in MENU order.",
+    "recorded_selected_ids": "row['meta']['final_go_ids']"
+  }
+}

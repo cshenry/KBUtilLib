@@ -332,29 +332,71 @@ def _parse_annotations_tsv(
     return records
 
 
-def _parse_dram2_version(text: str) -> str | None:
-    """Best-effort extraction of a DRAM2 / Nextflow pipeline version string.
+def _pipeline_manifest_version(pipeline: str | None) -> str | None:
+    """Read ``manifest.version`` from the pipeline's own ``nextflow.config``.
 
-    Looks for ``N E X T F L O W   ~  version X.Y.Z`` or
-    ``Launching '... main.nf' [...]  DSL2 - revision: <sha> [<tag>]``
-    style banners in *text*.
+    This is the DRAM2 version, read from the thing being run. Everything else
+    in this module's version handling is a fallback for when this is not
+    available.
+
+    *pipeline* is the path to ``main.nf``; ``nextflow.config`` sits beside it.
+    Returns None for an absent, unreadable or manifest-less config -- a
+    provenance read must never fail a run.
+    """
+    if not pipeline:
+        return None
+    config = Path(pipeline).parent / "nextflow.config"
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # `manifest { ... version = '2.0.0-beta17' ... }`. Anchored on a line
+    # start so a `custom_config_version` or a commented line cannot match.
+    m = re.search(
+        r"^\s*version\s*=\s*[\'\"]([^\'\"]+)[\'\"]", text, re.MULTILINE
+    )
+    return m.group(1).strip() if m else None
+
+
+def _parse_dram2_version(text: str) -> str | None:
+    """Extract a DRAM2 pipeline version from a Nextflow run's output.
+
+    Looks ONLY for the pipeline revision in the Launching banner
+    (``revision: <sha> [<tag>]``).
+
+    DELIBERATELY NOT the Nextflow engine banner. This function used to fall
+    back to ``N E X T F L O W ~ version X.Y.Z``, and on poplar that fallback
+    was what always fired -- the pipeline is launched by absolute path rather
+    than as a named revision, so the tag regex never matches. The result was
+    that ``AnnotationResult.tool_version`` carried ``24.10.5``, the NEXTFLOW
+    version, for every DRAM2 annotation. Measured in the first production ARC
+    rows on 2026-10-15.
+
+    That is worse than returning nothing twice over: ``24.10.5`` reads as a
+    DRAM2 version and is not one, and because ``DRAM2Utils`` PINS
+    ``NXF_VER=24.10.5`` it is constant across every DRAM2 upgrade -- the field
+    could never detect a change in the thing it was supposed to identify.
+
+    The runner's version is still worth recording, but as the runner: see
+    :meth:`DRAM2Utils._resolve_tool_version`, which labels it ``nextflow/...``
+    so no reader can mistake the two.
 
     Args:
         text: Captured stdout/stderr text from a Nextflow run.
 
     Returns:
-        Pipeline revision/tag string (e.g. ``"v2.0.0-beta17"``), the
-        Nextflow version, or ``None`` when nothing identifiable is found.
+        The pipeline revision/tag (e.g. ``"v2.0.0-beta17"``), or None.
     """
-    # Pipeline tag in the Launching banner: "[<sha> <tag>]"
     m = re.search(r"revision:\s*[0-9a-f]+\s*\[([^\]]+)\]", text)
     if m:
         return m.group(1).strip()
-    # Nextflow engine banner
-    m = re.search(r"N E X T F L O W\s*~\s*version\s+(\S+)", text)
-    if m:
-        return m.group(1).strip()
     return None
+
+
+def _parse_nextflow_engine_version(text: str) -> str | None:
+    """Extract the Nextflow ENGINE version, explicitly labelled as such."""
+    m = re.search(r"N E X T F L O W\s*~\s*version\s+(\S+)", text)
+    return f"nextflow/{m.group(1).strip()}" if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -907,8 +949,32 @@ class DRAM2Utils(AnnotatorUtils):
         tsv_path = outdir.joinpath(*_RAW_ANNOTATIONS_SUBPATH)
         tsv_text = tsv_path.read_text(encoding="utf-8") if tsv_path.exists() else ""
 
-        tool_version = _parse_dram2_version(result.stdout + "\n" + result.stderr)
+        tool_version = self._resolve_tool_version(result.stdout + "\n" + result.stderr)
         return tsv_text, tool_version, cmd_str
+
+    def _resolve_tool_version(self, output: str) -> str | None:
+        """The DRAM2 version, by the most authoritative source available.
+
+        Order, most to least trustworthy:
+
+        1. ``manifest.version`` in the pipeline's own ``nextflow.config`` --
+           the version declared by the code being run. On poplar this is
+           ``2.0.0-beta17``, matching the checkout's ``v2.0.0-beta17`` tag.
+        2. The pipeline revision tag in Nextflow's Launching banner, for a
+           pipeline launched by name rather than by path.
+        3. ``nextflow/<engine version>`` -- EXPLICITLY LABELLED, so a reader
+           can see at a glance that we are reporting the runner because the
+           tool would not say. This was silently returned bare until
+           2026-10-15; see :func:`_parse_dram2_version`.
+
+        Returns None when none of the three is available, which is honest:
+        the caller records "unreported" rather than inventing something.
+        """
+        return (
+            _pipeline_manifest_version(self._pipeline)
+            or _parse_dram2_version(output)
+            or _parse_nextflow_engine_version(output)
+        )
 
 
 # ---------------------------------------------------------------------------

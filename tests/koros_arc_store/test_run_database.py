@@ -635,3 +635,65 @@ class TestNoForbiddenImports:
             text = py.read_text(encoding="utf-8")
             for token in forbidden:
                 assert token not in text, (py, token)
+
+
+# ── concurrent writers ───────────────────────────────────────────────────────
+#
+# record_analysis is SOFT-FAIL: it swallows the exception and logs a warning.
+# A "database is locked" is therefore a record lost in SILENCE, not an error
+# anyone sees. The producers are a pool of up to 80 kbdl-worker@ processes on
+# one host sharing one file (KBDLSKANI alone has run 106,745 jobs at 40-way
+# concurrency), so overlap is expected rather than exceptional. WAL permits
+# one writer at a time, so without a busy timeout a contended write fails
+# immediately instead of waiting its turn.
+
+
+def test_contended_writes_all_land(tmp_path):
+    """Concurrent writers must all persist, not silently drop.
+
+    Asserts on the ROW COUNT rather than on ``failed_write_count``, because
+    the failure mode being guarded is a write that reports nothing AND stores
+    nothing -- a counter check would pass against a store that lost rows if
+    the soft-fail path ever stopped incrementing it.
+    """
+    import threading
+
+    db_path = tmp_path / "runs.sqlite"
+    n_threads, per_thread = 4, 15
+    errors: list[BaseException] = []
+
+    def writer(worker: int) -> None:
+        try:
+            wdb = RunDatabase(db_path=db_path, enabled=True)
+            for i in range(per_thread):
+                wdb.record_analysis(
+                    "proj",
+                    "arc",
+                    make_record(
+                        subject=f"subject-{worker}",
+                        run_uid=f"run-{worker}-{i}",
+                        significant_params={"method": "BAKTA", "i": i},
+                    ),
+                )
+        except BaseException as exc:  # pragma: no cover - surfaced by assert
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(w,)) for w in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+
+    assert not errors, errors
+    assert not any(t.is_alive() for t in threads), "a writer thread hung"
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM runs").fetchone()
+    finally:
+        conn.close()
+    expected = n_threads * per_thread
+    assert count == expected, (
+        f"{expected - count} of {expected} record(s) were dropped silently -- "
+        "this is what a missing busy timeout looks like"
+    )

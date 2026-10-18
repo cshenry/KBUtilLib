@@ -1,0 +1,58 @@
+# VERBATIM COPY of Filipe Liu's real mfgopredict council config, taken from
+# /scratch/fliu/hub_home/fliu/python3/mfgopredict_service/model_inference.yaml
+# on 2026-10-15, with api_key values replaced by REDACTED and nothing else
+# changed. It is a fixture precisely BECAUSE it is not tidy: its local
+# endpoints declare no `kind`, and its profiles seat ARGO aliases it never
+# declares in `models`. The legacy import rules exist for this file.
+# Model inference for mfgopredict's GO council: which models exist, where they
+# run, and who sits in which seat. Read at startup and re-read when this file
+# changes (no restart). Override the path with MFGOPREDICT_SERVICE_COUNCIL_CONFIG
+# ("" = Argo only).
+#
+# Local models are the model_service containers (model_service/compose.yaml),
+# one per model, idle until loaded. `supervisor: true` makes GET /models ask each
+# one's control plane whether its model is available / starting / stopped /
+# failed, or whether the container is not running at all:
+#
+#   cd model_service && docker compose up -d                 # all idle, no GPU used
+#   curl -X POST 'localhost:8301/service/start?gpus=1'       # load gpt-oss-120b on GPU #1
+#   curl localhost:8300/models                               # mfgopredict: who is available
+#
+# VLLM_HOST: localhost when mfgopredict runs on the host; compose sets it to
+# host.docker.internal inside the mfgopredict container (same published ports).
+# GET /models also reports each endpoint's `port` and `public_base_url`, with the
+# host swapped for $VLLM_PUBLIC_HOST (compose/run.sh set it to this machine's
+# name); give an endpoint `public_url:` to override that.
+endpoints:
+  argo:              {base_url: https://apps.inside.anl.gov/argoapi/v1, kind: argo, api_key_env: ARGO_USER}
+  gpt-oss-120b:      {base_url: "http://${VLLM_HOST:-localhost}:8301/v1", api_key: REDACTED, supervisor: true}
+  qwen3-32b:         {base_url: "http://${VLLM_HOST:-localhost}:8302/v1", api_key: REDACTED, supervisor: true}
+  llama-3.3-70b:     {base_url: "http://${VLLM_HOST:-localhost}:8303/v1", api_key: REDACTED, supervisor: true}
+  mistral-small-3.2: {base_url: "http://${VLLM_HOST:-localhost}:8304/v1", api_key: REDACTED, supervisor: true}
+  qwen3-235b:        {base_url: "http://${VLLM_HOST:-localhost}:8305/v1", api_key: REDACTED, supervisor: true}
+  qwen3.8-27b:       {base_url: "http://${VLLM_HOST:-localhost}:8306/v1", api_key: REDACTED, supervisor: true}
+  gemma-4-31b:       {base_url: "http://${VLLM_HOST:-localhost}:8307/v1", api_key: REDACTED, supervisor: true}
+  nemotron-3-super:  {base_url: "http://${VLLM_HOST:-localhost}:8308/v1", api_key: REDACTED, supervisor: true}
+  qwen3.5-122b:      {base_url: "http://${VLLM_HOST:-localhost}:8309/v1", api_key: REDACTED, supervisor: true}
+
+# alias -> endpoint. served_name defaults to the alias, which is each
+# container's SERVED_NAME (model_service/<model>/model.env).
+models:
+  gpt-oss-120b:      {endpoint: gpt-oss-120b}
+  qwen3-32b:         {endpoint: qwen3-32b}
+  llama-3.3-70b:     {endpoint: llama-3.3-70b}
+  mistral-small-3.2: {endpoint: mistral-small-3.2}
+  qwen3-235b:        {endpoint: qwen3-235b}
+  qwen3.8-27b:       {endpoint: qwen3.8-27b}
+  gemma-4-31b:       {endpoint: gemma-4-31b}
+  nemotron-3-super:  {endpoint: nemotron-3-super}
+  qwen3.5-122b:      {endpoint: qwen3.5-122b}
+
+# Named rosters a request can pick with "profile"; "roles" swaps single seats.
+# Unlisted aliases (gpt55, claudeopus45, ...) are Argo models: see GET /models.
+profiles:
+  argo:       {proposers: [gemini35flash, gpt54, gpt55], critic: claudesonnet5, meta: claudeopus45}
+  oss-critic: {proposers: [gemini35flash, gpt54, gpt55], critic: gpt-oss-120b, meta: claudeopus45}
+  oss:        {proposers: [qwen3-32b, llama-3.3-70b, gpt-oss-120b], critic: mistral-small-3.2, meta: qwen3-235b}
+  oss-next:   {proposers: [qwen3.8-27b, gemma-4-31b, nemotron-3-super], critic: mistral-small-3.2, meta: qwen3.5-122b}
+default_profile: argo

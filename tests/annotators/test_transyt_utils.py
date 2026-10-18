@@ -39,6 +39,10 @@ from kbutillib.domains.genome.annotation.transyt_utils import (
 # ---------------------------------------------------------------------------
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "transyt"
+# transyt_utils imports docker_image_identity by name, so the patch target is
+# the name in THAT module, not the definition site in annotator_utils.
+_IDENTITY = "kbutillib.domains.genome.annotation.transyt_utils.docker_image_identity"
+
 _XML_FIXTURE = _FIXTURES / "transyt.xml"
 _REF_FIXTURE = _FIXTURES / "reactions_references.txt"
 _SCORES_FIXTURE = _FIXTURES / "scoresMethod1.txt"
@@ -557,7 +561,7 @@ class TestAnnotateMocked:
     def _annotate(self, tu, **kwargs):
         with patch.object(tu, "is_available", return_value=True):
             with patch.object(tu, "_run_docker", side_effect=self._fake_run_docker):
-                with patch.object(tu, "_get_image_digest", return_value="sha256:abc"):
+                with patch(_IDENTITY, return_value="mock:latest@sha256:abc"):
                     return tu.annotate(**kwargs)
 
     def test_returns_annotation_result(self):
@@ -595,7 +599,7 @@ class TestAnnotateMocked:
         tu._docker_image = "mock:latest"
         with patch.object(tu, "is_available", return_value=True):
             with patch.object(tu, "_run_docker", side_effect=lambda d: ("cmd", 8)):
-                with patch.object(tu, "_get_image_digest", return_value=""):
+                with patch(_IDENTITY, return_value="mock:latest"):
                     result = tu.annotate(proteins={"p1": "MKTAY"}, tax_id="562")
         assert result.records == []
         assert result.tool == "transyt"
@@ -605,7 +609,7 @@ class TestAnnotateMocked:
         tu._docker_image = "mock:latest"
         with patch.object(tu, "is_available", return_value=True):
             with patch.object(tu, "_run_docker", side_effect=lambda d: ("cmd", 8)):
-                with patch.object(tu, "_get_image_digest", return_value=""):
+                with patch(_IDENTITY, return_value="mock:latest"):
                     result = tu.annotate(
                         proteins={"p1": "MKTAY"}, tax_id="562",
                         metabolites=["cpd00027"],
@@ -659,7 +663,7 @@ class TestAnnotateCleanupFailure:
 
         with patch.object(tu, "is_available", return_value=True), \
              patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
-             patch.object(tu, "_get_image_digest", return_value="sha256:abc"), \
+             patch(_IDENTITY, return_value="mock:latest@sha256:abc"), \
              patch("kbutillib.domains.genome.annotation.transyt_utils.shutil.rmtree",
                    side_effect=raising_rmtree):
             # The call MUST NOT raise PermissionError.
@@ -684,7 +688,7 @@ class TestAnnotateCleanupFailure:
 
         with patch.object(tu, "is_available", return_value=True), \
              patch.object(tu, "_run_docker", side_effect=self._fake_run_docker), \
-             patch.object(tu, "_get_image_digest", return_value=""), \
+             patch(_IDENTITY, return_value="mock:latest"), \
              patch("kbutillib.domains.genome.annotation.transyt_utils.shutil.rmtree") as rmtree_mock:
             tu.annotate(proteins={"prot1": "MKTAY"}, tax_id="562")
 

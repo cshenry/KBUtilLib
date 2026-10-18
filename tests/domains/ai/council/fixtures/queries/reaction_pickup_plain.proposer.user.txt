@@ -1,0 +1,25 @@
+Gene: Ac3H11_0042
+Description: "adenine phosphoribosyltransferase"
+EC: 2.4.2.7
+
+Candidates (presented in upstream rank order; rank reflects fused_score retrieval+rerank confidence).
+Format: rank | rxn_id | name | EC | fused_score | skos | equation
+    1 | rxn09001 | phosphoribosyltransferase variant 1 | 2.4.2.7 | 0.670 | closeMatch | (1) cpd00021[c0] + (1) cpd00062[c0] <=> (1) cpd00031[c0] + (1) cpd00012[c0]
+    2 | rxn09002 | phosphoribosyltransferase variant 2 | - | 0.620 | closeMatch | (1) cpd00022[c0] + (1) cpd00062[c0] <=> (1) cpd00032[c0] + (1) cpd00012[c0]
+    3 | rxn09003 | phosphoribosyltransferase variant 3 | - | 0.570 | closeMatch | (1) cpd00023[c0] + (1) cpd00062[c0] <=> (1) cpd00033[c0] + (1) cpd00012[c0]
+    4 | rxn09004 | phosphoribosyltransferase variant 4 | - | 0.520 | closeMatch | (1) cpd00024[c0] + (1) cpd00062[c0] <=> (1) cpd00034[c0] + (1) cpd00012[c0]
+    5 | rxn09005 | phosphoribosyltransferase variant 5 | - | 0.470 | closeMatch | (1) cpd00025[c0] + (1) cpd00062[c0] <=> (1) cpd00035[c0] + (1) cpd00012[c0]
+    6 | rxn09006 | phosphoribosyltransferase variant 6 | - | 0.420 | closeMatch | (1) cpd00026[c0] + (1) cpd00062[c0] <=> (1) cpd00036[c0] + (1) cpd00012[c0]
+
+Return JSON conforming to this schema:
+{
+  "picked_reactions": [
+    {"rxn_id": "<one of the offered ids>",
+      "confidence": "high|medium|low",
+      "rationale": "<one sentence grounded in the equation or EC>"}
+  ],
+  "overall_confidence": "high|medium|low",
+  "notes": "<optional, used when picked_reactions is empty or to flag ambiguity>"
+}
+
+Pick 0 to 5 reactions. Return ONLY the JSON object, no prose.

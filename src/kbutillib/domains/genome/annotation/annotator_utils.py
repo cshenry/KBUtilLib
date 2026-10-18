@@ -32,6 +32,7 @@ is recorded here so downstream consumers understand the choice.
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -212,6 +213,59 @@ def _guard_protein(sequences: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 # Ontology-description formatting (shared by BaktaUtils / KofamscanUtils)
 # ---------------------------------------------------------------------------
+
+
+def docker_image_identity(image: str, *, timeout: float = 10.0) -> str:
+    """Return an identifying provenance string for a local Docker *image*.
+
+    A bare tag is not an identity. ``kbutillib/kofamscan:latest`` names a
+    different set of bytes before and after a rebuild, so recording it as a
+    tool version says nothing about what actually ran. This pins the tag to
+    the image's content hash.
+
+    Resolution order, most to least portable:
+
+    1. ``<image>@<RepoDigest>`` -- the registry digest. Only present for an
+       image that was pulled from, or pushed to, a registry.
+    2. ``<image>@<Id>`` -- the local image id. Every image has one, including
+       images built locally and never pushed.
+    3. ``<image>`` -- the bare tag, when ``docker image inspect`` cannot be
+       run at all (no docker binary, timeout, image absent).
+
+    Step 2 is not an optimisation; it is the case that actually applies here.
+    Every ``kbutillib/*`` image on poplar is built locally and never pushed,
+    so ``RepoDigests`` is an EMPTY list for all of them and a lone
+    ``{{index .RepoDigests 0}}`` template fails with "slice index out of
+    range" (measured 2026-10-15 against ``kbutillib/transyt:latest``). A
+    RepoDigests-only implementation therefore degrades to the bare tag on
+    exactly the images we care about.
+
+    Args:
+        image: Docker image reference, e.g. ``"kbutillib/bakta:latest"``.
+        timeout: Seconds to allow ``docker image inspect``.
+
+    Returns:
+        The identity string. Never raises -- provenance must not fail a run.
+    """
+    if not image:
+        return ""
+    for field_template in ("{{index .RepoDigests 0}}", "{{.Id}}"):
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", "--format", field_template, image],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return image
+        if result.returncode == 0:
+            value = result.stdout.strip()
+            if value:
+                # A RepoDigest is already "<repo>@sha256:...", so returning it
+                # verbatim avoids "<image>@<repo>@sha256:...".
+                return value if "@" in value else f"{image}@{value}"
+    return image
 
 
 def describe_or_accession(

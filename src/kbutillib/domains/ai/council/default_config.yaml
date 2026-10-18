@@ -1,0 +1,124 @@
+# Packaged default council configuration.
+#
+# Shipped as package data, so a fresh KBUtilLib install with no user config at
+# all still has a working council. Override any entry from the `ai_council`
+# section of ~/.kbutillib/config.yaml -- the user's keys win per endpoint,
+# model and profile entry; entries they do not name are untouched.
+
+endpoints:
+  # ANL's ARGO gateway. OpenAI-compatible, and the only route that reaches
+  # Gemini. ARGO authenticates by ANL username rather than an API key, which
+  # is what user_env carries; proxy is empty unless the operator sets
+  # KBU_ARGO_PROXY (ARGO is inside the lab network).
+  argo:
+    kind: argo
+    base_url: https://apps.inside.anl.gov/argoapi/v1
+    user_env: ARGO_USER
+    proxy: ${KBU_ARGO_PROXY:-}
+
+  # Headless CLIs. Both bill against an interactive subscription, not an API
+  # key, so max_concurrency defaults to 1 for each: a CLI call is a
+  # subprocess against one logged-in session, not a pooled API.
+  claude:
+    kind: claude_cli
+    executable: claude
+    account: claude-max
+  codex:
+    kind: codex_cli
+    executable: codex
+    account: codex-chatgpt
+
+  # A SELF-HOSTED model is just an OpenAI-compatible endpoint you declare
+  # yourself -- the council manages no models and knows no GPUs (review round
+  # 2 took that out of the product). Nothing self-hosted is packaged here,
+  # because a port that is up on one machine is not up on another. Uncomment
+  # and edit, or put the same three lines in the `ai_council` section of
+  # ~/.kbutillib/config.yaml, then seat the alias in a profile:
+  #
+  # my-vllm:
+  #   kind: openai
+  #   base_url: http://127.0.0.1:8000/v1
+  #   api_key_env: MY_VLLM_API_KEY     # optional; vLLM ignores the value
+  #                                    # unless it was started with --api-key
+
+models:
+  # ARGO aliases. served_name defaults to the alias (ARGO's own model names),
+  # and canonical identity comes from the built-in DEFAULT_CANONICAL table.
+  gemini35flash:
+    endpoint: argo
+  gemini31flashlite:
+    endpoint: argo
+  gpt54:
+    endpoint: argo
+  gpt55:
+    endpoint: argo
+  claudesonnet5:
+    endpoint: argo
+  claudeopus45:
+    endpoint: argo
+
+  # Claude CLI. `sonnet` and `opus` are the CLI's own moving aliases; their
+  # canonical identity is resolved from DEFAULT_CANONICAL's claude_cli table,
+  # which is what makes sonnet-cli and the ARGO claudesonnet5 compare equal
+  # and so refuse to sit in two independent seats.
+  sonnet-cli:
+    endpoint: claude
+    served_name: sonnet
+  opus-cli:
+    endpoint: claude
+    served_name: opus
+
+  # Codex CLI. UNVERIFIED served names -- confirm with kbu council doctor
+  # (operator step OP-2). verified: false until then, and canonical identity
+  # is declared explicitly because these served names are not in the built-in
+  # table under any spelling.
+  gpt54-cli:
+    endpoint: codex
+    served_name: gpt-5.4
+    canonical: openai/gpt-5.4
+    verified: false
+  gpt55-cli:
+    endpoint: codex
+    served_name: gpt-5.5
+    canonical: openai/gpt-5.5
+    verified: false
+
+profiles:
+  # All-ARGO: one API key's worth of billing, every seat a frontier model.
+  argo:
+    proposers: [gemini35flash, gpt54, gpt55]
+    critic: claudesonnet5
+    meta: claudeopus45
+
+  # The default. Proposers and adjudicators are spread across an ARGO key and
+  # two interactive subscriptions, so a batch costs almost nothing in API
+  # tokens.
+  mixed-subscription:
+    proposers: [gemini35flash, gpt54-cli, gpt55-cli]
+    critic: sonnet-cli
+    meta: opus-cli
+
+default_profile: mixed-subscription
+
+# The store is a single SQLite file on LOCAL disk, one per machine -- there is
+# no shared store and no database server. `~` is expanded at load time. A path
+# inside a Dropbox directory is refused outright, and so is one on a network
+# filesystem (NFS, SMB, sshfs, ...): live SQLite WAL files corrupt under file
+# sync, and network filesystems do not give SQLite locks it can trust.
+store: sqlite:///~/.kbutillib/council/council.sqlite
+
+# Optional. The PROVENANCE label written to `jobs.submitted_by`; defaults to
+# the OS user. It grants no access and gates nothing -- the queue and the
+# budgets belong to the store, not to a person -- so changing it affects only
+# the label on jobs submitted afterwards.
+# user: someone
+
+# Optional. Directories of query-type YAML files. Every *.yaml / *.yml
+# DIRECTLY inside each one (non-recursive) is registered on every store open
+# and by `kbu council db init`: an identical spec is a no-op, the same
+# name@version with different content is refused naming the file, a missing
+# directory is only a warning, and nothing is ever written into these
+# directories -- they are expected to be in Dropbox. `~` and ${VAR} are
+# expanded at load time.
+# query_dirs:
+#   - ~/Dropbox/Projects/council-queries

@@ -1,0 +1,13 @@
+{
+  "bytes": 54617,
+  "captured_at": "2026-10-15T20:57:05Z",
+  "captured_by": "maestro developer task council-service-client",
+  "captured_from": "http://poplar.cels.anl.gov:8300/openapi.json",
+  "concordia_commit": null,
+  "http_status": 200,
+  "method": "GET",
+  "note": "The deployed OpenAPI 3.1 document of mfgopredict-service 0.1.0 (Filipe Liu), the authoritative contract for every request body this client builds. Saved byte-for-byte as the response body arrived, so the sha256 below verifies against the file.",
+  "redacted": false,
+  "service": "mfgopredict-service 0.1.0 (FastAPI), poplar.cels.anl.gov:8300",
+  "sha256": "37a62cffae5420ecfcdd00da049fe8fbb7938cdb4d00c3b3553f66d9e790d8ca"
+}

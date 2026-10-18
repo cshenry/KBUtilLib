@@ -22,6 +22,7 @@ from .core.shared_env_utils import SharedEnvUtils
 if TYPE_CHECKING:
     from .domains.ai.ai_curation_utils import AICurationUtilsImpl
     from .domains.ai.argo_utils import ArgoUtilsImpl
+    from .domains.ai.council_utils import CouncilUtilsImpl
     from .domains.ai.kb_plm_utils import KBPLMUtilsImpl
     from .domains.biochem.ms_biochem_utils import MSBiochemUtilsImpl
     from .domains.biochem.ms_reaction_similarity_utils import (
@@ -111,6 +112,7 @@ class KBUtilLib:
         self._sdk = None
         self._argo = None
         self._curation = None
+        self._council = None
         self._thermo = None
         self._predictive_thermo = None
         self._mmseqs = None
@@ -262,6 +264,13 @@ class KBUtilLib:
             from .domains.ai.ai_curation_utils import AICurationUtilsImpl
             self._curation = AICurationUtilsImpl(self.env, self.argo)
         return self._curation
+
+    @property
+    def council(self) -> CouncilUtilsImpl:
+        if self._council is None:
+            from .domains.ai.council_utils import CouncilUtilsImpl
+            self._council = CouncilUtilsImpl(self.env)
+        return self._council
 
     @property
     def thermo(self) -> ThermoUtilsImpl:

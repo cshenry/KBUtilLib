@@ -1,0 +1,431 @@
+{
+  "task": {
+    "item_id": "Ac3H11_1623",
+    "evidence": {
+      "gene_id": "Ac3H11_1623",
+      "description": "aldehyde dehydrogenase (NAD+) family protein",
+      "ec": "1.2.1.3"
+    },
+    "menu": [
+      {
+        "id": "rxn05001",
+        "label": "aldehyde dehydrogenase (NAD+) variant 1",
+        "description": null,
+        "rank": 1,
+        "score": 0.92,
+        "metadata": {
+          "ec": "1.2.1.3",
+          "equation": "(1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]",
+          "skos": "skos:exactMatch"
+        }
+      },
+      {
+        "id": "rxn05002",
+        "label": "aldehyde dehydrogenase (NAD+) variant 2",
+        "description": null,
+        "rank": 2,
+        "score": 0.89,
+        "metadata": {
+          "ec": "1.2.1.3",
+          "equation": "(1) cpd00001[c0] + (1) cpd00002[c0] + (1) cpd00067[c0] + (1) cpd00009[c0] + (2) cpd00013[c0] + (1) cpd00011[c0] + (3) cpd00012[c0] <=> (1) cpd00008[c0] + (1) cpd00010[c0] + (2) cpd00020[c0] + (1) cpd00023[c0] + (1) cpd00033[c0] + (1) cpd00035[c0] + (1) cpd00039[c0] + (1) cpd00041[c0] + (1) cpd00051[c0]",
+          "skos": "skos:exactMatch"
+        }
+      },
+      {
+        "id": "rxn05003",
+        "label": "long-chain acyl-CoA dehydrogenase / very-long-chain specific acyl-CoA dehydrogenase, mitochondrial precursor, electron-transfer-flavoprotein coupled, EC 1.3.8.9 family member",
+        "description": null,
+        "rank": 3,
+        "score": 0.86,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]",
+          "skos": "skos:exactMatch"
+        }
+      },
+      {
+        "id": "rxn05004",
+        "label": "aldehyde dehydrogenase (NAD+) variant 4",
+        "description": null,
+        "rank": 4,
+        "score": 0.83,
+        "metadata": {
+          "ec": "1.2.1.3",
+          "equation": "(1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05005",
+        "label": "aldehyde dehydrogenase (NAD+) variant 5",
+        "description": null,
+        "rank": 5,
+        "score": 0.8,
+        "metadata": {
+          "ec": "1.1.1.1;1.2.1.5",
+          "equation": "(1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05006",
+        "label": "aldehyde dehydrogenase (NAD+) variant 6",
+        "description": null,
+        "rank": 6,
+        "score": 0.77,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05007",
+        "label": "aldehyde dehydrogenase (NAD+) variant 7",
+        "description": null,
+        "rank": 7,
+        "score": 0.74,
+        "metadata": {
+          "ec": "1.2.1.3",
+          "equation": "(1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05008",
+        "label": "aldehyde dehydrogenase (NAD+) variant 8",
+        "description": null,
+        "rank": 8,
+        "score": 0.71,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05009",
+        "label": "aldehyde dehydrogenase (NAD+) variant 9",
+        "description": null,
+        "rank": 9,
+        "score": 0.68,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05010",
+        "label": "aldehyde dehydrogenase (NAD+) variant 10",
+        "description": null,
+        "rank": 10,
+        "score": 0.65,
+        "metadata": {
+          "ec": "1.1.1.1;1.2.1.5",
+          "equation": "(1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]",
+          "skos": "skos:closeMatch"
+        }
+      },
+      {
+        "id": "rxn05011",
+        "label": "aldehyde dehydrogenase (NAD+) variant 11",
+        "description": null,
+        "rank": 11,
+        "score": 0.62,
+        "metadata": {
+          "ec": "1.2.1.3",
+          "equation": "(1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05012",
+        "label": "aldehyde dehydrogenase (NAD+) variant 12",
+        "description": null,
+        "rank": 12,
+        "score": 0.59,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05013",
+        "label": "aldehyde dehydrogenase (NAD+) variant 13",
+        "description": null,
+        "rank": 13,
+        "score": 0.56,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05014",
+        "label": "aldehyde dehydrogenase (NAD+) variant 14",
+        "description": null,
+        "rank": 14,
+        "score": 0.53,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05015",
+        "label": "aldehyde dehydrogenase (NAD+) variant 15",
+        "description": null,
+        "rank": 15,
+        "score": 0.5,
+        "metadata": {
+          "ec": "1.1.1.1;1.2.1.5",
+          "equation": "(1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05016",
+        "label": "aldehyde dehydrogenase (NAD+) variant 16",
+        "description": null,
+        "rank": 16,
+        "score": 0.47,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05017",
+        "label": "aldehyde dehydrogenase (NAD+) variant 17",
+        "description": null,
+        "rank": 17,
+        "score": 0.44,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05018",
+        "label": "aldehyde dehydrogenase (NAD+) variant 18",
+        "description": null,
+        "rank": 18,
+        "score": 0.41,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05019",
+        "label": "aldehyde dehydrogenase (NAD+) variant 19",
+        "description": null,
+        "rank": 19,
+        "score": 0.38,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05020",
+        "label": "aldehyde dehydrogenase (NAD+) variant 20",
+        "description": null,
+        "rank": 20,
+        "score": 0.35,
+        "metadata": {
+          "ec": "1.1.1.1;1.2.1.5",
+          "equation": "(1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05021",
+        "label": "aldehyde dehydrogenase (NAD+) variant 21",
+        "description": null,
+        "rank": 21,
+        "score": 0.32,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      },
+      {
+        "id": "rxn05022",
+        "label": "aldehyde dehydrogenase (NAD+) variant 22",
+        "description": null,
+        "rank": 22,
+        "score": 0.29,
+        "metadata": {
+          "ec": "",
+          "equation": "(1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]",
+          "skos": "skos:relatedMatch"
+        }
+      }
+    ]
+  },
+  "votes": {
+    "rxn05001": 5,
+    "rxn05002": 3,
+    "rxn05004": 1,
+    "rxn05007": 0,
+    "rxn05021": 2
+  },
+  "ballots": [
+    {
+      "seat": "claudeopus48",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "rxn05001",
+          "confidence": "high",
+          "why": "EC 1.2.1.3 matches the annotation exactly and the equation is the canonical NAD+-dependent aldehyde oxidation."
+        },
+        {
+          "id": "rxn05002",
+          "confidence": "medium",
+          "why": "Same EC, longer-chain substrate; a promiscuous aldehyde dehydrogenase would catalyse it."
+        }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "",
+      "error": null
+    },
+    {
+      "seat": "claudesonnet46",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "rxn05001",
+          "confidence": "high",
+          "why": "Direct EC and equation match."
+        },
+        {
+          "id": "rxn05002",
+          "confidence": "low",
+          "why": "Plausible chain-length variant."
+        },
+        {
+          "id": "rxn05021",
+          "confidence": "low",
+          "why": "Score is low and the EC is absent, but the chemistry is the same oxidation."
+        }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "",
+      "error": null
+    },
+    {
+      "seat": "gpt55",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "rxn05001",
+          "confidence": "high",
+          "why": "Canonical reaction for the annotated EC."
+        },
+        {
+          "id": "rxn05004",
+          "confidence": "medium",
+          "why": "Shares the input EC and the equation is chemically reasonable."
+        },
+        {
+          "id": "rxn05021",
+          "confidence": "low",
+          "why": "Included on chemistry alone."
+        }
+      ],
+      "overall_confidence": "medium",
+      "no_functional_content": false,
+      "notes": "",
+      "error": null
+    },
+    {
+      "seat": "gpt54",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "rxn05001",
+          "confidence": "high",
+          "why": "Unambiguous EC match."
+        }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "Kept the set tight; the chain-length variants are speculative.",
+      "error": null
+    },
+    {
+      "seat": "gemini35flash",
+      "status": "ok",
+      "picks": [
+        {
+          "id": "rxn05001",
+          "confidence": "high",
+          "why": "EC 1.2.1.3 and the equation agree."
+        },
+        {
+          "id": "rxn05002",
+          "confidence": "medium",
+          "why": "Same EC cluster."
+        }
+      ],
+      "overall_confidence": "high",
+      "no_functional_content": false,
+      "notes": "",
+      "error": null
+    }
+  ],
+  "critic_raw": {
+    "per_reaction_critique": [
+      {
+        "rxn_id": "rxn05001",
+        "council_vote_count": 5,
+        "critic_verdict": "strongly_consistent",
+        "critic_reason": "Perfect EC and equation match; a unanimous pick is the right call."
+      },
+      {
+        "rxn_id": "rxn05002",
+        "council_vote_count": 3,
+        "critic_verdict": "consistent",
+        "critic_reason": "Chain-length variant within the same EC; defensible for a promiscuous enzyme."
+      },
+      {
+        "rxn_id": "rxn05004",
+        "council_vote_count": 1,
+        "critic_verdict": "consistent",
+        "critic_reason": "Shares the input EC; a single vote understates it but is not wrong."
+      },
+      {
+        "rxn_id": "rxn05007",
+        "council_vote_count": 0,
+        "critic_verdict": "ambiguous",
+        "critic_reason": "Same EC but the substrate is a branched aldehyde the description does not mention."
+      },
+      {
+        "rxn_id": "rxn05021",
+        "council_vote_count": 2,
+        "critic_verdict": "inconsistent",
+        "critic_reason": "No EC on this candidate and the equation oxidises an alcohol, not an aldehyde."
+      }
+    ],
+    "missed_picks": [
+      {
+        "rxn_id": "rxn05011",
+        "reason": "Shares the input EC and the equation is the straight NAD+ oxidation; no model picked it."
+      }
+    ],
+    "overall_note": "The core pick is right, one low-confidence pick is chemically wrong, and one same-EC candidate was overlooked."
+  }
+}

@@ -1,0 +1,36 @@
+Annotation string: "Bifunctional protein FolD: methylenetetrahydrofolate dehydrogenase (NADP+) / methenyltetrahydrofolate cyclohydrolase"
+Produced by: RAST
+
+Candidates (rank | GO id | name | definition):
+   1 | GO:0004488 | 0.812 | methylenetetrahydrofolate dehydrogenase (NADP+) activity | Catalysis of the reaction: 5,10-methylenetetrahydrofolate + NADP+ = 5,10-methenyltetrahydrofolate + NADPH + H+.
+   2 | GO:0004477 | 0.775 | methenyltetrahydrofolate cyclohydrolase activity | Catalysis of the reaction: 5,10-methenyltetrahydrofolate + H2O = 10-formyltetrahydrofolate + H+.
+   3 | GO:0016740 | 0.510 | transferase activity
+  10 | GO:0050661 | 0.489 | NADP binding | Binding to nicotinamide-adenine dinucleotide phosphate.
+
+Council votes (GO id : count of 2):
+  GO:0004488: 2
+  GO:0004477: 2
+  GO:0050661: 1
+
+Per-proposer reasoning:
+  - gemini35flash [high]:
+      GO:0004488 [high] The annotation names the NADP+-dependent dehydrogenase half of FolD outright.
+      GO:0004477 [high] The annotation also names the cyclohydrolase half, which this term covers.
+  - gpt54 [medium]:
+      GO:0004488 [high] Bifunctional FolD carries this activity; the EC and the wording both line up.
+      GO:0004477 [medium] Second activity of the same bifunctional protein.
+      GO:0050661 [low] NADP+ is named, so the protein must bind NADP, though that is implied rather than stated as a function.
+  - gpt55: ERROR timeout: the call exceeded its 180s deadline
+
+Critic audit:
+{"verdict": "ambiguous", "reason": "Both catalytic terms are clearly supported. GO:0050661 is a binding term inferred from the cofactor named in the dehydrogenase activity, not an independently stated function.", "overpicked": ["GO:0050661"], "missed": [], "contentless_input": false}
+
+Return JSON exactly matching:
+{
+  "final_go_ids": ["<go_id>", ...],
+  "final_confidence": "high|medium|low",
+  "no_functional_content": <true or false>,
+  "reasoning": "<paragraph explaining the call and how the disagreement was resolved>"
+}
+
+Return ONLY the JSON object.

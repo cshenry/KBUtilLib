@@ -79,6 +79,24 @@ api = [
 ai = [
   "httpx[socks] >=0.28",
 ]
+# Store layer for the LLM council (domains/ai/council/store/*). SQLAlchemy
+# Core 2.x -- not the ORM -- is the only query layer the store uses, and it is
+# the only requirement here: the council store is a LOCAL SQLite file, one per
+# machine, so there is no database server and no driver to install beyond the
+# stdlib's sqlite3. Kept optional for the same reason as `ai`: the council
+# modules are reached through a lazy loader
+# (domains/ai/council/__init__.py), so a core install imports fine without
+# this and only fails -- with a clean ImportError -- if someone actually
+# opens a store.
+#
+# Deliberately NOT in `all`, on the same rationale as `backfill`: `all` is
+# "every transport plus the docs build", and a query layer nothing else uses
+# is neither. The council's own protocol/types/config layer has no dependency
+# here at all (pydantic and PyYAML are core), so `kbu council` can render and
+# validate a configuration without this extra installed.
+council = [
+  "SQLAlchemy >=2.0",
+]
 # Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).
 # Deployed into a dedicated venv (~/venvs/lp-solver) per
 # agent-io/prds/remote-lp-solver/fullprompt.md "Deployment on H100", not
@@ -231,6 +249,24 @@ kbutillib = [
     # travels inside the wheel beside the manifest.
     "domains/kbase/berdl/backfills/*.toml",
     "domains/kbase/berdl/backfills/*.parquet",
+    # The packaged default council configuration
+    # (domains/ai/council/default_config.yaml). load_council_config() with no
+    # argument reads it through importlib.resources, so a non-editable install
+    # that did not ship it would have no default council at all: every profile
+    # lookup on a fresh machine would fail, which is precisely the machine the
+    # default exists for.
+    "domains/ai/council/*.yaml",
+    # The council's query types. The two builtin YAMLs ARE the prompts
+    # go_mf@1 and reaction_pickup@1 ask -- QueryRegistry.seed_builtins reads
+    # them through importlib.resources -- and generic_schemas.json is the
+    # authority a user-registered query type's answer schemas are compared
+    # against, so a wheel without them can neither seed the builtins nor
+    # validate a user spec. querytype.schema.json and the worked
+    # examples/custom_example.yaml travel for the same reason `kbu council
+    # query register --help` has to be able to point at something real.
+    "domains/ai/council/queries/*.json",
+    "domains/ai/council/queries/builtin/*.yaml",
+    "domains/ai/council/queries/examples/*.yaml",
 ]
 
 [tool.uv]

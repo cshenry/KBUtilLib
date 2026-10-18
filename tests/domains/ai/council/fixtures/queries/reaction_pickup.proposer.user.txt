@@ -1,0 +1,41 @@
+Gene: Ac3H11_1623
+Description: "aldehyde dehydrogenase (NAD+) family protein"
+EC: 1.2.1.3
+
+Candidates (presented in upstream rank order; rank reflects fused_score retrieval+rerank confidence).
+Format: rank | rxn_id | name | EC | fused_score | skos | equation
+    1 | rxn05001 | aldehyde dehydrogenase (NAD+) variant 1 | 1.2.1.3 | 0.920 | exactMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+    2 | rxn05002 | aldehyde dehydrogenase (NAD+) variant 2 | 1.2.1.3 | 0.890 | exactMatch | (1) cpd00001[c0] + (1) cpd00002[c0] + (1) cpd00067[c0] + (1) cpd00009[c0] + (2) cpd00013[c0] + (1) cpd00011[c0] + (3) cpd00012[c0] <=> (1) cpd00008[c0] + (1) cpd00010[c0] + (2) cpd00020[c0] + (1) cpd00023[c0] + (1) cp...
+    3 | rxn05003 | long-chain acyl-CoA dehydrogenase / very-long-chain specific acyl-CoA dehydrogenase, mitochondrial precursor, electron-transfer-flavoprot... | - | 0.860 | exactMatch | (1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]
+    4 | rxn05004 | aldehyde dehydrogenase (NAD+) variant 4 | 1.2.1.3 | 0.830 | closeMatch | (1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]
+    5 | rxn05005 | aldehyde dehydrogenase (NAD+) variant 5 | 1.1.1.1;1.2.1.5 | 0.800 | closeMatch | (1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]
+    6 | rxn05006 | aldehyde dehydrogenase (NAD+) variant 6 | - | 0.770 | closeMatch | (1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]
+    7 | rxn05007 | aldehyde dehydrogenase (NAD+) variant 7 | 1.2.1.3 | 0.740 | closeMatch | (1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]
+    8 | rxn05008 | aldehyde dehydrogenase (NAD+) variant 8 | - | 0.710 | closeMatch | (1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]
+    9 | rxn05009 | aldehyde dehydrogenase (NAD+) variant 9 | - | 0.680 | closeMatch | (1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]
+   10 | rxn05010 | aldehyde dehydrogenase (NAD+) variant 10 | 1.1.1.1;1.2.1.5 | 0.650 | closeMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+   11 | rxn05011 | aldehyde dehydrogenase (NAD+) variant 11 | 1.2.1.3 | 0.620 | relatedMatch | (1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]
+   12 | rxn05012 | aldehyde dehydrogenase (NAD+) variant 12 | - | 0.590 | relatedMatch | (1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]
+   13 | rxn05013 | aldehyde dehydrogenase (NAD+) variant 13 | - | 0.560 | relatedMatch | (1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]
+   14 | rxn05014 | aldehyde dehydrogenase (NAD+) variant 14 | - | 0.530 | relatedMatch | (1) cpd00006[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00015[c0]
+   15 | rxn05015 | aldehyde dehydrogenase (NAD+) variant 15 | 1.1.1.1;1.2.1.5 | 0.500 | relatedMatch | (1) cpd00007[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00016[c0]
+   16 | rxn05016 | aldehyde dehydrogenase (NAD+) variant 16 | - | 0.470 | relatedMatch | (1) cpd00008[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00017[c0]
+   17 | rxn05017 | aldehyde dehydrogenase (NAD+) variant 17 | - | 0.440 | relatedMatch | (1) cpd00009[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00018[c0]
+   18 | rxn05018 | aldehyde dehydrogenase (NAD+) variant 18 | - | 0.410 | relatedMatch | (1) cpd00001[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00010[c0]
+   19 | rxn05019 | aldehyde dehydrogenase (NAD+) variant 19 | - | 0.380 | relatedMatch | (1) cpd00002[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00011[c0]
+   20 | rxn05020 | aldehyde dehydrogenase (NAD+) variant 20 | 1.1.1.1;1.2.1.5 | 0.350 | relatedMatch | (1) cpd00003[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00012[c0]
+   21 | rxn05021 | aldehyde dehydrogenase (NAD+) variant 21 | - | 0.320 | relatedMatch | (1) cpd00004[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00013[c0]
+   22 | rxn05022 | aldehyde dehydrogenase (NAD+) variant 22 | - | 0.290 | relatedMatch | (1) cpd00005[c0] + (1) cpd00003[c0] <=> (1) cpd00004[c0] + (1) cpd00014[c0]
+
+Return JSON conforming to this schema:
+{
+  "picked_reactions": [
+    {"rxn_id": "<one of the offered ids>",
+      "confidence": "high|medium|low",
+      "rationale": "<one sentence grounded in the equation or EC>"}
+  ],
+  "overall_confidence": "high|medium|low",
+  "notes": "<optional, used when picked_reactions is empty or to flag ambiguity>"
+}
+
+Pick 0 to 12 reactions. Return ONLY the JSON object, no prose.

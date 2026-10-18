@@ -1,0 +1,75 @@
+{
+  "proposer": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "council proposer answer",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["picked", "overall_confidence", "no_functional_content"],
+    "properties": {
+      "picked": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "confidence", "why"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "one of the ids offered on the closed menu"
+            },
+            "confidence": {"enum": ["high", "medium", "low"]},
+            "why": {"type": "string"}
+          }
+        }
+      },
+      "overall_confidence": {"enum": ["high", "medium", "low"]},
+      "no_functional_content": {"type": "boolean"},
+      "notes": {"type": "string"}
+    }
+  },
+  "critic": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "council critic answer",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "verdict",
+      "reason",
+      "overpicked",
+      "missed",
+      "contentless_input"
+    ],
+    "properties": {
+      "verdict": {
+        "enum": [
+          "strongly_consistent",
+          "consistent",
+          "ambiguous",
+          "inconsistent"
+        ]
+      },
+      "reason": {"type": "string"},
+      "overpicked": {"type": "array", "items": {"type": "string"}},
+      "missed": {"type": "array", "items": {"type": "string"}},
+      "contentless_input": {"type": "boolean"}
+    }
+  },
+  "meta": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "council meta answer",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "final_ids",
+      "final_confidence",
+      "no_functional_content",
+      "reasoning"
+    ],
+    "properties": {
+      "final_ids": {"type": "array", "items": {"type": "string"}},
+      "final_confidence": {"enum": ["high", "medium", "low"]},
+      "no_functional_content": {"type": "boolean"},
+      "reasoning": {"type": "string"}
+    }
+  }
+}

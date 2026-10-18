@@ -8,6 +8,7 @@ Example::
 
     from kbutillib.domains.ai.argo_utils import ArgoUtils
     from kbutillib.domains.ai.ai_curation_utils import AICurationUtils
+    from kbutillib.domains.ai.council_utils import CouncilUtils
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ __all__ = [
     "llm_label",
     "AICurationUtils",
     "AICurationUtilsImpl",
+    "CouncilUtils",
+    "CouncilUtilsImpl",
     "KBPLMUtils",
     "KBPLMUtilsImpl",
     "ProtT5Utils",
@@ -33,6 +36,8 @@ _MODULE_MAP: dict[str, str] = {
     "llm_label": "argo_utils",
     "AICurationUtils": "ai_curation_utils",
     "AICurationUtilsImpl": "ai_curation_utils",
+    "CouncilUtils": "council_utils",
+    "CouncilUtilsImpl": "council_utils",
     "KBPLMUtils": "kb_plm_utils",
     "KBPLMUtilsImpl": "kb_plm_utils",
     "ProtT5Utils": "prott5_utils",

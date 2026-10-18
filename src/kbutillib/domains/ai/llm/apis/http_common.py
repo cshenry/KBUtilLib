@@ -505,8 +505,15 @@ class HttpBackend:
         return body
 
     def _headers(self, bearer: Optional[str]) -> Dict[str, str]:
-        """Request headers, built per call so no credential is ever stored."""
+        """Request headers, built per call so no credential is ever stored.
+
+        Order is the guarantee: ``Content-Type``, then whatever
+        :meth:`_static_headers` contributes, then ``Authorization`` LAST.  A
+        static header can therefore never displace the credential, whatever
+        a configuration tried to call it.
+        """
         headers = {"Content-Type": "application/json"}
+        headers.update(self._static_headers())
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         return headers
@@ -543,6 +550,15 @@ class HttpBackend:
         path rather than crash the worker at construction.
         """
         return None, None
+
+    def _static_headers(self) -> Dict[str, str]:
+        """Non-secret headers this backend adds to EVERY request.  None here.
+
+        Empty by default so a subclass that does not opt in sends exactly the
+        header dict it sent before this hook existed -- ARGO's requests are
+        byte-identical, which is the point of the default.
+        """
+        return {}
 
     def _params(self, req: LLMRequest) -> Dict[str, Any]:
         """Generation parameters this server accepts for *req*."""

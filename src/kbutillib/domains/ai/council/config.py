@@ -62,6 +62,7 @@ __all__ = [
     "looks_like_credential",
     "load_council_config",
     "load_legacy_model_inference",
+    "validate_static_headers",
 ]
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,120 @@ def _refuse_credential_values(section: str, name: str, value: Any, path: str = "
             _refuse_credential_values(section, name, item, f"{path}{index}.")
 
 
+#: Header names an endpoint's ``options.headers`` may never set, matched by
+#: exact name and case-insensitively.  Every one of them either IS the
+#: credential channel or is routinely used as one, and the council has
+#: exactly one credential channel: ``api_key_env``, which names an
+#: environment variable rather than holding its contents.
+_REFUSED_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+    }
+)
+
+#: ... and the fragments that make any OTHER name a credential carrier.
+#: Substring rather than suffix here, unlike :data:`_SECRET_SUFFIXES`: a
+#: header name is freely invented by a gateway (``X-Gateway-Token-V2``) and
+#: there is no budget-shaped counterexample among header names the way
+#: ``max_total_tokens`` is one among config keys.
+_REFUSED_HEADER_FRAGMENTS = ("token", "secret", "password", "key")
+
+#: A field name as RFC 9110 defines it: one or more ``tchar``.  A name with a
+#: space, a colon or a newline in it is how a header injection is spelled, so
+#: it is refused at load rather than handed to ``httpx``.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def validate_static_headers(endpoint: str, raw: Any) -> Dict[str, str]:
+    """Validate an endpoint's ``options.headers`` and return it as ``str: str``.
+
+    Static headers exist for gateways that route on a non-secret header --
+    the Genesis Model Access Gateway picks a provider from
+    ``X-AmSC-MAG-Provider`` -- and they are sent on EVERY request an
+    OpenAI-compatible endpoint makes.  Two things follow, and both are
+    enforced here rather than at call time, because a config that cannot work
+    must fail before any token is spent:
+
+    * **They are non-secret.**  A name on :data:`_REFUSED_HEADER_NAMES`, or
+      one containing any of :data:`_REFUSED_HEADER_FRAGMENTS`, is refused
+      naming the endpoint, and so is a VALUE that
+      :func:`looks_like_credential` recognises.  A credential goes through
+      ``api_key_env`` and nowhere else -- the store keeps a snapshot of this
+      configuration, and the route fingerprint hashes ``options`` verbatim,
+      so a secret put here would be persisted in both.
+    * **They are well-formed.**  Names must be RFC 9110 field names and
+      values must already be strings; a config is not the place to discover
+      that an integer or a newline reached the request line.
+
+    Args:
+        endpoint: the endpoint's name, for the error message.
+        raw: whatever the config put under ``options.headers``.
+
+    Returns:
+        The headers as a plain ``{str: str}`` dict.  ``{}`` when *raw* is
+        ``None`` or empty.
+
+    Raises:
+        ConfigError: *raw* is not a mapping, or any name or value is unusable.
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"endpoint {endpoint!r} sets options.headers to a "
+            f"{type(raw).__name__}; it must be a mapping of header name to "
+            "string value."
+        )
+
+    headers: Dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if not _HEADER_NAME_RE.match(name):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r}, "
+                "which is not a valid HTTP header name (RFC 9110 allows only "
+                "letters, digits and !#$%&'*+-.^_`|~)."
+            )
+        lowered = name.lower()
+        if lowered in _REFUSED_HEADER_NAMES or any(
+            fragment in lowered for fragment in _REFUSED_HEADER_FRAGMENTS
+        ):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r}, "
+                "which is a credential header. options.headers is for "
+                "NON-SECRET routing headers only (it is hashed into the route "
+                "fingerprint and kept in the store's config snapshot); the "
+                "credential goes through api_key_env: <VARIABLE NAME>, which "
+                "becomes the Authorization header and cannot be overridden "
+                "from here."
+            )
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r} to a "
+                f"{type(value).__name__}; a header value must be a string "
+                "(quote it in YAML if it looks like a number)."
+            )
+        # The name rule above cannot catch a gateway's own invented spelling
+        # (``X-Forwarded-Auth``), so the VALUE is screened too, by the same
+        # heuristic :func:`_refuse_credential_values` uses.  That function
+        # only screens values under credential-SHAPED key names, which a
+        # header name is not obliged to be.
+        if looks_like_credential(value):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r} to "
+                "what looks like a live credential. options.headers is for "
+                "NON-SECRET routing headers only (it is hashed into the route "
+                "fingerprint and kept in the store's config snapshot); the "
+                "credential goes through api_key_env: <VARIABLE NAME>."
+            )
+        headers[name] = value
+    return headers
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -466,11 +581,20 @@ class EndpointConfig(BaseModel):
     #: in a ``*_env`` key, enforced in :func:`load_council_config`), and part
     #: of the route fingerprint, because an option that changes the answer has
     #: to change the identity of the route that produced it.
+    #:
+    #: One option is understood by a BUILT-IN kind: ``headers``, a mapping of
+    #: static non-secret request headers an ``openai`` endpoint sends on every
+    #: request (see :func:`validate_static_headers`).
     options: Dict[str, Any] = {}
 
     @model_validator(mode="after")
     def _check(self) -> "EndpointConfig":
         """Fill per-kind defaults and refuse combinations that cannot work."""
+        # Checked for every kind, not only ``openai`` (which is the one kind
+        # that SENDS them today): the rule being enforced is "no credential
+        # in options", and that holds wherever the option was written.
+        validate_static_headers(self.name, self.options.get("headers"))
+
         if self.kind in CLI_KINDS:
             if self.billing == "api":
                 raise ConfigError(

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import httpx
 
@@ -297,6 +297,29 @@ class OpenAICompatibleBackend(HttpBackend):
             if from_env:
                 return from_env, None
         return "EMPTY", None
+
+    def _static_headers(self) -> Dict[str, str]:
+        """The endpoint's ``options.headers``, sent on every request.
+
+        A gateway in front of several providers routes on a header rather
+        than on the URL -- the Genesis Model Access Gateway picks the
+        provider from ``X-AmSC-MAG-Provider`` -- so an OpenAI-compatible
+        endpoint can declare static headers that travel with the chat call
+        AND with ``/models``.
+
+        Non-secret by contract: ``council.config.validate_static_headers``
+        refuses a credential-shaped name at load, and
+        :meth:`~..http_common.HttpBackend._headers` adds these BEFORE
+        ``Authorization``, so even a config built by hand and never passed
+        through the loader cannot displace the credential.  Names and values
+        are stringified here rather than validated a second time: this is the
+        call path, and a backend never raises.
+        """
+        options = self.config.get("options")
+        headers = options.get("headers") if isinstance(options, Mapping) else None
+        if not isinstance(headers, Mapping):
+            return {}
+        return {str(name): str(value) for name, value in headers.items()}
 
     def _clean_content(self, content: str) -> str:
         """Drop ``<think>...</think>`` reasoning blocks."""

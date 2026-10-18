@@ -14,7 +14,7 @@
   "review_rounds": 0,
   "confront_rounds": 1,
   "confront": "round 1 complete: 12 binding stalls, all 12 accepted and folded; see research/confront-round-1-stall-report.md and the Acceptance Criteria section",
-  "draft_commit": null,
+  "draft_commit": "886259c882917361700fb96560506857aaf9e52f",
   "review_protocol": "Written single-pass in Draft Mode on 2026-10-18, with no interview of Chris. Every judgement call is already decided and applied in the body; the 'Open Questions and Judgement Calls' section (Q1-Q15) is a manifest of those decisions ordered by blast radius, not a queue of holes. Chris reviews by editing fullprompt.md in place, annotating with (CSH ...) markers; `/ai-design --review ontology-mapping-function-to-go-v1` then diffs the working tree against draft_commit, classifies each hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to `ready` until review_rounds >= 1.",
   "research": {
     "external_scan": {

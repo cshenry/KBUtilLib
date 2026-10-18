@@ -1,0 +1,125 @@
+{
+  "prd_name": "ontology-mapping-function-to-go-v1",
+  "title": "OntologyMapping: a function_to_go capability for KBUtilLib",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "status": "draft",
+  "priority": "normal",
+  "authored_by": "miles",
+  "authored_on": "2026-10-18",
+  "authoring_session": "453cc116-a39a-597e-a66f-0eda9a1575d1",
+  "mode": "draft-mode-single-pass",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "confront": "round 1 complete: 12 binding stalls, all 12 accepted and folded; see research/confront-round-1-stall-report.md and the Acceptance Criteria section",
+  "draft_commit": null,
+  "review_protocol": "Written single-pass in Draft Mode on 2026-10-18, with no interview of Chris. Every judgement call is already decided and applied in the body; the 'Open Questions and Judgement Calls' section (Q1-Q15) is a manifest of those decisions ordered by blast radius, not a queue of holes. Chris reviews by editing fullprompt.md in place, annotating with (CSH ...) markers; `/ai-design --review ontology-mapping-function-to-go-v1` then diffs the working tree against draft_commit, classifies each hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to `ready` until review_rounds >= 1.",
+  "research": {
+    "external_scan": {
+      "path": "research/external-prior-art-scan.md",
+      "maestro_task_id": "task-ebbb3fd6",
+      "backend": "codex",
+      "machine": "h100",
+      "commit": "5287a8b7",
+      "web_access": true,
+      "ran_on": "2026-10-17"
+    },
+    "local_corpus_read_in_full": [
+      "type_4/full_specificity_rrf_fusion/source.py",
+      "domains/genome/annotation/ontology_dictionary.py",
+      "domains/genome/annotation/build_go_description_map.py",
+      "domains/genome/ontomap_utils.py",
+      "domains/modeling/ec_role_resolver.py",
+      "domains/genome/annotation/annotator_utils.py (Term/AnnotationRecord/describe_or_accession)"
+    ],
+    "not_read_and_flagged": [
+      "the ec2go file itself -- format taken from GO Consortium convention, not parsed",
+      "the research program's reports/ and results/ trees -- permission denied"
+    ],
+    "confront_round_1": {
+      "path": "research/confront-round-1-stall-report.md",
+      "maestro_task_id": "task-16d54bf7",
+      "backend": "codex",
+      "machine": "h100",
+      "commit": "db439846",
+      "stalls_reported": 12,
+      "stalls_accepted": 12,
+      "stalls_dropped": 0,
+      "note": "Status field read 'submitted' while h100-general-1 was running it -- known Maestro#11 reporting noise; verified by worker assignment and worktree, then by the committed artifact. The worktree was cleaned up before the artifact could be copied, so it was recovered from the Dropbox repo object store at db439846.",
+      "contradictions_it_caught_in_the_draft": [
+        "fullprompt and humanprompt disagreed on the default combine mode",
+        "the result schema required go_release/corpus_sha256 that an ec2go-only result cannot supply",
+        "top1_margin was called the confidence signal across scores the same document called incomparable",
+        "abstention and provided-GO passthrough could not both hold for a placeholder product with a known GO id"
+      ],
+      "factual_correction": "Q11 claimed that setting all synonym-scope multipliers to 1.0 reproduces Type 1 exactly. It does not: Type 1 concatenates every synonym into ONE field (_candidate_fields, source.py:53) and saturates it once, whereas four scope-separated fields saturate independently. Corrected in the PRD."
+    }
+  },
+  "measurements": {
+    "ontomap_installed_on_h100": false,
+    "ontomap_probe": "scrubbed-env import across all 20 ~/venvs/* on poplar 2026-10-18; absent everywhere, including gaa, gaa-model and kbdl which do import kbutillib",
+    "kbutillib_install_tree": "/home/chenry/projects/KBUtilLib",
+    "kbutillib_install_tree_inode": "64517:5167606134",
+    "kbutillib_path_alias": "/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib is the SAME inode -- one clone, two path aliases, not two trees",
+    "importing_venvs": [
+      "gaa",
+      "gaa-model",
+      "kbdl",
+      "lp-solver"
+    ],
+    "accuracy_measured": false,
+    "accuracy_note": "NO accuracy figure is claimed for any route. Task 6 ships the evaluation harness that would produce one; it has not been run.",
+    "type_1_source_readable": true,
+    "type_1_constants_verified": {
+      "FIELD_WEIGHTS": {
+        "name": 3.0,
+        "synonyms": 2.0,
+        "definition": 1.0
+      },
+      "NGRAM_SIZES": [
+        3,
+        4,
+        5
+      ],
+      "K1": 1.2,
+      "B": 0.75,
+      "normalisation": "join(TOKEN.findall(text.lower())) then pad with one leading and one trailing space",
+      "source": "/scratch/vsetlur/.../type_1/field_aware_bm25_char/source.py lines 31-33, 47-50"
+    }
+  },
+  "prior_art_in_fleet": {
+    "gaa-ontomap-council-mapping": "ARCHIVED 2026-07-12 -- remaining tasks blocked on Vibhav non-public assets (SSO LoRA + target_sapbert.npz) + h100 env. The direct precedent for Q1's refusal to depend on ontomap.",
+    "kbdl-ontology-descriptions-v1": "DONE 2026-08-27 but was INERT IN PRODUCTION -- seven reviewed tasks, reaction-yield delta exactly zero, because every guard injected OntologyDictionary at the constructor seam while the real adapter passed nothing. The direct precedent for task 7's no-injection acceptance gate."
+  },
+  "decision_summary": {
+    "total_judgement_calls": 15,
+    "by_blast_radius": {
+      "IRREVERSIBLE": 2,
+      "MEDIUM": 5,
+      "LOW": 7,
+      "terminal_could_not_decide": 1
+    },
+    "highest_risk": "Q4 -- route precedence vs RRF as the default combine mode. High confidence that equal-weight RRF should NOT be the default (the external scan's k=60 counterexample is arithmetic and matches our short-precise/long-noisy route asymmetry), but LOW confidence that precedence is the best alternative; a tuned weighted combination may beat it and only task 6 can say.",
+    "parked_on_measurement": [
+      "Q4 -- precedence vs a tuned combination",
+      "Q11 -- the four synonym-scope multipliers (exact 1.0 / narrow 0.75 / related 0.5 / broad 0.25) are invented",
+      "Q3 -- whether the ec2go route earns its place depends on unmeasured EC coverage over our descriptions"
+    ],
+    "needs_chris": [
+      "Q14 -- whether we may stage and use KEGG's ko2go.xl is a licensing question, not a technical one",
+      "whether a go/no-go accuracy threshold should gate the merge; nothing readable supplies one"
+    ]
+  },
+  "taskplan": {
+    "tasks": 7,
+    "phases": 7,
+    "all_sequential": true,
+    "sequential_reason": "the taskplan validator rejects two parallel tasks sharing one repo -- concurrent branches in the same repo collide (dev 1032)",
+    "lane": "in_context",
+    "validated": true
+  },
+  "notes": "Scope moved twice from the brief as given, both flagged in the PRD rather than silently absorbed. (1) The named path .../pipelines/type_4 holds a FUSION stage that computes no scores and refuses any query outside a frozen <=1000-query test manifest, so 'integrate type_4' became 'port Type 1's BM25 scorer plus Type 4's RRF kernel' (Q2). (2) 'A new API library' became 'a new capability domain on the existing @capability registry' on Chris's in-session steer, 'if there are already capabilities, build on those' (Q7). The name OntologyMapping survives as the capability domain (ontology_mapping.*) and the facade property. Adds no third-party dependency, deliberately: dependency-freedom is what stops this failing the way OntomapUtils did.",
+  "acceptance_criteria_count": 20
+}

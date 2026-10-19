@@ -41,9 +41,6 @@ if TYPE_CHECKING:
     from .domains.genome.kb_annotation_utils import KBAnnotationUtilsImpl
     from .domains.genome.kb_genome_utils import KBGenomeUtilsImpl
     from .domains.genome.mmseqs_utils import MMSeqsUtilsImpl
-    from .domains.genome.ontology_mapping.ontology_mapping_utils import (
-        OntologyMappingUtilsImpl,
-    )
     from .domains.genome.ontomap_utils import OntomapUtilsImpl
     from .domains.genome.skani_utils import SKANIUtilsImpl
     from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
@@ -131,7 +128,6 @@ class KBUtilLib:
         self._jobs = None
         self._kbdl_service = None
         self._ontomap = None
-        self._ontology_mapping = None
         self._network_expansion = None
         self._verab = None
 
@@ -421,17 +417,6 @@ class KBUtilLib:
             from .domains.genome.ontomap_utils import OntomapUtilsImpl
             self._ontomap = OntomapUtilsImpl(self.env)
         return self._ontomap
-
-    @property
-    def ontology_mapping(self) -> "OntologyMappingUtilsImpl":
-        """Function description -> GO: ``function_to_go`` (ranked candidates)
-        then ``function_to_go_council`` (AI council pick)."""
-        if self._ontology_mapping is None:
-            from .domains.genome.ontology_mapping.ontology_mapping_utils import (
-                OntologyMappingUtilsImpl,
-            )
-            self._ontology_mapping = OntologyMappingUtilsImpl(self.env)
-        return self._ontology_mapping
 
     @property
     def network_expansion(self) -> "NetworkExpansionUtilsImpl":

@@ -143,10 +143,6 @@ prott5 = ["torch", "transformers", "sentencepiece"]
 # runtime deps (beautifulsoup4, lxml); shapely/pandas are editEscher extras and
 # nothing this module calls needs them, so they are intentionally omitted.
 community = ["beautifulsoup4", "lxml"]
-# Function -> GO mapping (kbu.ontology_mapping.function_to_go). The vendored
-# OntoMap go-text models are scikit-learn pickles; 1.9.0 is the version they
-# load cleanly under (no InconsistentVersionWarning), so it is pinned exactly.
-ontology_mapping = ["numpy >=1.24", "scipy >=1.10", "scikit-learn ==1.9.0", "joblib >=1.3"]
 # Reaction-similarity module (kbu.rxnsim). Imported lazily, so the package
 # imports fine without these; install with: pip install KBUtilLib[reaction_similarity]
 reaction_similarity = [
@@ -260,12 +256,6 @@ kbutillib = [
     # lookup on a fresh machine would fail, which is precisely the machine the
     # default exists for.
     "domains/ai/council/*.yaml",
-    # The vendored OntoMap go-text models (byte-for-byte, with their own
-    # manifests) and the GO metadata table function_to_go attaches names,
-    # definitions and heights from. Without them function_to_go cannot run.
-    "data/ontology_mapping/*.json",
-    "data/ontology_mapping/go_text/*",
-    "data/ontology_mapping/go_text/*/*",
     # The council's query types. The two builtin YAMLs ARE the prompts
     # go_mf@1 and reaction_pickup@1 ask -- QueryRegistry.seed_builtins reads
     # them through importlib.resources -- and generic_schemas.json is the

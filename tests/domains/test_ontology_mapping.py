@@ -76,6 +76,7 @@ def test_placeholders_abstain(om, text):
 @pytest.mark.parametrize("text", [
     "ATP synthase subunit alpha", "DUF1234 domain-containing ABC transporter permease",
     "VOG02491 | K02313 | chromosomal replication initiator protein", "phage protein", "transporter",
+    "protein adenylyltransferase (EC 2.7.7.108)", "Protein kinase", "protein translocase subunit SecA",
 ])
 def test_real_functions_do_not_abstain(text):
     assert placeholder_reason(text) is None
@@ -101,6 +102,22 @@ def test_retrieval_matches_the_council_inputs_where_they_were_not_pooled(om):
         assert got[qid] == [c["go_id"] for c in inputs[qid]["candidates"]]
     for qid, inp in inputs.items():
         assert got[qid][0] == inp["candidates"][0]["go_id"]
+
+
+def test_ranked_handoff_round_trips_and_refuses_another_mapping(om, tmp_path):
+    ranked = om.function_to_go([{"id": "a", "text": "glucokinase"}, {"id": "b", "text": "hypothetical protein"}])
+    info = om.write_ranked(ranked, tmp_path / "ranked.jsonl.gz")
+    assert info["rows"] == 2
+    back = om.read_ranked(tmp_path / "ranked.jsonl.gz")
+    assert back["results"] == ranked["results"] and back["mapping_hash"] == ranked["mapping_hash"]
+
+    import gzip
+    lines = gzip.open(tmp_path / "ranked.jsonl.gz", "rt").read().splitlines()
+    head = json.loads(lines[0]); head["header"]["mapping_hash"] = "0" * 64
+    with gzip.open(tmp_path / "other.jsonl.gz", "wt") as fh:
+        fh.write("\n".join([json.dumps(head)] + lines[1:]) + "\n")
+    with pytest.raises(ValueError):
+        om.read_ranked(tmp_path / "other.jsonl.gz")
 
 
 class _FakeCouncil:

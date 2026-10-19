@@ -245,6 +245,77 @@ class OntologyMappingUtils(SharedEnvUtils):
             "results": results,
         }
 
+    # -- hand-off files ------------------------------------------------------
+    #
+    # Stage 1 and stage 2 may run on different machines (kbhub ranks, poplar
+    # runs the council). A ranked result is written COMPACTLY -- ids, scores,
+    # ranks; no names or definitions, which are 95% of its bytes and are a pure
+    # function of the vendored GO table -- and rehydrated on read. The header
+    # carries mapping_hash, and a reader whose installed backend differs
+    # refuses the file rather than silently mixing two mapping versions.
+
+    def write_ranked(self, ranked: Dict[str, Any], path: Union[str, Path]) -> Dict[str, Any]:
+        """Write :meth:`function_to_go` output as gzipped JSONL (header line first)."""
+        import gzip
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".partial")
+        n = 0
+        with gzip.open(tmp, "wt") as fh:
+            header = {k: ranked[k] for k in ("mapping_version", "mapping_hash", "provenance")}
+            fh.write(json.dumps({"header": header}) + "\n")
+            for r in ranked["results"]:
+                fh.write(json.dumps({
+                    "q": r["query_id"], "t": r["text"], "s": r.get("source") or "",
+                    "a": r["abstain_reason"] if r["abstained"] else None,
+                    "c": [[c["go_id"], c["score"]] for c in r["candidates"]],
+                }) + "\n")
+                n += 1
+        tmp.replace(path)  # atomic: a reader never sees a half-written file
+        return {"path": str(path), "rows": n, "mapping_hash": ranked["mapping_hash"]}
+
+    def read_ranked(self, path: Union[str, Path], allow_version_mismatch: bool = False) -> Dict[str, Any]:
+        """Read a :meth:`write_ranked` file back into :meth:`function_to_go`'s shape."""
+        import gzip
+
+        meta = go_text.load_metadata()
+        with gzip.open(Path(path), "rt") as fh:
+            header = json.loads(fh.readline())["header"]
+            mine = self.mapping_version()["mapping_hash"]
+            if header["mapping_hash"] != mine and not allow_version_mismatch:
+                raise ValueError(
+                    f"{path} was ranked by mapping_hash {header['mapping_hash'][:12]} "
+                    f"({header['mapping_version']}); this install is {mine[:12]}. "
+                    "Re-rank, or deploy the same KBUtilLib on both machines."
+                )
+            results = []
+            for line in fh:
+                row = json.loads(line)
+                cands = [{"go_id": g, "name": meta.name.get(g, ""), "def": meta.definition.get(g, ""),
+                          "score": s, "height": meta.height.get(g), "rank": i}
+                         for i, (g, s) in enumerate(row["c"], 1)]
+                results.append({"query_id": row["q"], "text": row["t"], "source": row["s"],
+                                "abstained": row["a"] is not None, "abstain_reason": row["a"],
+                                "candidates": cands})
+        return {**header, "results": results}
+
+    def write_council(self, council_out: Dict[str, Any], path: Union[str, Path]) -> Dict[str, Any]:
+        """Write :meth:`function_to_go_council` output as gzipped JSONL, one row per input."""
+        import gzip
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".partial")
+        with gzip.open(tmp, "wt") as fh:
+            header = {k: council_out[k] for k in ("mapping_version", "mapping_hash")}
+            header["council"] = council_out["council"]
+            fh.write(json.dumps({"header": header}, default=str) + "\n")
+            for r in council_out["results"]:
+                fh.write(json.dumps({k: v for k, v in r.items() if k != "verdict"}, default=str) + "\n")
+        tmp.replace(path)
+        return {"path": str(path), "rows": len(council_out["results"])}
+
     def _council(self) -> Any:
         from kbutillib.domains.ai.council_utils import CouncilUtils
 

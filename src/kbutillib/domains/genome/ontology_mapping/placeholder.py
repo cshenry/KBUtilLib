@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-PLACEHOLDER_RULES_VERSION = "placeholder-v1"
+PLACEHOLDER_RULES_VERSION = "placeholder-v2"
 
 _IDENTIFIER = re.compile(
     r"\b(?:K\d{5}|COG\d{4}|VOG\d{3,6}|PF\d{5}|TIGR\d{5}|IPR\d{6}|"
@@ -36,7 +36,8 @@ _PLACEHOLDERS = [
     r"(?:duf|upf)\d+(?: family)?(?: (?:domain[- ]containing )?protein)?(?: \w+)?",
     r"(?:conserved |putative )*(?:hypothetical|uncharacteri[sz]ed) (?:membrane|exported|secreted|lipo|periplasmic|cytoplasmic|phage|integral membrane) ?protein",
     r"(?:predicted|putative|conserved) protein",
-    r"(?:protein|orf|gene)(?: \w+)?",
+    # "Protein YbeD" / "ORF 12": a bare locus-style name, NOT "protein adenylyltransferase"
+    r"(?:protein|orf|gene)(?: (?:[a-z]{3,4}[a-z0-9]?|[a-z]{0,4}\d+[a-z]?))?",
     r"(?:no|unknown|none|na|n/a|-)(?: function)?",
     r"",
 ]

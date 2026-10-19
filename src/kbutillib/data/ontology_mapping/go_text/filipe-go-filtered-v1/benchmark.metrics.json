@@ -1,0 +1,28 @@
+{
+  "candidate_labels": 4409,
+  "coverage_any_gold_in_candidate_universe": 0.9862404823561242,
+  "duplicate_input_rows_test": 20852,
+  "entity_overlap_train_test": 0,
+  "failure_categories": {
+    "retrieval_miss_top100": 387,
+    "retrieved": 25130,
+    "unseen_gold_label": 356
+  },
+  "label_overlap_train_test": 2119,
+  "long_tail_test_gold_with_training_frequency_le_5": 987,
+  "mrr": 0.8593744287489301,
+  "multi_label_entities_test": 17771,
+  "schema_version": 1,
+  "score_reliability": {
+    "mean_top1_score": 0.8346283631679549,
+    "note": "descriptive lexical cosine score; not calibrated probability"
+  },
+  "test_entities": 25873,
+  "top1": 0.8021489583735941,
+  "top100": 0.9712828044679782,
+  "top20": 0.9504502763498628,
+  "top5": 0.9218876821396823,
+  "train_entities": 103375,
+  "unseen_gold_label_entities": 356,
+  "usefulness_assessment": "Candidate retrieval is useful when top-k coverage and MRR support analyst review; unseen gold labels cannot be retrieved by this training-derived universe."
+}

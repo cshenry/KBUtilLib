@@ -32,7 +32,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -55,6 +55,10 @@ __all__ = [
     "generic_postprocess",
     "final_ids_key",
     "load_spec_mapping",
+    "BATCH_ITEM_KEY_FIELD",
+    "BATCH_SYSTEM_SUFFIX",
+    "wrap_batch_answer_schema",
+    "render_batch_user",
 ]
 
 _GENERIC_SCHEMAS_RESOURCE = "generic_schemas.json"
@@ -374,3 +378,78 @@ def load_spec_mapping(source: Union[str, Path, Mapping[str, Any]]) -> Dict[str, 
     if exists:
         return dict(yaml.safe_load(candidate.read_text()) or {})
     return dict(yaml.safe_load(text) or {})
+
+
+# ---------------------------------------------------------------------------
+# Batched invocation -- the render/answer-schema surface for one seat
+# answering several call rows in one backend invocation (t8).
+#
+# Batching changes the TRANSPORT only: a single role's rendered prompts are
+# bundled into one numbered-list user prompt and the role's own answer schema
+# is wrapped so a reply can carry back several answers, each tagged with the
+# opaque ``item_key`` (a call id) it belongs to.  Nothing here knows about the
+# store, a seat or a backend -- see ``engine.worker`` for assembly, dispatch
+# and 1:N settlement, which is where that per-call context lives.
+# ---------------------------------------------------------------------------
+
+#: The key every batched answer element must carry back, naming which call
+#: row it answers.  Opaque to the model: it is handed out verbatim and read
+#: back verbatim, never interpreted.
+BATCH_ITEM_KEY_FIELD = "item_key"
+
+#: Appended to a role's system prompt for a BATCHED invocation only.  The only
+#: change to that prompt: everything else about asking the question is
+#: unchanged, so a batch of one is the same question a single call would ask,
+#: plus this one instruction.
+BATCH_SYSTEM_SUFFIX = (
+    "\n\nThis request bundles several independent items into a single call. "
+    "Answer every item below and return your answers as a JSON object with an "
+    "`answers` array; each element of that array must carry back the exact "
+    f"`{BATCH_ITEM_KEY_FIELD}` of the item it answers, alongside the answer "
+    "fields described above for this role. The items are independent: do not "
+    "let one item's evidence, menu or answer influence another item's answer."
+)
+
+
+def wrap_batch_answer_schema(role_schema: Mapping[str, Any]) -> Dict[str, Any]:
+    """Wrap one role's answer schema for a batched reply.
+
+    The wrapped schema is ``{"answers": [{"item_key": <str>, **role_schema}]}``:
+    one array element per item, each carrying the opaque
+    :data:`BATCH_ITEM_KEY_FIELD` plus the role's EXISTING answer shape,
+    unchanged.  The engine validates the wrapper (does ``answers`` exist and
+    is it an array?) separately from each element's role payload, and strips
+    ``item_key`` before that per-element validation runs -- so a single
+    malformed element never fails every other answer in the same reply (see
+    ``engine.worker._settle_batch_answers``).  This function only builds the
+    schema; it does not validate anything itself.
+    """
+    item_schema = copy.deepcopy(dict(role_schema or {}))
+    properties = dict(item_schema.get("properties") or {})
+    properties[BATCH_ITEM_KEY_FIELD] = {"type": "string"}
+    item_schema["properties"] = properties
+    required = [key for key in (item_schema.get("required") or []) if key != BATCH_ITEM_KEY_FIELD]
+    required.append(BATCH_ITEM_KEY_FIELD)
+    item_schema["required"] = required
+    item_schema.setdefault("type", "object")
+    return {
+        "type": "object",
+        "properties": {"answers": {"type": "array", "items": item_schema}},
+        "required": ["answers"],
+    }
+
+
+def render_batch_user(items: Sequence[Tuple[str, str]]) -> str:
+    """Render *items* -- ``(item_key, rendered_user_text)`` pairs -- as one
+    numbered-block batch prompt.
+
+    A plain, unambiguous delimiter naming the opaque item key, rather than
+    asking the model to invent or preserve an ordering: settlement reads
+    answers back by ``item_key``, never by position, so nothing here depends
+    on the model preserving the order these blocks were sent in.
+    """
+    blocks = [
+        f"### Item {index} (item_key: {item_key})\n{text}"
+        for index, (item_key, text) in enumerate(items, start=1)
+    ]
+    return "\n\n".join(blocks)

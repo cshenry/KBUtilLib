@@ -867,15 +867,20 @@ paused job can resume, which conflicts directly with story 21.
 **Confidence:** high -- the precedent is in the schema module and the rule is
 written there.
 
-### Q9. Should batching be enabled for codex and argo too? -- DECIDED: per-seat config knob, default 1; opt in codex later on evidence, leave argo alone
+### Q9. Should batching be enabled for codex and argo too? -- DECIDED: a per-QUEUE config knob defaulting to 1; opt in codex later on evidence, leave argo alone
 **Blast radius:** NONE
 **Why:** Codex is also a CLI with its own harness and would benefit similarly,
 but it is succeeding 51/51 today and is not the bottleneck; changing it now adds
 risk for no measured need. Argo is HTTP with no harness overhead, so batching
-buys it nothing and costs it blast radius. A default of 1 means no seat changes
+buys it nothing and costs it blast radius. A default of 1 means no queue changes
 behaviour unless named.
-**If you disagree:** set `batch_size` on those seats in config. No code changes.
-**Confidence:** high -- the default makes this reversible per seat.
+**Corrected after confront (stall 3):** the knob is on the QUEUE, not the seat —
+this entry originally said "per-seat", which contradicted `QueueConfig`. Since a
+queue resolves to exactly one account and owns a set of seats, enabling batching
+for codex means setting `batch_size` on the codex queue, which applies to both
+codex chairs together.
+**If you disagree:** set `batch_size` on that queue in config. No code changes.
+**Confidence:** high -- the default makes this reversible per queue.
 
 ### Q10. What I could not decide and did not guess
 Three external facts are unresolved, and each is handled by making the code

@@ -1,0 +1,96 @@
+{
+  "prd_name": "council-per-seat-queues-v1",
+  "title": "Per-seat queues and batched CLI calls for the council engine",
+  "repos": [
+    "KBUtilLib"
+  ],
+  "owning_repo": "KBUtilLib",
+  "status": "draft",
+  "priority": "high",
+  "authored_by": "miles",
+  "authored_on": "2026-10-19",
+  "authoring_session": "780537ef-a1e6-5680-ad96-228bba7b281b",
+  "mode": "draft-mode-single-pass",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "confront": "round 1 complete: 12 binding stalls, ALL 12 accepted and folded (none were padding; three were internal contradictions or factual errors in round 0). Maestro task-570d9569, backend codex, machine h100, artifact blob 5c61e65697899cd26760ea1c1d8ad6773d0eed10 on branch maestro/researcher/you-are-the-autonomous-build-con-task-570d9569, copied to research/confront-round-1-stall-report.md. See the Revision Log and the Acceptance Criteria section (38 criteria).",
+  "draft_commit": null,
+  "review_protocol": "Written in Draft Mode on 2026-10-19, single-pass, but with the architecture settled interactively first: Chris confirmed seat-level partition explicitly and settled batch size at 20 after being shown the amortization curve. Every judgement call is already decided and applied in the body; 'Open Questions and Judgement Calls' (Q1-Q10) is a manifest ordered by blast radius, not a queue of holes. Chris reviews by editing fullprompt.md in place, annotating with (CSH ...) markers; `/ai-design --review council-per-seat-queues-v1` then diffs the working tree against draft_commit, classifies each hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to `ready` until review_rounds >= 1.",
+  "registration": {
+    "state": "not-registered",
+    "reason": "AIAssistant/state/prd_registry.json is Jane's single-writer surface and must not be written from h100. Registration at `draft` is routed to her; see routed_to_jane below.",
+    "routed_to_jane": null
+  },
+  "research": {
+    "external_scan": {
+      "ran": false,
+      "reason": "Not dispatched. Multi-queue work distribution and head-of-line blocking are settled territory and the diagnosis is specific to this codebase, so expected yield was low. Recorded as a known gap in the Research Report quality section rather than silently skipped."
+    },
+    "live_production_data_read": {
+      "store": "/scratch/chenry/council/council.sqlite",
+      "mode": "read-only",
+      "job": "96a612a03a2149c5935478d519f9f522",
+      "tables": [
+        "jobs (roster, options)",
+        "calls (grouped by endpoint/seat/status)",
+        "items",
+        "attempts (joined to calls for per-seat latency and outcome_kind)",
+        "query_types (spec lengths)"
+      ]
+    },
+    "local_corpus_read_in_full": [
+      "council/engine/worker.py (work/_claim/_free_slots/_AccountLimit/_build_limits/_invoke/advance)",
+      "council/store/queries.py (ROLE_ORDER, select_claimable, claim_update)",
+      "council/store/schema.py (calls table, ADDITIVE_COLUMNS, attempts)",
+      "council/engine/decide.py (unanimity test, need_critic/need_meta)",
+      "council/daemon.py (docstring invariants, _DaemonWorker._claim, start/stop/_admits)",
+      "council/execlock.py (LOCK_FILENAME, LOCK_KINDS, acquire)",
+      "council/config.py (EndpointConfig.account/max_concurrency, merge rule)",
+      "llm/apis/cli.py (ClaudeCliBackend.argv)",
+      "llm/apis/cli_common.py (env allowlist, run_cli, TemporaryDirectory, communicate)"
+    ],
+    "not_read_and_flagged": [
+      "`claude -p` was never executed -- the permission gate refused it in the authoring session. The ~7,500-token harness figure rests on ONE stored usage record plus the argv. The confront then established something sharper: NEITHER CLI argv forwards any output-token limit (cli.py:114 and :344), so seat.max_output_tokens reaches no CLI child. Task t8 must establish a verified effective cap and a documented mechanism, and force singles until it has one.",
+      "the per-item payload/output size for the critic role is unmeasured (its prompt carries ballots and votes, so it is larger than the proposer's ~1,200 chars); batch size is derived at runtime, so this does not block the build",
+      "individual test bodies under tests/domains/ai/council/ -- the listing was used to identify test shape only"
+    ],
+    "confront_scan": {
+      "path": "research/confront-round-1-stall-report.md",
+      "maestro_task_id": "task-570d9569",
+      "backend": "codex",
+      "machine": "h100",
+      "worker": "h100-general-1",
+      "ran_on": "2026-10-19",
+      "prompt_chars": 53034,
+      "stalls_reported": 12,
+      "stalls_accepted": 12,
+      "stalls_dropped": 0,
+      "design_changing_stalls": [
+        "seat names do not bind to one account -- roster() overrides can replace the whole proposer bench, so account validation must cover every declared profile",
+        "a shared store lock alone does not stop two configs over-committing a provider -- queue workers now run only under a single controller with an immutable config",
+        "NO CLI argv forwards an output-token limit at all, so the batch ceiling divided by an unenforced number; batching now requires a verified cap or falls back to singles"
+      ]
+    }
+  },
+  "key_measurements": {
+    "claims_vs_slots": "92 calls claimed against ~20 slots; codex held 66",
+    "chair_successes": "argo 52/52 ok, codex proposer_2 26 ok, codex proposer_3 25 ok",
+    "claude_outcomes": "23 of 24 attempts transport-failed, 1 ok",
+    "codex_outcomes": "51 attempts, 51 ok, zero errors",
+    "critic_rate": "24 critic rows for ~25 fully-chaired items -- a measured ~100% disagreement rate",
+    "claude_token_floor": "~7,835 tokens reported as cache_creation with prompt_tokens=2 and completion_tokens=667; harness ~7,500, i.e. ~96% of billed input is boilerplate",
+    "latency_is_conflated": "worker.py:1173 stamps started_at BEFORE the slot acquire on :1174, so every stored elapsed is queue-wait + service; store medians read codex 345-352s vs a prior uncontended measurement of ~5.3s",
+    "batch_arithmetic": "per-item input = 7500/n + 300; n=20 gives 675 (11.6x of a maximum 21x); output does not amortize at ~667 tokens/item"
+  },
+  "decisions_settled_in_session": {
+    "partition_key": "seat for the queue, account for the budget -- confirmed explicitly by Chris 2026-10-19T18:40Z",
+    "batch_size": "QueueConfig.batch_size defaults to 1 and accepts 1-50; 20 is the recommended explicit opt-in for a Claude queue. Chris proposed ~50, then observed 20 already reduces overheads significantly, and the 7500/n+300 curve agrees (11.6x of a maximum 21x). CORRECTED after confront stall 3: an earlier wording said '20 by default', which contradicted the declared default of 1 and would have changed existing spend on upgrade.",
+    "accuracy_ab": "gates the full-corpus operator run, not the code landing -- Miles's call after Chris did not take the either/or",
+    "critic_rate": "out of scope, its own d session against go_mf -- Miles's call"
+  },
+  "deploy": {
+    "machine": "h100",
+    "check": "With a four-queue config on the live store, `kbu council jobs status` reports four live queue children with per-queue claimed/in-flight/pending counts, and resuming job 96a612a03a2149c5935478d519f9f522 settles items on at least two seats concurrently (argo progressing while a codex call is in flight) -- the condition that was impossible under the shared FIFO."
+  },
+  "acceptance_criteria_count": 38
+}

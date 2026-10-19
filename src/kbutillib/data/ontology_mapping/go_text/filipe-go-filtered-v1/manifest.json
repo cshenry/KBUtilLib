@@ -1,0 +1,75 @@
+{
+  "artifact_version": "filipe-go-filtered-v1",
+  "benchmark": {
+    "metrics_file": "benchmark.metrics.json",
+    "name": "filipe-go-filtered-v1",
+    "schema_version": 1,
+    "version": "1.0.0"
+  },
+  "compatibility": {
+    "deprecated_adapter": "reaction@legacy-1",
+    "input": "text only",
+    "output_schema": 1,
+    "rollback_artifact_version": "filipe-go-v1",
+    "rollback_method_version": "1.0.0"
+  },
+  "files": {
+    "benchmark.metrics.json": {
+      "sha256": "5cddff37fa165c65e09f726a53ac88b22ca13e3daf9867e0ea133b46a841077f"
+    },
+    "filipe_text_to_go.joblib": {
+      "sha256": "81e1bc338c57c050d5f87d31095b7b9f65240e421dbcbd7662fb33c11974b602"
+    },
+    "filter_summary.json": {
+      "sha256": "c437af3d69607aa903d1041e149adb860646e2b1a5334c03e56bc477544db051"
+    },
+    "heldout_smoke_prediction.json": {
+      "sha256": "b1c8c6697a6bdf75b63a1ee600fd06c66e6b54fc37944e8b1e6fad9375ab0c0e"
+    },
+    "training_summary.json": {
+      "sha256": "43a77886606b7813c2008012b1f7e816b964b8d00c57a5b3f6449ce022564826"
+    }
+  },
+  "filter": {
+    "excluded_go_ids": 33,
+    "go_metrics_sha256": "a3f1ec6bf13aa4e6a6195156ca2844f338b284187f1dac97a4dd38ccd8cb88f8",
+    "minimum_depth": 2,
+    "retained_go_ids": 10122,
+    "rule": "GO depth >= 2",
+    "schema_version": 1,
+    "summary_file": "filter_summary.json",
+    "version": "go-depth-gte-2-v1"
+  },
+  "method_version": "2.0.0",
+  "metric": {
+    "coverage_any_gold_in_candidate_universe": 0.9862404823561242,
+    "limitation": "Scores are descriptive lexical cosine scores, not calibrated probabilities.",
+    "mrr": 0.8593744287489301,
+    "top1": 0.8021489583735941,
+    "top100": 0.9712828044679782,
+    "top20": 0.9504502763498628,
+    "top5": 0.9218876821396823
+  },
+  "model_version": "2.0.0",
+  "promotion": {
+    "default": true,
+    "previous_default_method_version": "1.0.0",
+    "rollback": "select go-text@1.0.0 explicitly; immutable artifacts are never overwritten"
+  },
+  "provenance": {
+    "raw_data_included": false,
+    "source_artifact": "research workspace filtered bundle",
+    "source_bundle": "filipe_text_to_go_filtered",
+    "source_bundle_manifest_sha256": "28bde2fed6a877d98e174dc473c3d370abefacb3dbfafe871a8e45793fa45bfb",
+    "source_model_sha256": "81e1bc338c57c050d5f87d31095b7b9f65240e421dbcbd7662fb33c11974b602"
+  },
+  "schema_version": 1,
+  "training": {
+    "candidate_universe": "GO labels observed in training entities only",
+    "model": "filipe_text_to_go.joblib",
+    "provenance": "accepted public-safe derived filtered artifact; no raw data included",
+    "representation": "word and char TF-IDF; equal-weight cosine to training-document GO centroids",
+    "training_labels": 4409,
+    "training_records": 103375
+  }
+}

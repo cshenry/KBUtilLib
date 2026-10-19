@@ -177,6 +177,66 @@
           "max_retries": 0
         }
       ]
+    },
+    {
+      "name": "CLI temp-root wiring",
+      "parallel_group": [
+        {
+          "task_id": "t12-cli-temp-root-wiring",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Make the configured CLI temp root actually reach `run_cli`. It is currently INERT.\n\nFILES YOU OWN (touch no others): src/kbutillib/domains/ai/llm/apis/cli.py and tests/domains/ai/council/test_cli_backends.py.\n\nTHE GAP, VERIFIED. An earlier phase gave `run_cli` an optional `temp_root` parameter. Another declared a `cli_temp_root` config option, and `CouncilWorker.endpoint_mapping()` threads it into the mapping dict as `temp_root`. But `llm/apis/cli.py` has ZERO references to `temp_root`: both `ClaudeCliBackend._run` and `CodexCliBackend._run` call `run_cli(...)` without passing it. So a configured temp root cannot reach `run_cli` today and every CLI child still builds its working directory under the default. No task in the original plan owned this file, because the phase that could have touched it was deliberately forbidden from doing so (see the constraint below).\n\nWHY IT MATTERS: `tempfile.TemporaryDirectory` defaults to `/tmp`, and this is a SHARED host whose /tmp has filled before and taken out unrelated work. A multi-day council batch creating a temp dir per call is exactly the workload that fills it. This was one of the four original defects the PRD set out to fix.\n\nWHAT TO BUILD. Read `temp_root` out of the endpoint mapping each backend already receives and pass it through to `run_cli`. When absent or None, behaviour must be byte-identical to today. Do it for BOTH CLI backends -- codex and claude -- since both create per-call temp directories.\n\nTHE BINDING CONSTRAINT, and it is why this file was fenced off: DO NOT CHANGE THE ARGV. `--tools \"\"`, `--system-prompt`, `--no-session-persistence`, and the deliberate ABSENCE of `--bare` and `--dangerously-skip-permissions` must all stay exactly as they are. `--bare` would route authentication to an API key and move the call onto metered billing, defeating the entire purpose of a CLI seat. The existing argv assertions in the test file are the one test standing between a CLI seat and a metered bill -- keep every one of them intact and passing. Your diff should touch the `_run` methods and nothing else in the argv path.\n\nTESTS: a configured temp_root places the child's working directory under that root, for BOTH backends; absent temp_root reproduces base behaviour; the argv is unchanged in both cases (assert it explicitly, since that is the risk this task carries).\n\nBackground reference, possibly unreachable from your worktree: agent-io/prds/council-per-seat-queues-v1/fullprompt.md section 'CLI transport corrections'.",
+          "success_criteria": "A configured temp root places the CLI child's working directory under that root for both the claude and codex backends, an absent temp root reproduces base-commit behaviour, the argv is explicitly asserted unchanged in both cases with every pre-existing argv assertion intact and passing, and no test that passed on the base commit fails on the branch.",
+          "repos": [
+            "KBUtilLib"
+          ],
+          "depends_on": [
+            "t6-partitioned-worker-and-budgets"
+          ],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "Claim-index backfill for existing stores",
+      "parallel_group": [
+        {
+          "task_id": "t13-claim-index-backfill",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Make the partitioned-claim index reach stores that ALREADY EXIST. Today only brand-new stores get it.\n\nFILES YOU OWN (touch no others): src/kbutillib/domains/ai/council/store/sqlite.py, src/kbutillib/domains/ai/council/store/schema.py, and the store suites under tests/domains/ai/council/ (store_contract.py, test_store_contract.py, test_store_migrate_v2.py).\n\nTHE GAP, VERIFIED BY REVIEW. An earlier phase added `ix_calls_status_seat_not_before` to support the seat-filtered claim scan. `SqliteStore.migrate()` on an already-v2 store only runs `add_missing_columns()` -- COLUMNS, not indexes -- so the index is never backfilled; it is created only via `create_all()` for new stores. And the index definition carries no `if_not_exists` flag, so running `create_all()` unconditionally would NOT safely backfill it either. An explicit `CREATE INDEX IF NOT EXISTS` step is required.\n\nWHY IT MATTERS AND WHY IT IS NOT MERELY TIDINESS: the live production store is an existing SCHEMA_VERSION==2 store holding a paused 19,272-item job with roughly 57,000 pending call rows. Resuming that job is the whole point of this PRD. Without the index, every seat-filtered claim scans those rows and sorts them, repeatedly, for the life of the run -- so the partition fix would land and the resume would still crawl, for a reason nobody would look for.\n\nWHAT TO BUILD. An idempotent index-backfill step that runs for an existing store as well as a fresh one -- `CREATE INDEX IF NOT EXISTS` over the indexes the schema declares, applied at the same point `add_missing_columns()` is applied. Make it general over declared indexes rather than hard-coding this one index, so the next index added does not reintroduce the same gap; but keep it strictly additive.\n\nHARD CONSTRAINTS:\n- DO NOT BUMP SCHEMA_VERSION. It must stay 2. A bump would refuse to open every existing store, including the live one holding 104 already-paid model answers. The whole reason the column was additive was to keep that store openable.\n- The backfill must be IDEMPOTENT: running it twice, or on a store that already has the index, must be a no-op and must never raise.\n- It must not rebuild, drop or reorder any existing index, and must leave `ix_calls_status_not_before` in place for the unpartitioned claim path.\n- It must not lock the store for a meaningful period on a large table in a way that would wedge a running worker -- state what you measured or why it is safe.\n\nTESTS: a store created WITHOUT the index gains it after open/migrate, with every pre-existing jobs/items/calls/attempts row intact; running the backfill twice is a no-op; a store that already has the index is untouched; SCHEMA_VERSION is unchanged; and the unpartitioned claim path still works. Put the behaviour in the store CONTRACT where it belongs so both implementations are covered.\n\nBackground reference, possibly unreachable from your worktree: agent-io/prds/council-per-seat-queues-v1/fullprompt.md sections 'Claim filtering by seat' and judgement call Q8.",
+          "success_criteria": "A store created without `ix_calls_status_seat_not_before` gains it on open/migrate with all pre-existing rows intact; running the backfill twice is a no-op that raises nothing; a store already carrying the index is unchanged; `ix_calls_status_not_before` remains present; SCHEMA_VERSION is still 2; and no test that passed on the base commit fails on the branch.",
+          "repos": [
+            "KBUtilLib"
+          ],
+          "depends_on": [
+            "t6-partitioned-worker-and-budgets"
+          ],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
+    },
+    {
+      "name": "record_attempt guard coverage",
+      "parallel_group": [
+        {
+          "task_id": "t14-record-attempt-guard-coverage",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Close a hole in the guard that keeps prompt text out of the `attempts` table.\n\nFILES YOU OWN (touch no others): src/kbutillib/domains/ai/council/store/sqlite.py and tests/domains/ai/council/ (the store suites).\n\nTHE GAP, FOUND IN REVIEW. `record_attempt` raises `ValueError` if any argument is a dict carrying a `system` or `user` key at any depth -- prompt text must never enter the attempts table, which is a privacy and log-hygiene invariant, not a nicety. An earlier phase added a `queued_at: Optional[datetime] = None` parameter to `record_attempt`, but `refuse_prompt_text(...)` is called WITHOUT `queued_at` among its kwargs, so that parameter path is not covered by the guard.\n\nIT IS INERT TODAY, AND THAT IS EXACTLY WHY IT IS WORTH FIXING NOW: every current caller passes either a real `datetime` from the worker's own clock or `None`, never caller-supplied data, so nothing can smuggle anything through it. The defect is that the guard's coverage no longer matches the guard's promise. A future caller -- or a future parameter added by the same reasoning -- inherits an invariant that silently does not hold, and the failure would be a privacy leak discovered in a log rather than a test failure.\n\nWHAT TO BUILD. Include `queued_at` in the `refuse_prompt_text(...)` call so every parameter is covered. Then make the coverage STRUCTURAL rather than a list someone must remember to extend: prefer passing the guard everything the function received (e.g. derived from the call's own arguments) over hand-maintaining a kwargs list that the next added parameter will again omit. If you judge a structural approach unsafe or too invasive here, say why in the work-record and do the minimal explicit fix instead -- but make that a reasoned choice, not a default.\n\nTESTS: a dict carrying a `system` or `user` key passed as `queued_at` is refused (this is the regression the fix is for -- confirm it FAILS against the base implementation, and say so); the existing refusals for every other parameter still fire; a legitimate `datetime` and a legitimate `None` both still pass; and if you took the structural route, add a test that a NEWLY added parameter would be covered automatically, since that is the actual property being bought.\n\nBackground reference, possibly unreachable from your worktree: agent-io/prds/council-per-seat-queues-v1/fullprompt.md section 'Service-time instrumentation'.",
+          "success_criteria": "A dict carrying a `system` or `user` key passed as `queued_at` is refused by `record_attempt` and that test fails against the base implementation; every pre-existing prompt-text refusal still fires; legitimate datetime and None values still pass; and no test that passed on the base commit fails on the branch.",
+          "repos": [
+            "KBUtilLib"
+          ],
+          "depends_on": [
+            "t6-partitioned-worker-and-budgets"
+          ],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
     }
   ]
 }

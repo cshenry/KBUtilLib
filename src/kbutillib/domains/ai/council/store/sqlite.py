@@ -1338,8 +1338,15 @@ class SqliteStore:
         outcome_kind: str,
         usage: Optional[Mapping[str, Any]] = None,
         worker_id: Optional[str] = None,
+        queued_at: Optional[datetime] = None,
     ) -> None:
         """Record one try at a call.
+
+        ``queued_at`` writes the additive ``attempts.queued_at`` column added
+        for the per-queue worker's service-time split (``t2``); left
+        ``None`` (its default, and the column's own default) by any caller
+        that never measured a queue wait, which is "nothing to say" and not
+        the same claim as zero.
 
         Raises:
             ValueError: any argument carries prompt text -- a dict, at any
@@ -1369,6 +1376,7 @@ class SqliteStore:
                         "outcome_kind": outcome_kind,
                         "usage": usage,
                         "worker_id": worker_id,
+                        "queued_at": queued_at,
                     },
                 ),
             )

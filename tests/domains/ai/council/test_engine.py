@@ -18,6 +18,7 @@ GPU.  Every seat is a ``fake`` endpoint and every answer comes from a script.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -35,6 +36,7 @@ from kbutillib.domains.ai.council.store.errors import StaleClaim
 from kbutillib.domains.ai.council.types import (
     AuthError,
     BillingGuardRefused,
+    ConfigError,
     CouncilError,
     CouncilTask,
     CouncilVerdict,
@@ -2223,3 +2225,336 @@ class TestAnswerValidation:
 
         notes = {**proposer_answer("A:1"), "notes": 7}
         assert "expected a string" in (_validate_answer(notes, schema) or "")
+
+
+# ---------------------------------------------------------------------------
+# t6: the partitioned worker and its two budget fixes
+# ---------------------------------------------------------------------------
+
+
+class TestStarvationRegression:
+    """Two accounts, one saturated, one free -- the production bug.
+
+    ``_free_slots()`` used to sum free capacity across every account, and
+    that sum became the ``limit`` handed to ONE global ``claim_calls()``
+    call.  The claim query has no per-account quota, so it just returns the
+    FIFO head -- and when a saturated account's rows dominate that head (as
+    they will for as long as it has ANY pending rows), the free account's
+    calls are not claimed at all until the saturated account's pending
+    supply is fully drained.  Fixed: claim PER ACCOUNT, each call's
+    ``endpoints`` restricted to that account's own aliases.
+    """
+
+    def test_the_fast_account_completes_while_the_slow_one_is_still_in_flight(
+        self, store: Any
+    ) -> None:
+        """MUST fail on the base commit.
+
+        Verified by hand for this task: checked out the base commit's
+        ``engine/worker.py`` into this worktree, ran this test alone, and it
+        failed on the ``fast_items`` assertion below (the fast job's two
+        items were still ``pending`` at the 100ms deadline, because the
+        single global claim kept re-claiming the slow job's 300-row backlog
+        instead) -- then restored this branch's ``worker.py``.  See the
+        work-record for the exact captured output.
+        """
+        slow_monitor = InFlight()
+        fast_monitor = InFlight()
+        slow_backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")), delay=0.2, monitor=slow_monitor
+        )
+        fast_backend = InstrumentedBackend(
+            scripted(agreeing_script("A:1")), monitor=fast_monitor
+        )
+        config = endpoint_config(
+            slow_ep={"account": "slow-acct", "max_concurrency": 1},
+            fast_ep={"account": "fast-acct", "max_concurrency": 2},
+        )
+        worker = worker_for(
+            store,
+            {"slow_ep": slow_backend, "fast_ep": fast_backend},
+            config=config,
+            poll_interval_s=0.005,
+        )
+
+        slow_roster = make_roster(2, endpoint="slow_ep")
+        fast_roster = make_roster(2, endpoint="fast_ep")
+
+        # The slow job is submitted FIRST and carries far more pending rows
+        # (300 items x 2 proposers = 600) than any account's capacity, so
+        # its rows are the FIFO head -- exactly the shape that starved a
+        # real account in production.  Draining a backlog this size under
+        # the base-commit bug (a single global claim, re-claiming only this
+        # account's rows for as long as ANY of them are pending) takes
+        # roughly (600 rows / ~2 rows per poll) * poll_interval_s =~ 1.5s --
+        # far longer than this test's 0.5s observation window, which is the
+        # margin that makes the test reliable rather than a timing coin
+        # flip.
+        slow_tasks = [
+            make_task(f"slow-{i}", text=f"slow protein {i}") for i in range(300)
+        ]
+        slow_job = worker.submit(make_query(), slow_tasks, slow_roster, label="slow-job")
+        fast_tasks = [make_task(f"fast-{i}", text=f"fast protein {i}") for i in range(2)]
+        fast_job = worker.submit(make_query(), fast_tasks, fast_roster, label="fast-job")
+
+        async def drive() -> None:
+            stop_event = asyncio.Event()
+
+            async def _deadline() -> None:
+                await asyncio.sleep(0.5)
+                stop_event.set()
+
+            await asyncio.gather(worker.work(stop_event=stop_event), _deadline())
+
+        run(drive())
+
+        fast_items = store.get_items(fast_job)
+        assert fast_items and all(item["status"] == "ok" for item in fast_items), (
+            "the fast account's calls never completed within the observation "
+            "window -- the slow account's 600-row backlog is still starving "
+            "it, which is the bug this task fixes"
+        )
+        assert store.get_job(slow_job)["status"] != "done", (
+            "the slow account's 600-row job should still have calls "
+            "outstanding at the deadline -- if this fails the test's own "
+            "timing margin is too tight, not the fix"
+        )
+
+
+class TestAssignedNeverExceedsCapacity:
+    def test_a_claim_storm_never_pushes_assigned_past_capacity(
+        self, store: Any
+    ) -> None:
+        """Far more pending rows than slots, claimed repeatedly.
+
+        No call is ever executed here (``_run_one`` is never called), so
+        ``assigned`` can only grow -- which is exactly what proves the
+        invariant: if the fix is wrong, repeated claiming keeps incrementing
+        it past ``capacity``, the way the base commit's unconditional
+        ``assigned += 1`` did.
+        """
+        backend = InstrumentedBackend(scripted(agreeing_script("A:1")))
+        config = endpoint_config(ep1={"account": "acct", "max_concurrency": 3})
+        worker = worker_for(store, {"ep1": backend}, config=config)
+        roster = make_roster(2, endpoint="ep1")
+        tasks = [make_task(f"item-{i}", text=f"thing {i}") for i in range(50)]
+        worker.submit(make_query(), tasks, roster)
+
+        limit = worker._limits["acct"]
+        summary: Dict[str, Any] = {
+            "claimed": 0,
+            "finished": 0,
+            "released": 0,
+            "blockers": [],
+            "idle": False,
+        }
+        for _ in range(10):
+            free = worker._free_slots()
+            if free > 0:
+                worker._claim(free, None, summary)
+            assert limit.assigned <= limit.capacity, (
+                f"assigned {limit.assigned} exceeded capacity {limit.capacity} "
+                "during a claim storm with far more pending rows than slots"
+            )
+        assert limit.assigned == limit.capacity
+
+
+class TestSeatPartitioning:
+    def test_a_partitioned_worker_never_runs_another_seats_call(
+        self, store: Any
+    ) -> None:
+        backend = InstrumentedBackend(scripted(agreeing_script("A:1")))
+        worker = worker_for(
+            store,
+            {"ep1": backend},
+            config=endpoint_config(ep1={}),
+            seats={"proposer_a"},
+        )
+        assert worker.seats == {"proposer_a"}
+        roster = Roster(
+            proposers=[
+                fake_seat("proposer_a", "pa", endpoint="ep1"),
+                fake_seat("proposer_b", "pb", endpoint="ep1"),
+            ],
+            critic=fake_seat("critic", "c", endpoint="ep1"),
+            meta=fake_seat("meta", "m", endpoint="ep1"),
+        )
+        job_id = worker.submit(make_query(), [make_task()], roster)
+        run(worker.work(job_id=job_id))
+
+        calls = calls_of(store, job_id)
+        seat_b = [c for c in calls if c["seat_name"] == "proposer_b"]
+        seat_a = [c for c in calls if c["seat_name"] == "proposer_a"]
+        assert seat_b and all(c["status"] == "pending" for c in seat_b), (
+            "a seat outside this worker's partition must never be claimed, "
+            "even though it is at the FIFO head"
+        )
+        assert seat_a and all(c["status"] == "ok" for c in seat_a)
+        assert all(req.seat.seat_name != "proposer_b" for req in backend.calls)
+
+
+class TestServiceTimeInstrumentation:
+    def test_queued_at_is_written_and_started_at_is_at_or_after_it(
+        self, store: Any
+    ) -> None:
+        import sqlalchemy as sa
+
+        from kbutillib.domains.ai.council.store import schema as sch
+
+        backend = InstrumentedBackend(scripted(agreeing_script("A:1")), delay=0.05)
+        worker = worker_for(
+            store, {"ep1": backend}, config=endpoint_config(ep1={"max_concurrency": 1})
+        )
+        roster = make_roster(2, endpoint="ep1")
+        job_id = worker.submit(make_query(), [make_task()], roster)
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        with store.engine.begin() as conn:
+            rows = [dict(r._mapping) for r in conn.execute(sa.select(sch.attempts))]
+        settled = [r for r in rows if r["outcome_kind"] == "ok"]
+        # One item: two proposers plus the critic that always audits them
+        # (decide() only ever skips META on a unanimous approval, never the
+        # critic) -- three calls, all serialised through the single-slot
+        # account.
+        assert len(settled) == 3
+        for row in settled:
+            assert row["queued_at"] is not None
+            assert row["started_at"] >= row["queued_at"]
+        settled.sort(key=lambda r: r["queued_at"])
+        # Every call after the first had to wait for the single slot its
+        # predecessor held -- a REAL wait, not a tie, which is what proves
+        # `started` moved after `_slot()` rather than before it.
+        assert settled[-1]["started_at"] > settled[-1]["queued_at"]
+
+
+class TestPerChildBudgetIsQueueConcurrency:
+    def test_concurrency_overrides_the_accounts_max_concurrency(
+        self, store: Any
+    ) -> None:
+        backend = InstrumentedBackend(scripted(agreeing_script("A:1")))
+        config = endpoint_config(ep1={"account": "acct", "max_concurrency": 10})
+        worker = worker_for(store, {"ep1": backend}, config=config, concurrency=2)
+        assert worker._limits["acct"].capacity == 2
+
+    def test_none_leaves_the_accounts_max_concurrency_unchanged(
+        self, store: Any
+    ) -> None:
+        backend = InstrumentedBackend(scripted(agreeing_script("A:1")))
+        config = endpoint_config(ep1={"account": "acct", "max_concurrency": 10})
+        worker = worker_for(store, {"ep1": backend}, config=config)
+        assert worker._limits["acct"].capacity == 10
+
+
+class TestUnpartitionedWorkerUnchanged:
+    def test_no_seats_no_roles_behaves_as_on_the_base_commit(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        assert worker.seats is None
+        assert worker.roles is None
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+        assert store.get_job(job_id)["status"] == "done"
+
+
+class TestCliTempRootThreading:
+    def test_cli_temp_root_is_threaded_into_the_endpoint_mapping(
+        self, store: Any
+    ) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        from .test_types_config import config_dict
+
+        cfg = load_council_config(config_dict(cli_temp_root="/tmp/kbu-council-cli"))
+        worker = worker_for(store, {"argo": fake(agreeing_script("A:1"))}, config=cfg)
+        mapping = worker.endpoint_mapping("argo")
+        assert mapping["temp_root"] == "/tmp/kbu-council-cli"
+
+    def test_unconfigured_leaves_the_mapping_unchanged(self, store: Any) -> None:
+        backend = fake(agreeing_script("A:1"))
+        worker = worker_for(store, {"fake1": backend})
+        mapping = worker.endpoint_mapping("fake1")
+        assert "temp_root" not in mapping
+
+
+class TestRosterRejectionWiredAtSubmitAndClaim:
+    """``CouncilConfig.check_roster_against_queues`` is, by its own
+    docstring, 'a predicate only ... nothing in this module calls it',
+    with its two natural call sites named as submit() and the top of
+    _claim() in THIS file.  These tests prove it is actually wired in.
+    """
+
+    def _queues(self) -> Dict[str, Any]:
+        return {
+            "qA": {"seats": ["proposer_a"], "concurrency": 4},
+            "qB": {"seats": ["proposer_b"], "concurrency": 4},
+            "qC": {"seats": ["critic"], "concurrency": 4},
+            "qD": {"seats": ["meta"], "concurrency": 1},
+        }
+
+    def _worker(self, store: Any, cfg: Any) -> Any:
+        backends = {
+            "epA": fake(agreeing_script("A:1")),
+            "epB": fake(agreeing_script("A:1")),
+            "epC": fake(agreeing_script("A:1")),
+        }
+        return worker_for(store, backends, config=cfg)
+
+    def test_submit_refuses_an_override_outside_the_validated_queue_set(
+        self, store: Any
+    ) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        from .test_types_config import queue_config_dict
+
+        raw = queue_config_dict(self._queues())
+        raw["models"]["m_critic2"] = {"endpoint": "epB", "canonical": "vendor/critic2"}
+        cfg = load_council_config(raw)
+        worker = self._worker(store, cfg)
+        moved = cfg.roster("p", overrides={"critic": "m_critic2"})
+
+        with pytest.raises(ConfigError, match="qC"):
+            worker.submit(make_query(), [make_task()], moved)
+        # Refused before a job -- or any call row -- was ever written.
+        assert store.list_jobs() == []
+
+    def test_claim_refuses_an_existing_jobs_drifted_roster_with_no_mutation(
+        self, store: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from kbutillib.domains.ai.council.config import load_council_config
+
+        from .test_types_config import queue_config_dict
+
+        cfg = load_council_config(queue_config_dict(self._queues()))
+        worker = self._worker(store, cfg)
+        roster = cfg.roster("p")
+        job_id = worker.submit(make_query(), [make_task()], roster)
+        before = calls_of(store, job_id)
+        assert before and all(c["status"] == "pending" for c in before)
+
+        # A validated-account drift discovered only at claim time -- the
+        # same mechanism test_types_config.py exercises directly against the
+        # predicate; here it must be WIRED into the claim path.  Mutating
+        # the already-loaded config's cache is the narrowest way to build
+        # that world without re-deriving a whole second config.
+        cfg._queue_accounts["qA"] = "acct-b"
+
+        summary: Dict[str, Any] = {
+            "claimed": 0,
+            "finished": 0,
+            "released": 0,
+            "blockers": [],
+            "idle": False,
+        }
+        with caplog.at_level(logging.WARNING):
+            kept = worker._claim(worker._free_slots(), None, summary)
+
+        assert kept == []
+        assert summary["released"] == len(before)
+        after = calls_of(store, job_id)
+        for pre in before:
+            post = next(c for c in after if c["call_id"] == pre["call_id"])
+            assert post["status"] == "pending"
+            assert post["attempt_count"] == pre["attempt_count"]
+            assert post["claim_token"] is None
+        assert job_id in caplog.text
+        assert "proposer_a" in caplog.text

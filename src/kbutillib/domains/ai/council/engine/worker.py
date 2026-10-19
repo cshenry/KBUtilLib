@@ -66,6 +66,7 @@ from typing import (
     AsyncIterator,
     Callable,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -83,6 +84,7 @@ from ..types import (
     CLI_KINDS,
     BillingGuardRefused,
     CompletionRequest,
+    ConfigError,
     CouncilError,
     CouncilTask,
     CouncilVerdict,
@@ -263,6 +265,24 @@ class CouncilWorker:
             serves the model it claims to.
         worker_kind: ``foreground`` (the default, i.e. ``kbu council run``) or
             ``daemon``.  Recorded on the workers row.
+        seats: optional partition -- when given (not ``None``), this worker
+            claims calls for only these seats, passed straight through to
+            ``store.claim_calls()``.  ``None`` (the default) claims across
+            every seat, unchanged from a worker built before queue mode
+            existed.
+        roles: the same partition, for role (``proposer``/``critic``/
+            ``meta``).  ``None`` claims every role.
+        concurrency: the per-child budget in QUEUE mode -- a queue's own
+            ``concurrency``, not the account's full ``max_concurrency``.
+            Accepted as a plain parameter rather than read from ``config``,
+            so the caller (which already knows which queue this worker is)
+            decides the number once, instead of this class re-deriving it
+            from a ``QueueConfig`` it would otherwise have to look up by
+            name.  When given, it overrides the capacity :meth:`_build_limits`
+            would otherwise compute for every account this worker serves --
+            correct for queue mode, where a queue resolves to exactly one
+            account.  ``None`` (the default) leaves ``_build_limits``'s
+            account-capacity arithmetic exactly as it was before queue mode.
     """
 
     def __init__(
@@ -286,12 +306,24 @@ class CouncilWorker:
         idle_grace_s: float = 1.0,
         max_idle_s: float = 60.0,
         rng: Optional[random.Random] = None,
+        seats: Optional[Iterable[str]] = None,
+        roles: Optional[Iterable[str]] = None,
+        concurrency: Optional[int] = None,
     ) -> None:
         if not user:
             raise ValueError("a council worker must know which user it works for")
         self.store = store
         self.config = config
         self.backends: Dict[str, Any] = _as_endpoint_table(backends)
+        #: This worker's partition (``None`` means "every seat"/"every
+        #: role", the pre-queue-mode behaviour).  Carried as plain attributes
+        #: -- NOT folded into ``_claim``'s signature, which ``daemon.py``
+        #: subclasses and calls with exactly ``(limit, job_id, summary)``.
+        self.seats: Optional[set] = set(seats) if seats is not None else None
+        self.roles: Optional[set] = set(roles) if roles is not None else None
+        self._queue_concurrency: Optional[int] = (
+            int(concurrency) if concurrency is not None else None
+        )
         #: The one callable every model call is made through.  ``llm.acomplete``
         #: itself when nothing was injected -- identity a test can assert on,
         #: which is what makes "the worker goes through the wrapper" checkable
@@ -360,7 +392,20 @@ class CouncilWorker:
         return {}
 
     def _build_limits(self) -> None:
-        """Group this worker's endpoints into shared concurrency budgets."""
+        """Group this worker's endpoints into shared concurrency budgets.
+
+        In QUEUE mode (:attr:`_queue_concurrency` not ``None``) the account
+        arithmetic below still runs -- it is still how two endpoint aliases
+        on one subscription end up sharing one semaphore -- but every
+        resulting capacity is then OVERRIDDEN to the queue's own
+        ``concurrency``.  A queue resolves to exactly one account (an
+        enforced invariant once ``queues`` is configured), so this makes
+        ``_free_slots()`` that account's child budget rather than the whole
+        subscription's, which is the correction confront round 1 required:
+        the account's full ``max_concurrency`` is what OTHER queues on the
+        same account are allowed to use too, and this child must not claim
+        more than its own share.
+        """
         for endpoint in sorted(self.backends):
             cfg = self.endpoint_config(endpoint)
             account = str(cfg.get("account") or "") or f"endpoint:{endpoint}"
@@ -378,6 +423,9 @@ class CouncilWorker:
             else:
                 limit.capacity = min(limit.capacity, max(1, capacity))
             self._limit_by_endpoint[endpoint] = limit
+        if self._queue_concurrency is not None:
+            for limit in self._limits.values():
+                limit.capacity = max(1, self._queue_concurrency)
 
     def endpoint_mapping(self, endpoint: str) -> Dict[str, Any]:
         """The endpoint mapping the wrapper is given for *endpoint*.
@@ -390,9 +438,19 @@ class CouncilWorker:
         test, two vLLM ports behind one URL -- would share ONE client, and the
         shared-account concurrency tests would silently be measuring one
         endpoint twice.
+
+        Also threads ``cli_temp_root`` (a ``CouncilConfig``-level setting,
+        not a per-endpoint one -- a CLI backend has no other way to see it)
+        through as ``temp_root``, which is the key a CLI backend's own
+        invocation of ``run_cli`` reads for where to create its per-call
+        working directory.  ``None``/absent when unconfigured, which is
+        unchanged behaviour.
         """
         cfg = dict(self.endpoint_config(endpoint))
         cfg.setdefault("name", endpoint)
+        temp_root = getattr(self.config, "cli_temp_root", None)
+        if temp_root and "temp_root" not in cfg:
+            cfg["temp_root"] = temp_root
         return cfg
 
     def _api_for(self, seat: SeatSpec) -> Optional[Any]:
@@ -534,9 +592,14 @@ class CouncilWorker:
         Raises:
             RosterError: the seating is invalid, or a seat is unverified.
             BillingGuardRefused: a CLI backend's billing preflight refused.
+            ConfigError: ``config`` declares ``queues`` and this roster (the
+                profile's own, or one a submission overrode) is not covered
+                by the validated queue set -- refused before a job or any
+                call exists, exactly like every other submit-time refusal.
             ValueError: a duplicate item id with different content, or a menu
                 with a duplicate id.
         """
+        self._check_roster_against_queues(roster)
         self._check_roster(roster)
         await self._preflight(roster)
         self._queries[(str(query.name), str(query.version))] = query
@@ -608,6 +671,33 @@ class CouncilWorker:
             "n_items": len(item_rows),
         }
         return self.store.create_job(job_row, item_rows, call_rows)
+
+    def _check_roster_against_queues(
+        self, roster: Roster, *, job_id: Optional[str] = None
+    ) -> None:
+        """Refuse *roster* if ``config`` declares ``queues`` and it falls
+        outside the validated set.
+
+        ``CouncilConfig.check_roster_against_queues`` is a predicate only --
+        by its own docstring, "nothing in this module calls it" -- so it is
+        wired in from here and from :meth:`_claim`, which are the two
+        natural call sites its own docstring names: once at submission,
+        before a job or any call row exists, and again before claiming an
+        EXISTING job's pending calls, because a per-job ``roster()``
+        override (or the special ``"proposers"`` override key, which
+        replaces the whole bench) is keyed by seat name and can route a seat
+        to an account no queue was ever validated against -- something
+        config-LOAD validation cannot see, since it only resolves each
+        profile with no overrides.
+
+        A no-op for a plain mapping config (no ``check_roster_against_queues``
+        method) and for a ``CouncilConfig`` with no ``queues`` declared --
+        queue mode is opt-in.
+        """
+        checker = getattr(self.config, "check_roster_against_queues", None)
+        if checker is None:
+            return
+        checker(roster, job_id=job_id)
 
     def _check_roster(self, roster: Roster) -> None:
         """Re-run the roster invariants, then the verification rule.
@@ -800,8 +890,8 @@ class CouncilWorker:
                 free = self._free_slots()
                 rows = self._claim(free, job_id, summary) if free > 0 else []
                 summary["claimed"] += len(rows)
-                for row in rows:
-                    running.add(asyncio.ensure_future(self._run_one(row)))
+                for group in self._group_claimed(rows):
+                    running.add(asyncio.ensure_future(self._run_group(group)))
 
                 if running:
                     idle_since = None
@@ -899,32 +989,139 @@ class CouncilWorker:
         return bool(self.store.stop_requested(self.worker_id))
 
     def _free_slots(self) -> int:
-        """How many more calls this worker may take responsibility for."""
+        """How many more calls this worker may take responsibility for.
+
+        Summed across every account this worker serves -- used ONLY to gate
+        "is it worth claiming at all" in :meth:`work`'s loop.  The claim
+        itself is no longer sized from this sum: see :meth:`_claim`, which
+        claims PER ACCOUNT so that one saturated account's rows can never
+        occupy the budget a different, free account was owed.
+        """
         return sum(max(0, limit.capacity - limit.assigned) for limit in self._limits.values())
+
+    def _endpoints_by_account(self) -> Dict[str, set]:
+        """``{account: {endpoint, ...}}`` -- the inverse of ``_limit_by_endpoint``."""
+        table: Dict[str, set] = {}
+        for endpoint, limit in self._limit_by_endpoint.items():
+            table.setdefault(limit.key, set()).add(endpoint)
+        return table
 
     def _claim(
         self, limit: int, job_id: Optional[str], summary: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Claim up to *limit* calls, keeping only those in scope."""
-        rows = self.store.claim_calls(
-            self.worker_id, set(self.backends), max(1, int(limit)), _utcnow()
-        )
+        """Claim due calls, ACCOUNT BY ACCOUNT, keeping only those in scope.
+
+        THE STARVATION FIX.  The old shape claimed ONCE, against the SUM of
+        every account's free capacity: ``store.claim_calls(..., limit=sum)``.
+        The claim query has no per-account quota of its own -- it returns the
+        GLOBAL FIFO head -- so a saturated account's rows occupied the whole
+        batch, and the unconditional ``assigned += 1`` below let that
+        account's ``assigned`` run straight past its ``capacity``, which is
+        what starved every other account behind it (measured: 92 calls
+        claimed against ~20 slots, 66 of them one account's).
+
+        The fix claims SEPARATELY per account, each call's ``endpoints``
+        restricted to that account's own aliases and its ``limit`` to that
+        account's own free capacity (never the cross-account sum).  A
+        saturated account's rows can now never be returned against a
+        different account's budget, because that budget was never asked for
+        them -- the starvation is structurally impossible, not merely
+        corrected after the fact.  ``assigned`` is incremented inside this
+        same per-row loop (bounded by the per-account ``free`` the query was
+        already given, and belt-and-braced again just before the increment),
+        so it can never exceed ``capacity``.
+
+        *limit* is accepted only for signature compatibility -- ``daemon.py``
+        subclasses this worker and overrides ``_claim``, calling
+        ``super()._claim(limit, job_id, summary)`` with exactly these three
+        positional arguments, and changing that signature would break it
+        silently.  It no longer sizes anything: each account's own
+        ``capacity - assigned`` does.
+
+        A row refused by :meth:`_roster_refusal` -- a per-job queue-roster
+        mismatch discovered only now, at claim time -- is released exactly
+        like an out-of-scope row: handed back unmarked, counted in
+        ``summary['released']``, no attempt charged.
+        """
         kept: List[Dict[str, Any]] = []
-        for row in rows:
-            if job_id is None or row["job_id"] == job_id:
-                kept.append(row)
+        checked_jobs: Dict[str, Optional[str]] = {}
+        for account, endpoints in sorted(self._endpoints_by_account().items()):
+            account_limit = self._limits[account]
+            free = max(0, account_limit.capacity - account_limit.assigned)
+            if free <= 0:
                 continue
-            # Out of scope: hand it straight back, unmarked.  The claim
-            # contract has no job filter, so this is the only way to scope a
-            # run, and charging an attempt for it would be charging the call
-            # for this worker's scope.
-            self._release_quietly(row)
-            summary["released"] += 1
-        for row in kept:
-            self._limit_by_endpoint[row["endpoint"]].assigned += 1
+            rows = self.store.claim_calls(
+                self.worker_id,
+                endpoints,
+                free,
+                _utcnow(),
+                seats=self.seats,
+                roles=self.roles,
+            )
+            for row in rows:
+                if job_id is not None and row["job_id"] != job_id:
+                    # Out of scope: hand it straight back, unmarked.  The
+                    # claim contract has no job filter, so this is the only
+                    # way to scope a run, and charging an attempt for it
+                    # would be charging the call for this worker's scope.
+                    self._release_quietly(row)
+                    summary["released"] += 1
+                    continue
+                refusal = self._roster_refusal(row, checked_jobs)
+                if refusal is not None:
+                    logger.warning(
+                        "council worker %s: refusing claimed call %s (job %s, "
+                        "seat %s) -- %s",
+                        self.worker_id,
+                        row["call_id"],
+                        row["job_id"],
+                        row["seat_name"],
+                        refusal,
+                    )
+                    self._release_quietly(row)
+                    summary["released"] += 1
+                    continue
+                if account_limit.assigned >= account_limit.capacity:
+                    # Belt and braces: the query above was already bounded by
+                    # `free`, so this should not fire, but `assigned` must
+                    # NEVER exceed `capacity` whatever arrives.
+                    self._release_quietly(row)
+                    summary["released"] += 1
+                    continue
+                account_limit.assigned += 1
+                kept.append(row)
         for scoped_job in sorted({row["job_id"] for row in kept}):
             self.store.set_job_status(scoped_job, "running", only_if=("queued",))
         return kept
+
+    def _roster_refusal(
+        self, row: Mapping[str, Any], cache: Dict[str, Optional[str]]
+    ) -> Optional[str]:
+        """``None`` if *row*'s job's roster is still inside the validated
+        queue set (see :meth:`_check_roster_against_queues`); otherwise the
+        refusal message.
+
+        Checked once per JOB per ``_claim`` call, not once per row: the
+        predicate validates the whole roster, so a second claimed row of the
+        same job would only repeat the same verdict.  A no-op (returns
+        ``None``) for a plain mapping config, or a ``CouncilConfig`` with no
+        ``queues`` declared.
+        """
+        checker = getattr(self.config, "check_roster_against_queues", None)
+        if checker is None:
+            return None
+        job_id = row["job_id"]
+        if job_id in cache:
+            return cache[job_id]
+        message: Optional[str] = None
+        job = self.store.get_job(job_id)
+        if job is not None:
+            try:
+                checker(self._roster_for(job), job_id=job_id)
+            except ConfigError as exc:
+                message = str(exc)
+        cache[job_id] = message
+        return message
 
     def _release_quietly(self, row: Mapping[str, Any]) -> None:
         try:
@@ -933,6 +1130,31 @@ class CouncilWorker:
             )
         except StaleClaim:  # pragma: no cover - another worker already has it
             pass
+
+    def _group_claimed(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> List[List[Mapping[str, Any]]]:
+        """Group one claim batch for the execution path.
+
+        Today this is one row per group -- behaviourally IDENTICAL to the
+        pre-queue-mode "one task per claimed row" loop -- but it is a real
+        seam, not a hard-coded assumption.  A later phase that assembles
+        several homogeneous CLI rows into one batched invocation changes only
+        THIS (and :meth:`_run_group`), not ``work()``'s loop or how its tasks
+        are launched.
+        """
+        return [[row] for row in rows]
+
+    async def _run_group(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Run a claimed GROUP.
+
+        Always exactly one row today (see :meth:`_group_claimed`), run
+        through the same :meth:`_run_one` as before -- sequentially within
+        the group rather than concurrently, because today's groups never
+        hold more than one row for that to matter.
+        """
+        for row in rows:
+            await self._run_one(row)
 
     async def _run_one(self, row: Mapping[str, Any]) -> None:
         limit = self._limit_by_endpoint[row["endpoint"]]
@@ -1170,8 +1392,18 @@ class CouncilWorker:
                 deadline_s=seat.timeout_s,
             )
 
-        started = _utcnow()
+        # SERVICE-TIME INSTRUMENTATION.  ``queued_at`` is stamped the instant
+        # this call is ready to enter the endpoint's (possibly account-
+        # shared) concurrency slot; ``started`` only AFTER the slot is
+        # actually acquired.  Stamping ``started`` before the slot (as this
+        # used to) conflates queue-wait with service time -- measured to
+        # disagree by 65x between an honest uncontended reading and a
+        # store median taken under real contention.  With the split:
+        # service time is ``finished - started`` and queue wait is
+        # ``started - queued_at``.
+        queued_at = _utcnow()
         async with self._slot(endpoint):
+            started = _utcnow()
             result = await self._acomplete(
                 request, api_type=api_type, endpoint=mapping
             )
@@ -1192,6 +1424,7 @@ class CouncilWorker:
                     started,
                     finished,
                     result,
+                    queued_at=queued_at,
                 )
             # Two measured reply defects are repaired BEFORE the gate (see
             # engine/normalise.py).  The context is the one already built for
@@ -1207,9 +1440,11 @@ class CouncilWorker:
                     started,
                     finished,
                     result,
+                    queued_at=queued_at,
                 )
             return self._settle_ok(
-                call, token, result, started, finished, parsed, repairs
+                call, token, result, started, finished, parsed, repairs,
+                queued_at=queued_at,
             )
 
         error = result.error or CouncilError(
@@ -1223,9 +1458,12 @@ class CouncilWorker:
             failures = int(call.get("attempt_count") or 0) + 1
             if failures < self.max_attempts:
                 return self._retry_later(
-                    call, token, error, failures, started, finished, result
+                    call, token, error, failures, started, finished, result,
+                    queued_at=queued_at,
                 )
-        return self._fail_call(call, token, error, started, finished, result)
+        return self._fail_call(
+            call, token, error, started, finished, result, queued_at=queued_at
+        )
 
     # -- the per-call permission gate -------------------------------------
 
@@ -1400,6 +1638,8 @@ class CouncilWorker:
         finished: datetime,
         parsed: Optional[Any] = None,
         repairs: Optional[Sequence[Mapping[str, Any]]] = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Record a good answer, its tokens, its budget and its consequence.
 
@@ -1423,7 +1663,9 @@ class CouncilWorker:
                     error=None,
                     normalised=list(repairs or ()) or None,
                 )
-                self._record_attempt(call, started, finished, "ok", usage)
+                self._record_attempt(
+                    call, started, finished, "ok", usage, queued_at=queued_at
+                )
                 spent = _token_total(usage)
                 if spent:
                     self.store.add_tokens(endpoint, spent)
@@ -1496,6 +1738,8 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         result: Any = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Settle a call as failed: the seat errors and the item will too."""
         try:
@@ -1507,7 +1751,9 @@ class CouncilWorker:
                     reply_text=getattr(result, "text", None),
                     error=error.model_dump(),
                 )
-                self._record_attempt(call, started, finished, error.kind, None)
+                self._record_attempt(
+                    call, started, finished, error.kind, None, queued_at=queued_at
+                )
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:
             return "stale"
@@ -1522,13 +1768,17 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         result: Any = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Put a transiently-failed call back with a jittered backoff."""
         delay = self._backoff(failures)
         try:
             with self.store.transaction():
                 self.store.note_call_error(call["call_id"], error.model_dump())
-                self._record_attempt(call, started, finished, error.kind, None)
+                self._record_attempt(
+                    call, started, finished, error.kind, None, queued_at=queued_at
+                )
                 self.store.release_call(
                     call["call_id"],
                     token,
@@ -1625,16 +1875,41 @@ class CouncilWorker:
         finished: datetime,
         outcome_kind: str,
         usage: Optional[Mapping[str, Any]],
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> None:
-        self.store.record_attempt(
-            call["call_id"],
-            int(call.get("attempt_count") or 0) + 1,
-            started,
-            finished,
-            outcome_kind,
-            usage=dict(usage) if usage else None,
-            worker_id=self.worker_id,
-        )
+        """Record one try, plus -- when this attempt actually waited for a
+        slot -- WHEN it started waiting.
+
+        ``queued_at`` is ``None`` for anything that never went through
+        :meth:`_slot` at all (a reused or single-flight-followed answer: see
+        :meth:`_settle_reused`, which never calls this with one), which is
+        exactly "nothing to say" for the ``attempts.queued_at`` column.
+        """
+        try:
+            self.store.record_attempt(
+                call["call_id"],
+                int(call.get("attempt_count") or 0) + 1,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage) if usage else None,
+                worker_id=self.worker_id,
+                queued_at=queued_at,
+            )
+        except TypeError:
+            # A store built before `record_attempt` grew `queued_at` (or a
+            # test double standing in for one): fall back rather than lose
+            # the attempt record over an instrumentation-only column.
+            self.store.record_attempt(
+                call["call_id"],
+                int(call.get("attempt_count") or 0) + 1,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage) if usage else None,
+                worker_id=self.worker_id,
+            )
 
     def _backoff(self, failures: int) -> float:
         """The nth retry's delay, with +-25% jitter.

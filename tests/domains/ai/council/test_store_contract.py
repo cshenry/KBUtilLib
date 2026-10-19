@@ -120,6 +120,73 @@ class TestSchema:
 
 
 # ---------------------------------------------------------------------------
+# The additive column: attempts.queued_at
+# ---------------------------------------------------------------------------
+
+
+class TestAdditiveColumnQueuedAt:
+    """``attempts.queued_at`` on a store file that predates the column.
+
+    Mirrors the existing ``calls.normalised`` additive-column test: the
+    column is dropped from an otherwise-current store to stand in for one
+    built by an earlier binary, and ``migrate()`` must restore it without
+    touching -- or needing -- a ``SCHEMA_VERSION`` bump, and without
+    disturbing any pre-existing row.
+    """
+
+    def test_migrate_adds_the_column_and_keeps_every_row(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            started_at=T0,
+            finished_at=T0,
+            outcome_kind="transport",
+        )
+
+        with store.transaction() as conn:
+            conn.execute(sa.text("ALTER TABLE attempts DROP COLUMN queued_at"))
+        assert "queued_at" not in {
+            col["name"] for col in sa.inspect(store.engine).get_columns("attempts")
+        }
+        # Dropping the column by hand is not a version mismatch: the stamp
+        # never said anything about this column in the first place.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "queued_at" in {
+            col["name"] for col in sa.inspect(store.engine).get_columns("attempts")
+        }
+        # Idempotent: a second run adds nothing and does not raise.
+        assert store.add_missing_columns() == []
+        # No SCHEMA_VERSION bump was needed to do any of this.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        # Every pre-existing row -- job, item, call and attempt -- is intact.
+        assert store.get_job(job_id) is not None
+        stored_calls = store.get_calls(job_id)
+        assert len(stored_calls) == 1
+        assert stored_calls[0]["call_id"] == claim["call_id"]
+        with store.transaction() as conn:
+            attempt_rows = [
+                dict(row._mapping)
+                for row in conn.execute(
+                    sa.select(sch.attempts).where(
+                        sch.attempts.c.call_id == claim["call_id"]
+                    )
+                )
+            ]
+        assert len(attempt_rows) == 1
+        assert attempt_rows[0]["attempt_no"] == 1
+        assert attempt_rows[0]["outcome_kind"] == "transport"
+        # Nothing wrote the new column -- it reads back NULL, "nothing to say".
+        assert attempt_rows[0]["queued_at"] is None
+
+
+# ---------------------------------------------------------------------------
 # Query types
 # ---------------------------------------------------------------------------
 
@@ -896,6 +963,163 @@ class TestClaimCalls:
         )
         (claim,) = store.claim_calls("daemon-1", {"argo"}, 10, now=T0)
         assert claim["lease_generation"] is None
+
+
+# ---------------------------------------------------------------------------
+# The queue: claims filtered to a partition's seats / roles
+# ---------------------------------------------------------------------------
+
+
+class TestClaimCallsSeatsAndRoles:
+    def test_seats_a_never_returns_seat_b_with_b_at_the_fifo_head(self, store):
+        """B is FIFO head -- an unfiltered claim would return it first -- so
+        this would fail if the ``seats`` filter were a no-op."""
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                # Same job, item and role: the tiebreaker is call_id ascending,
+                # so "0-b" sorts before "1-a" and B is the FIFO head.
+                call_row("item-1", "B", call_id="0-b"),
+                call_row("item-1", "A", call_id="1-a"),
+            ],
+        )
+        unfiltered = store.claim_calls("w0", {"argo"}, 10, now=T0, seats=None)
+        assert [c["seat_name"] for c in unfiltered] == ["B", "A"]
+
+        store.release_call(
+            unfiltered[0]["call_id"],
+            unfiltered[0]["claim_token"],
+            increment_attempt=False,
+        )
+        store.release_call(
+            unfiltered[1]["call_id"],
+            unfiltered[1]["claim_token"],
+            increment_attempt=False,
+        )
+
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, seats={"A"})
+        assert [c["seat_name"] for c in claimed] == ["A"]
+
+    def test_roles_critic_never_returns_a_proposer_row(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "proposer_1", role="proposer"),
+                call_row("item-1", "critic", role="critic"),
+            ],
+        )
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, roles={"critic"})
+        assert [c["role"] for c in claimed] == ["critic"]
+
+    def test_seats_and_roles_combine(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "A", role="proposer", call_id="call-a-proposer"),
+                call_row("item-1", "A", role="critic", call_id="call-a-critic"),
+                call_row("item-1", "B", role="critic", call_id="call-b-critic"),
+            ],
+        )
+        claimed = store.claim_calls(
+            "w1", {"argo"}, 10, now=T0, seats={"A"}, roles={"critic"}
+        )
+        assert [(c["seat_name"], c["role"]) for c in claimed] == [("A", "critic")]
+
+    def test_seats_none_and_roles_none_is_byte_identical_to_today(self, store):
+        """Same rows, same order, as a call with no seats/roles keyword at all.
+
+        The exact fixture and expected order of
+        ``test_claim_order_is_priority_then_submission_then_item_then_role``,
+        replayed with ``seats=None, roles=None`` passed explicitly: the
+        two-column WHERE addition in ``select_claimable`` must be a no-op
+        when both are ``None``.
+        """
+        store.create_job(
+            job_row(job_id="low", priority=50, submitted_at=T0),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="later", priority=100, submitted_at=T0 + timedelta(minutes=2)
+            ),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="first", priority=100, submitted_at=T0 + timedelta(minutes=1)
+            ),
+            [item_row("item-b", item_order=1), item_row("item-a", item_order=0)],
+            [
+                call_row("item-b", "proposer_1"),
+                call_row("item-a", "meta", role="meta"),
+                call_row("item-a", "critic", role="critic"),
+                call_row("item-a", "proposer_1"),
+            ],
+        )
+
+        explicit_none = store.claim_calls(
+            "w1", {"argo"}, 10, now=T0 + timedelta(hours=1), seats=None, roles=None
+        )
+
+        assert [(c["job_id"], c["item_id"], c["role"]) for c in explicit_none] == [
+            ("first", "item-a", "proposer"),
+            ("first", "item-a", "critic"),
+            ("first", "item-a", "meta"),
+            ("first", "item-b", "proposer"),
+            ("later", "item-1", "proposer"),
+            ("low", "item-1", "proposer"),
+        ]
+
+    def test_claim_order_is_unchanged_under_filtering(self, store):
+        """The four-tier order from the unfiltered test, replayed under a
+        seats filter that excludes nothing -- the order must not shift."""
+        store.create_job(
+            job_row(job_id="low", priority=50, submitted_at=T0),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="later", priority=100, submitted_at=T0 + timedelta(minutes=2)
+            ),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="first", priority=100, submitted_at=T0 + timedelta(minutes=1)
+            ),
+            [item_row("item-b", item_order=1), item_row("item-a", item_order=0)],
+            [
+                call_row("item-b", "proposer_1"),
+                call_row("item-a", "meta", role="meta"),
+                call_row("item-a", "critic", role="critic"),
+                call_row("item-a", "proposer_1"),
+            ],
+        )
+
+        claimed = store.claim_calls(
+            "w1",
+            {"argo"},
+            10,
+            now=T0 + timedelta(hours=1),
+            seats={"proposer_1", "critic", "meta"},
+            roles={"proposer", "critic", "meta"},
+        )
+
+        assert [(c["job_id"], c["item_id"], c["role"]) for c in claimed] == [
+            ("first", "item-a", "proposer"),
+            ("first", "item-a", "critic"),
+            ("first", "item-a", "meta"),
+            ("first", "item-b", "proposer"),
+            ("later", "item-1", "proposer"),
+            ("low", "item-1", "proposer"),
+        ]
 
 
 # ---------------------------------------------------------------------------

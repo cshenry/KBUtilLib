@@ -1054,6 +1054,8 @@ class SqliteStore:
         now: Optional[datetime] = None,
         *,
         user: Optional[str] = None,
+        seats: Optional[Set[str]] = None,
+        roles: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Atomically claim up to *limit* due pending calls for this worker.
 
@@ -1063,6 +1065,11 @@ class SqliteStore:
         filtering on that label would strand every pending call the moment
         somebody edited config ``user`` (review round 3).  *user* is a
         deprecated no-op kept for older callers and is ignored.
+
+        *seats* and *roles*, when given (not ``None``), restrict the claim to
+        calls on one of those seats / roles -- a partitioned worker's queue.
+        Both default to ``None``, which claims across every seat and role
+        exactly as before.
 
         The select and the stamping happen inside one ``BEGIN IMMEDIATE``
         transaction, which is what makes the claim atomic: the write lock is
@@ -1079,7 +1086,13 @@ class SqliteStore:
         now = now or _utcnow()
 
         with self.transaction() as conn:
-            rows = _dicts(conn.execute(q.select_claimable(endpoints, now, limit)))
+            rows = _dicts(
+                conn.execute(
+                    q.select_claimable(
+                        endpoints, now, limit, seats=seats, roles=roles
+                    )
+                )
+            )
             if not rows:
                 return []
 

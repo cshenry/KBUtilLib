@@ -1,0 +1,70 @@
+{
+  "artifact_version": "filipe-go-height-lte-1-dedup-v1",
+  "benchmark": {
+    "metrics_file": "benchmark.metrics.json",
+    "name": "filipe-go-height-lte-1-dedup-v1",
+    "schema_version": 1,
+    "version": "1.0.0"
+  },
+  "compatibility": {
+    "input": "text only",
+    "output_schema": 1,
+    "rollback_artifact_versions": ["filipe-go-filtered-v1", "filipe-go-height-dedup-v2"],
+    "rollback_method_versions": ["2.0.0", "3.0.0"]
+  },
+  "files": {
+    "benchmark.metrics.json": {"sha256": "2413880db20bb704e3cd5ae46147d54cdaa5907c04b08f6d8a9d50c288db9b53"},
+    "model.joblib": {"sha256": "0a3504f2dbf8392e16be759b4f546be21cec007f1e642eb8a17d82b4d4609974"},
+    "split_summary.json": {"sha256": "de47f0172bb9f2304b6c122a97d8d36f795e4c8da3e907b8f1bc883b7c7c6f80"},
+    "training_config.json": {"sha256": "5ad5ecdfba915d62b127e87bd590ab094eb8bf2eae736bf04eb250cc924dc8fc"}
+  },
+  "filter": {
+    "id": "go-height-lte-1-v1",
+    "height_definition": "distance to furthest descendant",
+    "rule": "retain GO terms with supplied ontology height <= 1; exclude height >= 2",
+    "stage": "pre-training only; runtime predictions are never height-filtered"
+  },
+  "method_version": "4.0.0",
+  "metric": {
+    "candidate_labels": 3979,
+    "coverage_any_gold_in_candidate_universe": 0.8217673489765353,
+    "limitation": "Scores are descriptive held-out Filipe lexical cosine retrieval scores, not calibrated probabilities; benchmark results do not transfer to Henry.",
+    "mrr": 0.49637037904171766,
+    "top1": 0.43534697953070395,
+    "top100": 0.7244133799301048,
+    "top20": 0.6425361957064404,
+    "top5": 0.5621567648527209
+  },
+  "model_version": "4.0.0",
+  "preparation": {
+    "dedup_protocol": "exact normalized-text groups plus exhaustive char_wb TF-IDF [3,5] cosine >= 0.90 connected components; components split deterministically",
+    "dedup_components": 10009,
+    "filter_order": "height <= 1 before entity join, split, candidate selection, and training",
+    "retained_go_rows": 9352,
+    "stage": "pre-training only; runtime predictions are never height-filtered"
+  },
+  "promotion": {
+    "default": true,
+    "previous_default_method_version": "3.0.0",
+    "rollback": "select go-text@3.0.0 (inverted-height) or go-text@2.0.0 (depth) explicitly; immutable artifacts are never overwritten"
+  },
+  "provenance": {
+    "config_sha256": "5ad5ecdfba915d62b127e87bd590ab094eb8bf2eae736bf04eb250cc924dc8fc",
+    "raw_data_included": false,
+    "source_artifact": "accepted public-safe height<=1 and text-deduplicated research artifact",
+    "source_model_sha256": "0a3504f2dbf8392e16be759b4f546be21cec007f1e642eb8a17d82b4d4609974",
+    "split_manifest_sha256": "3674728a102eaed3327234fabf1d45fa6de4baabd7d77464b1cbc88148a4a3bb"
+  },
+  "schema_version": 1,
+  "training": {
+    "candidate_universe": "GO labels observed in training only",
+    "dedup_protocol": "filipe-text-go-dedup-v1",
+    "model": "model.joblib",
+    "provenance": "accepted public-safe derived height<=1 and text-deduplicated artifact; no raw data, private extracts, or Henry data included",
+    "representation": "word and char TF-IDF; equal-weight cosine to training-group GO centroids",
+    "test_entities": 25136,
+    "test_groups": 2003,
+    "train_entities": 94675,
+    "train_groups": 8006
+  }
+}

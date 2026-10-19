@@ -1,0 +1,33 @@
+{
+  "audit": {
+    "components": 10009,
+    "exact_duplicate_rows_collapsed": 106422,
+    "near_duplicate_pairs_at_or_above_threshold": 10793,
+    "raw_entities": 119811,
+    "unique_exact_texts": 13389
+  },
+  "config_sha256": "5ad5ecdfba915d62b127e87bd590ab094eb8bf2eae736bf04eb250cc924dc8fc",
+  "dedup_protocol": {
+    "char": {
+      "analyzer": "char_wb",
+      "min_df": 1,
+      "ngram_range": [
+        3,
+        5
+      ],
+      "sublinear_tf": true
+    },
+    "exact": "identical text union across sources",
+    "near": "exhaustive char_wb TF-IDF [3,5] cosine >=.90; sorted pairs; transitive union-find",
+    "threshold": 0.9
+  },
+  "note": "Aggregate-only public-safe split provenance; source rows, entity IDs, and texts are deliberately not packaged.",
+  "records_included": false,
+  "schema_version": 1,
+  "source_split_manifest_sha256": "3674728a102eaed3327234fabf1d45fa6de4baabd7d77464b1cbc88148a4a3bb",
+  "split": {
+    "method": "sha256(filipe-text-go-dedup-v1|seed|canonical component text) mod 100",
+    "seed": 20260909,
+    "train_percent": 80
+  }
+}

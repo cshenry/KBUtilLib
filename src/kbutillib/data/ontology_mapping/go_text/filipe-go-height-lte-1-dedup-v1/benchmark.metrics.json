@@ -1,0 +1,20 @@
+{
+  "candidate_labels": 3979,
+  "candidate_universe": "GO labels observed in training only",
+  "coverage_any_gold_in_candidate_universe": 0.8217673489765353,
+  "empty_gold_label_groups": 0,
+  "evaluation_unit": "deduplicated component; gold is union of member labels",
+  "group_overlap_train_test": 0,
+  "mrr": 0.49637037904171766,
+  "out_of_candidate_gold_labels": 500,
+  "retained_gold_labels": 3076,
+  "schema_version": 1,
+  "test_entities": 25136,
+  "test_groups": 2003,
+  "top1": 0.43534697953070395,
+  "top100": 0.7244133799301048,
+  "top20": 0.6425361957064404,
+  "top5": 0.5621567648527209,
+  "train_entities": 94675,
+  "train_groups": 8006
+}

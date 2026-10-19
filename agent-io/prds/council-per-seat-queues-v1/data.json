@@ -11,7 +11,7 @@
   "authored_on": "2026-10-19",
   "authoring_session": "780537ef-a1e6-5680-ad96-228bba7b281b",
   "mode": "draft-mode-single-pass",
-  "review_rounds": 0,
+  "review_rounds": 1,
   "confront_rounds": 1,
   "confront": "round 1 complete: 12 binding stalls, ALL 12 accepted and folded (none were padding; three were internal contradictions or factual errors in round 0). Maestro task-570d9569, backend codex, machine h100, artifact blob 5c61e65697899cd26760ea1c1d8ad6773d0eed10 on branch maestro/researcher/you-are-the-autonomous-build-con-task-570d9569, copied to research/confront-round-1-stall-report.md. See the Revision Log and the Acceptance Criteria section (38 criteria).",
   "draft_commit": "831b3a9cdf4e2cb2f222d612048c47ef11c3d23a",
@@ -92,5 +92,18 @@
     "machine": "h100",
     "check": "With a four-queue config on the live store, `kbu council jobs status` reports four live queue children with per-queue claimed/in-flight/pending counts, and resuming job 96a612a03a2149c5935478d519f9f522 settles items on at least two seats concurrently (argo progressing while a codex call is in flight) -- the condition that was impossible under the shared FIFO."
   },
-  "acceptance_criteria_count": 38
+  "acceptance_criteria_count": 38,
+  "review_log": [
+    {
+      "round": 1,
+      "date": "2026-10-19",
+      "reviewer": "chris",
+      "mode": "read-only approval",
+      "edits_folded": 0,
+      "how": "Chris read the bundle from the Dropbox artifacts copy (his KBUtilLib checkout is parked on wip and does not contain the PRD), and said: 'I reviewed the PRD in detail. It looks good. Let's proceed with the build.'",
+      "verified": "Zero edits to fold, established rather than assumed: the artifacts copy is byte-identical to the commit on all five files, carries no (CSH markers, and retains its original 14:11 write mtimes; the git working tree shows no modification to the PRD directory beyond the draft_commit line this session wrote.",
+      "propagation": "None required -- no decision-changed, question-answered, requirement-added or rationale-edited hunk existed. The Gotchas section was re-derived in the confront round 1 fold earlier today and is unchanged by this round.",
+      "note": "Recorded as a review round because the gate's purpose is that a human read the PRD before dispatch, which happened. Review Mode's diff-and-fold machinery had nothing to act on."
+    }
+  ]
 }

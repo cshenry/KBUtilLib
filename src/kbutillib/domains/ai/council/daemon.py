@@ -50,7 +50,11 @@ on an operator's ``systemctl restart`` is how a long batch dies of attrition.
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
+import json
 import logging
+import multiprocessing
 import os
 import signal
 import socket
@@ -59,13 +63,13 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .engine.worker import CouncilWorker
-from .execlock import ExecutionLock, LockHeld
+from .execlock import CONTROLLER_LOCK_FILENAME, ExecutionLock, LockHeld
 from .servable import probe_endpoint, seat_state
 from .store.errors import StaleClaim
 from .types import CouncilError, CouncilException
@@ -139,6 +143,14 @@ class DaemonTimings:
             whole drain window plus the time to tidy up.
         start_wait_s: how long ``start`` waits for its detached child to take
             the lock before reporting that it did not.
+        restart_delay_s: how long the controller waits after noticing a queue
+            worker died UNEXPECTEDLY before it restarts that worker.  A
+            daemon being stopped deliberately never waits this out -- see
+            :meth:`CouncilDaemon._supervise_tick`.
+        supervise_poll_s: how often the controller reconciles each queue's
+            desired state (dead-child restart, a per-queue stop marker)
+            against reality.  Independent of *idle_poll_s*, which governs one
+            worker's own claim loop.
     """
 
     heartbeat_s: float = 30.0
@@ -147,6 +159,8 @@ class DaemonTimings:
     drain_s: float = 120.0
     stop_wait_s: float = 130.0
     start_wait_s: float = 30.0
+    restart_delay_s: float = 5.0
+    supervise_poll_s: float = 2.0
 
     def scaled(self, **overrides: float) -> "DaemonTimings":
         """This record with some fields replaced."""
@@ -183,6 +197,29 @@ class _Route:
         return (self.endpoint, self.model)
 
 
+@dataclass
+class _QueueChild:
+    """The controller's own record of one ``(queue, index)`` worker process.
+
+    Not the ``workers`` row -- that is the child's OWN registration, written
+    from inside its own process once it is actually claiming.  This is the
+    CONTROLLER's bookkeeping of the OS process it spawned, which is what lets
+    it tell an unexpected death from a deliberate stop.
+    """
+
+    queue: str
+    index: int
+    process: Any
+    args: Tuple[Any, ...] = field(default_factory=tuple)
+    #: Set once the controller itself has stopped this child (a per-queue
+    #: stop, or the final drain-everything on the controller's own SIGTERM).
+    #: While true, :meth:`CouncilDaemon._supervise_tick` never restarts it.
+    stopped: bool = False
+    #: Monotonic time this child was FIRST observed dead since its last
+    #: (re)start, or ``None`` while it is alive.  Drives the restart delay.
+    dead_since: Optional[float] = None
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -211,6 +248,44 @@ def _route_of(call: Mapping[str, Any]) -> _Route:
         canonical_model=str(call.get("canonical_model") or ""),
         seat_name=str(call.get("seat_name") or ""),
     )
+
+
+def _serve_queue_child(
+    council_config_source: Any,
+    store_url_override: Optional[str],
+    queue: str,
+    index: int,
+    timings: DaemonTimings,
+) -> Dict[str, Any]:
+    """Entry point for ONE queue worker, run in its own ``spawn``ed process.
+
+    The controller's per-queue children are launched through
+    :mod:`multiprocessing` (``spawn``) rather than through another
+    ``subprocess.Popen`` of the shipped CLI argv: a spawned interpreter
+    shares nothing with its parent, which is exactly the isolation a second
+    OS process is for (Q1: the stdin stall this whole redesign exists to fix
+    was store I/O blocking the loop that fed a CLI subprocess), and it needs
+    no new command-line surface to carry the queue name and worker index --
+    they are plain, picklable arguments.
+
+    Rebuilds the council facade fresh from *council_config_source* (a file
+    path for any real deployment; a plain mapping is also accepted here,
+    since ``multiprocessing`` pickles it across the spawn boundary rather
+    than needing to spell it on a command line the way the top-level
+    detached spawn does), then runs exactly :meth:`CouncilDaemon._serve`,
+    scoped to this one ``(queue, index)`` partition.
+    """
+    from kbutillib.domains.ai.council_utils import CouncilUtils
+
+    council = CouncilUtils(
+        council_config=council_config_source,
+        store_url=store_url_override,
+        config_file=False,
+        token_file=None,
+        kbase_token_file=None,
+    )
+    daemon = CouncilDaemon(council, timings=timings, queue=queue, worker_index=index)
+    return daemon.run_foreground()
 
 
 class _DaemonWorker(CouncilWorker):
@@ -308,6 +383,19 @@ class CouncilDaemon:
         profiles: which configured profiles' seats to keep probed even when no
             job needs them, so ``status`` and the first submit of the day do
             not wait on a cold probe.  Defaults to every configured profile.
+        queue: when given, THIS object is one QUEUE WORKER -- it serves only
+            the named queue's seats/roles/concurrency and takes that queue's
+            partition lock, rather than the store-wide lock.  ``None`` (the
+            default) is every pre-queue-mode caller's shape: unchanged.
+        worker_index: this worker's index within *queue* (``0..workers-1``).
+            Meaningless without *queue*; defaults to ``0`` when *queue* is
+            given and this is omitted.
+        queue_child_target: the callable the CONTROLLER spawns one per
+            ``(queue, index)`` via :mod:`multiprocessing`.  Defaults to the
+            module-level :func:`_serve_queue_child`.  Overridable so a test
+            can register its scripted api type inside each spawned child
+            before delegating to the real one -- a spawned interpreter
+            shares no process-global state with the test that started it.
     """
 
     def __init__(
@@ -318,12 +406,21 @@ class CouncilDaemon:
         child_argv: Optional[Sequence[str]] = None,
         profiles: Optional[Sequence[str]] = None,
         worker_id: Optional[str] = None,
+        queue: Optional[str] = None,
+        worker_index: Optional[int] = None,
+        queue_child_target: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.council = council
         self.timings = timings or DEFAULT_TIMINGS
         self.child_argv = list(child_argv) if child_argv else None
         self._profiles = list(profiles) if profiles is not None else None
         self.worker_id = worker_id or f"{socket.gethostname()}-daemon-{uuid.uuid4().hex[:8]}"
+        #: Non-``None`` means this object IS one queue worker (see the class
+        #: docstring).  Read only by :meth:`run_foreground`/:meth:`status`;
+        #: everything else keeps working unscoped exactly as before.
+        self.queue: Optional[str] = queue
+        self.worker_index: Optional[int] = worker_index if queue is not None else None
+        self._queue_child_target = queue_child_target
 
         #: ``{(endpoint, model): seat_state report}`` as of the last probe.
         self.readiness: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -341,12 +438,26 @@ class CouncilDaemon:
         self._last_wall: Optional[float] = None
         self._last_mono: Optional[float] = None
         self._worker: Optional[_DaemonWorker] = None
+        #: This worker's own seat/role/concurrency partition, set by
+        #: :meth:`_run_as_queue_worker` once the named queue's config is
+        #: resolved.  ``None`` claims across every seat and role and uses the
+        #: account's full capacity -- unchanged from before queue mode, and
+        #: what a legacy/controller-less daemon always uses.
+        self._scope_seats: Optional[Set[str]] = None
+        self._scope_roles: Optional[Set[str]] = None
+        self._scope_concurrency: Optional[int] = None
         #: Set by the signal handler.  A plain threading event rather than an
         #: ``asyncio.Event`` because the handler is installed before the loop
         #: exists (see :meth:`run_foreground`).
         self._stop_flag = threading.Event()
         self._loop: Optional[Any] = None
         self._async_stop: Optional[asyncio.Event] = None
+        #: The controller's live children, ``(queue, index) -> _QueueChild``.
+        #: Populated only inside the controller's own process, by
+        #: :meth:`_serve_controller`; a fresh "operator-side" object (what
+        #: ``status()``/``stop(queue=...)`` are normally called on) never
+        #: has this, which is why those read the filesystem instead.
+        self._controller_children: Dict[Tuple[str, int], _QueueChild] = {}
 
     # -- where the daemon lives -------------------------------------------
 
@@ -396,7 +507,7 @@ class CouncilDaemon:
                         "state": "live" if age is not None and age < 120 else "stale",
                     }
                 )
-        return {
+        result: Dict[str, Any] = {
             "store": self.council.store_url(),
             "directory": str(self.directory),
             "lock": str(self.lock.path),
@@ -405,10 +516,85 @@ class CouncilDaemon:
             "holder": holder,
             "workers": rows,
         }
+        queues = self._queues_config()
+        if queues:
+            result["controller"] = self._probe_controller()
+            result["queues"] = {
+                name: self._queue_status(name, qcfg, store, rows)
+                for name, qcfg in sorted(queues.items())
+            }
+        return result
+
+    def _queue_status(
+        self,
+        name: str,
+        qcfg: Any,
+        store: Any,
+        worker_rows: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """One queue's entry in :meth:`status`: its children, and its seats'
+        claimed/in-flight/pending counts -- so "nothing is moving" names
+        WHICH queue, and a dead child is distinguishable from an idle one.
+
+        ``claimed`` and ``in_flight`` are reported as the SAME number: the
+        store has no status distinct from ``claimed`` for "an attempt is
+        actively running" (only ``attempts`` rows, which are per TRY, not per
+        outstanding call), so there is no second, more specific count to
+        give without inventing one.  Both keys are kept so a reader looking
+        for either name finds it.
+        """
+        children: List[Dict[str, Any]] = []
+        pids: List[int] = []
+        stopped = self._stop_marker_path(name).exists()
+        for index in range(qcfg.workers):
+            holder = self._probe_partition(name, index)
+            pid = holder.get("pid") if holder else None
+            alive = bool(isinstance(pid, int) and _alive(pid))
+            children.append(
+                {"queue": name, "index": index, "pid": pid, "alive": alive, "stopped": stopped}
+            )
+            if isinstance(pid, int):
+                pids.append(pid)
+
+        last_heartbeat = None
+        for row in worker_rows:
+            if row.get("pid") in pids:
+                beat = row.get("heartbeat_at")
+                if beat is not None and (last_heartbeat is None or beat > last_heartbeat):
+                    last_heartbeat = beat
+
+        seats = set(qcfg.seats)
+        pending = 0
+        claimed = 0
+        if store is not None:
+            try:
+                for job in store.list_jobs():
+                    if job.get("status") in ("done", "cancelled"):
+                        continue
+                    for call in store.get_calls(job["job_id"]):
+                        if not call.get("live", True):
+                            continue
+                        if call.get("seat_name") not in seats:
+                            continue
+                        status_ = call.get("status")
+                        if status_ == "pending":
+                            pending += 1
+                        elif status_ == "claimed":
+                            claimed += 1
+            except Exception as exc:  # noqa: BLE001 - status reports, never raises
+                logger.debug("council daemon status: queue %s calls unreadable: %s", name, exc)
+        return {
+            "seats": sorted(seats),
+            "children": children,
+            "pending": pending,
+            "claimed": claimed,
+            "in_flight": claimed,
+            "last_heartbeat": str(last_heartbeat) if last_heartbeat is not None else None,
+        }
 
     # -- start -------------------------------------------------------------
 
-    def start(self, foreground: bool = False) -> Dict[str, Any]:
+    def start(self, foreground: bool = False, queue: Optional[str] = None) -> Dict[str, Any]:
         """Start the daemon.  Detached by default; in-process with *foreground*.
 
         The detached form spawns ONE child in a session of its own
@@ -420,19 +606,48 @@ class CouncilDaemon:
         of a configuration error, and the user would learn that from an empty
         ``status`` minutes later.
 
+        When the configuration declares ``queues``, this child becomes a
+        CONTROLLER rather than a lone worker: it holds the ``controller``
+        lock and launches one process per configured queue (see
+        :meth:`run_foreground`), so the readiness this method waits for is
+        the CONTROLLER lock rather than the store-wide one.
+
+        Args:
+            foreground: run in this process rather than spawning a detached
+                child.
+            queue: start only this ALREADY-CONFIGURED queue against an
+                ALREADY-RUNNING controller (a per-queue restart after
+                :meth:`stop` was called with a queue name).  Mutually
+                exclusive with *foreground*; every other case starts (or
+                restarts) everything.
+
         Raises:
             LockHeld: another council process already holds the lock.  The
                 message names its kind, pid and start time.
-            DaemonError: the child exited, or never took the lock.
+            DaemonError: the child exited, or never took the lock; or
+                *queue* names an unconfigured queue or no controller is up.
         """
+        if queue is not None:
+            return self._start_one_queue(queue)
         if foreground:
             return self.run_foreground()
 
-        holder = self.lock.probe()
+        queues = self._queues_config()
+        if queues:
+            holder = self._probe_controller() or self.lock.probe()
+        else:
+            holder = self.lock.probe()
         if holder is not None:
             raise LockHeld(self.lock.held_message("daemon", holder), holder)
 
         self.directory.mkdir(parents=True, exist_ok=True)
+        # A fresh controller incarnation starts every configured queue: any
+        # per-queue stop marker left by a PREVIOUS controller is cleared here
+        # rather than inside stop() itself, so "start everything" always
+        # means everything (point 8's "no queues -> today's behaviour" and
+        # the all-or-nothing initial start both assume a clean slate).
+        for name in queues:
+            self._stop_marker_path(name).unlink(missing_ok=True)
         argv = list(self.child_argv or self._default_child_argv())
         with open(self.log_path, "ab") as log:
             log.write(
@@ -452,15 +667,16 @@ class CouncilDaemon:
 
         deadline = self._mono() + self.timings.start_wait_s
         while self._mono() < deadline:
-            holder = self.lock.probe()
+            holder = self._probe_controller() if queues else self.lock.probe()
             if holder is not None and holder.get("pid") == child.pid:
                 return {
                     "started": True,
                     "pid": child.pid,
                     "foreground": False,
-                    "lock": str(self.lock.path),
+                    "lock": str(self.directory / CONTROLLER_LOCK_FILENAME) if queues else str(self.lock.path),
                     "log": str(self.log_path),
                     "holder": holder,
+                    "queues": sorted(queues) or None,
                 }
             code = child.poll()
             if code is not None:
@@ -471,7 +687,7 @@ class CouncilDaemon:
                 )
             time.sleep(0.05)
 
-        holder = self.lock.probe()
+        holder = self._probe_controller() if queues else self.lock.probe()
         child.terminate()
         raise DaemonError(
             f"the council daemon child (pid {child.pid}) did not take the "
@@ -521,7 +737,7 @@ class CouncilDaemon:
 
     # -- stop --------------------------------------------------------------
 
-    def stop(self) -> Dict[str, Any]:
+    def stop(self, queue: Optional[str] = None) -> Dict[str, Any]:
         """Stop the daemon holding this store's lock, and wait for it to go.
 
         Signals ONLY a holder whose recorded kind is ``daemon`` (review round
@@ -529,7 +745,17 @@ class CouncilDaemon:
         halfway through dropping a table are also lock holders, and
         ``SIGTERM``-ing either because they were in the way is not this verb's
         business -- so it says what is running and stops.
+
+        Args:
+            queue: stop only this queue's children, draining and stopping
+                them and leaving every sibling queue running.  ``None`` (the
+                default) stops everything -- the whole controller, or the
+                legacy single daemon, exactly as before queue mode existed.
         """
+        if queue is not None:
+            return self._stop_one_queue(queue)
+        if self._queues_config():
+            return self._stop_controller()
         holder = self.lock.probe()
         if holder is None:
             return {
@@ -588,6 +814,244 @@ class CouncilDaemon:
             ),
         }
 
+    def _stop_controller(self) -> Dict[str, Any]:
+        """Stop the WHOLE controller: every queue's children, then itself.
+
+        Exactly :meth:`stop`'s shape, one level up: find the controller's
+        pid (via its OWN lock file, not the store-wide one -- a controller
+        holds the store-wide lock SHARED, so that file's single-holder
+        record reads ``unknown``), signal it, and wait for the controller
+        lock to come free.  The controller's own SIGTERM handler is
+        :meth:`request_stop`, shared with every other kind -- it drains and
+        stops every child itself (see :meth:`_serve_controller`) before
+        releasing its lock.
+        """
+        path = self.directory / CONTROLLER_LOCK_FILENAME
+        holder = self._probe_controller()
+        if holder is None:
+            return {
+                "stopped": False,
+                "running": False,
+                "detail": (
+                    f"no council controller holds {str(path)!r}; "
+                    "no daemon is running against this store"
+                ),
+            }
+        pid = holder.get("pid")
+        if not isinstance(pid, int) or pid <= 0:
+            raise DaemonError(
+                f"a council controller holds {str(path)!r} but its record names "
+                f"no usable pid ({pid!r}); it cannot be signalled. Its lock is "
+                "released when the process dies."
+            )
+        if not _alive(pid):
+            return {
+                "stopped": False,
+                "running": False,
+                "pid": pid,
+                "detail": f"pid {pid} is no longer running; its lock is already free",
+            }
+        os.kill(pid, signal.SIGTERM)
+        deadline = self._mono() + self.timings.stop_wait_s
+        while self._mono() < deadline:
+            if self._probe_controller() is None:
+                _reap(pid)
+                return {
+                    "stopped": True,
+                    "running": False,
+                    "pid": pid,
+                    "detail": f"sent SIGTERM to pid {pid}; the lock is free",
+                }
+            time.sleep(0.05)
+        return {
+            "stopped": False,
+            "running": True,
+            "pid": pid,
+            "detail": (
+                f"sent SIGTERM to pid {pid} but the lock was still held after "
+                f"{self.timings.stop_wait_s:g}s; it may be draining a long call. "
+                "Check `kbu council daemon status`."
+            ),
+        }
+
+    def _stop_one_queue(self, queue: str) -> Dict[str, Any]:
+        """Stop only *queue*'s children; every sibling queue keeps running.
+
+        Writes the "deliberately stopped" marker FIRST, before signalling
+        anything: the controller's own supervision loop (see
+        :meth:`_supervise_tick`) checks this file to tell an operator's stop
+        from a crash, and a child that died in the gap between the signal
+        and the marker existing would otherwise be restarted out from under
+        this call.  Then each live child for *queue* is signalled directly
+        (found via its OWN partition lock, exactly as :meth:`stop` finds the
+        whole daemon's pid via the store-wide one) -- the controller does not
+        need to be asked to relay this; each child already drains and
+        interrupts on its own ``SIGTERM``, unchanged from a lone daemon's.
+        """
+        queues = self._queues_config()
+        qcfg = queues.get(queue)
+        if qcfg is None:
+            raise DaemonError(f"unknown queue {queue!r}; configured: {sorted(queues)}")
+        controller = self._probe_controller()
+        if controller is None:
+            return {
+                "stopped": False,
+                "running": False,
+                "queue": queue,
+                "detail": (
+                    "no council controller is running against this store; "
+                    f"queue {queue!r} is not running"
+                ),
+            }
+        marker = self._stop_marker_path(queue)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        pids: List[int] = []
+        for index in range(qcfg.workers):
+            holder = self._probe_partition(queue, index)
+            pid = holder.get("pid") if holder else None
+            if isinstance(pid, int) and _alive(pid):
+                pids.append(pid)
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        deadline = self._mono() + self.timings.stop_wait_s
+        while self._mono() < deadline:
+            if all(self._probe_partition(queue, i) is None for i in range(qcfg.workers)):
+                for pid in pids:
+                    _reap(pid)
+                return {
+                    "stopped": True,
+                    "running": False,
+                    "queue": queue,
+                    "detail": f"queue {queue!r} drained and stopped",
+                }
+            time.sleep(0.05)
+        return {
+            "stopped": False,
+            "running": True,
+            "queue": queue,
+            "detail": (
+                f"queue {queue!r} was signalled but did not fully stop within "
+                f"{self.timings.stop_wait_s:g}s; it may be draining a long call."
+            ),
+        }
+
+    def _start_one_queue(self, queue: str) -> Dict[str, Any]:
+        """Re-enable *queue* after a deliberate :meth:`stop`.
+
+        Clears the stop marker and waits for the controller's own
+        supervision loop (:meth:`_supervise_tick`, polling every
+        ``supervise_poll_s``) to notice and relaunch that queue's children --
+        this call never spawns a process itself, because only the controller
+        may (judgement call (e): a second launcher could hold a non-
+        conflicting partition lock under a DIFFERENT config and jointly
+        over-commit the account the lock cannot see).
+        """
+        queues = self._queues_config()
+        qcfg = queues.get(queue)
+        if qcfg is None:
+            raise DaemonError(f"unknown queue {queue!r}; configured: {sorted(queues)}")
+        controller = self._probe_controller()
+        if controller is None:
+            raise DaemonError(
+                "no council controller is running against this store; start the "
+                f"daemon first (`daemon start`) before starting queue {queue!r}"
+            )
+        self._stop_marker_path(queue).unlink(missing_ok=True)
+        deadline = self._mono() + self.timings.start_wait_s
+        while self._mono() < deadline:
+            holders = [self._probe_partition(queue, i) for i in range(qcfg.workers)]
+            if all(
+                h is not None and isinstance(h.get("pid"), int) and _alive(h["pid"])
+                for h in holders
+            ):
+                return {"started": True, "queue": queue, "detail": f"queue {queue!r} is running"}
+            time.sleep(0.05)
+        raise DaemonError(
+            f"queue {queue!r} did not come up within {self.timings.start_wait_s:g}s of "
+            "clearing its stop marker; is the controller still running? Check "
+            "`kbu council daemon status`."
+        )
+
+    # -- queue-mode plumbing: config, markers and lock probes ---------------
+
+    def _queues_config(self) -> Dict[str, Any]:
+        """``{name: QueueConfig}``, or ``{}`` for an unreadable/unpartitioned
+        configuration.  Never raises: every caller treats "no queues" and "the
+        configuration could not say" identically -- both mean "behave exactly
+        as today"."""
+        try:
+            return dict(self.council.config().queues or {})
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            logger.debug("council daemon: configuration unreadable: %s", exc)
+            return {}
+
+    def _stop_marker_path(self, queue: str) -> Path:
+        """The file whose PRESENCE means "this queue was deliberately
+        stopped; do not auto-restart it" (see :meth:`_supervise_tick`).
+
+        Scoped to one controller incarnation: a fresh :meth:`start` (with no
+        queue named) clears every marker before spawning the controller, so
+        a stop this operator forgot about from a previous run never silently
+        disables a queue forever.
+        """
+        return self.directory / f"queue-{queue}.stopped"
+
+    @staticmethod
+    def _probe_lock_file(path: Path) -> Optional[Dict[str, Any]]:
+        """Who holds *path* (a controller or partition lock file), or ``None``.
+
+        The same try-the-flock technique :class:`~.execlock.ExecutionLock`
+        uses for the store-wide lock (never trust a stale record without
+        confirming the kernel still enforces it), duplicated here rather than
+        called into that module: ``execlock.py`` exposes no public probe for
+        an individual partition or the controller lock, only for the
+        store-wide file, and this module does not extend that one's surface.
+        """
+        if not path.exists():
+            return None
+        try:
+            handle = open(path, "r+", encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                try:
+                    text = path.read_text(encoding="utf-8").strip()
+                    if text:
+                        parsed = json.loads(text.splitlines()[0])
+                        if isinstance(parsed, dict):
+                            return parsed
+                except (OSError, ValueError, IndexError):
+                    pass
+                return {"kind": "unknown", "pid": None}
+            # Acquired it ourselves: nobody holds it.  Release at once.
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return None
+        finally:
+            handle.close()
+
+    def _probe_controller(self) -> Optional[Dict[str, Any]]:
+        """Who holds the controller lock, or ``None``."""
+        return self._probe_lock_file(self.directory / CONTROLLER_LOCK_FILENAME)
+
+    def _probe_partition(self, queue: str, index: int) -> Optional[Dict[str, Any]]:
+        """Who holds ``(queue, index)``'s own partition lock, or ``None``.
+
+        The filename convention (``council-<queue>-<index>.lock``) is
+        :class:`~.execlock.ExecutionLock`'s, documented in its module
+        docstring as the partition lock's naming scheme; reproduced here
+        rather than imported because the class exposes no accessor for it.
+        """
+        path = self.directory / f"council-{queue}-{index}.lock"
+        return self._probe_lock_file(path)
+
     # -- the foreground loop -----------------------------------------------
 
     def run_foreground(self) -> Dict[str, Any]:
@@ -597,10 +1061,26 @@ class CouncilDaemon:
         that spawns a child which calls exactly this, and ``--foreground`` is
         what a systemd unit, a launchd job, ``tmux`` or ``nohup`` runs -- the
         daemon does not care which, because process supervision is the
-        machine's job and differs on every machine in this fleet.
+        machine's job and differs on every machine in this fleet.  The SAME
+        rule holds whether this becomes a lone worker, a controller or one
+        queue worker beneath a controller (confront round 1 (d)): the three
+        paths share this one entry point and diverge only on what they
+        acquire and serve.
+
+        Three shapes, decided here:
+
+        * ``self.queue`` set -- THIS object is one queue worker (spawned by a
+          controller's :meth:`_launch_queue_child`, or built directly by a
+          caller that wants one partition in isolation).  Takes that
+          partition's lock and serves only its seats.
+        * the configuration declares ``queues`` -- a CONTROLLER: takes the
+          ``controller`` lock and launches/supervises one child per
+          configured queue (see :meth:`_serve_controller`).
+        * neither -- exactly the pre-queue-mode daemon: the store-wide
+          ``daemon`` lock, serving every seat.  Unchanged.
 
         Raises:
-            LockHeld: another council process holds the execution lock.
+            LockHeld: another council process holds a lock this needs.
         """
         # The handlers go on FIRST, before the lock and before the loop.  A
         # ``SIGTERM`` in the window between taking the lock and installing
@@ -612,15 +1092,260 @@ class CouncilDaemon:
         # rather than lost.
         self._stop_flag.clear()
         with _signals(self):
-            with self.lock.acquire("daemon") as record:
-                # Before ANYTHING is served: both CLI backends read project
-                # context out of the cwd, and a daemon inheriting the
-                # directory it was launched from would answer council
-                # questions with somebody's repository in scope.  The council
-                # directory holds the store, the lock and the log and nothing
-                # a CLI would read as context.
+            if self.queue is not None:
+                return self._run_as_queue_worker()
+
+            queues = self._queues_config()
+            if not queues:
+                with self.lock.acquire("daemon") as record:
+                    # Before ANYTHING is served: both CLI backends read
+                    # project context out of the cwd, and a daemon inheriting
+                    # the directory it was launched from would answer
+                    # council questions with somebody's repository in scope.
+                    # The council directory holds the store, the lock and
+                    # the log and nothing a CLI would read as context.
+                    os.chdir(self.directory)
+                    return _run_loop(self._serve(record))
+
+            with self.lock.acquire("controller") as record:
                 os.chdir(self.directory)
-                return _run_loop(self._serve(record))
+                return _run_loop(self._serve_controller(record, queues))
+
+    def _run_as_queue_worker(self) -> Dict[str, Any]:
+        """Serve exactly ``self.queue``'s seats, holding its partition lock.
+
+        Reuses :meth:`_serve` unchanged: the only difference from the
+        unpartitioned daemon is that :attr:`_scope_seats`/``_scope_roles``/
+        ``_scope_concurrency`` are set first, which :meth:`_worker_for`,
+        :meth:`_pending_calls` and :meth:`_profile_routes` all already read
+        (``None`` there, which is what every pre-queue-mode caller leaves
+        them at, means "unscoped" exactly as before).
+        """
+        queues = self._queues_config()
+        qcfg = queues.get(self.queue)
+        if qcfg is None:
+            raise DaemonError(f"unknown queue {self.queue!r}; configured: {sorted(queues)}")
+        index = self.worker_index if self.worker_index is not None else 0
+        if not (0 <= index < qcfg.workers):
+            raise DaemonError(
+                f"worker index {index} is out of range for queue {self.queue!r} "
+                f"(workers={qcfg.workers})"
+            )
+        self._scope_seats = set(qcfg.seats)
+        self._scope_roles = set(qcfg.roles) if qcfg.roles else None
+        self._scope_concurrency = int(qcfg.concurrency)
+        with self.lock.acquire("daemon", partition=(self.queue, index)) as record:
+            os.chdir(self.directory)
+            return _run_loop(self._serve(record))
+
+    # -- the controller ------------------------------------------------------
+
+    async def _serve_controller(
+        self, record: Mapping[str, Any], queues: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Launch every configured queue's children, then supervise them.
+
+        A fresh controller incarnation always starts with a clean slate
+        (every per-queue stop marker is cleared by :meth:`start` before this
+        child is even spawned), so the launch below is unconditionally
+        ALL-OR-NOTHING (confront (c)): if any child fails to take its
+        partition lock within ``start_wait_s``, every child already started
+        by THIS call is drained and stopped and the whole controller raises,
+        rather than leaving some queues consuming work and others not.
+
+        Thereafter this is a plain reconcile loop: every ``supervise_poll_s``
+        it asks each child whether it is alive and whether its queue's stop
+        marker says it should be, and acts on the difference (see
+        :meth:`_supervise_tick`).  The controller's OWN ``SIGTERM`` (via
+        :meth:`request_stop`, the same handler every other kind uses) sets
+        the same ``stop`` event this loop watches, at which point it drains
+        and stops every child before returning -- preserving the bounded
+        drain contract one level up: each CHILD's own ``_serve`` already
+        implements it unchanged, this only has to ask them all to stop and
+        wait.
+        """
+        stop = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
+        self._async_stop = stop
+        if self._stop_flag.is_set():
+            stop.set()
+        summary: Dict[str, Any] = {
+            "worker_id": self.worker_id,
+            "pid": os.getpid(),
+            "store": self.council.store_url(),
+            "lock": str(self.directory / CONTROLLER_LOCK_FILENAME),
+            "cwd": os.getcwd(),
+            "queues": sorted(queues),
+            "started_at": str(record.get("started_at") or ""),
+        }
+        children: Dict[Tuple[str, int], _QueueChild] = {}
+        try:
+            try:
+                for name, qcfg in sorted(queues.items()):
+                    for index in range(qcfg.workers):
+                        children[(name, index)] = await self._launch_queue_child(name, index)
+                await self._await_all_ready(children)
+            except Exception:
+                await self._drain_and_stop_all(children)
+                raise
+
+            self._controller_children = children
+            if not stop.is_set():
+                await _wait_for(stop, self.timings.supervise_poll_s)
+            while not stop.is_set():
+                await self._supervise_tick(children)
+                await _wait_for(stop, self.timings.supervise_poll_s)
+            await self._drain_and_stop_all(children)
+        finally:
+            self._loop = None
+            self._async_stop = None
+        return summary
+
+    async def _launch_queue_child(self, queue: str, index: int) -> "_QueueChild":
+        """Spawn one ``(queue, index)`` worker via ``multiprocessing`` and
+        return its bookkeeping record.  See :func:`_serve_queue_child`."""
+        ctx = multiprocessing.get_context("spawn")
+        source = getattr(self.council, "council_config_source", None)
+        override = getattr(self.council, "store_url_override", None)
+        target = self._queue_child_target or _serve_queue_child
+        args: Tuple[Any, ...] = (source, override, queue, index, self.timings)
+        process = ctx.Process(target=target, args=args, name=f"council-queue-{queue}-{index}")
+        process.start()
+        return _QueueChild(queue=queue, index=index, process=process, args=args)
+
+    async def _await_all_ready(self, children: Dict[Tuple[str, int], "_QueueChild"]) -> None:
+        """Block until every child in *children* holds its partition lock.
+
+        Raises :class:`DaemonError` naming whichever child(ren) failed --
+        either by exiting before taking their lock, or by never taking it
+        within ``start_wait_s``.  The caller (:meth:`_serve_controller`)
+        drains and stops every child, started or not, on this failure.
+        """
+        deadline = self._mono() + self.timings.start_wait_s
+        pending = set(children)
+        while pending and self._mono() < deadline:
+            for key in list(pending):
+                child = children[key]
+                if not child.process.is_alive():
+                    raise DaemonError(
+                        f"queue worker {child.queue!r}/{child.index} (pid "
+                        f"{child.process.pid}) exited {child.process.exitcode} "
+                        "before it took its partition lock"
+                    )
+                holder = self._probe_partition(*key)
+                if holder is not None and holder.get("pid") == child.process.pid:
+                    pending.discard(key)
+            if pending:
+                await asyncio.sleep(0.05)
+        if pending:
+            names = ", ".join(f"{q}/{i}" for q, i in sorted(pending))
+            raise DaemonError(
+                f"queue worker(s) {names} did not take their partition lock "
+                f"within {self.timings.start_wait_s:g}s"
+            )
+
+    async def _drain_and_stop_all(self, children: Dict[Tuple[str, int], "_QueueChild"]) -> None:
+        """Signal every child and wait (bounded) for them all to go.
+
+        Each child drains and interrupts its OWN claimed calls on this
+        ``SIGTERM`` -- unchanged, inherited :meth:`_serve`/:meth:`_shutdown`
+        behaviour -- so this only has to ask and wait, never repeat that
+        logic.
+        """
+        for child in children.values():
+            self._signal_stop_child(child)
+        deadline = self._mono() + self.timings.stop_wait_s
+        remaining = {k: c for k, c in children.items() if c.process.is_alive()}
+        while remaining and self._mono() < deadline:
+            for key in list(remaining):
+                if not remaining[key].process.is_alive():
+                    remaining[key].process.join(timeout=0.1)
+                    del remaining[key]
+            if remaining:
+                await asyncio.sleep(0.05)
+        for child in remaining.values():
+            logger.warning(
+                "council controller: queue %s/%s (pid %s) did not stop within "
+                "%.0fs; killing it",
+                child.queue,
+                child.index,
+                child.process.pid,
+                self.timings.stop_wait_s,
+            )
+            try:
+                child.process.kill()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+            child.process.join(timeout=5.0)
+
+    @staticmethod
+    def _signal_stop_child(child: "_QueueChild") -> None:
+        if child.process.is_alive() and child.process.pid:
+            try:
+                os.kill(child.process.pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    async def _supervise_tick(self, children: Dict[Tuple[str, int], "_QueueChild"]) -> None:
+        """Reconcile every child's desired state against its actual one.
+
+        Per child, per confront (b):
+
+        * stop marker present -- a DELIBERATE per-queue stop.  Signalled if
+          still alive; never restarted while the marker stands, however it
+          dies.
+        * marker absent, alive -- nothing to do.
+        * marker absent, dead, and this child was previously marked
+          ``stopped`` -- an operator just cleared the marker
+          (:meth:`_start_one_queue`): restart AT ONCE, no delay, because the
+          5-second delay below is for an UNEXPECTED death, not a requested
+          one.
+        * marker absent, dead, unexpectedly -- restart after
+          ``restart_delay_s``, indefinitely, logging the failure (visible
+          in :meth:`status` meanwhile via its dead/absent child entry) and
+          triggering an immediate stale-claim reclaim so its orphaned work is
+          not stuck behind the full ten-minute lease.
+        """
+        for key, child in list(children.items()):
+            marker = self._stop_marker_path(child.queue)
+            desired_stopped = marker.exists()
+            alive = child.process.is_alive()
+            if desired_stopped:
+                if alive:
+                    self._signal_stop_child(child)
+                child.stopped = True
+                child.dead_since = None
+                continue
+            if alive:
+                child.dead_since = None
+                continue
+            if child.stopped:
+                child.stopped = False
+                child.dead_since = None
+                self._safely_reclaim()
+                children[key] = await self._launch_queue_child(child.queue, child.index)
+                continue
+            now = self._mono()
+            if child.dead_since is None:
+                child.dead_since = now
+                logger.warning(
+                    "council controller: queue %s/%s (pid %s) died unexpectedly; "
+                    "restarting in %.0fs",
+                    child.queue,
+                    child.index,
+                    child.process.pid,
+                    self.timings.restart_delay_s,
+                )
+                self._safely_reclaim()
+                continue
+            if now - child.dead_since >= self.timings.restart_delay_s:
+                children[key] = await self._launch_queue_child(child.queue, child.index)
+
+    def _safely_reclaim(self) -> None:
+        try:
+            self.council.require_schema().reclaim_stale()
+        except Exception as exc:  # noqa: BLE001 - best effort, never fatal
+            logger.debug("council controller: could not reclaim stale claims: %s", exc)
 
     async def _serve(self, record: Mapping[str, Any]) -> Dict[str, Any]:
         """The loop, with the lock already held and the cwd already moved."""
@@ -927,6 +1652,12 @@ class CouncilDaemon:
             poll_interval_s=min(1.0, self.timings.idle_poll_s),
             admits=self._admits,
             route_wait_s=self.timings.probe_s,
+            # ``None`` for every pre-queue-mode caller and for the
+            # controller-less legacy daemon -- unscoped, unchanged.  Set by
+            # :meth:`_run_as_queue_worker` for a queue worker.
+            seats=self._scope_seats,
+            roles=self._scope_roles,
+            concurrency=self._scope_concurrency,
         )
         self._worker = worker
         worker.register()
@@ -1146,6 +1877,13 @@ class CouncilDaemon:
         job's ``options`` ride along on each row because the per-call
         permission is read from them and re-reading the job per call would be
         one SELECT per call per pass.
+
+        Restricted to :attr:`_scope_seats` for a queue worker -- "each child
+        probes only the routes its own seats need" -- so a queue's children
+        never probe, claim-reason-write-blockers-onto, or otherwise take
+        responsibility for a call that belongs to a DIFFERENT queue.  ``None``
+        (every caller before queue mode existed, and the unpartitioned
+        legacy daemon) is unscoped, unchanged.
         """
         rows: List[Dict[str, Any]] = []
         for job in store.list_jobs():
@@ -1156,6 +1894,8 @@ class CouncilDaemon:
                 if not call.get("live", True):
                     continue
                 if call.get("status") not in ("pending", "claimed"):
+                    continue
+                if self._scope_seats is not None and call.get("seat_name") not in self._scope_seats:
                     continue
                 row = dict(call)
                 row["job_options"] = options
@@ -1180,7 +1920,12 @@ class CouncilDaemon:
         return routes
 
     def _profile_routes(self) -> List[_Route]:
-        """The seats of every configured profile (or of *profiles*), as routes."""
+        """The seats of every configured profile (or of *profiles*), as routes.
+
+        Restricted to :attr:`_scope_seats` for a queue worker, for the same
+        reason :meth:`_pending_calls` is: a queue's children keep only their
+        OWN seats warm, never the whole roster's.
+        """
         try:
             config = self.council.config()
         except Exception as exc:  # noqa: BLE001 - a bad config is the CLI's error
@@ -1197,6 +1942,8 @@ class CouncilDaemon:
                 logger.debug("council daemon: profile %r unusable: %s", name, exc)
                 continue
             for _role, seat in roster.seats():
+                if self._scope_seats is not None and seat.seat_name not in self._scope_seats:
+                    continue
                 routes.append(
                     _Route(
                         endpoint=seat.endpoint,

@@ -14,7 +14,7 @@
   "review_rounds": 0,
   "confront_rounds": 1,
   "confront": "round 1 complete: 12 binding stalls, ALL 12 accepted and folded (none were padding; three were internal contradictions or factual errors in round 0). Maestro task-570d9569, backend codex, machine h100, artifact blob 5c61e65697899cd26760ea1c1d8ad6773d0eed10 on branch maestro/researcher/you-are-the-autonomous-build-con-task-570d9569, copied to research/confront-round-1-stall-report.md. See the Revision Log and the Acceptance Criteria section (38 criteria).",
-  "draft_commit": "3f377bf6c25d32070bbe6e8d946bc8f09b990324",
+  "draft_commit": "831b3a9cdf4e2cb2f222d612048c47ef11c3d23a",
   "review_protocol": "Written in Draft Mode on 2026-10-19, single-pass, but with the architecture settled interactively first: Chris confirmed seat-level partition explicitly and settled batch size at 20 after being shown the amortization curve. Every judgement call is already decided and applied in the body; 'Open Questions and Judgement Calls' (Q1-Q10) is a manifest ordered by blast radius, not a queue of holes. Chris reviews by editing fullprompt.md in place, annotating with (CSH ...) markers; `/ai-design --review council-per-seat-queues-v1` then diffs the working tree against draft_commit, classifies each hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. The PRD may not advance to `ready` until review_rounds >= 1.",
   "registration": {
     "state": "not-registered",

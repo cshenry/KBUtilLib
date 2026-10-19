@@ -126,6 +126,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 from ..types import (
@@ -255,6 +256,12 @@ AUTH_PATTERNS: Tuple[re.Pattern, ...] = tuple(
 
 #: How long a child gets to die after ``SIGTERM`` before it is ``SIGKILL``ed.
 KILL_GRACE_S = 5.0
+
+#: The prompt file's name inside the per-call working directory.  It lives
+#: INSIDE that directory (never beside it) so the same ``TemporaryDirectory``
+#: cleanup that removes the cwd also removes the prompt -- it must never
+#: outlive the call that wrote it.
+STDIN_FILENAME = "prompt.stdin"
 
 #: How much CLI output is quoted into an error message.  Enough to recognise
 #: a provider banner in a call row weeks later, short enough that the store
@@ -701,6 +708,7 @@ async def run_cli(
     *,
     prepare: Optional[Callable[[Path], Sequence[str]]] = None,
     collect: Optional[Callable[[Path], None]] = None,
+    temp_root: Optional[Union[str, Path]] = None,
 ) -> Tuple[int, str, str, float]:
     """Run a CLI child and return ``(returncode, stdout, stderr, elapsed)``.
 
@@ -717,9 +725,24 @@ async def run_cli(
     * **The prompt goes in on stdin**, never in ``argv``, so it cannot leak
       through ``ps`` to any other user on a shared host.
 
+    The prompt is handed to the child as a FILE, not a pipe.  It used to be:
+    ``proc.communicate(stdin_text.encode())`` pumps stdin from THIS coroutine,
+    on the same asyncio event loop that also drives the council's synchronous
+    store I/O.  When that loop stalled, the child gave up waiting for its
+    prompt and exited with "Input must be provided through stdin" -- measured
+    destroying 23 of 24 Claude attempts on a 19,276-item run, reported as
+    generic transport failures.  Writing the prompt to a file INSIDE the
+    per-call working directory and handing the child that file opened for
+    reading removes the parent from the data path entirely: the child reads
+    at its own pace, a child that never reads it does not block anyone
+    writing to a pipe (because there is no pipe), and the file is deleted
+    with the rest of the working directory, so the prompt never persists.
+    The child's view is unchanged -- it still reads its prompt on stdin, which
+    is the documented spelling both installed CLIs expect.
+
     Args:
         argv: the command line.  May be ``None`` when *prepare* is given.
-        stdin_text: written to the child's stdin, then stdin is closed.
+        stdin_text: written to a file and handed to the child as stdin.
         env: the child's COMPLETE environment -- built by :func:`_child_env`,
             not merged with the parent's by this function.
         timeout_s: wall-clock budget.  On expiry the process group is killed
@@ -735,31 +758,46 @@ async def run_cli(
             BEFORE the directory is removed, so output written to a file in it
             can be read.  Called even when the child failed, because a partial
             answer file is evidence.
+        temp_root: directory under which the per-call working directory is
+            created (passed straight through to
+            ``tempfile.TemporaryDirectory(dir=...)``).  ``None`` preserves
+            today's default (the platform temp directory).
 
     Raises:
         CallTimeout: the child did not finish within *timeout_s*.
     """
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="kbu-council-cli-") as tmp:
+    temp_root_str = str(temp_root) if temp_root is not None else None
+    with tempfile.TemporaryDirectory(
+        prefix="kbu-council-cli-", dir=temp_root_str
+    ) as tmp:
         cwd = Path(tmp)
         command = list(prepare(cwd)) if prepare is not None else list(argv or ())
         if not command:
             raise ValueError("run_cli needs a non-empty argv (or a prepare hook)")
 
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(cwd),
-            env=dict(env),
-            start_new_session=True,
-        )
+        stdin_path = cwd / STDIN_FILENAME
+        stdin_path.write_text(str(stdin_text or ""), encoding="utf-8")
+        stdin_file = stdin_path.open("rb")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=stdin_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(cwd),
+                env=dict(env),
+                start_new_session=True,
+            )
+        finally:
+            # The child gets its own duplicated fd at exec time; this process
+            # has no further use for the handle once the child exists.
+            stdin_file.close()
         _LIVE_CHILDREN[proc.pid] = proc
         try:
             try:
                 out, err = await asyncio.wait_for(
-                    proc.communicate(str(stdin_text or "").encode("utf-8")),
+                    proc.communicate(),
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError:

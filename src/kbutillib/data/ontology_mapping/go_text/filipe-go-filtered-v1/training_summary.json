@@ -1,0 +1,7 @@
+{
+  "candidate_universe": "GO labels observed in training entities only",
+  "model": "filipe_text_to_go.joblib",
+  "representation": "word and char TF-IDF; equal-weight cosine to training-document GO centroids",
+  "training_labels": 4409,
+  "training_records": 103375
+}

@@ -245,6 +245,8 @@ class CouncilStore(Protocol):
         now: Optional[datetime] = None,
         *,
         user: Optional[str] = None,
+        seats: Optional[Set[str]] = None,
+        roles: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Atomically claim up to *limit* due pending calls.
 
@@ -254,6 +256,10 @@ class CouncilStore(Protocol):
         ``jobs.submitted_by``, which is a provenance label and not an owner.
         Ordered by job priority then submission time then item order then
         role.  *user* is a deprecated no-op.
+
+        *seats* and *roles*, when given (not ``None``), restrict the claim to
+        one of those seats / roles; ``None`` (the default) claims across
+        every seat and role, unchanged from before these parameters existed.
         """
         ...
 
@@ -324,8 +330,15 @@ class CouncilStore(Protocol):
         outcome_kind: str,
         usage: Optional[Dict[str, Any]] = None,
         worker_id: Optional[str] = None,
+        queued_at: Optional[datetime] = None,
     ) -> None:
         """Record one try at a call.
+
+        ``queued_at`` is the additive, nullable ``attempts.queued_at`` column
+        (schema unchanged, no version bump): when the service-time split
+        this call is a service and has a queue-wait to report, else absent
+        -- "nothing to say", not zero.  Defaults to ``None`` so every caller
+        from before this parameter existed is unaffected.
 
         Raises ``ValueError`` if any argument is a dict containing a
         ``system`` or ``user`` key: prompt text never enters this table.

@@ -37,6 +37,8 @@ from kbutillib.domains.ai.council import (
 from kbutillib.domains.ai.council.config import (
     DEFAULT_CANONICAL,
     DEFAULT_CANONICAL_VERSION,
+    QueueConfig,
+    _merge,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -97,6 +99,44 @@ def config_dict(**overrides) -> dict:
         },
         "default_profile": "p",
         "store": "sqlite:///council-test.sqlite",
+    }
+    raw.update(overrides)
+    return raw
+
+
+def queue_config_dict(queues: dict, **overrides) -> dict:
+    """A native-format config sized for queue validation: two CLI accounts
+    (``acct-a`` via ``epA``, ``acct-b`` via ``epB``, each capped at 8) plus one
+    non-CLI endpoint (``epC``, an ARGO-kind endpoint, for the batch_size
+    refusal case), two proposer seats and one critic and one meta seat -- enough
+    seat/account variety to build every queue scenario under test without the
+    fixture itself becoming the thing under test.
+
+    *queues* becomes the ``queues`` section verbatim; the caller decides which
+    seats each queue owns and at what concurrency.
+    """
+    raw = {
+        "endpoints": {
+            "epA": {"kind": "codex_cli", "account": "acct-a", "max_concurrency": 8},
+            "epB": {"kind": "codex_cli", "account": "acct-b", "max_concurrency": 8},
+            "epC": {"kind": "argo", "base_url": "https://argo.example/v1"},
+        },
+        "models": {
+            "m_p1": {"endpoint": "epA", "canonical": "vendor/p1"},
+            "m_p2": {"endpoint": "epB", "canonical": "vendor/p2"},
+            "m_critic": {"endpoint": "epA", "canonical": "vendor/critic"},
+            "m_meta": {"endpoint": "epC", "canonical": "vendor/meta"},
+        },
+        "profiles": {
+            "p": {
+                "proposers": {"proposer_a": "m_p1", "proposer_b": "m_p2"},
+                "critic": "m_critic",
+                "meta": "m_meta",
+            },
+        },
+        "default_profile": "p",
+        "store": "sqlite:///council-test.sqlite",
+        "queues": queues,
     }
     raw.update(overrides)
     return raw
@@ -728,6 +768,251 @@ class TestConfigValidation:
     def test_unknown_endpoint_lookup_is_a_config_error(self):
         with pytest.raises(ConfigError, match="unknown endpoint"):
             load_council_config(config_dict()).endpoint("nope")
+
+
+# ---------------------------------------------------------------------------
+# Queue partitioning
+# ---------------------------------------------------------------------------
+
+
+class TestQueueConfig:
+    """``queues`` is additive: concurrency is owned by the ACCOUNT, not the
+    seat, so validation has to resolve every declared profile (an override
+    can move a seat to a different account per job) before it can promise a
+    worker-process split will never over-subscribe one.
+    """
+
+    def _full_coverage(self, **per_queue) -> dict:
+        """The four queues that cover every seat/role in ``queue_config_dict``.
+
+        A helper so each scenario test only has to override the one queue it
+        cares about -- otherwise every test would have to restate full
+        coverage, and a coverage-refusal from an unrelated queue would be
+        mistaken for the thing under test.
+        """
+        queues = {
+            "qA": {"seats": ["proposer_a"], "concurrency": 4},
+            "qB": {"seats": ["proposer_b"], "concurrency": 4},
+            "qC": {"seats": ["critic"], "concurrency": 4},
+            "qD": {"seats": ["meta"], "concurrency": 1},
+        }
+        for name, fields in per_queue.items():
+            queues[name] = fields
+        return queues
+
+    # -- the four-queue config: three chairs, one combined critic/meta ----
+
+    def test_four_queue_config_loads_and_round_trips(self):
+        raw = {
+            "endpoints": {
+                "codex": {"kind": "codex_cli", "account": "codex-chatgpt", "max_concurrency": 8},
+                "argo": {"kind": "argo", "base_url": "https://argo.example/v1"},
+                "argo2": {"kind": "argo", "base_url": "https://argo2.example/v1"},
+            },
+            "models": {
+                "sol": {"endpoint": "codex", "canonical": "openai/gpt-5.6-sol"},
+                "terra": {"endpoint": "codex", "canonical": "openai/gpt-5.6-terra"},
+                "flash": {"endpoint": "argo", "canonical": "google/gemini-3.5-flash"},
+                "critic_model": {"endpoint": "argo2", "canonical": "openai/gpt-5.6-critic"},
+                "meta_model": {"endpoint": "argo2", "canonical": "google/gemini-3.5-meta"},
+            },
+            "profiles": {
+                "main": {
+                    "proposers": {
+                        "chair_sol": "sol",
+                        "chair_terra": "terra",
+                        "chair_flash": "flash",
+                    },
+                    "critic": "critic_model",
+                    "meta": "meta_model",
+                },
+            },
+            "default_profile": "main",
+            "store": "sqlite:///council-test.sqlite",
+            "queues": {
+                "chair-sol": {"seats": ["chair_sol"], "concurrency": 4},
+                "chair-terra": {"seats": ["chair_terra"], "concurrency": 4},
+                "chair-flash": {"seats": ["chair_flash"], "concurrency": 8},
+                "critic-meta": {"seats": ["critic", "meta"], "concurrency": 1},
+            },
+        }
+        cfg = load_council_config(raw)
+        assert sorted(cfg.queues) == ["chair-flash", "chair-sol", "chair-terra", "critic-meta"]
+        assert cfg.queues["critic-meta"].seats == ["critic", "meta"]
+        assert cfg.queues["chair-sol"].concurrency == 4
+        assert cfg.queues["chair-sol"].workers == 1
+        assert cfg.queues["chair-sol"].batch_size == 1
+        assert cfg.roster("main").fingerprint()
+
+        # round-trip: dump the queues section back out and reload it.
+        dumped = {name: q.model_dump() for name, q in cfg.queues.items()}
+        reloaded = dict(raw)
+        reloaded["queues"] = dumped
+        cfg2 = load_council_config(reloaded)
+        assert cfg2.queues == cfg.queues
+
+    # -- duplicate seat -----------------------------------------------------
+
+    def test_a_seat_in_two_queues_is_refused_naming_both_queues(self):
+        queues = self._full_coverage(qB={"seats": ["proposer_a", "proposer_b"], "concurrency": 4})
+        with pytest.raises(ConfigError, match="qA.*qB|qB.*qA"):
+            load_council_config(queue_config_dict(queues))
+
+    # -- account over-subscription ------------------------------------------
+
+    def test_two_queues_over_an_accounts_cap_are_refused(self):
+        queues = self._full_coverage(qA={"seats": ["proposer_a"], "concurrency": 5})
+        # qA (5) + qC (4), both on acct-a, sum to 9 > cap 8.
+        with pytest.raises(ConfigError) as excinfo:
+            load_council_config(queue_config_dict(queues))
+        message = str(excinfo.value)
+        assert "acct-a" in message
+        assert "8" in message
+        assert "9" in message
+        assert "qA" in message and "qC" in message
+
+    def test_two_queues_summing_exactly_to_the_cap_are_accepted(self):
+        # qA (4) + qC (4) on acct-a sum to exactly 8, the endpoint's cap.
+        queues = self._full_coverage()
+        cfg = load_council_config(queue_config_dict(queues))
+        assert cfg.queues["qA"].concurrency == 4
+        assert cfg.queues["qC"].concurrency == 4
+
+    def test_workers_multiplies_into_the_account_sum(self):
+        # qB alone: concurrency 5 * workers 2 = 10 > acct-b's cap of 8.
+        queues = self._full_coverage(qB={"seats": ["proposer_b"], "concurrency": 5, "workers": 2})
+        with pytest.raises(ConfigError, match="sum to concurrency 10"):
+            load_council_config(queue_config_dict(queues))
+
+    def test_a_profile_override_moving_a_seat_to_another_account_is_caught(self):
+        """The subtle case: two DECLARED profiles move `critic` across accounts.
+
+        `roster(profile, overrides)` lets a job move a seat per submission,
+        which this static validation cannot see -- but two profiles that
+        already disagree on which account a seat lands on must still be
+        caught, because validating only `default_profile` would make the
+        no-over-subscription promise false for the second profile's jobs.
+        """
+        raw = queue_config_dict(self._full_coverage())
+        raw["models"]["m_critic2"] = {"endpoint": "epB", "canonical": "vendor/critic2"}
+        raw["profiles"]["p2"] = {
+            "proposers": {"proposer_a": "m_p1", "proposer_b": "m_p2"},
+            "critic": "m_critic2",
+            "meta": "m_meta",
+        }
+        with pytest.raises(ConfigError, match="more than one account"):
+            load_council_config(raw)
+
+    # -- coverage -------------------------------------------------------------
+
+    def test_a_config_omitting_meta_coverage_is_refused(self):
+        queues = {
+            "qA": {"seats": ["proposer_a"], "concurrency": 4},
+            "qB": {"seats": ["proposer_b"], "concurrency": 4},
+            "qC": {"seats": ["critic"], "concurrency": 4},
+        }
+        with pytest.raises(ConfigError, match="'meta'"):
+            load_council_config(queue_config_dict(queues))
+
+    # -- one account per queue -------------------------------------------------
+
+    def test_a_multi_account_queue_is_refused(self):
+        queues = {
+            "qA": {"seats": ["proposer_a", "proposer_b"], "concurrency": 4},
+            "qC": {"seats": ["critic"], "concurrency": 4},
+            "qD": {"seats": ["meta"], "concurrency": 1},
+        }
+        with pytest.raises(ConfigError, match="more than one account"):
+            load_council_config(queue_config_dict(queues))
+
+    # -- batch_size -------------------------------------------------------------
+
+    def test_batch_size_above_one_on_a_non_cli_seat_is_refused(self):
+        # `meta` sits on epC, which is an argo (non-CLI) endpoint.
+        queues = self._full_coverage(qD={"seats": ["meta"], "concurrency": 1, "batch_size": 2})
+        with pytest.raises(ConfigError, match="not a batchable backend") as excinfo:
+            load_council_config(queue_config_dict(queues))
+        message = str(excinfo.value)
+        assert "meta" in message
+        assert "argo" in message
+
+    def test_batch_size_above_one_on_a_cli_seat_is_allowed(self):
+        queues = self._full_coverage(qA={"seats": ["proposer_a"], "concurrency": 1, "batch_size": 20})
+        cfg = load_council_config(queue_config_dict(queues))
+        assert cfg.queues["qA"].batch_size == 20
+
+    def test_batch_size_defaults_to_one_not_twenty(self):
+        cfg = load_council_config(queue_config_dict(self._full_coverage()))
+        assert cfg.queues["qA"].batch_size == 1
+
+    @pytest.mark.parametrize("batch_size", [0, 51])
+    def test_batch_size_out_of_range_is_refused(self, batch_size):
+        queues = self._full_coverage(qA={"seats": ["proposer_a"], "concurrency": 1, "batch_size": batch_size})
+        with pytest.raises(ConfigError, match="batch_size"):
+            load_council_config(queue_config_dict(queues))
+
+    # -- numeric field validation ----------------------------------------------
+
+    def test_workers_and_concurrency_must_be_at_least_one(self):
+        queues = self._full_coverage(qA={"seats": ["proposer_a"], "concurrency": 0})
+        with pytest.raises(ConfigError, match="concurrency"):
+            load_council_config(queue_config_dict(queues))
+
+        queues = self._full_coverage(qA={"seats": ["proposer_a"], "concurrency": 1, "workers": 0})
+        with pytest.raises(ConfigError, match="workers"):
+            load_council_config(queue_config_dict(queues))
+
+    def test_a_queue_with_no_seats_is_refused(self):
+        queues = self._full_coverage(qA={"seats": [], "concurrency": 1})
+        with pytest.raises(ConfigError, match="seats"):
+            load_council_config(queue_config_dict(queues))
+
+    # -- additive / opt-in ------------------------------------------------------
+
+    def test_a_config_with_no_queues_loads_unchanged_from_today(self):
+        cfg = load_council_config(config_dict())
+        assert cfg.queues == {}
+        assert cfg.cli_temp_root is None
+        # unchanged: the default profile still resolves exactly as before.
+        assert cfg.roster("p").fingerprint()
+
+    def test_cli_temp_root_is_declared_and_expanded(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cfg = load_council_config(config_dict(cli_temp_root="~/cli-temp"))
+        assert cfg.cli_temp_root == str(tmp_path / "cli-temp")
+
+    # -- per-entry merge ------------------------------------------------------
+
+    def test_the_per_entry_merge_rule_applies_to_queues(self):
+        base = {
+            "queues": {
+                "q1": {"seats": ["a"], "concurrency": 1},
+                "q2": {"seats": ["b"], "concurrency": 2},
+            }
+        }
+        overlay = {"queues": {"q1": {"concurrency": 5}}}
+        merged = _merge(base, overlay)
+        # q1 is overridden but keeps its untouched `seats`; q2 is untouched.
+        assert merged["queues"]["q1"] == {"seats": ["a"], "concurrency": 5}
+        assert merged["queues"]["q2"] == {"seats": ["b"], "concurrency": 2}
+
+    # -- the per-job rejection predicate ---------------------------------------
+
+    def test_check_roster_against_queues_accepts_the_validated_default(self):
+        cfg = load_council_config(queue_config_dict(self._full_coverage()))
+        cfg.check_roster_against_queues(cfg.roster("p"))  # must not raise
+
+    def test_check_roster_against_queues_refuses_an_override_moving_the_account(self):
+        raw = queue_config_dict(self._full_coverage())
+        raw["models"]["m_critic2"] = {"endpoint": "epB", "canonical": "vendor/critic2"}
+        cfg = load_council_config(raw)
+        moved = cfg.roster("p", overrides={"critic": "m_critic2"})
+        with pytest.raises(ConfigError, match="qC"):
+            cfg.check_roster_against_queues(moved, job_id="job-42")
+
+    def test_check_roster_against_queues_is_a_noop_without_queues(self):
+        cfg = load_council_config(config_dict())
+        cfg.check_roster_against_queues(cfg.roster("p"))  # must not raise
 
 
 class TestVariableExpansion:

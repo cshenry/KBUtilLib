@@ -408,7 +408,9 @@ class TestKBUtilLibFacade:
         Passes whether or not the optional ``mscommunity`` package is
         installed — it asserts on the presence of ``available`` /
         ``unavailable_reason``, not on availability being ``True``.
+        It does need cobra: ``kbu.community`` is built on ``kbu.fba``.
         """
+        pytest.importorskip("cobra")
         from kbutillib import KBUtilLib
 
         kbu = KBUtilLib()

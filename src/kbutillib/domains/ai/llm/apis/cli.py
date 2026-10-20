@@ -151,6 +151,7 @@ class ClaudeCliBackend(CliBackend):
             req.user,
             self._env(),
             self._timeout(req),
+            temp_root=self.config.get("temp_root"),
         )
 
         if code != 0:
@@ -404,6 +405,7 @@ class CodexCliBackend(CliBackend):
             self._timeout(req),
             prepare=prepare,
             collect=collect,
+            temp_root=self.config.get("temp_root"),
         )
 
         last = captured["last"]

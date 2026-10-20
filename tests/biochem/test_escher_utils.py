@@ -15,6 +15,8 @@ import tempfile
 import os
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
+pytest.importorskip("cobra")  # EscherUtils imports cobra at module scope
+
 from kbutillib.domains.notebook.escher_utils import EscherUtils, DEFAULT_ARROW_WIDTH_RANGE, DEFAULT_FLUX_COLOR_SCHEMES
 
 

@@ -526,6 +526,12 @@ def test_fix1_resolve_mechinformed_returns_none_when_absent(tmp_path, monkeypatc
 
     # Remove env var and ensure config returns None
     monkeypatch.delenv("KBUTILLIB_VERAB_OPERATOR_TSV", raising=False)
+    # ...and the DependencyManager step too: on a machine with a real
+    # coarse-grain-rxns checkout it finds the genuine TSV, which is not
+    # "absent" and is not what this test is about.
+    import kbutillib.core.dependency_manager as dm
+
+    monkeypatch.setattr(dm, "get_data_path", lambda *a, **k: None)
 
     backend = PickaxeBackend(config_resolver=lambda key, default=None: None)
     resolved = backend._resolve_mechinformed()

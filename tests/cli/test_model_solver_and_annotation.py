@@ -87,6 +87,7 @@ def test_config_default_for_solver_is_glpk():
 
 def test_unavailable_solver_falls_back_with_a_warning(monkeypatch):
     """An unavailable solver must warn and degrade, never kill the verb."""
+    pytest.importorskip("cobra")  # apply_solver pins cobra's global solver
     monkeypatch.delenv("KBU_SOLVER", raising=False)
     chosen, warning = model_cli.apply_solver("definitely-not-a-solver")
     assert chosen != "definitely-not-a-solver"

@@ -36,7 +36,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, PrivateAttr, model_validator
 
 from .types import (
     CLI_KINDS,
@@ -56,12 +56,14 @@ __all__ = [
     "EndpointConfig",
     "ModelConfig",
     "ProfileConfig",
+    "QueueConfig",
     "CouncilConfig",
     "default_canonical",
     "expand_vars",
     "looks_like_credential",
     "load_council_config",
     "load_legacy_model_inference",
+    "validate_static_headers",
 ]
 
 logger = logging.getLogger(__name__)
@@ -138,17 +140,34 @@ _ENDPOINT_KEYS = frozenset(
 )
 _MODEL_KEYS = frozenset({"endpoint", "served_name", "canonical", "params", "verified"})
 _PROFILE_KEYS = frozenset({"proposers", "critic", "meta", "allow_meta_overlap"})
+_QUEUE_KEYS = frozenset(
+    {
+        "seats",
+        "roles",
+        "workers",
+        "concurrency",
+        "batch_size",
+        "max_output_tokens_per_item",
+    }
+)
 _TOP_KEYS = frozenset(
     {
         "endpoints",
         "models",
         "profiles",
+        "queues",
         "default_profile",
         "store",
         "user",
         "query_dirs",
+        "cli_temp_root",
     }
 )
+
+#: The batchable backends: one invocation may answer several items at once.
+#: ``QueueConfig.batch_size > 1`` is refused for any seat whose endpoint kind
+#: is not one of these (see :meth:`CouncilConfig._validate_queues`).
+_BATCHABLE_KINDS = CLI_KINDS
 
 _CLI_DEFAULT_EXECUTABLE = {"claude_cli": "claude", "codex_cli": "codex"}
 
@@ -271,6 +290,120 @@ def _refuse_credential_values(section: str, name: str, value: Any, path: str = "
     elif isinstance(value, list):
         for index, item in enumerate(value):
             _refuse_credential_values(section, name, item, f"{path}{index}.")
+
+
+#: Header names an endpoint's ``options.headers`` may never set, matched by
+#: exact name and case-insensitively.  Every one of them either IS the
+#: credential channel or is routinely used as one, and the council has
+#: exactly one credential channel: ``api_key_env``, which names an
+#: environment variable rather than holding its contents.
+_REFUSED_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+    }
+)
+
+#: ... and the fragments that make any OTHER name a credential carrier.
+#: Substring rather than suffix here, unlike :data:`_SECRET_SUFFIXES`: a
+#: header name is freely invented by a gateway (``X-Gateway-Token-V2``) and
+#: there is no budget-shaped counterexample among header names the way
+#: ``max_total_tokens`` is one among config keys.
+_REFUSED_HEADER_FRAGMENTS = ("token", "secret", "password", "key")
+
+#: A field name as RFC 9110 defines it: one or more ``tchar``.  A name with a
+#: space, a colon or a newline in it is how a header injection is spelled, so
+#: it is refused at load rather than handed to ``httpx``.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def validate_static_headers(endpoint: str, raw: Any) -> Dict[str, str]:
+    """Validate an endpoint's ``options.headers`` and return it as ``str: str``.
+
+    Static headers exist for gateways that route on a non-secret header --
+    the Genesis Model Access Gateway picks a provider from
+    ``X-AmSC-MAG-Provider`` -- and they are sent on EVERY request an
+    OpenAI-compatible endpoint makes.  Two things follow, and both are
+    enforced here rather than at call time, because a config that cannot work
+    must fail before any token is spent:
+
+    * **They are non-secret.**  A name on :data:`_REFUSED_HEADER_NAMES`, or
+      one containing any of :data:`_REFUSED_HEADER_FRAGMENTS`, is refused
+      naming the endpoint, and so is a VALUE that
+      :func:`looks_like_credential` recognises.  A credential goes through
+      ``api_key_env`` and nowhere else -- the store keeps a snapshot of this
+      configuration, and the route fingerprint hashes ``options`` verbatim,
+      so a secret put here would be persisted in both.
+    * **They are well-formed.**  Names must be RFC 9110 field names and
+      values must already be strings; a config is not the place to discover
+      that an integer or a newline reached the request line.
+
+    Args:
+        endpoint: the endpoint's name, for the error message.
+        raw: whatever the config put under ``options.headers``.
+
+    Returns:
+        The headers as a plain ``{str: str}`` dict.  ``{}`` when *raw* is
+        ``None`` or empty.
+
+    Raises:
+        ConfigError: *raw* is not a mapping, or any name or value is unusable.
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"endpoint {endpoint!r} sets options.headers to a "
+            f"{type(raw).__name__}; it must be a mapping of header name to "
+            "string value."
+        )
+
+    headers: Dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if not _HEADER_NAME_RE.match(name):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r}, "
+                "which is not a valid HTTP header name (RFC 9110 allows only "
+                "letters, digits and !#$%&'*+-.^_`|~)."
+            )
+        lowered = name.lower()
+        if lowered in _REFUSED_HEADER_NAMES or any(
+            fragment in lowered for fragment in _REFUSED_HEADER_FRAGMENTS
+        ):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r}, "
+                "which is a credential header. options.headers is for "
+                "NON-SECRET routing headers only (it is hashed into the route "
+                "fingerprint and kept in the store's config snapshot); the "
+                "credential goes through api_key_env: <VARIABLE NAME>, which "
+                "becomes the Authorization header and cannot be overridden "
+                "from here."
+            )
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r} to a "
+                f"{type(value).__name__}; a header value must be a string "
+                "(quote it in YAML if it looks like a number)."
+            )
+        # The name rule above cannot catch a gateway's own invented spelling
+        # (``X-Forwarded-Auth``), so the VALUE is screened too, by the same
+        # heuristic :func:`_refuse_credential_values` uses.  That function
+        # only screens values under credential-SHAPED key names, which a
+        # header name is not obliged to be.
+        if looks_like_credential(value):
+            raise ConfigError(
+                f"endpoint {endpoint!r} sets options.headers entry {name!r} to "
+                "what looks like a live credential. options.headers is for "
+                "NON-SECRET routing headers only (it is hashed into the route "
+                "fingerprint and kept in the store's config snapshot); the "
+                "credential goes through api_key_env: <VARIABLE NAME>."
+            )
+        headers[name] = value
+    return headers
 
 
 # ---------------------------------------------------------------------------
@@ -466,11 +599,20 @@ class EndpointConfig(BaseModel):
     #: in a ``*_env`` key, enforced in :func:`load_council_config`), and part
     #: of the route fingerprint, because an option that changes the answer has
     #: to change the identity of the route that produced it.
+    #:
+    #: One option is understood by a BUILT-IN kind: ``headers``, a mapping of
+    #: static non-secret request headers an ``openai`` endpoint sends on every
+    #: request (see :func:`validate_static_headers`).
     options: Dict[str, Any] = {}
 
     @model_validator(mode="after")
     def _check(self) -> "EndpointConfig":
         """Fill per-kind defaults and refuse combinations that cannot work."""
+        # Checked for every kind, not only ``openai`` (which is the one kind
+        # that SENDS them today): the rule being enforced is "no credential
+        # in options", and that holds wherever the option was written.
+        validate_static_headers(self.name, self.options.get("headers"))
+
         if self.kind in CLI_KINDS:
             if self.billing == "api":
                 raise ConfigError(
@@ -545,6 +687,31 @@ class ProfileConfig(BaseModel):
     allow_meta_overlap: bool = False
 
 
+class QueueConfig(BaseModel):
+    """One named worker queue: the seats it serves and its concurrency budget.
+
+    Declaring ``queues`` on :class:`CouncilConfig` switches the engine from
+    one worker process per store to one worker process **per queue**: a
+    queue claims calls only for its own ``seats`` (and ``roles``, when that
+    narrows it further), and ``concurrency`` is the number of calls that
+    child is allowed to have in flight -- not the account's full
+    ``max_concurrency`` (see :meth:`CouncilConfig._validate_queues` for why
+    that distinction is load-bearing).
+
+    ``batch_size`` lives here and nowhere else: there is no seat-level
+    override, so a queue's value applies independently to each of its seats.
+    It defaults to 1 (unbatched); 20 is a value an operator writes explicitly
+    for a Claude queue, not a default this class picks for them.
+    """
+
+    seats: List[str]
+    roles: Optional[List[str]] = None
+    workers: int = 1
+    concurrency: int
+    batch_size: int = 1
+    max_output_tokens_per_item: Optional[int] = None
+
+
 class CouncilConfig(BaseModel):
     """A validated council configuration.
 
@@ -555,8 +722,23 @@ class CouncilConfig(BaseModel):
     endpoints: Dict[str, EndpointConfig] = {}
     models: Dict[str, ModelConfig] = {}
     profiles: Dict[str, ProfileConfig] = {}
+    #: Opt-in queue partitioning (see :class:`QueueConfig`). Empty means "one
+    #: worker, every seat" -- today's behaviour, unchanged (point 6 of the
+    #: design: this section is additive).
+    queues: Dict[str, QueueConfig] = {}
     default_profile: Optional[str] = None
     store: str = DEFAULT_STORE_URL
+    #: Root directory a CLI backend writes its prompt file under (story 17:
+    #: delivering the Claude CLI's prompt by file rather than by stdin, so a
+    #: busy event loop cannot cause a 3-second stdin timeout). Declared here
+    #: only -- consumed by the CLI backend, not by this module.
+    cli_temp_root: Optional[str] = None
+    #: Per-queue account charged at load time by :meth:`_validate_queues`,
+    #: keyed by queue name. Not a config field: it is what makes
+    #: :meth:`check_roster_against_queues` able to refuse, at submission
+    #: time, a roster/override whose seat resolves to an account this
+    #: queue's budget was never checked against.
+    _queue_accounts: Dict[str, str] = PrivateAttr(default_factory=dict)
     #: PROVENANCE label written to ``jobs.submitted_by``, nothing more.  It
     #: grants no access and gates nothing: there is no identity in the
     #: council (review round 2), budgets and the queue are the store's and
@@ -711,6 +893,211 @@ class CouncilConfig(BaseModel):
             verified=model.verified,
         )
 
+    # -- queue partitioning ---------------------------------------------------
+
+    def _account_for(self, endpoint_name: str) -> str:
+        """The account a seat on *endpoint_name* charges concurrency against.
+
+        Mirrors the worker's own fallback (``engine/worker.py``
+        ``_build_limits``, around line 362): an endpoint that declares no
+        ``account`` gets a synthetic one scoped to itself, so it never
+        collides with another endpoint's budget.
+        """
+        endpoint = self.endpoints.get(endpoint_name)
+        if endpoint is None or not endpoint.account:
+            return f"endpoint:{endpoint_name}"
+        return endpoint.account
+
+    @model_validator(mode="after")
+    def _validate_queues(self) -> "CouncilConfig":
+        """Refuse a ``queues`` section that could over-subscribe an account.
+
+        A no-op when ``queues`` is empty: queue mode is additive and opt-in
+        (point 6 of the design) -- a config that declares none behaves
+        exactly as it did before this validator existed.
+
+        **A seat name does not bind to one account.** ``roster(profile,
+        overrides)`` resolves seat names per job, and ``overrides["proposers"]``
+        can replace the whole proposer bench, so the same seat name can reach a
+        different account in two simultaneous jobs -- including a job
+        persisted under a different, also-declared profile. Validating only
+        ``default_profile`` would make the no-over-subscription promise
+        false, so this resolves **every declared profile** (with no
+        overrides -- overrides are a per-job, per-submission concern, which
+        is exactly what :meth:`check_roster_against_queues` exists to police
+        at submission/claim time) and charges each queue's full
+        ``concurrency * workers`` reservation to every account any of those
+        resolutions reaches.
+        """
+        if not self.queues:
+            return self
+
+        # -- no seat in two queues --------------------------------------
+        seat_owner: Dict[str, str] = {}
+        for qname, q in self.queues.items():
+            for seat_name in q.seats:
+                other = seat_owner.get(seat_name)
+                if other is not None and other != qname:
+                    raise ConfigError(
+                        f"seat {seat_name!r} is declared in two queues, {other!r} and "
+                        f"{qname!r}. A seat may belong to only one queue: the claim "
+                        "protocol already prevents two workers claiming the same call, "
+                        "but two queues on one seat would silently count that seat's "
+                        "concurrency against its account twice."
+                    )
+                seat_owner[seat_name] = qname
+
+        # -- resolve every declared profile, with no overrides -----------
+        rosters: Dict[str, Roster] = {name: self.roster(name) for name in self.profiles}
+
+        all_pairs: set = set()
+        covered: set = set()
+        queue_accounts: Dict[str, set] = {name: set() for name in self.queues}
+
+        for roster in rosters.values():
+            for role, seat_spec in roster.seats():
+                pair = (seat_spec.seat_name, role)
+                all_pairs.add(pair)
+                qname = seat_owner.get(seat_spec.seat_name)
+                if qname is None:
+                    continue
+                q = self.queues[qname]
+                if q.roles is not None and role not in q.roles:
+                    continue
+                covered.add(pair)
+                if q.batch_size > 1 and seat_spec.endpoint_kind not in _BATCHABLE_KINDS:
+                    raise ConfigError(
+                        f"queue {qname!r} sets batch_size={q.batch_size}, but seat "
+                        f"{seat_spec.seat_name!r} is endpoint kind {seat_spec.endpoint_kind!r}, "
+                        f"which is not a batchable backend (batchable kinds: {list(_BATCHABLE_KINDS)}). "
+                        "batch_size > 1 is only valid for a seat reached through a CLI "
+                        "endpoint."
+                    )
+                queue_accounts[qname].add(self._account_for(seat_spec.endpoint))
+
+        # -- coverage is required, with no implicit fallback worker ------
+        uncovered = sorted(all_pairs - covered)
+        if uncovered:
+            described = ", ".join(f"{seat_name!r} acting as {role!r}" for seat_name, role in uncovered)
+            raise ConfigError(
+                "queue mode requires exactly one queue to own every seat/role a "
+                f"profile can submit; nothing covers: {described}. There is no "
+                "implicit fallback worker -- add the seat to a queue's `seats` "
+                "(and to `roles`, if that queue restricts them), or the job would "
+                "silently never finish."
+            )
+
+        # -- every queue resolves to exactly one account -----------------
+        for qname, accounts in queue_accounts.items():
+            if len(accounts) > 1:
+                raise ConfigError(
+                    f"queue {qname!r} resolves to more than one account across the "
+                    f"configured profiles: {sorted(accounts)}. A queue is one worker "
+                    "process with one concurrency budget; split it into one queue per "
+                    "account, or pin its seats so they cannot move accounts across "
+                    "profiles."
+                )
+
+        # -- per account: sum(concurrency * workers) <= max_concurrency ---
+        account_caps: Dict[str, int] = {}
+        for endpoint in self.endpoints.values():
+            account = endpoint.account or f"endpoint:{endpoint.name}"
+            cap = int(endpoint.max_concurrency or 0)
+            account_caps[account] = (
+                cap if account not in account_caps else min(account_caps[account], cap)
+            )
+
+        account_sum: Dict[str, int] = {}
+        account_queues: Dict[str, List[str]] = {}
+        queue_accounts_final: Dict[str, str] = {}
+        for qname, accounts in queue_accounts.items():
+            if not accounts:
+                continue
+            (account,) = accounts
+            queue_accounts_final[qname] = account
+            contribution = self.queues[qname].concurrency * self.queues[qname].workers
+            account_sum[account] = account_sum.get(account, 0) + contribution
+            account_queues.setdefault(account, []).append(qname)
+
+        for account, total in account_sum.items():
+            cap = account_caps.get(account)
+            if cap is not None and total > cap:
+                queue_list = sorted(account_queues[account])
+                raise ConfigError(
+                    f"account {account!r} (max_concurrency {cap}) is over-subscribed: "
+                    f"queues {queue_list} sum to concurrency {total}, which exceeds "
+                    f"its cap of {cap}. Lower concurrency/workers on one of them, or "
+                    "move a queue to a different account."
+                )
+
+        self._queue_accounts = queue_accounts_final
+        return self
+
+    def check_roster_against_queues(
+        self, roster: Roster, *, job_id: Optional[str] = None
+    ) -> None:
+        """Refuse *roster* if it falls outside the validated queue set.
+
+        This is the per-job rejection predicate point 3(e) of the design
+        calls for: a roster or override assembled at submission time -- or
+        read back for an existing job before claiming its calls -- whose
+        ``(seat, account, backend)`` mapping was never covered by
+        :meth:`_validate_queues` must be refused, with no mutation of any
+        stored call. It is a no-op when ``queues`` is not configured (queue
+        mode is opt-in).
+
+        **This method is a predicate only; nothing in this module calls it.**
+        Its natural call site is outside ``config.py`` -- in
+        ``engine/worker.py``, at the top of ``submit()`` (before a job or its
+        calls are written) and again in ``_claim()`` before an existing
+        job's pending calls are claimed (see the module docstring there for
+        the exact line numbers in this PRD phase). Wiring it in is out of
+        scope for this task: see the work-record for ``t5-queue-config``.
+
+        Args:
+            roster: the fully resolved seating to check -- typically built
+                from a submission's ``profile`` and ``overrides``.
+            job_id: included in the message only, so the caller's log/refusal
+                can name the job without this module knowing what a job is.
+
+        Raises:
+            ConfigError: a seat in *roster* is not covered by exactly one
+                queue for the role it is acting in, or resolves to an
+                account other than the one :meth:`_validate_queues` charged
+                that queue's budget against.
+        """
+        if not self.queues:
+            return
+        job_part = f" (job {job_id!r})" if job_id else ""
+        seat_owner: Dict[str, str] = {
+            seat_name: qname for qname, q in self.queues.items() for seat_name in q.seats
+        }
+        for role, seat_spec in roster.seats():
+            qname = seat_owner.get(seat_spec.seat_name)
+            if qname is None:
+                raise ConfigError(
+                    f"seat {seat_spec.seat_name!r}{job_part} is not covered by any "
+                    "configured queue; refusing rather than letting its calls sit "
+                    "unclaimed by any worker process."
+                )
+            q = self.queues[qname]
+            if q.roles is not None and role not in q.roles:
+                raise ConfigError(
+                    f"seat {seat_spec.seat_name!r}{job_part} is acting as {role!r}, but "
+                    f"queue {qname!r} only serves roles {q.roles}; this roster is not "
+                    "part of the validated queue set."
+                )
+            validated_account = self._queue_accounts.get(qname)
+            account = self._account_for(seat_spec.endpoint)
+            if validated_account is not None and account != validated_account:
+                raise ConfigError(
+                    f"seat {seat_spec.seat_name!r}{job_part} resolves to account "
+                    f"{account!r}, but queue {qname!r} was validated against "
+                    f"{validated_account!r}. An override that moves a seat to a "
+                    "different account is exactly what config-load validation cannot "
+                    "see -- refusing rather than silently over-subscribing the account."
+                )
+
 
 # ---------------------------------------------------------------------------
 # Loading
@@ -770,13 +1157,13 @@ def _user_overlay() -> Dict[str, Any]:
 def _merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
     """Overlay a user config onto the packaged default.
 
-    Merged per entry inside ``endpoints`` / ``models`` / ``profiles``: the
-    user's keys win within an entry they name, and entries they do not name
-    are untouched.  Scalars are replaced outright.
+    Merged per entry inside ``endpoints`` / ``models`` / ``profiles`` /
+    ``queues``: the user's keys win within an entry they name, and entries
+    they do not name are untouched.  Scalars are replaced outright.
     """
     merged: Dict[str, Any] = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
     for key, value in overlay.items():
-        if key in ("endpoints", "models", "profiles") and isinstance(value, Mapping):
+        if key in ("endpoints", "models", "profiles", "queues") and isinstance(value, Mapping):
             section = dict(merged.get(key) or {})
             for name, entry in value.items():
                 if isinstance(entry, Mapping) and isinstance(section.get(name), Mapping):
@@ -943,6 +1330,67 @@ def load_council_config(
             allow_meta_overlap=bool(fields.get("allow_meta_overlap", False)),
         )
 
+    # -- queues ---------------------------------------------------------------
+    raw_queues = raw.get("queues") or {}
+    queues: Dict[str, QueueConfig] = {}
+    for name, entry in raw_queues.items():
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"queue {name!r} must be a mapping, got {type(entry).__name__}")
+        fields = _warn_unknown("queue", name, entry, _QUEUE_KEYS)
+
+        seats = fields.get("seats")
+        if not isinstance(seats, (list, tuple)) or not seats:
+            raise ConfigError(
+                f"queue {name!r} declares no seats; `seats` must be a non-empty list of "
+                "seat names"
+            )
+        seats = [str(s) for s in seats]
+
+        roles = fields.get("roles")
+        if roles is not None:
+            if not isinstance(roles, (list, tuple)) or not roles:
+                raise ConfigError(
+                    f"queue {name!r} sets `roles` to {roles!r}; it must be a non-empty "
+                    "list of role names, or omitted entirely"
+                )
+            roles = [str(r) for r in roles]
+
+        workers = int(fields.get("workers", 1))
+        if workers < 1:
+            raise ConfigError(f"queue {name!r} sets workers={workers}; workers must be >= 1")
+
+        if "concurrency" not in fields or fields["concurrency"] is None:
+            raise ConfigError(f"queue {name!r} declares no concurrency")
+        concurrency = int(fields["concurrency"])
+        if concurrency < 1:
+            raise ConfigError(
+                f"queue {name!r} sets concurrency={concurrency}; concurrency must be >= 1"
+            )
+
+        batch_size = int(fields.get("batch_size", 1))
+        if not (1 <= batch_size <= 50):
+            raise ConfigError(
+                f"queue {name!r} sets batch_size={batch_size}; batch_size must be between "
+                "1 and 50 (default 1)"
+            )
+
+        max_output_tokens_per_item = fields.get("max_output_tokens_per_item")
+        if max_output_tokens_per_item is not None:
+            max_output_tokens_per_item = int(max_output_tokens_per_item)
+
+        queues[name] = QueueConfig(
+            seats=seats,
+            roles=roles,
+            workers=workers,
+            concurrency=concurrency,
+            batch_size=batch_size,
+            max_output_tokens_per_item=max_output_tokens_per_item,
+        )
+
+    cli_temp_root = raw.get("cli_temp_root")
+    if cli_temp_root is not None:
+        cli_temp_root = str(Path(str(cli_temp_root)).expanduser())
+
     # -- legacy backfill, then STRICT alias validation ----------------------
     referenced: List[str] = []
     for prof in profiles.values():
@@ -988,8 +1436,10 @@ def load_council_config(
         endpoints=endpoints,
         models=models,
         profiles=profiles,
+        queues=queues,
         default_profile=default_profile,
         store=_resolve_store_url(raw.get("store")),
+        cli_temp_root=cli_temp_root,
         user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
         query_dirs=_resolve_query_dirs(raw.get("query_dirs"), source),
         source=source,

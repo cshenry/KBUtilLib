@@ -55,6 +55,11 @@ from kbutillib.domains.ai.council.backends.cli_common import (
 from kbutillib.domains.ai.council.protocols import Backend
 from kbutillib.domains.ai.council.types import CompletionRequest, SeatSpec
 
+# STDIN_FILENAME is not part of the re-export shim's public surface (it is an
+# implementation detail of how the prompt reaches the child, not a billing or
+# protocol concern), so it is imported directly from where it is defined.
+from kbutillib.domains.ai.llm.apis.cli_common import STDIN_FILENAME
+
 #: The five variables that must never reach a CLI child.  Four would move the
 #: call onto metered API billing; ``CLAUDE_CODE_SESSION_ID`` is here to prove
 #: the ``CLAUDE_CODE_*`` prefix rule, since this suite itself runs inside a
@@ -153,9 +158,15 @@ import time
 
 CONFIG = json.loads({config!r})
 
-# Read stdin FIRST: the parent writes the prompt and closes the pipe, and a
-# fake that exited without draining it would make the parent look broken.
-stdin_text = sys.stdin.read()
+# Read stdin FIRST (unless the test asked us not to): the parent hands the
+# prompt in on stdin, and a fake that exited without draining it would make
+# the parent look broken if stdin were still a pipe -- which is exactly what
+# ``read_stdin=False`` tests: the prompt now arrives as a FILE, so a child
+# that never reads it must not hang or break the parent either.
+if CONFIG.get("read_stdin", True):
+    stdin_text = sys.stdin.read()
+else:
+    stdin_text = None
 
 record = {{
     "argv": sys.argv,
@@ -228,6 +239,7 @@ def make_fake(
     exit_code: int = 0,
     sleep: float = 0.0,
     write_output: Optional[str] = None,
+    read_stdin: bool = True,
 ) -> Fake:
     """Write an executable fake CLI into *tmp_path* and return a handle.
 
@@ -235,6 +247,10 @@ def make_fake(
     execute bit set, so the backend's own ``create_subprocess_exec`` runs it
     exactly as it would run the real binary -- no shell, no PATH lookup
     assumptions, and a genuine process group to kill.
+
+    ``read_stdin=False`` writes a fake that never touches stdin at all -- the
+    one way to prove a child that ignores its prompt cannot hang or break the
+    parent now that the prompt arrives as a file rather than a pipe.
     """
     record = tmp_path / f"{name}-record.json"
     config = json.dumps(
@@ -245,6 +261,7 @@ def make_fake(
             "exit_code": exit_code,
             "sleep": sleep,
             "write_output": write_output,
+            "read_stdin": read_stdin,
         }
     )
     path = tmp_path / name
@@ -535,6 +552,339 @@ class TestTheWorkingDirectory:
         assert first != second
         assert not Path(first).exists()
         assert not Path(second).exists()
+
+
+class TestConfiguredTempRoot:
+    """A ``temp_root`` in the endpoint config must reach ``run_cli`` -- for
+    BOTH backends -- without touching argv in any way.
+
+    ``CouncilWorker.endpoint_mapping`` threads a configured ``cli_temp_root``
+    through to each backend's own ``config`` mapping under the key
+    ``temp_root`` (``engine/worker.py``).  Before this suite, ``_run`` on
+    neither backend read that key back out, so the value could never reach
+    ``run_cli`` and every child still built its per-call directory under the
+    platform default -- exactly the gap this task closes.  ``TestStdinViaFile``
+    already proves ``run_cli`` itself honours ``temp_root``; these tests prove
+    each backend's ``_run`` actually passes it through, and that doing so
+    leaves the argv it builds byte-for-byte unchanged.
+    """
+
+    def test_claude_backend_threads_a_configured_temp_root_to_the_cwd(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        root = tmp_path / "configured-temp-root"
+        root.mkdir()
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(
+            str(fake),
+            _home=ready_home,
+            _parent_env={},
+            config={"temp_root": str(root)},
+        )
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        child_cwd = Path(fake.record["cwd"])
+        assert root in child_cwd.parents
+        # The one thing this task must not touch: the exact argv from
+        # ``TestClaudeArgv.test_the_exact_argv``, repeated here so a
+        # ``temp_root`` regression on argv is caught right next to the
+        # change that carries the risk.
+        assert fake.record["argv"] == [
+            str(fake),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(SCHEMA),
+            "--model",
+            MODEL,
+            "--system-prompt",
+            SYSTEM,
+            "--no-session-persistence",
+            "--tools",
+            "",
+        ]
+
+    def test_claude_backend_without_a_temp_root_reproduces_base_behaviour(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        not_the_root = tmp_path / "not-configured"
+        not_the_root.mkdir()
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        child_cwd = Path(fake.record["cwd"])
+        assert not_the_root not in child_cwd.parents
+        assert tmp_path not in child_cwd.parents, "still outside the test's own tree"
+        assert fake.record["argv"] == [
+            str(fake),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(SCHEMA),
+            "--model",
+            MODEL,
+            "--system-prompt",
+            SYSTEM,
+            "--no-session-persistence",
+            "--tools",
+            "",
+        ]
+
+    def test_codex_backend_threads_a_configured_temp_root_to_the_cwd(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        root = tmp_path / "configured-temp-root-codex"
+        root.mkdir()
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(
+            str(fake),
+            _home=ready_home,
+            _parent_env={},
+            config={"temp_root": str(root)},
+        )
+
+        result = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        )
+
+        assert result.ok is True, result.error
+        record = fake.record
+        cwd = Path(record["cwd"])
+        assert root in cwd.parents
+        # Codex's argv embeds the cwd itself (the schema/output file paths),
+        # so it is compared against paths built from the CHILD'S OWN reported
+        # cwd, exactly as ``TestCodexArgv.test_the_exact_argv`` does -- a
+        # ``temp_root`` regression on the surrounding flags would still fail
+        # this even though the embedded paths move with the directory.
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(cwd / CODEX_SCHEMA_NAME),
+                "-o",
+                str(cwd / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
+
+    def test_codex_backend_without_a_temp_root_reproduces_base_behaviour(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        not_the_root = tmp_path / "not-configured-codex"
+        not_the_root.mkdir()
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        )
+
+        assert result.ok is True, result.error
+        record = fake.record
+        cwd = Path(record["cwd"])
+        assert not_the_root not in cwd.parents
+        assert tmp_path not in cwd.parents, "still outside the test's own tree"
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(cwd / CODEX_SCHEMA_NAME),
+                "-o",
+                str(cwd / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
+
+
+# ---------------------------------------------------------------------------
+# The prompt travels as a FILE, not a pipe
+# ---------------------------------------------------------------------------
+
+
+class TestStdinViaFile:
+    """``run_cli`` hands the child its prompt as a file, not a pipe.
+
+    ``proc.communicate(stdin_text.encode())`` used to pump the child's stdin
+    from this coroutine, on the same event loop that also drives the
+    council's synchronous store I/O; when that loop stalled, the child gave
+    up waiting for its prompt and exited with "Input must be provided
+    through stdin" -- measured destroying 23 of 24 Claude attempts on one
+    19,276-item production run.  These tests prove the fix directly against
+    ``run_cli``, independent of either backend's argv construction.
+    """
+
+    def test_the_child_receives_the_complete_prompt(self, tmp_path: Path) -> None:
+        prompt = "\n".join(f"item {i}: some evidence string" for i in range(500))
+        fake = make_fake(tmp_path, "echoer")
+
+        code, _out, _err, _elapsed = run(
+            run_cli(
+                [str(fake)],
+                prompt,
+                {"PATH": os.environ.get("PATH", "")},
+                30.0,
+            )
+        )
+
+        assert code == 0
+        assert fake.record["stdin"] == prompt
+
+    def test_the_prompt_never_appears_in_argv(self, tmp_path: Path) -> None:
+        prompt = "a secret-shaped prompt: ANTHROPIC_API_KEY=sk-should-not-leak"
+        fake = make_fake(tmp_path, "echoer")
+
+        run(
+            run_cli(
+                [str(fake)],
+                prompt,
+                {"PATH": os.environ.get("PATH", "")},
+                30.0,
+            )
+        )
+
+        argv = fake.record["argv"]
+        assert prompt not in argv
+        assert prompt not in " ".join(argv)
+
+    def test_the_prompt_file_is_gone_after_run_cli_returns(
+        self, tmp_path: Path
+    ) -> None:
+        fake = make_fake(tmp_path, "echoer")
+        seen: Dict[str, Any] = {}
+
+        def collect(cwd: Path) -> None:
+            path = cwd / STDIN_FILENAME
+            # While the child is (or was) running, the prompt really was on
+            # disk inside the per-call directory -- this is the one moment
+            # that is still observable.
+            assert path.is_file(), "the prompt must live on disk during the call"
+            assert path.read_text(encoding="utf-8") == "the exact prompt text"
+            seen["path"] = path
+
+        run(
+            run_cli(
+                [str(fake)],
+                "the exact prompt text",
+                {"PATH": os.environ.get("PATH", "")},
+                30.0,
+                collect=collect,
+            )
+        )
+
+        assert not seen["path"].exists(), "the prompt must not outlive the call"
+        assert not seen["path"].parent.exists(), "its directory goes with it"
+
+    def test_temp_root_places_the_working_directory_under_it(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "custom-temp-root"
+        root.mkdir()
+        fake = make_fake(tmp_path, "echoer")
+
+        run(
+            run_cli(
+                [str(fake)],
+                "hi",
+                {"PATH": os.environ.get("PATH", "")},
+                30.0,
+                temp_root=root,
+            )
+        )
+
+        child_cwd = Path(fake.record["cwd"])
+        assert root in child_cwd.parents
+
+    def test_temp_root_none_preserves_todays_default_location(
+        self, tmp_path: Path
+    ) -> None:
+        not_the_root = tmp_path / "not-the-root"
+        not_the_root.mkdir()
+        fake = make_fake(tmp_path, "echoer")
+
+        run(
+            run_cli(
+                [str(fake)],
+                "hi",
+                {"PATH": os.environ.get("PATH", "")},
+                30.0,
+            )
+        )
+
+        child_cwd = Path(fake.record["cwd"])
+        assert not_the_root not in child_cwd.parents
+        assert tmp_path not in child_cwd.parents, "still outside the test's own tree"
+
+    def test_a_child_that_never_reads_stdin_does_not_hang_or_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression that matters most: the pipe version stalled right here."""
+        fake = make_fake(tmp_path, "silent", stdout="ok\n", read_stdin=False)
+
+        started = time.monotonic()
+        code, out, _err, _elapsed = run(
+            run_cli(
+                [str(fake)],
+                "a prompt that is never read",
+                {"PATH": os.environ.get("PATH", "")},
+                10.0,
+            )
+        )
+        elapsed = time.monotonic() - started
+
+        assert code == 0
+        assert out == "ok\n"
+        assert elapsed < 5.0, "it should not have waited at all, let alone hung"
+
+    def test_the_timeout_path_still_kills_the_process_group(
+        self, tmp_path: Path
+    ) -> None:
+        """Unchanged behaviour: file-backed stdin must not weaken the drain contract."""
+        from kbutillib.domains.ai.council.types import CallTimeout
+
+        fake = make_fake(tmp_path, "sleeper", sleep=30.0)
+
+        with pytest.raises(CallTimeout):
+            run(
+                run_cli(
+                    [str(fake)],
+                    "hi",
+                    {"PATH": os.environ.get("PATH", "")},
+                    1.0,
+                )
+            )
+
+        pgid = fake.record["pgid"]
+        for _ in range(50):
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                break
+            time.sleep(0.1)
+        else:  # pragma: no cover - only on a real leak
+            pytest.fail(f"process group {pgid} survived the timeout")
 
 
 # ---------------------------------------------------------------------------

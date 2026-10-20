@@ -152,3 +152,23 @@ def test_council_stage_dedups_skips_abstained_and_fans_back_out(om, monkeypatch)
     assert by["a"]["names"][by["a"]["selected_go_ids"][0]]
     assert by["c"]["selected_go_ids"] == [] and by["c"]["decline_reason"] == "abstained"
     assert out["mapping_hash"] == ranked["mapping_hash"] and out["council"]["job_id"] == "job-1"
+    assert out["council"]["errored_items"] == 0 and out["council"]["warnings"] == []
+
+
+class _ErroringCouncil(_FakeCouncil):
+    """The trial's run 1: job 'done', no blockers, every item status 'error', empty verdict."""
+
+    def run(self, job_id):
+        return {"job_id": job_id, "status": "done", "blockers": [], "by_status": {"error": 1}}
+
+    def results(self, job_id):
+        return [{"item_id": t["item_id"], "status": "error", "verdict": {}} for t in self.submitted[1]]
+
+
+def test_errored_council_items_are_never_silent_blanks(om, monkeypatch):
+    fake = _ErroringCouncil()
+    monkeypatch.setattr(type(om._delegate), "_council", lambda self: fake)
+    out = om.function_to_go_council(om.function_to_go(["glucokinase"]))
+    r = out["results"][0]
+    assert r["selected_go_ids"] == [] and r["decline_reason"] == "council_error:error"
+    assert out["council"]["errored_items"] == 1 and out["council"]["warnings"]

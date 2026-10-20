@@ -1,0 +1,90 @@
+{
+  "repo": "kbutillib",
+  "base_commit": "6310d612328b5c47f9ea50faa0c3cc1fa462e41a",
+  "captured": "2026-10-19",
+  "captured_by": "miles conductor session 780537ef (council-per-seat-queues-v1 build)",
+  "machine": "h100",
+  "interpreter": "/home/chenry/venvs/kbdl/bin/python (cpython-3.11.15)",
+  "command": "TMPDIR=/scratch/chenry/tmp PYTHONPATH=$PWD/src /home/chenry/venvs/kbdl/bin/python -m pytest tests/ -q -p no:cacheprovider --no-header",
+  "duration_s": 3416.17,
+  "duration_human": "56m56s",
+  "WHY_DURATION_MATTERS": "3416 s is 5.7x the 600 s Bash-tool ceiling, and a sub-agent may never background anything. A developer or reviewer told to 'run the full suite' is killed mid-run and reads as a FAILURE. Only a conductor (a main loop) may run this, backgrounded. Put a TARGETED selection in every sub-agent prompt. The pre-existing build-baselines/kbutillib.json records a command but NO duration, which is why this outgrew the ceiling unnoticed.",
+  "result": {
+    "failed": 69,
+    "passed": 5693,
+    "skipped": 282,
+    "xfailed": 1
+  },
+  "compare_by": "nodeid, never count",
+  "failed_nodeids_file": "/scratch/chenry/build-baselines/kbutillib-6310d61-failed.txt",
+  "failures_by_area": {
+    "biochem": 27,
+    "cli": 19,
+    "modeling": 16,
+    "domains/ai": 5,
+    "core": 2
+  },
+  "MACHINE_LOCAL_FAILURES_NOT_PRODUCT_DEFECTS": {
+    "count": 4,
+    "nodeids": [
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_cli_endpoints_default_to_one_call_at_a_time",
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_every_packaged_profile_builds_a_roster",
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_on_a_fresh_machine_with_no_kbutillib_config",
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_the_packaged_config_declares_no_poplar_endpoint"
+    ],
+    "cause": "The h100 user config /home/chenry/.kbutillib/config.yaml leaks into these tests DESPITE their monkeypatched HOME. Proven: the resolved CouncilConfig reports source='packaged default + user ai_council section' with store='sqlite:////scratch/chenry/council/council.sqlite' and query_dirs=['/scratch/chenry/council/queries'], while the test had set HOME to an empty tmp_path. The extra 'mag' endpoint and 'smoke' profile come from the USER config (lines 150 and 206); the packaged default_config.yaml has mag COMMENTED OUT (line 59) and no smoke profile.",
+    "consequence": "These 4 would PASS on a clean machine. Do not fix them inside a council task and do not count them as regressions. test_types_config.py's h100 baseline is 4 failed / 93 passed / 2.35 s, NOT all-passing.",
+    "underlying_defect": "The config loader does not honour a monkeypatched HOME for the user ai_council section, so these tests are not hermetic. Filed separately; it is NOT this PRD's to fix."
+  },
+  "targeted_baselines_measured_this_run": {
+    "tests/domains/ai/council/test_execlock.py": {
+      "at": "6310d61",
+      "passed": 25,
+      "failed": 0,
+      "duration_s": 11.61
+    },
+    "store suites (test_store_contract, test_queries, test_store_migrate_v2, test_store_path_refusals)": {
+      "at": "35f2687",
+      "passed": 289,
+      "failed": 0,
+      "duration_s": 17.88
+    },
+    "tests/domains/ai/council/test_types_config.py": {
+      "at": "35f2687",
+      "passed": 93,
+      "failed": 4,
+      "duration_s": 2.35,
+      "note": "the 4 are the machine-local set above"
+    }
+  },
+  "supersedes_note": "build-baselines/kbutillib.json is from 2026-09-13 at commit 0f84803 with a DIFFERENT command (seven --ignore flags) captured in a minimal task venv missing optional scientific deps. Its 99-failure figure is NOT comparable to this run's 69.",
+  "regression_check_after_phases_1_to_8": {
+    "measured_at": "2026-10-19",
+    "commit": "50dcc49",
+    "location": "/home/chenry/projects/KBUtilLib (THE MAIN CLONE -- same location as the base run; this is what makes the comparison valid)",
+    "result": {
+      "failed": 69,
+      "passed": 5781,
+      "skipped": 282,
+      "xfailed": 1,
+      "duration_s": 2865.38
+    },
+    "verdict": "ZERO REGRESSIONS. Non-passing nodeids 69 -> 69, NEW breakages 0, accidentally-fixed 0. The failing set is node-ID-identical to base across ~6000 changed lines in 8 phases (execution lock, claim path, daemon controller, +1015 lines in worker.py). The +88 passed are the new tests those phases added.",
+    "DURATION_CORRECTION": "Base read 3416 s under load; this read 2865 s (47m45s) on a quieter box. BOTH are far above the 600 s sub-agent Bash ceiling (4.8x at best), so 'only a conductor may run the full suite' stands. A 424 s run observed inside a .maestro worktree was NOT a fast path -- it was fast because ~31 fixtures errored at setup and short-circuited the slow tests. Do not cite that figure.",
+    "WORKTREE_MEASUREMENT_TRAP": "Running the full tests/ tree inside /home/chenry/.maestro/worktrees/<x>/ yields ~5 SPURIOUS setup errors in tests/core/test_composition_smoke.py: a fixture resolves a data file relative to the package dir and lands on /home/chenry/.maestro/worktrees/cb_annotation_ontology_api/data/FilteredReactions.csv -- a sibling worktree that does not exist. Those 5 tests pass in the main clone (1 failed / 20 passed / 3 skipped for that file). A worktree run compared against a main-clone baseline therefore shows 5 phantom regressions. ALWAYS compare full-suite runs taken in the SAME location. This cost one wasted 7-minute run and a false alarm in this build."
+  },
+  "FINAL_regression_check_all_13_phases": {
+    "measured_at": "2026-10-20",
+    "commit": "758b1182130e4499894f988bfc805e81e56e430e",
+    "location": "/home/chenry/projects/KBUtilLib (main clone -- same location as the base run)",
+    "result": {
+      "failed": 69,
+      "passed": 5811,
+      "skipped": 282,
+      "xfailed": 1,
+      "duration_s": 2665.3
+    },
+    "verdict": "ZERO REGRESSIONS across the complete build. Non-passing nodeids 69 -> 69, NEW breakages 0, accidentally-fixed 0. The failing set is node-ID-identical to the 6310d61 base after 13 merged phases rewriting the execution lock, the claim path, the daemon (now a supervising controller), and adding batched invocation. The +118 passed are the tests those phases added.",
+    "what_this_does_and_does_not_establish": "It establishes that nothing regressed. It does NOT establish that the council works end to end in production: nothing has been deployed, batching is inert pending a verified CLI output cap, and the live-store resume additionally requires `kbu council db migrate` with the council stopped. See the PRD data.json deploy section."
+  }
+}

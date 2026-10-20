@@ -53,19 +53,23 @@ a second attempt would cost.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import random
 import socket
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
     AsyncIterator,
     Callable,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -83,6 +87,7 @@ from ..types import (
     CLI_KINDS,
     BillingGuardRefused,
     CompletionRequest,
+    ConfigError,
     CouncilError,
     CouncilTask,
     CouncilVerdict,
@@ -131,6 +136,84 @@ RETRYABLE_KINDS = ("transport", "timeout")
 #: the call was created under.  ``store.queries.BLOCKER_BY_ERROR_KIND`` maps
 #: it to the ``configuration_mismatch`` blocker.
 CONFIGURATION_MISMATCH = "configuration_mismatch"
+
+# ---------------------------------------------------------------------------
+# Batched invocation (t8)
+# ---------------------------------------------------------------------------
+#
+# A batch is a set of claimed call rows sharing (job_id, role, seat_name,
+# query_name, query_version) -- see :meth:`CouncilWorker._group_claimed`.
+# ``batch_size`` (a queue-level setting, threaded through the constructor the
+# same way ``concurrency`` already is) opts a worker into sending several
+# items per backend invocation; ``batch_size <= 1`` (the default) leaves
+# :meth:`CouncilWorker._group_claimed` returning one-row groups, bit for bit
+# identical to the pre-batching behaviour.
+
+#: CLI/model combinations with a VERIFIED effective output cap and a
+#: DOCUMENTED mechanism for enforcing it.  Checked by
+#: :meth:`CouncilWorker._effective_output_cap`.
+#:
+#: Empty today, and not because nobody looked: ``ClaudeCliBackend.argv``
+#: (``llm/apis/cli.py``) passes ``-p``, ``--output-format``, ``--json-schema``,
+#: ``--model``, ``--system-prompt``, ``--no-session-persistence`` and
+#: ``--tools ""``, and ``CodexCliBackend.argv`` passes ``exec``, ``--model``,
+#: ``--output-schema``, ``-o``, ``--ephemeral``, ``--ignore-user-config``,
+#: ``--sandbox``, ``--skip-git-repo-check`` and ``-``.  NEITHER forwards an
+#: output-token argument, so there is no flag to point at and no cap to
+#: verify for either CLI kind on this commit.  A seat whose
+#: ``(endpoint_kind, model)`` has no entry here is forced to run as singles
+#: (see :meth:`CouncilWorker._batch_n`) -- that is the CORRECT, SAFE outcome
+#: for every CLI seat today, not a bug to work around.
+#:
+#: Add an entry only once a real mechanism is found AND independently
+#: measured end to end against the live CLI (see the t8 work record for what
+#: "measure first" means here) -- never to make a config option "look"
+#: enabled.  A test may monkeypatch this table to exercise the ceiling
+#: arithmetic without waiting on that verification; production code must
+#: never write to it.
+VERIFIED_OUTPUT_CAPS: Dict[Tuple[str, str], int] = {}
+
+#: The wrapper shape every batched reply must satisfy, checked SEPARATELY
+#: from (and before) each element's own per-role answer schema -- see
+#: :meth:`CouncilWorker._invoke_batch`.  Deliberately loose (just "there is an
+#: ``answers`` array"): the per-role schema is what actually constrains an
+#: element, via :data:`..queries.spec.wrap_batch_answer_schema` on the way out
+#: and :func:`_validate_answer` per element on the way back in.
+BATCH_WRAPPER_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"answers": {"type": "array"}},
+    "required": ["answers"],
+}
+
+#: Mirrors ``..queries.spec.BATCH_ITEM_KEY_FIELD`` -- duplicated as a bare
+#: string rather than imported, so this module keeps its "nothing here
+#: imports a query type" property at module scope (see the module docstring
+#: and :meth:`CouncilWorker._invoke_batch`, which imports the SCHEMA/PROMPT
+#: helpers lazily, only once a batch is actually being sent).
+BATCH_ITEM_KEY_FIELD = "item_key"
+
+
+@dataclass
+class _BatchMember:
+    """One claimed call row, prepared and ready to ride in a batch invocation.
+
+    Built by :meth:`CouncilWorker._prepare_member`, which has already run
+    every per-row check a single call would run BEFORE spending anything
+    (route fingerprint, reuse, the permission gate) -- a member exists only
+    for a row this worker is actually about to ask a model.
+    """
+
+    call: Dict[str, Any]
+    token: Optional[str]
+    job: Mapping[str, Any]
+    roster: Roster
+    seat: SeatSpec
+    query: Any
+    role: str
+    system: str
+    user: str
+    schema: Dict[str, Any]
+    context: Mapping[str, Any]
 
 
 def _utcnow() -> datetime:
@@ -263,6 +346,38 @@ class CouncilWorker:
             serves the model it claims to.
         worker_kind: ``foreground`` (the default, i.e. ``kbu council run``) or
             ``daemon``.  Recorded on the workers row.
+        seats: optional partition -- when given (not ``None``), this worker
+            claims calls for only these seats, passed straight through to
+            ``store.claim_calls()``.  ``None`` (the default) claims across
+            every seat, unchanged from a worker built before queue mode
+            existed.
+        roles: the same partition, for role (``proposer``/``critic``/
+            ``meta``).  ``None`` claims every role.
+        concurrency: the per-child budget in QUEUE mode -- a queue's own
+            ``concurrency``, not the account's full ``max_concurrency``.
+            Accepted as a plain parameter rather than read from ``config``,
+            so the caller (which already knows which queue this worker is)
+            decides the number once, instead of this class re-deriving it
+            from a ``QueueConfig`` it would otherwise have to look up by
+            name.  When given, it overrides the capacity :meth:`_build_limits`
+            would otherwise compute for every account this worker serves --
+            correct for queue mode, where a queue resolves to exactly one
+            account.  ``None`` (the default) leaves ``_build_limits``'s
+            account-capacity arithmetic exactly as it was before queue mode.
+        batch_size: items per backend invocation, the same queue-level number
+            as ``QueueConfig.batch_size`` (threaded through exactly like
+            ``concurrency``, for the same reason: the caller already knows
+            which queue this worker is).  ``1`` (the default) is BIT FOR BIT
+            today's behaviour -- :meth:`_group_claimed` returns one-row groups
+            and nothing about batching is engaged.  Above 1, a worker may
+            send up to that many homogeneous claimed rows in one invocation,
+            subject to the derived ceiling in :meth:`_batch_n`.
+        max_output_tokens_per_item: the configured per-item output estimate
+            used to derive the batch ceiling (``QueueConfig``'s field of the
+            same name).  ``None`` (the default) falls back to this worker's
+            own running mean of observed per-item output for a
+            ``(seat, role, served_model)``; with neither available, batching
+            is forced to singles rather than running on an unknown guess.
     """
 
     def __init__(
@@ -286,12 +401,47 @@ class CouncilWorker:
         idle_grace_s: float = 1.0,
         max_idle_s: float = 60.0,
         rng: Optional[random.Random] = None,
+        seats: Optional[Iterable[str]] = None,
+        roles: Optional[Iterable[str]] = None,
+        concurrency: Optional[int] = None,
+        batch_size: int = 1,
+        max_output_tokens_per_item: Optional[int] = None,
     ) -> None:
         if not user:
             raise ValueError("a council worker must know which user it works for")
         self.store = store
         self.config = config
         self.backends: Dict[str, Any] = _as_endpoint_table(backends)
+        #: This worker's partition (``None`` means "every seat"/"every
+        #: role", the pre-queue-mode behaviour).  Carried as plain attributes
+        #: -- NOT folded into ``_claim``'s signature, which ``daemon.py``
+        #: subclasses and calls with exactly ``(limit, job_id, summary)``.
+        self.seats: Optional[set] = set(seats) if seats is not None else None
+        self.roles: Optional[set] = set(roles) if roles is not None else None
+        self._queue_concurrency: Optional[int] = (
+            int(concurrency) if concurrency is not None else None
+        )
+        #: Queue-level batching knobs; see the class docstring.  ``1`` means
+        #: "not opted in" and must leave every code path this worker takes
+        #: identical to the pre-batching one.
+        self.batch_size: int = max(1, int(batch_size))
+        self.max_output_tokens_per_item: Optional[int] = (
+            int(max_output_tokens_per_item)
+            if max_output_tokens_per_item is not None
+            else None
+        )
+        #: Running mean of OBSERVED per-item completion tokens, keyed by
+        #: ``(seat_name, role, served_model)`` as ``(total_tokens,
+        #: total_members)`` -- see :meth:`_per_item_output` and
+        #: :meth:`_record_output_sample`.  Process-local and cold on every new
+        #: worker: nothing here is persisted, which is fine, because an empty
+        #: entry forces singles (never an unbounded guess) until this worker
+        #: itself has observed something.
+        self._output_samples: Dict[Tuple[str, str, str], Tuple[int, int]] = {}
+        #: ``{(seat_name, role, tag)}`` already logged this worker's life, so
+        #: a reduced or refused batch ceiling is reported once per seat per
+        #: run rather than once per claimed group.
+        self._logged_batch_notices: set = set()
         #: The one callable every model call is made through.  ``llm.acomplete``
         #: itself when nothing was injected -- identity a test can assert on,
         #: which is what makes "the worker goes through the wrapper" checkable
@@ -360,7 +510,20 @@ class CouncilWorker:
         return {}
 
     def _build_limits(self) -> None:
-        """Group this worker's endpoints into shared concurrency budgets."""
+        """Group this worker's endpoints into shared concurrency budgets.
+
+        In QUEUE mode (:attr:`_queue_concurrency` not ``None``) the account
+        arithmetic below still runs -- it is still how two endpoint aliases
+        on one subscription end up sharing one semaphore -- but every
+        resulting capacity is then OVERRIDDEN to the queue's own
+        ``concurrency``.  A queue resolves to exactly one account (an
+        enforced invariant once ``queues`` is configured), so this makes
+        ``_free_slots()`` that account's child budget rather than the whole
+        subscription's, which is the correction confront round 1 required:
+        the account's full ``max_concurrency`` is what OTHER queues on the
+        same account are allowed to use too, and this child must not claim
+        more than its own share.
+        """
         for endpoint in sorted(self.backends):
             cfg = self.endpoint_config(endpoint)
             account = str(cfg.get("account") or "") or f"endpoint:{endpoint}"
@@ -378,6 +541,9 @@ class CouncilWorker:
             else:
                 limit.capacity = min(limit.capacity, max(1, capacity))
             self._limit_by_endpoint[endpoint] = limit
+        if self._queue_concurrency is not None:
+            for limit in self._limits.values():
+                limit.capacity = max(1, self._queue_concurrency)
 
     def endpoint_mapping(self, endpoint: str) -> Dict[str, Any]:
         """The endpoint mapping the wrapper is given for *endpoint*.
@@ -390,9 +556,19 @@ class CouncilWorker:
         test, two vLLM ports behind one URL -- would share ONE client, and the
         shared-account concurrency tests would silently be measuring one
         endpoint twice.
+
+        Also threads ``cli_temp_root`` (a ``CouncilConfig``-level setting,
+        not a per-endpoint one -- a CLI backend has no other way to see it)
+        through as ``temp_root``, which is the key a CLI backend's own
+        invocation of ``run_cli`` reads for where to create its per-call
+        working directory.  ``None``/absent when unconfigured, which is
+        unchanged behaviour.
         """
         cfg = dict(self.endpoint_config(endpoint))
         cfg.setdefault("name", endpoint)
+        temp_root = getattr(self.config, "cli_temp_root", None)
+        if temp_root and "temp_root" not in cfg:
+            cfg["temp_root"] = temp_root
         return cfg
 
     def _api_for(self, seat: SeatSpec) -> Optional[Any]:
@@ -534,9 +710,14 @@ class CouncilWorker:
         Raises:
             RosterError: the seating is invalid, or a seat is unverified.
             BillingGuardRefused: a CLI backend's billing preflight refused.
+            ConfigError: ``config`` declares ``queues`` and this roster (the
+                profile's own, or one a submission overrode) is not covered
+                by the validated queue set -- refused before a job or any
+                call exists, exactly like every other submit-time refusal.
             ValueError: a duplicate item id with different content, or a menu
                 with a duplicate id.
         """
+        self._check_roster_against_queues(roster)
         self._check_roster(roster)
         await self._preflight(roster)
         self._queries[(str(query.name), str(query.version))] = query
@@ -608,6 +789,33 @@ class CouncilWorker:
             "n_items": len(item_rows),
         }
         return self.store.create_job(job_row, item_rows, call_rows)
+
+    def _check_roster_against_queues(
+        self, roster: Roster, *, job_id: Optional[str] = None
+    ) -> None:
+        """Refuse *roster* if ``config`` declares ``queues`` and it falls
+        outside the validated set.
+
+        ``CouncilConfig.check_roster_against_queues`` is a predicate only --
+        by its own docstring, "nothing in this module calls it" -- so it is
+        wired in from here and from :meth:`_claim`, which are the two
+        natural call sites its own docstring names: once at submission,
+        before a job or any call row exists, and again before claiming an
+        EXISTING job's pending calls, because a per-job ``roster()``
+        override (or the special ``"proposers"`` override key, which
+        replaces the whole bench) is keyed by seat name and can route a seat
+        to an account no queue was ever validated against -- something
+        config-LOAD validation cannot see, since it only resolves each
+        profile with no overrides.
+
+        A no-op for a plain mapping config (no ``check_roster_against_queues``
+        method) and for a ``CouncilConfig`` with no ``queues`` declared --
+        queue mode is opt-in.
+        """
+        checker = getattr(self.config, "check_roster_against_queues", None)
+        if checker is None:
+            return
+        checker(roster, job_id=job_id)
 
     def _check_roster(self, roster: Roster) -> None:
         """Re-run the roster invariants, then the verification rule.
@@ -800,8 +1008,8 @@ class CouncilWorker:
                 free = self._free_slots()
                 rows = self._claim(free, job_id, summary) if free > 0 else []
                 summary["claimed"] += len(rows)
-                for row in rows:
-                    running.add(asyncio.ensure_future(self._run_one(row)))
+                for group in self._group_claimed(rows):
+                    running.add(asyncio.ensure_future(self._run_group(group)))
 
                 if running:
                     idle_since = None
@@ -899,32 +1107,160 @@ class CouncilWorker:
         return bool(self.store.stop_requested(self.worker_id))
 
     def _free_slots(self) -> int:
-        """How many more calls this worker may take responsibility for."""
+        """How many more calls this worker may take responsibility for.
+
+        Summed across every account this worker serves -- used ONLY to gate
+        "is it worth claiming at all" in :meth:`work`'s loop.  The claim
+        itself is no longer sized from this sum: see :meth:`_claim`, which
+        claims PER ACCOUNT so that one saturated account's rows can never
+        occupy the budget a different, free account was owed.
+        """
         return sum(max(0, limit.capacity - limit.assigned) for limit in self._limits.values())
+
+    def _endpoints_by_account(self) -> Dict[str, set]:
+        """``{account: {endpoint, ...}}`` -- the inverse of ``_limit_by_endpoint``."""
+        table: Dict[str, set] = {}
+        for endpoint, limit in self._limit_by_endpoint.items():
+            table.setdefault(limit.key, set()).add(endpoint)
+        return table
 
     def _claim(
         self, limit: int, job_id: Optional[str], summary: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Claim up to *limit* calls, keeping only those in scope."""
-        rows = self.store.claim_calls(
-            self.worker_id, set(self.backends), max(1, int(limit)), _utcnow()
-        )
+        """Claim due calls, ACCOUNT BY ACCOUNT, keeping only those in scope.
+
+        THE STARVATION FIX.  The old shape claimed ONCE, against the SUM of
+        every account's free capacity: ``store.claim_calls(..., limit=sum)``.
+        The claim query has no per-account quota of its own -- it returns the
+        GLOBAL FIFO head -- so a saturated account's rows occupied the whole
+        batch, and the unconditional ``assigned += 1`` below let that
+        account's ``assigned`` run straight past its ``capacity``, which is
+        what starved every other account behind it (measured: 92 calls
+        claimed against ~20 slots, 66 of them one account's).
+
+        The fix claims SEPARATELY per account, each call's ``endpoints``
+        restricted to that account's own aliases and its ``limit`` to that
+        account's own free capacity (never the cross-account sum).  A
+        saturated account's rows can now never be returned against a
+        different account's budget, because that budget was never asked for
+        them -- the starvation is structurally impossible, not merely
+        corrected after the fact.  ``assigned`` is incremented inside this
+        same per-row loop (bounded by the per-account ``free`` the query was
+        already given, and belt-and-braced again just before the increment),
+        so it can never exceed ``capacity``.
+
+        *limit* is accepted only for signature compatibility -- ``daemon.py``
+        subclasses this worker and overrides ``_claim``, calling
+        ``super()._claim(limit, job_id, summary)`` with exactly these three
+        positional arguments, and changing that signature would break it
+        silently.  It no longer sizes anything: each account's own
+        ``capacity - assigned`` does.
+
+        A row refused by :meth:`_roster_refusal` -- a per-job queue-roster
+        mismatch discovered only now, at claim time -- is released exactly
+        like an out-of-scope row: handed back unmarked, counted in
+        ``summary['released']``, no attempt charged.
+
+        FOR A BATCHED QUEUE (``batch_size > 1``), capacity is measured in
+        INVOCATIONS, not rows (confront round 1, point i): up to
+        ``free * batch_size`` candidate rows are claimed -- enough to
+        assemble up to ``free`` homogeneous groups via the EXISTING
+        :meth:`_group_claimed` seam, consumed here rather than re-derived --
+        and ``assigned`` moves by ONE PER KEPT GROUP.  A group that would
+        push ``assigned`` past ``capacity`` is surplus (over-claimed only to
+        leave room for grouping) and is released WITHOUT an attempt charge,
+        exactly like an out-of-scope row.  ``batch_size <= 1`` makes
+        ``_group_claimed`` return one-row groups, which makes this bit for
+        bit the unbatched per-row accounting above.
+        """
         kept: List[Dict[str, Any]] = []
-        for row in rows:
-            if job_id is None or row["job_id"] == job_id:
-                kept.append(row)
+        checked_jobs: Dict[str, Optional[str]] = {}
+        for account, endpoints in sorted(self._endpoints_by_account().items()):
+            account_limit = self._limits[account]
+            free = max(0, account_limit.capacity - account_limit.assigned)
+            if free <= 0:
                 continue
-            # Out of scope: hand it straight back, unmarked.  The claim
-            # contract has no job filter, so this is the only way to scope a
-            # run, and charging an attempt for it would be charging the call
-            # for this worker's scope.
-            self._release_quietly(row)
-            summary["released"] += 1
-        for row in kept:
-            self._limit_by_endpoint[row["endpoint"]].assigned += 1
+            row_limit = free * max(1, self.batch_size)
+            rows = self.store.claim_calls(
+                self.worker_id,
+                endpoints,
+                row_limit,
+                _utcnow(),
+                seats=self.seats,
+                roles=self.roles,
+            )
+            survivors: List[Dict[str, Any]] = []
+            for row in rows:
+                if job_id is not None and row["job_id"] != job_id:
+                    # Out of scope: hand it straight back, unmarked.  The
+                    # claim contract has no job filter, so this is the only
+                    # way to scope a run, and charging an attempt for it
+                    # would be charging the call for this worker's scope.
+                    self._release_quietly(row)
+                    summary["released"] += 1
+                    continue
+                refusal = self._roster_refusal(row, checked_jobs)
+                if refusal is not None:
+                    logger.warning(
+                        "council worker %s: refusing claimed call %s (job %s, "
+                        "seat %s) -- %s",
+                        self.worker_id,
+                        row["call_id"],
+                        row["job_id"],
+                        row["seat_name"],
+                        refusal,
+                    )
+                    self._release_quietly(row)
+                    summary["released"] += 1
+                    continue
+                survivors.append(row)
+
+            for group in self._group_claimed(survivors):
+                if account_limit.assigned >= account_limit.capacity:
+                    # Belt and braces for the unbatched case, and the REAL
+                    # gate for the batched one: this account's invocation
+                    # slots are spent, so every remaining group -- rows that
+                    # were over-claimed only to leave room for grouping -- is
+                    # surplus.  Release it whole, unmarked, no attempt
+                    # charged: a group is not any one row's refusal.
+                    for row in group:
+                        self._release_quietly(row)
+                        summary["released"] += 1
+                    continue
+                account_limit.assigned += 1
+                kept.extend(group)
         for scoped_job in sorted({row["job_id"] for row in kept}):
             self.store.set_job_status(scoped_job, "running", only_if=("queued",))
         return kept
+
+    def _roster_refusal(
+        self, row: Mapping[str, Any], cache: Dict[str, Optional[str]]
+    ) -> Optional[str]:
+        """``None`` if *row*'s job's roster is still inside the validated
+        queue set (see :meth:`_check_roster_against_queues`); otherwise the
+        refusal message.
+
+        Checked once per JOB per ``_claim`` call, not once per row: the
+        predicate validates the whole roster, so a second claimed row of the
+        same job would only repeat the same verdict.  A no-op (returns
+        ``None``) for a plain mapping config, or a ``CouncilConfig`` with no
+        ``queues`` declared.
+        """
+        checker = getattr(self.config, "check_roster_against_queues", None)
+        if checker is None:
+            return None
+        job_id = row["job_id"]
+        if job_id in cache:
+            return cache[job_id]
+        message: Optional[str] = None
+        job = self.store.get_job(job_id)
+        if job is not None:
+            try:
+                checker(self._roster_for(job), job_id=job_id)
+            except ConfigError as exc:
+                message = str(exc)
+        cache[job_id] = message
+        return message
 
     def _release_quietly(self, row: Mapping[str, Any]) -> None:
         try:
@@ -934,12 +1270,840 @@ class CouncilWorker:
         except StaleClaim:  # pragma: no cover - another worker already has it
             pass
 
+    def _group_claimed(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> List[List[Mapping[str, Any]]]:
+        """Group one claim batch for the execution path.
+
+        ``batch_size <= 1`` (not opted in, the default) returns ONE ROW PER
+        GROUP -- behaviourally IDENTICAL to the pre-batching "one task per
+        claimed row" loop, bit for bit: :meth:`_run_group` sends a
+        single-row group straight through the unmodified :meth:`_run_one`
+        path, never through any of the batched-invocation machinery below.
+
+        Opted in (``batch_size > 1``), rows are grouped by the full
+        homogeneity key ``(job_id, role, seat_name, query_name,
+        query_version)`` -- homogeneity is free given a partitioned worker's
+        single-seat claim, but it is ASSERTED here rather than assumed: two
+        rows land in the same bucket only when every one of those five
+        fields agrees, and each bucket is then split into one or more groups
+        of size :meth:`_batch_n`, which may itself reduce to 1 (an unverified
+        output cap, no per-item estimate, or a low derived ceiling all force
+        singles -- see :meth:`_batch_n`).  A bucket whose job or seat cannot
+        be resolved falls back to one-row groups for that bucket only.
+        """
+        if self.batch_size <= 1 or not rows:
+            return [[row] for row in rows]
+
+        order: List[tuple] = []
+        buckets: Dict[tuple, List[Mapping[str, Any]]] = {}
+        for row in rows:
+            key = (
+                str(row["job_id"]),
+                str(row["role"]),
+                str(row["seat_name"]),
+                str(row.get("query_name") or ""),
+                str(row.get("query_version") or ""),
+            )
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(row)
+
+        groups: List[List[Mapping[str, Any]]] = []
+        for key in order:
+            groups.extend(self._split_bucket(key, buckets[key]))
+        return groups
+
+    def _split_bucket(
+        self, key: tuple, bucket: List[Mapping[str, Any]]
+    ) -> List[List[Mapping[str, Any]]]:
+        """Split one homogeneous bucket into one or more sized groups."""
+        job_id, role, seat_name = key[0], key[1], key[2]
+        job = self.store.get_job(job_id)
+        if job is None:  # pragma: no cover - a claimed row's job always exists
+            return [[row] for row in bucket]
+        roster = self._roster_for(job)
+        try:
+            seat = self._seat_for(roster, role, seat_name)
+        except ValueError:  # pragma: no cover - claim_calls already filtered this
+            return [[row] for row in bucket]
+
+        n = self._batch_n(seat, role, len(bucket))
+        if n <= 1:
+            return [[row] for row in bucket]
+        groups: List[List[Mapping[str, Any]]] = []
+        remaining = list(bucket)
+        while remaining:
+            groups.append(remaining[:n])
+            remaining = remaining[n:]
+        return groups
+
+    def _batch_n(self, seat: SeatSpec, role: str, rows_in_hand: int) -> int:
+        """The size of the next batch for *seat*/*role*: ``1`` means singles.
+
+        ``n = min(batch_size, rows_in_hand, derived_ceiling)``, where
+        ``derived_ceiling = floor(effective_output_cap * 0.75 /
+        per_item_output)``.  Three ways this forces (or reduces to) ``1``,
+        each logged once per ``(seat, role)`` per worker run (confront round
+        1, points a/b):
+
+        * no VERIFIED effective output cap for this seat's
+          ``(endpoint_kind, model)`` (see :data:`VERIFIED_OUTPUT_CAPS`) --
+          batching is not merely unproven here, it is UNBUILDABLE: no CLI
+          argv forwards an output-token ceiling today, so there is nothing to
+          size a batch against;
+        * no per-item output estimate (:attr:`max_output_tokens_per_item` nor
+          a running mean) -- batching must never run on an unknown;
+        * ``derived_ceiling < 1`` -- refused outright rather than assembling
+          an empty batch, which would leave work spinning forever.
+
+        A ceiling that is merely SMALLER than the configured ``batch_size``
+        (but still ``>= 1``) reduces the batch instead of refusing it, and
+        logs both numbers once.
+        """
+        desired = min(self.batch_size, max(0, rows_in_hand))
+        if desired <= 1:
+            return desired
+
+        cap = self._effective_output_cap(seat)
+        if cap is None:
+            self._log_once(
+                seat.seat_name,
+                role,
+                "no_cap",
+                f"seat {seat.seat_name!r} role {role!r}: no VERIFIED effective "
+                f"output cap for endpoint_kind={seat.endpoint_kind!r} "
+                f"model={seat.model!r}; batching forced to singles until one is "
+                "measured and verified (see worker.VERIFIED_OUTPUT_CAPS)",
+            )
+            return 1
+
+        per_item = self._per_item_output(seat, role)
+        if per_item is None or per_item <= 0:
+            self._log_once(
+                seat.seat_name,
+                role,
+                "no_estimate",
+                f"seat {seat.seat_name!r} role {role!r}: no per-item output "
+                "estimate yet (max_output_tokens_per_item is unset and no "
+                "observation has been recorded); batching forced to singles",
+            )
+            return 1
+
+        derived_ceiling = int(math.floor((cap * 0.75) / per_item))
+        if derived_ceiling < 1:
+            self._log_once(
+                seat.seat_name,
+                role,
+                "ceiling_refused",
+                f"seat {seat.seat_name!r} role {role!r}: derived_ceiling="
+                f"{derived_ceiling} (< 1) from effective_output_cap={cap} and "
+                f"per_item_output={per_item:.1f}; refusing batching this run, "
+                "running as singles rather than assembling an empty batch",
+            )
+            return 1
+        if derived_ceiling < desired:
+            self._log_once(
+                seat.seat_name,
+                role,
+                "ceiling_reduced",
+                f"seat {seat.seat_name!r} role {role!r}: derived_ceiling="
+                f"{derived_ceiling} < batch_size={self.batch_size}; reducing "
+                f"this batch to {derived_ceiling} (effective_output_cap={cap}, "
+                f"per_item_output={per_item:.1f})",
+            )
+            desired = derived_ceiling
+        return max(1, desired)
+
+    def _effective_output_cap(self, seat: SeatSpec) -> Optional[int]:
+        """The lesser of a VERIFIED output cap and ``seat.max_output_tokens``.
+
+        ``None`` when no cap for this seat's ``(endpoint_kind, model)`` is
+        verified (see :data:`VERIFIED_OUTPUT_CAPS`) -- which, on this commit,
+        is every CLI combination, because neither CLI backend's argv forwards
+        an output-token ceiling at all.  A seat declaring batch support (an
+        endpoint kind config validation already requires) does NOT by itself
+        establish a cap.
+        """
+        verified = VERIFIED_OUTPUT_CAPS.get((seat.endpoint_kind, seat.model))
+        if verified is None:
+            return None
+        return min(int(verified), int(seat.max_output_tokens))
+
+    def _per_item_output(self, seat: SeatSpec, role: str) -> Optional[float]:
+        """The per-item output estimate for *seat*/*role*, or ``None``.
+
+        The configured :attr:`max_output_tokens_per_item` wins when set;
+        otherwise the running mean of OBSERVED per-item completion tokens
+        for this ``(seat, role, served_model)``, which
+        :meth:`_record_output_sample` maintains -- ``None`` with no eligible
+        observation yet, which is "unknown", not zero.
+        """
+        if self.max_output_tokens_per_item is not None:
+            return float(self.max_output_tokens_per_item)
+        total_tokens, total_members = self._output_samples.get(
+            (seat.seat_name, role, seat.model), (0, 0)
+        )
+        if total_members <= 0:
+            return None
+        return total_tokens / total_members
+
+    def _record_output_sample(
+        self, seat_name: str, role: str, served_model: str, members: int, completion_tokens: int
+    ) -> None:
+        """Feed one SUCCESSFUL, COMPLETE invocation into the running mean.
+
+        ``members`` is the number of items REQUESTED (the invocation's own
+        batch size), not the number actually answered -- a model that
+        answered 18 of 20 still cost roughly a 20-item invocation's worth of
+        output, and dividing by 18 would overestimate the per-item cost the
+        next ceiling is sized from.  Callers must only call this for an
+        invocation that was ``ok``, not truncated, and whose usage was
+        actually measured: including zero-cost or partial samples would drag
+        the mean down and *enlarge* the next batch -- a feedback loop pointed
+        straight at the truncation this heuristic exists to avoid.  Enforced
+        HERE, at the one choke point every caller goes through, rather than
+        trusted to each call site: a ``completion_tokens`` of zero or less is
+        dropped rather than recorded, zero being exactly the sentinel a
+        reused answer reports (:data:`ZERO_USAGE`) and also what an
+        unmeasured-but-coerced usage dict would read as.
+        """
+        if members <= 0 or completion_tokens <= 0:
+            return
+        key = (seat_name, role, served_model)
+        total_tokens, total_members = self._output_samples.get(key, (0, 0))
+        self._output_samples[key] = (
+            total_tokens + max(0, int(completion_tokens)),
+            total_members + members,
+        )
+
+    def _log_once(self, seat_name: str, role: str, tag: str, message: str) -> None:
+        """Log *message* at most once per ``(seat, role, tag)`` per worker run."""
+        key = (seat_name, role, tag)
+        if key in self._logged_batch_notices:
+            return
+        self._logged_batch_notices.add(key)
+        logger.warning("council worker %s: %s", self.worker_id, message)
+
+    async def _run_group(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Run a claimed GROUP: one unit against ``_AccountLimit``.
+
+        A one-row group (today's only shape when ``batch_size <= 1``) runs
+        through the unmodified :meth:`_run_one`.  A real batch (``len(rows) >
+        1``) runs through :meth:`_run_batch_or_split`, which may bisect on a
+        whole-invocation failure (:meth:`_invoke_batch`) -- however many
+        backend invocations that recursion costs, ``assigned`` is released
+        exactly ONCE here, when the whole group is done, because a batch is
+        ONE in-flight unit against the account's capacity, not ``len(rows)``.
+        """
+        if len(rows) <= 1:
+            for row in rows:
+                await self._run_one(row)
+            return
+        endpoint = str(rows[0]["endpoint"])
+        limit = self._limit_by_endpoint.get(endpoint)
+        try:
+            await self._run_batch_or_split(list(rows))
+        finally:
+            if limit is not None:
+                limit.assigned = max(0, limit.assigned - 1)
+
     async def _run_one(self, row: Mapping[str, Any]) -> None:
         limit = self._limit_by_endpoint[row["endpoint"]]
         try:
             await self.execute(row)
         finally:
             limit.assigned = max(0, limit.assigned - 1)
+
+    async def _run_one_within_group(self, call: Mapping[str, Any]) -> None:
+        """Run one row through the unmodified single-call path, INSIDE a
+        group whose ``assigned`` unit is managed by the group's own caller.
+
+        This is how bisection bottoms out (see :meth:`_run_batch_or_split`):
+        once a split reaches one row, that row is isolated and fails or
+        succeeds exactly as it does today -- including the existing
+        ``max_attempts`` retry/exhaustion gate, which this deliberately does
+        NOT re-implement.
+        """
+        await self.execute(dict(call))
+
+    # -- batched invocation -------------------------------------------------
+
+    async def _run_batch_or_split(self, rows: List[Mapping[str, Any]]) -> None:
+        """Run *rows* as one batched invocation, bisecting on failure.
+
+        *rows* are already CLAIMED and stay that way across every recursive
+        step: a whole-invocation failure (transport, timeout, truncation, or
+        a wrapper-schema-invalid reply) is retried by splitting *rows* in
+        half and recursing on each half directly under the SAME claims,
+        sequentially -- never released back to the queue mid-split, because a
+        re-queued half could recombine with the poison item and loop
+        forever.  Recursion bottoms out at one row, which runs through
+        :meth:`_run_one_within_group` -- the ordinary single-call path,
+        including its own ``max_attempts`` gate -- so a poison item is
+        isolated in ``log2(n)`` rounds and costs only its OWN attempts, never
+        its batch-mates'.
+        """
+        if len(rows) <= 1:
+            for row in rows:
+                await self._run_one_within_group(row)
+            return
+
+        members: List[_BatchMember] = []
+        for row in rows:
+            member = await self._prepare_member(dict(row))
+            if member is not None:
+                members.append(member)
+        if not members:
+            return
+        if len(members) <= 1:
+            for member in members:
+                await self._run_one_within_group(member.call)
+            return
+
+        outcome = await self._invoke_batch(members)
+        if outcome != "batch_failed":
+            return
+        sent = [member.call for member in members]
+        left, right = _bisect_rows(sent)
+        await self._run_batch_or_split(left)
+        await self._run_batch_or_split(right)
+
+    async def _prepare_member(self, call: Dict[str, Any]) -> Optional[_BatchMember]:
+        """Run one row's pre-spend checks and return it ready to batch.
+
+        The same three checks :meth:`execute` runs for a single call, in the
+        same order, because batching changes only the transport: a route
+        fingerprint that no longer matches this worker's config parks the
+        row (never included); an already-answered identical question is
+        settled from reuse (never included); a job whose permission gate
+        refuses this call settles or parks it here too.  ``None`` means the
+        row was fully handled by one of those three and must not be sent to
+        a model.  Single-flight collapsing is intentionally NOT applied to
+        batch members (see the t8 work record).
+        """
+        token = call.get("claim_token")
+        job = self.store.get_job(call["job_id"])
+        if job is None:  # pragma: no cover - a claimed row's job always exists
+            return None
+        roster = self._roster_for(job)
+        role = str(call["role"])
+        try:
+            seat = self._seat_for(roster, role, str(call["seat_name"]))
+        except ValueError:  # pragma: no cover - claim_calls already filtered this
+            return None
+
+        expected_route = self._route_fingerprint(seat)
+        if call.get("route_fingerprint") and call["route_fingerprint"] != expected_route:
+            self._park(
+                call,
+                token,
+                CouncilError(
+                    kind=CONFIGURATION_MISMATCH,
+                    message=(
+                        f"call was created for route {call['route_fingerprint'][:12]}... "
+                        f"but this worker's config for endpoint {call['endpoint']!r} "
+                        f"now routes seat {seat.seat_name!r} to {expected_route[:12]}..."
+                    ),
+                ),
+                wait_s=self.mismatch_wait_s,
+            )
+            return None
+
+        query = self._query_for(job)
+        item = self._item_for(call["job_id"], call["item_id"])
+        if item is None:  # pragma: no cover - a claimed row's item always exists
+            return None
+        task = self._task_for(item)
+
+        hash_key = str(call.get("prompt_hash") or "")
+        if hash_key:
+            reusable = self.store.find_reusable(hash_key)
+            if reusable is not None and reusable["call_id"] != call["call_id"]:
+                self._settle_reused(
+                    call, token, reusable, query=query, roster=roster, role=role
+                )
+                return None
+
+        gate = await self._permission_gate(call, token, seat, job)
+        if gate is not None:
+            return None
+
+        context = self._context_for(role, call, query, roster)
+        system, user = query.render(role, task, context)
+        schema = query.answer_schema(role)
+        return _BatchMember(
+            call=call,
+            token=token,
+            job=job,
+            roster=roster,
+            seat=seat,
+            query=query,
+            role=role,
+            system=system,
+            user=user,
+            schema=schema,
+            context=context,
+        )
+
+    async def _invoke_batch(self, members: List[_BatchMember]) -> str:
+        """Send ONE batched invocation for *members* and settle or fail it.
+
+        Returns ``"ok"`` once every member has been individually settled
+        (banked, released for retry, or terminally failed -- see
+        :meth:`_settle_batch_answers`), or ``"batch_failed"`` when the
+        invocation itself did not individually judge any item (transport,
+        timeout, truncation, or a wrapper-schema-invalid reply), which the
+        caller retries by bisection.
+
+        Usage is recorded exactly once per invocation, by ``invocation_id``
+        -- never anchored on "the first call row", which may itself be
+        missing, invalid or stale, and which a bisected child batch could
+        share with its parent (confront round 1, point f).  This happens for
+        a FAILED invocation too, whose spend the single-call retry path
+        discards today.
+        """
+        first = members[0]
+        endpoint = str(first.call["endpoint"])
+        seat = first.seat
+        mapping = self.endpoint_mapping(endpoint)
+        api_type = str(mapping.get("kind") or seat.endpoint_kind or "")
+
+        from ..queries.spec import (
+            BATCH_SYSTEM_SUFFIX,
+            render_batch_user,
+            wrap_batch_answer_schema,
+        )
+
+        role_schema = first.schema
+        wrapped_schema = wrap_batch_answer_schema(role_schema)
+        system = f"{first.system}{BATCH_SYSTEM_SUFFIX}"
+        user = render_batch_user(
+            [(str(m.call["call_id"]), m.user) for m in members]
+        )
+        trace_id = f"batch|{first.role}|{seat.seat_name}|{len(members)}"
+
+        request: Any = LLMRequest(
+            model=seat.model,
+            system=system,
+            user=user,
+            json_schema=wrapped_schema,
+            max_output_tokens=seat.max_output_tokens,
+            temperature=seat.temperature,
+            params=dict(seat.extra or {}),
+            timeout_s=seat.timeout_s,
+            trace_id=trace_id,
+        )
+        if self.backends.get(endpoint) is not None:
+            request = CompletionRequest(
+                seat=seat,
+                role=first.role,
+                system=system,
+                user=user,
+                json_schema=wrapped_schema,
+                trace_id=trace_id,
+                deadline_s=seat.timeout_s,
+            )
+
+        queued_at = _utcnow()
+        async with self._slot(endpoint):
+            started = _utcnow()
+            result = await self._acomplete(request, api_type=api_type, endpoint=mapping)
+        finished = _utcnow()
+
+        batch_error: Optional[CouncilError] = None
+        parsed_wrapper: Any = None
+        if not result.ok:
+            batch_error = result.error or CouncilError(
+                kind="transport", message="the backend reported failure with no error"
+            )
+        elif result.truncated:
+            batch_error = CouncilError(
+                kind="invalid_output",
+                message=(
+                    "the batched reply was truncated at the token ceiling "
+                    f"({seat.max_output_tokens}); a cut-off batch cannot be "
+                    "trusted for any of its items"
+                ),
+            )
+        else:
+            complaint = _validate_answer(result.parsed, BATCH_WRAPPER_SCHEMA)
+            if complaint is not None:
+                batch_error = CouncilError(
+                    kind="invalid_output",
+                    message=f"the batched reply did not satisfy the wrapper schema: {complaint}",
+                )
+            else:
+                parsed_wrapper = result.parsed
+
+        invocation_id = uuid.uuid4().hex
+        member_call_ids = [str(m.call["call_id"]) for m in members]
+        anchor = first
+        anchor_attempt_no = int(anchor.call.get("attempt_count") or 0) + 1
+        usage = dict(result.usage) if result.usage is not None else None
+
+        if usage is not None:
+            spent = _token_total(usage)
+            if spent:
+                self.store.add_tokens(endpoint, spent)
+            self._enforce_budget(endpoint, usage)
+
+        if batch_error is not None:
+            self._record_failed_invocation(
+                members,
+                invocation_id,
+                anchor,
+                anchor_attempt_no,
+                usage,
+                batch_error,
+                started,
+                finished,
+                queued_at,
+            )
+            return "batch_failed"
+
+        if usage is not None:
+            self._record_output_sample(
+                seat.seat_name,
+                first.role,
+                seat.model,
+                len(members),
+                int(usage.get("completion_tokens") or 0),
+            )
+
+        self._settle_batch_answers(
+            members,
+            parsed_wrapper,
+            role_schema,
+            invocation_id=invocation_id,
+            anchor=anchor,
+            anchor_attempt_no=anchor_attempt_no,
+            usage=usage,
+            started=started,
+            finished=finished,
+            queued_at=queued_at,
+        )
+        return "ok"
+
+    def _invocation_usage(
+        self,
+        invocation_id: str,
+        member_call_ids: Sequence[str],
+        anchor_call_id: str,
+        anchor_attempt_no: int,
+        usage: Optional[Mapping[str, Any]],
+        *,
+        is_anchor: bool,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """The audit-trail ``usage`` payload every member attempt carries.
+
+        Every member references the SAME ``invocation_id``, ``batch_size``,
+        ``member_call_ids`` and anchor -- so the invocation is reconstructible
+        from any one of its members' attempt rows -- but only the anchor's
+        own record carries the REAL measured token counts.  The others get
+        the bookkeeping fields alone: duplicating the real numbers onto every
+        member would invite a naive reader to sum them and multiply the
+        invocation's true cost by ``len(members)``.
+        """
+        payload: Dict[str, Any] = {
+            "invocation_id": invocation_id,
+            "batch_size": len(member_call_ids),
+            "member_call_ids": list(member_call_ids),
+            "anchor_call_id": anchor_call_id,
+            "anchor_attempt_no": anchor_attempt_no,
+        }
+        if is_anchor and usage is not None:
+            payload["prompt_tokens"] = usage.get("prompt_tokens")
+            payload["completion_tokens"] = usage.get("completion_tokens")
+        if extra:
+            payload.update(dict(extra))
+        return payload
+
+    def _record_failed_invocation(
+        self,
+        members: List[_BatchMember],
+        invocation_id: str,
+        anchor: _BatchMember,
+        anchor_attempt_no: int,
+        usage: Optional[Mapping[str, Any]],
+        error: CouncilError,
+        started: datetime,
+        finished: datetime,
+        queued_at: datetime,
+    ) -> None:
+        """Audit a whole-invocation failure WITHOUT charging any row.
+
+        Filed under a negative, UNCHARGED ``attempts.attempt_no`` (the same
+        convention ``daemon.py``'s stop-deadline ``interrupted`` recording
+        uses, via ``store.next_uncharged_attempt_no``): ``attempt_count``
+        stays untouched, because a batch-level failure is not any one item's
+        fault, and the single-item ``max_attempts`` budget must not be spent
+        until a row is invoked ALONE (confront round 1, point h).  Claims are
+        left exactly as they were -- this never releases or completes a
+        call -- so the caller can bisect and retry under the same tokens.
+        """
+        member_call_ids = [str(m.call["call_id"]) for m in members]
+        anchor_call_id = str(anchor.call["call_id"])
+        with self.store.transaction():
+            for member in members:
+                call_id = str(member.call["call_id"])
+                payload = self._invocation_usage(
+                    invocation_id,
+                    member_call_ids,
+                    anchor_call_id,
+                    anchor_attempt_no,
+                    usage,
+                    is_anchor=call_id == anchor_call_id,
+                    extra={"ancestor_failure": True},
+                )
+                attempt_no = self._uncharged_attempt_no(call_id)
+                self._write_attempt(
+                    call_id,
+                    attempt_no,
+                    started,
+                    finished,
+                    error.kind,
+                    payload,
+                    queued_at,
+                )
+
+    def _uncharged_attempt_no(self, call_id: str) -> int:
+        """A free, negative ``attempts.attempt_no`` that charges nothing.
+
+        Mirrors ``daemon.py``'s ``_uncharged_attempt_no``: a store missing
+        ``next_uncharged_attempt_no`` (a test double, say) falls back to a
+        fixed ``-1``, which is wrong only if TWO uncharged rows are filed for
+        the same call in one process lifetime -- acceptable for a fallback
+        that exists purely so a minimal store double does not crash.
+        """
+        nxt = getattr(self.store, "next_uncharged_attempt_no", None)
+        if callable(nxt):
+            return int(nxt(call_id))
+        return -1  # pragma: no cover - SqliteStore always has this method
+
+    def _write_attempt(
+        self,
+        call_id: str,
+        attempt_no: int,
+        started: datetime,
+        finished: datetime,
+        outcome_kind: str,
+        usage: Mapping[str, Any],
+        queued_at: Optional[datetime],
+    ) -> None:
+        """``store.record_attempt``, tolerating a store built before
+        ``queued_at`` existed -- the same fallback :meth:`_record_attempt`
+        already uses for the single-call path.
+        """
+        try:
+            self.store.record_attempt(
+                call_id,
+                attempt_no,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage),
+                worker_id=self.worker_id,
+                queued_at=queued_at,
+            )
+        except TypeError:
+            self.store.record_attempt(
+                call_id,
+                attempt_no,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage),
+                worker_id=self.worker_id,
+            )
+
+    def _settle_batch_answers(
+        self,
+        members: List[_BatchMember],
+        parsed_wrapper: Any,
+        role_schema: Mapping[str, Any],
+        *,
+        invocation_id: str,
+        anchor: _BatchMember,
+        anchor_attempt_no: int,
+        usage: Optional[Mapping[str, Any]],
+        started: datetime,
+        finished: datetime,
+        queued_at: datetime,
+    ) -> None:
+        """Settle every member of a WRAPPER-VALID batched reply, 1:N.
+
+        The wrapper was already validated as a unit by :meth:`_invoke_batch`
+        (there IS an ``answers`` array); this resolves each element to its
+        call row by ``item_key``, strips that key, and validates the
+        REMAINING payload against the role's OWN answer schema -- so
+        ``_validate_answer`` and :mod:`.normalise` are reused unchanged per
+        element, and one malformed element never fails its batch-mates
+        (confront round 1, point c).  An unknown ``item_key`` is dropped with
+        a warning; a repeated one keeps the first and drops the rest.
+        """
+        known_keys = {str(m.call["call_id"]) for m in members}
+        answers = (
+            parsed_wrapper.get("answers")
+            if isinstance(parsed_wrapper, Mapping)
+            else None
+        )
+        by_key: Dict[str, Mapping[str, Any]] = {}
+        for element in answers or ():
+            if not isinstance(element, Mapping):
+                continue
+            key = element.get(BATCH_ITEM_KEY_FIELD)
+            if not isinstance(key, str) or key not in known_keys:
+                logger.warning(
+                    "council worker %s: batched reply named unknown item_key %r; "
+                    "dropped",
+                    self.worker_id,
+                    key,
+                )
+                continue
+            if key in by_key:
+                logger.warning(
+                    "council worker %s: batched reply repeated item_key %r; first "
+                    "wins",
+                    self.worker_id,
+                    key,
+                )
+                continue
+            by_key[key] = element
+
+        member_call_ids = [str(m.call["call_id"]) for m in members]
+        anchor_call_id = str(anchor.call["call_id"])
+        for member in members:
+            call_id = str(member.call["call_id"])
+            base_usage = self._invocation_usage(
+                invocation_id,
+                member_call_ids,
+                anchor_call_id,
+                anchor_attempt_no,
+                usage,
+                is_anchor=call_id == anchor_call_id,
+            )
+            element = by_key.get(call_id)
+            if element is None:
+                self._settle_batch_released(
+                    member,
+                    base_usage,
+                    started,
+                    finished,
+                    queued_at,
+                    outcome_kind="missing",
+                    message=(
+                        f"the batched reply did not include an answer for item "
+                        f"{member.call['item_id']!r} (item_key {call_id!r})"
+                    ),
+                )
+                continue
+            payload = {k: v for k, v in element.items() if k != BATCH_ITEM_KEY_FIELD}
+            parsed, repairs = normalise(member.role, payload, role_schema, member.context)
+            complaint = _validate_answer(parsed, role_schema)
+            if complaint is not None:
+                self._settle_batch_released(
+                    member,
+                    base_usage,
+                    started,
+                    finished,
+                    queued_at,
+                    outcome_kind="invalid_output",
+                    message=complaint,
+                )
+                continue
+            self._settle_batch_ok(
+                member, base_usage, parsed, repairs, started, finished, queued_at
+            )
+
+    def _settle_batch_ok(
+        self,
+        member: _BatchMember,
+        base_usage: Mapping[str, Any],
+        parsed: Any,
+        repairs: Sequence[Mapping[str, Any]],
+        started: datetime,
+        finished: datetime,
+        queued_at: datetime,
+    ) -> None:
+        """Bank one member's valid, known answer."""
+        call, token = member.call, member.token
+        attempt_no = int(call.get("attempt_count") or 0) + 1
+        try:
+            with self.store.transaction():
+                self.store.complete_call(
+                    call["call_id"],
+                    token,
+                    "ok",
+                    reply_text=json.dumps(
+                        {BATCH_ITEM_KEY_FIELD: call["call_id"], **parsed}, sort_keys=True
+                    ),
+                    reply_parsed=parsed,
+                    fresh_usage=None,
+                    error=None,
+                    normalised=list(repairs or ()) or None,
+                )
+                self._write_attempt(
+                    call["call_id"], attempt_no, started, finished, "ok", base_usage, queued_at
+                )
+                self.advance(call["job_id"], call["item_id"])
+        except StaleClaim:  # pragma: no cover - another worker already has it
+            return
+
+    def _settle_batch_released(
+        self,
+        member: _BatchMember,
+        base_usage: Mapping[str, Any],
+        started: datetime,
+        finished: datetime,
+        queued_at: datetime,
+        *,
+        outcome_kind: str,
+        message: str,
+    ) -> None:
+        """Release a MISSING or INVALID member for retry, or exhaust it.
+
+        Both are treated identically to each other and symmetrically to the
+        single-call retry path: released with ``attempt_count`` incremented
+        while below ``max_attempts``, settled as ``error`` and its item
+        advanced on exhaustion (confront round 1, points d and e) -- a
+        finite budget, because an always-omitted or always-invalid item must
+        not consume calls indefinitely.
+        """
+        call, token = member.call, member.token
+        failures = int(call.get("attempt_count") or 0) + 1
+        error = CouncilError(kind=outcome_kind, message=message)
+        if failures < self.max_attempts:
+            try:
+                with self.store.transaction():
+                    self.store.note_call_error(call["call_id"], error.model_dump())
+                    self._write_attempt(
+                        call["call_id"], failures, started, finished, outcome_kind,
+                        base_usage, queued_at,
+                    )
+                    self.store.release_call(
+                        call["call_id"],
+                        token,
+                        _utcnow() + timedelta(seconds=self._backoff(failures)),
+                        increment_attempt=True,
+                    )
+            except StaleClaim:  # pragma: no cover - another worker already has it
+                return
+            return
+        try:
+            with self.store.transaction():
+                self.store.complete_call(
+                    call["call_id"], token, "error", reply_text=None, error=error.model_dump()
+                )
+                self._write_attempt(
+                    call["call_id"], failures, started, finished, outcome_kind,
+                    base_usage, queued_at,
+                )
+                self.advance(call["job_id"], call["item_id"])
+        except StaleClaim:  # pragma: no cover - another worker already has it
+            return
 
     def _scope_state(
         self, job_id: Optional[str]
@@ -1170,8 +2334,18 @@ class CouncilWorker:
                 deadline_s=seat.timeout_s,
             )
 
-        started = _utcnow()
+        # SERVICE-TIME INSTRUMENTATION.  ``queued_at`` is stamped the instant
+        # this call is ready to enter the endpoint's (possibly account-
+        # shared) concurrency slot; ``started`` only AFTER the slot is
+        # actually acquired.  Stamping ``started`` before the slot (as this
+        # used to) conflates queue-wait with service time -- measured to
+        # disagree by 65x between an honest uncontended reading and a
+        # store median taken under real contention.  With the split:
+        # service time is ``finished - started`` and queue wait is
+        # ``started - queued_at``.
+        queued_at = _utcnow()
         async with self._slot(endpoint):
+            started = _utcnow()
             result = await self._acomplete(
                 request, api_type=api_type, endpoint=mapping
             )
@@ -1192,6 +2366,7 @@ class CouncilWorker:
                     started,
                     finished,
                     result,
+                    queued_at=queued_at,
                 )
             # Two measured reply defects are repaired BEFORE the gate (see
             # engine/normalise.py).  The context is the one already built for
@@ -1207,9 +2382,11 @@ class CouncilWorker:
                     started,
                     finished,
                     result,
+                    queued_at=queued_at,
                 )
             return self._settle_ok(
-                call, token, result, started, finished, parsed, repairs
+                call, token, result, started, finished, parsed, repairs,
+                queued_at=queued_at,
             )
 
         error = result.error or CouncilError(
@@ -1223,9 +2400,12 @@ class CouncilWorker:
             failures = int(call.get("attempt_count") or 0) + 1
             if failures < self.max_attempts:
                 return self._retry_later(
-                    call, token, error, failures, started, finished, result
+                    call, token, error, failures, started, finished, result,
+                    queued_at=queued_at,
                 )
-        return self._fail_call(call, token, error, started, finished, result)
+        return self._fail_call(
+            call, token, error, started, finished, result, queued_at=queued_at
+        )
 
     # -- the per-call permission gate -------------------------------------
 
@@ -1400,6 +2580,8 @@ class CouncilWorker:
         finished: datetime,
         parsed: Optional[Any] = None,
         repairs: Optional[Sequence[Mapping[str, Any]]] = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Record a good answer, its tokens, its budget and its consequence.
 
@@ -1411,6 +2593,22 @@ class CouncilWorker:
         """
         usage = dict(result.usage) if result.usage is not None else None
         endpoint = str(call["endpoint"])
+        if usage is not None:
+            # A fresh SINGLETON observation for the batching running mean
+            # (see :meth:`_per_item_output`) -- purely additive bookkeeping,
+            # read by nothing when batch_size <= 1.  This is what lets a
+            # batched queue bootstrap its own per-item estimate from ordinary
+            # single-call traffic ("fresh singleton observations") rather
+            # than being permanently stuck forcing singles for lack of one.
+            # Never reached for a REUSED answer: that settles through
+            # :meth:`_settle_reused`, not here.
+            self._record_output_sample(
+                str(call["seat_name"]),
+                str(call["role"]),
+                str(call.get("served_model") or ""),
+                1,
+                int(usage.get("completion_tokens") or 0),
+            )
         try:
             with self.store.transaction():
                 self.store.complete_call(
@@ -1423,7 +2621,9 @@ class CouncilWorker:
                     error=None,
                     normalised=list(repairs or ()) or None,
                 )
-                self._record_attempt(call, started, finished, "ok", usage)
+                self._record_attempt(
+                    call, started, finished, "ok", usage, queued_at=queued_at
+                )
                 spent = _token_total(usage)
                 if spent:
                     self.store.add_tokens(endpoint, spent)
@@ -1496,6 +2696,8 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         result: Any = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Settle a call as failed: the seat errors and the item will too."""
         try:
@@ -1507,7 +2709,9 @@ class CouncilWorker:
                     reply_text=getattr(result, "text", None),
                     error=error.model_dump(),
                 )
-                self._record_attempt(call, started, finished, error.kind, None)
+                self._record_attempt(
+                    call, started, finished, error.kind, None, queued_at=queued_at
+                )
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:
             return "stale"
@@ -1522,13 +2726,17 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         result: Any = None,
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> str:
         """Put a transiently-failed call back with a jittered backoff."""
         delay = self._backoff(failures)
         try:
             with self.store.transaction():
                 self.store.note_call_error(call["call_id"], error.model_dump())
-                self._record_attempt(call, started, finished, error.kind, None)
+                self._record_attempt(
+                    call, started, finished, error.kind, None, queued_at=queued_at
+                )
                 self.store.release_call(
                     call["call_id"],
                     token,
@@ -1625,16 +2833,41 @@ class CouncilWorker:
         finished: datetime,
         outcome_kind: str,
         usage: Optional[Mapping[str, Any]],
+        *,
+        queued_at: Optional[datetime] = None,
     ) -> None:
-        self.store.record_attempt(
-            call["call_id"],
-            int(call.get("attempt_count") or 0) + 1,
-            started,
-            finished,
-            outcome_kind,
-            usage=dict(usage) if usage else None,
-            worker_id=self.worker_id,
-        )
+        """Record one try, plus -- when this attempt actually waited for a
+        slot -- WHEN it started waiting.
+
+        ``queued_at`` is ``None`` for anything that never went through
+        :meth:`_slot` at all (a reused or single-flight-followed answer: see
+        :meth:`_settle_reused`, which never calls this with one), which is
+        exactly "nothing to say" for the ``attempts.queued_at`` column.
+        """
+        try:
+            self.store.record_attempt(
+                call["call_id"],
+                int(call.get("attempt_count") or 0) + 1,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage) if usage else None,
+                worker_id=self.worker_id,
+                queued_at=queued_at,
+            )
+        except TypeError:
+            # A store built before `record_attempt` grew `queued_at` (or a
+            # test double standing in for one): fall back rather than lose
+            # the attempt record over an instrumentation-only column.
+            self.store.record_attempt(
+                call["call_id"],
+                int(call.get("attempt_count") or 0) + 1,
+                started,
+                finished,
+                outcome_kind,
+                usage=dict(usage) if usage else None,
+                worker_id=self.worker_id,
+            )
 
     def _backoff(self, failures: int) -> float:
         """The nth retry's delay, with +-25% jitter.
@@ -1921,6 +3154,19 @@ def _token_total(usage: Optional[Mapping[str, Any]]) -> int:
     if not usage:
         return 0
     return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+
+
+def _bisect_rows(
+    rows: Sequence[Mapping[str, Any]]
+) -> Tuple[List[Mapping[str, Any]], List[Mapping[str, Any]]]:
+    """Split *rows* into two near-equal halves for bisection-on-failure.
+
+    Ceiling split (``20 -> 10/10``, ``5 -> 3/2``, ``3 -> 2/1``, ``2 ->
+    1/1``), which is the path the design's own worked example
+    (``20->10->5->3->2->1``) walks.
+    """
+    mid = (len(rows) + 1) // 2
+    return list(rows[:mid]), list(rows[mid:])
 
 
 def _validate_answer(parsed: Any, schema: Mapping[str, Any]) -> Optional[str]:

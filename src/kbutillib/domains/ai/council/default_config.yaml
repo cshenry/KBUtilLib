@@ -41,6 +41,29 @@ endpoints:
   #   api_key_env: MY_VLLM_API_KEY     # optional; vLLM ignores the value
   #                                    # unless it was started with --api-key
 
+  # A gateway that routes on a HEADER rather than on the URL. The Genesis
+  # Model Access Gateway (MAG) is OpenAI-compatible and picks which provider
+  # to forward to from X-AmSC-MAG-Provider, so the provider travels in
+  # options.headers -- a mapping of static, NON-SECRET headers sent on every
+  # request this endpoint makes (both /chat/completions and /models). The
+  # bearer token is NOT one of them: it comes from api_key_env, as always,
+  # and a credential-shaped header name is refused at config load.
+  #
+  # The provider value below and the model ids to seat against it are NOT
+  # guessed here: take both from the MyAmSC portal's MAG documentation for
+  # your account, then declare the aliases under `models:` yourself with
+  # `verified: false` until `kbu council doctor` has confirmed them. (That
+  # key belongs to a model entry, not to an endpoint -- an endpoint has no
+  # `verified` key and would warn and drop it.)
+  #
+  # mag:
+  #   kind: openai
+  #   base_url: https://mag.genesis.americansciencecloud.org/v1
+  #   api_key_env: AMSC_TOKEN
+  #   options:
+  #     headers:
+  #       X-AmSC-MAG-Provider: <provider>   # from the MyAmSC portal docs
+
 models:
   # ARGO aliases. served_name defaults to the alias (ARGO's own model names),
   # and canonical identity comes from the built-in DEFAULT_CANONICAL table.

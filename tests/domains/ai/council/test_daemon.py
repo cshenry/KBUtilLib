@@ -36,7 +36,9 @@ a GPU.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import logging
 import multiprocessing
 import os
 import signal
@@ -50,6 +52,7 @@ import yaml
 
 from kbutillib.domains.ai import llm
 from kbutillib.domains.ai.council.backends.testing import FakeBackend
+from kbutillib.domains.ai.council.config import QueueConfig
 from kbutillib.domains.ai.council.daemon import (
     DEFAULT_TIMINGS,
     LOG_FILENAME,
@@ -57,7 +60,11 @@ from kbutillib.domains.ai.council.daemon import (
     DaemonError,
     DaemonTimings,
 )
-from kbutillib.domains.ai.council.execlock import ExecutionLock, LockHeld
+from kbutillib.domains.ai.council.execlock import (
+    CONTROLLER_LOCK_FILENAME,
+    ExecutionLock,
+    LockHeld,
+)
 from kbutillib.domains.ai.council_utils import CouncilUtils
 
 from . import engine_support as support
@@ -80,6 +87,21 @@ FAST = DaemonTimings(
     stop_wait_s=20.0,
     start_wait_s=30.0,
 )
+
+#: Queue-mode timings: a short, fast restart delay and a fast supervision
+#: tick, so a test watching for a restart or a per-queue stop/start is
+#: seconds, not the 5s/2s production defaults.
+FAST_QUEUES = FAST.scaled(
+    restart_delay_s=0.3,
+    supervise_poll_s=0.1,
+    start_wait_s=20.0,
+    stop_wait_s=20.0,
+)
+
+#: Like :data:`FAST_QUEUES`, but with the restart delay long enough that a
+#: test can observe a crashed child BEFORE the controller would have
+#: restarted it -- used only by tests that need that frozen window.
+FROZEN_RESTART = FAST_QUEUES.scaled(restart_delay_s=120.0)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +339,84 @@ def _bare_config(tmp_path: Path) -> Dict[str, Any]:
     return {"store": f"sqlite:///{tmp_path}/council/council.sqlite"}
 
 
+def _queue_config(
+    tmp_path: Path,
+    queues: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    q1_workers: int = 1,
+) -> Dict[str, Any]:
+    """A council with FOUR queues, each on its own account (one per endpoint),
+    covering the whole "test" profile -- chairs split three ways, review
+    (critic + meta) on a fourth.  ``q1`` is the chairs' first seat alone, so
+    *q1_workers* can be driven up without touching anyone else's budget.
+    """
+    endpoints = {name: _endpoint(reuse=name, max_concurrency=4) for name in ("e1", "e2", "e3", "e4")}
+    models = {
+        "p1": {"endpoint": "e1", "canonical": "test/p1"},
+        "p2": {"endpoint": "e2", "canonical": "test/p2"},
+        "p3": {"endpoint": "e3", "canonical": "test/p3"},
+        "cr": {"endpoint": "e4", "canonical": "test/cr"},
+        "mt": {"endpoint": "e4", "canonical": "test/mt"},
+    }
+    # `QueueConfig.seats` names SEAT SLOTS ("proposer_1", "critic", "meta" --
+    # what `_normalise_proposers` assigns and what `calls.seat_name` stores),
+    # never the model ALIAS ("p1") a slot happens to be seated with.
+    default_queues = {
+        "q1": {"seats": ["proposer_1"], "workers": q1_workers, "concurrency": 1},
+        "q2": {"seats": ["proposer_2"], "concurrency": 1},
+        "q3": {"seats": ["proposer_3"], "concurrency": 1},
+        "q4": {"seats": ["critic", "meta"], "concurrency": 2},
+    }
+    return {
+        "endpoints": endpoints,
+        "models": models,
+        "profiles": {
+            "test": {"proposers": ["p1", "p2", "p3"], "critic": "cr", "meta": "mt"}
+        },
+        "default_profile": "test",
+        "store": f"sqlite:///{tmp_path}/council/council.sqlite",
+        "queues": queues if queues is not None else default_queues,
+    }
+
+
+def _two_queue_config(
+    tmp_path: Path, chairs_options: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """A council with exactly two queues: the chairs, and review.
+
+    Submitting a job immediately creates pending calls for every CHAIR seat
+    (``p1``/``p2``/``p3``) but none for ``cr``/``mt`` -- those are only
+    created once every chair settles -- so this is the natural, un-contrived
+    shape for "one queue has pending work, the other has nothing to do yet".
+    """
+    chairs_options = dict(chairs_options or {})
+    max_concurrency = int(chairs_options.pop("max_concurrency", 4))
+    endpoints = {
+        "chairs": _endpoint(reuse="chairs", max_concurrency=max_concurrency, **chairs_options),
+        "review": _endpoint(reuse="review", max_concurrency=4),
+    }
+    models = {
+        "p1": {"endpoint": "chairs", "canonical": "test/p1"},
+        "p2": {"endpoint": "chairs", "canonical": "test/p2"},
+        "p3": {"endpoint": "chairs", "canonical": "test/p3"},
+        "cr": {"endpoint": "review", "canonical": "test/cr"},
+        "mt": {"endpoint": "review", "canonical": "test/mt"},
+    }
+    return {
+        "endpoints": endpoints,
+        "models": models,
+        "profiles": {
+            "test": {"proposers": ["p1", "p2", "p3"], "critic": "cr", "meta": "mt"}
+        },
+        "default_profile": "test",
+        "store": f"sqlite:///{tmp_path}/council/council.sqlite",
+        "queues": {
+            "q_chairs": {"seats": ["proposer_1", "proposer_2", "proposer_3"], "concurrency": 1},
+            "q_review": {"seats": ["critic", "meta"], "concurrency": 2},
+        },
+    }
+
+
 def _written(tmp_path: Path, config: Dict[str, Any]) -> str:
     """*config* as a YAML FILE, and its path.
 
@@ -479,6 +579,81 @@ def serve_the_store(config: Dict[str, Any], timings: DaemonTimings, results: Any
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+def _queue_child_with_fake(
+    config_source: Any, store_url_override: Optional[str], queue: str, index: int, timings: Any
+) -> Dict[str, Any]:
+    """The controller's per-queue child target, WITH the test api type.
+
+    Every queue worker the controller spawns is its OWN ``spawn``ed
+    interpreter and shares nothing with the parent or with each other, so
+    each one has to register the test kind itself before delegating to the
+    real, shipped entry point.
+    """
+    from kbutillib.domains.ai.council.daemon import _serve_queue_child
+
+    register_api_type()
+    return _serve_queue_child(config_source, store_url_override, queue, index, timings)
+
+
+def _flaky_queue_child_failing(
+    bad_queue: str,
+    config_source: Any,
+    store_url_override: Optional[str],
+    queue: str,
+    index: int,
+    timings: Any,
+) -> Dict[str, Any]:
+    """Like :func:`_queue_child_with_fake`, except *bad_queue* exits at once.
+
+    Drives the all-or-nothing initial-start test: one queue's child dies
+    before it can take its partition lock, deterministically and fast,
+    without needing a real misconfiguration to reproduce it.
+    """
+    if queue == bad_queue:
+        import sys
+
+        sys.exit(3)
+    from kbutillib.domains.ai.council.daemon import _serve_queue_child
+
+    register_api_type()
+    return _serve_queue_child(config_source, store_url_override, queue, index, timings)
+
+
+def serve_the_queues(
+    config: Dict[str, Any], timings: DaemonTimings, results: Any, bad_queue: Optional[str] = None
+) -> None:
+    """Run the CONTROLLER's foreground loop in a brand-new interpreter.
+
+    ``queue_child_target`` is what lets a spawned-per-queue child register
+    the test api type itself -- see :func:`_queue_child_with_fake`.
+    """
+    try:
+        register_api_type()
+        target = _queue_child_with_fake
+        if bad_queue is not None:
+            target = functools.partial(_flaky_queue_child_failing, bad_queue)
+        daemon = _council(config).daemon(timings=timings, queue_child_target=target)
+        results.put(("served", daemon.run_foreground()))
+    except BaseException as exc:  # noqa: BLE001 - reported, see above
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def serve_one_queue_worker(
+    config: Dict[str, Any], timings: DaemonTimings, queue: str, index: int, results: Any
+) -> None:
+    """Run ONE queue worker directly, bypassing the controller entirely.
+
+    For tests about a single partition in isolation (distinct partition
+    locks, the drain contract) that do not need the whole controller up.
+    """
+    try:
+        register_api_type()
+        daemon = _council(config).daemon(timings=timings, queue=queue, worker_index=index)
+        results.put(("served", daemon.run_foreground()))
+    except BaseException as exc:  # noqa: BLE001 - reported, see above
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
 def _stop_and_collect(child: Any, results: Any) -> Dict[str, Any]:
     """``SIGTERM`` the daemon child, wait for it, and return its own summary.
 
@@ -509,8 +684,14 @@ def children() -> Iterator[Any]:
     class _Children:
         context = ctx
 
-        def start(self, target: Any, *args: Any) -> Any:
-            proc = ctx.Process(target=target, args=args, daemon=True)
+        def start(self, target: Any, *args: Any, daemon: bool = True) -> Any:
+            # ``daemon=False`` for anything that becomes a council
+            # CONTROLLER: a daemonic process may not have children of its
+            # own (Python refuses it outright), and the controller's whole
+            # job is spawning one process per configured queue.  Still
+            # killed however the test ends -- see below -- so this does not
+            # reopen the leaked-process risk ``daemon=True`` exists to close.
+            proc = ctx.Process(target=target, args=args, daemon=daemon)
             proc.start()
             spawned.append(proc)
             return proc
@@ -1341,5 +1522,450 @@ class TestWhatIsShipped:
             assert "exited 17" in str(caught.value)
             assert str(daemon.log_path) in str(caught.value)
             assert daemon.lock.probe() is None
+        finally:
+            util.close()
+
+
+# ---------------------------------------------------------------------------
+# H. Queue mode: one controller, one process per configured queue
+# ---------------------------------------------------------------------------
+
+
+def _until_queues_alive(daemon: CouncilDaemon, names: List[str], timeout: float = 20.0) -> Dict[str, Any]:
+    """Poll :meth:`CouncilDaemon.status` until every named queue's children
+    are ALL alive, and return that status."""
+
+    def _check() -> Any:
+        status = daemon.status()
+        queues = status.get("queues") or {}
+        if not all(name in queues for name in names):
+            return None
+        if not all(
+            queues[name]["children"] and all(c["alive"] for c in queues[name]["children"])
+            for name in names
+        ):
+            return None
+        return status
+
+    return _until(_check, timeout=timeout)
+
+
+class TestQueueMode:
+    """The controller: one child per configured queue, supervised.
+
+    Every test here either spawns the REAL controller (:func:`serve_the_queues`,
+    a real ``spawn``ed interpreter that becomes the detached controller's
+    foreground loop) or a lone queue worker in isolation
+    (:func:`serve_one_queue_worker`) -- nothing about the partition lock, the
+    claim or the drain is mocked.
+    """
+
+    def test_a_four_queue_config_starts_four_children_each_in_its_own_queue(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        results = children.context.Queue()
+        child = children.start(serve_the_queues, config, FAST_QUEUES, results, daemon=False)
+        try:
+            daemon = util.daemon(timings=FAST_QUEUES)
+            status = _until_queues_alive(daemon, ["q1", "q2", "q3", "q4"])
+            queues = status["queues"]
+            assert sorted(queues) == ["q1", "q2", "q3", "q4"]
+            pids = set()
+            for name, qstatus in queues.items():
+                assert len(qstatus["children"]) == 1
+                entry = qstatus["children"][0]
+                # Each child's record CARRIES its own queue name and index --
+                # the information `_default_child_argv` would otherwise have
+                # had to spell on a command line.
+                assert entry["queue"] == name
+                assert entry["index"] == 0
+                assert entry["alive"] is True
+                pids.add(entry["pid"])
+            assert len(pids) == 4, "each queue must be a DISTINCT OS process"
+            assert status["controller"] is not None
+            assert status["controller"]["pid"] == child.pid
+        finally:
+            _stop_and_collect(child, results)
+            util.close()
+
+    def test_each_queue_childs_launch_args_carry_its_queue_name_and_index(
+        self, tmp_path: Path
+    ) -> None:
+        """The literal argument record one child is launched with."""
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        try:
+            daemon = util.daemon(timings=FAST_QUEUES, queue_child_target=_queue_child_with_fake)
+            child = support.run(daemon._launch_queue_child("q1", 0))
+            try:
+                assert child.queue == "q1"
+                assert child.index == 0
+                assert child.args[2] == "q1"
+                assert child.args[3] == 0
+                _until(lambda: daemon._probe_partition("q1", 0) is not None, timeout=20)
+                holder = daemon._probe_partition("q1", 0)
+                assert holder["pid"] == child.process.pid
+            finally:
+                os.kill(child.process.pid, signal.SIGTERM)
+                child.process.join(timeout=20)
+        finally:
+            util.close()
+
+    def test_workers_two_on_a_queue_starts_two_children_with_distinct_partition_locks(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        config = _queue_config(tmp_path, q1_workers=2)
+        util = _util(config)
+        results0 = children.context.Queue()
+        results1 = children.context.Queue()
+        c0 = children.start(serve_one_queue_worker, config, FAST_QUEUES, "q1", 0, results0)
+        c1 = children.start(serve_one_queue_worker, config, FAST_QUEUES, "q1", 1, results1)
+        try:
+            daemon = util.daemon(timings=FAST_QUEUES)
+            _until(lambda: daemon._probe_partition("q1", 0) is not None, timeout=20)
+            _until(lambda: daemon._probe_partition("q1", 1) is not None, timeout=20)
+            h0 = daemon._probe_partition("q1", 0)
+            h1 = daemon._probe_partition("q1", 1)
+            assert h0["pid"] == c0.pid
+            assert h1["pid"] == c1.pid
+            assert h0["pid"] != h1["pid"], "two workers must hold DISTINCT partition locks"
+            # Both GENUINELY hold their own lock: a third attempt at q1/0
+            # specifically is refused while c0 lives, even though the
+            # store-wide lock is shared and admits any number of workers.
+            with pytest.raises(LockHeld):
+                with util.execution_lock().acquire("daemon", partition=("q1", 0)):
+                    pass
+        finally:
+            _stop_and_collect(c0, results0)
+            _stop_and_collect(c1, results1)
+            util.close()
+
+    def test_status_distinguishes_pending_work_behind_a_dead_child_from_an_idle_queue(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        config = _two_queue_config(tmp_path, {"delay": 5.0, "max_concurrency": 1})
+        util = _util(config)
+        _submit(util, "alpha")
+        results = children.context.Queue()
+        child = children.start(serve_one_queue_worker, config, FAST_QUEUES, "q_chairs", 0, results)
+        try:
+            claimed = _until(
+                lambda: [c for c in _calls(config) if c["status"] == "claimed"], timeout=30
+            )
+            assert claimed
+            # A crash: no SIGTERM, no drain -- the call stays claimed forever.
+            os.kill(child.pid, signal.SIGKILL)
+            child.join(timeout=20)
+
+            daemon = util.daemon(timings=FAST_QUEUES)
+            status = _until(
+                lambda: daemon.status() if daemon._probe_partition("q_chairs", 0) is None else None,
+                timeout=20,
+            )
+            chairs = status["queues"]["q_chairs"]
+            review = status["queues"]["q_review"]
+            assert chairs["children"][0]["alive"] is False
+            assert (chairs["pending"] + chairs["claimed"]) > 0, (
+                "q_chairs has outstanding work stuck behind its dead child"
+            )
+            assert review["pending"] == 0 and review["claimed"] == 0, (
+                "q_review has nothing queued at all -- a DIFFERENT reason "
+                "nothing is moving, and distinguishable from q_chairs's"
+            )
+        finally:
+            util.close()
+
+    def test_stopping_one_queue_leaves_siblings_running_and_restart_policy_holds(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        """(b) both ways, and per-queue stop/start, in one flow: spinning up
+        a fresh four-queue controller four times over would cost minutes."""
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        results = children.context.Queue()
+        child = children.start(serve_the_queues, config, FAST_QUEUES, results, daemon=False)
+        try:
+            daemon = util.daemon(timings=FAST_QUEUES)
+            status = _until_queues_alive(daemon, ["q1", "q2", "q3", "q4"])
+            q1_pid_1 = status["queues"]["q1"]["children"][0]["pid"]
+            q2_pid_0 = status["queues"]["q2"]["children"][0]["pid"]
+
+            # An UNEXPECTED death: simulate a crash directly.
+            os.kill(q1_pid_1, signal.SIGKILL)
+
+            def _q1_restarted() -> Any:
+                s = daemon.status()
+                entry = s["queues"]["q1"]["children"][0]
+                return s if entry["alive"] and entry["pid"] != q1_pid_1 else None
+
+            status = _until(_q1_restarted, timeout=20)
+            q1_pid_2 = status["queues"]["q1"]["children"][0]["pid"]
+            assert q1_pid_2 != q1_pid_1, "an unexpected death IS restarted"
+            # q2 was never touched by any of this.
+            assert status["queues"]["q2"]["children"][0]["pid"] == q2_pid_0
+            assert status["queues"]["q2"]["children"][0]["alive"] is True
+
+            # A DELIBERATE per-queue stop: q1 goes down and STAYS down.
+            report = daemon.stop(queue="q1")
+            assert report["stopped"] is True
+            status = daemon.status()
+            assert status["queues"]["q1"]["children"][0]["alive"] is False
+            assert status["queues"]["q1"]["children"][0]["stopped"] is True
+            # Every sibling keeps running (and, for q2/q3/q4, claiming) the
+            # whole time.
+            for name in ("q2", "q3", "q4"):
+                assert status["queues"][name]["children"][0]["alive"] is True
+
+            # It does not come back on its own across several restart windows.
+            time.sleep(FAST_QUEUES.restart_delay_s * 3 + FAST_QUEUES.supervise_poll_s * 5)
+            status = daemon.status()
+            assert status["queues"]["q1"]["children"][0]["alive"] is False
+
+            # An explicit per-queue start brings it back; siblings untouched.
+            report = daemon.start(queue="q1")
+            assert report["started"] is True
+
+            def _q1_back_up() -> Any:
+                s = daemon.status()
+                return s if s["queues"]["q1"]["children"][0]["alive"] else None
+
+            status = _until(_q1_back_up, timeout=20)
+            assert status["queues"]["q1"]["children"][0]["alive"] is True
+            assert status["queues"]["q2"]["children"][0]["pid"] == q2_pid_0
+        finally:
+            _stop_and_collect(child, results)
+            util.close()
+
+    def test_a_partial_start_failure_drains_and_stops_every_child_from_that_operation(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        results = children.context.Queue()
+        child = children.start(
+            serve_the_queues,
+            config,
+            FAST_QUEUES.scaled(start_wait_s=5.0),
+            results,
+            "q2",
+            daemon=False,
+        )
+        try:
+            child.join(timeout=30)
+            # The spawned process itself always exits 0 -- it reports its own
+            # exception on the queue rather than by crashing (the SAME
+            # pattern every other child here uses, so the harness can tell a
+            # reported failure from a child that never got that far).  The
+            # all-or-nothing failure is the "error" outcome, not the exit code.
+            outcome, payload = results.get(timeout=20)
+            assert outcome == "error", payload
+            assert "did not take" in payload or "exited" in payload, payload
+
+            daemon = util.daemon(timings=FAST_QUEUES)
+            for name in ("q1", "q3", "q4"):
+                assert daemon._probe_partition(name, 0) is None, (
+                    f"{name} must have been drained and stopped too, not left running"
+                )
+            assert daemon._probe_controller() is None
+        finally:
+            util.close()
+
+    def test_a_standalone_run_is_refused_while_the_controller_holds_the_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """The account-safety argument (Q1/(e)): the controller's SHARED
+        store-wide hold already conflicts with an unpartitioned `run`'s
+        EXCLUSIVE one, exactly as it does for a lone ``daemon`` today."""
+        config = _config(tmp_path)
+        util = _util(config)
+        try:
+            job_id = _submit(util, "alpha")
+            with util.execution_lock().acquire("controller"):
+                with pytest.raises(LockHeld) as caught:
+                    util.run(job_id)
+            assert "council controller" in str(caught.value)
+            assert {call["status"] for call in _calls(config)} == {"pending"}
+            assert _attempts(config) == []
+        finally:
+            util.close()
+
+    def test_the_bounded_drain_contract_holds_for_a_queue_worker(
+        self, tmp_path: Path, children: Any
+    ) -> None:
+        """Exactly :class:`TestTheStopDeadline`'s property, through a queue
+        worker instead of the unpartitioned daemon -- the same inherited
+        ``_serve``/``_shutdown``/``_interrupt_claimed``, unmodified."""
+        config = _two_queue_config(tmp_path, {"hang": True, "max_concurrency": 1})
+        util = _util(config)
+        _submit(util, "alpha")
+        results = children.context.Queue()
+        child = children.start(serve_one_queue_worker, config, FAST_QUEUES, "q_chairs", 0, results)
+
+        claimed = _until(
+            lambda: [c for c in _calls(config) if c["status"] == "claimed"], timeout=30
+        )
+        assert len(claimed) == 1
+        call_id = claimed[0]["call_id"]
+        assert claimed[0]["attempt_count"] == 0
+
+        summary = _stop_and_collect(child, results)
+        assert summary["interrupted"] == 1
+
+        calls = {c["call_id"]: c for c in _calls(config)}
+        assert calls[call_id]["status"] == "pending"
+        assert calls[call_id]["attempt_count"] == 0, "a stop must not cost a retry"
+        assert calls[call_id]["claim_token"] is None
+
+        attempts = [a for a in _attempts(config) if a["call_id"] == call_id]
+        assert [a["outcome_kind"] for a in attempts] == ["interrupted"]
+        assert attempts[0]["usage"] == {"unknown": True}
+        util.close()
+
+    def test_a_config_with_no_queues_keeps_the_base_status_shape(self, tmp_path: Path) -> None:
+        config = _bare_config(tmp_path)
+        util = _util(config)
+        try:
+            status = util.daemon(timings=FAST).status()
+            assert "queues" not in status
+            assert "controller" not in status
+        finally:
+            util.close()
+
+
+# ---------------------------------------------------------------------------
+# G. Daemon batch-config wiring (t15)
+# ---------------------------------------------------------------------------
+
+
+class TestQueueBatchConfigWiring:
+    """``QueueConfig.batch_size``/``max_output_tokens_per_item`` reaching the
+    ``CouncilWorker`` a queue child constructs -- see ``_run_as_queue_worker``
+    and ``_worker_for`` in ``daemon.py``.
+
+    Every test here monkeypatches :meth:`CouncilDaemon._queues_config` to hand
+    back a hand-built :class:`QueueConfig` directly, rather than declaring
+    ``batch_size`` in a YAML ``queues:`` section. That is deliberate:
+    ``batch_size > 1`` is refused at CONFIG-LOAD time for any seat whose
+    endpoint kind is not a CLI kind (``config.py``'s ``_validate_queues`` --
+    not this task's file), and every seat in this module is the test ``fake``
+    kind. That refusal is t5's, correctly out of scope here, and bypassing it
+    this way tests exactly what t15 owns: whether a value ``daemon.py`` is
+    HANDED reaches the worker, independent of how the value got validated.
+
+    ``_run_as_queue_worker`` also acquires the partition lock, chdirs into
+    the council directory and runs the service loop forever, so ``_serve``
+    is stubbed to return at once -- only the scope-setting prologue (the code
+    this task adds) needs to run for real.  ``monkeypatch.chdir`` is used
+    purely as a safety net to restore this process's cwd afterwards, since
+    the stubbed call still runs the real ``os.chdir`` into the council
+    directory.
+    """
+
+    @staticmethod
+    def _scoped_daemon(tmp_path: Path, qcfg: QueueConfig) -> Tuple[CouncilDaemon, CouncilUtils]:
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        daemon = util.daemon(timings=FAST, queue="q1", worker_index=0)
+        daemon._queues_config = lambda: {"q1": qcfg}  # type: ignore[method-assign]
+
+        async def _fake_serve(record: Any) -> Dict[str, Any]:
+            return {}
+
+        daemon._serve = _fake_serve  # type: ignore[method-assign]
+        return daemon, util
+
+    def test_batch_size_n_constructs_its_worker_with_that_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=2, batch_size=7)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.batch_size == 7, "the queue's batch_size must reach the worker"
+        finally:
+            util.close()
+
+    def test_max_output_tokens_per_item_passes_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(
+            seats=["proposer_1"], concurrency=2, batch_size=5, max_output_tokens_per_item=321
+        )
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.max_output_tokens_per_item == 321
+        finally:
+            util.close()
+
+    def test_a_queue_declaring_neither_gets_base_commit_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=2)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.batch_size == 1, "base-commit default: unbatched"
+            assert worker.max_output_tokens_per_item is None
+        finally:
+            util.close()
+
+    def test_batch_size_20_with_empty_verified_caps_still_runs_singles_and_names_the_seat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The one that matters (t15's own success criterion).
+
+        The configured ``batch_size`` must REACH the worker (asserted
+        directly on it), and with ``VERIFIED_OUTPUT_CAPS`` still empty the
+        worker's OWN refusal path -- ``_batch_n``/``_effective_output_cap``,
+        untouched by this task -- must still force every group to one row
+        and still log the no-verified-cap refusal naming the seat. Closing
+        only the cap gate without this task's wiring would do nothing
+        (the value never arrives); this task alone must not open the cap
+        gate either.
+        """
+        from kbutillib.domains.ai.council.engine import worker as worker_module
+
+        assert worker_module.VERIFIED_OUTPUT_CAPS == {}, (
+            "this task must not populate the cap table -- batching stays shut"
+        )
+
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=5, batch_size=20)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            job_id = _submit(util, "alpha", "bravo", "charlie")
+            store = util.require_schema()
+
+            daemon._run_as_queue_worker()
+            assert daemon._scope_batch_size == 20, "the parsed scope attribute carries the value"
+
+            support.run(daemon._refresh_readiness(store))
+            worker = daemon._worker_for(store)
+            assert worker.batch_size == 20, "the configured value reached the worker"
+
+            logger_name = "kbutillib.domains.ai.council.engine.worker"
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                rows = worker._claim(5, job_id, {"released": 0})
+            assert len(rows) == 3, "all three proposer_1 rows for this job should claim"
+
+            groups = worker._group_claimed(rows)
+            assert groups == [[row] for row in rows], (
+                "batch_size=20 must still produce SINGLES with no verified cap"
+            )
+
+            messages = [record.getMessage() for record in caplog.records]
+            assert any(
+                "no VERIFIED effective" in message and "proposer_1" in message
+                for message in messages
+            ), "the no-verified-cap refusal must name the seat"
         finally:
             util.close()

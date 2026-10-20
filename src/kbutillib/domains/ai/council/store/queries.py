@@ -167,6 +167,8 @@ def select_claimable(
     limit: int,
     *,
     identity: str = STORE_IDENTITY,
+    seats: Optional[Iterable[str]] = None,
+    roles: Optional[Iterable[str]] = None,
 ) -> sa.Select:
     """The calls a worker on this store may claim, in claim order.
 
@@ -187,6 +189,11 @@ def select_claimable(
         identity: the ``endpoint_state`` key the halt is looked up under.
             Store-local and fixed; a parameter only so a caller can be
             explicit about it.
+        seats: when given (not ``None``), only calls whose ``seat_name`` is
+            one of these.  ``None`` means every seat -- behaviour identical
+            to a store with no partitioning.
+        roles: when given (not ``None``), only calls whose ``role`` is one of
+            these.  ``None`` means every role.
     """
     calls, jobs, items = sch.calls, sch.jobs, sch.items
 
@@ -204,6 +211,19 @@ def select_claimable(
         .exists()
     )
 
+    conditions = [
+        calls.c.status == "pending",
+        sa.or_(calls.c.not_before.is_(None), calls.c.not_before <= now),
+        calls.c.endpoint.in_(sorted(endpoints)),
+        jobs.c.status.not_in(("cancelled", "paused")),
+        jobs.c.deleted_at.is_(None),
+        ~halted,
+    ]
+    if seats is not None:
+        conditions.append(calls.c.seat_name.in_(sorted(seats)))
+    if roles is not None:
+        conditions.append(calls.c.role.in_(sorted(roles)))
+
     return (
         sa.select(calls)
         .join(jobs, calls.c.job_id == jobs.c.job_id)
@@ -214,14 +234,7 @@ def select_claimable(
                 items.c.item_id == calls.c.item_id,
             ),
         )
-        .where(
-            calls.c.status == "pending",
-            sa.or_(calls.c.not_before.is_(None), calls.c.not_before <= now),
-            calls.c.endpoint.in_(sorted(endpoints)),
-            jobs.c.status.not_in(("cancelled", "paused")),
-            jobs.c.deleted_at.is_(None),
-            ~halted,
-        )
+        .where(*conditions)
         .order_by(
             jobs.c.priority.desc(),
             jobs.c.submitted_at.asc(),

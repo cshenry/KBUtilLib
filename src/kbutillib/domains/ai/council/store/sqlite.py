@@ -363,6 +363,12 @@ class SqliteStore:
 
         A database stamped NEWER than this code is refused: downgrading would
         silently drop columns a newer council wrote.
+
+        Both an already-current store and a freshly-migrated v1-to-v2 one also
+        get :meth:`add_missing_columns` and :meth:`add_missing_indexes`
+        applied, at the same point: a store built by an earlier binary of the
+        SAME schema version can be missing either one, and neither omission
+        changes the version stamp.
         """
         current = self.schema_version()
         if current == 0:
@@ -370,10 +376,12 @@ class SqliteStore:
             return sch.SCHEMA_VERSION
         if current == sch.SCHEMA_VERSION:
             self.add_missing_columns()
+            self.add_missing_indexes()
             return current
         if current == 1:
             self._migrate_v1_to_v2()
             self.add_missing_columns()
+            self.add_missing_indexes()
             return sch.SCHEMA_VERSION
         raise _version_mismatch(current)
 
@@ -483,6 +491,49 @@ class SqliteStore:
                 )
             added.append(f"{table_name}.{column_name}")
         return added
+
+    def add_missing_indexes(self) -> List[str]:
+        """Create any index :mod:`.schema` declares that this store lacks.
+
+        The index-shaped twin of :meth:`add_missing_columns`, and exists for
+        the identical reason: a store created by an earlier build of the SAME
+        schema version has every table and the right stamp but can be missing
+        an index added later (``ix_calls_status_seat_not_before``, added to
+        support the seat-filtered claim scan).  ``metadata.create_all`` only
+        creates indexes for tables it is ALSO creating, so it does nothing for
+        a table that already exists -- hence this, mirroring why
+        ``add_missing_columns`` exists at all.
+
+        Deliberately general over every index the schema declares, on every
+        table, rather than naming ``ix_calls_status_seat_not_before``
+        specifically: a future index added the same way would reopen the
+        identical gap if this only knew about today's one.  It stays
+        strictly additive, though -- nothing here drops, rebuilds or reorders
+        an existing index, so ``ix_calls_status_not_before`` and every other
+        index already present are left exactly as they are.
+
+        Each statement is ``CREATE INDEX IF NOT EXISTS`` (``CREATE UNIQUE
+        INDEX IF NOT EXISTS`` for a unique one, and the partial-index
+        ``WHERE`` clause is preserved), so a second run -- or a run against a
+        store that already has every index -- is a no-op pushed down into
+        SQLite itself rather than one this code has to get right by reading
+        the catalog first. Idempotent; returns the index names it created,
+        which is what ``kbu council db migrate`` reports.
+        """
+        inspector = sa.inspect(self._engine)
+        created: List[str] = []
+        for table in sch.metadata.tables.values():
+            if not inspector.has_table(table.name):
+                continue
+            present = {idx["name"] for idx in inspector.get_indexes(table.name)}
+            for index in table.indexes:
+                if index.name in present:
+                    continue
+                ddl = sa.schema.CreateIndex(index, if_not_exists=True)
+                with self.transaction() as conn:
+                    conn.execute(ddl)
+                created.append(str(index.name))
+        return created
 
     def _assert_schema_version(self) -> None:
         current = self.schema_version()
@@ -1054,6 +1105,8 @@ class SqliteStore:
         now: Optional[datetime] = None,
         *,
         user: Optional[str] = None,
+        seats: Optional[Set[str]] = None,
+        roles: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Atomically claim up to *limit* due pending calls for this worker.
 
@@ -1063,6 +1116,11 @@ class SqliteStore:
         filtering on that label would strand every pending call the moment
         somebody edited config ``user`` (review round 3).  *user* is a
         deprecated no-op kept for older callers and is ignored.
+
+        *seats* and *roles*, when given (not ``None``), restrict the claim to
+        calls on one of those seats / roles -- a partitioned worker's queue.
+        Both default to ``None``, which claims across every seat and role
+        exactly as before.
 
         The select and the stamping happen inside one ``BEGIN IMMEDIATE``
         transaction, which is what makes the claim atomic: the write lock is
@@ -1079,7 +1137,13 @@ class SqliteStore:
         now = now or _utcnow()
 
         with self.transaction() as conn:
-            rows = _dicts(conn.execute(q.select_claimable(endpoints, now, limit)))
+            rows = _dicts(
+                conn.execute(
+                    q.select_claimable(
+                        endpoints, now, limit, seats=seats, roles=roles
+                    )
+                )
+            )
             if not rows:
                 return []
 
@@ -1325,8 +1389,15 @@ class SqliteStore:
         outcome_kind: str,
         usage: Optional[Mapping[str, Any]] = None,
         worker_id: Optional[str] = None,
+        queued_at: Optional[datetime] = None,
     ) -> None:
         """Record one try at a call.
+
+        ``queued_at`` writes the additive ``attempts.queued_at`` column added
+        for the per-queue worker's service-time split (``t2``); left
+        ``None`` (its default, and the column's own default) by any caller
+        that never measured a queue wait, which is "nothing to say" and not
+        the same claim as zero.
 
         Raises:
             ValueError: any argument carries prompt text -- a dict, at any
@@ -1334,15 +1405,16 @@ class SqliteStore:
                 is the audit trail and is readable by every user of a shared
                 store; see :func:`.queries.refuse_prompt_text`.
         """
-        q.refuse_prompt_text(
-            call_id=call_id,
-            attempt_no=attempt_no,
-            started_at=started_at,
-            finished_at=finished_at,
-            outcome_kind=outcome_kind,
-            usage=usage,
-            worker_id=worker_id,
-        )
+        # Pass every parameter this call received, derived from the call's
+        # own arguments rather than hand-copied -- `locals()` here, before
+        # any local variable is defined, is exactly the parameter dict minus
+        # `self`.  A hand-maintained kwargs list silently stops covering a
+        # parameter the moment one is added and this call site is not
+        # updated (that is the bug this guards against): `queued_at` was
+        # added to the signature without being added here.  Deriving the
+        # dict instead makes a future parameter covered automatically, with
+        # no second place to remember.
+        q.refuse_prompt_text(**{k: v for k, v in locals().items() if k != "self"})
         with self.transaction() as conn:
             conn.execute(
                 sch.attempts.insert(),
@@ -1356,6 +1428,7 @@ class SqliteStore:
                         "outcome_kind": outcome_kind,
                         "usage": usage,
                         "worker_id": worker_id,
+                        "queued_at": queued_at,
                     },
                 ),
             )

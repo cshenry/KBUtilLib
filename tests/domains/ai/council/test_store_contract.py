@@ -19,6 +19,7 @@ spends a token, needs a CLI login or needs a GPU.
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 from datetime import datetime, timedelta, timezone
 
@@ -117,6 +118,191 @@ class TestSchema:
         assert reopened.schema_version() == 99
         with pytest.raises(SchemaVersionMismatch):
             reopened.migrate()
+
+
+# ---------------------------------------------------------------------------
+# The additive column: attempts.queued_at
+# ---------------------------------------------------------------------------
+
+
+class TestAdditiveColumnQueuedAt:
+    """``attempts.queued_at`` on a store file that predates the column.
+
+    Mirrors the existing ``calls.normalised`` additive-column test: the
+    column is dropped from an otherwise-current store to stand in for one
+    built by an earlier binary, and ``migrate()`` must restore it without
+    touching -- or needing -- a ``SCHEMA_VERSION`` bump, and without
+    disturbing any pre-existing row.
+    """
+
+    def test_migrate_adds_the_column_and_keeps_every_row(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            started_at=T0,
+            finished_at=T0,
+            outcome_kind="transport",
+        )
+
+        with store.transaction() as conn:
+            conn.execute(sa.text("ALTER TABLE attempts DROP COLUMN queued_at"))
+        assert "queued_at" not in {
+            col["name"] for col in sa.inspect(store.engine).get_columns("attempts")
+        }
+        # Dropping the column by hand is not a version mismatch: the stamp
+        # never said anything about this column in the first place.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "queued_at" in {
+            col["name"] for col in sa.inspect(store.engine).get_columns("attempts")
+        }
+        # Idempotent: a second run adds nothing and does not raise.
+        assert store.add_missing_columns() == []
+        # No SCHEMA_VERSION bump was needed to do any of this.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        # Every pre-existing row -- job, item, call and attempt -- is intact.
+        assert store.get_job(job_id) is not None
+        stored_calls = store.get_calls(job_id)
+        assert len(stored_calls) == 1
+        assert stored_calls[0]["call_id"] == claim["call_id"]
+        with store.transaction() as conn:
+            attempt_rows = [
+                dict(row._mapping)
+                for row in conn.execute(
+                    sa.select(sch.attempts).where(
+                        sch.attempts.c.call_id == claim["call_id"]
+                    )
+                )
+            ]
+        assert len(attempt_rows) == 1
+        assert attempt_rows[0]["attempt_no"] == 1
+        assert attempt_rows[0]["outcome_kind"] == "transport"
+        # Nothing wrote the new column -- it reads back NULL, "nothing to say".
+        assert attempt_rows[0]["queued_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# The backfilled index: ix_calls_status_seat_not_before
+# ---------------------------------------------------------------------------
+
+
+class TestAdditiveIndexSeatNotBefore:
+    """``ix_calls_status_seat_not_before`` on a store file that predates it.
+
+    An earlier phase added this index to :mod:`.schema` to support the
+    seat-filtered claim scan, but ``metadata.create_all`` only creates an
+    index for a table it is ALSO creating -- it does nothing for a table
+    that already exists -- so a store already at SCHEMA_VERSION 2 never got
+    it.  ``migrate()`` must backfill it via ``add_missing_indexes()``, the
+    index-shaped twin of ``add_missing_columns()``: no SCHEMA_VERSION bump,
+    idempotent, and without disturbing any pre-existing row.  The index is
+    dropped by hand here to stand in for a store built before it existed.
+    """
+
+    @staticmethod
+    def _index_names(store, table_name: str) -> set:
+        return {
+            idx["name"] for idx in sa.inspect(store.engine).get_indexes(table_name)
+        }
+
+    def test_migrate_adds_the_index_and_keeps_every_row(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            started_at=T0,
+            finished_at=T0,
+            outcome_kind="transport",
+        )
+
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        assert "ix_calls_status_seat_not_before" not in self._index_names(
+            store, "calls"
+        )
+        # Dropping the index by hand is not a version mismatch: the stamp
+        # never said anything about this index in the first place.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        # The unpartitioned claim path's index is untouched throughout.
+        assert "ix_calls_status_not_before" in self._index_names(store, "calls")
+        # No SCHEMA_VERSION bump was needed to do any of this.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        # Every pre-existing job, item, call and attempt row is intact.
+        assert store.get_job(job_id) is not None
+        stored_calls = store.get_calls(job_id)
+        assert len(stored_calls) == 1
+        assert stored_calls[0]["call_id"] == claim["call_id"]
+        with store.transaction() as conn:
+            attempt_rows = [
+                dict(row._mapping)
+                for row in conn.execute(
+                    sa.select(sch.attempts).where(
+                        sch.attempts.c.call_id == claim["call_id"]
+                    )
+                )
+            ]
+        assert len(attempt_rows) == 1
+        assert attempt_rows[0]["attempt_no"] == 1
+        assert attempt_rows[0]["outcome_kind"] == "transport"
+
+    def test_add_missing_indexes_is_idempotent(self, store):
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        first = store.add_missing_indexes()
+        assert first == ["ix_calls_status_seat_not_before"]
+        # Running it again -- the store now already has the index -- is a
+        # no-op and must not raise.
+        second = store.add_missing_indexes()
+        assert second == []
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+
+    def test_a_store_already_carrying_the_index_is_untouched(self, store):
+        # `store` is freshly init_schema()'d, so it already has every index
+        # :mod:`.schema` declares.
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        assert store.add_missing_indexes() == []
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        assert "ix_calls_status_not_before" in self._index_names(store, "calls")
+
+    def test_unpartitioned_and_seat_filtered_claims_both_work_after_backfill(
+        self, store
+    ):
+        """The claim query behaves identically whether the index was there
+        from the start or just backfilled -- the index changes a scan's
+        plan, never a query's result."""
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "B", call_id="0-b"),
+                call_row("item-1", "A", call_id="1-a"),
+            ],
+        )
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        assert store.migrate() == sch.SCHEMA_VERSION
+
+        unfiltered = store.claim_calls("w0", {"argo"}, 10, now=T0, seats=None)
+        assert sorted(c["seat_name"] for c in unfiltered) == ["A", "B"]
+        for c in unfiltered:
+            store.release_call(c["call_id"], c["claim_token"], increment_attempt=False)
+
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, seats={"A"})
+        assert [c["seat_name"] for c in claimed] == ["A"]
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +1085,163 @@ class TestClaimCalls:
 
 
 # ---------------------------------------------------------------------------
+# The queue: claims filtered to a partition's seats / roles
+# ---------------------------------------------------------------------------
+
+
+class TestClaimCallsSeatsAndRoles:
+    def test_seats_a_never_returns_seat_b_with_b_at_the_fifo_head(self, store):
+        """B is FIFO head -- an unfiltered claim would return it first -- so
+        this would fail if the ``seats`` filter were a no-op."""
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                # Same job, item and role: the tiebreaker is call_id ascending,
+                # so "0-b" sorts before "1-a" and B is the FIFO head.
+                call_row("item-1", "B", call_id="0-b"),
+                call_row("item-1", "A", call_id="1-a"),
+            ],
+        )
+        unfiltered = store.claim_calls("w0", {"argo"}, 10, now=T0, seats=None)
+        assert [c["seat_name"] for c in unfiltered] == ["B", "A"]
+
+        store.release_call(
+            unfiltered[0]["call_id"],
+            unfiltered[0]["claim_token"],
+            increment_attempt=False,
+        )
+        store.release_call(
+            unfiltered[1]["call_id"],
+            unfiltered[1]["claim_token"],
+            increment_attempt=False,
+        )
+
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, seats={"A"})
+        assert [c["seat_name"] for c in claimed] == ["A"]
+
+    def test_roles_critic_never_returns_a_proposer_row(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "proposer_1", role="proposer"),
+                call_row("item-1", "critic", role="critic"),
+            ],
+        )
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, roles={"critic"})
+        assert [c["role"] for c in claimed] == ["critic"]
+
+    def test_seats_and_roles_combine(self, store):
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "A", role="proposer", call_id="call-a-proposer"),
+                call_row("item-1", "A", role="critic", call_id="call-a-critic"),
+                call_row("item-1", "B", role="critic", call_id="call-b-critic"),
+            ],
+        )
+        claimed = store.claim_calls(
+            "w1", {"argo"}, 10, now=T0, seats={"A"}, roles={"critic"}
+        )
+        assert [(c["seat_name"], c["role"]) for c in claimed] == [("A", "critic")]
+
+    def test_seats_none_and_roles_none_is_byte_identical_to_today(self, store):
+        """Same rows, same order, as a call with no seats/roles keyword at all.
+
+        The exact fixture and expected order of
+        ``test_claim_order_is_priority_then_submission_then_item_then_role``,
+        replayed with ``seats=None, roles=None`` passed explicitly: the
+        two-column WHERE addition in ``select_claimable`` must be a no-op
+        when both are ``None``.
+        """
+        store.create_job(
+            job_row(job_id="low", priority=50, submitted_at=T0),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="later", priority=100, submitted_at=T0 + timedelta(minutes=2)
+            ),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="first", priority=100, submitted_at=T0 + timedelta(minutes=1)
+            ),
+            [item_row("item-b", item_order=1), item_row("item-a", item_order=0)],
+            [
+                call_row("item-b", "proposer_1"),
+                call_row("item-a", "meta", role="meta"),
+                call_row("item-a", "critic", role="critic"),
+                call_row("item-a", "proposer_1"),
+            ],
+        )
+
+        explicit_none = store.claim_calls(
+            "w1", {"argo"}, 10, now=T0 + timedelta(hours=1), seats=None, roles=None
+        )
+
+        assert [(c["job_id"], c["item_id"], c["role"]) for c in explicit_none] == [
+            ("first", "item-a", "proposer"),
+            ("first", "item-a", "critic"),
+            ("first", "item-a", "meta"),
+            ("first", "item-b", "proposer"),
+            ("later", "item-1", "proposer"),
+            ("low", "item-1", "proposer"),
+        ]
+
+    def test_claim_order_is_unchanged_under_filtering(self, store):
+        """The four-tier order from the unfiltered test, replayed under a
+        seats filter that excludes nothing -- the order must not shift."""
+        store.create_job(
+            job_row(job_id="low", priority=50, submitted_at=T0),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="later", priority=100, submitted_at=T0 + timedelta(minutes=2)
+            ),
+            [item_row("item-1")],
+            [call_row("item-1", "proposer_1")],
+        )
+        store.create_job(
+            job_row(
+                job_id="first", priority=100, submitted_at=T0 + timedelta(minutes=1)
+            ),
+            [item_row("item-b", item_order=1), item_row("item-a", item_order=0)],
+            [
+                call_row("item-b", "proposer_1"),
+                call_row("item-a", "meta", role="meta"),
+                call_row("item-a", "critic", role="critic"),
+                call_row("item-a", "proposer_1"),
+            ],
+        )
+
+        claimed = store.claim_calls(
+            "w1",
+            {"argo"},
+            10,
+            now=T0 + timedelta(hours=1),
+            seats={"proposer_1", "critic", "meta"},
+            roles={"proposer", "critic", "meta"},
+        )
+
+        assert [(c["job_id"], c["item_id"], c["role"]) for c in claimed] == [
+            ("first", "item-a", "proposer"),
+            ("first", "item-a", "critic"),
+            ("first", "item-a", "meta"),
+            ("first", "item-b", "proposer"),
+            ("later", "item-1", "proposer"),
+            ("low", "item-1", "proposer"),
+        ]
+
+
+# ---------------------------------------------------------------------------
 # The queue: no double claim, across two real OS processes
 # ---------------------------------------------------------------------------
 
@@ -1299,6 +1642,97 @@ class TestRecordAttempt:
             claim["call_id"], 1, T0, T0, "ok", usage={"prompt_tokens": 3, "users": 1}
         )
         assert len(self._attempts(store)) == 1
+
+    @pytest.mark.parametrize(
+        "queued_at",
+        [
+            {"system": "You are a careful curator."},
+            {"user": "Map this protein: ..."},
+        ],
+        ids=["system", "user"],
+    )
+    def test_prompt_text_in_queued_at_is_refused(self, store, queued_at):
+        """The regression this task exists for.
+
+        An earlier phase added ``queued_at`` to ``record_attempt`` but never
+        added it to the ``refuse_prompt_text(...)`` call, so a dict carrying
+        prompt text passed as ``queued_at`` sailed straight into the
+        ``attempts`` table.  Nothing in the codebase actually does that
+        today -- every real caller passes a real ``datetime`` or ``None`` --
+        but the guard's promise is that ANY argument is checked, and this is
+        the one that silently was not.  This test is written to FAIL against
+        the base implementation (the hand-maintained kwargs list in
+        ``record_attempt`` that omits ``queued_at``) and to pass once the
+        guard call covers every parameter.
+        """
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        with pytest.raises(ValueError, match="prompt text"):
+            store.record_attempt(claim["call_id"], 1, T0, T0, "ok", queued_at=queued_at)
+        assert self._attempts(store) == []
+
+    def test_a_legitimate_queued_at_datetime_is_accepted_and_stored(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"], 1, T0, T0, "ok", queued_at=T0 - timedelta(seconds=5)
+        )
+        rows = self._attempts(store)
+        assert len(rows) == 1
+        assert rows[0]["queued_at"] == T0 - timedelta(seconds=5)
+
+    def test_queued_at_left_as_none_is_accepted(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(claim["call_id"], 1, T0, T0, "ok", queued_at=None)
+        rows = self._attempts(store)
+        assert len(rows) == 1
+        assert rows[0]["queued_at"] is None
+
+    def test_guard_coverage_is_structural_not_a_hand_maintained_list(self, store):
+        """The property this task actually buys: a parameter is covered by
+        construction, not because someone remembered to list it.
+
+        This enumerates ``record_attempt``'s LIVE signature rather than
+        naming each optional parameter by hand, so a parameter added after
+        this test was written is exercised by it automatically -- exactly
+        the gap that let ``queued_at`` go uncovered originally.  Every
+        optional parameter (one with a default, so passing a bad value for
+        it cannot be mistaken for a required-argument error) must refuse a
+        dict carrying prompt text.
+        """
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        base_args = {
+            "call_id": claim["call_id"],
+            "attempt_no": 1,
+            "started_at": T0,
+            "finished_at": T0,
+            "outcome_kind": "ok",
+        }
+        sig = inspect.signature(store.record_attempt)
+        optional_params = [
+            name
+            for name, param in sig.parameters.items()
+            if param.default is not inspect.Parameter.empty
+        ]
+        # Fails loudly rather than vacuously passing if record_attempt's
+        # signature ever loses its optional parameters.
+        assert set(optional_params) >= {"usage", "worker_id", "queued_at"}
+        for name in optional_params:
+            kwargs = dict(base_args)
+            kwargs[name] = {"system": "leaked prompt"}
+            with pytest.raises(ValueError, match="prompt text"):
+                store.record_attempt(**kwargs)
+        assert self._attempts(store) == []
 
 
 # ---------------------------------------------------------------------------

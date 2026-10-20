@@ -221,27 +221,50 @@ class OntologyMappingUtils(SharedEnvUtils):
             for row in council.results(job_id):
                 verdicts[str(row.get("item_id"))] = row
 
+        # A council item whose calls all failed settles with status "error" and an
+        # EMPTY verdict, while the job still reports "done" with no blockers. An
+        # empty pick must never be mistaken for "the council chose nothing", so an
+        # errored item is labelled council_error and counted, never left blank.
         results = []
+        errored = 0
         for r in ranked["results"]:
             out = {k: r[k] for k in ("query_id", "text", "source", "abstained", "abstain_reason")}
             row = verdicts.get(item_of_text.get(r["text"], ""))
             verdict = _verdict_of(row)
+            item_status = (row or {}).get("status")
+            if row is None:
+                decline = "abstained" if r["abstained"] else ("no_candidates" if not r["candidates"] else "not_decided")
+            elif item_status not in (None, "ok"):
+                decline = f"council_error:{item_status}"
+                errored += 1
+                verdict = {}
+            else:
+                decline = verdict.get("decline_reason")
             out.update({
                 "selected_go_ids": list(verdict.get("selected_ids") or []),
                 "final_confidence": verdict.get("final_confidence"),
-                "decline_reason": verdict.get("decline_reason") if row else (
-                    "abstained" if r["abstained"] else ("no_candidates" if not r["candidates"] else "not_decided")),
+                "decline_reason": decline,
                 "decided_by": verdict.get("decided_by"),
+                "council_item_status": item_status,
                 "names": {g: go_text.load_metadata().name.get(g) for g in (verdict.get("selected_ids") or [])},
                 "verdict": row,
             })
             results.append(out)
+        job = {k: v for k, v in status.items() if k != "worker"}
+        by_status = dict(job.get("by_status") or {})
+        warnings = []
+        if errored or by_status.get("error"):
+            warnings.append(
+                f"{max(errored, by_status.get('error', 0))} council item(s) ERRORED (no verdict); "
+                "they are marked decline_reason=council_error:* -- check `kbu council jobs status "
+                f"{job_id}` and resume with job_id= once the seat is fixed"
+            )
         return {
             "mapping_version": ranked["mapping_version"],
             "mapping_hash": ranked["mapping_hash"],
             "council": {"job_id": job_id, "query": query, "profile": profile,
-                        "status": {k: v for k, v in status.items() if k != "worker"},
-                        "worker": status.get("worker")},
+                        "status": job, "worker": status.get("worker"),
+                        "errored_items": errored, "warnings": warnings},
             "results": results,
         }
 

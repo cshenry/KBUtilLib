@@ -71,7 +71,7 @@ REMOVED_IN_V2 = (
 #: the meaning of an existing row -- which is why it does not need a version
 #: bump.  ``SqliteStore.migrate()`` adds any that a store is missing; nothing
 #: else in the store layer may use this list to skip a real migration.
-ADDITIVE_COLUMNS = (("calls", "normalised"),)
+ADDITIVE_COLUMNS = (("calls", "normalised"), ("attempts", "queued_at"))
 
 
 class UtcDateTime(sa.types.TypeDecorator):
@@ -265,6 +265,16 @@ calls = sa.Table(
     ),
     # Claim scan: "pending calls that are due".
     sa.Index("ix_calls_status_not_before", "status", "not_before"),
+    # Partitioned claim scan: "this seat's pending calls that are due".  Left
+    # alongside the unpartitioned index above rather than replacing it: a
+    # worker with no seats declared still scans by (status, not_before) alone.
+    #
+    # Added after some stores already existed at SCHEMA_VERSION 2, which is
+    # exactly the case ``SqliteStore.add_missing_indexes()`` backfills onto an
+    # existing store at ``migrate()`` time -- declaring an index here is
+    # enough; nothing further has to be wired up for it to reach an existing
+    # store.
+    sa.Index("ix_calls_status_seat_not_before", "status", "seat_name", "not_before"),
     # Reuse lookup: find_reusable(prompt_hash) wants status 'ok' rows.
     sa.Index("ix_calls_prompt_hash_status", "prompt_hash", "status"),
     # search_calls(): "what has this model already said about this entity?"
@@ -299,6 +309,14 @@ attempts = sa.Table(
     sa.Column("outcome_kind", _ENUM, nullable=True),
     sa.Column("usage", sa.JSON, nullable=True),
     sa.Column("worker_id", _ID, nullable=True),
+    # When the call entered the slot queue, written by the same code that
+    # writes ``started_at`` once a slot is acquired.  Nullable with no
+    # default (see ADDITIVE_COLUMNS): an existing row's absence of this
+    # column means "nothing to say", not "zero wait", so adding it changes
+    # the meaning of no row and needs no SCHEMA_VERSION bump.  Service time
+    # is ``finished_at - started_at``; queue wait is ``started_at -
+    # queued_at``.
+    sa.Column("queued_at", UtcDateTime, nullable=True),
 )
 
 

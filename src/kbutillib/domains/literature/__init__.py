@@ -21,12 +21,16 @@ __all__ = [
     "EuropePMCClient",
     "EuropePMCClientImpl",
     "LiteratureCache",
+    "PaperBLASTUtils",
+    "PaperBLASTUtilsImpl",
     "alias_query",
     "canonical_paper_id",
     "default_cache_path",
     "merge_ids",
     "normalise_paper_id",
+    "parse_stats",
     "resolve_cache_path",
+    "split_db_id",
 ]
 
 _MODULE_MAP: dict[str, str] = {
@@ -39,6 +43,10 @@ _MODULE_MAP: dict[str, str] = {
     "LiteratureCache": "cache",
     "default_cache_path": "cache",
     "resolve_cache_path": "cache",
+    "PaperBLASTUtils": "paperblast",
+    "PaperBLASTUtilsImpl": "paperblast",
+    "parse_stats": "paperblast",
+    "split_db_id": "paperblast",
 }
 
 

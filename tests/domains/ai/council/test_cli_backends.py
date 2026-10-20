@@ -42,6 +42,16 @@ from kbutillib.domains.ai.council.backends.cli import (
     ClaudeCliBackend,
     CodexCliBackend,
 )
+
+# The web-search flag values, imported rather than re-spelled so a test
+# cannot assert a spelling the shipped code does not use.  They come from the
+# llm package because the council shim re-exports only the M1 surface.
+from kbutillib.domains.ai.llm.apis.cli import (
+    CLAUDE_WEB_SEARCH_ALLOWED_TOOLS,
+    CLAUDE_WEB_SEARCH_TOOLS,
+    CODEX_WEB_SEARCH_FLAG,
+)
+from kbutillib.domains.ai.llm.types import LLMRequest
 from kbutillib.domains.ai.council.backends.cli_common import (
     CHILD_ENV_ALLOWLIST,
     DENIED_BILLING_VARS,
@@ -1940,3 +1950,379 @@ class TestTheProtocolSurface:
         backend = CodexCliBackend(config={"executable": "/opt/bin/codex", "name": "cx"})
         assert backend.executable == "/opt/bin/codex"
         assert backend.name == "cx"
+
+
+# ---------------------------------------------------------------------------
+# Web search: opt-in only, through the REAL execution path
+# ---------------------------------------------------------------------------
+
+
+def llm_request(**kw: Any) -> LLMRequest:
+    """An :class:`LLMRequest` carrying the same prompts as :func:`request`.
+
+    The web-search opt-in lives in ``params``, which is the llm layer's own
+    vocabulary, so these tests go in through ``LLMRequest`` rather than
+    through the council's ``CompletionRequest``.  ``complete()`` accepts both.
+    """
+    base: Dict[str, Any] = {
+        "model": MODEL,
+        "system": SYSTEM,
+        "user": USER,
+        "json_schema": SCHEMA,
+        "timeout_s": 30,
+    }
+    base.update(kw)
+    return LLMRequest(**base)
+
+
+def _fill(golden: list, **subs: str) -> list:
+    """*golden* with each whole-entry ``{name}`` placeholder replaced.
+
+    Entry-by-entry rather than ``str.format``, because one of the golden
+    entries is a JSON schema whose braces ``format`` would try to read as
+    fields.  Every other entry is compared verbatim, which is the point of a
+    golden list.
+    """
+    return [subs.get(entry[1:-1], entry) if entry in {
+        "{" + name + "}" for name in subs
+    } else entry for entry in golden]
+
+
+#: The Claude command line as it stood at the base commit, before web search
+#: existed.  A LITERAL list on purpose: deriving it from the code under test
+#: would assert that ``argv`` equals itself.  ``{exe}`` is substituted.
+CLAUDE_BASE_GOLDEN = [
+    "{exe}",
+    "-p",
+    "--output-format",
+    "json",
+    "--json-schema",
+    json.dumps(SCHEMA),
+    "--model",
+    MODEL,
+    "--system-prompt",
+    SYSTEM,
+    "--no-session-persistence",
+    "--tools",
+    "",
+]
+
+#: The Codex command line as it stood at the base commit.  ``{exe}``,
+#: ``{schema}`` and ``{output}`` are substituted.
+CODEX_BASE_GOLDEN = [
+    "{exe}",
+    "exec",
+    "--model",
+    MODEL,
+    "--output-schema",
+    "{schema}",
+    "-o",
+    "{output}",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "-",
+]
+
+
+class TestClaudeWebSearchArgv:
+    """``params={"web_search": True}`` changes the ``--tools`` pair and nothing else.
+
+    Every test drives the backend's REAL execution path: a fake executable on
+    disk, invoked by the backend's own ``run_cli``/``create_subprocess_exec``,
+    which writes the argv it was handed to a JSON file.  The assertions read
+    that file.  Nothing is monkeypatched -- not ``argv``, not the runner --
+    so a pass is evidence about the shipped command line.
+    """
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param(None, id="absent"),
+            pytest.param({}, id="empty"),
+            pytest.param({"web_search": False}, id="false"),
+            pytest.param({"web_search": None}, id="none"),
+        ],
+        ids=None,
+    )
+    def test_without_the_opt_in_the_argv_is_the_base_commit_s_byte_for_byte(
+        self, tmp_path: Path, ready_home: Path, params: Optional[Dict[str, Any]]
+    ) -> None:
+        """The default path must not move: the council is a live consumer."""
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(
+            backend.complete(
+                llm_request() if params is None else llm_request(params=params)
+            )
+        )
+
+        assert result.ok is True, result.error
+        assert fake.record["argv"] == _fill(CLAUDE_BASE_GOLDEN, exe=str(fake))
+
+    def test_the_opt_in_carries_the_documented_flags(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``--tools WebSearch,WebFetch`` plus the variadic ``--allowedTools``.
+
+        Both spellings are from the installed ``claude --help`` (2.1.269),
+        quoted in ``llm/apis/cli_common.py``: ``--tools`` takes a
+        comma-separated list, ``--allowedTools`` is variadic.
+        """
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(llm_request(params={"web_search": True})))
+
+        assert result.ok is True, result.error
+        assert fake.record["argv"] == [
+            str(fake),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(SCHEMA),
+            "--model",
+            MODEL,
+            "--system-prompt",
+            SYSTEM,
+            "--no-session-persistence",
+            "--tools",
+            "WebSearch,WebFetch",
+            "--allowedTools",
+            "WebSearch",
+            "WebFetch",
+        ]
+
+    def test_the_empty_tools_string_is_gone_rather_than_kept_alongside(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``--tools ""`` and ``--tools WebSearch,WebFetch`` would contradict.
+
+        The opt-in REPLACES the pair; it does not append a second one, which
+        a CLI would resolve by last-wins or by erroring and either way would
+        make the command line a guess.
+        """
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(backend.complete(llm_request(params={"web_search": True})))
+
+        argv = fake.record["argv"]
+        assert argv.count("--tools") == 1
+        assert argv[argv.index("--tools") + 1] == CLAUDE_WEB_SEARCH_TOOLS
+        assert "" not in argv
+
+    def test_the_allowed_tools_pair_is_last_so_nothing_is_swallowed(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``--allowedTools`` is variadic and eats every following plain token."""
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(backend.complete(llm_request(params={"web_search": True})))
+
+        argv = fake.record["argv"]
+        tail = argv[argv.index("--allowedTools") + 1 :]
+        assert tail == list(CLAUDE_WEB_SEARCH_ALLOWED_TOOLS)
+        assert not any(entry.startswith("-") for entry in tail)
+
+    def test_the_forbidden_flags_stay_absent_with_web_search_on(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Opting into two named tools must not widen anything else."""
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(backend.complete(llm_request(params={"web_search": True})))
+
+        argv = fake.record["argv"]
+        assert "--bare" not in argv
+        assert "--dangerously-skip-permissions" not in argv
+        assert "--allow-dangerously-skip-permissions" not in argv
+        assert "--add-dir" not in argv
+
+    def test_the_prompt_still_arrives_on_stdin_and_not_in_argv(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(backend.complete(llm_request(params={"web_search": True})))
+
+        record = fake.record
+        assert record["stdin"] == USER
+        assert not any(USER in entry for entry in record["argv"])
+
+    def test_a_council_seat_can_opt_in_through_its_extra_block(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Configuration route: ``SeatSpec.extra`` becomes ``LLMRequest.params``.
+
+        This is how an endpoint turns search on without a caller writing
+        code, so the two routes must produce the same command line.
+        """
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(
+            backend.complete(
+                request(seat_kw={"extra": {"web_search": True}})
+            )
+        )
+
+        argv = fake.record["argv"]
+        assert argv[argv.index("--tools") + 1] == CLAUDE_WEB_SEARCH_TOOLS
+        assert "--allowedTools" in argv
+
+
+class TestCodexWebSearchArgv:
+    """``--search`` goes BEFORE ``exec``, and the sandbox does not move.
+
+    Same real execution path as the Claude tests: a fake ``codex`` on disk,
+    the backend's own subprocess call, assertions against the argv file the
+    child wrote.
+    """
+
+    def _run(
+        self, tmp_path: Path, home: Path, **req_kw: Any
+    ) -> Fake:
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=home, _parent_env={})
+        result = run(backend.complete(llm_request(**req_kw)))
+        assert result.ok is True, result.error
+        return fake
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param(None, id="absent"),
+            pytest.param({}, id="empty"),
+            pytest.param({"web_search": False}, id="false"),
+            pytest.param({"web_search": None}, id="none"),
+        ],
+    )
+    def test_without_the_opt_in_the_argv_is_the_base_commit_s_byte_for_byte(
+        self, tmp_path: Path, ready_home: Path, params: Optional[Dict[str, Any]]
+    ) -> None:
+        fake = self._run(
+            tmp_path, ready_home, **({} if params is None else {"params": params})
+        )
+        record = fake.record
+        cwd = Path(record["cwd"])
+
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            _fill(
+                CODEX_BASE_GOLDEN,
+                exe=str(fake),
+                schema=str(cwd / CODEX_SCHEMA_NAME),
+                output=str(cwd / CODEX_OUTPUT_NAME),
+            )
+        )
+
+    def test_the_opt_in_adds_search_before_the_exec_subcommand(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Measured on codex-cli 0.160.0: ``codex exec --search`` exits 2.
+
+        ``--search`` is a TOP-LEVEL option -- it is in ``codex --help`` and
+        not in ``codex exec --help`` -- so its position is the whole
+        correctness question here, not a style choice.  The help lines and
+        both probe exit codes are quoted in ``llm/apis/cli_common.py``.
+        """
+        fake = self._run(tmp_path, ready_home, params={"web_search": True})
+        record = fake.record
+        cwd = Path(record["cwd"])
+
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                CODEX_WEB_SEARCH_FLAG,
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(cwd / CODEX_SCHEMA_NAME),
+                "-o",
+                str(cwd / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
+        argv = record["argv"]
+        assert argv.index(CODEX_WEB_SEARCH_FLAG) < argv.index("exec")
+
+    def test_the_sandbox_stays_read_only_and_the_user_config_stays_ignored(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Search is the provider reading the web, not the agent writing to disk.
+
+        Neither reason to be strict has gone away: a wider sandbox would let
+        the child write, and loading ``config.toml`` could re-route the call
+        to a metered provider.
+        """
+        argv = self._run(
+            tmp_path, ready_home, params={"web_search": True}
+        ).record["argv"]
+
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert "--ignore-user-config" in argv
+        assert "--ephemeral" in argv
+        assert "--skip-git-repo-check" in argv
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        assert "--dangerously-bypass-hook-trust" not in argv
+        assert "--add-dir" not in argv
+
+    def test_the_prompt_still_arrives_on_stdin_and_not_in_argv(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        record = self._run(
+            tmp_path, ready_home, params={"web_search": True}
+        ).record
+        assert record["stdin"] == f"{SYSTEM}\n\n{USER}"
+        assert record["argv"][-1] == "-"
+        assert not any(USER in entry for entry in record["argv"])
+
+    def test_a_council_seat_can_opt_in_through_its_extra_block(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(
+            backend.complete(
+                request(
+                    seat_kw={
+                        "endpoint_kind": "codex_cli",
+                        "extra": {"web_search": True},
+                    }
+                )
+            )
+        )
+
+        argv = fake.record["argv"]
+        assert argv[1] == CODEX_WEB_SEARCH_FLAG
+
+
+class TestCliBackendsDeclareWebSearchSupport:
+    """Both CLI backends report the capability, as a free class attribute."""
+
+    @pytest.mark.parametrize("cls", [ClaudeCliBackend, CodexCliBackend])
+    def test_the_class_attribute_is_true(self, cls: Any) -> None:
+        # On the CLASS, so a caller can ask before constructing anything and
+        # certainly before spending a token.
+        assert cls.supports_web_search is True
+        assert cls("no-such-cli").supports_web_search is True
+
+    def test_the_shared_base_defaults_to_false(self) -> None:
+        """A subclass that has not thought about it inherits the safe answer."""
+        from kbutillib.domains.ai.llm.apis.cli_common import CliBackend
+
+        assert CliBackend.supports_web_search is False

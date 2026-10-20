@@ -21,6 +21,14 @@ the per-family rules (which models take ``max_tokens`` versus
 token floor) are his findings against the live gateway, and the credit for
 them is his.
 
+Neither backend has live web search, and both say so: ``supports_web_search``
+is ``False`` on each, and a request carrying ``params={"web_search": True}``
+is refused with ``ok=False`` / ``invalid_output`` by
+:meth:`~.http_common.HttpBackend._complete` before a socket is touched.  The
+refusal lives in the shared base because that is where the single request
+path is -- putting it in each subclass would be two copies of one guard, and
+a third HTTP backend added later would silently miss it.
+
 Neither backend starts, stops or supervises a model, and between them they
 request exactly two paths -- ``/v1/chat/completions`` and ``/v1/models``.
 There is no control plane to consult: review round 2 took model management out
@@ -208,6 +216,10 @@ class ArgoBackend(HttpBackend):
     kind = "argo"
     default_base_url = ARGO_BASE_URL
 
+    #: ARGO's OpenAI-compatible surface exposes no search tool, so a call
+    #: that needs the live web must be given it in the prompt.
+    supports_web_search = False
+
     @property
     def user_env(self) -> str:
         """Name of the environment variable holding the ANL username."""
@@ -279,6 +291,10 @@ class OpenAICompatibleBackend(HttpBackend):
     """
 
     kind = "openai"
+
+    #: A self-hosted model behind a vLLM port has no tool runtime and no
+    #: outbound network of its own, so there is nothing here to search with.
+    supports_web_search = False
 
     def _bearer(self) -> Tuple[Optional[str], Optional[LLMError]]:
         """An explicit key, else the key named by ``api_key_env``, else ``EMPTY``.

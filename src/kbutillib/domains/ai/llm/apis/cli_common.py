@@ -81,6 +81,63 @@ confirms why:
 * ``--skip-git-repo-check`` -- "Allow running Codex outside a Git repository",
   needed because :func:`run_cli` runs in a bare temporary directory.
 
+Web search, re-read off the SAME installed CLIs, 2026-10-20
+------------------------------------------------------------
+
+Opt-in only: ``LLMRequest.params["web_search"] = True``.  Both spellings
+below were taken from the installed ``--help`` and confirmed by a
+PARSE-ONLY probe -- a command line ending in a deliberately invalid flag, so
+the CLI reports the first option it does not recognise and exits without
+sending a prompt.  **No prompt was sent through either real CLI** and no
+token was spent, so the claim made at the top of this docstring still holds.
+
+``claude --help`` (``2.1.269``), the two flags the Claude web-search argv
+adds:
+
+* ``--tools <tools...>`` -- "Specify the list of available tools from the
+  built-in set.  Use "" to disable all tools, "default" to use all tools, or
+  specify tool names (e.g. "Bash,Edit,Read")."  So the COMMA-separated form
+  is the documented spelling, and ``WebSearch,WebFetch`` replaces the ``""``
+  that the default argv passes.
+* ``--allowedTools, --allowed-tools <tools...>`` -- "Comma or space-separated
+  list of tool names to allow (e.g. "Bash(git *) Edit")".  Variadic, which is
+  why the two tool names are separate argv entries and why this pair is
+  APPENDED LAST: the next token would otherwise be swallowed as a third tool
+  name.
+* Probe: ``claude -p ... --tools 'WebSearch,WebFetch' --allowedTools
+  WebSearch WebFetch --zzz-not-a-real-flag`` exited 1 with
+  ``error: unknown option '--zzz-not-a-real-flag'`` -- i.e. every option
+  BEFORE the sentinel was recognised.  The control
+  (``claude -p --definitely-not-a-flag 'say OK'``) exits 1 the same way and
+  makes no model call, which is what makes the sentinel probe free.
+
+``codex --help`` (``codex-cli 0.160.0``).  The switch is a **TOP-LEVEL**
+option and is NOT listed by ``codex exec --help``:
+
+* ``--search`` -- "Enable live web search.  When enabled, the native
+  Responses ``web_search`` tool is available to the model (no per-call
+  approval)".
+
+  It must therefore come BEFORE the ``exec`` subcommand.  Measured on the
+  installed version:
+
+  * ``codex --search exec --help`` -> exit 0, prints the ``exec`` help.
+  * ``codex exec --search --help`` -> exit **2**,
+    ``error: unexpected argument '--search' found``.
+
+  No ``-c`` config-override equivalent is documented in either help text, so
+  the top-level flag is used rather than a guessed ``-c`` key.  The full
+  web-search argv was parse-checked as well:
+  ``codex --search exec --model gpt-5 --output-schema <f> -o <f> --ephemeral
+  --ignore-user-config --sandbox read-only --skip-git-repo-check --help``
+  -> exit 0.
+
+``--sandbox read-only`` and ``--ignore-user-config`` are kept on the
+web-search command line unchanged, and that is not an oversight.  Search is
+the model reading the web through the provider's own tool; it is not the
+agent running shell commands, so there is no reason to widen the sandbox,
+and widening it is exactly the mistake this note exists to prevent.
+
 Config-file locations and KEY NAMES (names only -- no value was printed):
 
 * ``~/.claude/settings.json`` and ``~/.claude/settings.local.json`` both
@@ -909,6 +966,12 @@ class CliBackend:
 
     kind: str = "claude_cli"
     default_executable: str = "claude"
+
+    #: Optional ``ApiType`` member (see :mod:`..protocol`): can this API type
+    #: run a call with live web search?  ``False`` here so a subclass that has
+    #: not thought about it inherits the safe answer; both shipped CLI
+    #: backends override it to ``True``.
+    supports_web_search: bool = False
 
     def __init__(
         self,

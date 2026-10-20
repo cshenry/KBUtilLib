@@ -40,6 +40,7 @@ from ..types import (
     InvalidOutput,
     LLMRequest,
     LLMResult,
+    wants_web_search,
 )
 from .cli_common import (
     OUTPUT_EXCERPT_CHARS,
@@ -52,8 +53,11 @@ from .cli_common import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CLAUDE_WEB_SEARCH_ALLOWED_TOOLS",
+    "CLAUDE_WEB_SEARCH_TOOLS",
     "CODEX_OUTPUT_NAME",
     "CODEX_SCHEMA_NAME",
+    "CODEX_WEB_SEARCH_FLAG",
     "ClaudeCliBackend",
     "CodexCliBackend",
 ]
@@ -63,6 +67,28 @@ __all__ = [
 #: same files it expects to see in ``argv``.
 CODEX_SCHEMA_NAME = "schema.json"
 CODEX_OUTPUT_NAME = "last.txt"
+
+#: Value for Claude's ``--tools`` when a request opted into web search.  Its
+#: own ``--help`` documents the comma-separated form; this REPLACES the ``""``
+#: of the default argv, which means "no tools at all".
+CLAUDE_WEB_SEARCH_TOOLS = "WebSearch,WebFetch"
+
+#: What Claude's variadic ``--allowedTools`` is given when a request opted
+#: into web search -- separate argv entries, appended LAST, because a
+#: variadic option swallows every following non-flag token.
+#:
+#: Both tools are pre-allowed rather than only ``WebSearch``.  Under ``-p``
+#: there is no human to approve anything, so a tool that is AVAILABLE but not
+#: ALLOWED cannot run at all: leaving ``WebFetch`` out would let the model
+#: find a URL and then be unable to read it, which is the half-working state
+#: that looks like a model failure.
+CLAUDE_WEB_SEARCH_ALLOWED_TOOLS = ("WebSearch", "WebFetch")
+
+#: Codex's web-search switch.  A **top-level** option -- it is documented by
+#: ``codex --help`` and REJECTED after the ``exec`` subcommand (measured:
+#: ``codex exec --search`` exits 2 with "unexpected argument"), so it goes
+#: between the executable and ``exec``.  Quoted in :mod:`.cli_common`.
+CODEX_WEB_SEARCH_FLAG = "--search"
 
 
 def _int_or_none(value: Any) -> Optional[int]:
@@ -89,10 +115,22 @@ class ClaudeCliBackend(CliBackend):
     * **``--dangerously-skip-permissions``** would bypass every permission
       check.  A council seat picks ids from a closed menu; it has no business
       touching the filesystem at all, which is what ``--tools ""`` says.
+
+    One thing is OPT-IN and changes the ``--tools`` pair: a request carrying
+    ``params={"web_search": True}`` gets
+    ``--tools WebSearch,WebFetch --allowedTools WebSearch WebFetch`` instead
+    of ``--tools ""``.  Nothing else about the command line moves, and
+    ``--dangerously-skip-permissions`` is still absent -- ``--allowedTools``
+    names the two tools EXPLICITLY, which is the narrow grant; skipping
+    permissions would be the broad one.
     """
 
     kind = "claude_cli"
     default_executable = "claude"
+
+    #: ``claude --help`` documents ``--tools``/``--allowedTools``, and
+    #: ``WebSearch``/``WebFetch`` are in its built-in tool set.
+    supports_web_search = True
 
     def __init__(
         self,
@@ -118,8 +156,14 @@ class ClaudeCliBackend(CliBackend):
         the test asserts it flag by flag, and a reviewer should be able to
         read it without following it through a subprocess call.  The USER
         prompt is NOT here -- it goes in on stdin.
+
+        Without ``params={"web_search": True}`` this is BYTE-IDENTICAL to the
+        command line before web search existed, which is a deliberate
+        property and is asserted against a literal golden list: the council
+        is a live consumer of this argv and an accidental extra flag is a
+        security change, not a feature.
         """
-        return [
+        argv = [
             self.executable,
             "-p",
             "--output-format",
@@ -131,9 +175,17 @@ class ClaudeCliBackend(CliBackend):
             "--system-prompt",
             req.system,
             "--no-session-persistence",
-            "--tools",
-            "",
         ]
+        if not wants_web_search(req):
+            return argv + ["--tools", ""]
+        # The variadic ``--allowedTools`` goes LAST: it swallows every
+        # following non-flag token, and the prompt is on stdin so there is
+        # nothing after it to swallow.
+        return (
+            argv
+            + ["--tools", CLAUDE_WEB_SEARCH_TOOLS, "--allowedTools"]
+            + list(CLAUDE_WEB_SEARCH_ALLOWED_TOOLS)
+        )
 
     async def _run(self, req: LLMRequest, started: float) -> LLMResult:
         """Run one ``claude -p`` invocation and read its result envelope."""
@@ -320,10 +372,21 @@ class CodexCliBackend(CliBackend):
 
     ``--skip-git-repo-check`` is required because :func:`run_cli` runs the
     child in a bare temporary directory, which is not a git repository.
+
+    Web search is OPT-IN and adds exactly one token: a request carrying
+    ``params={"web_search": True}`` gets :data:`CODEX_WEB_SEARCH_FLAG`
+    BEFORE the ``exec`` subcommand, because that is where the installed CLI
+    accepts it.  ``--sandbox read-only`` and ``--ignore-user-config`` are
+    unchanged -- search is the provider's own tool reading the web, not the
+    agent writing to disk or loading a config that could re-route the
+    billing, so neither of those two reasons to be strict has gone away.
     """
 
     kind = "codex_cli"
     default_executable = "codex"
+
+    #: ``codex --help`` documents ``--search`` ("Enable live web search").
+    supports_web_search = True
 
     def __init__(
         self,
@@ -350,9 +413,17 @@ class CodexCliBackend(CliBackend):
         ``"-"`` is the installed CLI's documented spelling of "read the
         prompt from stdin", so neither the system nor the user prompt appears
         here.
+
+        Without ``params={"web_search": True}`` this is BYTE-IDENTICAL to the
+        command line before web search existed, and is asserted against a
+        literal golden list for the same reason as Claude's.
         """
-        return [
-            self.executable,
+        leading = [self.executable]
+        if wants_web_search(req):
+            # A TOP-LEVEL option: ``codex exec --search`` exits 2 with
+            # "unexpected argument", so it cannot go with the other flags.
+            leading.append(CODEX_WEB_SEARCH_FLAG)
+        return leading + [
             "exec",
             "--model",
             req.model,

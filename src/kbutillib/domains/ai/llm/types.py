@@ -33,6 +33,7 @@ from ....core.errors import KBUtilLibError
 
 __all__ = [
     "LLM_ERROR_KINDS",
+    "WEB_SEARCH_PARAM",
     "AuthError",
     "BillingGuardRefused",
     "CallError",
@@ -48,6 +49,7 @@ __all__ = [
     "as_llm_error",
     "as_llm_request",
     "generation_params",
+    "wants_web_search",
 ]
 
 #: Every ``LLMError.kind`` an API type may report.  A caller may define more
@@ -63,6 +65,19 @@ LLM_ERROR_KINDS = (
     "model_unavailable",
     "invalid_output",
 )
+
+#: The :attr:`LLMRequest.params` key a caller sets to opt ONE call into live
+#: web search: ``params={"web_search": True}``.
+#:
+#: Named here rather than spelled as a literal in four places because it is
+#: read on both sides of the same fence -- an API type that CAN search reads
+#: it to add the provider's flag, and one that cannot reads it to refuse --
+#: and a typo in one of those two places would silently search nothing while
+#: reporting success.  It is also the one ``params`` key that must NEVER be
+#: forwarded to a provider as a generation parameter (see
+#: ``HttpBackend._model_params``): it is an instruction to the API TYPE about
+#: how to make the call, not a knob on the model.
+WEB_SEARCH_PARAM = "web_search"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +231,11 @@ class LLMRequest(BaseModel):
             is not the same as sending zero -- several models reject an
             explicit temperature outright.
         params: provider extras, merged over the API type's own mapping.  A
-            model's configured ``top_p`` arrives here.
+            model's configured ``top_p`` arrives here.  One key is special
+            and is not a generation parameter at all:
+            :data:`WEB_SEARCH_PARAM` (``"web_search"``) opts this call into
+            live web search on an API type whose ``supports_web_search`` is
+            true, and is refused by one whose is not.
         timeout_s: wall-clock budget for this one call.
         trace_id: an opaque caller-side label.  Never sent to a provider; it
             is how a reply is matched back to what asked for it.
@@ -340,3 +359,19 @@ def generation_params(spec: Any) -> Dict[str, Any]:
     }
     params.update(dict(request.params or {}))
     return params
+
+
+def wants_web_search(request: Any) -> bool:
+    """Did *request* opt into live web search?
+
+    True only for a TRUTHY :data:`WEB_SEARCH_PARAM` in ``params``; an absent
+    key and an explicit ``False`` are the same answer, which is what keeps a
+    caller that always writes ``web_search=False`` on the byte-identical
+    default command line.
+
+    Accepts anything :func:`as_llm_request` reads, so a council
+    ``CompletionRequest`` (whose seat's ``extra`` block becomes ``params``)
+    can opt in through configuration without a second code path.
+    """
+    params = dict(as_llm_request(request).params or {})
+    return bool(params.get(WEB_SEARCH_PARAM))

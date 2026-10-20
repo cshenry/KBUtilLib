@@ -1,0 +1,15 @@
+{
+  "version": "6.9",
+  "hitCount": 0,
+  "request": {
+    "queryString": "(EXT_ID:99999999999 AND SRC:MED)",
+    "resultType": "core",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "format": "json",
+    "synonym": false
+  },
+  "resultList": {
+    "result": []
+  }
+}

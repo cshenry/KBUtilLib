@@ -1825,21 +1825,37 @@ _ECOLI_RRND_REGION = "".join(
 )
 
 
-def _real_image_present() -> bool:
-    """Return True if ``docker image inspect kbutillib/bakta:1.11.4`` exits 0.
+def _real_image_present(image: str = REAL_IMAGE) -> bool:
+    """Return True if ``docker image inspect <image>`` exits 0.
+
+    Args:
+        image: Image reference to probe; defaults to :data:`REAL_IMAGE`.
 
     Returns:
-        True when the pinned image is present locally.
+        True when the image is present locally. False — never an exception —
+        when Docker is absent, times out, or does not know the image, so the
+        integration test skips rather than errors on a Docker-less host.
     """
     try:
         completed = subprocess.run(
-            ["docker", "image", "inspect", REAL_IMAGE],
+            ["docker", "image", "inspect", image],
             capture_output=True,
             timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
     return completed.returncode == 0
+
+
+class TestIntegrationSkipGuard:
+    """The integration test's own skip condition behaves."""
+
+    def test_absent_image_is_reported_absent(self):
+        """So the integration class skips, rather than erroring, off-poplar."""
+        assert _real_image_present("kbutillib/definitely-not-an-image:0") is False
+
+    def test_db_env_var_name_is_the_documented_one(self):
+        assert BAKTA_DB_ENV == "KBUTILLIB_TEST_BAKTA_DB"
 
 
 def _reverse_complement(sequence: str) -> str:

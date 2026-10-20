@@ -237,6 +237,27 @@
           "max_retries": 0
         }
       ]
+    },
+    {
+      "name": "Daemon batch-config wiring",
+      "parallel_group": [
+        {
+          "task_id": "t15-daemon-batch-config-wiring",
+          "lane": "in_context",
+          "role": "developer",
+          "prompt": "Thread the queue's batching configuration from `QueueConfig` into the worker the daemon constructs. It is currently NOT passed, so batching is dead even once a cap is verified.\n\nFILES YOU OWN (touch no others): src/kbutillib/domains/ai/council/daemon.py and tests/domains/ai/council/test_daemon.py.\n\nTHE GAP, CONFIRMED BY REVIEW. `QueueConfig` carries `batch_size` and `max_output_tokens_per_item` (landed by the queue-config task), and `CouncilWorker` accepts them, but nothing in `daemon.py` passes them when it constructs a queue child's worker. So `batch_size` is 1 for every daemon-run worker regardless of what the operator wrote in config.\n\nWHY IT MATTERS: this is the SECOND of two gates holding batching shut. The first is that no `(endpoint_kind, model)` has a VERIFIED output cap yet, so `VERIFIED_OUTPUT_CAPS` is deliberately empty and every CLI seat runs singles. Closing only that gate would still leave batching off, because the configured `batch_size` never reaches the worker -- and the symptom would be an operator setting `batch_size: 20`, seeing no error, and getting singles anyway. That is the worst shape of bug: a config option that silently does nothing.\n\nWHAT TO BUILD. Pass the queue's `batch_size` and `max_output_tokens_per_item` from its `QueueConfig` into the `CouncilWorker(...)` construction for that queue's children, alongside the `seats`/`roles`/`concurrency` already threaded. A queue that declares neither keeps today's defaults.\n\nDO NOT enable batching, do not populate `VERIFIED_OUTPUT_CAPS`, and do not weaken the three refusal paths (no verified cap / no per-item estimate / derived ceiling below 1). With the cap table still empty, a seat configured `batch_size: 20` must STILL run singles -- and that is the correct observable outcome of this task. What you are fixing is that the value now REACHES the worker, so the refusal is made on the real configured value and logged against it, rather than the value being silently lost before anything can refuse it.\n\nPRESERVE: the bounded-drain contract (`_interrupt_claimed` -- a still-claimed call at the deadline returns to pending with its retry count UNMOVED), the chdir into the council directory in both the controller and the queue-child path, and `_DaemonWorker._claim`'s positional `super()._claim(limit, job_id, summary)` call.\n\nTESTS: a queue declaring `batch_size: N` constructs its worker with that value (assert on the worker, not the config); a queue declaring `max_output_tokens_per_item` passes it through; a queue declaring neither gets today's defaults; and -- the one that matters -- with `VERIFIED_OUTPUT_CAPS` empty, a queue declaring `batch_size: 20` still runs SINGLES and logs the no-verified-cap refusal naming that seat. Give every test a bounded timeout and use `DaemonTimings.scaled(...)` rather than waiting on real delays.\n\nBackground reference, possibly unreachable from your worktree: agent-io/prds/council-per-seat-queues-v1/fullprompt.md sections 'Queue configuration' and 'Batched invocation'.",
+          "success_criteria": "A queue declaring batch_size and max_output_tokens_per_item constructs its worker with those values (asserted on the worker); a queue declaring neither gets base-commit defaults; with VERIFIED_OUTPUT_CAPS empty a queue declaring batch_size 20 still runs singles and logs the no-verified-cap refusal naming the seat; the bounded-drain contract and the positional super()._claim call are preserved; and no test that passed on the base commit fails on the branch.",
+          "repos": [
+            "KBUtilLib"
+          ],
+          "depends_on": [
+            "t7-daemon-per-queue-supervision",
+            "t8-batched-invocation"
+          ],
+          "machine": null,
+          "max_retries": 0
+        }
+      ]
     }
   ]
 }

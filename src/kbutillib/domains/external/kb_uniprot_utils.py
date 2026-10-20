@@ -186,7 +186,15 @@ class KBUniProtUtils(BaseUtils):
             uniprot_id: UniProt accession or ID
 
         Returns:
-            List of publication dictionaries containing citation information
+            List of publication dictionaries containing citation information.
+            Each entry carries ``title``, ``journal``, ``pubmed_id``, ``doi``,
+            ``year`` and ``scope``.  ``scope`` is the reference's
+            ``referencePositions`` list -- what the paper was cited FOR
+            (``["FUNCTION", "CATALYTIC ACTIVITY"]``,
+            ``["NUCLEOTIDE SEQUENCE [LARGE SCALE GENOMIC DNA]"]``, ...) -- and
+            is ``[]`` when UniProt records none.  It is what lets a caller
+            separate a paper that characterised the protein from a
+            whole-genome sequencing or reannotation reference.
 
         Raises:
             ValueError: If uniprot_id is empty
@@ -208,12 +216,25 @@ class KBUniProtUtils(BaseUtils):
         publications = []
         for ref in references:
             citation = ref.get("citation", {})
+            # referencePositions is UniProt's own name for the reference
+            # scope; it comes back alongside the citation under the field
+            # projection above (verified against rest.uniprot.org 2026-10-20),
+            # so no extra field has to be requested.  ``scope`` is accepted as
+            # an alias because some UniProt responses spell it that way.
+            scope = ref.get("referencePositions")
+            if scope is None:
+                scope = ref.get("scope")
+            if scope is None:
+                scope = []
+            elif isinstance(scope, str):
+                scope = [scope]
             pub_info = {
                 "title": citation.get("title", ""),
                 "journal": citation.get("journal", ""),
                 "pubmed_id": None,
                 "doi": None,
-                "year": citation.get("publicationDate", "")
+                "year": citation.get("publicationDate", ""),
+                "scope": [str(item) for item in scope],
             }
 
             # Extract PubMed ID and DOI from citationCrossReferences

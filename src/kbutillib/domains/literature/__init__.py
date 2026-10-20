@@ -10,6 +10,11 @@ Example::
 
     client = EuropePMCClient()
     hits = client.search(alias_query("dnaA", ["Acinetobacter baylyi", "ADP1"]))
+
+    from kbutillib.domains.literature import GeneLiteratureUtils
+
+    lit = GeneLiteratureUtils()
+    annotation = lit.annotate_genes_with_papers(genes, organism)
 """
 
 from __future__ import annotations
@@ -18,19 +23,35 @@ import importlib
 from typing import Any
 
 __all__ = [
+    "DEFAULT_MENTION_THRESHOLD",
+    "DEFAULT_SOURCES",
+    "EVIDENCE_CLASSES",
+    "Evidence",
     "EuropePMCClient",
     "EuropePMCClientImpl",
+    "Gene",
+    "GeneEntry",
+    "GeneLiteratureUtils",
+    "GeneLiteratureUtilsImpl",
     "LiteratureCache",
+    "Organism",
+    "PaperAnnotation",
     "PaperBLASTUtils",
     "PaperBLASTUtilsImpl",
+    "PaperEntry",
+    "PaperIds",
+    "Provenance",
+    "SourceStatus",
     "alias_query",
     "canonical_paper_id",
     "default_cache_path",
+    "is_sequencing_scope",
     "merge_ids",
     "normalise_paper_id",
     "parse_stats",
     "resolve_cache_path",
     "split_db_id",
+    "uniprot_accessions",
 ]
 
 _MODULE_MAP: dict[str, str] = {
@@ -47,6 +68,22 @@ _MODULE_MAP: dict[str, str] = {
     "PaperBLASTUtilsImpl": "paperblast",
     "parse_stats": "paperblast",
     "split_db_id": "paperblast",
+    "DEFAULT_MENTION_THRESHOLD": "annotate",
+    "DEFAULT_SOURCES": "annotate",
+    "EVIDENCE_CLASSES": "annotate",
+    "Evidence": "annotate",
+    "Gene": "annotate",
+    "GeneEntry": "annotate",
+    "GeneLiteratureUtils": "annotate",
+    "GeneLiteratureUtilsImpl": "annotate",
+    "Organism": "annotate",
+    "PaperAnnotation": "annotate",
+    "PaperEntry": "annotate",
+    "PaperIds": "annotate",
+    "Provenance": "annotate",
+    "SourceStatus": "annotate",
+    "is_sequencing_scope": "annotate",
+    "uniprot_accessions": "annotate",
 }
 
 

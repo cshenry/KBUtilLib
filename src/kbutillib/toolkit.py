@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from .domains.genome.ontomap_utils import OntomapUtilsImpl
     from .domains.genome.skani_utils import SKANIUtilsImpl
     from .domains.kbase.kb_berdl_utils import KBBERDLUtilsImpl
+    from .domains.literature.annotate import GeneLiteratureUtilsImpl
     from .domains.kbase.kb_callback_utils import KBCallbackUtilsImpl
     from .domains.kbase.kb_reads_utils import KBReadsUtilsImpl
     from .domains.kbase.kb_sdk_utils import KBSDKUtilsImpl
@@ -126,6 +127,7 @@ class KBUtilLib:
         self._patric = None
         self._rast = None
         self._uniprot = None
+        self._gene_literature = None
         self._pdb = None
         self._catalog = None
         self._jobs = None
@@ -385,6 +387,13 @@ class KBUtilLib:
             from .domains.external.kb_uniprot_utils import KBUniProtUtilsImpl
             self._uniprot = KBUniProtUtilsImpl(self.env)
         return self._uniprot
+
+    @property
+    def gene_literature(self) -> GeneLiteratureUtilsImpl:
+        if self._gene_literature is None:
+            from .domains.literature.annotate import GeneLiteratureUtilsImpl
+            self._gene_literature = GeneLiteratureUtilsImpl(self.env)
+        return self._gene_literature
 
     @property
     def pdb(self) -> RCSBPDBUtilsImpl:

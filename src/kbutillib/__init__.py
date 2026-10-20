@@ -264,6 +264,20 @@ except ImportError as e:
     PaperAnnotation = None
 
 try:
+    from .domains.literature.facts import (
+        Citation,
+        Fact,
+        GeneFacts,
+        GeneFactsUtils,
+    )
+except ImportError as e:
+    _import_error("gene_facts", e)
+    Citation = None
+    Fact = None
+    GeneFacts = None
+    GeneFactsUtils = None
+
+try:
     from .domains.genome.annotation.annotator_utils import (
         AnnotationRecord,
         AnnotationResult,
@@ -577,6 +591,10 @@ __all__ = [
     "GeneLiteratureUtils",
     "Organism",
     "PaperAnnotation",
+    "Citation",
+    "Fact",
+    "GeneFacts",
+    "GeneFactsUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSReactionSimilarityUtils",

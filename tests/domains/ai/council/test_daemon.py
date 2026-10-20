@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import logging
 import multiprocessing
 import os
 import signal
@@ -51,6 +52,7 @@ import yaml
 
 from kbutillib.domains.ai import llm
 from kbutillib.domains.ai.council.backends.testing import FakeBackend
+from kbutillib.domains.ai.council.config import QueueConfig
 from kbutillib.domains.ai.council.daemon import (
     DEFAULT_TIMINGS,
     LOG_FILENAME,
@@ -1828,5 +1830,142 @@ class TestQueueMode:
             status = util.daemon(timings=FAST).status()
             assert "queues" not in status
             assert "controller" not in status
+        finally:
+            util.close()
+
+
+# ---------------------------------------------------------------------------
+# G. Daemon batch-config wiring (t15)
+# ---------------------------------------------------------------------------
+
+
+class TestQueueBatchConfigWiring:
+    """``QueueConfig.batch_size``/``max_output_tokens_per_item`` reaching the
+    ``CouncilWorker`` a queue child constructs -- see ``_run_as_queue_worker``
+    and ``_worker_for`` in ``daemon.py``.
+
+    Every test here monkeypatches :meth:`CouncilDaemon._queues_config` to hand
+    back a hand-built :class:`QueueConfig` directly, rather than declaring
+    ``batch_size`` in a YAML ``queues:`` section. That is deliberate:
+    ``batch_size > 1`` is refused at CONFIG-LOAD time for any seat whose
+    endpoint kind is not a CLI kind (``config.py``'s ``_validate_queues`` --
+    not this task's file), and every seat in this module is the test ``fake``
+    kind. That refusal is t5's, correctly out of scope here, and bypassing it
+    this way tests exactly what t15 owns: whether a value ``daemon.py`` is
+    HANDED reaches the worker, independent of how the value got validated.
+
+    ``_run_as_queue_worker`` also acquires the partition lock, chdirs into
+    the council directory and runs the service loop forever, so ``_serve``
+    is stubbed to return at once -- only the scope-setting prologue (the code
+    this task adds) needs to run for real.  ``monkeypatch.chdir`` is used
+    purely as a safety net to restore this process's cwd afterwards, since
+    the stubbed call still runs the real ``os.chdir`` into the council
+    directory.
+    """
+
+    @staticmethod
+    def _scoped_daemon(tmp_path: Path, qcfg: QueueConfig) -> Tuple[CouncilDaemon, CouncilUtils]:
+        config = _queue_config(tmp_path)
+        util = _util(config)
+        daemon = util.daemon(timings=FAST, queue="q1", worker_index=0)
+        daemon._queues_config = lambda: {"q1": qcfg}  # type: ignore[method-assign]
+
+        async def _fake_serve(record: Any) -> Dict[str, Any]:
+            return {}
+
+        daemon._serve = _fake_serve  # type: ignore[method-assign]
+        return daemon, util
+
+    def test_batch_size_n_constructs_its_worker_with_that_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=2, batch_size=7)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.batch_size == 7, "the queue's batch_size must reach the worker"
+        finally:
+            util.close()
+
+    def test_max_output_tokens_per_item_passes_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(
+            seats=["proposer_1"], concurrency=2, batch_size=5, max_output_tokens_per_item=321
+        )
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.max_output_tokens_per_item == 321
+        finally:
+            util.close()
+
+    def test_a_queue_declaring_neither_gets_base_commit_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=2)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            daemon._run_as_queue_worker()
+            worker = daemon._worker_for(util.require_schema())
+            assert worker.batch_size == 1, "base-commit default: unbatched"
+            assert worker.max_output_tokens_per_item is None
+        finally:
+            util.close()
+
+    def test_batch_size_20_with_empty_verified_caps_still_runs_singles_and_names_the_seat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The one that matters (t15's own success criterion).
+
+        The configured ``batch_size`` must REACH the worker (asserted
+        directly on it), and with ``VERIFIED_OUTPUT_CAPS`` still empty the
+        worker's OWN refusal path -- ``_batch_n``/``_effective_output_cap``,
+        untouched by this task -- must still force every group to one row
+        and still log the no-verified-cap refusal naming the seat. Closing
+        only the cap gate without this task's wiring would do nothing
+        (the value never arrives); this task alone must not open the cap
+        gate either.
+        """
+        from kbutillib.domains.ai.council.engine import worker as worker_module
+
+        assert worker_module.VERIFIED_OUTPUT_CAPS == {}, (
+            "this task must not populate the cap table -- batching stays shut"
+        )
+
+        monkeypatch.chdir(Path.cwd())
+        qcfg = QueueConfig(seats=["proposer_1"], concurrency=5, batch_size=20)
+        daemon, util = self._scoped_daemon(tmp_path, qcfg)
+        try:
+            job_id = _submit(util, "alpha", "bravo", "charlie")
+            store = util.require_schema()
+
+            daemon._run_as_queue_worker()
+            assert daemon._scope_batch_size == 20, "the parsed scope attribute carries the value"
+
+            support.run(daemon._refresh_readiness(store))
+            worker = daemon._worker_for(store)
+            assert worker.batch_size == 20, "the configured value reached the worker"
+
+            logger_name = "kbutillib.domains.ai.council.engine.worker"
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                rows = worker._claim(5, job_id, {"released": 0})
+            assert len(rows) == 3, "all three proposer_1 rows for this job should claim"
+
+            groups = worker._group_claimed(rows)
+            assert groups == [[row] for row in rows], (
+                "batch_size=20 must still produce SINGLES with no verified cap"
+            )
+
+            messages = [record.getMessage() for record in caplog.records]
+            assert any(
+                "no VERIFIED effective" in message and "proposer_1" in message
+                for message in messages
+            ), "the no-verified-cap refusal must name the seat"
         finally:
             util.close()

@@ -446,6 +446,15 @@ class CouncilDaemon:
         self._scope_seats: Optional[Set[str]] = None
         self._scope_roles: Optional[Set[str]] = None
         self._scope_concurrency: Optional[int] = None
+        #: This worker's queue-level batching knobs, set alongside
+        #: ``_scope_seats``/``_scope_roles``/``_scope_concurrency`` by
+        #: :meth:`_run_as_queue_worker`.  ``None`` leaves :meth:`_worker_for`
+        #: passing ``CouncilWorker``'s own defaults (``batch_size=1``,
+        #: ``max_output_tokens_per_item=None``) -- unscoped, unchanged, and
+        #: what every pre-queue-mode caller and the legacy/controller-less
+        #: daemon always uses.
+        self._scope_batch_size: Optional[int] = None
+        self._scope_max_output_tokens_per_item: Optional[int] = None
         #: Set by the signal handler.  A plain threading event rather than an
         #: ``asyncio.Event`` because the handler is installed before the loop
         #: exists (see :meth:`run_foreground`).
@@ -1116,10 +1125,18 @@ class CouncilDaemon:
 
         Reuses :meth:`_serve` unchanged: the only difference from the
         unpartitioned daemon is that :attr:`_scope_seats`/``_scope_roles``/
-        ``_scope_concurrency`` are set first, which :meth:`_worker_for`,
-        :meth:`_pending_calls` and :meth:`_profile_routes` all already read
-        (``None`` there, which is what every pre-queue-mode caller leaves
-        them at, means "unscoped" exactly as before).
+        ``_scope_concurrency``/``_scope_batch_size``/
+        ``_scope_max_output_tokens_per_item`` are set first, which
+        :meth:`_worker_for`, :meth:`_pending_calls` and :meth:`_profile_routes`
+        all already read (``None`` there, which is what every pre-queue-mode
+        caller leaves them at, means "unscoped" exactly as before).
+
+        ``batch_size``/``max_output_tokens_per_item`` reaching the worker does
+        NOT enable batching by itself: with ``VERIFIED_OUTPUT_CAPS`` empty (see
+        ``engine/worker.py``), ``CouncilWorker._batch_n`` still forces singles
+        for every seat and logs why.  What changes here is that the refusal is
+        now made against the operator's REAL configured value instead of the
+        value being silently lost before anything could refuse it.
         """
         queues = self._queues_config()
         qcfg = queues.get(self.queue)
@@ -1134,6 +1151,12 @@ class CouncilDaemon:
         self._scope_seats = set(qcfg.seats)
         self._scope_roles = set(qcfg.roles) if qcfg.roles else None
         self._scope_concurrency = int(qcfg.concurrency)
+        self._scope_batch_size = int(qcfg.batch_size)
+        self._scope_max_output_tokens_per_item = (
+            int(qcfg.max_output_tokens_per_item)
+            if qcfg.max_output_tokens_per_item is not None
+            else None
+        )
         with self.lock.acquire("daemon", partition=(self.queue, index)) as record:
             os.chdir(self.directory)
             return _run_loop(self._serve(record))
@@ -1658,6 +1681,16 @@ class CouncilDaemon:
             seats=self._scope_seats,
             roles=self._scope_roles,
             concurrency=self._scope_concurrency,
+            # Same story for the queue's batching knobs.  ``_scope_batch_size``
+            # is ``None`` for every caller that never went through
+            # :meth:`_run_as_queue_worker`, which must reproduce
+            # ``CouncilWorker``'s own default of ``1`` (unbatched) bit for
+            # bit -- it cannot be forwarded as ``None`` itself, since
+            # ``CouncilWorker.__init__`` does ``int(batch_size)``.
+            # ``max_output_tokens_per_item`` already defaults to ``None`` on
+            # both sides, so it is forwarded as-is.
+            batch_size=self._scope_batch_size if self._scope_batch_size is not None else 1,
+            max_output_tokens_per_item=self._scope_max_output_tokens_per_item,
         )
         self._worker = worker
         worker.register()

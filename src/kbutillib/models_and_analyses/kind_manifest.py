@@ -94,24 +94,39 @@ def build_manifest() -> Dict[str, Any]:
     }
 
 
-def resolve_manifest_dir() -> Path:
+def resolve_manifest_dir(apps_dir: Optional[Path] = None) -> Path:
     """Resolve the plugin-union directory the manifest is written into.
 
-    Precedence (binding, corrected 2026-09-24):
+    Precedence (binding, corrected 2026-09-24; ``apps_dir`` added 2026-10-05):
 
-      1. ``$KING_PLUGINS_DIR`` when set — the variable KIND's
+      1. ``apps_dir / "plugins"`` when *apps_dir* is given — this is
+         ``kbu kind install --apps-dir``, an explicit per-invocation
+         instruction to install into a specific tree, so it wins;
+      2. ``$KING_PLUGINS_DIR`` when set — the variable KIND's
          ``_resolve_plugins()`` reads first;
-      2. otherwise ``~/kind-apps/plugins``.
+      3. otherwise ``~/kind-apps/plugins``.
+
+    ``apps_dir`` outranks the environment deliberately. Without it this
+    function had no knowledge of ``--apps-dir`` at all, so an install
+    redirected to a scratch tree still wrote its manifest into the **real**
+    ``~/kind-apps/plugins`` — measured on the kbhub pod 2026-10-05. That broke
+    the containment ``--apps-dir`` exists for, and broke it *silently*: the
+    redirected registry, ``CONTEXT.md`` and ``serve-kind.sh`` all landed in the
+    scratch tree, so nothing looked wrong. Rehearsing an install against a
+    throwaway copy is a documented practice and has to be safe.
 
     NEVER derived from ``$KING_STATE`` (that formula doubled the path on the
     pod). The environment and home directory are read at CALL time. The
     directory is created if missing.
     """
-    king_plugins = os.environ.get("KING_PLUGINS_DIR")
-    if king_plugins:
-        plugins_dir = Path(king_plugins)
+    if apps_dir is not None:
+        plugins_dir = Path(apps_dir) / "plugins"
     else:
-        plugins_dir = Path.home() / "kind-apps" / "plugins"
+        king_plugins = os.environ.get("KING_PLUGINS_DIR")
+        if king_plugins:
+            plugins_dir = Path(king_plugins)
+        else:
+            plugins_dir = Path.home() / "kind-apps" / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
     return plugins_dir
 
@@ -232,19 +247,25 @@ def write_manifest(plugins_dir: Optional[Path] = None) -> Path:
 def register_manifest(
     plugins_dir: Optional[Path] = None,
     king_root: Optional[Path] = None,
+    apps_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Write the manifest and refresh the union symlink farm (CAC I1).
 
     This is the single entry point both ``serve`` and ``kbu kind install`` call.
-    It writes the manifest to the union dir ($KING_PLUGINS_DIR else
-    ~/kind-apps/plugins) and then links every upstream KIND manifest in beside
-    it so installing this app never hides KIND's shipped plugins.
+    It writes the manifest to the union dir (``apps_dir/plugins`` when given,
+    else ``$KING_PLUGINS_DIR``, else ``~/kind-apps/plugins``) and then links
+    every upstream KIND manifest in beside it so installing this app never
+    hides KIND's shipped plugins.
+
+    Pass ``apps_dir`` through from ``kbu kind install --apps-dir`` so a
+    redirected install stays inside its target tree; see
+    :func:`resolve_manifest_dir` for why that is not optional.
 
     Returns a small result dict (``manifest_path``, ``plugins_dir``,
     ``king_root``, ``linked_upstream``) so a caller can report what it did.
     """
     if plugins_dir is None:
-        plugins_dir = resolve_manifest_dir()
+        plugins_dir = resolve_manifest_dir(apps_dir=apps_dir)
     manifest_path = write_manifest(plugins_dir)
     linked = refresh_plugin_union(plugins_dir=plugins_dir, king_root=king_root)
     resolved_root = king_root if king_root is not None else resolve_king_root()

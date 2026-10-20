@@ -83,6 +83,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+import socket
 from pathlib import Path
 from typing import Any, Optional
 
@@ -92,6 +93,192 @@ from .manifest import now_utc_iso, sha256_file
 from .model_recording import file_uri, model_id_for_path, record_model_analysis
 from .session import _route_save_local
 from .subproject import _find_project_root
+
+# ── LP solver selection ────────────────────────────────────────────────────
+
+#: Machines whose default solver is overridden away from GLPK, because they
+#: hold an *unrestricted* commercial licence. Everywhere else gets GLPK.
+#: Keyed on a substring of the hostname, matched case-insensitively.
+_UNRESTRICTED_GUROBI_HOSTS = ("h100", "poplar")
+
+
+def machine_default_solver() -> str:
+    """The solver this machine defaults to, absent any explicit override.
+
+    ``glpk`` everywhere except the hosts holding an unrestricted gurobi
+    licence (see :data:`_UNRESTRICTED_GUROBI_HOSTS`), which get ``gurobi``.
+
+    Hostname detection is deliberate rather than config-file-only: the
+    failure it guards against is a *silent* one. ``optlang`` selects gurobi
+    whenever it is merely importable, so on a machine with a **size-capped**
+    licence an unpinned solver is captured by a gurobi that then fails
+    ModelSEED gapfilling with ``Model too large for size-limited license``
+    -- a message that misdescribes its own cause. Defaulting to glpk in code
+    means a machine that was never configured still works, rather than
+    working only if someone remembered to write a config file.
+    """
+    host = socket.gethostname().lower()
+    if any(h in host for h in _UNRESTRICTED_GUROBI_HOSTS):
+        return "gurobi"
+    return "glpk"
+
+
+def resolve_solver(explicit: Optional[str] = None) -> str:
+    """Resolve the LP solver to use, most specific source winning.
+
+    Order: ``explicit`` (i.e. ``--solver``) -> ``KBU_SOLVER`` env var ->
+    the ``modeling.solver`` config key -> :func:`machine_default_solver`.
+    """
+    if explicit:
+        return explicit.strip().lower()
+
+    env = os.environ.get("KBU_SOLVER")
+    if env and env.strip():
+        return env.strip().lower()
+
+    try:  # config is optional -- never let its absence break a verb
+        from ...core.config import load_config
+
+        configured = load_config().get("modeling.solver", None)
+        if configured and str(configured).strip():
+            return str(configured).strip().lower()
+    except Exception:  # noqa: BLE001 -- solver selection must not hard-fail
+        pass
+
+    return machine_default_solver()
+
+
+def apply_solver(explicit: Optional[str] = None) -> tuple:
+    """Pin cobra's global default solver. Returns ``(chosen, warning)``.
+
+    Every model created or loaded afterwards in this process inherits it,
+    which is why this is applied once at the ``kbu model`` group callback
+    rather than per-verb. ``warning`` is ``None`` on success, or a
+    human-readable string when the requested solver is unavailable and the
+    process fell back -- an unavailable solver is reported, never fatal,
+    because a working fallback beats a dead verb.
+    """
+    import cobra
+    import cobra.util.solver as cobra_solver
+
+    chosen = resolve_solver(explicit)
+    available = set(cobra_solver.solvers)
+
+    if chosen not in available:
+        fallback = "glpk" if "glpk" in available else next(iter(sorted(available)), None)
+        if fallback is None:  # pragma: no cover -- cobra always ships one
+            return chosen, f"no LP solver available at all (wanted {chosen!r})"
+        warning = (
+            f"solver {chosen!r} is not available (have: "
+            f"{', '.join(sorted(available))}); falling back to {fallback!r}"
+        )
+        cobra.Configuration().solver = fallback
+        return fallback, warning
+
+    cobra.Configuration().solver = chosen
+    return chosen, None
+
+
+# ── genome annotation ──────────────────────────────────────────────────────
+
+#: The ontology key modelseedpy's builder reads roles from. ``MSBuilder``
+#: takes ``ontology_term="RAST"`` as its default and ``msbuilder._aaaa()``
+#: looks up exactly ``feature.ontology_terms[ontology_term]``, so anything
+#: written under a different key is invisible to reconstruction.
+_MS_ONTOLOGY_KEY = "RAST"
+
+
+def _annotated_feature_count(ms_genome: Any) -> int:
+    """How many features carry at least one functional role."""
+    return sum(1 for f in ms_genome.features if getattr(f, "ontology_terms", None))
+
+
+def _ensure_annotated(ms_genome: Any, genome_path: Path) -> None:
+    """Annotate *ms_genome* in place via RAST when it carries no roles.
+
+    ``MSGenome.from_fasta`` parses the FASTA header into ``.description``
+    and leaves ``.ontology_terms`` empty, so a bare protein FASTA reaches
+    ``build_metabolic_model`` with **zero functional roles**. The builder
+    maps reactions from roles only, so it then returns nothing but the
+    template biomass scaffold -- measured on E. coli K-12 (4285 proteins):
+    5 reactions, 82 metabolites, 0 genes, exit code 0. That silent, plausible
+    near-empty model is the failure this function exists to prevent.
+
+    A genome that already carries roles is left untouched, so this is a
+    no-op for callers who annotated upstream.
+
+    Raises:
+        click.ClickException: If the genome has no roles and RAST cannot
+            supply them -- unavailable, erroring, or returning nothing.
+            **Failing loudly is deliberate**: the alternative is the
+            scaffold above, which looks like a successful reconstruction
+            and is not.
+    """
+    if _annotated_feature_count(ms_genome) > 0:
+        return
+
+    proteins = {
+        f.id: f.seq for f in ms_genome.features if getattr(f, "seq", None)
+    }
+    if not proteins:
+        raise click.ClickException(
+            f"'{genome_path}' yielded no protein sequences to annotate."
+        )
+
+    click.echo(
+        f"[annotate] {genome_path.name}: 0 of {len(ms_genome.features)} features "
+        f"carry a functional role; annotating {len(proteins)} proteins via RAST "
+        f"(this is a network call and can take minutes on a full genome)...",
+        err=True,
+    )
+
+    from ...domains.external.rast_utils import RastUtils
+
+    try:
+        rast = RastUtils()
+        if not rast.is_available():
+            raise click.ClickException(
+                "RAST annotation is unavailable (modelseedpy's RastClient is not "
+                "importable), and this genome has no functional roles. Without "
+                "roles, reconstruction can only emit an empty biomass scaffold. "
+                "Annotate the genome upstream, or install modelseedpy."
+            )
+        result = rast.annotate(proteins)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- surface any RAST failure as a CLI error
+        raise click.ClickException(
+            f"RAST annotation failed for '{genome_path}': {exc}. This genome has "
+            "no functional roles, so reconstruction would emit only an empty "
+            "biomass scaffold -- refusing rather than returning it."
+        ) from exc
+
+    by_id = {f.id: f for f in ms_genome.features}
+    annotated = 0
+    for record in result.records:
+        feature = by_id.get(record.gene_id)
+        if feature is None:
+            continue
+        added = False
+        for term in record.terms:
+            if term.value:
+                feature.add_ontology_term(_MS_ONTOLOGY_KEY, term.value)
+                added = True
+        if added:
+            annotated += 1
+
+    if annotated == 0:
+        raise click.ClickException(
+            f"RAST returned no functional roles for any of the {len(proteins)} "
+            f"proteins in '{genome_path}'. Reconstruction would emit only an "
+            "empty biomass scaffold -- refusing rather than returning it."
+        )
+
+    click.echo(
+        f"[annotate] RAST assigned roles to {annotated} of {len(proteins)} proteins.",
+        err=True,
+    )
+
 
 # ── local/offline construction of the modeling-utility classes ─────────────
 
@@ -452,14 +639,36 @@ def _record_fva(
 
 
 @click.group("model")
-def model_cmd() -> None:
+@click.option(
+    "--solver",
+    default=None,
+    metavar="NAME",
+    help=(
+        "LP solver for every verb in this group (e.g. glpk, gurobi, cplex). "
+        "Default: glpk, except on hosts with an unrestricted commercial "
+        "licence. Overrides KBU_SOLVER and the modeling.solver config key."
+    ),
+)
+def model_cmd(solver: Optional[str]) -> None:
     """Metabolic-modeling verbs (reconstruct/gapfill/fba/fva) + exec escape hatch.
 
     A thin facade over KBUtilLib's ``ms_reconstruction_utils``/
     ``ms_fba_utils`` modules.  Runs in the standard ``kbu`` interpreter
     (kbutillib + cobra + modelseedpy); no additional environment needed for
     the default (``--no-atp-safe``) local verbs.
+
+    **The LP solver defaults to GLPK.** It is unrestricted and measured
+    sufficient for ModelSEED-template gapfilling -- 28.1s against a
+    9434-reaction candidate set, versus 27.4s for an unrestricted gurobi.
+    Pinning it matters because ``optlang`` prefers gurobi whenever it is
+    merely importable, so on a machine with a *size-capped* licence an
+    unpinned solver gets captured and gapfilling then fails with a
+    misleading ``Model too large for size-limited license``.
     """
+    chosen, warning = apply_solver(solver)
+    if warning:
+        click.echo(f"warning: {warning}", err=True)
+    os.environ.setdefault("KBU_ACTIVE_SOLVER", chosen)
 
 
 # ── reconstruct ──────────────────────────────────────────────────────────
@@ -532,6 +741,7 @@ def reconstruct_cmd(
     from modelseedpy.core.msgenome import MSGenome
 
     ms_genome = MSGenome.from_fasta(str(genome_path))
+    _ensure_annotated(ms_genome, genome_path)
     resolved_model_id = model_id or genome_path.stem
 
     recon = _recon_utils()

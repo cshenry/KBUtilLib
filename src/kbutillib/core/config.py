@@ -162,6 +162,20 @@ class ModelingConfig(BaseModel):
     default_objective: str = "bio1"
     fba_timeout: int = 300
 
+    #: LP solver for cobra/modelseedpy work. **GLPK is the default
+    #: deliberately, on every machine.** It is unrestricted and measured
+    #: sufficient for ModelSEED-template gapfilling: on an E. coli-sized
+    #: genome against a 9434-reaction candidate set, glpk solved in 28.1s
+    #: (437 reactions added, post-gapfill objective 1.168) versus 27.4s for
+    #: an *unrestricted* gurobi -- no measurable benefit. A size-capped
+    #: gurobi fails that same problem with a misleading ``Model too large
+    #: for size-limited license``, which is a licence ceiling, not a large
+    #: problem. Because ``optlang`` prefers gurobi whenever it is merely
+    #: *importable*, leaving the solver unpinned is exactly how a capped
+    #: licence silently captures it. Override per-machine (h100 holds an
+    #: unrestricted licence) via this key, ``KBU_SOLVER``, or ``--solver``.
+    solver: str = "glpk"
+
 
 class PathsConfig(BaseModel):
     """Configuration for the ``paths`` block."""

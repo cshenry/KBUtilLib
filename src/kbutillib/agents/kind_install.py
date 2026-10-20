@@ -322,7 +322,21 @@ def generate_serve_script(
     """
     king_stack_dir = king_stack_dir or resolve_king_stack_dir()
     registry = read_registry(apps_dir)
-    has_manifests = any(entry.get("manifests") for entry in registry.values())
+    # Export KING_PLUGINS_DIR when the registry declares manifests OR when any
+    # manifest actually EXISTS on disk. The disk check is not redundant: the
+    # manifest write and the registry's ``manifests`` field are separate code
+    # paths and have already drifted -- on kbhub 2026-10-02 the
+    # models-and-analyses manifest was present in ``plugins/`` while
+    # ``kbutillib-modeling`` carried ``manifests: None``, so this flag was False
+    # and the wrapper omitted the export. That is silently destructive: KING then
+    # falls back to ``KING_DIR/plugins`` (its OWN checkout), which does not hold
+    # our manifest, so the app simply disappears from a KIND relaunched via this
+    # wrapper -- with no error anywhere. The running server only had the variable
+    # because the Jupyter boot path happened to set it.
+    plugins_dir = apps_dir / "plugins"
+    has_manifests = any(entry.get("manifests") for entry in registry.values()) or (
+        plugins_dir.is_dir() and any(plugins_dir.glob("*.json"))
+    )
     context_path = _context_md_path(apps_dir)
     king_serve = king_stack_dir / "king" / "scripts" / "serve.sh"
 
@@ -352,6 +366,12 @@ def generate_serve_script(
         # KING_CONTEXT / KING_PLUGINS_DIR are read by Adam's backend --
         # never KIND_. See the "DO NOT RENAME" block above.
         f'export KING_CONTEXT="{context_path}"',
+        # Belt-and-braces: the run index defaults to ON in code as of
+        # 2026-10-02, but pin it at the launch point too so the server's
+        # behaviour does not silently change if that default is ever revisited.
+        # A disabled index makes record_analysis() validate, return normally and
+        # write NOTHING, so the apps would read empty while looking healthy.
+        'export KBDL_RUN_DB_ENABLED="${KBDL_RUN_DB_ENABLED:-1}"',
     ]
     if has_manifests:
         lines.append(f'export KING_PLUGINS_DIR="{apps_dir / "plugins"}"')
@@ -388,6 +408,22 @@ def _copy_bundle_files(bundle_dir: Path, app_dir: Path, bundle: dict) -> bool:
     return changed
 
 
+def _bundle_source_root(bundle_dir: Path) -> str:
+    """The checkout root a bundle was composed from, as a string.
+
+    Walks up from *bundle_dir* to the directory holding ``src/kbutillib`` (the
+    repo root) and falls back to the bundle's own resolved path when that is
+    not recognisable. Used only for provenance and drift reporting -- never to
+    locate anything -- so an unrecognised layout degrades to a still-useful
+    absolute path rather than failing.
+    """
+    resolved = bundle_dir.resolve()
+    for parent in resolved.parents:
+        if (parent / "src" / "kbutillib").is_dir():
+            return str(parent)
+    return str(resolved)
+
+
 def install(
     bundle_dir: Path,
     apps_dir: Optional[Path] = None,
@@ -415,6 +451,26 @@ def install(
     )
     existing = registry.get(app_id)
     registry_changed = False
+
+    # Which CHECKOUT composed this bundle. Recorded because more than one
+    # KBUtilLib checkout can be importable at once, and they drift. On the
+    # kbhub pod ``bin/kbu`` prepends the global_share checkout to
+    # ``PYTHONPATH``, while a bare ``python -m kbutillib`` in the same venv
+    # resolves kbutillib through an editable install pointing at a DIFFERENT
+    # clone. Measured 2026-10-05: installing via the bare form composed that
+    # clone's older ``kind_app/skill.md`` and silently dropped whole sections
+    # of guidance out of CONTEXT.md -- at exit 0, with ``kind status`` still
+    # green, because every check in this module asks whether the installed
+    # files agree with the bundle it was handed, never which bundle that was.
+    # Recording the source makes the swap visible in ``registry.json``, and
+    # ``source_changed`` lets the caller say so out loud.
+    source_root = _bundle_source_root(bundle_dir)
+    source_changed = bool(
+        existing
+        and existing.get("source_root")
+        and existing["source_root"] != source_root
+    )
+
     if not existing or existing.get("bundle_hash") != bundle_hash:
         now = now_utc_iso()
         registry[app_id] = {
@@ -425,6 +481,7 @@ def install(
             "verify": bundle.get("verify"),
             "manifests": bundle.get("manifests"),
             "bundle_hash": bundle_hash,
+            "source_root": source_root,
             "installed_at": existing["installed_at"] if existing else now,
             "updated_at": now,
         }
@@ -448,6 +505,11 @@ def install(
         "context_md": str(_context_md_path(apps_dir)),
         "serve_script": str(_serve_script_path(apps_dir)),
         "registry": str(_registry_path(apps_dir)),
+        "source_root": source_root,
+        "source_changed": source_changed,
+        "previous_source_root": (
+            existing.get("source_root") if source_changed and existing else None
+        ),
     }
 
 

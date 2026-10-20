@@ -118,12 +118,18 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
     # *app*, while the bundle install wires the context-injection *skill* — and
     # the bundle step can hard-fail on a machine with no KING launcher. Doing the
     # manifest first means an install-time registration path always exists (the
-    # same file the app writes on `serve`), written to $KING_PLUGINS_DIR (else
-    # ~/kind-apps/plugins), NEVER to king/plugins/, with the union symlink farm
-    # refreshed so KIND's own shipped plugins are not hidden.
+    # same file the app writes on `serve`), written to --apps-dir/plugins when
+    # given (else $KING_PLUGINS_DIR, else ~/kind-apps/plugins), NEVER to
+    # king/plugins/, with the union symlink farm refreshed so KIND's own
+    # shipped plugins are not hidden.
+    #
+    # ``apps_dir=resolved`` is load-bearing: without it this call ignored
+    # --apps-dir entirely, so an install redirected to a scratch tree still
+    # wrote its manifest into the real ~/kind-apps/plugins (measured
+    # 2026-10-05) -- silently breaking the containment --apps-dir is for.
     from ...models_and_analyses.kind_manifest import register_manifest
 
-    manifest_result = register_manifest()
+    manifest_result = register_manifest(apps_dir=resolved)
 
     results = [
         kind_install.install(bundle_dir, apps_dir=resolved)
@@ -152,6 +158,22 @@ def install_cmd(app: Optional[str], apps_dir: Optional[str], as_json: bool) -> N
                 f"pip install -e <repo containing {result['cli']}>"
             )
         click.echo(f"  changed: {result['changed']}")
+        # A bundle composed from a DIFFERENT checkout than last time is the one
+        # failure this verb cannot otherwise show you: every other check asks
+        # whether the files agree with the bundle, not which bundle it was, so
+        # a stale sibling clone downgrades CONTEXT.md at exit 0 with status
+        # still green. Say it loudly; it is almost never what the caller meant.
+        if result.get("source_changed"):
+            click.echo(
+                f"  ! SOURCE CHANGED: composed from {result['source_root']}\n"
+                f"    (previously {result['previous_source_root']})\n"
+                f"    More than one KBUtilLib checkout is importable here and they "
+                f"can differ. If you did not intend to switch, re-run via `kbu kind "
+                f"install` (which pins the intended checkout on PYTHONPATH) rather "
+                f"than a bare `python -m kbutillib`, and check CONTEXT.md did not "
+                f"lose content.",
+                err=True,
+            )
     click.echo(f"  CONTEXT.md: {results[-1]['context_md']}")
     click.echo(f"  serve-kind.sh: {results[-1]['serve_script']}")
     click.echo(f"  KIND manifest: {manifest_result['manifest_path']}")

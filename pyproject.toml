@@ -277,6 +277,15 @@ kbutillib = [
     "domains/ai/council/queries/*.json",
     "domains/ai/council/queries/builtin/*.yaml",
     "domains/ai/council/queries/examples/*.yaml",
+    # The Bakta structural-calling driver
+    # (domains/genome/annotation/bakta_call_features.py). It is a DATA FILE,
+    # not a module: BaktaUtils.call_features resolves it by path and
+    # bind-mounts it into the Bakta container to be RUN there, and it imports
+    # `bakta`, which KBUtilLib's own environment does not have -- importing it
+    # here would fail. Declaring it as package data is what guarantees it
+    # travels in a wheel even though no `import` reaches it, so a non-editable
+    # install can still call features.
+    "domains/genome/annotation/bakta_call_features.py",
 ]
 
 [tool.uv]

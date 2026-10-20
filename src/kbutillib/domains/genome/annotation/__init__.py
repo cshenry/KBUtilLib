@@ -6,7 +6,11 @@ from .annotator_utils import (  # noqa: F401
     Term,
     ToolUnavailableError,
 )
-from .bakta_utils import BaktaUtils  # noqa: F401
+from .bakta_utils import (  # noqa: F401
+    BaktaCallError,
+    BaktaCallResult,
+    BaktaUtils,
+)
 from .dram2_utils import DRAM2Utils  # noqa: F401
 from .kofamscan_utils import KofamscanUtils  # noqa: F401
 from .ontology_dictionary import OntologyDictionary  # noqa: F401
@@ -19,6 +23,8 @@ __all__ = [
     "AnnotationResult",
     "Term",
     "ToolUnavailableError",
+    "BaktaCallError",
+    "BaktaCallResult",
     "BaktaUtils",
     "DRAM2Utils",
     "KofamscanUtils",

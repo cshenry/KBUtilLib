@@ -1405,15 +1405,16 @@ class SqliteStore:
                 is the audit trail and is readable by every user of a shared
                 store; see :func:`.queries.refuse_prompt_text`.
         """
-        q.refuse_prompt_text(
-            call_id=call_id,
-            attempt_no=attempt_no,
-            started_at=started_at,
-            finished_at=finished_at,
-            outcome_kind=outcome_kind,
-            usage=usage,
-            worker_id=worker_id,
-        )
+        # Pass every parameter this call received, derived from the call's
+        # own arguments rather than hand-copied -- `locals()` here, before
+        # any local variable is defined, is exactly the parameter dict minus
+        # `self`.  A hand-maintained kwargs list silently stops covering a
+        # parameter the moment one is added and this call site is not
+        # updated (that is the bug this guards against): `queued_at` was
+        # added to the signature without being added here.  Deriving the
+        # dict instead makes a future parameter covered automatically, with
+        # no second place to remember.
+        q.refuse_prompt_text(**{k: v for k, v in locals().items() if k != "self"})
         with self.transaction() as conn:
             conn.execute(
                 sch.attempts.insert(),

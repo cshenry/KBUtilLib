@@ -19,6 +19,7 @@ spends a token, needs a CLI login or needs a GPU.
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 from datetime import datetime, timedelta, timezone
 
@@ -1641,6 +1642,97 @@ class TestRecordAttempt:
             claim["call_id"], 1, T0, T0, "ok", usage={"prompt_tokens": 3, "users": 1}
         )
         assert len(self._attempts(store)) == 1
+
+    @pytest.mark.parametrize(
+        "queued_at",
+        [
+            {"system": "You are a careful curator."},
+            {"user": "Map this protein: ..."},
+        ],
+        ids=["system", "user"],
+    )
+    def test_prompt_text_in_queued_at_is_refused(self, store, queued_at):
+        """The regression this task exists for.
+
+        An earlier phase added ``queued_at`` to ``record_attempt`` but never
+        added it to the ``refuse_prompt_text(...)`` call, so a dict carrying
+        prompt text passed as ``queued_at`` sailed straight into the
+        ``attempts`` table.  Nothing in the codebase actually does that
+        today -- every real caller passes a real ``datetime`` or ``None`` --
+        but the guard's promise is that ANY argument is checked, and this is
+        the one that silently was not.  This test is written to FAIL against
+        the base implementation (the hand-maintained kwargs list in
+        ``record_attempt`` that omits ``queued_at``) and to pass once the
+        guard call covers every parameter.
+        """
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        with pytest.raises(ValueError, match="prompt text"):
+            store.record_attempt(claim["call_id"], 1, T0, T0, "ok", queued_at=queued_at)
+        assert self._attempts(store) == []
+
+    def test_a_legitimate_queued_at_datetime_is_accepted_and_stored(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"], 1, T0, T0, "ok", queued_at=T0 - timedelta(seconds=5)
+        )
+        rows = self._attempts(store)
+        assert len(rows) == 1
+        assert rows[0]["queued_at"] == T0 - timedelta(seconds=5)
+
+    def test_queued_at_left_as_none_is_accepted(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(claim["call_id"], 1, T0, T0, "ok", queued_at=None)
+        rows = self._attempts(store)
+        assert len(rows) == 1
+        assert rows[0]["queued_at"] is None
+
+    def test_guard_coverage_is_structural_not_a_hand_maintained_list(self, store):
+        """The property this task actually buys: a parameter is covered by
+        construction, not because someone remembered to list it.
+
+        This enumerates ``record_attempt``'s LIVE signature rather than
+        naming each optional parameter by hand, so a parameter added after
+        this test was written is exercised by it automatically -- exactly
+        the gap that let ``queued_at`` go uncovered originally.  Every
+        optional parameter (one with a default, so passing a bad value for
+        it cannot be mistaken for a required-argument error) must refuse a
+        dict carrying prompt text.
+        """
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        base_args = {
+            "call_id": claim["call_id"],
+            "attempt_no": 1,
+            "started_at": T0,
+            "finished_at": T0,
+            "outcome_kind": "ok",
+        }
+        sig = inspect.signature(store.record_attempt)
+        optional_params = [
+            name
+            for name, param in sig.parameters.items()
+            if param.default is not inspect.Parameter.empty
+        ]
+        # Fails loudly rather than vacuously passing if record_attempt's
+        # signature ever loses its optional parameters.
+        assert set(optional_params) >= {"usage", "worker_id", "queued_at"}
+        for name in optional_params:
+            kwargs = dict(base_args)
+            kwargs[name] = {"system": "leaked prompt"}
+            with pytest.raises(ValueError, match="prompt text"):
+                store.record_attempt(**kwargs)
+        assert self._attempts(store) == []
 
 
 # ---------------------------------------------------------------------------

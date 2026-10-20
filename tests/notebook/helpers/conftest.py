@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import pytest
-import cobra
+
+try:
+    import cobra
+except ImportError:  # optional modeling stack; see tests/README.md
+    cobra = None
+    collect_ignore_glob = ["test_*.py"]
 
 
 @pytest.fixture

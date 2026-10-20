@@ -3,10 +3,12 @@
 These exercise the ``template_reactions_only`` flag on
 ``_add_reactions_from_gene_mapping`` without standing up the full modeling
 stack: the method is called unbound against a lightweight fake ``self`` whose
-``biochem_db()`` returns a fake ModelSEED database, so we can assert exactly
+``biochem_db`` property returns a fake ModelSEED database, so we can assert exactly
 when the database fallback is (and is not) consulted.
 """
 from __future__ import annotations
+
+import pytest
 
 from kbutillib.domains.modeling.ms_reconstruction_utils import MSReconstructionUtils
 
@@ -108,6 +110,9 @@ class _FakeSelf:
     def __init__(self, db):
         self._db = db
 
+    # A property, as on the real class (ms_biochem_utils.MSBiochemUtils):
+    # production reads ``self.biochem_db.reactions``, never calls it.
+    @property
     def biochem_db(self):
         return self._db
 
@@ -280,7 +285,7 @@ def test_incoming_list_gene_that_is_a_substring_is_still_skipped():
 
 def test_existing_plus_incoming_str_parenthesises_both_sides():
     """Both rules are wrapped, so neither side's internal "and" re-associates."""
-    from cobra.core.gene import GPR
+    GPR = pytest.importorskip("cobra.core.gene").GPR
 
     rxns = _call_with_existing({"rxnA_c0": "g1 or g2"}, {"rxnA": "(g3 and g4)"})
     merged = rxns.get_by_id("rxnA_c0").gene_reaction_rule
@@ -360,7 +365,7 @@ class _CobraMdlUtl:
 
 def _cobra_call(template_ids, hash_, existing_rules=None):
     """Drive the method against a real ``cobra.Model``; return that model."""
-    import cobra
+    cobra = pytest.importorskip("cobra")
 
     model = cobra.Model("test_model")
     for rid, rule in (existing_rules or {}).items():
@@ -380,7 +385,7 @@ def _cobra_call(template_ids, hash_, existing_rules=None):
 
 def test_str_gpr_is_stored_as_cobra_normalises_it():
     """The stored rule is cobra's normalised form of the verbatim string."""
-    from cobra.core.gene import GPR
+    GPR = pytest.importorskip("cobra.core.gene").GPR
 
     model = _cobra_call(["rxnA_c"], {"rxnA": "(g1 and g2) or g3"})
     rxn = model.reactions.get_by_id("rxnA_c0")
@@ -451,7 +456,7 @@ def test_model_gene_count_consumer_is_correct_for_a_str_value():
     ``rule.split(" or ")`` it could have been would report 2 for this complex
     instead of 3.
     """
-    from cobra.core.gene import GPR
+    GPR = pytest.importorskip("cobra.core.gene").GPR
 
     model = _cobra_call(["rxnA_c"], {"rxnA": "(g1 and g2) or g3"})
     assert len(model.genes) == 3

@@ -45,6 +45,9 @@ def _data_available():
     return os.path.isfile(_MODEL_PATH) and os.path.isfile(_TEMPLATE_PATH)
 
 
+pytest.importorskip("cobra")
+pytest.importorskip("modelseedpy")
+
 pytestmark = pytest.mark.skipif(
     not _data_available(),
     reason="ModelSEEDpy test data not found at ~/Dropbox/Projects/ModelSEEDpy/tests/test_data/",

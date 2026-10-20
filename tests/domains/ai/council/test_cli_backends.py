@@ -554,6 +554,171 @@ class TestTheWorkingDirectory:
         assert not Path(second).exists()
 
 
+class TestConfiguredTempRoot:
+    """A ``temp_root`` in the endpoint config must reach ``run_cli`` -- for
+    BOTH backends -- without touching argv in any way.
+
+    ``CouncilWorker.endpoint_mapping`` threads a configured ``cli_temp_root``
+    through to each backend's own ``config`` mapping under the key
+    ``temp_root`` (``engine/worker.py``).  Before this suite, ``_run`` on
+    neither backend read that key back out, so the value could never reach
+    ``run_cli`` and every child still built its per-call directory under the
+    platform default -- exactly the gap this task closes.  ``TestStdinViaFile``
+    already proves ``run_cli`` itself honours ``temp_root``; these tests prove
+    each backend's ``_run`` actually passes it through, and that doing so
+    leaves the argv it builds byte-for-byte unchanged.
+    """
+
+    def test_claude_backend_threads_a_configured_temp_root_to_the_cwd(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        root = tmp_path / "configured-temp-root"
+        root.mkdir()
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(
+            str(fake),
+            _home=ready_home,
+            _parent_env={},
+            config={"temp_root": str(root)},
+        )
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        child_cwd = Path(fake.record["cwd"])
+        assert root in child_cwd.parents
+        # The one thing this task must not touch: the exact argv from
+        # ``TestClaudeArgv.test_the_exact_argv``, repeated here so a
+        # ``temp_root`` regression on argv is caught right next to the
+        # change that carries the risk.
+        assert fake.record["argv"] == [
+            str(fake),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(SCHEMA),
+            "--model",
+            MODEL,
+            "--system-prompt",
+            SYSTEM,
+            "--no-session-persistence",
+            "--tools",
+            "",
+        ]
+
+    def test_claude_backend_without_a_temp_root_reproduces_base_behaviour(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        not_the_root = tmp_path / "not-configured"
+        not_the_root.mkdir()
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        child_cwd = Path(fake.record["cwd"])
+        assert not_the_root not in child_cwd.parents
+        assert tmp_path not in child_cwd.parents, "still outside the test's own tree"
+        assert fake.record["argv"] == [
+            str(fake),
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(SCHEMA),
+            "--model",
+            MODEL,
+            "--system-prompt",
+            SYSTEM,
+            "--no-session-persistence",
+            "--tools",
+            "",
+        ]
+
+    def test_codex_backend_threads_a_configured_temp_root_to_the_cwd(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        root = tmp_path / "configured-temp-root-codex"
+        root.mkdir()
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(
+            str(fake),
+            _home=ready_home,
+            _parent_env={},
+            config={"temp_root": str(root)},
+        )
+
+        result = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        )
+
+        assert result.ok is True, result.error
+        record = fake.record
+        cwd = Path(record["cwd"])
+        assert root in cwd.parents
+        # Codex's argv embeds the cwd itself (the schema/output file paths),
+        # so it is compared against paths built from the CHILD'S OWN reported
+        # cwd, exactly as ``TestCodexArgv.test_the_exact_argv`` does -- a
+        # ``temp_root`` regression on the surrounding flags would still fail
+        # this even though the embedded paths move with the directory.
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(cwd / CODEX_SCHEMA_NAME),
+                "-o",
+                str(cwd / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
+
+    def test_codex_backend_without_a_temp_root_reproduces_base_behaviour(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        not_the_root = tmp_path / "not-configured-codex"
+        not_the_root.mkdir()
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        )
+
+        assert result.ok is True, result.error
+        record = fake.record
+        cwd = Path(record["cwd"])
+        assert not_the_root not in cwd.parents
+        assert tmp_path not in cwd.parents, "still outside the test's own tree"
+        assert _argv_realpaths(record["argv"]) == _argv_realpaths(
+            [
+                str(fake),
+                "exec",
+                "--model",
+                MODEL,
+                "--output-schema",
+                str(cwd / CODEX_SCHEMA_NAME),
+                "-o",
+                str(cwd / CODEX_OUTPUT_NAME),
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ]
+        )
+
+
 # ---------------------------------------------------------------------------
 # The prompt travels as a FILE, not a pipe
 # ---------------------------------------------------------------------------

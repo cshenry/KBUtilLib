@@ -363,6 +363,12 @@ class SqliteStore:
 
         A database stamped NEWER than this code is refused: downgrading would
         silently drop columns a newer council wrote.
+
+        Both an already-current store and a freshly-migrated v1-to-v2 one also
+        get :meth:`add_missing_columns` and :meth:`add_missing_indexes`
+        applied, at the same point: a store built by an earlier binary of the
+        SAME schema version can be missing either one, and neither omission
+        changes the version stamp.
         """
         current = self.schema_version()
         if current == 0:
@@ -370,10 +376,12 @@ class SqliteStore:
             return sch.SCHEMA_VERSION
         if current == sch.SCHEMA_VERSION:
             self.add_missing_columns()
+            self.add_missing_indexes()
             return current
         if current == 1:
             self._migrate_v1_to_v2()
             self.add_missing_columns()
+            self.add_missing_indexes()
             return sch.SCHEMA_VERSION
         raise _version_mismatch(current)
 
@@ -483,6 +491,49 @@ class SqliteStore:
                 )
             added.append(f"{table_name}.{column_name}")
         return added
+
+    def add_missing_indexes(self) -> List[str]:
+        """Create any index :mod:`.schema` declares that this store lacks.
+
+        The index-shaped twin of :meth:`add_missing_columns`, and exists for
+        the identical reason: a store created by an earlier build of the SAME
+        schema version has every table and the right stamp but can be missing
+        an index added later (``ix_calls_status_seat_not_before``, added to
+        support the seat-filtered claim scan).  ``metadata.create_all`` only
+        creates indexes for tables it is ALSO creating, so it does nothing for
+        a table that already exists -- hence this, mirroring why
+        ``add_missing_columns`` exists at all.
+
+        Deliberately general over every index the schema declares, on every
+        table, rather than naming ``ix_calls_status_seat_not_before``
+        specifically: a future index added the same way would reopen the
+        identical gap if this only knew about today's one.  It stays
+        strictly additive, though -- nothing here drops, rebuilds or reorders
+        an existing index, so ``ix_calls_status_not_before`` and every other
+        index already present are left exactly as they are.
+
+        Each statement is ``CREATE INDEX IF NOT EXISTS`` (``CREATE UNIQUE
+        INDEX IF NOT EXISTS`` for a unique one, and the partial-index
+        ``WHERE`` clause is preserved), so a second run -- or a run against a
+        store that already has every index -- is a no-op pushed down into
+        SQLite itself rather than one this code has to get right by reading
+        the catalog first. Idempotent; returns the index names it created,
+        which is what ``kbu council db migrate`` reports.
+        """
+        inspector = sa.inspect(self._engine)
+        created: List[str] = []
+        for table in sch.metadata.tables.values():
+            if not inspector.has_table(table.name):
+                continue
+            present = {idx["name"] for idx in inspector.get_indexes(table.name)}
+            for index in table.indexes:
+                if index.name in present:
+                    continue
+                ddl = sa.schema.CreateIndex(index, if_not_exists=True)
+                with self.transaction() as conn:
+                    conn.execute(ddl)
+                created.append(str(index.name))
+        return created
 
     def _assert_schema_version(self) -> None:
         current = self.schema_version()

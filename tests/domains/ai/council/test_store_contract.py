@@ -187,6 +187,124 @@ class TestAdditiveColumnQueuedAt:
 
 
 # ---------------------------------------------------------------------------
+# The backfilled index: ix_calls_status_seat_not_before
+# ---------------------------------------------------------------------------
+
+
+class TestAdditiveIndexSeatNotBefore:
+    """``ix_calls_status_seat_not_before`` on a store file that predates it.
+
+    An earlier phase added this index to :mod:`.schema` to support the
+    seat-filtered claim scan, but ``metadata.create_all`` only creates an
+    index for a table it is ALSO creating -- it does nothing for a table
+    that already exists -- so a store already at SCHEMA_VERSION 2 never got
+    it.  ``migrate()`` must backfill it via ``add_missing_indexes()``, the
+    index-shaped twin of ``add_missing_columns()``: no SCHEMA_VERSION bump,
+    idempotent, and without disturbing any pre-existing row.  The index is
+    dropped by hand here to stand in for a store built before it existed.
+    """
+
+    @staticmethod
+    def _index_names(store, table_name: str) -> set:
+        return {
+            idx["name"] for idx in sa.inspect(store.engine).get_indexes(table_name)
+        }
+
+    def test_migrate_adds_the_index_and_keeps_every_row(self, store):
+        job_id = store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            started_at=T0,
+            finished_at=T0,
+            outcome_kind="transport",
+        )
+
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        assert "ix_calls_status_seat_not_before" not in self._index_names(
+            store, "calls"
+        )
+        # Dropping the index by hand is not a version mismatch: the stamp
+        # never said anything about this index in the first place.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        # The unpartitioned claim path's index is untouched throughout.
+        assert "ix_calls_status_not_before" in self._index_names(store, "calls")
+        # No SCHEMA_VERSION bump was needed to do any of this.
+        assert store.schema_version() == sch.SCHEMA_VERSION
+
+        # Every pre-existing job, item, call and attempt row is intact.
+        assert store.get_job(job_id) is not None
+        stored_calls = store.get_calls(job_id)
+        assert len(stored_calls) == 1
+        assert stored_calls[0]["call_id"] == claim["call_id"]
+        with store.transaction() as conn:
+            attempt_rows = [
+                dict(row._mapping)
+                for row in conn.execute(
+                    sa.select(sch.attempts).where(
+                        sch.attempts.c.call_id == claim["call_id"]
+                    )
+                )
+            ]
+        assert len(attempt_rows) == 1
+        assert attempt_rows[0]["attempt_no"] == 1
+        assert attempt_rows[0]["outcome_kind"] == "transport"
+
+    def test_add_missing_indexes_is_idempotent(self, store):
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        first = store.add_missing_indexes()
+        assert first == ["ix_calls_status_seat_not_before"]
+        # Running it again -- the store now already has the index -- is a
+        # no-op and must not raise.
+        second = store.add_missing_indexes()
+        assert second == []
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+
+    def test_a_store_already_carrying_the_index_is_untouched(self, store):
+        # `store` is freshly init_schema()'d, so it already has every index
+        # :mod:`.schema` declares.
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        assert store.add_missing_indexes() == []
+        assert store.migrate() == sch.SCHEMA_VERSION
+        assert "ix_calls_status_seat_not_before" in self._index_names(store, "calls")
+        assert "ix_calls_status_not_before" in self._index_names(store, "calls")
+
+    def test_unpartitioned_and_seat_filtered_claims_both_work_after_backfill(
+        self, store
+    ):
+        """The claim query behaves identically whether the index was there
+        from the start or just backfilled -- the index changes a scan's
+        plan, never a query's result."""
+        store.create_job(
+            job_row(),
+            [item_row("item-1")],
+            [
+                call_row("item-1", "B", call_id="0-b"),
+                call_row("item-1", "A", call_id="1-a"),
+            ],
+        )
+        with store.transaction() as conn:
+            conn.execute(sa.text("DROP INDEX ix_calls_status_seat_not_before"))
+        assert store.migrate() == sch.SCHEMA_VERSION
+
+        unfiltered = store.claim_calls("w0", {"argo"}, 10, now=T0, seats=None)
+        assert sorted(c["seat_name"] for c in unfiltered) == ["A", "B"]
+        for c in unfiltered:
+            store.release_call(c["call_id"], c["claim_token"], increment_attempt=False)
+
+        claimed = store.claim_calls("w1", {"argo"}, 10, now=T0, seats={"A"})
+        assert [c["seat_name"] for c in claimed] == ["A"]
+
+
+# ---------------------------------------------------------------------------
 # Query types
 # ---------------------------------------------------------------------------
 

@@ -268,6 +268,12 @@ calls = sa.Table(
     # Partitioned claim scan: "this seat's pending calls that are due".  Left
     # alongside the unpartitioned index above rather than replacing it: a
     # worker with no seats declared still scans by (status, not_before) alone.
+    #
+    # Added after some stores already existed at SCHEMA_VERSION 2, which is
+    # exactly the case ``SqliteStore.add_missing_indexes()`` backfills onto an
+    # existing store at ``migrate()`` time -- declaring an index here is
+    # enough; nothing further has to be wired up for it to reach an existing
+    # store.
     sa.Index("ix_calls_status_seat_not_before", "status", "seat_name", "not_before"),
     # Reuse lookup: find_reusable(prompt_hash) wants status 'ok' rows.
     sa.Index("ix_calls_prompt_hash_status", "prompt_hash", "status"),

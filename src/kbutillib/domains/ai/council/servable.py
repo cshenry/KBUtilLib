@@ -102,11 +102,27 @@ async def probe_endpoint(endpoint: str, kind: str, api: Any) -> Dict[str, Any]:
         # whose verdict nothing reads, and for an api type that opens a client
         # to answer it that is a cost with no buyer.
         listing = await llm.models_api(api)
-        names = {
-            str(entry.get("id") or entry.get("name") or "")
-            for entry in listing
-            if isinstance(entry, Mapping)
-        }
+        # EVERY id a gateway advertises for an entry, not just the first one
+        # that happens to be present.  A gateway may carry more than one
+        # spelling per model and accept a DIFFERENT one than it displays:
+        # ARGO's listing is
+        #   {"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash", ...}
+        # and as of 2026-10-20 its /chat/completions accepts ONLY
+        # ``internal_id`` -- the display spelling returns HTTP 400 (Claude) or
+        # HTTP 500 (Gemini).  Reading just ``id`` therefore made the readiness
+        # test the exact inverse of the call: the only spelling that works is
+        # the one that was reported unavailable, so every ARGO seat was
+        # refused at submit while the call itself would have succeeded.
+        # Collecting all of them makes "served" mean "the gateway names it",
+        # which is the question a seat is actually asking.
+        names = set()
+        for entry in listing:
+            if not isinstance(entry, Mapping):
+                continue
+            for key in ("id", "name", "internal_id"):
+                value = entry.get(key)
+                if value:
+                    names.add(str(value))
         names.discard("")
         probe["models"] = names
         return probe

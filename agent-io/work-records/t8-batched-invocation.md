@@ -4,6 +4,7 @@
 - **branch:** `maestro/developer/t8-batched-invocation`
 - **commit_shas:**
   - `385657f14a358cbc3c61b416270759d503f72ac8` — feat(council): batched invocation for CLI seats (t8)
+  - (flake-fix commit added below, see "Flake fix" section)
 - **base commit:** `edb8627` (PRD `council-per-seat-queues-v1`, phase 7 of 12)
 
 ## Summary
@@ -219,3 +220,60 @@ independently confirmed end to end — not before.
   implemented, since asserting homogeneity across two jobs' independently
   resolved rosters (which could route the same seat name differently) adds a
   real correctness risk for no evidence of operational need yet.
+
+## Flake fix (post-review)
+
+A reviewer failed this task on one test:
+`TestBatchedSettlement::test_missing_and_invalid_both_exhaust_at_max_attempts_and_settle_error`,
+measured to fail ~2 runs in 6, including when run completely alone.
+
+**Diagnosis (confirmed, not re-derived here — handed to me already done):**
+the flake is in the test, not in production code. `BatchScript.__call__` has
+an acknowledged asymmetry: a *batched* call can genuinely omit an item
+(`missing`), but a *solo* call has no such notion, so it answers a
+`missing_item_ids` item the same schema-invalid way it answers an
+`invalid_item_ids` item (`{"picked": "not-a-list"}`). Whether a given item's
+retry gets regrouped into a batch or isolated to a solo call is a timing
+accident of `_group_claimed`/`_split_bucket` under `max_concurrency=4`, so
+`item-0` (seeded as `missing`) nondeterministically settles with
+`error.kind` of either `"missing"` or `"invalid_output"` depending on which
+path its retry took — both are faithful records of what the script actually
+did on that attempt, and the production behaviour (row exhausts
+`max_attempts`, settles `error`, item advances) is correct either way.
+
+**Fix chosen: (A), assert the stable invariant.** I changed the two
+`== "missing"` / `== "invalid_output"` assertions to `in {"missing",
+"invalid_output"}` for both rows, and added a comment explaining why (so a
+future reader doesn't "fix" it back to a specific label). I chose (A) over
+(B) (forcing deterministic regrouping in the fixture) because the specific
+label is not a property of the design the PRD asks this test to pin down —
+only the terminal outcome (exhausted, errored, advanced) is. Forcing
+determinism would make the test assert something about the scheduler's
+regrouping heuristic under one arbitrarily chosen `max_concurrency`, which is
+more brittle, not less, and would misrepresent a genuinely free design choice
+as a contract. To avoid weakening the test into something that would pass
+even if nothing were retried, the kind assertion is restricted to exactly the
+two kinds `BatchScript` can legitimately produce here (never e.g.
+`"transport"`), and the pre-existing `attempt_count == 1` assertions are
+kept — together these still prove both items were actually driven through a
+release-then-terminal-settle retry, just not which specific label each one
+landed on.
+
+**Only** `tests/domains/ai/council/test_batched_invocation.py` was touched;
+no production file changed.
+
+**Verification:**
+- Target test run 12 times in a row, in isolation: **12/12 passed**
+  (`TMPDIR=/scratch/chenry/tmp PYTHONPATH=$PWD/src /home/chenry/venvs/kbdl/bin/python -m pytest tests/domains/ai/council/test_batched_invocation.py::TestBatchedSettlement::test_missing_and_invalid_both_exhaust_at_max_attempts_and_settle_error -q -p no:cacheprovider --no-header`,
+  each run ~2.3-3.6 s).
+- Full module `test_batched_invocation.py`: **22 passed** (36.30 s).
+- `test_engine.py` alone: **108 passed**, confirming the default
+  `batch_size <= 1` path is unchanged.
+- Full `tests/domains/ai/council` subtree: **4 failed, 963 passed** (157.96 s)
+  — the 4 failures are exactly
+  `test_types_config.py::TestPackagedDefaultConfig::{test_every_packaged_profile_builds_a_roster,
+  test_the_packaged_config_declares_no_poplar_endpoint,
+  test_on_a_fresh_machine_with_no_kbutillib_config,
+  test_cli_endpoints_default_to_one_call_at_a_time}` — the pre-existing,
+  machine-local failures named in the task envelope (dev row 53). No other
+  test regressed.

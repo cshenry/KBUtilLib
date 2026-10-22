@@ -177,7 +177,7 @@ coordinates, and the tRNA-Lys it overlaps is still called at 50..122.
 | Rule implemented as specified, `CDS_OVERLAP_DISCARD_FRACTION = 0.5` | PASS — `bakta_call_features.py:140`, `_reconcile_cds_overlaps:537` |
 | Driver flag `--cds-overlap-discard-fraction` (default 0.5) | PASS — `_parse_driver_args:168` |
 | `call_features(..., cds_overlap_discard_fraction=0.5)` kwarg | PASS — `bakta_utils.py:1225` |
-| `BaktaCallResult` echo | PASS — `bakta_utils.py:287`, set at `:1352` |
+| `BaktaCallResult` echo | PASS — `bakta_utils.py:287`, set at `:1371` |
 | `rna_overlap` on kept CDS | PASS — driver `_feature_record:371`, adapter `_build_kept_feature:549` |
 | Implemented AFTER `anno.detect_feature_overlaps`, no fork/monkeypatch, non-CDS features unchanged | PASS — single call site in `_run` on the line after Bakta's pass; the loop skips every non-CDS feature |
 | Still-discarded CDS keep reason `'overlap'` and gain `overlap_fraction` | PASS — `_reconcile_cds_overlaps` mutates the existing block in place |

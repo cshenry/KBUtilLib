@@ -9,7 +9,7 @@
   "authored_on": "2026-10-22",
   "authored_session": "2534c232-9109-57eb-aab7-2463a1be6507",
   "machine": "h100",
-  "review_rounds": 0,
+  "review_rounds": 1,
   "confront_rounds": 1,
   "confront": "ran: task-d9e8311c, codex researcher on h100, 12 binding stalls returned, 9 folded, 0 dropped",
   "draft_commit": "4e98392",
@@ -26,6 +26,7 @@
     "RESOLVED THIS SESSION: the 760 'never submitted' definitions flagged as an unexplained coverage gap are the retrieval stage's abstained rows. Measured against ranked.jsonl.gz and priority_adp1_pmi.tsv: 20,036 distinct definitions = 19,276 non-abstained (exactly what was submitted) + 760 abstained, the two sets disjoint. Nothing is missing.",
     "The clearinghouse is READABLE from h100 off-pod over the BERDL delta API (measured 2026-10-22, 16 successful queries). Only load and verify are in-pod. Stage 1 does not need kbhub.",
     "function_result holds 0 rows: the 19,268 verdicts are not loaded. function_entity and function_content hold 47,341 rows each, which is exactly the row count of ranked.jsonl.gz.",
+    "ROUND 2, from Chris's review: the clearinghouse parameter_set must be keyed on a model-only bench_fingerprint, NOT Roster.fingerprint(). Measured at types.py:507, Roster.fingerprint covers role, endpoint_kind, model (route spelling), canonical_model, max_output_tokens, temperature and extra -- so it includes the TRANSPORT, and a codex->MAG move would have re-partitioned all 47,341 clearinghouse functions and re-charged ~199M tokens for a pure cost optimisation. roster_fingerprint and route_fingerprint remain as provenance. prompt_hash deliberately KEEPS endpoint_kind (Q8): measured, the same ~1,400-token question cost ~63,000 input tokens over claude -p against 1,403 over the API, so CLI and API answers are not interchangeable.",
     "<T>_result is keyed on parameter_set_hash and current_state() windows per parameter set, so 'un-run at THIS version' is a native query. The parameter set is where query_version, roster_fingerprint and mapping_hash belong.",
     "prompt_hash is a PURE function (types.py:264) and seat_generation_params exists so a fingerprint can be computed without a backend, so the quote can be EXACT for proposer and critic with zero API calls, and reuse is one indexed lookup per prompt against ix_calls_prompt_hash_status.",
     "The token model can be fitted from attempts.usage over the run's own 199.2M tokens, removing any third-party tokenizer dependency across a Google/OpenAI/Anthropic roster.",
@@ -92,7 +93,8 @@
     "ARGO's and MAG's effective token rates are derivable from no artifact; the design assumes an operator-supplied rate table plus a per-run balance delta, and reports 'unpriced' otherwise. This is the one flag-not-question in the PRD.",
     "The granularity of ClearinghouseLockUnavailableError is unestablished, so whether two shard runs can load concurrently is unknown. Affects only whether pending runs must be loaded in series.",
     "Whether endpoint_state's halt path actually STOPS a running worker on a budget overrun, as opposed to merely recording the halt, is unverified. t9 is instructed to verify and report. If it does not, Q6's ceiling mechanism changes.",
-    "Why the uncompressed JSONL had not reached kbhub while the sync client reported the directory up to date is unknown. The design routes around it via run.json plus per-batch sha256, but 'the sync client said up to date' is now established as not a completeness signal."
+    "Why the uncompressed JSONL had not reached kbhub while the sync client reported the directory up to date is unknown. The design routes around it via run.json plus per-batch sha256, but 'the sync client said up to date' is now established as not a completeness signal.",
+    "Whether `temperature` should be scientifically load-bearing. It is EXCLUDED from bench_fingerprint because it is substantially transport-coupled and including it would let a routing change re-partition the corpus through the back door. On a near-deterministic JSON-extraction task that is the right trade, but it is the one line in Q2 a reasonable person could reverse -- and if reversed it belongs in the QUERY VERSION, not the bench hash."
   ],
   "related": {
     "continuations": {
@@ -109,6 +111,13 @@
     ],
     "trigger_replies": {
       "5231042e-f59b-461c-8e53-839b7f7bce65": "Albert, 2026-10-22: ~/Dropbox/Jobs/ reaches kbhub; .gz and .tsv verified by sha256; the uncompressed .jsonl absent; drop-point and loader-shape recommendations. Folded into Q8, Q9, Q10, Q14.4."
+    },
+    "chris_review": {
+      "round": 2,
+      "date": "2026-10-22",
+      "annotation": "We should try and use the same models for the same seats in ALL our council runs we do for a specific task, and this should go into the hash. The thing I think would be OK to vary is HOW the model is run (e.g. codex, max, MAG, ARGO, direct GPU). The plan should be iterative as I iron out for each particular run where we are best able to allocate token cost.",
+      "disposition": "Folded. One substantive hunk, classified decision-changed against Q2 (IRREVERSIBLE). Propagated to Q2 (rewritten), new Q8, Solution stages 1/2/3/5, the Versioning section, G16, G17, acceptance criteria 31-36, and taskplan tasks t3/t4/t5/t7/t8. Chris's editor reformatting adopted as the new base rather than reverted.",
+      "authorization": "I'm good with it otherwise if you want to just build directly."
     }
   },
   "out_of_scope": [

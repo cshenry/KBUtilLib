@@ -9,12 +9,14 @@ bypassed all of them.** This is the finding that sets the shape of the whole PRD
 Every defect the 2026-10-20/21 run hit is a consequence of the bypass, not of a
 missing capability:
 
-| what went wrong on 2026-10-20 | what the bypassed API already does |
-|---|---|
-| council `items.entity_hash` matched 0 of 19,268 clearinghouse hashes; recovered by joining on definition text | `function_to_go_council` carries `query_id` — the clearinghouse hash — on every output row (`ontology_mapping_utils.py:231`) |
-| 760 priority definitions "never submitted", cause unexplained, flagged to Albert as an open gap | they are the retrieval stage's `abstained` rows. `function_to_go_council` emits them with `decline_reason="abstained"` rather than dropping them |
-| a hand-written SQL export on `/scratch`, the only record of how verdicts became a file | `write_council()` already writes council output as gzipped JSONL with an atomic `.partial` → `replace` |
-| three output files + a hand-written `MANIFEST.json`, one of which did not reach the consumer | `kbu clearinghouse shard` publishes bronze parquet plus a `run.json` carrying per-batch sha256, row count and hash range |
+
+| what went wrong on 2026-10-20                                                                                 | what the bypassed API already does                                                                                                               |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| council `items.entity_hash` matched 0 of 19,268 clearinghouse hashes; recovered by joining on definition text | `function_to_go_council` carries `query_id` — the clearinghouse hash — on every output row (`ontology_mapping_utils.py:231`)                     |
+| 760 priority definitions "never submitted", cause unexplained, flagged to Albert as an open gap               | they are the retrieval stage's `abstained` rows. `function_to_go_council` emits them with `decline_reason="abstained"` rather than dropping them |
+| a hand-written SQL export on `/scratch`, the only record of how verdicts became a file                        | `write_council()` already writes council output as gzipped JSONL with an atomic `.partial` → `replace`                                           |
+| three output files + a hand-written `MANIFEST.json`, one of which did not reach the consumer                  | `kbu clearinghouse shard` publishes bronze parquet plus a `run.json` carrying per-batch sha256, row count and hash range                         |
+
 
 **2. The 760-definition coverage gap is SOLVED, by measurement, in this session.**
 `agent-io/.../2026-10-20-...md` round 9 flagged 760 definitions in the priority
@@ -59,14 +61,16 @@ function_result        0 rows      <- partitioned by `source`
 so the ranked file already covers the whole corpus and the priority list was a
 20,036-row subset of it.
 
-**4. `<T>_result` is keyed on `parameter_set_hash`, which is the versioning
+**4.** `<T>_result` **is keyed on** `parameter_set_hash`**, which is the versioning
 answer, for free.** `current_state()` windows per parameter set, and
 `clearinghouse results --parameter-set-hash` pre-filters on it. So "un-run at
 THIS version" is a native query, not something this design has to invent. The
-parameter set is where `query_version`, `roster_fingerprint` and `mapping_hash`
-belong.
+parameter set is where `query_version`, the BENCH and `mapping_hash` belong —
+but **not** `roster_fingerprint`, which covers `endpoint_kind` and the route
+spelling too and so would make a transport change re-partition the corpus. See
+Q2.
 
-**5. `prompt_hash` is a pure function, so the quote can be EXACT for the
+**5.** `prompt_hash` **is a pure function, so the quote can be EXACT for the
 deterministic seats.** `types.py:264` takes only (seat spec, reuse namespace,
 effective params, json schema, query name, query version, renderer id version,
 role, system, user) — no network, no backend. `seat_generation_params()` exists
@@ -74,10 +78,10 @@ specifically so a fingerprint can be computed "without instantiating a backend".
 Two consequences:
 
 - Every proposer and critic prompt for a planned run can be rendered and counted
-  locally, at zero API cost.
+locally, at zero API cost.
 - Reuse is exactly countable: `ix_calls_prompt_hash_status` indexes
-  `(prompt_hash, status)`, so "how many of these prompts already have a paid
-  `ok` answer" is one indexed lookup per prompt.
+`(prompt_hash, status)`, so "how many of these prompts already have a paid
+`ok` answer" is one indexed lookup per prompt.
 
 Only the **meta** seat must be projected, because its prompt is a function of
 ballots that do not exist until the chairs have voted.
@@ -108,50 +112,50 @@ effective multiple over list is unknown and above 1. **A dollar figure derived
 from list rates is a FLOOR and presenting it as a cost is the specific error
 already made once.**
 
-**8. The one hard prerequisite: the council on `main` cannot run.** `0825c5a`
+**8. The one hard prerequisite: the council on** `main` **cannot run.** `0825c5a`
 ("readiness must accept every id a gateway advertises") exists in no shared
 branch — `git cat-file` in the Dropbox repo cannot even resolve the object. It
 lives only in h100's editable install (`~/projects/KBUtilLib` and
 `/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib` are the same inode,
 `64517:5167606134`, one tree). Its own commit message records the measurement:
-ARGO `/models` returns `{"id": "Gemini 3.5 Flash", "internal_id":
-"gemini35flash"}` and `/chat/completions` now accepts only `internal_id` — the
+ARGO `/models` returns `{"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"}` and `/chat/completions` now accepts only `internal_id` — the
 display spelling returns HTTP 400 for Claude and HTTP 500 for Gemini.
 `servable.py` read only `entry["id"]`, making the readiness test the exact
-inverse of the call, so **every ARGO seat is refused at submit and `kbu council
-doctor` reports the whole ARGO bench unavailable.** Three of five seats in the
+inverse of the call, so **every ARGO seat is refused at submit and** `kbu council doctor` **reports the whole ARGO bench unavailable.** Three of five seats in the
 measured roster are ARGO.
 
 **9. Operational constraints that are measurement, not lore**, and that the
 design must carry as hard constraints:
 
 - **MAG limits are ACCOUNT-WIDE**: `max_parallel_requests` 20 and `requests` 120
-  per minute, read verbatim from stored errors. A config asking 24 parallel
-  errored 427 of 500 pilot items. MAG queues must sum to **6** (≈100 req/min with
-  headroom). Burst-concurrency probes overestimated sustained throughput by ~3x;
-  the limit is windowed and account-wide, so only sustained multi-seat load
-  reveals it.
+per minute, read verbatim from stored errors. A config asking 24 parallel
+errored 427 of 500 pilot items. MAG queues must sum to **6** (≈100 req/min with
+headroom). Burst-concurrency probes overestimated sustained throughput by ~3x;
+the limit is windowed and account-wide, so only sustained multi-seat load
+reveals it.
 - **ARGO saturates at ~24** and showed zero rate limiting at 40 concurrent across
-  three models. Round-1's "ARGO is the slow gateway" was an artifact of testing
-  it at 8.
+three models. Round-1's "ARGO is the slow gateway" was an artifact of testing
+it at 8.
 - **~2,000-item chunks, one chunk in flight.** `claim_calls` is synchronous on
-  the worker's event loop and its cost is linear in the pending set: 217 ms at
-  19k pending rows vs **10.4 ms** at 2k, a 21x difference that inflated service
-  times 6–9x on both gateways at once and cost a 10.8x throughput collapse. The
-  daemon drains every claimable job, so submitting all chunks up front rebuilds
-  the pending set being avoided. KBUtilLib issue 84 is the real fix; chunking is
-  a declared workaround.
+the worker's event loop and its cost is linear in the pending set: 217 ms at
+19k pending rows vs **10.4 ms** at 2k, a 21x difference that inflated service
+times 6–9x on both gateways at once and cost a 10.8x throughput collapse. The
+daemon drains every claimable job, so submitting all chunks up front rebuilds
+the pending set being avoided. KBUtilLib issue 84 is the real fix; chunking is
+a declared workaround.
 - **A retry pass is a stage, not an afterthought.** `invalid_output` is not in
-  `RETRYABLE_KINDS` (only `transport` and `timeout`) and ARGO truncates silently
-  with no length finish-reason, so a cut-off reply is abandoned on its first
-  attempt. 113 items failed that way; **105 came back on a plain retry for 0.30%
-  of run cost.**
+`RETRYABLE_KINDS` (only `transport` and `timeout`) and ARGO truncates silently
+with no length finish-reason, so a cut-off reply is abandoned on its first
+attempt. 113 items failed that way; **105 came back on a plain retry for 0.30%
+of run cost.**
 - **The meta fire rate is 24.1%** over the full 19,268-item set. That figure
-  supersedes 16.7% (n=6) and 38.7% (n=475); each earlier one was honestly
-  caveated and each was wrong.
+supersedes 16.7% (n=6) and 38.7% (n=475); each earlier one was honestly
+caveated and each was wrong.
 - **Input is 86% of all tokens.**
 
-**10. The `file` adapter reads parquet, jsonl and tsv — not gzip.**
+
+
+**10. The** `file` **adapter reads parquet, jsonl and tsv — not gzip.**
 `FileSourceAdapter._format()` infers from the suffix among exactly those three
 and `_iter_jsonl` uses a plain `path.open("r")`. So Albert's reasonable
 suggestion — "for the automated loop, ship the `.gz` only" — is incompatible with
@@ -162,18 +166,20 @@ is compressed, `estimate_rows()` is exact from the footer where jsonl returns
 ### Links to full research output
 
 - [External prior-art scan (literature, web, reusable tools)](research/external-scan.md)
-  — run by a cross-family adversary (codex) on the Maestro rail as
-  `task-d9e8311c`, verified by git rather than by status (blob
-  `2e20c507`, absent from `main`, so the artifact is this run's). Covers:
-  pre-flight cost quoting for batch LLM workloads;
-  human-in-the-loop approval-gate artifacts; atomic directory publishing over an
-  eventually-consistent file sync; idempotent cross-machine loaders and receipts;
-  deriving the un-processed work set under a versioned transform; join-key
-  mismatch as a silent failure class; and rate-limit-aware work shaping.
+— run by a cross-family adversary (codex) on the Maestro rail as
+`task-d9e8311c`, verified by git rather than by status (blob
+`2e20c507`, absent from `main`, so the artifact is this run's). Covers:
+pre-flight cost quoting for batch LLM workloads;
+human-in-the-loop approval-gate artifacts; atomic directory publishing over an
+eventually-consistent file sync; idempotent cross-machine loaders and receipts;
+deriving the un-processed work set under a versioned transform; join-key
+mismatch as a silent failure class; and rate-limit-aware work shaping.
 - [Council composition and schedule, rounds 1–9](../../research/2026-10-20-function-to-go-council-composition-and-schedule.md)
-  — in the `miles` steward repo, not this one. The measured record of the
-  completed run: every service time, the four retracted projections, the token
-  economics, and the three cost levers with numbers.
+— in the `miles` steward repo, not this one. The measured record of the
+completed run: every service time, the four retracted projections, the token
+economics, and the three cost levers with numbers.
+
+
 
 ### Quality report
 
@@ -197,19 +203,19 @@ and priority TSV; the inode identity of the two KBUtilLib paths; the absence of
 **NOT searched, and why:**
 
 - **The kbhub side of the load.** Deliberately. `load` is in-pod and kbhub is
-  Albert's machine; this PRD specifies the contract and the two commands he runs
-  and does not write his script. His 2026-10-22 reply (trigger
-  `5231042e`) confirms `~/Dropbox/Jobs/` reaches kbhub and that he verified the
-  `.gz` and `.tsv` by sha256 against the manifest.
-- **`engine/decide.py` beyond the unanimity/critic/meta control flow.** The
-  council's decision logic is continuation [145]'s subject, not this PRD's.
-- **The retrieval backend (`go_text`).** Its abstain behaviour was measured
-  through its output rather than read in source, which was sufficient to resolve
-  the 760; the ranking quality question (25.4% `no_candidate_matched`) is
-  explicitly out of scope.
-- **Whether a second `kbu clearinghouse` concurrent load is safe.** The ingest
-  module has a lock (`ClearinghouseLockUnavailableError`) and I did not establish
-  its granularity. Recorded as a terminal open item.
+Albert's machine; this PRD specifies the contract and the two commands he runs
+and does not write his script. His 2026-10-22 reply (trigger
+`5231042e`) confirms `~/Dropbox/Jobs/` reaches kbhub and that he verified the
+`.gz` and `.tsv` by sha256 against the manifest.
+- `engine/decide.py` **beyond the unanimity/critic/meta control flow.** The
+council's decision logic is continuation [145]'s subject, not this PRD's.
+- **The retrieval backend (**`go_text`**).** Its abstain behaviour was measured
+through its output rather than read in source, which was sufficient to resolve
+the 760; the ranking quality question (25.4% `no_candidate_matched`) is
+explicitly out of scope.
+- **Whether a second** `kbu clearinghouse` **concurrent load is safe.** The ingest
+module has a lock (`ClearinghouseLockUnavailableError`) and I did not establish
+its granularity. Recorded as a terminal open item.
 
 **Confidence the design should carry:** high on stages 1, 4 and 5, because they
 are assembly of code that exists and whose contracts were read directly. Medium
@@ -233,7 +239,7 @@ twelve binding stalls. Nine changed the design and none were dropped. The three
 that mattered most: **concurrency caps do not enforce a rate limit** — the
 working "MAG queues sum to 6" is concurrency standing in for MAG's account-wide
 120/min and breaks if the gateway gets faster, so an account-wide pacer is now
-Q5; **a sync client need not deliver `run.json` last**, so manifest-presence is
+Q5; **a sync client need not deliver** `run.json` **last**, so manifest-presence is
 not an arrival proof and the trigger must verify bytes with a transfer deadline
 behind it; and **a ceiling set at the quote's mean halts half of all runs**
 partway, having spent most of the tokens for none of the result, so the quote now
@@ -241,6 +247,24 @@ emits an upper band and the ceiling derives from it. Also folded: approval expir
 and one-shot consumption, the call graph as a quote line-item, the pre-join
 assertion set, mixed-version coverage in `council-status`, and a receipt that
 reconciles against items *submitted* rather than rows written.
+
+**Round 2 — 2026-10-22 (review, Chris's edits folded).** One substantive
+annotation, and it landed on an IRREVERSIBLE decision: the bench must be fixed
+across runs and go in the hash, while HOW a model is run may vary. That caught a
+real defect. Round 1 put `roster_fingerprint` in the clearinghouse
+`parameter_set`, and `Roster.fingerprint()` covers `endpoint_kind` and the route
+spelling — so a transport change would have re-partitioned all 47,341 functions
+and re-charged ~199M tokens for a pure cost optimisation. Q2 is rewritten around
+a new model-only `bench_fingerprint`; `roster_fingerprint` and
+`route_fingerprint` stay as provenance. New Q8 records the deliberate decision
+NOT to apply the same rule to `prompt_hash`, whose `endpoint_kind` key is
+justified by a direct measurement (the same question cost ~63,000 input tokens
+over `claude -p` against 1,403 over the API). `PLAN.json` now carries the
+per-seat transport allocation as an explicitly run-varying field; the quote
+attributes reuse misses to new-item / bench-change / transport-change; the
+approval binds to the bench rather than the roster. New gotchas G16 and G17.
+Chris's editor reformatting was adopted as the new base rather than reverted, so
+it stops swamping every future review diff.
 
 ## Problem Statement
 
@@ -253,27 +277,27 @@ he pays it.
 What stands in the way:
 
 1. **Nothing can tell him what has not been run.** The one run was driven off a
-   hand-exported priority TSV for two genomes. There is no verb that answers
+  hand-exported priority TSV for two genomes. There is no verb that answers
    "which functions have no verdict at the current version".
 2. **Nothing can quote a run.** He is asked to authorise a 200M-token spend on a
-   gateway whose rate card does not exist, with no figure in front of him except
+  gateway whose rate card does not exist, with no figure in front of him except
    what the last run happened to cost.
 3. **The approval is a conversation.** It binds to nothing. A run started an hour
-   later against a changed item set or a changed roster is indistinguishable from
+  later against a changed item set or a changed roster is indistinguishable from
    the one he approved, and there is no ceiling that stops a run that goes wrong
    from spending the rest of the balance.
 4. **The pipeline is eight scripts on an ephemeral shared filesystem.**
-   `/scratch` on this host is shared with other users, has filled to ENOSPC
+  `/scratch` on this host is shared with other users, has filled to ENOSPC
    before, and is not backed up. `export_results.py` is the only description of
    how verdicts became a loadable file, and it is 88 lines of `sqlite3` and `csv`
    that joins on definition text because the hash it needed was thrown away two
    stages earlier.
 5. **The hand-off to kbhub is undefined.** The last one was three files and a
-   hand-written manifest; one of the three had not arrived on the consumer
+  hand-written manifest; one of the three had not arrived on the consumer
    machine even though the sync client reported the directory up to date. Nothing
    reported back that a load had happened.
-6. **And on `main`, the council does not run at all** — every ARGO seat is
-   refused at submit, and three of five seats are ARGO.
+6. **And on** `main`**, the council does not run at all** — every ARGO seat is
+  refused at submit, and three of five seats are ARGO.
 
 The cost of leaving this alone is not only the hand-driving. It is that each of
 the three cost levers already identified — dropping the third chair (~22% of
@@ -289,6 +313,26 @@ directory per run holding the small artifacts that cross machines or that Chris
 reads. Large intermediates and the council store stay on h100-local `/scratch`,
 because every byte on the sync surface needs an integrity gate and only what
 another machine reads belongs there.
+
+**The bench is fixed; the transport is not.** Chris, 2026-10-22: "We should try
+and use the same models for the same seats in ALL our council runs we do for a
+specific task, and this should go into the hash. The thing I think would be OK to
+vary is HOW the model is run (e.g. codex, max, MAG, ARGO, direct GPU). The plan
+should be iterative as I iron out for each particular run where we are best able
+to allocate token cost."
+
+That requirement separates two things this design had conflated, and the
+separation runs through every stage below:
+
+- **The BENCH** — which model sits in which seat — is the scientific identity of
+  a verdict. It goes in the hash that partitions the corpus, and it is meant to
+  stay constant across every run for a given task.
+- **The TRANSPORT** — codex CLI, the Max subscription, MAG, ARGO, a direct GPU —
+  is a cost-allocation decision, expected to change run to run as Chris works out
+  where tokens are best spent. It is recorded as provenance on every row and
+  **must not re-partition the corpus.**
+
+See Q2 for what this replaced and why the obvious implementation was wrong.
 
 ### The run directory
 
@@ -314,63 +358,77 @@ Derives the un-run set and writes `PLAN.json`. Runs on h100, unattended,
 schedulable.
 
 1. **Universe.** `function_entity` hashes joined to `function_content` text, read
-   from the clearinghouse over the delta API. Measured working from h100.
+  from the clearinghouse over the delta API. Measured working from h100.
 2. **Already done.** `current_state("function")` filtered to
-   `source = council/<query_name>@<version>` and
+  `source = council/<query_name>@<version>` and
    `parameter_set_hash = <this run's parameter set>`.
 3. **Un-run** = universe − done.
 4. **Rank.** `function_to_go` over the un-run set; `write_ranked` to
-   `/scratch/.../ranked.jsonl.gz` (already atomic via `.partial` → `replace`).
+  `/scratch/.../ranked.jsonl.gz` (already atomic via `.partial` → `replace`).
 5. **Partition.** The un-run set splits three ways and all three are recorded:
-   - **submit** — not abstained, has candidates, deduplicated by text
-   - **abstain** — the retrieval stage declined (placeholder function, or no
-     candidate survived the height filter); carried forward as result rows with
-     `decline_reason = abstained:<reason>`, never dropped
-   - **fan-out** — distinct `query_id`s sharing one text, which are answered once
-     and fanned back out
+  - **submit** — not abstained, has candidates, deduplicated by text
+  - **abstain** — the retrieval stage declined (placeholder function, or no
+  candidate survived the height filter); carried forward as result rows with
+  `decline_reason = abstained:<reason>`, never dropped
+  - **fan-out** — distinct `query_id`s sharing one text, which are answered once
+  and fanned back out
 6. **Chunk.** ~2,000 submit items per chunk, ordered, one in flight.
-7. **Write `PLAN.json`** with the counts, the chunk list, the roster fingerprint,
-   the query name and version, the `mapping_hash`, the resolved
-   `parameter_set`, and a `plan_hash` over the canonicalised whole.
+7. **Write** `PLAN.json` with the counts, the chunk list, the query name and
+   version, the `mapping_hash`, the **`bench_fingerprint`** (model-only, Q2),
+   the resolved `parameter_set`, the **transport allocation per seat** — which
+   gateway each seat is routed over for THIS run, expected to differ between
+   runs — the `roster_fingerprint` and per-seat `route_fingerprint` as
+   provenance, the concurrency block, and a `plan_hash` over the canonicalised
+   whole.
+
+
 
 ### Stage 2 — `kbu council quote`
 
 Reads `PLAN.json`, writes `QUOTE.json`. **Spends nothing: zero API calls.**
 
 1. **Fit the token model** from the store's own history — per `(seat, role)`,
-   input tokens per prompt character and mean output tokens, over every
+  input tokens per prompt character and mean output tokens, over every
    `attempts.usage` row for that seat. Reported with its sample size.
 2. **Render every deterministic prompt locally** — proposer and critic — through
-   the same `queries/spec.py` renderer the worker uses, and compute each
+  the same `queries/spec.py` renderer the worker uses, and compute each
    `prompt_hash` through `types.prompt_hash`.
-3. **Count reuse exactly.** For each `prompt_hash`, one indexed lookup for an
-   existing `status='ok'` call. A hit costs zero tokens. Reported **per seat**,
+3. **Attribute every reuse MISS, because a transport change makes a cheap run
+   look like a full one.** `prompt_hash` includes `endpoint_kind` (Q8), so
+   re-routing a seat invalidates that seat's stored answers even though the
+   bench is unchanged. The quote must therefore split its misses three ways —
+   **new item** (never asked), **bench change** (this seat's model moved), and
+   **transport change** (same model, different route) — and say so in a line of
+   its own. Without the split, a pure cost optimisation quotes like a corpus
+   re-run and reads as a bug.
+4. **Count reuse exactly.** For each `prompt_hash`, one indexed lookup for an
+  existing `status='ok'` call. A hit costs zero tokens. Reported **per seat**,
    because that is what distinguishes a cheap roster change (one seat re-pays)
    from an expensive query-version bump (`query_version` is inside `prompt_hash`,
    so everything re-pays).
-4. **Quote the CALL GRAPH, not just prompt lengths.** Five seats is not five
-   identical calls per item, and an arithmetic that assumes it is will be wrong
+5. **Quote the CALL GRAPH, not just prompt lengths.** Five seats is not five
+  identical calls per item, and an arithmetic that assumes it is will be wrong
    in the same direction every time. `QUOTE.json` enumerates the graph:
-   - 3 proposer calls per item, **unconditional**;
-   - 1 critic call per item, **also unconditional** — `decide.py` step 5 returns
-     `need_critic` with no guard, which is why one critic per item carries no
-     information about disagreement;
-   - 1 meta call on a **fraction** of items;
-   - a **paid-repair line** for the retry pass.
-5. **Project meta only.** Volume = `submit_count × meta_fire_rate`, with the rate
-   and its sample size named in the output. Default 0.241 (n=19,268).
-6. **Emit a point estimate AND an upper band.** The band is what the approval's
-   ceiling is derived from (stage 3). A mean presented as a cap understates the
+  - 3 proposer calls per item, **unconditional**;
+  - 1 critic call per item, **also unconditional** — `decide.py` step 5 returns
+  `need_critic` with no guard, which is why one critic per item carries no
+  information about disagreement;
+  - 1 meta call on a **fraction** of items;
+  - a **paid-repair line** for the retry pass.
+6. **Project meta only.** Volume = `submit_count × meta_fire_rate`, with the rate
+  and its sample size named in the output. Default 0.241 (n=19,268).
+7. **Emit a point estimate AND an upper band.** The band is what the approval's
+  ceiling is derived from (stage 3). A mean presented as a cap understates the
    risk of the one outcome worth avoiding: a run halted partway, having spent
    most of the tokens for none of the result.
-7. **Wall clock** from the measured per-seat throughput and the binding
-   rate-limit ceiling, reported as the slowest queue, not the sum.
-8. **Dollars, conditionally.** If `ai_council.rates` carries a rate for a
-   gateway, report a dollar figure labelled with the rate's provenance and
+8. **Wall clock** from the measured per-seat throughput and the binding
+  rate-limit ceiling, reported as the slowest queue, not the sum.
+9. **Dollars, conditionally.** If `ai_council.rates` carries a rate for a
+  gateway, report a dollar figure labelled with the rate's provenance and
    whether it is a floor. If it does not, report `unpriced` for that gateway.
    **Never substitute vendor list rates for a gateway's own rate.**
-9. **A balance-delta block** — fields for the operator-read gateway balance
-   before and after. Each completed run therefore calibrates the next run's
+10. **A balance-delta block** — fields for the operator-read gateway balance
+  before and after. Each completed run therefore calibrates the next run's
    dollar figure, which is the only route from "unpriced" to a real number.
 
 Every line in `QUOTE.json` is tagged `exact` or `projected`. A quote whose
@@ -387,8 +445,12 @@ The runner refuses to start unless all of:
 - `APPROVED.json` exists and parses;
 - its `quote_hash` equals the recomputed hash of the `QUOTE.json` on disk;
 - the `QUOTE.json`'s `plan_hash` equals the recomputed hash of `PLAN.json`;
-- the roster fingerprint and query version in `PLAN.json` still match what the
-  live config resolves to;
+- the **`bench_fingerprint`** and query version in `PLAN.json` still match what
+the live config resolves to. Deliberately the BENCH and not the
+`roster_fingerprint`: a transport change between quote and run is permitted and
+must not invalidate an approval, whereas a model swap under the approval would
+be approving one experiment and running another. A transport change does
+invalidate the quote's *price*, so the runner warns and names the changed seats;
 - `expires_at` is in the future;
 - the approval has not already been consumed by a different run.
 
@@ -413,49 +475,52 @@ outcome. The quote therefore emits an upper band alongside the point estimate
 Executes the approved plan. Replaces `run_chunks.sh`.
 
 - One chunk submitted and drained at a time, in plan order, `.done` markers for
-  resumability, a per-chunk timeout so one bad chunk cannot wedge the run.
+resumability, a per-chunk timeout so one bad chunk cannot wedge the run.
 - Credentials: `ARGO_USER` and `AMSC_TOKEN` are exported in no shell on this
-  host, and a council started without them does not fail loudly — the seats
-  report unavailable and the calls park. The runner resolves both itself and
-  refuses to start if either is missing, which retires `kbu-env.sh`.
+host, and a council started without them does not fail loudly — the seats
+report unavailable and the calls park. The runner resolves both itself and
+refuses to start if either is missing, which retires `kbu-env.sh`.
 - To outlive the launching session it must be started under
-  `systemd-run --user --scope --collect`. `setsid`, `nohup` and `disown` do not
-  escape the unit's cgroup and systemd kills everything in it without a trace.
+`systemd-run --user --scope --collect`. `setsid`, `nohup` and `disown` do not
+escape the unit's cgroup and systemd kills everything in it without a trace.
 - **A retry pass is part of the run.** After the last chunk, items whose calls
-  failed `invalid_output` are retried to a round cap of 2. The run is not
-  complete until the retry pass has run or been declared unnecessary.
+failed `invalid_output` are retried to a round cap of 2. The run is not
+complete until the retry pass has run or been declared unnecessary.
 - `RUN.json` is appended per chunk: items, ok, error, duration, tokens by
-  gateway, and the live claim cost.
+gateway, and the live claim cost.
 - Halts on the approved ceiling, on a gateway halt, and on an operator stop.
+
+
 
 ### Stage 5 — export, publish, load, receipt
 
-1. **`kbu ontomap council-export`** writes **parquet** on `/scratch`, one row per
-   *input* `query_id` — including abstentions and council declines — carrying
+1. `kbu ontomap council-export` writes **parquet** on `/scratch`, one row per
+  *input* `query_id` — including abstentions and council declines — carrying
    `query_id`, `function_text`, `go_ids`, `go_confidences`, `final_confidence`,
    `decided_by`, `decline_reason`, `n_valid_proposers`, `votes`, `decided_at`,
-   and the run identity. **`query_id` comes from the ranked file, not from a text
+   and the run identity. `query_id` **comes from the ranked file, not from a text
    join.**
 2. **A shipped manifest preset**, `function-to-go-council`, as package data
-   alongside the existing presets: `adapter = "file"`, `format = "parquet"`,
+  alongside the existing presets: `adapter = "file"`, `format = "parquet"`,
    `entity_type = "function"`, `kinds = ["result"]`,
    `[source.hash] precomputed = "query_id"` (re-canonicalised through
    `encode_entity_hash`, never trusted raw), `observed_at_column = "decided_at"`,
    and a `[source.result]` block whose `parameter_set` carries the query version,
-   roster fingerprint and `mapping_hash`.
-3. **`kbu clearinghouse plan`** then **`kbu clearinghouse shard --out
-   <run-dir>/shard`**, on h100. Sharding runs anywhere. The sharder publishes
-   `run.json` last, carrying a sha256, a row count and a hash range per batch —
+   the `bench_fingerprint` and the `mapping_hash` — NOT the
+   `roster_fingerprint`, which would re-partition the corpus on a routing change
+   (Q2). The `roster_fingerprint` and per-seat `route_fingerprint` ride along in
+   the result `payload` as provenance instead.
+3. `kbu clearinghouse plan` then **`kbu clearinghouse shard --out
+  /shard`**, on h100. Sharding runs anywhere. The sharder publishes`  run.json` last, carrying a sha256, a row count and a hash range per batch —
    which is the completeness contract this hand-off needs, already implemented.
-4. **Dropbox syncs `shard/` to kbhub.**
+4. **Dropbox syncs** `shard/` **to kbhub.**
 5. **On kbhub, Albert runs `kbu clearinghouse load <shard_dir> --dry-run`, then
-   without it.** Fill-only, idempotent, ledger-resumable; the ingest path runs
+  without it.** Fill-only, idempotent, ledger-resumable; the ingest path runs
    five integrity checks per batch before any byte is used, and refuses a
    directory with no `run.json`.
-6. **`kbu clearinghouse verify <shard_dir> --run-id <id>` is the receipt.** Its
-   envelope is written back into the run directory as `LOADED.json`, which is
+6. `kbu clearinghouse verify <shard_dir> --run-id <id>` **is the receipt.** Its
+  envelope is written back into the run directory as `LOADED.json`, which is
    what lets h100 see the pickup happened without asking.
-
    **The receipt must reconcile against what was SUBMITTED, not against what was
    exported, and must distinguish items from association rows.** "Loaded 19,268"
    is not a complete reconciliation when the plan submitted 19,276: the eight
@@ -470,7 +535,7 @@ Executes the approved plan. Replaces `run_chunks.sh`.
 Before committing, the load must assert all of, and report the counts for each:
 
 - the expected input is **non-empty** — a shard run with zero rows is a producer
-  failure, not a clean load;
+failure, not a clean load;
 - every join key is **non-null**;
 - each source key maps to **at most one** target slot (no ambiguity);
 - the **coverage** of source keys that resolve is at or above a declared floor.
@@ -482,20 +547,20 @@ worked. The trap is that the assertion must run **before** the join, not on its
 result — a relationship test evaluated over an empty join passes vacuously, which
 is how this class of defect survives having tests.
 
-**`run.json`'s presence is NOT proof of arrival, and the trigger must not treat
+`run.json`**'s presence is NOT proof of arrival, and the trigger must not treat
 it as one.** The sync client reported the last hand-off's directory up to date
 while one of its three files was absent on the consumer, and nothing guarantees a
 sync client preserves the producer's write order — so the marker can arrive
 before the bytes it describes. The trigger condition is therefore not "a
-`run.json` exists" but **"a `run.json` exists and every batch it lists is present
+`run.json` exists" but **"a** `run.json` **exists and every batch it lists is present
 and sha256-matches"**, which the existing five-check ingest gate already
 computes. What the design adds is what to do when it does not:
 
 - **first failures mean "still syncing" — retry**, with progress persisted so a
-  retry does not restart the verification from nothing;
+retry does not restart the verification from nothing;
 - **after a declared transfer deadline** (default 6 h from the `run.json`'s
-  mtime) **it is a failed delivery** and must be raised with the evidence: which
-  batch, expected vs observed size, expected vs observed digest.
+mtime) **it is a failed delivery** and must be raised with the evidence: which
+batch, expected vs observed size, expected vs observed digest.
 
 Neither extreme is safe on its own. Treating the first mismatch as corruption
 alarms on every normal sync lag; treating it as transient forever means a genuinely
@@ -519,14 +584,16 @@ missing receipt rather than re-loading.
 
 ### What is automated and what is not
 
-| stage | runs | automatable |
-|---|---|---|
-| 1 plan | h100, unattended | yes — schedulable |
-| 2 quote | h100, unattended, spends nothing | yes — runs with the plan |
-| 3 approve | Chris | no, by design |
-| 4 run | h100, launched by the approval | yes, once approved |
-| 5 export + shard | h100, unattended | yes |
-| 5 load + verify | kbhub, in-pod | Albert's, triggered by a shard dir with a `run.json` and no `LOADED.json` |
+
+| stage            | runs                             | automatable                                                               |
+| ---------------- | -------------------------------- | ------------------------------------------------------------------------- |
+| 1 plan           | h100, unattended                 | yes — schedulable                                                         |
+| 2 quote          | h100, unattended, spends nothing | yes — runs with the plan                                                  |
+| 3 approve        | Chris                            | no, by design                                                             |
+| 4 run            | h100, launched by the approval   | yes, once approved                                                        |
+| 5 export + shard | h100, unattended                 | yes                                                                       |
+| 5 load + verify  | kbhub, in-pod                    | Albert's, triggered by a shard dir with a `run.json` and no `LOADED.json` |
+
 
 Stages 1 and 2 together are the "automatically placed in a job folder" half of
 the ask, and they are safe to schedule because neither spends anything.
@@ -534,112 +601,116 @@ the ask, and they are safe to schedule because neither spends anything.
 ## User Stories
 
 1. As Chris, I want a verb that tells me how many functions have no council
-   verdict at the current version, so that I know whether a run is worth
+  verdict at the current version, so that I know whether a run is worth
    starting at all.
 2. As Chris, I want the un-run set materialised in a Dropbox folder I can open,
-   so that the pending work is visible without my asking an agent.
+  so that the pending work is visible without my asking an agent.
 3. As Chris, I want a token quote before I approve, so that I am authorising a
-   number rather than a hope.
+  number rather than a hope.
 4. As Chris, I want the quote to tell me which of its lines are measured and
-   which are projected, so that I know where its error lives.
+  which are projected, so that I know where its error lives.
 5. As Chris, I want the quote expressed in tokens, with dollars only where a rate
-   is actually known, so that I am never shown a list-derived figure as a cost.
+  is actually known, so that I am never shown a list-derived figure as a cost.
 6. As Chris, I want the quote to tell me how much of the run is already paid for
-   by reuse, so that re-running after a small change is visibly cheap.
+  by reuse, so that re-running after a small change is visibly cheap.
 7. As Chris, I want to see, per seat, what a roster change costs versus what a
-   query-version bump costs, so that I can choose the cheap change knowingly.
+  query-version bump costs, so that I can choose the cheap change knowingly.
 8. As Chris, I want my approval to carry a token ceiling the run halts at, so
-   that a run that goes wrong cannot spend the balance.
+  that a run that goes wrong cannot spend the balance.
 9. As Chris, I want my approval bound to the exact plan and quote I read, so that
-   nothing can be substituted between my yes and the run.
+  nothing can be substituted between my yes and the run.
 10. As Chris, I want a one-line verb to approve, so that the gate costs me a
-    command and not a session.
+  command and not a session.
 11. As Chris, I want to decline a quote and have that recorded, so that a
-    declined plan does not sit looking pending.
+  declined plan does not sit looking pending.
 12. As an operator, I want the run to survive the session that starts it, so that
-    a 9-hour job does not die when a wake ends.
+  a 9-hour job does not die when a wake ends.
 13. As an operator, I want per-chunk progress on disk, so that I can see where a
-    run is without attaching to it.
+  run is without attaching to it.
 14. As an operator, I want a resumable run, so that a killed chunk costs one
-    chunk and not the whole job.
+  chunk and not the whole job.
 15. As an operator, I want the runner to resolve its own credentials and refuse
-    without them, so that a run cannot silently lose seats.
+  without them, so that a run cannot silently lose seats.
 16. As an operator, I want a retry pass to be part of the run, so that the ~0.6%
-    of items that fail on a silent truncation are not abandoned.
+  of items that fail on a silent truncation are not abandoned.
 17. As an operator, I want the chunk size and the per-gateway concurrency to come
-    from the plan, so that the measured rate limits are configuration and not
+  from the plan, so that the measured rate limits are configuration and not
     folklore.
 18. As an operator, I want the run to halt on a gateway halt rather than retry
-    into a rate limit, so that a 429 does not amplify into a storm.
+  into a rate limit, so that a 429 does not amplify into a storm.
 19. As Albert, I want the published output to be a standard shard run with a
-    `run.json`, so that I load it with the command I already have and not a
+  `run.json`, so that I load it with the command I already have and not a
     bespoke script.
 20. As Albert, I want a dry-run that tells me what a load would do before it does
-    it, so that I have a last gate.
+  it, so that I have a last gate.
 21. As Albert, I want the load to be idempotent, so that re-running it after a
-    pod restart is free and safe.
+  pod restart is free and safe.
 22. As Albert, I want declines in the data as rows with a reason, so that I do not
-    mistake a legitimate "no GO term" for missing data.
+  mistake a legitimate "no GO term" for missing data.
 23. As Albert, I want the join key to be a clearinghouse entity hash carried
-    through from the source, so that I am not matching on free text.
+  through from the source, so that I am not matching on free text.
 24. As Albert, I want a load that joins nothing to fail loudly, so that a wrong
-    key is an alarm and not a silent success.
+  key is an alarm and not a silent success.
 25. As Chris, I want a receipt written back into the run folder, so that h100 can
-    see the load happened without waking anyone on kbhub.
+  see the load happened without waking anyone on kbhub.
 26. As Chris, I want the receipt to carry row counts, so that "loaded" and
-    "loaded nothing" are different answers.
+  "loaded nothing" are different answers.
 27. As Chris, I want each run's gateway balance before and after recorded, so
-    that the next run's dollar quote is better than this one's.
+  that the next run's dollar quote is better than this one's.
 28. As Chris, I want abstained functions recorded as results, so that they are
-    not re-selected as un-run forever.
+  not re-selected as un-run forever.
 29. As Chris, I want a version bump to re-select the corpus and to say so in the
-    quote, so that the cost of a bump is visible before I pay it.
+  quote, so that the cost of a bump is visible before I pay it.
 30. As a future maintainer, I want the whole pipeline to be `kbu` verbs in the
-    repo rather than scripts on `/scratch`, so that the next run does not depend
+  repo rather than scripts on `/scratch`, so that the next run does not depend
     on a filesystem that is shared, unbacked-up and declared ephemeral.
 31. As a future maintainer, I want the chunking workaround to name KBUtilLib
-    issue 84, so that the workaround is removed when the defect is fixed rather
+  issue 84, so that the workaround is removed when the defect is fixed rather
     than becoming permanent.
 32. As a future maintainer, I want the council to run from a clean clone of
-    `main`, so that the system is not dependent on one machine's local commit.
+  `main`, so that the system is not dependent on one machine's local commit.
+
+
 
 ## Implementation Decisions
 
+
+
 ### Modules and their interfaces
 
-**`kbutillib/domains/genome/ontology_mapping/ontology_mapping_utils.py`** gains
+`kbutillib/domains/genome/ontology_mapping/ontology_mapping_utils.py` gains
 the pipeline stages, because it already owns `function_to_go`,
 `function_to_go_council`, `write_ranked`/`read_ranked` and `write_council`, and
 the stages are the same two capabilities plus bookkeeping:
 
 - `council_plan(run_dir, *, query, parameter_set=None, chunk_size=2000) -> dict`
-  — derives the un-run set, ranks it, partitions it, chunks it, writes
-  `PLAN.json`, returns the plan.
+— derives the un-run set, ranks it, partitions it, chunks it, writes
+`PLAN.json`, returns the plan.
 - `council_run(run_dir, *, resume=True) -> dict` — validates the approval, drains
-  the chunks, runs the retry pass, appends `RUN.json`.
+the chunks, runs the retry pass, appends `RUN.json`.
 - `council_export(run_dir, out_path) -> dict` — writes the verdict parquet, one
-  row per input `query_id`.
+row per input `query_id`.
 
 The un-run derivation is a separate deep module so it is testable without the
 clearinghouse: `unrun_set(universe, done, ranked) -> {submit, abstain, fanout}`
 is pure, and the clearinghouse reads are two thin calls around it.
 
-**`kbutillib/domains/ai/council/quote.py`** — new, and the deep module of this
+`kbutillib/domains/ai/council/quote.py` — new, and the deep module of this
 PRD. A lot of behaviour behind a small interface:
 
 - `fit_token_model(store, *, seats) -> TokenModel` — per `(seat, role)`, input
-  tokens per prompt character and mean output tokens, from `attempts.usage`, with
-  sample sizes.
+tokens per prompt character and mean output tokens, from `attempts.usage`, with
+sample sizes.
 - `quote_plan(plan, *, store, config, token_model, meta_fire_rate) -> Quote` — the
-  whole quote. Renders deterministic prompts, computes `prompt_hash` per
-  `(item, seat)`, counts reuse, applies the model, projects meta, computes wall
-  clock, prices against a rate table if one exists.
+whole quote. Renders deterministic prompts, computes `prompt_hash` per
+`(item, seat)`, counts reuse, applies the model, projects meta, computes wall
+clock, prices against a rate table if one exists.
 
 `Quote` is a dataclass with per-line `basis: "exact" | "projected"` and serialises
 to `QUOTE.json`. Nothing in this module opens a socket; that is the testable
 property that makes "the quote spends nothing" checkable rather than asserted.
 
-**`kbutillib/interfaces/cli/ontomap.py`** — new CLI group `kbu ontomap`, since
+`kbutillib/interfaces/cli/ontomap.py` — new CLI group `kbu ontomap`, since
 none exists. It follows the envelope conventions already used by `council.py` and
 `clearinghouse.py` verbatim: `_envelope`/`_emit`/`_render`, a `--json` flag on
 every command, `locus` where relevant, and `warnings` as a first-class field.
@@ -647,11 +718,11 @@ Commands: `version`, `council-plan`, `council-quote` (a thin alias onto
 `kbu council quote`), `council-approve`, `council-run`, `council-export`,
 `council-publish`, `council-status`.
 
-**`kbu council quote`** is added to the existing council group, because the quote
+`kbu council quote` is added to the existing council group, because the quote
 needs the renderer, `prompt_hash`, the seat specs and the usage history — all
 council-internal. `kbu ontomap council-quote` delegates to it.
 
-**`kbutillib/domains/kbase/berdl/presets/function-to-go-council.toml`** — the
+`kbutillib/domains/kbase/berdl/presets/function-to-go-council.toml` — the
 shipped manifest preset, as package data beside the existing presets, so
 `backfill resolve` finds it by name.
 
@@ -693,11 +764,13 @@ against a changed job is refused.
 
 Three decline classes are written to `function_result`, all with `go_ids = []`:
 
-| `decline_reason` | origin | cost to produce |
-|---|---|---|
-| `abstained:<reason>` | retrieval; placeholder function or no candidate survived the height filter | local, cheap |
-| `no_candidate_matched` | the council; the right term was not on the menu | full council cost |
-| `contentless` | the council; the description carries no functional content | full council cost |
+
+| `decline_reason`       | origin                                                                     | cost to produce   |
+| ---------------------- | -------------------------------------------------------------------------- | ----------------- |
+| `abstained:<reason>`   | retrieval; placeholder function or no candidate survived the height filter | local, cheap      |
+| `no_candidate_matched` | the council; the right term was not on the menu                            | full council cost |
+| `contentless`          | the council; the description carries no functional content                 | full council cost |
+
 
 Recording all three is what stops stage 1 re-selecting them forever. The
 expensive two are the load-bearing case: 9,356 declined rows in the completed
@@ -707,20 +780,41 @@ five-seat council pass. An absent row is indistinguishable from "not yet run".
 A `council_error:*` item — all calls failed, so there is no verdict — is **not** a
 result and is not written. It is genuinely un-run and must be re-selected.
 
-### Versioning
+### Versioning — the bench partitions, the transport does not
 
-`parameter_set = {query: "<name>@<version>", roster_fingerprint: "<sha>",
-mapping_hash: "<sha>"}`, hashed by the clearinghouse's own
-`parameter_set_hash`. Un-run means "no current-state `function_result` row at
-this `parameter_set_hash`".
+    parameter_set = {query:            "<name>@<version>",
+                     bench_fingerprint: "<sha>",
+                     mapping_hash:      "<sha>"}
 
-The consequence, stated so it is a decision rather than a surprise: a bump to any
-of the three re-selects the whole corpus. That is correct — a different query, a
-different bench or a different candidate generator is a different experiment —
-and it is expensive, which is exactly why the quote exists. The quote's per-seat
-reuse count is what distinguishes the cheap case (one seat changed; the others
-reuse) from the expensive one (`query_version` is inside `prompt_hash`, so
-everything re-pays).
+hashed by the clearinghouse's own `parameter_set_hash`. Un-run means "no
+current-state `function_result` row at this `parameter_set_hash`".
+
+`bench_fingerprint` is NEW and is `canonical_sha256([{role, canonical_model} for
+role, seat in roster.seats()])` — the bench and nothing else. It is deliberately
+NOT `Roster.fingerprint()`, which also covers `endpoint_kind`, the route
+spelling, `max_output_tokens`, `temperature` and `extra`, and would therefore
+let a routing change re-partition 47,341 rows. Q2 carries the measurement and
+the reasoning.
+
+**What is still recorded, just not as a key.** Every exported row keeps
+`roster_fingerprint` and the per-seat `route_fingerprint` as provenance, so
+"which transport produced this answer" stays answerable — that is what
+`route_fingerprint` is for, per its own docstring. And `PLAN.json` records the
+run's **transport allocation** per seat explicitly, as a field expected to differ
+between runs: Chris, 2026-10-22, "the plan should be iterative as I iron out for
+each particular run where we are best able to allocate token cost." A field that
+is expected to vary should be written down per run, not inferred from config
+later.
+
+The consequence, stated so it is a decision rather than a surprise: a bump to the
+query version, the bench, or the `mapping_hash` still re-selects the whole
+corpus. That is correct — a different question, a different bench or a different
+candidate generator is a different experiment — and it is expensive, which is
+exactly why the quote exists. A transport change re-selects nothing.
+
+The quote's per-seat reuse count is what distinguishes the cheap case (one seat's
+model changed; the others reuse) from the expensive one (`query_version` is
+inside `prompt_hash`, so everything re-pays).
 
 ### Rate-limit shaping — an ACCOUNT-WIDE pacer, not per-queue semaphores
 
@@ -743,13 +837,15 @@ the bucket is what enforces the rate.
 Two honest limits on it, both recorded rather than designed around:
 
 - The bucket cannot see **other consumers on the same account**. If another
-  process on this host uses MAG, the ceiling is shared and the pacer will
-  overshoot. The run must therefore treat a sustained 429 as a halt condition
-  and not only as a retry.
+process on this host uses MAG, the ceiling is shared and the pacer will
+overshoot. The run must therefore treat a sustained 429 as a halt condition
+and not only as a retry.
 - Discovering a ceiling safely means **ramping**, not storming. Burst probes
-  overestimated sustained throughput by ~3x because the limit is windowed; the
-  only safe discovery is a slow ramp that backs off on the first 429 and records
-  the rate it reached.
+overestimated sustained throughput by ~3x because the limit is windowed; the
+only safe discovery is a slow ramp that backs off on the first 429 and records
+the rate it reached.
+
+
 
 ### `kbu ontomap council-status` — the mixed-version view
 
@@ -758,15 +854,17 @@ verb that reports one number hides that. `council-status` reports corpus coverag
 split two ways:
 
 - **by lifecycle**: un-run · planned-not-quoted · quoted-not-approved ·
-  approved-not-run · running · exported-not-loaded · loaded. The two middle-late
-  states are the ones that go missing: work that has been paid for but has not
-  landed is invisible in both a "what is un-run" count and a "what is loaded"
-  count, and that is precisely the state a crashed run leaves behind.
-- **by `parameter_set_hash`**: how much of the corpus is current, and how much is
-  covered only by an older parameter set. Partial-version coverage is **tolerated,
-  not normalised away** — re-running the whole corpus on every bump would be
-  unaffordable — so it must be reported rather than hidden. Anything else makes
-  "is this dataset consistent?" unanswerable.
+approved-not-run · running · exported-not-loaded · loaded. The two middle-late
+states are the ones that go missing: work that has been paid for but has not
+landed is invisible in both a "what is un-run" count and a "what is loaded"
+count, and that is precisely the state a crashed run leaves behind.
+- **by** `parameter_set_hash`: how much of the corpus is current, and how much is
+covered only by an older parameter set. Partial-version coverage is **tolerated,
+not normalised away** — re-running the whole corpus on every bump would be
+unaffordable — so it must be reported rather than hidden. Anything else makes
+"is this dataset consistent?" unanswerable.
+
+
 
 ### What is deliberately NOT built
 
@@ -803,7 +901,7 @@ assertions are the per-seat-versus-query-bump distinction the design rests on.
 **The approval binding refuses every way it can be stale.** Four separate tests,
 one per check: a missing `APPROVED.json`; a `quote_hash` that no longer matches
 an edited `QUOTE.json`; a `plan_hash` that no longer matches an edited
-`PLAN.json`; a roster fingerprint that no longer matches the live config. Each
+`PLAN.json`; a `bench_fingerprint` that no longer matches the live config. Each
 must refuse and name which check failed. A single "it refuses a bad approval"
 test would pass while three of the four checks were absent.
 
@@ -847,6 +945,7 @@ taskplan**. The PRD is buildable as it stands. To change a decision, edit its
 Ordered by blast radius descending.
 
 ### Q1. What is the join key from the council into the clearinghouse? — DECIDED: `query_id`, carried through from the ranked file, re-canonicalised by the manifest's `precomputed` hash mode. Never a text join, and never the council's own `entity_hash`.
+
 **Blast radius:** IRREVERSIBLE
 **Why:** The council computes its own `items.entity_hash` and it matched **0 of
 19,268** clearinghouse hashes; the definition text matched 19,268 of 19,268. But
@@ -865,25 +964,60 @@ must be shipped with every export. Changing this moves `council-export`
 **Confidence:** high — both hash behaviours were measured, and the `precomputed`
 mode exists for exactly this case.
 
-### Q2. Does "lacking a council run" mean lacking ANY verdict, or one at the current version? — DECIDED: at the current version, defined as the clearinghouse `parameter_set_hash` over `{query@version, roster_fingerprint, mapping_hash}`.
+### Q2. What partitions the corpus — i.e. what makes an item "un-run"? — DECIDED: the clearinghouse `parameter_set_hash` over `{query@version, bench_fingerprint, mapping_hash}`, where `bench_fingerprint` is a NEW model-only hash. NOT `roster_fingerprint`, which was round 1's answer and was wrong.
+
 **Blast radius:** IRREVERSIBLE
-**Why:** The clearinghouse already partitions results this way natively —
-`current_state()` windows per parameter set and `results --parameter-set-hash`
-pre-filters on it — so this is the shape the store wants and inventing a
-watermark instead would fight it. It is also the honest answer: a different query
-version, a different bench or a different candidate generator is a different
-experiment, and calling its output interchangeable would corrupt the corpus.
-**If you disagree:** "any verdict" makes the corpus a mixture of versions with no
-way to ask what the current bench thinks, and makes a prompt fix unapplyable
-without a manual re-selection. It would also make `parameter_set = {}` (the
-default set) the only partition, collapsing every future run into one slot.
-Changing this moves `unrun_set` (t5), the manifest's `parameter_set` block (t8),
-and the three version-bump reuse tests (t4).
-**Confidence:** high
-**Consequence, named rather than hidden:** a bump to any of the three
-re-selects all 47,341 functions. See G3.
+**Why:** Round 1 used `roster_fingerprint`, and Chris's review caught that it
+violates his requirement. Measured: `Roster.fingerprint()` (`types.py:507`)
+covers, per seat, `role`, **`endpoint_kind`**, `model` (the route spelling),
+`canonical_model`, `max_output_tokens`, `temperature` and `extra`. So it
+**includes the transport.** Moving `gpt-5.6-sol` from the codex CLI to MAG
+changes `endpoint_kind` and the route spelling, so the hash changes, so stage 1
+re-selects all 47,341 functions as un-run and the whole corpus is re-paid — about
+199M tokens — for a pure cost optimisation. That is the precise opposite of
+"the thing I think would be OK to vary is HOW the model is run."
+
+`bench_fingerprint` is therefore `canonical_sha256([{role, canonical_model} for
+role, seat in roster.seats()])` — the bench and nothing else. Model-only is the
+minimal scientifically-meaningful identity: the query fixes the question, the
+`mapping_hash` fixes the candidate menu, and the bench fixes who answered. The
+transport does not change what the experiment IS.
+
+`roster_fingerprint` and the per-seat `route_fingerprint` are still recorded as
+**provenance** on every exported row — `route_fingerprint`'s own docstring says
+it "answers 'where did this come from', not 'is this the same question'" — so
+nothing is lost. They simply stop being partition keys.
+
+The clearinghouse side is unchanged and still native: `current_state()` windows
+per parameter set and `results --parameter-set-hash` pre-filters on it, so this
+is the shape the store already wants.
+
+**Deliberately EXCLUDED from `bench_fingerprint`, and this is the judgement
+call inside the judgement call:** `temperature`, `max_output_tokens` and `extra`.
+They can change an answer, so there is a real argument for including them. They
+are excluded because they are substantially transport-COUPLED — different
+gateways impose different ceilings and defaults — so including them would let a
+transport change re-partition the corpus through the back door, which is the
+failure this question exists to prevent. On a near-deterministic JSON-extraction
+task that is the right trade. If Chris wants sampling parameters to be
+scientifically load-bearing, they belong in the **query version**, where a change
+is explicit and intentional, not in the bench hash where it would be a side
+effect of a routing decision.
+
+**If you disagree:** reverting to `roster_fingerprint` means every transport
+change is a full-corpus re-run, and it will not be obvious that is what happened
+— stage 1 will simply report 47,341 items un-run and the quote will price them.
+Changing this moves `bench_fingerprint` itself (t3), `unrun_set` and `PLAN.json`
+(t5), the manifest's `parameter_set` block (t8), and the reuse tests (t4).
+**Confidence:** high on the diagnosis, which is read directly off
+`types.py:507`; high on model-only for the bench; **medium on excluding
+`temperature`**, which is the one line here a reasonable person could reverse.
+**Consequence, named rather than hidden:** a bump to the query version, the
+bench, or the `mapping_hash` still re-selects all 47,341 functions. That is
+correct and it is expensive, which is why the quote exists. See G3 and G16.
 
 ### Q3. How is a run's cost quoted when no gateway publishes a rate card? — DECIDED: quote in TOKENS as the primary unit; report dollars only per-gateway where `ai_council.rates` carries a rate, labelled with its provenance and whether it is a floor; `unpriced` otherwise. Record a balance-delta per run so each run calibrates the next.
+
 **Blast radius:** MEDIUM
 **Why:** Measured: every ARGO and MAG `usage`/`billing`/`pricing`/`quota` path
 404s, and MAG's `/models/<id>` returns 401 "Only proxy admin". Vendor list rates
@@ -902,6 +1036,7 @@ balance deltas recorded, after which the multiple is measured and dollars become
 real.
 
 ### Q4. Is the quote exact or projected? — DECIDED: exact for proposer and critic (rendered locally, `prompt_hash`-counted, reuse looked up); projected for meta only; every line tagged with its basis.
+
 **Blast radius:** MEDIUM
 **Why:** `prompt_hash` is a pure function of the seat spec, params, schema, query
 name and version, renderer version, role and prompt text —
@@ -919,6 +1054,7 @@ run that was already 70% paid for.
 which is unmeasured until t3 fits it.
 
 ### Q5. What enforces MAG's account-wide 120 requests/minute? — DECIDED: an account-wide token-bucket pacer that every seat on that account acquires from, in addition to the per-model concurrency caps. NOT per-queue semaphores alone.
+
 **Blast radius:** MEDIUM
 **Why:** The working configuration found by measurement is "MAG queues summing to
 6", which is a *concurrency* control standing in for a *rate* limit. It works
@@ -943,6 +1079,7 @@ the same account, so a sustained 429 must remain a halt condition and not only a
 retry.
 
 ### Q6. What enforces the ceiling the approval carries? — DECIDED: the existing `endpoint_state` budget machinery — approval opens a `budget_epoch` with the ceiling and the existing `halt_kind`/`halt_message` path stops the run.
+
 **Blast radius:** MEDIUM
 **Why:** `endpoint_state` already carries `budget_epoch`, `epoch_tokens`,
 `lifetime_tokens`, `halt_kind` and `halt_message` per endpoint, keyed on the
@@ -958,6 +1095,7 @@ I did not trace the halt path end to end from a budget overrun to a stopped
 worker. t9 must verify it rather than assume it, and the task says so.
 
 ### Q7. Where does the pipeline's code live? — DECIDED: `OntologyMappingUtils` for stages 1/4/5-export; a new `council/quote.py` for stage 2; a new `kbu ontomap` CLI group; a shipped manifest preset for stage 5.
+
 **Blast radius:** MEDIUM
 **Why:** `OntologyMappingUtils` already owns both council capabilities and the
 hand-off file formats, and its module docstring already describes the two-machine
@@ -969,7 +1107,34 @@ releasable but would re-export four existing formats and duplicate the two
 capabilities. Changing this moves every task's file layout but no behaviour.
 **Confidence:** high
 
-### Q8. What does Albert run, and who writes it? — DECIDED: `kbu clearinghouse load` then `verify`, both existing; this PRD ships the manifest preset and the published shard run, and does NOT write any kbhub-side script.
+### Q8. Should `prompt_hash` also stop keying on the transport, so a paid answer survives a routing change? — DECIDED: NO. The reuse key legitimately keeps `endpoint_kind`; only the PARTITION key (Q2) drops it.
+**Blast radius:** MEDIUM
+**Why:** This is the other half of Chris's bench-vs-transport requirement, and it
+is the half where the requirement should NOT be applied — so it is recorded as a
+decision rather than silently skipped. `prompt_hash` (`types.py:264`) includes
+`endpoint_kind`, and its docstring gives the reason: "the same canonical model
+reached over a CLI and over HTTP is a different deployment with different
+defaults." That reason is not theoretical here. Measured in round 3: the same
+~1,400-token critic question cost **~63,000 input tokens** over `claude -p`
+against **1,403** over the API, because the CLI path wraps an agent harness
+around it. The two paths demonstrably do not send the same thing, so treating
+their answers as interchangeable would let a harness-contaminated answer be
+served as an API answer. The partition key asks "is this the same experiment";
+the reuse key asks "is this literally the same question, already paid for".
+Different questions, correctly different keys.
+**Why keeping them different costs almost nothing:** the two interact benignly.
+Under Q2's `bench_fingerprint` a transport change does not re-select completed
+items, so the reuse `prompt_hash` would have lost is never needed. The loss bites
+only on items that are genuinely pending, which are unpaid anyway.
+**If you disagree:** dropping `endpoint_kind` from `prompt_hash` is a KBUtilLib
+engine change against a documented rationale, and it would make every `claude -p`
+answer already in the store reusable as though it had come from the API. There
+are 104 such answers from the pre-rebuild runs.
+**Confidence:** high — this rests on a direct measurement and on the code's own
+stated reason.
+
+### Q9. What does Albert run, and who writes it? — DECIDED: `kbu clearinghouse load` then `verify`, both existing; this PRD ships the manifest preset and the published shard run, and does NOT write any kbhub-side script.
+
 **Blast radius:** LOW
 **Why:** `load` is in-pod-only by design and kbhub is Albert's machine; acting
 outside this machine's scope is not mine to do. The load is already idempotent,
@@ -982,7 +1147,8 @@ The trigger itself is three lines: find a `shard/` with a `run.json` and no
 **Confidence:** high — Albert's 2026-10-22 reply already states he will load from
 the published artifact and has opened it as work on his side.
 
-### Q9. What is published across Dropbox? — DECIDED: four small JSON files, one parquet shard run, and nothing else. The ranked file, the council store and the verdict intermediates stay on `/scratch`.
+### Q10. What is published across Dropbox? — DECIDED: four small JSON files, one parquet shard run, and nothing else. The ranked file, the council store and the verdict intermediates stay on `/scratch`.
+
 **Blast radius:** LOW
 **Why:** Every byte on the sync surface needs an integrity gate, and the gate for
 the shard run already exists. The last hand-off put a 10.2 MB `ranked.jsonl.gz`
@@ -995,7 +1161,8 @@ the council). But both stages run on h100 in this pipeline because the retrieval
 models are vendored package data, so there is no second ranker to feed.
 **Confidence:** high
 
-### Q10. Parquet, JSONL or gzipped JSONL for the published verdicts? — DECIDED: parquet, via the sharder, with no intermediate published at all.
+### Q11. Parquet, JSONL or gzipped JSONL for the published verdicts? — DECIDED: parquet, via the sharder, with no intermediate published at all.
+
 **Blast radius:** LOW
 **Why:** `FileSourceAdapter._format()` accepts exactly `parquet | jsonl | tsv` and
 `_iter_jsonl` uses a plain `path.open("r")`, so **gzipped JSONL is not readable by
@@ -1011,7 +1178,8 @@ let the `.gz` be loaded directly, which is attractive if a human ever wants to
 and it is named in Out of Scope.
 **Confidence:** high
 
-### Q11. How is the approval authenticated? — DECIDED: it is not. `APPROVED.json` is an audit trail and a binding ceiling, not an authentication boundary, and the PRD says so plainly.
+### Q12. How is the approval authenticated? — DECIDED: it is not. `APPROVED.json` is an audit trail and a binding ceiling, not an authentication boundary, and the PRD says so plainly.
+
 **Blast radius:** LOW
 **Why:** There is no key material on these machines that would make an approval
 cryptographically Chris's, and an agent can write the file. A signature scheme
@@ -1025,7 +1193,8 @@ plus one check in t7. It is not built because nobody asked for it and the ceilin
 is the part that actually limits damage.
 **Confidence:** high
 
-### Q12. Chunk size and one-chunk-in-flight — configuration or constant? — DECIDED: written into `PLAN.json` at plan time, defaulting to 2,000, with the issue-84 rationale recorded in the plan itself.
+### Q13. Chunk size and one-chunk-in-flight — configuration or constant? — DECIDED: written into `PLAN.json` at plan time, defaulting to 2,000, with the issue-84 rationale recorded in the plan itself.
+
 **Blast radius:** LOW
 **Why:** It is a workaround for a known defect with a measured shape (claim cost
 217 ms at 19k pending rows vs 10.4 ms at 2k), and a workaround baked in as a
@@ -1037,7 +1206,8 @@ should not vary run to run. But it must vary once, when the defect is fixed, and
 that is the case this guards.
 **Confidence:** high
 
-### Q13. Is the full standing run part of acceptance? — DECIDED: no. Acceptance is a complete dry-run rehearsal of all five stages that spends zero tokens, using the 19,268 verdicts already in the store. The real run is an operator action behind Chris's approval.
+### Q14. Is the full standing run part of acceptance? — DECIDED: no. Acceptance is a complete dry-run rehearsal of all five stages that spends zero tokens, using the 19,268 verdicts already in the store. The real run is an operator action behind Chris's approval.
+
 **Blast radius:** NONE
 **Why:** The conductor must not spend real money, and it does not need to: the
 store already holds a completed run, so plan → quote → approval-refusal checks →
@@ -1049,34 +1219,37 @@ exercise the live gateways, which the dry-run cannot. That is a reasonable
 addition if Chris wants it, and it is a flag on t11, not a redesign.
 **Confidence:** high
 
-### Q14. What I could not decide and did not guess
+### Q15. What I could not decide and did not guess
+
 Four external facts left unreconciled:
 
 1. **ARGO's and MAG's effective rates.** Not derivable from any artifact here;
-   every pricing path 404s. The design assumes a human-supplied rate table and a
+  every pricing path 404s. The design assumes a human-supplied rate table and a
    per-run balance delta, and reports `unpriced` otherwise. **This is the one
    permitted flag-not-question: the PRD's dollar-quote decision rests on a fact
    no artifact I can read contains, and I assumed "no rate unless configured"
    rather than substituting list prices.**
 2. **The granularity of the clearinghouse ingest lock.**
-   `ClearinghouseLockUnavailableError` exists; whether it is per-table, per-run or
+  `ClearinghouseLockUnavailableError` exists; whether it is per-table, per-run or
    global, and therefore whether two shard runs can load concurrently, I did not
    establish. It affects only whether two pending runs must be loaded in series.
-3. **Whether `endpoint_state`'s halt path actually stops a running worker** on a
-   budget overrun, as opposed to merely recording the halt. The fields and the
+3. **Whether** `endpoint_state`**'s halt path actually stops a running worker** on a
+  budget overrun, as opposed to merely recording the halt. The fields and the
    enum exist; the end-to-end behaviour is unverified. t9 is instructed to verify
    it and to report rather than assume. If it does not, the ceiling needs a second
    mechanism and Q6 changes.
 4. **Why the uncompressed JSONL had not reached kbhub** while the sync client
-   reported the directory up to date. Albert's read and mine disagree about the
+  reported the directory up to date. Albert's read and mine disagree about the
    file's presence at the same moment. The design routes around it — the published
    artifact is gated on `run.json` and per-batch sha256 — but the cause is
    unknown, and "the sync client said up to date" is now established as not a
    completeness signal.
 
+
+
 ## Gotchas and Unintuitive Consequences
 
-**G1. Running `kbu council doctor` from a clean clone of `main` will report the
+**G1. Running** `kbu council doctor` **from a clean clone of** `main` **will report the
 entire ARGO bench unavailable, and the gateway is fine.** The readiness test
 reads the gateway's display spelling while the call accepts only `internal_id`,
 so readiness is the exact inverse of the call. Anyone debugging this will suspect
@@ -1090,15 +1263,15 @@ quote's accuracy is the replay against the completed run's recorded 199.2M
 actual, which is a different test. A green acceptance does not mean the quote is
 right.
 
-**G3. A `mapping_hash` bump re-selects all 47,341 functions, and the retrieval
+**G3. A** `mapping_hash` **bump re-selects all 47,341 functions, and the retrieval
 backend is expected to change.** The module docstring says so in terms: "the
 backend underneath is expected to change (e.g. to Vibhav's Type 4 fusion)". So a
 retrieval upgrade is a full re-run of the corpus at current prices, and the
 quote is what makes that visible. This is the correct behaviour and it will still
 be a surprise the first time.
 
-**G4. Recording `no_candidate_matched` as a result means a retrieval improvement
-cannot fix those items until the `mapping_hash` changes.** 4,893 items declined
+**G4. Recording** `no_candidate_matched` **as a result means a retrieval improvement
+cannot fix those items until the** `mapping_hash` **changes.** 4,893 items declined
 because the right GO term was never on the menu. Once recorded at this
 `parameter_set_hash` they are "done" and stage 1 will not re-select them — which
 is right, because re-running them against the same menu would decline again. But
@@ -1118,9 +1291,9 @@ paused and cancelled jobs *after* the index has found the rows, so a paused job'
 waste. A run directory left with a paused job in the store taxes every later run
 until the job is cancelled, and `jobs cancel` is terminal.
 
-**G7. `estimate_rows()` returns `None` for jsonl and tsv on purpose**, so a
+**G7.** `estimate_rows()` **returns** `None` **for jsonl and tsv on purpose**, so a
 manifest over a text source cannot report a row count at plan time. This is why
-Q10's parquet decision also improves `kbu clearinghouse plan`'s usefulness — an
+Q11's parquet decision also improves `kbu clearinghouse plan`'s usefulness — an
 effect of a format choice on an unrelated command.
 
 **G8. A load that joins nothing currently succeeds.** Fill-only means a batch
@@ -1137,13 +1310,13 @@ run cost — but it happens *after* the approval, and a ceiling set tightly agai
 the quote could halt the retry pass rather than the run. The ceiling must carry
 headroom, and the plan should say how much.
 
-**G10. `/scratch` is shared and has filled before.** The council store, the ranked
+**G10.** `/scratch` **is shared and has filled before.** The council store, the ranked
 file and the verdict intermediates all live there by this design. A co-tenant
 filling the filesystem produces a harness ENOSPC that can present as a clean exit
 with no commit, which has already happened once on this host. The run directory in
 Dropbox is what survives; `/scratch` is not.
 
-**G11. The sync client may deliver `run.json` BEFORE the bytes it describes.**
+**G11. The sync client may deliver** `run.json` **BEFORE the bytes it describes.**
 Nothing guarantees a sync client preserves the producer's write order, so
 "manifest written last" is a producer-side discipline that buys the consumer
 nothing on its own. It is the per-batch sha256 verification, not the manifest's
@@ -1178,121 +1351,148 @@ run directories both in stage 4 would interleave their chunks and defeat the
 chunking entirely. Nothing in this design prevents it; the status verb should
 make it visible, and the runner should refuse if another run's job is claimable.
 
+**G16. THREE fingerprints now exist and they are not interchangeable — this is
+the likeliest thing for a later reader to get wrong.** `bench_fingerprint`
+(new, model-only) PARTITIONS the corpus. `roster_fingerprint`
+(`Roster.fingerprint()`) additionally covers `endpoint_kind`, the route
+spelling, `max_output_tokens`, `temperature` and `extra`, and is PROVENANCE
+only. `route_fingerprint` covers the endpoint alias, base URL and account and is
+also provenance. Substituting `roster_fingerprint` for `bench_fingerprint`
+anywhere in the partition path silently re-partitions 47,341 rows on the next
+routing change, and the symptom is not an error — it is stage 1 reporting the
+whole corpus un-run and the quote dutifully pricing it. Round 1 of this PRD made
+exactly that mistake.
+
+**G17. A transport change makes a cheap run quote like an expensive one, and the
+quote is not wrong.** Because `prompt_hash` keys on `endpoint_kind` (Q8),
+re-routing a seat invalidates that seat's stored answers. The corpus is not
+re-selected (the bench did not change), so nothing already landed is re-paid —
+but any still-pending item loses its partial credit. The quote's reuse-miss
+attribution line exists so this reads as "transport change" rather than as a
+corpus re-run. Expect it the first time a seat moves off codex.
+
 ## Sources Consulted
 
 **Read in full, with the symbols that mattered:**
 
 - `KBUtilLib/src/kbutillib/domains/genome/ontology_mapping/ontology_mapping_utils.py`
-  — `mapping_version`, `function_to_go`, `function_to_go_council` (the
-  `by_text`/`item_of_text` dedup at :196-212, the `query_id` propagation at :231,
-  the `council_error` handling at :234-241), `write_ranked`/`read_ranked`
-  (atomic `.partial`, the `mapping_hash` refusal at :309), `write_council`.
+— `mapping_version`, `function_to_go`, `function_to_go_council` (the
+`by_text`/`item_of_text` dedup at :196-212, the `query_id` propagation at :231,
+the `council_error` handling at :234-241), `write_ranked`/`read_ranked`
+(atomic `.partial`, the `mapping_hash` refusal at :309), `write_council`.
 - `KBUtilLib/src/kbutillib/interfaces/cli/council.py` — full command inventory
-  (`doctor`, `submit`, `run`, `daemon{start,stop,status}`,
-  `jobs{list,status,results,cancel,delete,rerun}`, `query{list,show,register,retire}`,
-  `calls`, `endpoints`, `db`, `models`); `_submit_options` at :520 for the input
-  contract. **No quote, estimate or pause verb exists.**
+(`doctor`, `submit`, `run`, `daemon{start,stop,status}`,
+`jobs{list,status,results,cancel,delete,rerun}`, `query{list,show,register,retire}`,
+`calls`, `endpoints`, `db`, `models`); `_submit_options` at :520 for the input
+contract. **No quote, estimate or pause verb exists.**
 - `KBUtilLib/src/kbutillib/interfaces/cli/clearinghouse.py` —
-  `_require_in_pod_or_refuse` at :293 (guards load/verify only), `_build_known`,
-  `_build_results`/`results_cmd` (`--parameter-set-hash`, `--default-parameters`),
-  `plan_cmd`, `shard_cmd`, `load_cmd` (`--run-id`, `--dry-run`, `--reconcile`),
-  `verify_cmd`.
+`_require_in_pod_or_refuse` at :293 (guards load/verify only), `_build_known`,
+`_build_results`/`results_cmd` (`--parameter-set-hash`, `--default-parameters`),
+`plan_cmd`, `shard_cmd`, `load_cmd` (`--run-id`, `--dry-run`, `--reconcile`),
+`verify_cmd`.
 - `KBUtilLib/src/kbutillib/domains/kbase/berdl/clearinghouse_manifest.py` — the
-  TOML contract, `DERIVATIONS`, `[source.hash]` modes (`raw_column` /
-  `precomputed` / `contig_set`), `[source.result]` with `parameter_set` and
-  `parameter_set_column`, `observed_at_column`, plan-time validation.
+TOML contract, `DERIVATIONS`, `[source.hash]` modes (`raw_column` /
+`precomputed` / `contig_set`), `[source.result]` with `parameter_set` and
+`parameter_set_column`, `observed_at_column`, plan-time validation.
 - `KBUtilLib/src/kbutillib/domains/kbase/berdl/clearinghouse_shard.py` —
-  `FileSourceAdapter` in full (`_format` at :712, `_iter_jsonl` at :785,
-  `estimate_rows` returning `None` for text at :736), and the "runs anywhere"
-  statement in its docstring.
+`FileSourceAdapter` in full (`_format` at :712, `_iter_jsonl` at :785,
+`estimate_rows` returning `None` for text at :736), and the "runs anywhere"
+statement in its docstring.
 - `KBUtilLib/src/kbutillib/domains/kbase/berdl/clearinghouse_ingest.py` —
-  `verify_batch_file`'s five checks at :377, `file_sha256`, `read_batch_table`'s
-  parquet-only refusal, the `run.json` requirement at :517, `run_manifest_version`
-  gating, `_registry_first` (registry before results).
+`verify_batch_file`'s five checks at :377, `file_sha256`, `read_batch_table`'s
+parquet-only refusal, the `run.json` requirement at :517, `run_manifest_version`
+gating, `_registry_first` (registry before results).
 - `KBUtilLib/src/kbutillib/domains/ai/council/store/schema.py` — `calls`
-  (`prompt_hash` as the reuse key, `fresh_usage`, `ix_calls_prompt_hash_status`,
-  `ux_calls_one_live`), `attempts` (`usage`, `queued_at` and the service-time
-  comment), `endpoint_state` (`budget_epoch`, `epoch_tokens`, `halt_kind`).
+(`prompt_hash` as the reuse key, `fresh_usage`, `ix_calls_prompt_hash_status`,
+`ux_calls_one_live`), `attempts` (`usage`, `queued_at` and the service-time
+comment), `endpoint_state` (`budget_epoch`, `epoch_tokens`, `halt_kind`).
 - `KBUtilLib/src/kbutillib/domains/ai/council/types.py` — `prompt_hash` at :264
-  and `seat_generation_params` at :250 ("so the fingerprint can be computed
-  without instantiating a backend").
+(including `endpoint_kind`, with its stated rationale),
+`seat_generation_params` at :250 ("so the fingerprint can be computed without
+instantiating a backend"), **`Roster.fingerprint()` at :507** (round 2: covers
+`role`, `endpoint_kind`, `model`, `canonical_model`, `max_output_tokens`,
+`temperature`, `extra` — i.e. it includes the transport, which is what made
+round 1's Q2 wrong), and `route_fingerprint` at :304 ("answers 'where did this
+come from', not 'is this the same question'").
 - `KBUtilLib/src/kbutillib/domains/kbase/berdl/examples/clearinghouse_example_seed.toml`
-  — a worked three-source manifest, the `parameter_set = {}` default-run
-  declaration and `DEFAULT_PARAMETER_SET_HASH`, and the "source label is a
-  provenance label, not a tool version" convention.
+— a worked three-source manifest, the `parameter_set = {}` default-run
+declaration and `DEFAULT_PARAMETER_SET_HASH`, and the "source label is a
+provenance label, not a tool version" convention.
 - `/scratch/chenry/council/export_results.py`, `_adp1_prep.py`, `run_chunks.sh`,
-  `kbu-env.sh` — the current pipeline, in full. `_adp1_prep.py:18` is where the
-  `abstained` filter that explains the 760 lives.
+`kbu-env.sh` — the current pipeline, in full. `_adp1_prep.py:18` is where the
+`abstained` filter that explains the 760 lives.
 - `miles/agent-io/research/2026-10-20-function-to-go-council-composition-and-schedule.md`
-  — rounds 1–9 in full.
+— rounds 1–9 in full.
 
 **Measured live, 2026-10-22:**
 
 - `kbu clearinghouse tables` from h100 → `function_entity` 47,341,
-  `function_content` 47,341, `function_result` **0**, partitioned by `source`.
-  Sixteen successful delta-API queries; `health` then 422'd on one table.
+`function_content` 47,341, `function_result` **0**, partitioned by `source`.
+Sixteen successful delta-API queries; `health` then 422'd on one table.
 - The 760-definition partition, computed against `ranked.jsonl.gz` (47,341 result
-  rows, short keys `q`/`t`/`s`/`a`/`c`) and `priority_adp1_pmi.tsv` (22,255 rows,
-  20,036 distinct `entity_hash` = 20,036 distinct `definition`).
+rows, short keys `q`/`t`/`s`/`a`/`c`) and `priority_adp1_pmi.tsv` (22,255 rows,
+20,036 distinct `entity_hash` = 20,036 distinct `definition`).
 - `git cat-file` in `~/Dropbox/Projects/KBUtilLib`: `0825c5a` is **not a valid
-  commit name**. Dropbox `main` is `b9a6bb6`; `~/projects/KBUtilLib` HEAD is
-  `0825c5a` on `main`.
+commit name**. Dropbox `main` is `b9a6bb6`; `~/projects/KBUtilLib` HEAD is
+`0825c5a` on `main`.
 - `stat` on `~/projects/KBUtilLib` and
-  `/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib` → `64517:5167606134`,
-  the same inode: one tree, the usual h100 path alias.
+`/scratch/fliu/hub_home/chenry/H100Projects/KBUtilLib` → `64517:5167606134`,
+the same inode: one tree, the usual h100 path alias.
 - `git show 0825c5a` — the readiness fix and its measured ARGO evidence.
 - The published hand-off: `MANIFEST.json`, a verdict row from
-  `function_to_go_verdicts.jsonl`, and the three files' sizes.
+`function_to_go_verdicts.jsonl`, and the three files' sizes.
 - `maestro list --status running/submitted` before dispatching the external scan.
 
 **Read and found uninformative, recorded so the absence is visible:**
 
 - `council/default_config.yaml` — searched for a budget block; it carries only the
-  `user` provenance-label comment. The budget lives in `config.py`'s validation
-  (`:627`, "an unmeasurable budget is unenforceable") and in `endpoint_state`, not
-  in the shipped config.
+`user` provenance-label comment. The budget lives in `config.py`'s validation
+(`:627`, "an unmeasurable budget is unenforceable") and in `endpoint_state`, not
+in the shipped config.
 - `clearinghouse_backfill.py` — `available_presets`/`resolve` confirm presets are
-  package data resolved by name with shipped names winning over same-named local
-  files. Nothing about how a preset is registered beyond file placement, which is
-  all t8 needs.
+package data resolved by name with shipped names winning over same-named local
+files. Nothing about how a preset is registered beyond file placement, which is
+all t8 needs.
 - `interfaces/cli/` directory listing — confirmed there is **no** `ontomap` CLI
-  module today, so Q7's new group is genuinely new surface rather than an
-  extension.
+module today, so Q7's new group is genuinely new surface rather than an
+extension.
 
 **Routed, not read:** Albert's trigger reply
 `Dropbox/AIPlatform/channels/trigger-inbox/replies/fngo-clearinghouse-load-20261022.json`
 — kbhub sees `~/Dropbox/Jobs/`, `.gz` and `.tsv` verified by sha256, the
 uncompressed `.jsonl` absent, and his drop-point/shape recommendations. Read in
-full and folded into Q8, Q9, Q10 and Q14.4.
+full and folded into Q9, Q10, Q11 and Q15.4.
 
 ## Out of Scope
 
 - **Council composition.** Dropping the third chair (~22% of tokens, 85% pairwise
-  agreement), letting a 2-of-3 majority settle without a critic (~19%), and the
-  candidate-menu size (~30% of tokens, but now a joint yield/cost question
-  because 25.4% of items declined for `no_candidate_matched`) all belong to
-  continuation [145]. This PRD makes each choice priceable; it does not make any
-  of them.
+agreement), letting a 2-of-3 majority settle without a critic (~19%), and the
+candidate-menu size (~30% of tokens, but now a joint yield/cost question
+because 25.4% of items declined for `no_candidate_matched`) all belong to
+continuation [145]. This PRD makes each choice priceable; it does not make any
+of them.
 - **The retrieval-recall limit.** 25.4% of items declined because the right GO
-  term was never on the closed menu. That is upstream of the council and is the
-  largest single lever on *yield*. Not touched here.
+term was never on the closed menu. That is upstream of the council and is the
+largest single lever on *yield*. Not touched here.
 - **KBUtilLib issue 84** — getting `claim_calls` off the worker's event loop, or
-  denormalising the ordering columns onto `calls` so the temp B-tree disappears.
-  This PRD implements the chunking workaround and names the issue so the
-  workaround is removable.
+denormalising the ordering columns onto `calls` so the temp B-tree disappears.
+This PRD implements the chunking workaround and names the issue so the
+workaround is removable.
 - **KBUtilLib issue 83** — `test_static_headers.py`'s MAG-endpoint assertion
-  failing on any machine with a user MAG endpoint configured. Pre-existing; every
-  criterion here is regression-framed because of it.
-- **Making `invalid_output` retryable in the engine**, or detecting ARGO's silent
-  truncation. The retry pass is a pipeline stage here; fixing `RETRYABLE_KINDS`
-  or adding truncation detection is an engine change and a separate task.
-- **gzip support in `FileSourceAdapter._iter_jsonl`** — four lines, independently
-  useful, not needed because the published artifact is parquet (Q10).
+failing on any machine with a user MAG endpoint configured. Pre-existing; every
+criterion here is regression-framed because of it.
+- **Making** `invalid_output` **retryable in the engine**, or detecting ARGO's silent
+truncation. The retry pass is a pipeline stage here; fixing `RETRYABLE_KINDS`
+or adding truncation detection is an engine change and a separate task.
+- **gzip support in** `FileSourceAdapter._iter_jsonl` — four lines, independently
+useful, not needed because the published artifact is parquet (Q11).
 - **The kbhub-side trigger.** Albert's, by scope. This PRD ships the contract.
-- **Authenticating the approval.** Q11; no key material exists to do it with.
+- **Authenticating the approval.** Q12; no key material exists to do it with.
 - **Loading the existing 19,268 verdicts.** Albert has opened that as work on his
-  side and will load from the already-published `.gz`. This PRD's acceptance
-  rehearses the *new* path against the same store without re-publishing.
+side and will load from the already-published `.gz`. This PRD's acceptance
+rehearses the *new* path against the same store without re-publishing.
+
+
 
 ## Further Notes
 
@@ -1358,5 +1558,11 @@ re-parallelises without re-authoring.
 28. The full five-stage rehearsal runs end to end against the already-stored verdicts and spends zero tokens.
 29. The failure-oriented rehearsal passes: marker arriving before payload, one missing file, a wrong hash, a 0% join, a partial join, a duplicate consumer, a crash immediately after the commit, an expired approval, a job changed after approval, and a sustained rate-limit response.
 30. An operator runbook in the repo carries the five stages, the measured concurrency and chunk constants with their rationale, and the KBUtilLib issue 84 reference that makes the chunking workaround removable.
-31. No test that passed on the base commit fails on the branch.
+31. `bench_fingerprint` is computed from `{role, canonical_model}` per seat only: changing a seat's transport (endpoint kind, alias, base URL or account) leaves it unchanged, while changing a seat's model changes it.
+32. `kbu ontomap council-plan` re-selects nothing after a transport-only change, and re-selects the whole corpus after a bench, query-version or `mapping_hash` change.
+33. The clearinghouse `parameter_set` carries `bench_fingerprint` and not `roster_fingerprint`; `roster_fingerprint` and the per-seat `route_fingerprint` appear in the result payload as provenance.
+34. `PLAN.json` records the per-seat transport allocation for the run as an explicit field.
+35. `kbu council quote` splits reuse misses into new-item, bench-change and transport-change, and reports the three counts separately.
+36. `kbu ontomap council-run` accepts an approval across a transport-only change while warning and naming the re-routed seats, and refuses it across a bench change.
+37. No test that passed on the base commit fails on the branch.
 

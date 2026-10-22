@@ -1767,7 +1767,9 @@ def _build_backfill_run(
             "units": units,
             "incomplete_units": incomplete,
             "state_file": str(backfill.state_path(out)),
-            "parameter_set_integrity": cap.parameter_set_orphans(),
+            "parameter_set_integrity": cap.parameter_set_orphans(
+                namespace=f"{TENANT}.{dataset}"
+            ),
         }
     )
     return _envelope("backfill-run", locus=_locus(cap), data=data, warnings=warnings)
@@ -2087,7 +2089,9 @@ def _build_backfill_load(
     execution_id = ingest.get("execution_id") or ingest.get("run_id")
     verification: dict[str, Any] = {}
     if not dry_run and execution_id:
-        verification = cap.verify_run(shard_dir, run_id=execution_id, unit=unit)
+        verification = cap.verify_run(
+            shard_dir, run_id=execution_id, unit=unit, dataset=dataset
+        )
     warnings: list[str] = []
     if dry_run:
         warnings.append(
@@ -2132,7 +2136,9 @@ def _build_backfill_load(
             "units": verification.get("units", []),
             "unverified_units": unverified,
             "discrepancies": verification.get("discrepancies", []),
-            "parameter_set_integrity": cap.parameter_set_orphans(),
+            "parameter_set_integrity": cap.parameter_set_orphans(
+                namespace=f"{TENANT}.{dataset}"
+            ),
         },
         warnings=warnings,
     )

@@ -137,7 +137,7 @@ class _FakeIngestCapability:
         self.orphan_calls += 1
         return dict(self._orphans)
 
-    def verify_run(self, shard_dir, *, run_id):
+    def verify_run(self, shard_dir, *, run_id, dataset=None):
         self.verify_calls.append({"shard_dir": str(shard_dir), "run_id": run_id})
         return {
             "run_id": run_id,

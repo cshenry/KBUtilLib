@@ -163,9 +163,14 @@ class _FakeIngestCapability:
             "tables": tables,
         }
 
-    def verify_run(self, shard_dir, *, run_id, unit=None):
+    def verify_run(self, shard_dir, *, run_id, unit=None, dataset=None):
         self.verify_calls.append(
-            {"shard_dir": str(shard_dir), "run_id": run_id, "unit": unit}
+            {
+                "shard_dir": str(shard_dir),
+                "run_id": run_id,
+                "unit": unit,
+                "dataset": dataset,
+            }
         )
         run = cs.read_run_manifest(Path(shard_dir))
         units = [

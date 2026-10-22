@@ -1522,7 +1522,9 @@ def run_backfill(
             tenant=tenant,
             dataset=dataset,
         )
-        verification = cap.verify_run(str(unit_dir), run_id=execution_id)
+        verification = cap.verify_run(
+            str(unit_dir), run_id=execution_id, dataset=dataset
+        )
         state_value, reasons = unit_outcome(
             unit_dir, verification=verification, limit=limit
         )

@@ -1659,7 +1659,7 @@ class _FakeCap:
             "namespace": f"{tenant}.{dataset}",
         }
 
-    def verify_run(self, shard_dir, *, run_id=None, unit=None):
+    def verify_run(self, shard_dir, *, run_id=None, unit=None, dataset=None):
         return {"discrepancies": [] if self.verify_ok else ["a batch is short"]}
 
 

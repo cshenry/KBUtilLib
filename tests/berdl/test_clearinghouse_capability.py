@@ -2064,7 +2064,9 @@ def test_registry_lookup_runs_on_spark_without_params():
     fake = _FakeWriteCapability(registry_hashes={DEFAULT_PARAMETER_SET_HASH})
     cap = ClearinghouseCapability(fake)
 
-    present = cap._registered_parameter_set_hashes([DEFAULT_PARAMETER_SET_HASH])
+    present = cap._registered_parameter_set_hashes(
+        [DEFAULT_PARAMETER_SET_HASH], write_ns=f"{TENANT}.{NAMESPACE}"
+    )
 
     assert present == {DEFAULT_PARAMETER_SET_HASH}
     # The fake asserts params-on-spark itself; this pins the inlining.

@@ -649,7 +649,9 @@ class ClearinghouseCapability:
 
     # -- FQN helpers ------------------------------------------------------
 
-    def _fqn(self, entity_type: str, kind: str) -> str:
+    def _fqn(
+        self, entity_type: str, kind: str, *, namespace: str | None = None
+    ) -> str:
         """Return the dot-separated FQN of one clearinghouse table.
 
         Resolves the bare name through :func:`table_name` (Rule 2 -- the
@@ -657,8 +659,13 @@ class ClearinghouseCapability:
         prepends the namespace prefix. The derivation/schema modules quote
         each segment; this method returns the unquoted dotted form they
         expect.
+
+        ``namespace`` overrides the default ``tenant.dataset`` prefix. The
+        write and verify paths pass the namespace they confirmed through
+        :meth:`_assert_write_target`, so a non-default ``--dataset`` reads
+        the tables it writes rather than the production ones.
         """
-        return f"{_FQN_PREFIX}.{table_name(entity_type, kind)}"
+        return f"{namespace or _FQN_PREFIX}.{table_name(entity_type, kind)}"
 
     @staticmethod
     def _in_placeholders(n: int) -> str:
@@ -1120,6 +1127,7 @@ class ClearinghouseCapability:
         self,
         *,
         engine: str | None = None,
+        namespace: str | None = None,
     ) -> dict[str, Any]:
         """Check parameter-set registry integrity and report every finding.
 
@@ -1156,6 +1164,10 @@ class ClearinghouseCapability:
 
         Args:
             engine: Default is Trino (small ``DISTINCT`` aggregates).
+            namespace: The ``tenant.dataset`` to audit. Default is the
+                production clearinghouse. A run against a non-default
+                ``--dataset`` passes its own namespace, or it would audit
+                tables it never wrote.
 
         Returns:
             A report dict with ``'ok'`` (``True`` only when every list is
@@ -1181,7 +1193,9 @@ class ClearinghouseCapability:
         # table an operator has to go and look at.
         result_hash_types: dict[Any, set[str]] = {}
         for etype in ENTITY_TYPES:
-            table = _quote_fqn(self._fqn(etype, "result"), resolved_engine)
+            table = _quote_fqn(
+                self._fqn(etype, "result", namespace=namespace), resolved_engine
+            )
             rows = read(
                 f"SELECT DISTINCT parameter_set_hash FROM {table}"
             )
@@ -1195,7 +1209,7 @@ class ClearinghouseCapability:
         # harmless) while KEEPING two rows when the text differs, which is
         # precisely the conflict being looked for.
         registry = _quote_fqn(
-            f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", resolved_engine
+            f"{namespace or _FQN_PREFIX}.{PARAMETER_SET_TABLE}", resolved_engine
         )
         registry_rows = read(
             "SELECT DISTINCT parameter_set_hash, canonical_json "
@@ -1832,7 +1846,9 @@ class ClearinghouseCapability:
             )
         return parsed
 
-    def _registered_parameter_set_hashes(self, hashes: Sequence[str]) -> set[str]:
+    def _registered_parameter_set_hashes(
+        self, hashes: Sequence[str], *, write_ns: str
+    ) -> set[str]:
         """Return which of ``hashes`` the parameter-set registry already holds.
 
         A single ``SELECT DISTINCT`` over the registry on the Spark engine
@@ -1848,7 +1864,7 @@ class ClearinghouseCapability:
         """
         if not hashes:
             return set()
-        table = _quote_fqn(f"{_FQN_PREFIX}.{PARAMETER_SET_TABLE}", "spark")
+        table = _quote_fqn(f"{write_ns}.{PARAMETER_SET_TABLE}", "spark")
         sql = (
             f"SELECT DISTINCT parameter_set_hash FROM {table} "
             f"WHERE parameter_set_hash IN ({self._in_placeholders(len(hashes))})"
@@ -1876,7 +1892,7 @@ class ClearinghouseCapability:
         that is what makes an ordinary retry add no registry row).
         """
         hashes = [row["parameter_set_hash"] for row in registry_rows]
-        present = self._registered_parameter_set_hashes(hashes)
+        present = self._registered_parameter_set_hashes(hashes, write_ns=write_ns)
         new_rows = [
             dict(row)
             for row in registry_rows
@@ -2492,7 +2508,7 @@ class ClearinghouseCapability:
         hash_max = ci.validate_hex64(
             str(entry.get("hash_max")), where=f"batch {entry.get('batch_id')!r} hash_max"
         )
-        fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "spark")
+        fqn = _quote_fqn(f"{write_ns}.{table}", "spark")
         columns = ", ".join(key_columns)
         rows = self._run(
             f"SELECT {columns} FROM {fqn} "
@@ -2592,7 +2608,7 @@ class ClearinghouseCapability:
             name = config["name"]
             if name != PARAMETER_SET_TABLE and not name.endswith("_result"):
                 continue
-            columns = self._live_columns(name)
+            columns = self._live_columns(name, write_ns=write_ns)
             if columns is None:
                 findings.append(f"{name}: table does not exist in {write_ns}")
             elif name != PARAMETER_SET_TABLE and "parameter_set_hash" not in columns:
@@ -2615,7 +2631,7 @@ class ClearinghouseCapability:
                 "zero times."
             )
 
-    def _live_columns(self, name: str) -> set[str] | None:
+    def _live_columns(self, name: str, *, write_ns: str) -> set[str] | None:
         """The live column names of one clearinghouse table, or ``None``.
 
         ``DESCRIBE`` on Spark, which is the schema probe available in-pod
@@ -2624,7 +2640,7 @@ class ClearinghouseCapability:
         which is itself a refusal, so the distinction between an absent table
         and an unreadable one is not one this guard needs to draw.
         """
-        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}", "spark")
+        fqn = _quote_fqn(f"{write_ns}.{name}", "spark")
         try:
             rows = self._run(f"DESCRIBE {fqn}", params=None, engine="spark")
         except Exception:
@@ -2701,7 +2717,7 @@ class ClearinghouseCapability:
                 )
             expected = record.get("expected_rows")
             expected_rows = int(expected) if isinstance(expected, int) else 0
-            counted = self._count_batch_rows(table, batch_id)
+            counted = self._count_batch_rows(table, batch_id, write_ns=write_ns)
             if counted == expected_rows:
                 ledger.append(
                     {
@@ -2734,7 +2750,7 @@ class ClearinghouseCapability:
                 "resume."
             )
 
-    def _count_batch_rows(self, name: str, batch_id: str) -> int:
+    def _count_batch_rows(self, name: str, batch_id: str, *, write_ns: str) -> int:
         """Count the rows of ``name`` carrying exactly this ``ingest_batch_id``.
 
         THE reconcile and verification primitive, replacing the any-snapshot
@@ -2744,7 +2760,7 @@ class ClearinghouseCapability:
         channel there.
         """
         validated = ci.validate_batch_id(batch_id)
-        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}", "spark")
+        fqn = _quote_fqn(f"{write_ns}.{name}", "spark")
         rows = self._run(
             f"SELECT COUNT(*) AS row_count FROM {fqn} "
             f"WHERE ingest_batch_id = '{validated}'",
@@ -2754,7 +2770,7 @@ class ClearinghouseCapability:
         value = _scalar(rows, "row_count")
         return int(value) if isinstance(value, (int, float)) else 0
 
-    def _live_snapshot_ids(self, name: str) -> set[str]:
+    def _live_snapshot_ids(self, name: str, *, write_ns: str) -> set[str]:
         """Return the set of snapshot ids currently present on ``<ns>.<name>``.
 
         A single read-only ``query(..., engine="spark")`` against the table's
@@ -2764,7 +2780,7 @@ class ClearinghouseCapability:
         JSON-decoded (often string) snapshot value compares cleanly against the
         metadata table's (often numeric) column.
         """
-        fqn = _quote_fqn(f"{_FQN_PREFIX}.{name}.snapshots")
+        fqn = _quote_fqn(f"{write_ns}.{name}.snapshots")
         rows = self._run(
             f"SELECT snapshot_id FROM {fqn}",
             params=None,
@@ -2785,6 +2801,7 @@ class ClearinghouseCapability:
         *,
         run_id: str,
         unit: str | None = None,
+        dataset: str | None = None,
     ) -> dict[str, Any]:
         """Prove a load execution landed, batch by batch, against the live table.
 
@@ -2835,6 +2852,12 @@ class ClearinghouseCapability:
                 unit says nothing false about the others. The namespace-wide
                 registry check still runs -- it is a property of the tables as
                 they now stand, not of a unit.
+            dataset: The dataset the execution wrote to. Default is the
+                dataset its binding records (``tenant.<dataset>``), falling
+                back to the production dataset for a binding that names
+                none. Every read below -- counts, snapshots, the registry --
+                goes to this namespace. Passing one that disagrees with the
+                binding is reported as a discrepancy, never silently obeyed.
 
         Returns:
             A dict with ``'run_id'``/``'execution_id'``, ``'namespace'``,
@@ -2853,10 +2876,18 @@ class ClearinghouseCapability:
                 (dev 1206).
         """
         self._require_in_pod("verify_run")
-        write_ns = self._assert_write_target(dataset=NAMESPACE, tenant=TENANT)
         shard_root = Path(shard_dir)
         state_dir = ci.execution_state_dir(run_id)
         binding = ci.read_execution(state_dir)
+        if dataset is None:
+            bound = binding.get("namespace") if binding else None
+            prefix = f"{TENANT}."
+            dataset = (
+                bound[len(prefix):]
+                if isinstance(bound, str) and bound.startswith(prefix)
+                else NAMESPACE
+            )
+        write_ns = self._assert_write_target(dataset=dataset, tenant=TENANT)
         ledger = ci.ExecutionLedger(state_dir)
         records = ledger.records()
         discrepancies: list[str] = []
@@ -2923,7 +2954,7 @@ class ClearinghouseCapability:
                     )
                     + " -- unresolved or failed batches block completion."
                 )
-            live_rows = self._count_batch_rows(table, batch_id)
+            live_rows = self._count_batch_rows(table, batch_id, write_ns=write_ns)
             expected = ledger_rows if isinstance(ledger_rows, int) else None
             if expected is None:
                 if state == ci.LEDGER_COMMITTED:
@@ -2985,7 +3016,8 @@ class ClearinghouseCapability:
                 registered = self._registered_parameter_set_hashes(
                     self._validate_parameter_set_hashes(
                         sorted(hashes), verb="verify_run"
-                    )
+                    ),
+                    write_ns=write_ns,
                 )
                 missing = sorted(hashes - registered)
             if missing:
@@ -3011,7 +3043,7 @@ class ClearinghouseCapability:
         # table-wide audit that any rows could satisfy.
         table_reports: list[dict[str, Any]] = []
         for table in sorted(set(per_table_rows) | set(per_table_snaps)):
-            live_snaps = self._live_snapshot_ids(table)
+            live_snaps = self._live_snapshot_ids(table, write_ns=write_ns)
             missing_snaps = sorted(per_table_snaps.get(table, set()) - live_snaps)
             if missing_snaps:
                 discrepancies.append(
@@ -3038,7 +3070,7 @@ class ClearinghouseCapability:
                 report["missing_snapshots"] = missing_snaps
             table_reports.append(report)
 
-        parameter_set_integrity = self.parameter_set_orphans()
+        parameter_set_integrity = self.parameter_set_orphans(namespace=write_ns)
         discrepancies.extend(parameter_set_integrity["failures"])
 
         return {

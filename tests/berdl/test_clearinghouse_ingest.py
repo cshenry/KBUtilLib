@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import pyarrow as pa
@@ -1389,3 +1390,120 @@ def test_verify_folds_the_namespace_orphan_report_into_its_discrepancies(
     # The batches this load proved are still proven: another writer's orphan
     # is not this execution's batch failing.
     assert all(report["ok"] for report in flagged["batches"])
+
+
+# ===========================================================================
+# A NON-DEFAULT --dataset READS THE NAMESPACE IT WRITES (dev task 7)
+# ===========================================================================
+
+_SCRATCH_DATASET = "clh_scratch_probe"
+_SCRATCH_NS = f"{TENANT}.{_SCRATCH_DATASET}"
+
+
+class _NamespacedLake(_FakeLake):
+    """A lake with more than one namespace, which :class:`_FakeLake` is not.
+
+    ``_FakeLake`` keeps ONE row store and matches a table by its bare name, so
+    a read of ``production.gene_entity`` and a write to
+    ``scratch.gene_entity`` meet the same rows. That is how fill-only reading
+    the production namespace during a ``--dataset`` run went unseen: measured
+    live on 2026-10-16, two scratch runs over 3-then-5 functions left 8 rows
+    where 5 is correct. Here every namespace has its own rows, and every query
+    is recorded with the namespace it named.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.by_ns: dict[str, dict[str, list[dict]]] = {_WRITE_NS: self.rows}
+        self.query_namespaces: list[str] = []
+
+    def resolve_write_namespace(self, *, dataset, tenant):
+        return f"{tenant}.{dataset}"
+
+    def resolve_probe_namespace(self, *, dataset, tenant):
+        return f"{tenant}.{dataset}"
+
+    def _select(self, ns):
+        self.rows = self.by_ns.setdefault(ns, {})
+
+    def load(self, **kwargs):
+        self._select(kwargs["namespace"])
+        return super().load(**kwargs)
+
+    def query(self, sql, *, params=None, engine=None, **kwargs):
+        plain = sql.replace("`", "").replace('"', "")
+        match = re.search(r"(?:FROM|DESCRIBE)\s+(\w+\.\w+)\.\w+", plain)
+        assert match, f"cannot tell which namespace this reads: {sql}"
+        self.query_namespaces.append(match.group(1))
+        self._select(match.group(1))
+        return super().query(sql, params=params, engine=engine, **kwargs)
+
+
+def test_a_scratch_rerun_drops_present_rows_instead_of_duplicating_them(tmp_path):
+    root, _ = _simple_run(tmp_path)
+    fake = _NamespacedLake(spark=_FakeSpark())
+    cap = _capability(fake)
+
+    cap.ingest_shards(root, dataset=_SCRATCH_DATASET)
+    second = cap.ingest_shards(root, dataset=_SCRATCH_DATASET)
+
+    assert [r["rows_ingested"] for r in second["tables"]] == [0, 0]
+    assert [r["rows_dropped_present"] for r in second["tables"]] == [2, 1]
+    assert len(fake.by_ns[_SCRATCH_NS]["gene_entity"]) == 2
+    assert len(fake.by_ns[_SCRATCH_NS]["gene_content"]) == 1
+    assert fake.by_ns[_WRITE_NS] == {}, "production must not be written"
+    assert set(fake.query_namespaces) == {_SCRATCH_NS}, (
+        "a --dataset run read a namespace it does not write"
+    )
+
+
+def test_rows_already_in_production_still_land_in_an_empty_scratch_dataset(
+    tmp_path,
+):
+    """The inverse direction: production's keys must not suppress scratch rows."""
+    root, _ = _simple_run(tmp_path)
+    fake = _NamespacedLake(spark=_FakeSpark())
+    cap = _capability(fake)
+    cap.ingest_shards(root)  # the default dataset: production
+    assert len(fake.by_ns[_WRITE_NS]["gene_entity"]) == 2
+
+    scratch = cap.ingest_shards(root, dataset=_SCRATCH_DATASET)
+
+    assert [r["rows_ingested"] for r in scratch["tables"]] == [2, 1]
+    assert len(fake.by_ns[_SCRATCH_NS]["gene_entity"]) == 2
+
+
+def test_verify_of_a_scratch_execution_reads_the_namespace_it_is_bound_to(
+    tmp_path,
+):
+    root, _ = _simple_run(tmp_path)
+    fake = _NamespacedLake(spark=_FakeSpark())
+    cap = _capability(fake)
+    result = cap.ingest_shards(root, dataset=_SCRATCH_DATASET)
+    fake.query_namespaces.clear()
+
+    # No dataset passed: the execution's binding decides.
+    verified = cap.verify_run(root, run_id=result["run_id"])
+
+    assert verified["ok"], verified["discrepancies"]
+    assert verified["namespace"] == _SCRATCH_NS
+    assert {r["name"]: r["live_rows"] for r in verified["batches"]} == {
+        "gene_entity": 2,
+        "gene_content": 1,
+    }
+    assert set(fake.query_namespaces) == {_SCRATCH_NS}
+
+
+def test_verify_told_a_dataset_the_execution_did_not_write_says_so(tmp_path):
+    root, _ = _simple_run(tmp_path)
+    fake = _NamespacedLake(spark=_FakeSpark())
+    cap = _capability(fake)
+    result = cap.ingest_shards(root, dataset=_SCRATCH_DATASET)
+
+    verified = cap.verify_run(root, run_id=result["run_id"], dataset=NAMESPACE)
+
+    assert not verified["ok"]
+    assert any(
+        f"bound to namespace {_SCRATCH_NS!r}" in line
+        for line in verified["discrepancies"]
+    )

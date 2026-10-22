@@ -1,7 +1,9 @@
 {
   "prd_name": "function-to-go-council-pipeline-v1",
   "title": "function_to_go council pipeline: un-run detection, cost quote, approval gate, chunked run, clearinghouse publish",
-  "repos": ["KBUtilLib"],
+  "repos": [
+    "KBUtilLib"
+  ],
   "owning_repo": "KBUtilLib",
   "authored_by": "miles",
   "authored_on": "2026-10-22",
@@ -10,7 +12,7 @@
   "review_rounds": 0,
   "confront_rounds": 1,
   "confront": "ran: task-d9e8311c, codex researcher on h100, 12 binding stalls returned, 9 folded, 0 dropped",
-  "draft_commit": null,
+  "draft_commit": "5bc217b",
   "review_protocol": "Written single-pass in Draft Mode: every judgement call is decided in the body and manifested in '## Open Questions and Judgement Calls' (Q1-Q14), ordered by blast radius descending. Chris edits the committed fullprompt.md in place, annotating with (CSH ...) markers; `/ai-miles d --review function-to-go-council-pipeline-v1` then diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through the body, user stories, testing decisions, gotchas and taskplan.json, and recommits with a fresh baseline. The PRD is held at draft until one review round completes (review_rounds >= 1), which is the hard ready gate.",
   "stages": [
     "1 detect un-run functions -> PLAN.json",
@@ -46,14 +48,45 @@
       "error_rate": "0.59%",
       "retry_recovery": "105 of 113 on one retry, for 0.30% of run cost"
     },
-    "meta_fire_rate": {"value": 0.241, "n": 19268, "withdrawn": [0.167, 0.192, 0.387]},
-    "yield": {"with_go_term": 9912, "declined_no_candidate_matched": 4893, "declined_contentless": 4463},
-    "decided": {"unanimous": 14619, "by_meta": 4649},
+    "meta_fire_rate": {
+      "value": 0.241,
+      "n": 19268,
+      "withdrawn": [
+        0.167,
+        0.192,
+        0.387
+      ]
+    },
+    "yield": {
+      "with_go_term": 9912,
+      "declined_no_candidate_matched": 4893,
+      "declined_contentless": 4463
+    },
+    "decided": {
+      "unanimous": 14619,
+      "by_meta": 4649
+    },
     "input_share_of_tokens": "86%",
-    "mag_limits": {"max_parallel_requests": 20, "requests_per_minute": 120, "scope": "account-wide", "working_queue_sum": 6},
-    "argo_limits": {"saturates_at": 24, "clean_at": "40 concurrent across 3 models"},
-    "claim_cost": {"at_19k_pending_ms": 217, "at_2k_pending_ms": 10.4, "throughput_collapse": "10.8x"},
-    "chunking": {"items_per_chunk": 2000, "in_flight": 1, "issue": "KBUtilLib#84"}
+    "mag_limits": {
+      "max_parallel_requests": 20,
+      "requests_per_minute": 120,
+      "scope": "account-wide",
+      "working_queue_sum": 6
+    },
+    "argo_limits": {
+      "saturates_at": 24,
+      "clean_at": "40 concurrent across 3 models"
+    },
+    "claim_cost": {
+      "at_19k_pending_ms": 217,
+      "at_2k_pending_ms": 10.4,
+      "throughput_collapse": "10.8x"
+    },
+    "chunking": {
+      "items_per_chunk": 2000,
+      "in_flight": 1,
+      "issue": "KBUtilLib#84"
+    }
   },
   "open_contingencies": [
     "ARGO's and MAG's effective token rates are derivable from no artifact; the design assumes an operator-supplied rate table plus a per-run balance delta, and reports 'unpriced' otherwise. This is the one flag-not-question in the PRD.",

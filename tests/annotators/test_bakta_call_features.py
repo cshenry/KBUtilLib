@@ -35,6 +35,7 @@ import pytest
 
 from kbutillib.domains.genome.annotation.annotator_utils import ToolUnavailableError
 from kbutillib.domains.genome.annotation.bakta_utils import (
+    _DRIVER_CDS_OVERLAP_DISCARD_FRACTION,
     _DRIVER_FILENAME,
     _DRIVER_PINNED_BAKTA_VERSION,
     BaktaCallError,
@@ -797,6 +798,7 @@ class TestDockerImageOverride:
             "translation_table",
             "threads",
             "call_non_coding",
+            "cds_overlap_discard_fraction",
         }
 
     def test_docker_image_id_is_native_in_native_mode(self):
@@ -816,6 +818,7 @@ class TestDockerCommandShape:
             threads=3,
             translation_table=11,
             call_non_coding=True,
+            cds_overlap_discard_fraction=_DRIVER_CDS_OVERLAP_DISCARD_FRACTION,
         )
 
     def test_runs_with_no_network_and_an_explicit_user(self, cmd):
@@ -848,6 +851,7 @@ class TestDockerCommandShape:
             threads=1,
             translation_table=11,
             call_non_coding=False,
+            cds_overlap_discard_fraction=_DRIVER_CDS_OVERLAP_DISCARD_FRACTION,
         )
         assert cmd[0] == "/usr/bin/python3.11"
         assert cmd[1].endswith(_DRIVER_FILENAME)
@@ -1295,6 +1299,195 @@ search = bakta.forbidden("exp_aa_hmms.search")
 ''',
 }
 
+
+#: Stub source overlay for the CDS overlap-rule tests, appended to
+#: :data:`_STUB_FILES` by :func:`_write_stub`.
+#:
+#: It replaces the non-coding callers and ``cds.predict`` with a geometry
+#: built around the rule's threshold, and replaces
+#: ``annotation.detect_feature_overlaps`` with one that reproduces Bakta
+#: 1.11.4's ACTUAL CDS rule -- discard on an overlap of ANY size with a
+#: tmRNA/tRNA/rRNA/CRISPR, each match overwriting the previous one's
+#: discard block -- so what the driver re-judges here is the real verdict
+#: rather than a canned one. Every CDS names the case it exists to prove in
+#: ``_stub_case``; the assertions key on its start coordinate, since
+#: ``_stub_case`` is stripped from the output like every other stub field.
+_OVERLAP_RULE_STUB_APPENDS: dict[str, str] = {
+    "bakta/features/t_rna.py": '''
+def _overlap_rule_trna(contig, start, stop, **extra):
+    return {
+        "type": "tRNA",
+        "sequence": contig,
+        "start": start,
+        "stop": stop,
+        "strand": "+",
+        "nt": "A" * (stop - start + 1),
+        "product": "tRNA-Xxx",
+        "db_xrefs": [],
+        **extra,
+    }
+
+
+def predict_t_rnas(data, sequences_path):
+    bakta.record("t_rna.predict_t_rnas")
+    contig = data["sequences"][0]["id"]
+    return [
+        # Discarded for a tmRNA overlap by the pass below, as in the base
+        # stub: a NON-CDS overlap discard, which the rule must not touch.
+        _overlap_rule_trna(contig, 400, 470, _stub_fate="overlap"),
+        _overlap_rule_trna(contig, 5000, 5075),    # 3 bp of CDS 4400-5002
+        _overlap_rule_trna(contig, 9000, 9084),    # 85 bp of CDS 8916-9482
+        _overlap_rule_trna(contig, 9950, 10029),   # 30 bp of CDS 10000-10099
+        _overlap_rule_trna(contig, 10070, 10200),  # a further 30 bp of it
+    ]
+''',
+    "bakta/features/tm_rna.py": '''
+def predict_tm_rnas(data, sequences_path):
+    bakta.record("tm_rna.predict_tm_rnas")
+    return [
+        {
+            "type": "tmRNA",
+            "sequence": data["sequences"][0]["id"],
+            "start": 8000,
+            "stop": 8086,  # 87 bp of the 126 bp CDS at 8000 -> 69%
+            "strand": "+",
+            "nt": "T" * 87,
+            "product": "transfer-messenger RNA, SsrA",
+            "db_xrefs": [],
+        }
+    ]
+''',
+    "bakta/features/r_rna.py": '''
+def predict_r_rnas(data, sequences_path):
+    bakta.record("r_rna.predict_r_rnas")
+    return [
+        {
+            "type": "rRNA",
+            "sequence": data["sequences"][0]["id"],
+            "start": 6000,
+            "stop": 7500,  # wholly contains the CDS at 6100-6399
+            "strand": "+",
+            "nt": "G" * 1501,
+            "product": "16S ribosomal RNA",
+            "db_xrefs": ["RFAM:RF00177"],
+        }
+    ]
+''',
+    "bakta/features/nc_rna.py": '''
+def predict_nc_rnas(data, sequences_path):
+    bakta.record("nc_rna.predict_nc_rnas")
+    contig = data["sequences"][0]["id"]
+    return [
+        {
+            "type": "ncRNA",
+            "sequence": contig,
+            "start": 800,
+            "stop": 899,
+            "strand": "-",
+            "nt": "T" * 100,
+            "product": "a ribozyme",
+            "class": so.SO_NCRNA_GENE_RIBOZYME,
+            "score": 107.0,
+            "db_xrefs": ["RFAM:RF01830", "GO:0003824"],
+        },
+        {
+            # Wholly contains the CDS at 11000-11200. Bakta's CDS overlap
+            # pass does not test CDS against ncRNA GENES at all, so that
+            # CDS is never discarded and never reaches the rule.
+            "type": "ncRNA",
+            "sequence": contig,
+            "start": 10900,
+            "stop": 11300,
+            "strand": "+",
+            "nt": "T" * 401,
+            "product": "a riboswitch",
+            "score": 90.0,
+            "db_xrefs": ["RFAM:RF00050"],
+        },
+    ]
+''',
+    "bakta/features/cds.py": '''
+#: ``(start, stop, case)`` per CDS the overlap-rule tests need. The two
+#: cases named for a fate are picked up by the base stub's filter_length /
+#: detect_spurious, so they never reach the overlap pass -- exactly as in
+#: Bakta.
+_OVERLAP_CASES = (
+    (1500, 1800, "spurious"),
+    (2000, 2300, "no_overlap"),
+    (3000, 3300, "length"),
+    (4400, 5002, "trna_3bp_tail"),
+    (6100, 6399, "inside_rrna"),
+    (8000, 8125, "tmrna_69pct"),
+    (8916, 9482, "trna_15pct"),
+    (10000, 10099, "two_trnas_60pct"),
+    (11000, 11200, "inside_ncrna_gene"),
+)
+
+
+def predict(data):
+    bakta.record("cds.predict")
+    contig = data["sequences"][0]["id"]
+    return [
+        {
+            "type": "cds",
+            "sequence": contig,
+            "start": start,
+            "stop": stop,
+            "strand": "+",
+            "nt": "ATG" * ((stop - start + 1) // 3),
+            "aa": "MKV*",
+            "aa_digest": b"\\x00\\x01\\x02",
+            "product": None,
+            "db_xrefs": ["SO:0000316"],
+            "_stub_case": case,
+            "_stub_fate": case if case in ("length", "spurious") else "keep",
+        }
+        for start, stop, case in _OVERLAP_CASES
+    ]
+''',
+    "bakta/features/annotation.py": '''
+def detect_feature_overlaps(data):
+    """Reproduce Bakta 1.11.4's own CDS overlap rule: ANY overlap discards.
+
+    Mirrors the CDS branch of the real
+    ``bakta/features/annotation.py:detect_feature_overlaps`` -- tmRNA, then
+    tRNA, then rRNA, then CRISPR, each match overwriting the previous one's
+    discard block, so the surviving description names only the LAST overlap
+    found and is neither the largest nor the union. ncRNA genes are absent
+    from that list in Bakta, and so are absent here.
+    """
+    bakta.record(
+        "annotation.detect_feature_overlaps",
+        seen=[[f["type"], f["start"]] for f in data["features"]],
+    )
+    for feature in data["features"]:
+        if feature.get("_stub_fate") == "overlap":
+            feature["discarded"] = {
+                "type": "overlap",
+                "feature_type": "tmRNA",
+                "description": "tmRNA overlap with (transfer-messenger RNA, "
+                "SsrA) at [400,450]",
+            }
+    for cds in [f for f in data["features"] if f["type"] == "cds"]:
+        for kind in ("tmRNA", "tRNA", "rRNA", "crispr"):
+            for other in data["features"]:
+                if other["type"] != kind:
+                    continue
+                if other["sequence"] != cds["sequence"]:
+                    continue
+                if cds["stop"] < other["start"] or cds["start"] > other["stop"]:
+                    continue
+                start = max(cds["start"], other["start"])
+                stop = min(cds["stop"], other["stop"])
+                cds["discarded"] = {
+                    "type": "overlap",
+                    "feature_type": kind,
+                    "description": "%s overlap with (%s) at [%i,%i]"
+                    % (kind, other.get("product"), start, stop),
+                }
+''',
+}
+
 #: Functional-annotation entry points that must never be reached. Each is a
 #: `bakta.forbidden(...)` in the stub, so reaching one both raises AND leaves
 #: a FORBIDDEN: marker in the trace.
@@ -1318,20 +1511,38 @@ _FORBIDDEN_CALLS = (
 )
 
 
-def _write_stub(root: Path) -> Path:
+def _write_stub(root: Path, appends: dict[str, str] | None = None) -> Path:
     """Materialise the stub ``bakta`` package under *root*.
 
     Args:
         root: Directory to create ``bakta/`` in; becomes the PYTHONPATH
             entry.
+        appends: Optional ``{relative path: extra source}``. Each is
+            appended to that file's base source, so a ``def`` in it shadows
+            the base one of the same name. That is how
+            :data:`_OVERLAP_RULE_STUB_APPENDS` re-points ``cds.predict``
+            and ``annotation.detect_feature_overlaps`` without having to
+            re-declare the ``bakta.forbidden`` entry points that sit in the
+            same files.
 
     Returns:
         *root*, for chaining.
+
+    Raises:
+        KeyError: If *appends* names a file the base stub does not define --
+            a typo there would otherwise silently do nothing.
     """
+    unknown = set(appends or {}) - set(_STUB_FILES)
+    if unknown:
+        raise KeyError(f"no base stub file to append to: {sorted(unknown)}")
     for rel, source in _STUB_FILES.items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        text = textwrap.dedent(source).lstrip()
+        extra = (appends or {}).get(rel)
+        if extra is not None:
+            text = text + "\n\n" + textwrap.dedent(extra).lstrip()
+        path.write_text(text, encoding="utf-8")
     return root
 
 
@@ -1339,6 +1550,7 @@ def _run_driver_against_stub(
     tmp_path: Path,
     extra_args: list[str] | None = None,
     stub_version: str | None = None,
+    appends: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess, list[dict[str, Any]], Path]:
     """Run the real driver as a subprocess against the stub ``bakta``.
 
@@ -1346,11 +1558,12 @@ def _run_driver_against_stub(
         tmp_path: Scratch dir.
         extra_args: Extra driver flags (e.g. ``["--no-non-coding"]``).
         stub_version: ``bakta.__version__`` the stub should report.
+        appends: Stub source overlay, passed to :func:`_write_stub`.
 
     Returns:
         ``(completed_process, trace_entries, out_json_path)``.
     """
-    stub_root = _write_stub(tmp_path / "stub")
+    stub_root = _write_stub(tmp_path / "stub", appends=appends)
     trace = tmp_path / "trace.jsonl"
     contigs = tmp_path / "contigs.fna"
     contigs.write_text(">c1\n" + "ACGT" * 250 + "\n", encoding="utf-8")
@@ -1601,6 +1814,144 @@ class TestDriverStub:
         assert not out_json.exists()
 
 
+class TestDriverStubOverlapRule:
+    """The CDS overlap rule, in the driver, against a faithful stub pass.
+
+    The stub's ``detect_feature_overlaps``
+    (:data:`_OVERLAP_RULE_STUB_APPENDS`) applies Bakta's own rule -- any
+    overlap at all discards the CDS -- so each case below starts from the
+    verdict the real Bakta would reach and checks what the driver does with
+    it afterwards.
+    """
+
+    @pytest.fixture()
+    def payload(self, tmp_path) -> dict[str, Any]:
+        completed, _, out_json = _run_driver_against_stub(
+            tmp_path, appends=_OVERLAP_RULE_STUB_APPENDS
+        )
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(out_json.read_text())
+
+    @staticmethod
+    def _cds(payload: dict[str, Any], start: int) -> dict[str, Any]:
+        """Return the one CDS record starting at *start*."""
+        return next(
+            feature
+            for feature in payload["features"]
+            if feature["type"] == "cds" and feature["start"] == start
+        )
+
+    def test_a_three_bp_tail_overlap_is_kept_with_rna_overlap(self, payload):
+        """The S. coelicolor shape: 3 bp of tRNA at the end of a 603 bp CDS."""
+        cds = self._cds(payload, 4400)
+        assert "discarded" not in cds
+        assert cds["rna_overlap"] == {
+            "feature_type": "tRNA",
+            "overlap_start": 5000,
+            "overlap_stop": 5002,
+            "overlap_bp": 3,
+            "overlap_fraction": pytest.approx(3 / 603),
+        }
+
+    def test_a_cds_wholly_inside_an_rrna_is_discarded(self, payload):
+        cds = self._cds(payload, 6100)
+        assert cds["discarded"]["type"] == "overlap"
+        assert cds["discarded"]["feature_type"] == "rRNA"
+        assert cds["discarded"]["overlap_fraction"] == pytest.approx(1.0)
+        assert "rna_overlap" not in cds
+
+    def test_a_fifteen_percent_trna_overlap_is_kept(self, payload):
+        """The E. coli 1287065..1287631 shape: 85 bp of tRNA in 567 nt."""
+        cds = self._cds(payload, 8916)
+        assert "discarded" not in cds
+        assert cds["rna_overlap"]["overlap_bp"] == 85
+        assert cds["rna_overlap"]["overlap_fraction"] == pytest.approx(85 / 567)
+
+    def test_a_sixty_nine_percent_tmrna_overlap_is_discarded(self, payload):
+        """The E. coli 2755554..2755679 shape: 87 bp of tmRNA in 126 nt."""
+        cds = self._cds(payload, 8000)
+        assert cds["discarded"]["type"] == "overlap"
+        assert cds["discarded"]["feature_type"] == "tmRNA"
+        assert cds["discarded"]["overlap_fraction"] == pytest.approx(87 / 126)
+
+    def test_two_small_overlaps_are_unioned_not_taken_singly(self, payload):
+        """60% of a 100 bp CDS, as 30 bp + 30 bp from two tRNAs.
+
+        Neither overlap reaches the threshold alone, so a per-feature test
+        would keep this CDS; the union puts it over.
+        """
+        cds = self._cds(payload, 10000)
+        assert cds["discarded"]["type"] == "overlap"
+        assert cds["discarded"]["overlap_fraction"] == pytest.approx(0.6)
+
+    def test_a_cds_with_no_overlap_is_untouched(self, payload):
+        cds = self._cds(payload, 2000)
+        assert "discarded" not in cds
+        assert "rna_overlap" not in cds
+
+    def test_a_cds_inside_an_ncrna_gene_is_never_discarded(self, payload):
+        """Bakta's CDS pass does not test CDS against ncRNA GENES at all.
+
+        So this CDS is kept by Bakta, never reaches the rule, and gets no
+        ``rna_overlap`` -- ncRNA coverage is deliberately outside
+        :data:`CDS_OVERLAP_DISCARD_FRACTION`'s remit (see the driver's
+        ``_CDS_OVERLAP_FEATURE_TYPES``).
+        """
+        cds = self._cds(payload, 11000)
+        assert "discarded" not in cds
+        assert "rna_overlap" not in cds
+
+    def test_the_spurious_discard_is_untouched(self, payload):
+        cds = self._cds(payload, 1500)
+        assert cds["discarded"]["type"] == "spurious"
+        assert cds["discarded"]["overlap_fraction"] is None
+        assert "rna_overlap" not in cds
+
+    def test_the_length_discard_is_untouched(self, payload):
+        cds = self._cds(payload, 3000)
+        assert cds["discarded"]["type"] == "length"
+        assert cds["discarded"]["overlap_fraction"] is None
+        assert "rna_overlap" not in cds
+
+    def test_a_non_cds_overlap_discard_is_untouched(self, payload):
+        """The rule re-judges CDS only: the tRNA dropped for a tmRNA stays."""
+        trna = next(
+            feature
+            for feature in payload["features"]
+            if feature["type"] == "tRNA" and feature["start"] == 400
+        )
+        assert trna["discarded"]["type"] == "overlap"
+        assert trna["discarded"]["feature_type"] == "tmRNA"
+        assert trna["discarded"]["overlap_fraction"] is None
+        assert "rna_overlap" not in trna
+
+    def test_the_threshold_flag_changes_the_outcome(self, tmp_path):
+        """At 0.1 the 15% case flips to a discard; the 0.5% one does not."""
+        completed, _, out_json = _run_driver_against_stub(
+            tmp_path,
+            extra_args=["--cds-overlap-discard-fraction", "0.1"],
+            appends=_OVERLAP_RULE_STUB_APPENDS,
+        )
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(out_json.read_text())
+        flipped = self._cds(payload, 8916)
+        assert flipped["discarded"]["type"] == "overlap"
+        assert flipped["discarded"]["overlap_fraction"] == pytest.approx(85 / 567)
+        assert "discarded" not in self._cds(payload, 4400)
+
+    def test_at_zero_the_rule_reproduces_baktas_own_behaviour(self, tmp_path):
+        """A fraction of 0.0 is the pre-rule driver: any overlap discards."""
+        completed, _, out_json = _run_driver_against_stub(
+            tmp_path,
+            extra_args=["--cds-overlap-discard-fraction", "0"],
+            appends=_OVERLAP_RULE_STUB_APPENDS,
+        )
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(out_json.read_text())
+        for start in (4400, 8916, 8000, 6100, 10000):
+            assert self._cds(payload, start)["discarded"]["type"] == "overlap"
+
+
 class TestNativeDriverEndToEnd:
     """``call_features`` through its DEFAULT NATIVE runner path, no fakes.
 
@@ -1680,6 +2031,108 @@ class TestNativeDriverEndToEnd:
         assert "1.11.3" in message
 
 
+class TestCallFeaturesOverlapRule:
+    """The overlap rule through ``call_features``'s DEFAULT native runner.
+
+    Same no-injection shape as :class:`TestNativeDriverEndToEnd`:
+    ``_run_driver`` is not replaced, so this really exercises the
+    ``--cds-overlap-discard-fraction`` argv wiring, the ``rna_overlap``
+    passthrough and the provenance echo. Only *Bakta* is substituted, by
+    the stub on the child's ``PYTHONPATH``.
+    """
+
+    @staticmethod
+    def _call(tmp_path, monkeypatch, **kwargs) -> BaktaCallResult:
+        stub_root = _write_stub(
+            tmp_path / "stub", appends=_OVERLAP_RULE_STUB_APPENDS
+        )
+        monkeypatch.setenv("PYTHONPATH", str(stub_root))
+        monkeypatch.setenv("BAKTA_STUB_TRACE", str(tmp_path / "trace.jsonl"))
+        bu = _make_utils(docker_image="", db_path=str(tmp_path))
+        bu._call_python = sys.executable
+        return bu.call_features([("c1", "ACGT" * 250)], **kwargs)
+
+    def test_kept_cds_carries_rna_overlap(self, tmp_path, monkeypatch):
+        result = self._call(tmp_path, monkeypatch)
+        cds = next(
+            f
+            for f in result.features
+            if f["type"] == "cds" and f["start"] == 4400
+        )
+        assert cds["rna_overlap"]["feature_type"] == "tRNA"
+        assert cds["rna_overlap"]["overlap_bp"] == 3
+
+    def test_kept_cds_without_an_overlap_carries_no_rna_overlap(
+        self, tmp_path, monkeypatch
+    ):
+        result = self._call(tmp_path, monkeypatch)
+        cds = next(
+            f
+            for f in result.features
+            if f["type"] == "cds" and f["start"] == 2000
+        )
+        assert "rna_overlap" not in cds
+
+    def test_discarded_cds_carries_overlap_fraction(self, tmp_path, monkeypatch):
+        result = self._call(tmp_path, monkeypatch)
+        entry = next(
+            e for e in result.discarded["cds"] if e["start"] == 6100
+        )
+        assert entry["reason"] == "overlap"
+        assert entry["overlap_fraction"] == pytest.approx(1.0)
+
+    def test_a_length_discard_reports_no_fraction(self, tmp_path, monkeypatch):
+        result = self._call(tmp_path, monkeypatch)
+        entry = next(e for e in result.discarded["cds"] if e["start"] == 3000)
+        assert entry["reason"] == "length"
+        assert entry["overlap_fraction"] is None
+
+    def test_the_default_threshold_is_echoed(self, tmp_path, monkeypatch):
+        result = self._call(tmp_path, monkeypatch)
+        assert result.cds_overlap_discard_fraction == 0.5
+        assert result.cds_overlap_discard_fraction == (
+            _DRIVER_CDS_OVERLAP_DISCARD_FRACTION
+        )
+
+    def test_the_threshold_kwarg_reaches_the_driver_and_is_echoed(
+        self, tmp_path, monkeypatch
+    ):
+        """0.1 flips the 15% case from kept to discarded, end to end."""
+        result = self._call(
+            tmp_path, monkeypatch, cds_overlap_discard_fraction=0.1
+        )
+        assert result.cds_overlap_discard_fraction == 0.1
+        assert not [
+            f for f in result.features
+            if f["type"] == "cds" and f["start"] == 8916
+        ]
+        entry = next(e for e in result.discarded["cds"] if e["start"] == 8916)
+        assert entry["reason"] == "overlap"
+        assert entry["overlap_fraction"] == pytest.approx(85 / 567)
+
+    def test_the_flag_is_on_the_driver_argv(self, tmp_path):
+        bu = _make_utils(docker_image="")
+        cmd = bu._build_call_features_cmd(
+            work=tmp_path,
+            contigs_path=tmp_path / "contigs.fna",
+            out_path=tmp_path / "out.json",
+            threads=1,
+            translation_table=11,
+            call_non_coding=True,
+            cds_overlap_discard_fraction=0.25,
+        )
+        assert cmd[cmd.index("--cds-overlap-discard-fraction") + 1] == "0.25"
+
+    @pytest.mark.parametrize("fraction", [-0.1, 1.5])
+    def test_an_out_of_range_threshold_raises_value_error(self, fraction):
+        bu = _make_utils(docker_image="")
+        bu._call_python = sys.executable
+        with pytest.raises(ValueError, match="cds_overlap_discard_fraction"):
+            bu.call_features(
+                [("c1", "ACGT" * 10)], cds_overlap_discard_fraction=fraction
+            )
+
+
 # ---------------------------------------------------------------------------
 # Driver packaging / purity
 # ---------------------------------------------------------------------------
@@ -1714,6 +2167,13 @@ class TestDriverPackaging:
         source = DRIVER_PATH.read_text(encoding="utf-8")
         assert (
             f'PINNED_BAKTA_VERSION = "{_DRIVER_PINNED_BAKTA_VERSION}"' in source
+        )
+
+    def test_driver_overlap_fraction_matches_the_adapters_default(self):
+        source = DRIVER_PATH.read_text(encoding="utf-8")
+        assert (
+            "CDS_OVERLAP_DISCARD_FRACTION = "
+            f"{_DRIVER_CDS_OVERLAP_DISCARD_FRACTION}" in source
         )
 
     def test_exported_from_annotation_package(self):
@@ -1823,6 +2283,49 @@ _ECOLI_RRND_REGION = "".join(
     "GGACTTGAACCACCGACCTCACCCTTATCAGGGGTGCGCTCTAACCACCTGAGCTACAAGCCTGTAGAGG"
     "TTTTACTGCTCATTTTCATCAGACAATCTGTGTGAGCACTG"
 )
+
+
+# A 1,001 bp slice of Streptomyces coelicolor A3(2), NC_003888.3
+# 4,498,100-4,499,100 (plus strand of the reference), fetched over HTTPS
+# from NCBI efetch while this test was written. It is the pair that forced
+# the CDS overlap rule.
+#
+# NCBI RefSeq annotation, in LOCAL 1-based coordinates of the string below
+# (local = absolute - 4,498,099):
+#
+#     SC_RS22650 (SCOt45)   tRNA-Lys    50 - 122  (+)
+#     SC_RS22655 (SCO4098)  CDS        120 - 809  (-)  CatB-related
+#                                                      O-acetyltransferase
+#
+# The CDS is on the minus strand, so its 3' end is its LOW coordinate, and
+# that end overlaps the tRNA by exactly 3 bp (120, 121, 122) -- 0.43 per
+# cent of its 690 nt. Bakta 1.11.4's overlap pass discards the CDS outright
+# for those 3 bp, which is the behaviour this branch replaces: it is now
+# kept, carrying ``rna_overlap``. Verified against the RefSeq annotation of
+# NC_003888.3 4,497,000-4,500,200.
+_SCO_TRNA_OVERLAP_REGION = "".join(
+    "GCTATGCTCGGTGTGGCAACATCACGCAGCACCGCGCGACACACCGCCTGGGCCCTTAGCTCAATTGGCA"
+    "GAGCAGTGGACTTTTAATCCATTGGTTGTGGGTTCGAGTCCCACAGGGCCTACTCGTCGGACCCCGGCTC"
+    "ACGGCAGGACTGAGCTGGGGTCCTTTTCGTCCGTGCGGCGGCCTCTTCCAGTTGCGTGACGGTGCCCGAC"
+    "ATGATCGTCCGGACGTGTGCGGTGATCTGCTCCACCGGCCAGTCCCACCACGCCACCGCGAGCAGTCGGG"
+    "CGATGTCCCGCTCCGGGTGGCGCTTACGGATCAGACGGGCCGGGTTGCCGCCGACGATGCCGTAGTCGGG"
+    "CACGTCGCTCGTCACCACCGCCCCGGTGGCGATGATCGCGCCGTGGCCGATGCGGACGCCGGGCATCACG"
+    "GTGGCGCCGTTGCCGAACCAGACGTCGTTGCCCACCACGGTGTCCCCCGGGTTCGGCAGGCCGGTGAGCA"
+    "GGTCGAAGTGCTCGGCCCAGGAGCCGCCCATGGTGGGGAAGGGGAAGGTGGACGGGCCGTCCATACGGTG"
+    "GTTGGCGCCGTTCATGATGAAGCGCGTGCCGGTCCCCAGGGCACAGAACTTCCCGATCACCAGCTTCTCC"
+    "GGCCCGTAGTGGTAGAGCACGTTGCGGGTCTCGAAGGCGGTCGCGTCGTCCGGGTCGTCGTAGTAGGAGA"
+    "AGTCGCCGACCTCGATCAGCGGGGACTTCACCAGAGGCTTGAGCAGTACGACCCGGGGCTGTTCGGGCAT"
+    "CGGGTGGAGCACGGTGGGATCGGCGGGGGCGGCAGGCATCGGCAAGGCGGATCCTCTCGGCGGACCACTA"
+    "GTGCGACAGGTGTAGCGTTAAGAGGGTGGCACGACCAGTCGTATCGATCAAACGGATAGTGGACGGCCGA"
+    "TGACGGATTCGACGGATTCGACGGAGCCGGCAGTCGGGGCGCCCGAGCGGCGTCCGGGCGGCCGTACCGC"
+    "CCGCGTCCGCGCCCAAGTCCT"
+)
+
+#: Local 1-based coordinates of SC_RS22655 and the size of its tRNA
+#: overlap in :data:`_SCO_TRNA_OVERLAP_REGION`.
+_SCO_CDS_START = 120
+_SCO_CDS_STOP = 809
+_SCO_OVERLAP_BP = 3
 
 
 def _real_image_present(image: str = REAL_IMAGE) -> bool:
@@ -1971,6 +2474,63 @@ class TestRealImageIntegration:
 
     def test_discard_counts_are_present_for_all_three_types(self, result):
         assert set(result.discarded["counts"]) == {"overlap", "spurious", "length"}
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def sco_result() -> BaktaCallResult:
+        """The S. coelicolor tRNA-overlap case, same default runner path."""
+        bu = BaktaUtils(
+            db_path=os.environ[BAKTA_DB_ENV],
+            config_file=False,
+            token_file=None,
+            kbase_token_file=None,
+            docker_image=REAL_IMAGE,
+        )
+        return bu.call_features(
+            [("NC_003888.3_sco4098", _SCO_TRNA_OVERLAP_REGION)], threads=4
+        )
+
+    def test_keeps_the_cds_whose_3_prime_end_sits_inside_a_trna(
+        self, sco_result
+    ):
+        """SC_RS22655: an exact RefSeq gene Bakta discards over 3 bp.
+
+        The NO-INJECTION check for the overlap rule -- real Docker, real
+        Bakta 1.11.4, real database, through ``call_features``'s own
+        runner.
+        """
+        cdss = [f for f in sco_result.features if f["type"] == "cds"]
+        kept = [
+            f
+            for f in cdss
+            if (f["start"], f["stop"]) == (_SCO_CDS_START, _SCO_CDS_STOP)
+        ]
+        assert kept, [(f["start"], f["stop"], f["strand"]) for f in cdss]
+        cds = kept[0]
+        assert cds["strand"] == "-"
+        assert cds["rna_overlap"]["feature_type"] == "tRNA"
+        assert cds["rna_overlap"]["overlap_bp"] == _SCO_OVERLAP_BP
+        assert cds["rna_overlap"]["overlap_start"] == _SCO_CDS_START
+        assert cds["rna_overlap"]["overlap_fraction"] == pytest.approx(
+            _SCO_OVERLAP_BP / (_SCO_CDS_STOP - _SCO_CDS_START + 1)
+        )
+        assert not [
+            e
+            for e in sco_result.discarded["cds"]
+            if (e["start"], e["stop"]) == (_SCO_CDS_START, _SCO_CDS_STOP)
+        ]
+
+    def test_the_overlapping_trna_is_still_called_too(self, sco_result):
+        """Keeping the CDS must not cost the tRNA: both are real genes."""
+        trnas = [f for f in sco_result.features if f["type"] == "tRNA"]
+        assert any(
+            f["amino_acid"] == "Lys" and f["start"] == 50 for f in trnas
+        ), [(f["start"], f["stop"], f.get("amino_acid")) for f in trnas]
+
+    def test_the_threshold_is_echoed_on_a_real_run(self, sco_result):
+        assert sco_result.cds_overlap_discard_fraction == (
+            _DRIVER_CDS_OVERLAP_DISCARD_FRACTION
+        )
 
     def test_call_non_coding_false_returns_cds_only(self):
         bu = BaktaUtils(

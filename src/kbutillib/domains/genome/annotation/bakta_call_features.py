@@ -45,7 +45,8 @@ STRUCTURAL CALL ORDER (mirrors bakta/main.py 1.11.4)
 ``r_rna.predict_r_rnas`` -> ``nc_rna.predict_nc_rnas`` ->
 ``crispr.predict_crispr`` -> ``feat_cds.predict`` ->
 ``feat_cds.filter_length`` -> ``orf.detect_spurious`` ->
-``anno.detect_feature_overlaps``.
+``anno.detect_feature_overlaps`` -> (this driver's own)
+:func:`_reconcile_cds_overlaps`.
 
 ``main.py`` steps deliberately NOT mirrored, and why:
 
@@ -76,6 +77,26 @@ feature list at the end, so a discarded CDS is reported with its reason
 instead of silently vanishing -- while the overlap pass still sees exactly
 the feature set Bakta would have shown it.
 
+CDS OVERLAP RULE (this driver's own, NOT Bakta's)
+-------------------------------------------------
+Bakta's ``anno.detect_feature_overlaps`` discards a CDS for an overlap of
+ANY size with a tmRNA/tRNA/rRNA/CRISPR feature -- one shared base is
+enough. Live acceptance on poplar caught it discarding two exact RefSeq
+genes in *S. coelicolor* -- ``SC_RS16190`` (10 bp of tRNA-Lys at its 3'
+end) and ``SC_RS22655`` (3 bp) -- so per Chris's decision of 2026-10-22
+("don't cut
+small overlapping genes, this causes bugs") the pass is re-judged
+afterwards by :func:`_reconcile_cds_overlaps`: a CDS stays discarded only
+when the overlapping non-coding features cover at least
+:data:`CDS_OVERLAP_DISCARD_FRACTION` of its nucleotide length, and is
+otherwise re-admitted carrying an ``rna_overlap`` block.
+
+Bakta itself is neither forked nor monkeypatched -- its pass runs exactly
+as it always did, and the re-admission only ever edits CDS *it* discarded
+for overlap. Every non-CDS discard (a tRNA dropped for a tmRNA overlap, an
+ncRNA-region dropped for a better-scoring one) and both CDS discards that
+never reach the overlap pass (length, spurious/AntiFam) are untouched.
+
 OUTPUT
 ------
 ``{"features": [...], "contig_ids": [...], "versions": {"bakta": str,
@@ -87,7 +108,8 @@ per-feature fields.
 CLI
 ---
 ``python bakta_call_features.py --db DB --contigs FASTA --out JSON
---threads N --translation-table T [--no-non-coding]``
+--threads N --translation-table T [--no-non-coding]
+[--cds-overlap-discard-fraction F]``
 """
 
 from __future__ import annotations
@@ -110,6 +132,23 @@ EXIT_VERSION_MISMATCH = 3
 
 #: Exit code for any other driver-level failure (bad input, no sequences).
 EXIT_ERROR = 1
+
+#: Fraction of a CDS's nucleotide length that overlapping non-coding
+#: features must cover before the CDS is discarded for overlap. See the
+#: module docstring's CDS OVERLAP RULE section for why this exists; it is
+#: overridable per run via ``--cds-overlap-discard-fraction``.
+CDS_OVERLAP_DISCARD_FRACTION = 0.5
+
+#: The feature types Bakta's CDS overlap pass actually tests a CDS against
+#: (``bakta/features/annotation.py`` 1.11.4 ``detect_feature_overlaps``:
+#: tmRNA, tRNA, rRNA, CRISPR, in that order, each match overwriting the
+#: previous one's ``discarded`` block). ncRNA *genes* are deliberately
+#: absent -- that pass does not test CDS against them at all, so no CDS is
+#: ever discarded for an ncRNA-gene overlap and folding ncRNA coverage into
+#: the fraction would let a feature type Bakta ignores tip a CDS into a
+#: discard. Its fifth case, a user-provided CDS, is not a non-coding
+#: feature and cannot arise here: this driver passes no ``--regions``.
+_CDS_OVERLAP_FEATURE_TYPES = ("tmRNA", "tRNA", "rRNA", "crispr")
 
 #: Bakta embeds the overlap interval in the discard description as
 #: ``[start,stop]`` (see bakta/features/annotation.py 1.11.4, e.g. line
@@ -160,6 +199,17 @@ def _parse_driver_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         dest="no_non_coding",
         help="Skip tRNA/tmRNA/rRNA/ncRNA/CRISPR calling (CDS only)",
+    )
+    parser.add_argument(
+        "--cds-overlap-discard-fraction",
+        type=float,
+        default=CDS_OVERLAP_DISCARD_FRACTION,
+        dest="cds_overlap_discard_fraction",
+        help=(
+            "Fraction of a CDS's length that overlapping non-coding "
+            "features must cover for the CDS to be discarded for overlap "
+            f"(default {CDS_OVERLAP_DISCARD_FRACTION})"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -292,8 +342,11 @@ def _discard_record(discarded: Any) -> dict[str, Any] | None:
 
     Returns:
         ``{"type", "feature_type", "description", "overlap_start",
-        "overlap_stop"}`` (``None`` for anything absent), or ``None`` when
-        the feature was not discarded.
+        "overlap_stop", "overlap_fraction"}`` (``None`` for anything
+        absent), or ``None`` when the feature was not discarded.
+        ``overlap_fraction`` is present only on a CDS the overlap rule
+        judged and still discarded (see :func:`_reconcile_cds_overlaps`);
+        a length or spurious discard has no overlap and reports ``None``.
     """
     if not isinstance(discarded, dict):
         return None
@@ -311,6 +364,7 @@ def _discard_record(discarded: Any) -> dict[str, Any] | None:
         "description": description,
         "overlap_start": overlap_start,
         "overlap_stop": overlap_stop,
+        "overlap_fraction": discarded.get("overlap_fraction"),
     }
 
 
@@ -321,6 +375,9 @@ def _feature_record(feature: dict[str, Any]) -> dict[str, Any]:
     forward), ``aa_digest`` (raw ``bytes``), ``aa_hexdigest``, ``frame``,
     ``evalue``, ``start_type`` and ``rbs_motif``: none of them are part of
     a structural call, and ``aa_digest`` is not even JSON-serialisable.
+
+    A CDS the overlap rule re-admitted carries ``rna_overlap`` (see
+    :func:`_reconcile_cds_overlaps`); nothing else ever does.
 
     ``truncated`` and ``edge`` are passed through verbatim because they are
     Bakta's own partiality markers and the consumer derives
@@ -370,10 +427,178 @@ def _feature_record(feature: dict[str, Any]) -> dict[str, Any]:
         record["rfam"] = rfam
     if "class" in feature:
         record["ncrna_class"] = _ncrna_class_name(feature["class"])
+    rna_overlap = feature.get("rna_overlap")
+    if isinstance(rna_overlap, dict):
+        record["rna_overlap"] = dict(rna_overlap)
     discard = _discard_record(feature.get("discarded"))
     if discard is not None:
         record["discarded"] = discard
     return record
+
+
+# ---------------------------------------------------------------------------
+# CDS overlap rule (this driver's own -- see the module docstring)
+# ---------------------------------------------------------------------------
+
+
+def _overlap_interval(
+    start_a: int, stop_a: int, start_b: int, stop_b: int
+) -> tuple[int, int] | None:
+    """Intersect two 1-based inclusive coordinate intervals.
+
+    Args:
+        start_a: First interval's start.
+        stop_a: First interval's stop.
+        start_b: Second interval's start.
+        stop_b: Second interval's stop.
+
+    Returns:
+        ``(start, stop)`` of the shared span, or ``None`` when the two do
+        not touch.
+    """
+    start = max(start_a, start_b)
+    stop = min(stop_a, stop_b)
+    return (start, stop) if start <= stop else None
+
+
+def _cds_rna_overlaps(
+    cds: dict[str, Any], non_coding: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Describe every non-coding overlap of one CDS.
+
+    Recomputed from the feature list rather than read back out of Bakta's
+    discard description, because Bakta rewrites ``cds['discarded']`` once
+    per overlapping feature (``bakta/features/annotation.py`` 1.11.4), so
+    the surviving text names only the LAST overlap found -- which is
+    neither necessarily the largest nor the union.
+
+    Args:
+        cds: A Bakta CDS feature dict.
+        non_coding: Candidate non-coding features, any contig; the contig
+            is matched here on Bakta's ``sequence`` key.
+
+    Returns:
+        One ``{feature_type, overlap_start, overlap_stop, overlap_bp}``
+        per overlapping feature, in *non_coding* order. Strand is
+        deliberately ignored: a CDS sitting on the opposite strand of an
+        rRNA is as unlikely to be real as one on the same strand, and
+        Bakta's own pass ignores strand too.
+    """
+    overlaps: list[dict[str, Any]] = []
+    for feature in non_coding:
+        if feature.get("sequence") != cds.get("sequence"):
+            continue
+        interval = _overlap_interval(
+            cds["start"], cds["stop"], feature["start"], feature["stop"]
+        )
+        if interval is None:
+            continue
+        start, stop = interval
+        overlaps.append(
+            {
+                "feature_type": feature.get("type"),
+                "overlap_start": start,
+                "overlap_stop": stop,
+                "overlap_bp": stop - start + 1,
+            }
+        )
+    return overlaps
+
+
+def _covered_bp(overlaps: list[dict[str, Any]]) -> int:
+    """Count the distinct CDS positions covered by *overlaps*.
+
+    The intervals are unioned, not summed: two non-coding features can
+    overlap each other as well as the CDS (a tRNA inside an rRNA operon,
+    say), and summing would double-count the shared bases and could push a
+    CDS over the discard threshold on the strength of positions counted
+    twice.
+
+    Args:
+        overlaps: Entries from :func:`_cds_rna_overlaps`.
+
+    Returns:
+        The number of distinct covered positions, in bp.
+    """
+    covered = 0
+    reach: int | None = None  # highest stop merged so far
+    for entry in sorted(overlaps, key=lambda item: item["overlap_start"]):
+        start = entry["overlap_start"]
+        stop = entry["overlap_stop"]
+        if reach is None or start > reach:
+            covered += stop - start + 1
+            reach = stop
+        elif stop > reach:
+            covered += stop - reach
+            reach = stop
+    return covered
+
+
+def _reconcile_cds_overlaps(data: dict, discard_fraction: float) -> None:
+    """Re-admit CDS the overlap pass discarded for a small overlap.
+
+    Runs immediately AFTER ``anno.detect_feature_overlaps`` and mutates
+    only the CDS *that pass* discarded. A CDS stays discarded when the
+    overlapping non-coding features cover at least *discard_fraction* of
+    its nucleotide length -- its ``discarded`` block keeps type
+    ``'overlap'`` and gains ``overlap_fraction``. Below the threshold the
+    ``discarded`` block is deleted (the CDS is kept) and an
+    ``rna_overlap`` block records the LARGEST single overlap, so the
+    overlap stays visible to the caller instead of being either silently
+    dropped or silently kept.
+
+    ``overlap_fraction`` is the same number in both cases: the fraction of
+    the CDS covered by the UNION of its overlaps, i.e. the quantity the
+    rule compared against the threshold. With one overlapping feature --
+    which is every case observed in acceptance -- it is simply
+    ``overlap_bp / length``.
+
+    Bakta's own handling of everything else is untouched: non-CDS discards
+    (a tRNA dropped for a tmRNA overlap, an ncRNA-region dropped for a
+    better-scoring one) are left exactly as Bakta left them, and the length
+    and spurious/AntiFam CDS discards never reach the overlap pass at all
+    (see :func:`_call_cdss`).
+
+    Args:
+        data: Bakta's ``data`` dict, after the overlap pass has run.
+        discard_fraction: Covered fraction at or above which a CDS stays
+            discarded (:data:`CDS_OVERLAP_DISCARD_FRACTION`).
+    """
+    # Non-coding features that are THEMSELVES discarded stay in the
+    # candidate set on purpose: Bakta's CDS loop reads per-contig lists it
+    # built before marking tRNA-vs-tmRNA discards and never re-filters
+    # them, so a CDS can be discarded over a tRNA that is itself discarded.
+    # Mirroring that keeps the cause set identical to the one being
+    # re-judged.
+    non_coding = [
+        feature
+        for feature in data["features"]
+        if feature.get("type") in _CDS_OVERLAP_FEATURE_TYPES
+    ]
+    for cds in data["features"]:
+        if cds.get("type") != "cds":
+            continue
+        discarded = cds.get("discarded")
+        if not isinstance(discarded, dict) or discarded.get("type") != "overlap":
+            continue
+        if discarded.get("feature_type") not in _CDS_OVERLAP_FEATURE_TYPES:
+            # The pass's one non-RNA case, an overlap with a user-provided
+            # CDS. Unreachable here (no --regions is ever passed) and not
+            # this rule's business, so Bakta's verdict stands.
+            continue
+        overlaps = _cds_rna_overlaps(cds, non_coding)
+        if not overlaps:
+            continue
+        length = cds["stop"] - cds["start"] + 1
+        # A non-positive length would be a Bakta bug; keeping the discard
+        # is the safe reading of one.
+        fraction = _covered_bp(overlaps) / length if length > 0 else 1.0
+        if fraction >= discard_fraction:
+            discarded["overlap_fraction"] = fraction
+            continue
+        largest = max(overlaps, key=lambda item: item["overlap_bp"])
+        del cds["discarded"]
+        cds["rna_overlap"] = {**largest, "overlap_fraction": fraction}
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +808,9 @@ def _run(
     data["features"].extend(cdss)
 
     anno.detect_feature_overlaps(data)
+    # Bakta discards a CDS for an overlap of ANY size; this re-judges only
+    # the CDS it just discarded against the fraction threshold.
+    _reconcile_cds_overlaps(data, args.cds_overlap_discard_fraction)
 
     payload = {
         "features": [

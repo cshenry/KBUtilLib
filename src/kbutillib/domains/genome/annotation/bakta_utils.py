@@ -29,6 +29,17 @@ KBUtilLib, whose environment has no Bakta. Read that file's docstring for
 the exact mirrored call order and the list of ``main.py`` steps it
 deliberately omits.
 
+One behaviour is deliberately NOT Bakta's. Bakta's overlap pass discards a
+CDS for an overlap of ANY size with a tmRNA/tRNA/rRNA/CRISPR feature; live
+acceptance on poplar caught that discarding two exact RefSeq genes in
+*S. coelicolor* over 3 bp and 10 bp of tRNA at their 3' ends. The driver
+therefore re-judges that pass's CDS discards against
+``cds_overlap_discard_fraction`` (default
+:data:`_DRIVER_CDS_OVERLAP_DISCARD_FRACTION`) and re-admits any CDS the
+overlapping features cover less of than that, tagging it with an
+``rna_overlap`` block. Bakta is neither forked nor patched, and its
+handling of every non-CDS feature is untouched.
+
 Database
 --------
 The database directory is an explicit constructor argument
@@ -179,6 +190,14 @@ _DRIVER_PINNED_BAKTA_VERSION = "1.11.4"
 #: The driver's dedicated exit code for a Bakta version mismatch.
 _DRIVER_EXIT_VERSION_MISMATCH = 3
 
+#: Default fraction of a CDS's nucleotide length that overlapping
+#: non-coding features must cover before the driver discards the CDS for
+#: overlap. Kept in step with
+#: ``bakta_call_features.CDS_OVERLAP_DISCARD_FRACTION`` -- duplicated rather
+#: than imported, for the same reason the version pin is: importing the
+#: driver would pull in ``bakta``.
+_DRIVER_CDS_OVERLAP_DISCARD_FRACTION = 0.5
+
 #: Bakta feature types a structural call can produce
 #: (``bakta.constants.FEATURE_*``; note ``cds`` is lowercase there).
 _CALL_FEATURE_TYPES: frozenset[str] = frozenset(
@@ -232,7 +251,10 @@ class BaktaCallResult:
             ``start``, ``stop`` (1-based inclusive, ``start <= stop``),
             ``strand``, ``nt``, ``product`` and ``partial``. CDS
             additionally carry ``aa`` (trailing ``*`` stripped),
-            ``start_complete`` and ``stop_complete``. ``amino_acid``,
+            ``start_complete`` and ``stop_complete``, plus
+            ``rna_overlap`` when the CDS overlaps a non-coding feature by
+            less than ``cds_overlap_discard_fraction`` of its length (see
+            :meth:`BaktaUtils.call_features`). ``amino_acid``,
             ``anticodon``, ``rfam``, ``ncrna_class`` and ``score`` appear
             only on the feature types that have them. GO ``db_xrefs`` are
             dropped -- only the Rfam accession survives from ``db_xrefs``.
@@ -242,19 +264,27 @@ class BaktaCallResult:
             a tmRNA, which would otherwise vanish without trace. ``cds``
             enumerates the discarded CDS only, each as
             ``{contig_id, start, stop, strand, reason, overlap_type,
-            overlap_start, overlap_stop}``.
+            overlap_start, overlap_stop, overlap_fraction}``.
+            ``overlap_fraction`` is the fraction of the CDS covered by the
+            overlapping non-coding features, set only on an ``overlap``
+            discard (``None`` for length/spurious).
         versions: The driver's own version block (``bakta``, ``db``) plus
             ``image`` (the image reference, or ``"native"``), ``image_id``
             (the Docker image id, or ``"native"``) and ``driver_sha256``.
         call_non_coding: Echoes the ``call_non_coding`` argument the run was
             invoked with, so a result carrying no tRNAs can be told apart
             from a result where tRNAs were never looked for.
+        cds_overlap_discard_fraction: Echoes the
+            ``cds_overlap_discard_fraction`` the run was invoked with, so
+            provenance records the threshold that decided which
+            RNA-overlapping CDS survived.
     """
 
     features: list[dict[str, Any]]
     discarded: dict[str, Any]
     versions: dict[str, Any]
     call_non_coding: bool
+    cds_overlap_discard_fraction: float = _DRIVER_CDS_OVERLAP_DISCARD_FRACTION
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +543,10 @@ def _build_kept_feature(record: dict[str, Any]) -> dict[str, Any]:
         start_complete, stop_complete = _completeness(truncated)
         feature["start_complete"] = start_complete
         feature["stop_complete"] = stop_complete
+        # Present only on a CDS the driver's overlap rule re-admitted
+        # (bakta_call_features._reconcile_cds_overlaps).
+        if isinstance(record.get("rna_overlap"), dict):
+            feature["rna_overlap"] = record["rna_overlap"]
     for key in ("amino_acid", "anticodon", "rfam", "ncrna_class", "score"):
         if key in record:
             feature[key] = record[key]
@@ -528,9 +562,9 @@ def _build_discarded_cds(record: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         ``{contig_id, start, stop, strand, reason, overlap_type,
-        overlap_start, overlap_stop}``. The three ``overlap_*`` fields are
-        ``None`` for a length/spurious discard, which has no counterpart
-        feature and no interval.
+        overlap_start, overlap_stop, overlap_fraction}``. The four
+        ``overlap_*`` fields are ``None`` for a length/spurious discard,
+        which has no counterpart feature, no interval and no fraction.
     """
     discarded = record.get("discarded") or {}
     return {
@@ -542,6 +576,7 @@ def _build_discarded_cds(record: dict[str, Any]) -> dict[str, Any]:
         "overlap_type": discarded.get("feature_type"),
         "overlap_start": discarded.get("overlap_start"),
         "overlap_stop": discarded.get("overlap_stop"),
+        "overlap_fraction": discarded.get("overlap_fraction"),
     }
 
 
@@ -1093,6 +1128,7 @@ class BaktaUtils(AnnotatorUtils):
         threads: int,
         translation_table: int,
         call_non_coding: bool,
+        cds_overlap_discard_fraction: float,
     ) -> list[str]:
         """Build the argv that runs the driver, Docker or native.
 
@@ -1103,6 +1139,8 @@ class BaktaUtils(AnnotatorUtils):
             threads: CPU threads.
             translation_table: Translation table (11/4/25).
             call_non_coding: When False, ``--no-non-coding`` is passed.
+            cds_overlap_discard_fraction: Passed as
+                ``--cds-overlap-discard-fraction``.
 
         Returns:
             The argv list.
@@ -1113,6 +1151,8 @@ class BaktaUtils(AnnotatorUtils):
             str(threads),
             "--translation-table",
             str(translation_table),
+            "--cds-overlap-discard-fraction",
+            str(cds_overlap_discard_fraction),
         ]
         if not call_non_coding:
             driver_flags.append("--no-non-coding")
@@ -1182,6 +1222,9 @@ class BaktaUtils(AnnotatorUtils):
         translation_table: int = 11,
         threads: int = 1,
         call_non_coding: bool = True,
+        cds_overlap_discard_fraction: float = (
+            _DRIVER_CDS_OVERLAP_DISCARD_FRACTION
+        ),
     ) -> BaktaCallResult:
         """Call genes structurally on *contigs* — no functional annotation.
 
@@ -1204,6 +1247,19 @@ class BaktaUtils(AnnotatorUtils):
             call_non_coding: When True (the default) tRNA, tmRNA, rRNA,
                 ncRNA-gene and CRISPR callers run too. When False only CDS
                 are called. Echoed back on the result.
+            cds_overlap_discard_fraction: Fraction of a CDS's nucleotide
+                length that overlapping non-coding features must cover for
+                the CDS to be discarded for overlap. Bakta itself discards
+                a CDS for an overlap of ANY size, which cost two exact
+                RefSeq genes in live acceptance on *S. coelicolor*
+                (3 bp and 10 bp of tRNA at their 3' ends), so the driver
+                re-judges the overlap pass's CDS discards against this
+                threshold and re-admits the ones under it with an
+                ``rna_overlap`` block. ``0.0`` restores Bakta's own
+                behaviour (any overlap discards); ``1.0`` discards only a
+                fully covered CDS. Default
+                :data:`_DRIVER_CDS_OVERLAP_DISCARD_FRACTION`. Echoed back
+                on the result.
 
         Returns:
             A :class:`BaktaCallResult`.
@@ -1212,8 +1268,9 @@ class BaktaUtils(AnnotatorUtils):
             ToolUnavailableError: If the Docker image (Docker mode) or the
                 ``bakta.python`` interpreter (native mode) is absent.
             ValueError: If *contigs* is empty, carries a duplicate or
-                whitespace-bearing contig id, carries an empty sequence, or
-                does not look like DNA.
+                whitespace-bearing contig id, carries an empty sequence,
+                does not look like DNA, or if
+                *cds_overlap_discard_fraction* is outside ``[0.0, 1.0]``.
             BaktaCallError: If the driver exits non-zero (the message
                 quotes the stderr tail; exit
                 :data:`_DRIVER_EXIT_VERSION_MISMATCH` names both Bakta
@@ -1222,6 +1279,11 @@ class BaktaUtils(AnnotatorUtils):
         """
         self._require_call_features_available()
 
+        if not 0.0 <= cds_overlap_discard_fraction <= 1.0:
+            raise ValueError(
+                "cds_overlap_discard_fraction must be between 0.0 and 1.0, "
+                f"got {cds_overlap_discard_fraction!r}"
+            )
         if not contigs:
             raise ValueError("call_features requires at least one contig")
         sequences: dict[str, str] = {}
@@ -1258,6 +1320,7 @@ class BaktaUtils(AnnotatorUtils):
                 threads=threads,
                 translation_table=translation_table,
                 call_non_coding=call_non_coding,
+                cds_overlap_discard_fraction=cds_overlap_discard_fraction,
             )
             returncode, stderr = self._run_driver(cmd)
             if returncode != 0:
@@ -1305,6 +1368,7 @@ class BaktaUtils(AnnotatorUtils):
             discarded=discarded,
             versions=versions,
             call_non_coding=call_non_coding,
+            cds_overlap_discard_fraction=cds_overlap_discard_fraction,
         )
 
     @staticmethod

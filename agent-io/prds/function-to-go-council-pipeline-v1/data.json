@@ -1,0 +1,92 @@
+{
+  "prd_name": "function-to-go-council-pipeline-v1",
+  "title": "function_to_go council pipeline: un-run detection, cost quote, approval gate, chunked run, clearinghouse publish",
+  "repos": ["KBUtilLib"],
+  "owning_repo": "KBUtilLib",
+  "authored_by": "miles",
+  "authored_on": "2026-10-22",
+  "authored_session": "2534c232-9109-57eb-aab7-2463a1be6507",
+  "machine": "h100",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "confront": "ran: task-d9e8311c, codex researcher on h100, 12 binding stalls returned, 9 folded, 0 dropped",
+  "draft_commit": null,
+  "review_protocol": "Written single-pass in Draft Mode: every judgement call is decided in the body and manifested in '## Open Questions and Judgement Calls' (Q1-Q14), ordered by blast radius descending. Chris edits the committed fullprompt.md in place, annotating with (CSH ...) markers; `/ai-miles d --review function-to-go-council-pipeline-v1` then diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through the body, user stories, testing decisions, gotchas and taskplan.json, and recommits with a fresh baseline. The PRD is held at draft until one review round completes (review_rounds >= 1), which is the hard ready gate.",
+  "stages": [
+    "1 detect un-run functions -> PLAN.json",
+    "2 quote the cost (new) -> QUOTE.json",
+    "3 human approval bound to quote_hash, with a token ceiling -> APPROVED.json",
+    "4 chunked run with a retry pass and an account-wide pacer -> RUN.json",
+    "5 export parquet, shard, publish; kbhub loads and verifies -> shard/ + LOADED.json"
+  ],
+  "findings": [
+    "Four of the five stages already exist in KBUtilLib; the 2026-10-20 hand-driven run bypassed all of them, and every defect it hit is a consequence of the bypass rather than a missing capability.",
+    "RESOLVED THIS SESSION: the 760 'never submitted' definitions flagged as an unexplained coverage gap are the retrieval stage's abstained rows. Measured against ranked.jsonl.gz and priority_adp1_pmi.tsv: 20,036 distinct definitions = 19,276 non-abstained (exactly what was submitted) + 760 abstained, the two sets disjoint. Nothing is missing.",
+    "The clearinghouse is READABLE from h100 off-pod over the BERDL delta API (measured 2026-10-22, 16 successful queries). Only load and verify are in-pod. Stage 1 does not need kbhub.",
+    "function_result holds 0 rows: the 19,268 verdicts are not loaded. function_entity and function_content hold 47,341 rows each, which is exactly the row count of ranked.jsonl.gz.",
+    "<T>_result is keyed on parameter_set_hash and current_state() windows per parameter set, so 'un-run at THIS version' is a native query. The parameter set is where query_version, roster_fingerprint and mapping_hash belong.",
+    "prompt_hash is a PURE function (types.py:264) and seat_generation_params exists so a fingerprint can be computed without a backend, so the quote can be EXACT for proposer and critic with zero API calls, and reuse is one indexed lookup per prompt against ix_calls_prompt_hash_status.",
+    "The token model can be fitted from attempts.usage over the run's own 199.2M tokens, removing any third-party tokenizer dependency across a Google/OpenAI/Anthropic roster.",
+    "Neither ARGO nor MAG publishes a rate card (every usage/billing/pricing/quota path 404s; MAG /models/<id> returns 401 'only proxy admin'). Vendor list rates were solved exactly from the Claude CLI's costBasis=list, but a $350/month ARGO cap was exhausted in a week, so ARGO's effective multiple over list is unknown and >1. A list-derived dollar figure is a FLOOR.",
+    "kbu clearinghouse plan/shard/load/verify is a complete idempotent loader: declarative TOML manifest, bronze parquet, run.json with per-batch sha256 + row count + hash range, a five-check pre-use integrity gate, fill-only appends, a resumable ledger, --dry-run as 'the operator's last gate', and registry-before-results ordering. Nobody needs to write a kbhub loader.",
+    "FileSourceAdapter accepts exactly parquet | jsonl | tsv and _iter_jsonl uses a plain open(), so gzipped JSONL is NOT readable by the manifest path. Parquet is the answer: compressed, exact row count from the footer, and read_batch_table refuses anything else.",
+    "BLOCKER: commit 0825c5a ('readiness must accept every id a gateway advertises') exists in NO shared branch -- the object is not present in the Dropbox repo. It lives only in h100's editable install. Without it servable.py reads the gateway's display spelling while /chat/completions accepts only internal_id, so readiness is the exact inverse of the call: every ARGO seat is refused at submit and kbu council doctor reports the whole ARGO bench unavailable. Three of five seats are ARGO. The council on main cannot run."
+  ],
+  "measured_inputs": {
+    "completed_run": {
+      "items_submitted": 19276,
+      "verdicts": 19268,
+      "coverage": "99.96%",
+      "tokens_total": 199200000,
+      "tokens_argo": 106970000,
+      "tokens_mag": 92210000,
+      "tokens_per_item": 10334,
+      "projection_error": "1.4% (10,334 actual vs 10,482 projected)",
+      "wall_clock_hours": 9.46,
+      "error_rate": "0.59%",
+      "retry_recovery": "105 of 113 on one retry, for 0.30% of run cost"
+    },
+    "meta_fire_rate": {"value": 0.241, "n": 19268, "withdrawn": [0.167, 0.192, 0.387]},
+    "yield": {"with_go_term": 9912, "declined_no_candidate_matched": 4893, "declined_contentless": 4463},
+    "decided": {"unanimous": 14619, "by_meta": 4649},
+    "input_share_of_tokens": "86%",
+    "mag_limits": {"max_parallel_requests": 20, "requests_per_minute": 120, "scope": "account-wide", "working_queue_sum": 6},
+    "argo_limits": {"saturates_at": 24, "clean_at": "40 concurrent across 3 models"},
+    "claim_cost": {"at_19k_pending_ms": 217, "at_2k_pending_ms": 10.4, "throughput_collapse": "10.8x"},
+    "chunking": {"items_per_chunk": 2000, "in_flight": 1, "issue": "KBUtilLib#84"}
+  },
+  "open_contingencies": [
+    "ARGO's and MAG's effective token rates are derivable from no artifact; the design assumes an operator-supplied rate table plus a per-run balance delta, and reports 'unpriced' otherwise. This is the one flag-not-question in the PRD.",
+    "The granularity of ClearinghouseLockUnavailableError is unestablished, so whether two shard runs can load concurrently is unknown. Affects only whether pending runs must be loaded in series.",
+    "Whether endpoint_state's halt path actually STOPS a running worker on a budget overrun, as opposed to merely recording the halt, is unverified. t9 is instructed to verify and report. If it does not, Q6's ceiling mechanism changes.",
+    "Why the uncompressed JSONL had not reached kbhub while the sync client reported the directory up to date is unknown. The design routes around it via run.json plus per-batch sha256, but 'the sync client said up to date' is now established as not a completeness signal."
+  ],
+  "related": {
+    "continuations": {
+      "161": "this PRD's origin (d, picked up by session 2534c232)",
+      "145": "council composition and the candidate menu -- the three cost levers. Out of scope here; this PRD makes them priceable."
+    },
+    "issues": {
+      "KBUtilLib#84": "claim_calls blocks the worker event loop; chunking here is the declared workaround",
+      "KBUtilLib#83": "test_static_headers MAG-endpoint assertion fails on any machine with a user MAG endpoint; why every criterion is regression-framed"
+    },
+    "research": [
+      "agent-io/prds/function-to-go-council-pipeline-v1/research/external-scan.md",
+      "miles:agent-io/research/2026-10-20-function-to-go-council-composition-and-schedule.md"
+    ],
+    "trigger_replies": {
+      "5231042e-f59b-461c-8e53-839b7f7bce65": "Albert, 2026-10-22: ~/Dropbox/Jobs/ reaches kbhub; .gz and .tsv verified by sha256; the uncompressed .jsonl absent; drop-point and loader-shape recommendations. Folded into Q8, Q9, Q10, Q14.4."
+    }
+  },
+  "out_of_scope": [
+    "Council composition: the third chair (~22% of tokens), a 2-of-3 majority without a critic (~19%), candidate-menu size (~30%, now a joint yield/cost question). Continuation 145.",
+    "The retrieval-recall limit behind 25.4% no_candidate_matched.",
+    "KBUtilLib#84's real fix (claim off the event loop / denormalised ordering columns).",
+    "KBUtilLib#83.",
+    "Making invalid_output retryable in the engine, or detecting ARGO's silent truncation.",
+    "gzip support in FileSourceAdapter._iter_jsonl.",
+    "The kbhub-side trigger (Albert's, by scope).",
+    "Authenticating the approval (no key material exists).",
+    "Loading the already-published 19,268 verdicts (Albert has opened that separately)."
+  ]
+}

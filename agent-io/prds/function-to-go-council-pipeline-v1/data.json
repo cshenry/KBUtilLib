@@ -12,7 +12,7 @@
   "review_rounds": 1,
   "confront_rounds": 1,
   "confront": "ran: task-d9e8311c, codex researcher on h100, 12 binding stalls returned, 9 folded, 0 dropped",
-  "draft_commit": "4e98392",
+  "draft_commit": "181379c",
   "review_protocol": "Written single-pass in Draft Mode: every judgement call is decided in the body and manifested in '## Open Questions and Judgement Calls' (Q1-Q14), ordered by blast radius descending. Chris edits the committed fullprompt.md in place, annotating with (CSH ...) markers; `/ai-miles d --review function-to-go-council-pipeline-v1` then diffs the working tree against draft_commit, classifies every hunk, propagates decision changes through the body, user stories, testing decisions, gotchas and taskplan.json, and recommits with a fresh baseline. The PRD is held at draft until one review round completes (review_rounds >= 1), which is the hard ready gate.",
   "stages": [
     "1 detect un-run functions -> PLAN.json",

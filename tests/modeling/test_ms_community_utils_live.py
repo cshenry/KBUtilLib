@@ -31,7 +31,6 @@ whole file well under a minute.
 
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
@@ -94,14 +93,72 @@ def community_util():
     return MSCommunityUtils(config_file=False, token_file=None, kbase_token_file=None)
 
 
+def _modelseed_member(model_id):
+    """A minimal ModelSEED-shaped cobra model that ``mscommunity`` can merge.
+
+    The shared ``mini_model`` (tests/conftest.py) cannot be used here: its ids are
+    synthetic (``a_c``, ``bio1`` producing ``c_c``), and MSCommunity is
+    ModelSEED-specific -- it locates each member's primary biomass as the reaction
+    producing exactly one ``cpd11416_c<i>``, and its drain as a reaction consuming
+    that compound alone.  Without them the merge yields no primary biomass
+    (``'NoneType' has no attribute 'products'``) and no member keyed by model id.
+
+    Shape: glucose (cpd00027) is taken up from ``e0``, lumped to two acetate
+    (cpd00029) + 2 ATP, acetate is secreted; ``bio1`` turns glucose + ATP into
+    ``cpd11416_c0``, which ``SK_cpd11416_c0`` drains.  With no glucose nothing can
+    grow -- the carbon-free control the growth assertions rest on.  ``rxn00062``
+    (ATP hydrolysis) is present because real ModelSEED models carry it and
+    MSCommunity otherwise tries to build it from a ``cpd00067`` it cannot find.
+    """
+    import cobra
+
+    model = cobra.Model(model_id)
+
+    def met(cpd, comp, name):
+        return cobra.Metabolite(f"{cpd}_{comp}", name=name, compartment=comp)
+
+    glc_e, glc_c = met("cpd00027", "e0", "D-Glucose"), met("cpd00027", "c0", "D-Glucose")
+    ac_e, ac_c = met("cpd00029", "e0", "Acetate"), met("cpd00029", "c0", "Acetate")
+    atp, adp = met("cpd00002", "c0", "ATP"), met("cpd00008", "c0", "ADP")
+    pi, h2o = met("cpd00009", "c0", "Phosphate"), met("cpd00001", "c0", "H2O")
+    h = met("cpd00067", "c0", "H+")
+    biomass = met("cpd11416", "c0", "Biomass")
+
+    def rxn(rid, stoich, lb=0, ub=1000):
+        reaction = cobra.Reaction(rid, lower_bound=lb, upper_bound=ub)
+        reaction.add_metabolites(stoich)
+        return reaction
+
+    model.add_reactions(
+        [
+            rxn("EX_cpd00027_e0", {glc_e: -1}, lb=-10),
+            rxn("EX_cpd00029_e0", {ac_e: -1}, lb=0),
+            # glucose and acetate transport
+            rxn("rxn99001_c0", {glc_e: -1, glc_c: 1}),
+            rxn("rxn99002_c0", {ac_c: -1, ac_e: 1}),
+            # lumped glycolysis: glucose + 2 ADP + 2 Pi -> 2 acetate + 2 ATP + 2 H2O
+            rxn(
+                "rxn99003_c0",
+                {glc_c: -1, adp: -2, pi: -2, ac_c: 2, atp: 2, h2o: 2},
+            ),
+            # ATP hydrolysis; MSCommunity reuses rxn00062_c<i> rather than building one
+            rxn("rxn00062_c0", {atp: -1, h2o: -1, adp: 1, pi: 1, h: 1}),
+            rxn(
+                "bio1",
+                {glc_c: -1, atp: -1, h2o: -1, adp: 1, pi: 1, biomass: 1},
+            ),
+            rxn("SK_cpd11416_c0", {biomass: -1}),
+        ]
+    )
+    model.objective = "bio1"
+    model.solver = "glpk"
+    return model
+
+
 @pytest.fixture
-def member_models(mini_model):
-    """Two deep copies of ``mini_model`` with distinct ids, in a fixed order."""
-    m1 = copy.deepcopy(mini_model)
-    m1.id = "member_one"
-    m2 = copy.deepcopy(mini_model)
-    m2.id = "member_two"
-    return [m1, m2]
+def member_models():
+    """Two ModelSEED-shaped members with distinct ids, in a fixed order."""
+    return [_modelseed_member("member_one"), _modelseed_member("member_two")]
 
 
 @pytest.fixture
@@ -245,6 +302,20 @@ def test_run_community_fba_no_growth_returns_result(community_util, community):
 
     assert isinstance(result, CommunityFBAResult)
     assert (result.trustworthy is False) or (abs(result.community_growth) < 1e-6)
+
+
+@_needs_solver
+def test_run_community_fba_grows_on_glucose(community_util, community):
+    """With glucose available the community grows -- the positive half of the
+    no-growth test above.  Without it, a community that can never grow would
+    pass that test too."""
+    from modelseedpy.core.msmedia import MSMedia
+
+    glucose = MSMedia.from_dict({"cpd00027": 10})
+    result = community_util.run_community_fba(community, media=glucose)
+
+    assert isinstance(result, CommunityFBAResult)
+    assert result.community_growth > 1e-6
 
 
 # ── 5. drain guard: solo growth recovered vs. raw zeros ───────────────────────

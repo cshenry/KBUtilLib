@@ -49,15 +49,30 @@ Fixed parameter keys
 So that two writers never name the same parameter differently, these keys
 are fixed. A tool listed here must use exactly the key named.
 
-================ =============== ========== ==================================
-Tool             Key             Required?  Value
-================ =============== ========== ==================================
-TRANSYT          ``taxonomy_id`` required   NCBI taxonomy id as a decimal
-                                            string with no leading zeros
-                                            (e.g. ``"562"``). A TRANSYT
-                                            result whose parameter set is
-                                            ``{}`` is invalid.
-================ =============== ========== ==================================
+================ ==================== ========== =============================
+Tool             Key                  Required?  Value
+================ ==================== ========== =============================
+TRANSYT          ``taxonomy_id``      required   NCBI taxonomy id as a decimal
+                                                 string with no leading zeros
+                                                 (e.g. ``"562"``). A TRANSYT
+                                                 result whose parameter set is
+                                                 ``{}`` is invalid.
+``council``      ``query``            required   ``"<name>@<version>"``, the
+                                                 version never omitted.
+``council``      ``bench_fingerprint`` required  sha256 of
+                                                 ``{role, canonical_model}``
+                                                 per seat -- the models, never
+                                                 the transport.
+``council``      ``mapping_hash``     required   sha256 of the retrieval
+                                                 mapping the menus came from.
+                                                 A council result whose
+                                                 parameter set is ``{}`` is
+                                                 invalid.
+================ ==================== ========== =============================
+
+The council rule lives in
+:mod:`kbutillib.domains.kbase.berdl.clearinghouse_parameters` beside the
+TRANSYT one, not here: this module owns the GENERIC rule and knows no tools.
 
 Public interface:
     ParameterSetError            — raised on any violation of the rule above.

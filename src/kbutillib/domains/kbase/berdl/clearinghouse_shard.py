@@ -4992,8 +4992,8 @@ def _build_row(
     - STATIC ``parameter_set``: the hash the plan computed ONCE at plan time,
       not re-derived per row. When the plan's result ``source`` is a
       derivation rather than a ``@const(...)``, the tool was unknown at plan
-      time, so the shared TRANSYT result-boundary validator
-      (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) runs
+      time, so the shared per-tool result-boundary layer
+      (:func:`clearinghouse_parameters.validate_tool_parameter_set`) runs
       HERE, against this row's resolved ``source``.
     - PER-ROW ``parameter_set_column``: the row's OWN set, canonicalised and
       hashed here through
@@ -5001,9 +5001,9 @@ def _build_row(
       same function the static form uses at plan time, which is what makes
       the two forms produce byte-identical canonical text and an identical
       hash for an equal set. Both layers (the generic parameter-set rule and
-      the tool-specific TRANSYT rule) run, against this row's resolved
-      ``source``, and a refusal is a :class:`ShardParameterSetError` that
-      skips THIS ROW rather than failing the run.
+      every declared tool rule) run, against this row's resolved ``source``,
+      and a refusal is a :class:`ShardParameterSetError` that skips THIS ROW
+      rather than failing the run.
 
     ``parameter_sets`` is the per-row form's only other output: the sharder
     must register every DISTINCT set it saw, and the canonical text that
@@ -5026,7 +5026,10 @@ def _build_row(
         else:
             out["parameter_set_hash"] = plan.parameter_set_hash
             if cm.constant_result_source(plan.columns) is None:
-                cp.validate_transyt_parameter_set(
+                # EVERY tool rule, not TRANSYT's by name: a tool declared
+                # later must not be enforced at plan time and silently absent
+                # here.
+                cp.validate_tool_parameter_set(
                     plan.parameter_set or {},
                     source=out.get("source"),
                     where=(

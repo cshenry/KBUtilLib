@@ -1287,6 +1287,66 @@ def test_register_non_transyt_source_accepts_a_default_parameter_set():
     assert stored["parameter_set_hash"] == DEFAULT_PARAMETER_SET_HASH
 
 
+# -- the shared AI-COUNCIL validator, in register() -------------------------
+#
+# The third write path. `register()` goes through
+# `result_parameter_set_identity`, which runs EVERY declared tool rule, so the
+# council rule is enforced here for free -- and these tests are what make
+# "for free" a claim rather than a hope.
+
+_COUNCIL_SET = {
+    "query": "go_mf@1",
+    "bench_fingerprint": "a" * 64,
+    "mapping_hash": "b" * 64,
+}
+
+
+@pytest.mark.parametrize("source", ["council/go_mf@1", "Council/go_mf@1"])
+def test_register_council_refuses_a_default_parameter_set(source):
+    """{} would land every council run in one parameter_set_hash slot."""
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "function", [_result_row(parameter_set={}, source=source)], kind="result"
+        )
+    assert "bench_fingerprint" in str(exc.value)
+    assert fake.load_calls == []
+
+
+def test_register_council_refuses_the_roster_fingerprint_as_a_key():
+    """Provenance used as identity: the defect bench_fingerprint fixes.
+
+    `Roster.fingerprint()` moves when a seat is re-routed to another gateway,
+    so using it as the partition key would re-charge the whole corpus for a
+    pure cost optimisation.
+    """
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    params = {**_COUNCIL_SET, "roster_fingerprint": "c" * 64}
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "function",
+            [_result_row(parameter_set=params, source="council/go_mf@1")],
+            kind="result",
+        )
+    assert "roster_fingerprint" in str(exc.value)
+    assert fake.load_calls == []
+
+
+def test_register_council_accepts_the_run_identity():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "function",
+        [_result_row(parameter_set=_COUNCIL_SET, source="council/go_mf@1")],
+        kind="result",
+    )
+    (rows_index,) = _loads_of(fake, "function_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["function_result"]
+    assert stored["parameter_set_hash"] == parameter_set_hash(_COUNCIL_SET)
+
+
 # --------------------------------------------------------------------------
 # Registry-first LOAD order (the ordering function itself)
 # --------------------------------------------------------------------------

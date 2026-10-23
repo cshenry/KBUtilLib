@@ -57,11 +57,12 @@ Three structural rules, carried over verbatim:
 STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
-WHAT IS IMPLEMENTED HERE. The group, ``version`` and ``council-quote``. The
-remaining six pipeline verbs are REGISTERED but each exits non-zero with "not
-implemented yet" -- they are filled in by later tasks. A stub that exited 0
-would be worse than no stub at all, because a rehearsal of the whole pipeline
-would pass straight over it and report success.
+WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan`` and
+``council-quote``. The remaining five pipeline verbs are REGISTERED but each
+exits non-zero with "not implemented yet" -- they are filled in by later
+tasks. A stub that exited 0 would be worse than no stub at all, because a
+rehearsal of the whole pipeline would pass straight over it and report
+success.
 
 ``council-quote`` OWNS NO PRICING LOGIC EITHER. It delegates to
 ``kbu council quote``'s own :func:`~.council.build_quote`, which is the same
@@ -169,6 +170,32 @@ def _render(envelope: Dict[str, Any]) -> None:
         from .council import _render as _render_council
 
         _render_council({"verb": "quote", "data": data})
+        return
+
+    if verb == "council-plan":
+        counts = data.get("counts") or {}
+        click.echo(f"plan:            {data.get('plan_file')}")
+        click.echo(f"query:           {data.get('query')}   profile: {data.get('profile')}")
+        click.echo(f"parameter_set:   {str(data.get('parameter_set_hash'))[:12]}  "
+                   f"(bench {str(data.get('bench_fingerprint'))[:12]}, "
+                   f"mapping {str(data.get('mapping_hash'))[:12]})")
+        click.echo(f"plan_hash:       {str(data.get('plan_hash'))[:12]}")
+        click.echo(
+            "counts:          "
+            + ", ".join(f"{key}={counts.get(key)}" for key in
+                        ("universe", "done", "unrun", "submit", "abstain", "fanout"))
+        )
+        concurrency = data.get("concurrency") or {}
+        click.echo(
+            f"chunks:          {len(data.get('chunks') or [])} of "
+            f"{concurrency.get('chunk_size')}, "
+            f"{concurrency.get('chunks_in_flight')} in flight "
+            f"({concurrency.get('issue')})"
+        )
+        _rows(
+            data.get("transport_allocation") or [],
+            ("role", "seat_name", "gateway", "endpoint_kind", "canonical_model"),
+        )
         return
 
     if verb == "version":
@@ -382,6 +409,122 @@ def council_quote_cmd(
 
 
 # ---------------------------------------------------------------------------
+# council-plan -- stage 1
+# ---------------------------------------------------------------------------
+
+
+def _build_council_plan(util: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-plan`` envelope from the facade's own plan dict.
+
+    OWNS NO PLANNING LOGIC. Every number in the envelope comes from
+    :meth:`OntologyMappingUtils.council_plan`, which is the only
+    implementation; this builder selects what an operator reads and warns
+    where the answer is degraded.
+    """
+    try:
+        plan = dict(util.council_plan(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable plan is a CLI error
+        raise _fail(exc) from exc
+
+    counts = dict(plan.get("counts") or {})
+    warnings = []
+    if not counts.get("submit"):
+        warnings.append(
+            "the plan holds NO submit items: every function in the "
+            f"clearinghouse universe ({counts.get('universe', 0)}) either "
+            f"already has a current-state result at this parameter_set_hash "
+            f"({counts.get('done', 0)}) or was declined by retrieval "
+            f"({counts.get('abstain', 0)}). Stage 2 will refuse to quote it."
+        )
+    if counts.get("abstain"):
+        warnings.append(
+            f"{counts['abstain']} un-run function(s) were declined by "
+            "retrieval and are NOT in the submit set; they are recorded in "
+            f"{plan.get('abstain_file')} and stage 5 publishes them as "
+            "decline_reason=abstained:* rather than dropping them."
+        )
+    return _envelope("council-plan", data=plan, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-plan")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Run directory PLAN.json is written into (created if absent).",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>". Default: the shipped go_mf@1.',
+)
+@click.option("--profile", default=None, help="Bench to plan against. Default: the configured one.")
+@click.option(
+    "--chunk-size",
+    default=None,
+    type=int,
+    help="Submit items per chunk. Default: 2000 (KBUtilLib issue 84 workaround).",
+)
+@click.option(
+    "--scratch-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Local ROOT for the ranked/items files; function-to-go/<run-id>/ is "
+    "appended. Default: $KBU_SCRATCH_DIR, else /scratch/<user>.",
+)
+@_json_option
+def council_plan_cmd(
+    run_dir: str,
+    query: Optional[str],
+    profile: Optional[str],
+    chunk_size: Optional[int],
+    scratch_dir: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 1: detect the un-run functions and write the run plan.
+
+    SPENDS NO LLM TOKENS. It reads the clearinghouse, runs the retrieval
+    stage locally and writes `PLAN.json`; the first token is spent in stage 4,
+    behind a quote and an approval.
+
+    "Un-run" means no current-state `function_result` row at this run's
+    clearinghouse `parameter_set_hash`, over the parameter set
+    `{query, bench_fingerprint, mapping_hash}`. `bench_fingerprint` is
+    model-only, so re-routing a seat to a different gateway re-selects
+    NOTHING, while a bench, query-version or mapping_hash change re-selects
+    the whole corpus.
+
+    `PLAN.json` is the only file written into the run directory. The ranked
+    file, the items file and the abstain/fanout records are machine-local
+    intermediates and go under the scratch directory.
+    """
+    from ...domains.genome.ontology_mapping.ontology_mapping_utils import (
+        DEFAULT_COUNCIL_QUERY,
+        PLAN_CHUNK_SIZE,
+    )
+
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _build_council_plan(
+            util,
+            run_dir=run_dir,
+            query=query or DEFAULT_COUNCIL_QUERY,
+            chunk_size=PLAN_CHUNK_SIZE if chunk_size is None else chunk_size,
+            profile=profile,
+            scratch_dir=scratch_dir,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The remaining six pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
@@ -389,12 +532,10 @@ def council_quote_cmd(
 #: stage each belongs to. They are registered NOW so the operator surface and
 #: its help listing are settled before the stages land, and each one exits
 #: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
-#: pass over a missing stage and report success.
+#: pass over a missing stage and report success. ``council-plan`` and
+#: ``council-quote`` have LEFT this list -- stages 1 and 2 landed -- which is
+#: the expected shape of progress through the five stages.
 _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
-    (
-        "council-plan",
-        "Stage 1: detect the un-run functions and write the run plan.",
-    ),
     (
         "council-approve",
         "Stage 3: record a human's approval of one specific quote.",

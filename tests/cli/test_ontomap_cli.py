@@ -37,12 +37,13 @@ from kbutillib.cli import main
 #: deliberate edit here rather than a silent contract change.
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
-#: The verbs still registered-but-not-implemented. ``council-quote`` has
-#: LEFT this list: stage 2 landed, so it is now a real verb that prices a
-#: plan (see :class:`TestCouncilQuoteIsImplemented`). A verb leaving this
-#: list is the expected shape of progress through the five stages.
+#: The verbs still registered-but-not-implemented. ``council-quote`` and
+#: ``council-plan`` have LEFT this list: stages 2 and 1 landed, so each is
+#: now a real verb -- one prices a plan, the other writes one (see
+#: :class:`TestCouncilQuoteIsImplemented` and
+#: :class:`TestCouncilPlanIsImplemented`). A verb leaving this list is the
+#: expected shape of progress through the five stages.
 STUB_VERBS = [
-    "council-plan",
     "council-approve",
     "council-run",
     "council-status",
@@ -268,7 +269,12 @@ class TestStubsExitNonZero:
         self,
     ) -> None:
         registered = set(ontomap.ontomap_cmd.commands)
-        assert registered == {"version", "council-quote", *STUB_VERBS}
+        assert registered == {
+            "version",
+            "council-plan",
+            "council-quote",
+            *STUB_VERBS,
+        }
         assert [name for name, _ in ontomap._PLANNED_VERBS] == STUB_VERBS
 
 
@@ -299,3 +305,222 @@ class TestCouncilQuoteIsImplemented:
         assert result.exit_code != 0
         assert "not implemented yet" not in result.output
         assert "--plan" in result.output
+
+
+class TestCouncilPlanIsImplemented:
+    """Stage 1 landed, so ``council-plan`` must no longer refuse.
+
+    The planning behaviour itself is covered beside the facade method that
+    owns it (``tests/domains/test_ontomap_council_plan.py``); what is pinned
+    here is the OPERATOR SURFACE -- that the verb is no longer a stub, that it
+    emits the one envelope under ``--json``, that it passes the operator's
+    options through to the facade unchanged, and that a planning failure is a
+    clean CLI error rather than a traceback.
+    """
+
+    #: What a real ``council_plan()`` returns, shaped like the production
+    #: value (see the facade's own tests for the full object).
+    FAKE_PLAN: Dict[str, Any] = {
+        "schema_version": 1,
+        "run_dir": "/runs/2026-10-22-adp1",
+        "plan_file": "/runs/2026-10-22-adp1/PLAN.json",
+        "query": "go_mf@1",
+        "source": "council/go_mf@1",
+        "profile": "go_council_v3",
+        "mapping_hash": "e" * 64,
+        "bench_fingerprint": "b" * 64,
+        "roster_fingerprint": "r" * 64,
+        "parameter_set": {
+            "query": "go_mf@1",
+            "bench_fingerprint": "b" * 64,
+            "mapping_hash": "e" * 64,
+        },
+        "parameter_set_hash": "0" * 64,
+        "transport_allocation": [
+            {
+                "role": "proposer",
+                "seat_name": "proposer_1",
+                "gateway": "argo-anl",
+                "endpoint_kind": "argo",
+                "canonical_model": "gemini-3.5-flash",
+                "route_fingerprint": "1" * 64,
+            }
+        ],
+        "counts": {
+            "universe": 20036,
+            "done": 0,
+            "unrun": 20036,
+            "submit": 19276,
+            "abstain": 760,
+            "fanout": 19276,
+        },
+        "chunks": [{"index": 0, "offset": 0, "items": 2000}],
+        "concurrency": {
+            "chunk_size": 2000,
+            "chunks_in_flight": 1,
+            "issue": "KBUtilLib issue 84",
+        },
+        "abstain_file": "/scratch/function-to-go/2026-10-22-adp1/abstain.jsonl",
+        "plan_hash": "f" * 64,
+    }
+
+    class _FakePlanner:
+        """A facade whose only job is to answer ``council_plan()``."""
+
+        def __init__(self, payload: Dict[str, Any], boom: Any = None) -> None:
+            self.payload = payload
+            self.boom = boom
+            self.kwargs: Dict[str, Any] = {}
+
+        def council_plan(self, run_dir: Any, **kwargs: Any) -> Dict[str, Any]:
+            if self.boom is not None:
+                raise self.boom
+            self.kwargs = {"run_dir": run_dir, **kwargs}
+            return dict(self.payload)
+
+    def _planner(
+        self, monkeypatch: pytest.MonkeyPatch, boom: Any = None
+    ) -> "TestCouncilPlanIsImplemented._FakePlanner":
+        planner = self._FakePlanner(self.FAKE_PLAN, boom)
+        monkeypatch.setattr(ontomap, "_ontomap", lambda: planner)
+        return planner
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-plan" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-plan" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-plan", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_invoked_bare_it_is_a_usage_error_not_a_refusal(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-plan"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--run-dir" in result.output
+
+    def test_json_emits_exactly_one_envelope_carrying_the_plan(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._planner(monkeypatch)
+        result = runner.invoke(
+            main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.stdout)
+        assert set(envelope) == ENVELOPE_KEYS
+        assert envelope["verb"] == "council-plan"
+        data = envelope["data"]
+        assert data["counts"]["submit"] == 19276
+        assert data["plan_hash"] == "f" * 64
+        assert data["parameter_set"]["bench_fingerprint"] == "b" * 64
+        # The partition key is the bench, never the roster.
+        assert "roster_fingerprint" not in data["parameter_set"]
+        assert data["roster_fingerprint"] == "r" * 64
+
+    def test_the_abstained_set_is_warned_about_rather_than_passed_over(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """760 declined functions are not a silent 760-function shortfall."""
+        self._planner(monkeypatch)
+        result = runner.invoke(
+            main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
+        )
+        (warning,) = json.loads(result.stdout)["warnings"]
+        assert "760" in warning
+        assert "abstained:*" in warning
+
+    def test_an_empty_submit_set_is_a_warning_not_a_silent_success(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = {
+            **self.FAKE_PLAN,
+            "counts": {
+                "universe": 20036,
+                "done": 20036,
+                "unrun": 0,
+                "submit": 0,
+                "abstain": 0,
+                "fanout": 0,
+            },
+            "chunks": [],
+        }
+        planner = self._FakePlanner(payload)
+        monkeypatch.setattr(ontomap, "_ontomap", lambda: planner)
+        result = runner.invoke(
+            main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        warnings = json.loads(result.stdout)["warnings"]
+        assert any("NO submit items" in warning for warning in warnings)
+
+    def test_the_human_rendering_is_the_same_dict(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._planner(monkeypatch)
+        result = runner.invoke(main, ["ontomap", "council-plan", "--run-dir", "/runs/x"])
+        assert result.exit_code == 0, result.output
+        assert "/runs/2026-10-22-adp1/PLAN.json" in result.output
+        assert "submit=19276" in result.output
+        assert "KBUtilLib issue 84" in result.output
+        assert "proposer_1" in result.output and "argo-anl" in result.output
+
+    def test_the_operators_options_reach_the_facade_unchanged(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        planner = self._planner(monkeypatch)
+        result = runner.invoke(
+            main,
+            [
+                "ontomap",
+                "council-plan",
+                "--run-dir",
+                "/runs/x",
+                "--query",
+                "go_mf@2",
+                "--profile",
+                "cheap",
+                "--chunk-size",
+                "500",
+                "--scratch-dir",
+                "/scratch/here",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert planner.kwargs == {
+            "run_dir": "/runs/x",
+            "query": "go_mf@2",
+            "profile": "cheap",
+            "chunk_size": 500,
+            "scratch_dir": "/scratch/here",
+        }
+
+    def test_the_defaults_are_the_librarys_own(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kbutillib.domains.genome.ontology_mapping.ontology_mapping_utils import (
+            DEFAULT_COUNCIL_QUERY,
+            PLAN_CHUNK_SIZE,
+        )
+
+        planner = self._planner(monkeypatch)
+        runner.invoke(main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"])
+        assert planner.kwargs["query"] == DEFAULT_COUNCIL_QUERY
+        assert planner.kwargs["chunk_size"] == PLAN_CHUNK_SIZE
+        assert planner.kwargs["profile"] is None
+
+    def test_a_planning_failure_is_a_cli_error_not_a_traceback(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._planner(monkeypatch, boom=ValueError("query 'go_mf' names no VERSION"))
+        result = runner.invoke(
+            main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "ValueError: query 'go_mf' names no VERSION" in result.output
+        assert "schema_version" not in result.output

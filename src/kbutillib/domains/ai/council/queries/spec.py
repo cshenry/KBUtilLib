@@ -54,6 +54,7 @@ __all__ = [
     "generic_schema_for",
     "generic_postprocess",
     "final_ids_key",
+    "renderer_id_version",
     "load_spec_mapping",
     "BATCH_ITEM_KEY_FIELD",
     "BATCH_SYSTEM_SUFFIX",
@@ -110,6 +111,29 @@ def generic_schema_for(role: str, id_field: str) -> Dict[str, Any]:
                 final_key if r == "final_ids" else r for r in schema["required"]
             ]
     return schema
+
+
+def renderer_id_version(query: Any) -> str:
+    """Identity of HOW a query type renders prompts and reads answers.
+
+    Part of the prompt hash, so that two installations only reuse each other's
+    answers when they would have asked and read them the same way.  The query
+    type's own ``(name, version)`` is in the hash as well, but it is not
+    enough on its own: a spec names its renderer and adapter as
+    ``"<name>@<version>"``, and an installation shipping a different version
+    of either asks or scores a different question under the same spec name.
+
+    Lives HERE, beside the renderer it identifies, rather than in the worker
+    that first needed it: the quote stage has to reproduce a prompt hash
+    exactly, and :mod:`..quote` may not import :mod:`..engine` (the engine
+    reaches the backends, and a quote must be unable to open a socket).  One
+    definition, imported by both -- ``engine.worker`` re-exports this name,
+    so every existing caller is unaffected.
+    """
+    renderer = getattr(query, "renderer", None) or "template"
+    adapter = getattr(query, "adapter", None) or "generic"
+    id_field = getattr(query, "id_field", None) or "id"
+    return f"{renderer}|{adapter}|{id_field}"
 
 
 def final_ids_key(id_field: str) -> str:

@@ -82,6 +82,10 @@ from ...llm import get_api as llm_get_api
 from ...llm import preflight_api as llm_preflight_api
 from ...llm.types import LLMRequest
 from ..config import DEFAULT_MAX_CONCURRENCY
+# Re-exported (see ``__all__``): the definition moved to the query-spec
+# module so the quote stage can reproduce a prompt hash without
+# importing this module, which reaches the backends.
+from ..queries.spec import renderer_id_version
 from ..store.errors import StaleClaim
 from ..types import (
     CLI_KINDS,
@@ -218,22 +222,6 @@ class _BatchMember:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def renderer_id_version(query: Any) -> str:
-    """Identity of HOW a query type renders prompts and reads answers.
-
-    Part of the prompt hash, so that two installations only reuse each other's
-    answers when they would have asked and read them the same way.  The query
-    type's own ``(name, version)`` is in the hash as well, but it is not
-    enough on its own: a spec names its renderer and adapter as
-    ``"<name>@<version>"``, and an installation shipping a different version
-    of either asks or scores a different question under the same spec name.
-    """
-    renderer = getattr(query, "renderer", None) or "template"
-    adapter = getattr(query, "adapter", None) or "generic"
-    id_field = getattr(query, "id_field", None) or "id"
-    return f"{renderer}|{adapter}|{id_field}"
 
 
 def _as_endpoint_table(backends: Optional[Any]) -> Dict[str, Any]:

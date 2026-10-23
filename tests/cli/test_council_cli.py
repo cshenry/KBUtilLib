@@ -1039,3 +1039,208 @@ class TestTokenModel:
         )
         assert result.exit_code != 0
         assert "db init" in result.output
+
+
+# ---------------------------------------------------------------------------
+# quote
+# ---------------------------------------------------------------------------
+
+
+def _plan_dir(tmp_path: Path, *, version: str = "1", query: str = "go_mf") -> Path:
+    """A run directory holding a PLAN.json over two items of the builtin query."""
+    directory = tmp_path / "run"
+    directory.mkdir(exist_ok=True)
+    (directory / "PLAN.json").write_text(
+        json.dumps(
+            {
+                "query": f"{query}@{version}",
+                "mapping_hash": "m" * 64,
+                "profile": "test",
+                "items": [
+                    {
+                        "item_id": item_id,
+                        "evidence": {"text": text, "source": "test"},
+                        "menu": MENU,
+                        "query_id": f"clearinghouse-{item_id}",
+                    }
+                    for item_id, text in (
+                        ("item-1", "alpha synthase"),
+                        ("item-2", "beta transferase"),
+                    )
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def _builtin_query_ref(argv: List[str]) -> str:
+    """``<name>@<version>`` of a query type the seeded store actually holds."""
+    result = CliRunner().invoke(main, argv + ["query", "list", "--json"])
+    rows = json.loads(
+        [line for line in result.output.splitlines() if line.startswith("{")][0]
+    )["data"]["query_types"]
+    row = next(r for r in rows if r["name"] == "go_mf")
+    return f"{row['name']}@{row['version']}"
+
+
+class TestQuote:
+    """``kbu council quote`` prices a plan and writes QUOTE.json."""
+
+    def test_it_writes_QUOTE_json_into_the_run_directory(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+
+        result = runner.invoke(
+            main, fake_council + ["quote", "--plan", str(plan), "--json"]
+        )
+        payload = _envelope(result)
+
+        assert result.exit_code == 0, result.output
+        assert payload["verb"] == "quote"
+        written = plan / "QUOTE.json"
+        assert written.exists()
+        assert json.loads(written.read_text())["plan_hash"] == payload["data"]["plan_hash"]
+
+    def test_the_quote_reports_the_whole_contract(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        """One assertion per thing the approval stage will read off it."""
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+
+        data = _envelope(
+            runner.invoke(main, fake_council + ["quote", "--plan", str(plan), "--json"])
+        )["data"]
+
+        headline = data["headline"]
+        assert next(iter(headline)) == "projected_fraction_of_total"
+        assert headline["point"]["total_tokens"] > 0
+        assert headline["upper"]["total_tokens"] >= headline["point"]["total_tokens"]
+        assert headline["dollars_point"] is None  # no rates configured
+        assert headline["unpriced_gateways"]
+
+        graph = {line["line"]: line for line in data["call_graph"]}
+        assert graph["critic"]["calls_total"] == 2  # unconditional, one per item
+        assert graph["critic"]["basis"] == "exact"
+        assert graph["meta"]["basis"] == "projected"
+        assert "paid_repair" in graph
+        assert all(line["basis"] in ("exact", "projected") for line in graph.values())
+
+        assert set(data["reuse"]["misses"]) == {
+            "new_item",
+            "bench_change",
+            "transport_change",
+        }
+        assert data["wall_clock"]["binding_queue"]
+        assert data["balance_delta"]["gateways"]
+        assert data["meta_fire_rate"]["n"] == 19268
+        assert set(data["parameter_set"]) == {
+            "query",
+            "bench_fingerprint",
+            "mapping_hash",
+        }
+
+    def test_no_write_leaves_the_run_directory_alone(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+
+        result = runner.invoke(
+            main, fake_council + ["quote", "--plan", str(plan), "--no-write", "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert not (plan / "QUOTE.json").exists()
+
+    def test_a_plan_naming_an_unregistered_query_is_a_clean_error(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        plan = _plan_dir(tmp_path, query="no_such_query", version="1")
+
+        result = runner.invoke(main, fake_council + ["quote", "--plan", str(plan)])
+
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
+    def test_the_human_rendering_leads_with_the_projected_fraction(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+
+        result = runner.invoke(main, fake_council + ["quote", "--plan", str(plan)])
+
+        assert result.exit_code == 0, result.output
+        assert "PROJECTED FRACTION OF TOTAL" in result.output
+        assert "reuse misses:" in result.output
+        assert "unpriced" in result.output
+
+
+class TestOntomapCouncilQuote:
+    """``kbu ontomap council-quote`` delegates; it does not reimplement."""
+
+    def test_it_produces_the_same_quote_as_kbu_council_quote(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+        config_path, store = fake_council[2], fake_council[4]
+
+        direct = _envelope(
+            runner.invoke(
+                main, fake_council + ["quote", "--plan", str(plan), "--no-write", "--json"]
+            )
+        )
+        delegated = _envelope(
+            runner.invoke(
+                main,
+                [
+                    "ontomap",
+                    "council-quote",
+                    "--plan",
+                    str(plan),
+                    "--config",
+                    config_path,
+                    "--store",
+                    store,
+                    "--no-write",
+                    "--json",
+                ],
+            )
+        )
+
+        assert delegated["verb"] == "council-quote"
+        assert delegated["data"]["plan_hash"] == direct["data"]["plan_hash"]
+        assert delegated["data"]["headline"] == direct["data"]["headline"]
+        assert delegated["data"]["call_graph"] == direct["data"]["call_graph"]
+
+    def test_council_quote_is_no_longer_a_not_implemented_stub(
+        self, runner: CliRunner, fake_council: List[str], tmp_path: Path
+    ) -> None:
+        name, _, version = _builtin_query_ref(fake_council).partition("@")
+        plan = _plan_dir(tmp_path, version=version, query=name)
+        config_path, store = fake_council[2], fake_council[4]
+
+        result = runner.invoke(
+            main,
+            [
+                "ontomap",
+                "council-quote",
+                "--plan",
+                str(plan),
+                "--config",
+                config_path,
+                "--store",
+                store,
+                "--no-write",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output

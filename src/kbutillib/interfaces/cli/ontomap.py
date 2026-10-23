@@ -7,7 +7,15 @@ function descriptions. Five stages, in order, each one a verb:
 1. **PLAN** -- detect the un-run functions. "Un-run" means no current-state
    ``function_result`` row at this run's clearinghouse ``parameter_set_hash``,
    where the parameter set is ``{query: "<name>@<version>",
-   roster_fingerprint, mapping_hash}``. ``council-plan``.
+   bench_fingerprint, mapping_hash}``. ``council-plan``.
+
+   ``bench_fingerprint`` and NOT ``roster_fingerprint``: the bench partitions
+   the corpus, the transport does not. ``Roster.fingerprint()`` covers the
+   endpoint kind, the route spelling, the token ceiling, the temperature and
+   the extras, so moving one seat from the codex CLI to MAG moves it --
+   which would re-partition all 47,341 clearinghouse functions and re-charge
+   ~199M tokens for a pure cost optimisation. See
+   :func:`~kbutillib.domains.ai.council.types.bench_fingerprint`.
 2. **QUOTE** -- price the plan before anything is spent: items, tokens per
    seat, wall clock, concurrency the gateways will actually tolerate.
    ``council-quote``.
@@ -49,11 +57,17 @@ Three structural rules, carried over verbatim:
 STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
-WHAT IS IMPLEMENTED HERE. Only the group and ``version``. The seven pipeline
-verbs are REGISTERED but each exits non-zero with "not implemented yet" --
-they are filled in by later tasks. A stub that exited 0 would be worse than no
-stub at all, because a rehearsal of the whole pipeline would pass straight
-over it and report success.
+WHAT IS IMPLEMENTED HERE. The group, ``version`` and ``council-quote``. The
+remaining six pipeline verbs are REGISTERED but each exits non-zero with "not
+implemented yet" -- they are filled in by later tasks. A stub that exited 0
+would be worse than no stub at all, because a rehearsal of the whole pipeline
+would pass straight over it and report success.
+
+``council-quote`` OWNS NO PRICING LOGIC EITHER. It delegates to
+``kbu council quote``'s own :func:`~.council.build_quote`, which is the same
+function that command calls -- two code paths that both priced a plan would
+be two numbers that could disagree, and the one an operator approved would be
+whichever CLI they happened to type.
 """
 
 from __future__ import annotations
@@ -147,6 +161,15 @@ def _render(envelope: Dict[str, Any]) -> None:
     """
     verb = str(envelope.get("verb") or "")
     data = envelope.get("data") or {}
+
+    if verb == "council-quote":
+        # Rendered by `kbu council`'s own renderer, under the verb name that
+        # renderer keys on. This group adds no second rendering of a quote:
+        # the two commands must print the same thing from the same dict.
+        from .council import _render as _render_council
+
+        _render_council({"verb": "quote", "data": data})
+        return
 
     if verb == "version":
         provenance = data.get("provenance") or {}
@@ -274,7 +297,92 @@ def version_cmd(as_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The seven pipeline verbs -- registered, NOT yet implemented
+# council-quote -- stage 2, delegated to `kbu council quote`
+# ---------------------------------------------------------------------------
+
+
+@ontomap_cmd.command(name="council-quote")
+@click.option(
+    "--plan",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run directory holding PLAN.json, or the plan file itself.",
+)
+@click.option("--profile", default=None, help="Bench to quote. Default: the plan's own.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--meta-fire-rate",
+    default=None,
+    type=float,
+    help="Fraction of items reaching meta. Default: 0.241, measured over n=19,268.",
+)
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(),
+    help="Where to write QUOTE.json. Default: the run directory the plan came from.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Compute and print the quote without writing QUOTE.json.",
+)
+@click.option("--config", "config_path", default=None, type=click.Path(exists=True, dir_okay=False), help="Council configuration YAML.")
+@click.option("--store", "store_url", default=None, help="Override the council store URL.")
+@_json_option
+def council_quote_cmd(
+    plan: str,
+    profile: Optional[str],
+    seat: Sequence[str],
+    meta_fire_rate: Optional[float],
+    out: Optional[str],
+    no_write: bool,
+    config_path: Optional[str],
+    store_url: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 2: price a plan -- per-seat tokens, reuse, wall clock, dollars.
+
+    SPENDS NOTHING. Delegates to `kbu council quote`, which is the only
+    implementation; this verb exists so the five pipeline stages read as one
+    sequence under `kbu ontomap`.
+
+    Writes `QUOTE.json` into the run directory, carrying the `plan_hash` the
+    approval in stage 3 binds to.
+    """
+    from .council import _council, build_quote
+
+    context = click.Context(click.Command("quote"))
+    context.obj = {"config_path": config_path, "store_url": store_url}
+    try:
+        util = _council(context)
+        util.require_schema()
+    except Exception as exc:  # noqa: BLE001 - an unusable store is a CLI error
+        raise _fail(exc) from exc
+    try:
+        envelope = build_quote(
+            util,
+            plan=plan,
+            profile=profile,
+            seat=seat,
+            meta_fire_rate=meta_fire_rate,
+            out=out,
+            write=not no_write,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a bad plan is a CLI error
+        raise _fail(exc) from exc
+    # Re-labelled to this group's verb so the envelope says which command was
+    # run, but it is the SAME dict `kbu council quote` emits.
+    envelope["verb"] = "council-quote"
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# The remaining six pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
 #: The pipeline verbs this module registers but does not implement, with the
@@ -286,10 +394,6 @@ _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
     (
         "council-plan",
         "Stage 1: detect the un-run functions and write the run plan.",
-    ),
-    (
-        "council-quote",
-        "Stage 2: price a plan -- items, per-seat tokens, wall clock, concurrency.",
     ),
     (
         "council-approve",

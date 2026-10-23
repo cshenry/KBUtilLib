@@ -1346,6 +1346,146 @@ class CouncilUtils(SharedEnvUtils):
         data.update(model.to_dict())
         return data
 
+    # -- the quote a run is approved against ------------------------------
+
+    def quote_plan(
+        self,
+        plan: Any,
+        profile: Optional[str] = None,
+        meta_fire_rate: Optional[float] = None,
+        upper_percentile: Optional[float] = None,
+        **seat_overrides: Any,
+    ) -> Any:
+        """Price a run plan.  SPENDS NOTHING and reaches no network.
+
+        Stage 2 of the standing ``function_to_go`` pipeline: it renders every
+        proposer prompt locally, counts reuse exactly against the store's
+        ``ix_calls_prompt_hash_status`` index, projects only meta and the
+        repair pass, and returns a :class:`~.council.quote.Quote` carrying
+        the plan hash an approval binds to.
+
+        No backend is built -- not "none is called", none is BUILT: the
+        reuse namespace and the effective params come from
+        :func:`~.council.types.default_reuse_namespace` and
+        :func:`~.council.types.seat_generation_params`, which exist so a
+        prompt hash can be computed without instantiating one.
+
+        Args:
+            plan: a :class:`~.council.quote.Plan`, a run directory, a path to
+                a ``PLAN.json``, or an already-parsed mapping.
+            profile: the bench.  Defaults to the plan's own ``profile``, then
+                to the configured default.
+            meta_fire_rate: fraction of items reaching meta.  Defaults to the
+                measured :data:`~.council.quote.META_FIRE_RATE`.
+            upper_percentile: percentile for the token model's upper band.
+            **seat_overrides: roster overrides, keyed by seat name.
+
+        Returns:
+            A :class:`~.council.quote.Quote`.
+        """
+        from .council.quote import (
+            DEFAULT_UPPER_PERCENTILE,
+            META_FIRE_RATE,
+            fit_token_model,
+            load_plan,
+            quote_plan,
+        )
+        from .council.quote import Plan as _Plan
+
+        store = self.require_schema()
+        if not isinstance(plan, _Plan):
+            plan = load_plan(plan)
+        roster = self.roster(profile or plan.profile, **seat_overrides)
+        token_model = fit_token_model(
+            store,
+            seats=roster,
+            upper_percentile=(
+                DEFAULT_UPPER_PERCENTILE
+                if upper_percentile is None
+                else float(upper_percentile)
+            ),
+        )
+        return quote_plan(
+            plan,
+            store=store,
+            config=self.config(),
+            token_model=token_model,
+            meta_fire_rate=(
+                META_FIRE_RATE if meta_fire_rate is None else float(meta_fire_rate)
+            ),
+            roster=roster,
+            effective_params=self._effective_params_resolver(),
+        )
+
+    def _effective_params_resolver(self) -> Any:
+        """``(seat) -> params`` reporting what a seat's api type would send.
+
+        THE REUSE COUNT DEPENDS ON THIS BEING RIGHT.  ``prompt_hash`` keys on
+        the effective generation params, and an api type returns the WIRE
+        spelling (``max_tokens``) while
+        :func:`~.council.types.seat_generation_params` returns the
+        provider-independent one (``max_output_tokens``); ARGO additionally
+        forces ``temperature: 1`` on some models whatever was asked for.  A
+        quote that used the latter would compute a different hash from the
+        worker for every HTTP seat and report zero reuse on a corpus that is
+        almost entirely already paid for.
+
+        It lives HERE and not in :mod:`.council.quote` because this is the
+        object that already builds api types; the quote module may not, so
+        that "the quote cannot spend" stays a property of its import graph
+        rather than a promise.  ``effective_params`` is specified as
+        deterministic, generation-only and call-free
+        (:meth:`~.llm.protocol.LLMApi.effective_params`), so resolving it
+        opens no socket -- which the quote tests assert with the socket
+        module poisoned.
+
+        Falls back per seat to the provider-independent params when no api
+        type can be built (an endpoint this installation cannot serve), which
+        keeps a quote possible on a machine that could not run the job.
+        """
+        from .council.types import seat_generation_params
+
+        cache: Dict[str, Any] = {}
+
+        def _resolve(seat: Any) -> Dict[str, Any]:
+            endpoint = str(getattr(seat, "endpoint", "") or "")
+            if endpoint not in cache:
+                cache[endpoint] = self.endpoint_api(
+                    endpoint, str(getattr(seat, "endpoint_kind", "") or "")
+                )
+            api = cache[endpoint]
+            if api is None:
+                return dict(seat_generation_params(seat))
+            try:
+                return dict(api.effective_params(self._seat_request(seat)))
+            except Exception as exc:  # noqa: BLE001 - never fail a quote over this
+                self.log_debug(
+                    f"council quote: {endpoint!r} could not report effective "
+                    f"params ({exc}); falling back to the seat's own"
+                )
+                return dict(seat_generation_params(seat))
+
+        return _resolve
+
+    @staticmethod
+    def _seat_request(seat: Any) -> Any:
+        """A prompt-less :class:`LLMRequest` carrying only *seat*'s params.
+
+        The same shape ``CouncilWorker._seat_request`` builds, and for the
+        same reason: ``effective_params`` is computed per seat, before any
+        role's prompts exist, so the request it reads carries the parameters
+        and no prompts.
+        """
+        from .llm.types import LLMRequest
+
+        return LLMRequest(
+            model=seat.model,
+            max_output_tokens=seat.max_output_tokens,
+            temperature=seat.temperature,
+            params=dict(getattr(seat, "extra", None) or {}),
+            timeout_s=seat.timeout_s,
+        )
+
     # -- the deployed GO council service ----------------------------------
 
     def service_client(self, **kwargs: Any) -> Any:

@@ -37,10 +37,12 @@ from kbutillib.cli import main
 #: deliberate edit here rather than a silent contract change.
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
-#: The seven verbs registered but not implemented by this task.
+#: The verbs still registered-but-not-implemented. ``council-quote`` has
+#: LEFT this list: stage 2 landed, so it is now a real verb that prices a
+#: plan (see :class:`TestCouncilQuoteIsImplemented`). A verb leaving this
+#: list is the expected shape of progress through the five stages.
 STUB_VERBS = [
     "council-plan",
-    "council-quote",
     "council-approve",
     "council-run",
     "council-status",
@@ -262,7 +264,38 @@ class TestStubsExitNonZero:
             assert not stripped.startswith("{"), f"{verb} emitted a JSON object"
         assert "schema_version" not in result.output
 
-    def test_every_registered_verb_is_either_version_or_a_known_stub(self) -> None:
+    def test_every_registered_verb_is_either_implemented_or_a_known_stub(
+        self,
+    ) -> None:
         registered = set(ontomap.ontomap_cmd.commands)
-        assert registered == {"version", *STUB_VERBS}
+        assert registered == {"version", "council-quote", *STUB_VERBS}
         assert [name for name, _ in ontomap._PLANNED_VERBS] == STUB_VERBS
+
+
+class TestCouncilQuoteIsImplemented:
+    """Stage 2 landed, so ``council-quote`` must no longer refuse.
+
+    The end-to-end behaviour is covered beside the command it delegates to
+    (``tests/cli/test_council_cli.py::TestOntomapCouncilQuote``); what is
+    pinned here is only that this group no longer registers it as a stub,
+    because a stub that quietly came back would make the whole pipeline
+    un-runnable from the operator surface.
+    """
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-quote" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-quote" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-quote", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_it_requires_a_plan_rather_than_refusing_outright(
+        self, runner: CliRunner
+    ) -> None:
+        """Invoked bare it is a USAGE error (no --plan), not a refusal."""
+        result = runner.invoke(main, ["ontomap", "council-quote"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--plan" in result.output

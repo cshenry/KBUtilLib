@@ -273,6 +273,80 @@ def _render(envelope: Dict[str, Any]) -> None:
             _rows(rows, ("alias", "endpoint", "kind", "served_name", "canonical", "verified"))
         return
 
+    if verb == "quote":
+        headline = data.get("headline") or {}
+        point = headline.get("point") or {}
+        upper = headline.get("upper") or {}
+        click.echo(
+            f"plan: {data.get('plan_hash', '')[:12]}   "
+            f"query: {(data.get('parameter_set') or {}).get('query')}   "
+            f"items: {(data.get('plan') or {}).get('n_items')}"
+        )
+        click.echo(
+            "bench_fingerprint (the PARTITION key): "
+            f"{str((data.get('parameter_set') or {}).get('bench_fingerprint'))[:12]}"
+        )
+        # The projected fraction FIRST: it says how much of what follows is a
+        # measurement and how much is an extrapolation.
+        click.echo(
+            f"PROJECTED FRACTION OF TOTAL: "
+            f"{float(headline.get('projected_fraction_of_total') or 0.0):.1%}"
+        )
+        click.echo(
+            f"tokens: point {int(point.get('total_tokens') or 0):,}   "
+            f"upper {int(upper.get('total_tokens') or 0):,}   "
+            f"(input {int(point.get('input_tokens') or 0):,})"
+        )
+        click.echo(
+            f"calls: {headline.get('calls_total')} total, "
+            f"{headline.get('calls_reused')} reused, "
+            f"{headline.get('calls_paid')} paid"
+        )
+        _rows(
+            data.get("call_graph") or [],
+            (
+                "line",
+                "role",
+                "basis",
+                "calls_total",
+                "calls_reused",
+                "calls_paid",
+                "input_tokens_point",
+                "output_tokens_point",
+                "total_tokens_upper",
+            ),
+        )
+        misses = (data.get("reuse") or {}).get("misses") or {}
+        click.echo(
+            "reuse misses: "
+            f"new_item {misses.get('new_item', 0)}, "
+            f"bench_change {misses.get('bench_change', 0)}, "
+            f"transport_change {misses.get('transport_change', 0)}"
+        )
+        wall = data.get("wall_clock") or {}
+        click.echo(
+            f"wall clock: {wall.get('hours_point')} h point / "
+            f"{wall.get('hours_upper')} h upper, set by the SLOWEST queue "
+            f"{wall.get('binding_queue')!r} (limit: {wall.get('binding_limit')})"
+        )
+        _rows(
+            data.get("gateways") or [],
+            ("gateway", "total_tokens_point", "priced", "dollars_point", "dollars_upper"),
+        )
+        for gateway in data.get("gateways") or []:
+            if not gateway.get("priced"):
+                click.echo(f"{gateway.get('gateway')}: unpriced")
+            elif gateway.get("is_floor"):
+                click.echo(
+                    f"{gateway.get('gateway')}: FLOOR, not a cost "
+                    f"({gateway.get('rate_provenance')})"
+                )
+        rate = data.get("meta_fire_rate") or {}
+        click.echo(
+            f"meta fire rate: {float(rate.get('rate') or 0.0):.1%} (n={rate.get('n')})"
+        )
+        return
+
     if verb == "token-model":
         click.echo(
             f"profile: {data.get('profile')}   bench: {str(data.get('bench_fingerprint'))[:12]}"
@@ -1404,5 +1478,127 @@ def token_model_cmd(
             upper_percentile=upper_percentile,
         )
     except Exception as exc:  # noqa: BLE001 - a config or store failure is a CLI error
+        raise _fail(exc) from exc
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# quote
+# ---------------------------------------------------------------------------
+
+
+def build_quote(
+    util: Any,
+    *,
+    plan: str,
+    profile: Optional[str] = None,
+    seat: Sequence[str] = (),
+    meta_fire_rate: Optional[float] = None,
+    out: Optional[str] = None,
+    write: bool = True,
+) -> Dict[str, Any]:
+    """Build the ``quote`` envelope, and write ``QUOTE.json`` beside the plan.
+
+    PUBLIC because ``kbu ontomap council-quote`` delegates to this very
+    function rather than reimplementing the stage: two code paths that both
+    priced a plan would be two numbers that could disagree, and the one an
+    operator approved would be whichever CLI they happened to type.
+
+    Every projected seat in the token model is a warning, and so is every
+    unpriced gateway: both are degraded answers, and the third structural
+    rule of this module's output contract is that a degraded answer never
+    has an empty ``warnings``.
+    """
+    quote = util.quote_plan(
+        plan, profile=profile, meta_fire_rate=meta_fire_rate, **_parse_seats(seat)
+    )
+    data = quote.to_dict()
+    warnings = list(data.get("warnings") or [])
+    for seat_fit in (data.get("token_model") or {}).get("seats") or []:
+        if seat_fit.get("basis") == "projected":
+            warnings.append(
+                f"{seat_fit.get('seat_name')} ({seat_fit.get('role')}) has no "
+                f"measured history in this store; its tokens are projected "
+                f"from {seat_fit.get('fallback')}"
+            )
+    if write:
+        destination = out or (quote.plan.get("run_dir") if quote.plan else None)
+        if not destination:
+            raise click.ClickException(
+                "the plan was not loaded from a directory, so there is nowhere "
+                "to write QUOTE.json; pass --out"
+            )
+        data["written_to"] = str(quote.write(destination))
+    return _envelope("quote", data=data, warnings=warnings)
+
+
+@council_cmd.command(name="quote")
+@click.option(
+    "--plan",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run directory holding PLAN.json, or the plan file itself.",
+)
+@click.option("--profile", default=None, help="Bench to quote. Default: the plan's own, then the configured default.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--meta-fire-rate",
+    default=None,
+    type=float,
+    help="Fraction of items reaching meta. Default: 0.241, measured over n=19,268.",
+)
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(),
+    help="Where to write QUOTE.json. Default: the run directory the plan came from.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Compute and print the quote without writing QUOTE.json.",
+)
+@_json_option
+@click.pass_context
+def quote_cmd(
+    ctx: click.Context,
+    plan: str,
+    profile: Optional[str],
+    seat: Sequence[str],
+    meta_fire_rate: Optional[float],
+    out: Optional[str],
+    no_write: bool,
+    as_json: bool,
+) -> None:
+    """Price a run plan and write QUOTE.json. SPENDS NOTHING.
+
+    Stage 2 of the standing pipeline. Every proposer prompt is rendered
+    locally and hashed with the same `prompt_hash` the worker uses, so reuse
+    is COUNTED rather than guessed; only meta's volume and the repair pass
+    are projected, and every line says which it is.
+
+    \b
+    What the quote will not do:
+      - it will not price a gateway that has no rate in `ai_council.rates`;
+        it reports `unpriced`. A vendor list rate is a FLOOR, not a cost.
+      - it will not add the queues together for a wall clock. Queues run
+        concurrently, so the estimate is the slowest one.
+    """
+    util = _ready(ctx)
+    try:
+        envelope = build_quote(
+            util,
+            plan=plan,
+            profile=profile,
+            seat=seat,
+            meta_fire_rate=meta_fire_rate,
+            out=out,
+            write=not no_write,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a bad plan or store is a CLI error
         raise _fail(exc) from exc
     _emit(envelope, as_json=as_json)

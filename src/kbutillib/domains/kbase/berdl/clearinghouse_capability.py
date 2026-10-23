@@ -824,6 +824,62 @@ class ClearinghouseCapability:
             sql_for=sql_for, encoded=encoded, engine=resolved_engine
         )
 
+    def universe(
+        self,
+        entity_type: str,
+        *,
+        engine: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return EVERY entity of one type, joined to its content row.
+
+        The one read verb that takes no hash list, because its question is
+        "what is there at all": the ``<type>_entity`` table is the authority
+        on membership and ``<type>_content`` carries the payload, so the
+        answer is the INNER JOIN of the two on ``entity_hash``. Rows are the
+        full content row (``entity_hash`` plus the type-specialized columns
+        -- ``definition`` for ``function``, ``sequence`` for ``protein`` --
+        plus the shared tail), exactly as :meth:`content` returns them. An
+        entity with no content row is not returned; that is a gap in the
+        content table and :meth:`stats` is the verb that reports it.
+
+        WHY IT EXISTS. The ``function_to_go`` pipeline's stage 1 derives its
+        un-run set as ``universe - done``, and ``done`` is
+        :meth:`current_state`. Before this verb there was no sanctioned way
+        to read ``universe`` at all, so the only route was hand-rolled SQL
+        against a table name a caller had constructed -- which Rules 2 and 4
+        exist to prevent. It is a whole-table read by design and by name.
+
+        ORDERED BY ``entity_hash``, which the other verbs do not need and
+        this one does: off-pod the read pages with ``limit``/``offset``
+        (:meth:`_page_offpod`), and an unordered relational scan may return
+        rows in a different order per page, which would silently both drop
+        and duplicate rows across page boundaries.
+
+        Default engine: Spark -- a whole-table scan is Spark's shape, the
+        same choice and reasoning as :meth:`current_state`. Off-pod there is
+        no Spark, so the read routes through the off-pod REST transport and
+        pages to completion.
+
+        Args:
+            entity_type: One of the five entity types (Rule 1).
+            engine: Override the engine choice.
+
+        Raises:
+            ValueError: ``entity_type`` is not a known entity type (raised by
+                :func:`~clearinghouse_schema.table_name`, Rule 2).
+        """
+        resolved_engine = self._resolve_engine(engine, default="spark")
+        content = _quote_fqn(self._fqn(entity_type, "content"), resolved_engine)
+        entity = _quote_fqn(self._fqn(entity_type, "entity"), resolved_engine)
+        sql = (
+            f"SELECT c.* FROM {content} AS c\n"
+            f"JOIN {entity} AS e ON c.entity_hash = e.entity_hash\n"
+            "ORDER BY c.entity_hash"
+        )
+        if self._locus() == "off_pod":
+            return self._page_offpod(sql, params=None, engine=resolved_engine)
+        return self._run(sql, params=None, engine=resolved_engine)
+
     def results(
         self,
         entity_type: str,

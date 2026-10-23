@@ -38,15 +38,16 @@ from kbutillib.cli import main
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
 #: The verbs still registered-but-not-implemented. ``council-quote``,
-#: ``council-plan`` and ``council-export`` have LEFT this list: stages 2, 1
-#: and the first half of 5 landed, so each is now a real verb -- one prices a
-#: plan, one writes one, one exports the verdicts (see
+#: ``council-plan``, ``council-approve`` and ``council-export`` have LEFT this
+#: list: stages 2, 1, 3 and the first half of 5 landed, so each is now a real
+#: verb -- one prices a plan, one writes one, one approves one with a ceiling
+#: on it, one exports the verdicts (see
 #: :class:`TestCouncilQuoteIsImplemented`,
-#: :class:`TestCouncilPlanIsImplemented` and
+#: :class:`TestCouncilPlanIsImplemented`,
+#: :class:`TestCouncilApprove` and
 #: :class:`TestCouncilExportIsImplemented`). A verb leaving this list is the
 #: expected shape of progress through the five stages.
 STUB_VERBS = [
-    "council-approve",
     "council-run",
     "council-status",
     "council-publish",
@@ -55,7 +56,13 @@ STUB_VERBS = [
 #: The verbs that ARE implemented, so the registration test can assert the
 #: registered set is exactly the two lists together -- a new verb must land in
 #: one of them rather than appearing unnoticed.
-IMPLEMENTED_VERBS = ["version", "council-plan", "council-quote", "council-export"]
+IMPLEMENTED_VERBS = [
+    "version",
+    "council-plan",
+    "council-quote",
+    "council-approve",
+    "council-export",
+]
 
 #: What a real ``mapping_version()`` returns, shaped like the production value
 #: measured on this tree (``ontomap-go-text-union@1.0.0``, GO 2026-07-26).
@@ -754,4 +761,235 @@ class TestCouncilExportIsImplemented:
         assert result.exit_code != 0
         assert result.exception is None or isinstance(result.exception, SystemExit)
         assert "ValueError: council_export: no council job ids" in result.output
+        assert "schema_version" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# council-approve -- stage 3
+# ---------------------------------------------------------------------------
+
+
+class TestCouncilApprove:
+    """Stage 3 landed, so ``council-approve`` must no longer refuse.
+
+    The gate itself -- the ceiling arithmetic and the six checks stage 4 makes
+    -- is covered beside the module that owns it
+    (``tests/domains/ai/council/test_approval.py``). What is pinned here is
+    the OPERATOR SURFACE: that the verb writes the artifact, that the ceiling
+    an operator reads comes off the quote's UPPER band rather than its point
+    estimate, that the help says plainly what the artifact is NOT, and that an
+    unapprovable run directory is a clean CLI error.
+
+    Unlike the other verbs this one does not go through ``_ontomap()``: an
+    approval is two files on disk and a clock, with no retrieval backend
+    anywhere near it, so these tests run against REAL ``PLAN.json`` and
+    ``QUOTE.json`` files.
+    """
+
+    #: Upper-band tokens the fixture quote attributes to each gateway.
+    ARGO_UPPER = 120_000_000
+    MAG_UPPER = 80_000_000
+
+    #: The point estimate, deliberately well below the band, so a ceiling
+    #: taken from the wrong column is visible in the number the CLI prints.
+    ARGO_POINT = 100_000_000
+    MAG_POINT = 60_000_000
+
+    def _run_dir(self, tmp_path: Any) -> Any:
+        """A run directory holding a real plan and a quote priced against it."""
+        from kbutillib.domains.ai.council.quote import load_plan
+
+        directory = tmp_path / "2026-10-23-adp1"
+        directory.mkdir()
+        plan = {
+            "schema_version": 1,
+            "query": "go_mf@1",
+            "profile": "go_council_v3",
+            "mapping_hash": "e" * 64,
+            "bench_fingerprint": "b" * 64,
+            "roster_fingerprint": "r" * 64,
+            "items": [
+                {
+                    "item_id": "t0",
+                    "query_id": "a" * 64,
+                    "evidence": {"text": "hydrolase", "source": "ADP1"},
+                    "menu": [{"id": "GO:0016787", "label": "hydrolase activity"}],
+                }
+            ],
+        }
+        (directory / "PLAN.json").write_text(json.dumps(plan), encoding="utf-8")
+        plan["plan_hash"] = load_plan(directory).plan_hash
+        (directory / "PLAN.json").write_text(json.dumps(plan), encoding="utf-8")
+        (directory / "QUOTE.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "plan_hash": plan["plan_hash"],
+                    "headline": {
+                        "point": {"total_tokens": self.ARGO_POINT + self.MAG_POINT},
+                        "upper": {"total_tokens": self.ARGO_UPPER + self.MAG_UPPER},
+                    },
+                    "gateways": [
+                        {
+                            "gateway": "argo",
+                            "total_tokens_point": self.ARGO_POINT,
+                            "total_tokens_upper": self.ARGO_UPPER,
+                        },
+                        {
+                            "gateway": "mag",
+                            "total_tokens_point": self.MAG_POINT,
+                            "total_tokens_upper": self.MAG_UPPER,
+                        },
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-approve" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-approve" in ontomap.ontomap_cmd.commands
+
+    def test_it_writes_approved_json_and_emits_one_envelope(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(
+            main,
+            [
+                "ontomap",
+                "council-approve",
+                str(run_dir),
+                "--approver",
+                "chenry",
+                "--note",
+                "ADP1+PMI standing run",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.stdout)
+        assert set(envelope) == ENVELOPE_KEYS
+        assert envelope["verb"] == "council-approve"
+        data = envelope["data"]
+        for key in (
+            "approved_at",
+            "expires_at",
+            "approver",
+            "plan_hash",
+            "quote_hash",
+            "ceiling_tokens",
+            "note",
+        ):
+            assert key in data, f"the envelope carries no {key}"
+        assert data["approver"] == "chenry"
+        assert data["note"] == "ADP1+PMI standing run"
+        written = json.loads(
+            (run_dir / "APPROVED.json").read_text(encoding="utf-8")
+        )
+        assert written["quote_hash"] == data["quote_hash"]
+
+    def test_the_ceiling_is_the_quotes_upper_band_not_its_point_estimate(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(
+            main, ["ontomap", "council-approve", str(run_dir), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        ceiling = json.loads(result.stdout)["data"]["ceiling_tokens"]
+        assert ceiling["argo"] > self.ARGO_UPPER > self.ARGO_POINT
+        assert ceiling["mag"] > self.MAG_UPPER > self.MAG_POINT
+
+    def test_ceiling_tokens_overrides_one_gateway(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(
+            main,
+            [
+                "ontomap",
+                "council-approve",
+                str(run_dir),
+                "--ceiling-tokens",
+                "mag=250000000",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        ceiling = json.loads(result.stdout)["data"]["ceiling_tokens"]
+        assert ceiling["mag"] == 250_000_000
+        assert ceiling["argo"] != 250_000_000
+
+    def test_a_malformed_ceiling_option_is_a_clean_cli_error(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(
+            main,
+            ["ontomap", "council-approve", str(run_dir), "--ceiling-tokens", "argo"],
+        )
+        assert result.exit_code != 0
+        assert "GATEWAY=N" in result.output
+        assert not (run_dir / "APPROVED.json").exists()
+
+    def test_expires_in_is_passed_through(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(
+            main,
+            ["ontomap", "council-approve", str(run_dir), "--expires-in", "1", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)["data"]
+        assert data["approved_at"][:4] == data["expires_at"][:4]
+        assert data["approved_at"] != data["expires_at"]
+
+    def test_no_write_approves_nothing_and_says_so(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-approve", str(run_dir), "--no-write", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.stdout)
+        assert envelope["data"]["ceiling_tokens"]
+        assert envelope["warnings"], "a run nobody approved must be warned about"
+        assert not (run_dir / "APPROVED.json").exists()
+
+    def test_the_help_says_it_is_not_an_authentication_boundary(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-approve", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+        assert "NOT AN AUTHENTICATION BOUNDARY" in result.output
+        assert "AUDIT TRAIL" in result.output
+        assert "UPPER BAND" in result.output
+
+    def test_the_human_rendering_names_the_ceiling_and_the_caveat(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        run_dir = self._run_dir(tmp_path)
+        result = runner.invoke(main, ["ontomap", "council-approve", str(run_dir)])
+        assert result.exit_code == 0, result.output
+        assert "approval:" in result.output
+        assert "ceiling_tokens" in result.output
+        assert "argo" in result.output and "mag" in result.output
+        assert "NOT AN AUTHENTICATION BOUNDARY" in result.output
+
+    def test_a_run_directory_with_no_quote_is_a_cli_error_not_a_traceback(
+        self, runner: CliRunner, tmp_path: Any
+    ) -> None:
+        result = runner.invoke(
+            main, ["ontomap", "council-approve", str(tmp_path), "--json"]
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "FileNotFoundError" in result.output
+        assert "council-quote" in result.output
         assert "schema_version" not in result.output

@@ -58,11 +58,20 @@ STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
 WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan``,
-``council-quote`` and ``council-export``. The remaining four pipeline verbs
-are REGISTERED but each exits non-zero with "not implemented yet" -- they are
-filled in by later tasks. A stub that exited 0 would be worse than no stub at
-all, because a rehearsal of the whole pipeline would pass straight over it and
-report success.
+``council-quote``, ``council-approve`` and ``council-export``. The remaining
+three pipeline verbs are REGISTERED but each exits non-zero with "not
+implemented yet" -- they are filled in by later tasks. A stub that exited 0
+would be worse than no stub at all, because a rehearsal of the whole pipeline
+would pass straight over it and report success.
+
+``council-approve`` WRITES AN AUDIT TRAIL AND A BINDING CEILING, NOT AN
+AUTHENTICATION BOUNDARY. ``APPROVED.json`` is unsigned, there is no key
+material on these machines that could sign it, and an agent can write it. What
+it buys is an explicit per-gateway token ceiling, a checkable binding to this
+plan and this quote, and a refusal when the job has changed under it. The
+checks themselves live in
+:func:`~kbutillib.domains.ai.council.approval.validate_approval`, which is the
+function stage 4 calls -- this verb owns no gate logic of its own.
 
 ``council-quote`` OWNS NO PRICING LOGIC EITHER. It delegates to
 ``kbu council quote``'s own :func:`~.council.build_quote`, which is the same
@@ -195,6 +204,43 @@ def _render(envelope: Dict[str, Any]) -> None:
         _rows(
             data.get("transport_allocation") or [],
             ("role", "seat_name", "gateway", "endpoint_kind", "canonical_model"),
+        )
+        return
+
+    if verb == "council-approve":
+        click.echo(f"approval:        {data.get('approval_file') or '(not written)'}")
+        click.echo(f"approver:        {data.get('approver')}")
+        click.echo(
+            f"approved_at:     {data.get('approved_at')}   "
+            f"expires_at: {data.get('expires_at')}"
+        )
+        click.echo(f"plan_hash:       {str(data.get('plan_hash'))[:12]}")
+        click.echo(f"quote_hash:      {str(data.get('quote_hash'))[:12]}")
+        basis = data.get("ceiling_basis") or {}
+        _rows(
+            [
+                {
+                    "gateway": gateway,
+                    "ceiling_tokens": f"{int(tokens):,}",
+                    "quote_upper": f"{int((basis.get('gateway_upper_tokens') or {}).get(gateway, 0)):,}",
+                }
+                for gateway, tokens in sorted(
+                    (data.get("ceiling_tokens") or {}).items()
+                )
+            ],
+            ("gateway", "ceiling_tokens", "quote_upper"),
+        )
+        click.echo(
+            f"ceiling basis:   the quote's UPPER band x {basis.get('headroom')} "
+            "headroom (never the point estimate), with "
+            f"{int(basis.get('unattributed_upper_tokens') or 0):,} unattributed "
+            "repair-pass tokens spread pro rata"
+        )
+        if data.get("note"):
+            click.echo(f"note:            {data.get('note')}")
+        click.echo(
+            "THIS IS AN AUDIT TRAIL AND A CEILING, NOT AN AUTHENTICATION "
+            "BOUNDARY: the file is unsigned and an agent can write it."
         )
         return
 
@@ -554,6 +600,170 @@ def council_plan_cmd(
 
 
 # ---------------------------------------------------------------------------
+# council-approve -- stage 3
+# ---------------------------------------------------------------------------
+
+
+def _parse_ceilings(values: Sequence[str]) -> Dict[str, int]:
+    """``--ceiling-tokens argo=250000000`` -> ``{"argo": 250000000}``.
+
+    Underscores and commas are accepted in the number, because an operator
+    typing a nine-digit token ceiling by hand will group it.
+    """
+    out: Dict[str, int] = {}
+    for raw in values or ():
+        gateway, sep, number = str(raw).partition("=")
+        gateway, number = gateway.strip(), number.strip().replace(",", "").replace("_", "")
+        if not sep or not gateway or not number:
+            raise click.ClickException(
+                f"--ceiling-tokens {raw!r} is not GATEWAY=N; the gateway is the "
+                "payer name the quote reports (an account, else an endpoint "
+                "alias), e.g. --ceiling-tokens argo=250000000"
+            )
+        try:
+            out[gateway] = int(number)
+        except ValueError as exc:
+            raise click.ClickException(
+                f"--ceiling-tokens {raw!r}: {number!r} is not a whole number of "
+                "tokens"
+            ) from exc
+    return out
+
+
+def _build_council_approve(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-approve`` envelope from the approval it writes.
+
+    OWNS NO GATE LOGIC. The artifact, the ceiling derivation and the six
+    checks stage 4 makes all live in
+    :mod:`kbutillib.domains.ai.council.approval`; this builder calls
+    :func:`~kbutillib.domains.ai.council.approval.approve` and selects what an
+    operator reads.
+    """
+    from ...domains.ai.council.approval import approve
+
+    try:
+        approval = approve(**kwargs)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable quote is a CLI error
+        raise _fail(exc) from exc
+    data = {
+        **approval.to_dict(),
+        "run_dir": str(kwargs.get("run_dir")),
+        "approval_file": approval.source or None,
+    }
+    warnings = list(approval.warnings)
+    if not approval.source:
+        warnings.append(
+            "--no-write was given, so NOTHING was approved: this is the "
+            "ceiling the quote implies, and stage 4 will refuse the run until "
+            "APPROVED.json exists."
+        )
+    return _envelope("council-approve", data=data, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-approve")
+@click.argument(
+    "run_dir",
+    type=click.Path(exists=True, file_okay=False),
+)
+@click.option(
+    "--ceiling-tokens",
+    "ceiling",
+    multiple=True,
+    metavar="GATEWAY=N",
+    help="Override one gateway's token ceiling (repeatable). Default: that "
+    "gateway's quoted UPPER band times the headroom factor.",
+)
+@click.option(
+    "--headroom",
+    default=None,
+    type=float,
+    help="Multiple applied to the quote's upper band. Default: 1.25.",
+)
+@click.option(
+    "--expires-in",
+    "expires_in",
+    default=None,
+    type=float,
+    metavar="DAYS",
+    help="Days until the approval expires. Default: 7. An approval with no expiry would be a standing authorisation to spend.",
+)
+@click.option("--note", default="", help="Why this run, recorded in the artifact.")
+@click.option(
+    "--approver",
+    default=None,
+    help="Who is approving. Default: $KBU_APPROVER, else the login name. A "
+    "LABEL for the audit trail -- it is not authenticated.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Show the ceiling the quote implies without writing APPROVED.json.",
+)
+@_json_option
+def council_approve_cmd(
+    run_dir: str,
+    ceiling: Sequence[str],
+    headroom: Optional[float],
+    expires_in: Optional[float],
+    note: str,
+    approver: Optional[str],
+    no_write: bool,
+    as_json: bool,
+) -> None:
+    """Stage 3: approve one specific quote, with a token ceiling on it.
+
+    SPENDS NOTHING. Reads `QUOTE.json` out of RUN_DIR, hashes it, and writes
+    `APPROVED.json` beside it carrying `approved_at`, `expires_at`,
+    `approver`, `plan_hash`, `quote_hash`, the per-gateway `ceiling_tokens`
+    and your note.
+
+    \b
+    THIS ARTIFACT IS AN AUDIT TRAIL AND A BINDING CEILING.
+    IT IS NOT AN AUTHENTICATION BOUNDARY. It is unsigned and cannot be:
+    there is no key material on these machines, and an agent can write the
+    file as easily as you can. `--approver` is a label, not an identity.
+
+    What it does buy: stage 4 has an explicit number to halt at, the binding
+    to this plan and this quote is checkable, and a stale approval against a
+    changed job is refused by name.
+
+    THE CEILING DEFAULTS TO THE QUOTE'S UPPER BAND TIMES 1.25, NOT TO ITS
+    POINT ESTIMATE. A ceiling at the mean halts about half of all runs
+    partway, and a run halted at 60% has spent 60% of the tokens for none of
+    the result. The headroom also covers the retry pass, which is charged
+    after this approval is written (~0.3% of run cost, measured).
+
+    A MODEL swap after approval is refused by stage 4; RE-ROUTING the same
+    models to another gateway is permitted and only makes the quoted PRICE
+    stale (it is reported as a warning). The approval binds to the bench, not
+    to the transport.
+    """
+    from ...domains.ai.council.approval import (
+        DEFAULT_EXPIRES_IN_DAYS,
+        DEFAULT_HEADROOM,
+    )
+
+    _emit(
+        _build_council_approve(
+            run_dir=run_dir,
+            approver=approver,
+            ceiling_tokens=_parse_ceilings(ceiling) or None,
+            headroom=DEFAULT_HEADROOM if headroom is None else headroom,
+            expires_in_days=(
+                DEFAULT_EXPIRES_IN_DAYS if expires_in is None else expires_in
+            ),
+            note=note,
+            write=not no_write,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
 # council-export -- stage 5
 # ---------------------------------------------------------------------------
 
@@ -677,14 +887,11 @@ def council_export_cmd(
 #: stage each belongs to. They are registered NOW so the operator surface and
 #: its help listing are settled before the stages land, and each one exits
 #: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
-#: pass over a missing stage and report success. ``council-plan`` and
-#: ``council-quote`` have LEFT this list -- stages 1 and 2 landed -- which is
-#: the expected shape of progress through the five stages.
+#: pass over a missing stage and report success. ``council-plan``,
+#: ``council-quote``, ``council-approve`` and ``council-export`` have LEFT
+#: this list -- stages 1, 2, 3 and the first half of 5 landed -- which is the
+#: expected shape of progress through the five stages.
 _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
-    (
-        "council-approve",
-        "Stage 3: record a human's approval of one specific quote.",
-    ),
     (
         "council-run",
         "Stage 4: execute an approved plan, including the retry pass.",

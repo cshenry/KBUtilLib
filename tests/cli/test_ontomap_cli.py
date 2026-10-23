@@ -10,10 +10,10 @@ Nothing here spends a token, makes a network call or needs a GPU. The
   is absent, so the facade method the CLI calls is proved to exist and to
   return the three keys the envelope promises.
 
-The other seven verbs are REGISTERED STUBS, and the thing these tests are here
-to pin is that every one of them exits NON-ZERO. A stub that exited 0 would
-let a rehearsal of the whole pipeline pass over a missing stage and report
-success.
+The four verbs whose stages have not landed are REGISTERED STUBS, and the
+thing these tests are here to pin is that every one of them exits NON-ZERO. A
+stub that exited 0 would let a rehearsal of the whole pipeline pass over a
+missing stage and report success.
 
 The published envelope (from ``ontomap.py``'s docstring)::
 
@@ -37,19 +37,25 @@ from kbutillib.cli import main
 #: deliberate edit here rather than a silent contract change.
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
-#: The verbs still registered-but-not-implemented. ``council-quote`` and
-#: ``council-plan`` have LEFT this list: stages 2 and 1 landed, so each is
-#: now a real verb -- one prices a plan, the other writes one (see
-#: :class:`TestCouncilQuoteIsImplemented` and
-#: :class:`TestCouncilPlanIsImplemented`). A verb leaving this list is the
+#: The verbs still registered-but-not-implemented. ``council-quote``,
+#: ``council-plan`` and ``council-export`` have LEFT this list: stages 2, 1
+#: and the first half of 5 landed, so each is now a real verb -- one prices a
+#: plan, one writes one, one exports the verdicts (see
+#: :class:`TestCouncilQuoteIsImplemented`,
+#: :class:`TestCouncilPlanIsImplemented` and
+#: :class:`TestCouncilExportIsImplemented`). A verb leaving this list is the
 #: expected shape of progress through the five stages.
 STUB_VERBS = [
     "council-approve",
     "council-run",
     "council-status",
-    "council-export",
     "council-publish",
 ]
+
+#: The verbs that ARE implemented, so the registration test can assert the
+#: registered set is exactly the two lists together -- a new verb must land in
+#: one of them rather than appearing unnoticed.
+IMPLEMENTED_VERBS = ["version", "council-plan", "council-quote", "council-export"]
 
 #: What a real ``mapping_version()`` returns, shaped like the production value
 #: measured on this tree (``ontomap-go-text-union@1.0.0``, GO 2026-07-26).
@@ -133,7 +139,7 @@ class TestGroupRegistration:
         result = runner.invoke(main, ["ontomap", "--help"])
         assert result.exit_code == 0, result.output
         commands = result.output.split("Commands:", 1)[1]
-        for verb in ["version", *STUB_VERBS]:
+        for verb in [*IMPLEMENTED_VERBS, *STUB_VERBS]:
             assert verb in commands, f"{verb} missing from the help listing"
 
     def test_help_describes_the_five_pipeline_stages(self, runner: CliRunner) -> None:
@@ -144,7 +150,7 @@ class TestGroupRegistration:
         assert "parameter_set_hash" in result.output
 
     def test_every_command_takes_json(self, runner: CliRunner) -> None:
-        for verb in ["version", *STUB_VERBS]:
+        for verb in [*IMPLEMENTED_VERBS, *STUB_VERBS]:
             result = runner.invoke(main, ["ontomap", verb, "--help"])
             assert result.exit_code == 0, result.output
             assert "--json" in result.output, f"{verb} has no --json flag"
@@ -291,12 +297,7 @@ class TestStubsExitNonZero:
         self,
     ) -> None:
         registered = set(ontomap.ontomap_cmd.commands)
-        assert registered == {
-            "version",
-            "council-plan",
-            "council-quote",
-            *STUB_VERBS,
-        }
+        assert registered == {*IMPLEMENTED_VERBS, *STUB_VERBS}
         assert [name for name, _ in ontomap._PLANNED_VERBS] == STUB_VERBS
 
 
@@ -545,4 +546,212 @@ class TestCouncilPlanIsImplemented:
         assert result.exit_code != 0
         assert result.exception is None or isinstance(result.exception, SystemExit)
         assert "ValueError: query 'go_mf' names no VERSION" in result.output
+        assert "schema_version" not in result.output
+
+
+class TestCouncilExportIsImplemented:
+    """Stage 5's export landed, so ``council-export`` must no longer refuse.
+
+    The export behaviour itself is covered beside the code that owns it
+    (``tests/domains/test_verdict_export.py`` for the pure row derivation,
+    ``tests/domains/test_ontomap_council_export.py`` for the facade method);
+    what is pinned here is the OPERATOR SURFACE -- that the verb is no longer
+    a stub, that it emits the one envelope, that the operator's options reach
+    the facade unchanged, that withheld items are WARNED about rather than
+    passed over, and that a failure is a clean CLI error.
+    """
+
+    #: What a real ``council_export()`` returns.
+    FAKE_EXPORT: Dict[str, Any] = {
+        "out_path": "/scratch/function-to-go/2026-10-22-adp1/verdicts.parquet",
+        "rows": 20036,
+        "bytes": 4194304,
+        "counts": {
+            "inputs": 20036,
+            "rows": 20036,
+            "withheld": 0,
+            "abstained": 760,
+            "decided": 19276,
+            "with_go_ids": 9920,
+            "retried": 105,
+            "no_candidate_matched": 4893,
+            "contentless": 4463,
+            "no_candidates": 0,
+        },
+        "plan_file": "/runs/2026-10-22-adp1/PLAN.json",
+        "plan_hash": "f" * 64,
+        "query": "go_mf@1",
+        "query_name": "go_mf",
+        "query_version": "1",
+        "source": "council/go_mf@1",
+        "parameter_set_hash": "0" * 64,
+        "mapping_hash": "e" * 64,
+        "roster_fingerprint": "r" * 64,
+        "job_ids": ["job-a", "job-retry"],
+        "retry_job_ids": ["job-retry"],
+        "warnings": [],
+    }
+
+    class _FakeExporter:
+        """A facade whose only job is to answer ``council_export()``."""
+
+        def __init__(self, payload: Dict[str, Any], boom: Any = None) -> None:
+            self.payload = payload
+            self.boom = boom
+            self.kwargs: Dict[str, Any] = {}
+
+        def council_export(self, **kwargs: Any) -> Dict[str, Any]:
+            if self.boom is not None:
+                raise self.boom
+            self.kwargs = dict(kwargs)
+            return dict(self.payload)
+
+    def _exporter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        payload: Dict[str, Any] | None = None,
+        boom: Any = None,
+    ) -> "TestCouncilExportIsImplemented._FakeExporter":
+        exporter = self._FakeExporter(payload or self.FAKE_EXPORT, boom)
+        monkeypatch.setattr(ontomap, "_ontomap", lambda: exporter)
+        return exporter
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-export" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-export" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-export", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_invoked_bare_it_is_a_usage_error_not_a_refusal(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-export"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--run-dir" in result.output
+
+    def test_json_emits_exactly_one_envelope_carrying_the_export(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        self._exporter(monkeypatch)
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.stdout)
+        assert set(envelope) == ENVELOPE_KEYS
+        assert envelope["verb"] == "council-export"
+        assert envelope["warnings"] == []
+        data = envelope["data"]
+        assert data["counts"]["rows"] == data["counts"]["inputs"] == 20036
+        assert data["counts"]["no_candidate_matched"] == 4893
+        assert data["out_path"].endswith(".parquet")
+
+    def test_withheld_items_are_warned_about_rather_than_passed_over(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """8 items with no verdict are not a silent 8-function shortfall."""
+        payload = {
+            **self.FAKE_EXPORT,
+            "rows": 20028,
+            "counts": {**self.FAKE_EXPORT["counts"], "rows": 20028, "withheld": 8},
+            "warnings": ["8 of 20036 input function(s) were WITHHELD"],
+        }
+        self._exporter(monkeypatch, payload)
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        warnings = json.loads(result.stdout)["warnings"]
+        assert any("WITHHELD" in warning for warning in warnings)
+
+    def test_an_empty_export_is_a_warning_not_a_silent_success(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        payload = {
+            **self.FAKE_EXPORT,
+            "rows": 0,
+            "counts": {**self.FAKE_EXPORT["counts"], "rows": 0, "withheld": 20036},
+            "warnings": [],
+        }
+        self._exporter(monkeypatch, payload)
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        warnings = json.loads(result.stdout)["warnings"]
+        assert any("NO rows" in warning for warning in warnings)
+
+    def test_the_human_rendering_is_the_same_dict(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        self._exporter(monkeypatch)
+        result = runner.invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "verdicts.parquet" in result.output
+        assert "inputs=20036" in result.output
+        assert "no_candidate_matched=4893" in result.output
+        assert "job-retry" in result.output
+
+    def test_the_operators_options_reach_the_facade_unchanged(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        exporter = self._exporter(monkeypatch)
+        result = runner.invoke(
+            main,
+            [
+                "ontomap",
+                "council-export",
+                "--run-dir",
+                str(tmp_path),
+                "--out",
+                "/scratch/out.parquet",
+                "--job-id",
+                "job-a",
+                "--job-id",
+                "job-b",
+                "--retry-job-id",
+                "job-retry",
+                "--scratch-dir",
+                "/scratch/here",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert exporter.kwargs == {
+            "run_dir": str(tmp_path),
+            "out_path": "/scratch/out.parquet",
+            "job_ids": ["job-a", "job-b"],
+            "retry_job_ids": ["job-retry"],
+            "scratch_dir": "/scratch/here",
+        }
+
+    def test_omitted_options_are_passed_as_none_so_the_library_defaults(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        exporter = self._exporter(monkeypatch)
+        runner.invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert exporter.kwargs["out_path"] is None
+        assert exporter.kwargs["job_ids"] is None
+        assert exporter.kwargs["retry_job_ids"] is None
+
+    def test_an_export_failure_is_a_cli_error_not_a_traceback(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        self._exporter(
+            monkeypatch, boom=ValueError("council_export: no council job ids")
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-export", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "ValueError: council_export: no council job ids" in result.output
         assert "schema_version" not in result.output

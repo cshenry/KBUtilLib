@@ -57,12 +57,12 @@ Three structural rules, carried over verbatim:
 STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
-WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan`` and
-``council-quote``. The remaining five pipeline verbs are REGISTERED but each
-exits non-zero with "not implemented yet" -- they are filled in by later
-tasks. A stub that exited 0 would be worse than no stub at all, because a
-rehearsal of the whole pipeline would pass straight over it and report
-success.
+WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan``,
+``council-quote`` and ``council-export``. The remaining four pipeline verbs
+are REGISTERED but each exits non-zero with "not implemented yet" -- they are
+filled in by later tasks. A stub that exited 0 would be worse than no stub at
+all, because a rehearsal of the whole pipeline would pass straight over it and
+report success.
 
 ``council-quote`` OWNS NO PRICING LOGIC EITHER. It delegates to
 ``kbu council quote``'s own :func:`~.council.build_quote`, which is the same
@@ -195,6 +195,35 @@ def _render(envelope: Dict[str, Any]) -> None:
         _rows(
             data.get("transport_allocation") or [],
             ("role", "seat_name", "gateway", "endpoint_kind", "canonical_model"),
+        )
+        return
+
+    if verb == "council-export":
+        counts = data.get("counts") or {}
+        click.echo(f"export:          {data.get('out_path')}")
+        click.echo(f"query:           {data.get('query')}")
+        click.echo(f"parameter_set:   {str(data.get('parameter_set_hash'))[:12]}  "
+                   f"(mapping {str(data.get('mapping_hash'))[:12]}, "
+                   f"roster {str(data.get('roster_fingerprint'))[:12]})")
+        click.echo(f"jobs:            {', '.join(data.get('job_ids') or []) or '-'}")
+        click.echo(
+            "counts:          "
+            + ", ".join(
+                f"{key}={counts.get(key)}"
+                for key in ("inputs", "rows", "withheld", "abstained", "decided")
+            )
+        )
+        click.echo(
+            "declines:        "
+            + ", ".join(
+                f"{key}={counts.get(key, 0)}"
+                for key in ("abstained", "no_candidate_matched", "contentless")
+            )
+        )
+        click.echo(
+            f"with go_ids:     {counts.get('with_go_ids')}   "
+            f"retried: {counts.get('retried')}   "
+            f"bytes: {data.get('bytes')}"
         )
         return
 
@@ -525,7 +554,123 @@ def council_plan_cmd(
 
 
 # ---------------------------------------------------------------------------
-# The remaining six pipeline verbs -- registered, NOT yet implemented
+# council-export -- stage 5
+# ---------------------------------------------------------------------------
+
+
+def _build_council_export(util: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-export`` envelope from the facade's export record.
+
+    OWNS NO EXPORT LOGIC. Every number comes from
+    :meth:`OntologyMappingUtils.council_export`, including its own warnings,
+    which are carried through rather than restated: a withheld item is a
+    DEGRADED answer and the envelope contract says ``warnings`` is never empty
+    for one.
+    """
+    try:
+        export = dict(util.council_export(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable run dir is a CLI error
+        raise _fail(exc) from exc
+
+    counts = dict(export.get("counts") or {})
+    warnings = list(export.get("warnings") or [])
+    if not counts.get("rows"):
+        warnings.append(
+            "the export holds NO rows: the plan named "
+            f"{counts.get('inputs', 0)} input function(s) and none of them "
+            "produced a publishable row. A shard run over zero rows is a "
+            "producer failure, not a clean load."
+        )
+    return _envelope("council-export", data=export, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-export")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json (and RUN.json, for the job ids).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Where the parquet goes. Default: <scratch>/verdicts.parquet. A path "
+    "inside the run directory is refused.",
+)
+@click.option(
+    "--job-id",
+    "job_id",
+    multiple=True,
+    help="Council job to read verdicts from (repeatable, in order). Default: "
+    "whatever RUN.json names.",
+)
+@click.option(
+    "--retry-job-id",
+    "retry_job_id",
+    multiple=True,
+    help="Council job belonging to the retry pass (repeatable). Its verdicts "
+    "supersede the chunk jobs' and its rows are marked retried.",
+)
+@click.option(
+    "--scratch-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Local ROOT for the default --out; function-to-go/<run-id>/ is "
+    "appended. Default: $KBU_SCRATCH_DIR, else /scratch/<user>.",
+)
+@_json_option
+def council_export_cmd(
+    run_dir: str,
+    out_path: Optional[str],
+    job_id: Sequence[str],
+    retry_job_id: Sequence[str],
+    scratch_dir: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 5: export the run's verdicts as PARQUET, one row per input.
+
+    SPENDS NOTHING. Reads `PLAN.json`, the plan's abstain/fanout records and
+    the council store; writes one parquet file on LOCAL SCRATCH. The published
+    artifact is the shard run (`council-publish`); this file is its input, so
+    writing it into the synced run directory is refused.
+
+    ONE ROW PER INPUT `query_id`, including all three decline classes --
+    `abstained:<reason>`, `no_candidate_matched` and `contentless` -- each with
+    `go_ids = []`. Recording them is what stops stage 1 re-selecting them
+    forever: un-run means "no current-state result row", so an ABSENT row is
+    indistinguishable from "not yet run".
+
+    An item with NO VERDICT (every call failed) is withheld and reported as a
+    warning: it is genuinely un-run and the next plan must re-select it.
+
+    `query_id` comes from the ranked data the plan carried through, never from
+    a text join and never from the council's own `items.entity_hash`.
+    """
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _build_council_export(
+            util,
+            run_dir=run_dir,
+            out_path=out_path,
+            job_ids=list(job_id) or None,
+            retry_job_ids=list(retry_job_id) or None,
+            scratch_dir=scratch_dir,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The remaining four pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
 #: The pipeline verbs this module registers but does not implement, with the
@@ -547,10 +692,6 @@ _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
     (
         "council-status",
         "Stage 4: report progress, spend and blockers for a running plan.",
-    ),
-    (
-        "council-export",
-        "Stage 5: export the verdicts, keyed on query_id, for publication.",
     ),
     (
         "council-publish",

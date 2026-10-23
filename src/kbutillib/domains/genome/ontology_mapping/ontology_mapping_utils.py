@@ -24,6 +24,11 @@ here because they are those same two capabilities plus bookkeeping:
   set from the clearinghouse, ranks it, partitions it three ways, chunks the
   submit side and writes ``PLAN.json``. The partition arithmetic itself is
   pure and lives in :mod:`.unrun`.
+* :meth:`OntologyMappingUtils.council_export` -- stage 5's first half. Joins
+  the plan's abstain and fanout records to the council store's verdicts and
+  writes PARQUET, one row per input ``query_id``, on local scratch. The row
+  derivation itself is pure and lives in :mod:`.verdicts`, for the same
+  reason :mod:`.unrun` is separate.
 
 Stage 2 (the quote) is :func:`kbutillib.domains.ai.council.quote.quote_plan`,
 which READS the ``PLAN.json`` this module writes -- so the plan's contract is
@@ -83,6 +88,12 @@ COUNCIL_SOURCE_PREFIX = "council/"
 #: change the day issue 84 is fixed: a workaround baked in as a code constant
 #: becomes permanent silently, with nothing recording why it was ever there.
 PLAN_CHUNK_SIZE = 2000
+
+#: The file STAGE 4 appends per chunk inside the run directory. Stage 5 reads
+#: it for one thing only -- which council jobs the run used -- so that
+#: ``council_export`` can be pointed at a run directory rather than told the
+#: job ids by hand. Stage 4 owns everything else about its contract.
+RUN_FILENAME = "RUN.json"
 
 #: Chunks the run stage may have outstanding at once. One, for the same
 #: reason: the daemon drains every claimable job, so two chunks in flight is
@@ -672,6 +683,174 @@ class OntologyMappingUtils(SharedEnvUtils):
         tmp.replace(plan_file)  # atomic: a reader never sees a half-written plan
         return {**plan, "plan_file": str(plan_file)}
 
+    # -- pipeline stage 5: the verdict export --------------------------------
+
+    def council_export(
+        self,
+        run_dir: Union[str, Path],
+        out_path: Optional[Union[str, Path]] = None,
+        *,
+        job_ids: Optional[Sequence[str]] = None,
+        retry_job_ids: Optional[Sequence[str]] = None,
+        genomes: Optional[Dict[str, Sequence[str]]] = None,
+        scratch_dir: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
+        """Stage 5: write the run's verdicts as parquet, one row per input.
+
+        Spends NO LLM tokens: it reads ``PLAN.json``, the plan's abstain and
+        fanout records and the council store, and writes one file.
+
+        ONE ROW PER INPUT ``query_id`` -- the whole un-run set the plan
+        recorded, which is ``abstain`` plus ``fanout`` (a text shared by three
+        ``query_id``s is answered once and published three times). All three
+        decline classes are written with ``go_ids = []``; the only thing
+        withheld is an item with NO VERDICT, which is still un-run. The row
+        derivation and the reasons for each cell live in :mod:`.verdicts`,
+        which is pure and testable without the retrieval stack.
+
+        THE JOIN KEY IS ``query_id``, taken from the plan's fanout and abstain
+        records -- which carry it through from the ranked file, because
+        :func:`~.unrun.unrun_items` reads it off the clearinghouse universe
+        row and never discards it. It is NOT resolved through a text join and
+        NOT the council's own ``items.entity_hash``: measured 2026-10-21, that
+        hash matched 0 of 19,268 clearinghouse hashes while the definition
+        text matched 19,268 of 19,268, and the fix is to stop discarding the
+        key rather than to join on the text.
+
+        Args:
+            run_dir: The run directory holding ``PLAN.json``.
+            out_path: Where the parquet goes. Default:
+                ``<scratch>/verdicts.parquet``. A path inside ``run_dir`` is
+                REFUSED -- the published artifact is the shard run, and the
+                verdict parquet is its input, not a sync artifact.
+            job_ids: The council jobs to read verdicts from, in order; a later
+                job's verdict for an ``item_id`` supersedes an earlier one's.
+                Default: whatever ``RUN.json`` names (see
+                :func:`_run_job_ids`).
+            retry_job_ids: Which of those belong to the retry pass. A row
+                whose verdict came from one is marked ``retried``. Default:
+                ``RUN.json``'s.
+            genomes: Optional ``query_id -> [genome_id, ...]``. See
+                :func:`~.verdicts.export_rows` -- nothing in-pipeline can fill
+                this today, and the column is an empty list without it.
+            scratch_dir: Local ROOT for the default ``out_path``, resolved the
+                same way :meth:`council_plan` resolves it.
+
+        Returns:
+            The export record: ``out_path``, ``rows``, ``bytes``, ``counts``,
+            the run identity, the job ids read, and ``warnings`` -- non-empty
+            whenever anything was withheld.
+
+        Raises:
+            FileNotFoundError: ``run_dir`` holds no ``PLAN.json``, or the plan
+                names an abstain/fanout file that is gone (``/scratch`` is
+                ephemeral on this host and is not backed up).
+            ValueError: No job ids were given and ``RUN.json`` names none,
+                ``out_path`` is inside ``run_dir``, or the abstain/fanout
+                records disagree with the counts ``PLAN.json`` recorded.
+        """
+        from kbutillib.domains.ai.council.quote import PLAN_FILENAME
+
+        from .verdicts import export_rows, verdicts_by_item, write_verdict_parquet
+
+        run_dir = Path(run_dir).expanduser()
+        plan_file = run_dir / PLAN_FILENAME
+        if not plan_file.exists():
+            raise FileNotFoundError(
+                f"no plan at {plan_file}. Stage 1 writes it: "
+                "`kbu ontomap council-plan`"
+            )
+        plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        name, version = _split_query_ref(str(plan.get("query") or ""))
+
+        abstain = _read_jsonl(_plan_path(plan, "abstain_file", run_dir))
+        fanout = _read_jsonl(_plan_path(plan, "fanout_file", run_dir))
+        _check_plan_counts(plan, abstain=len(abstain), fanout=len(fanout))
+
+        declared = _run_job_ids(run_dir)
+        resolved_jobs = (
+            [str(jid) for jid in job_ids] if job_ids is not None else declared["job_ids"]
+        )
+        resolved_retries = (
+            [str(jid) for jid in retry_job_ids]
+            if retry_job_ids is not None
+            else declared["retry_job_ids"]
+        )
+        if not resolved_jobs:
+            raise ValueError(
+                f"council_export: no council job ids. {run_dir / RUN_FILENAME} "
+                "names none (stage 4 writes it), so pass job_ids= explicitly. "
+                "Exporting with no job would write every item as withheld and "
+                "publish nothing, which reads as a completed export."
+            )
+        # Retry jobs LAST, so their verdicts supersede the chunk jobs' --
+        # measured: 105 of the 113 items that failed on a silently truncated
+        # ARGO response came back on a plain retry, and the retry's answer is
+        # the run's answer for those items.
+        retries = set(resolved_retries)
+        ordered = [jid for jid in resolved_jobs if jid not in retries]
+        ordered.extend(jid for jid in resolved_retries if jid not in set(ordered))
+
+        council = self._council()
+        settled: Dict[str, Dict[str, Any]] = {}
+        for job in ordered:
+            verdicts_by_item(council.results(job), job_id=job, into=settled)
+
+        if out_path is None:
+            out_path = _scratch_dir(run_dir, scratch_dir) / "verdicts.parquet"
+        out_path = Path(out_path).expanduser()
+        _refuse_inside_run_dir(out_path, run_dir)
+
+        built = export_rows(
+            abstain=abstain,
+            fanout=fanout,
+            verdicts=settled,
+            identity={
+                "query_name": name,
+                "query_version": version,
+                "roster_fingerprint": str(plan.get("roster_fingerprint") or ""),
+                "mapping_hash": str(plan.get("mapping_hash") or ""),
+            },
+            job_ids=ordered,
+            # The time RETRIEVAL declined, which is when the plan was written.
+            # The shard SKIPS a row whose observed_at is null, so an abstained
+            # row needs a real timestamp or it would vanish at shard time.
+            abstained_at=str(plan.get("generated_at") or "") or None,
+            genomes=genomes,
+            retry_job_ids=resolved_retries,
+        )
+        written = write_verdict_parquet(built["rows"], out_path)
+
+        counts = dict(built["counts"])
+        warnings: List[str] = []
+        if counts["withheld"]:
+            warnings.append(
+                f"{counts['withheld']} of {counts['inputs']} input function(s) "
+                "were WITHHELD: their council item has no verdict (every call "
+                "failed, or it never settled). They are not results, so they "
+                "are not in the export and the next `council-plan` will "
+                "re-select them -- run the retry pass before publishing if "
+                "that is not what you want."
+            )
+        return {
+            "out_path": written["path"],
+            "rows": written["rows"],
+            "bytes": written["bytes"],
+            "counts": counts,
+            "plan_file": str(plan_file),
+            "plan_hash": str(plan.get("plan_hash") or ""),
+            "query": f"{name}@{version}",
+            "query_name": name,
+            "query_version": version,
+            "source": str(plan.get("source") or ""),
+            "parameter_set_hash": str(plan.get("parameter_set_hash") or ""),
+            "mapping_hash": str(plan.get("mapping_hash") or ""),
+            "roster_fingerprint": str(plan.get("roster_fingerprint") or ""),
+            "job_ids": ordered,
+            "retry_job_ids": resolved_retries,
+            "warnings": warnings,
+        }
+
     def _clearinghouse(self) -> Any:
         """The clearinghouse READ surface this stage derives its universe from.
 
@@ -704,15 +883,17 @@ def _split_query_ref(query: str) -> tuple:
     BEFORE the clearinghouse is read rather than at quote time: the query
     version is part of the parameter set and of every prompt hash, so a plan
     that left it to be guessed could be quoted against one spec and run
-    against another.
+    against another. Used by stage 1, which gets it from the operator, and by
+    stage 5, which gets it back off ``PLAN.json`` -- so the message names the
+    query rather than a stage.
     """
     name, _, version = str(query or "").strip().partition("@")
     name, version = name.strip(), version.strip()
     if not name:
-        raise ValueError('council_plan: query is empty; expected "<name>@<version>"')
+        raise ValueError('query is empty; expected "<name>@<version>"')
     if not version:
         raise ValueError(
-            f"council_plan: query {name!r} names no VERSION. A query version "
+            f"query {name!r} names no VERSION. A query version "
             "is part of the clearinghouse parameter set and of every prompt "
             'hash; pass "<name>@<version>".'
         )
@@ -757,6 +938,149 @@ def _scratch_dir(run_dir: Path, scratch_dir: Optional[Union[str, Path]]) -> Path
         )
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _plan_path(plan: Dict[str, Any], key: str, run_dir: Path) -> Path:
+    """One of the plan's named side files, absolute or relative to ``run_dir``.
+
+    ``council_plan`` writes these keys as ABSOLUTE paths under the scratch
+    root, which is the spelling
+    :func:`~kbutillib.domains.ai.council.quote.load_plan` supports for the
+    items file. A relative one is resolved against the run directory, the same
+    rule that function applies, so a plan hand-edited to use relative paths
+    reads the same here as it does there.
+    """
+    raw = plan.get(key)
+    if not raw:
+        raise ValueError(
+            f"the plan declares no {key}; stage 1 writes it, and without it "
+            "this stage cannot tell which functions the run was given"
+        )
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = run_dir / path
+    return path
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Read a :func:`_write_jsonl` file back, skipping blank lines."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} is missing. Stage 1 wrote it under the scratch root, and "
+            "`/scratch` on this host is shared, ephemeral and not backed up -- "
+            "re-run `kbu ontomap council-plan` to regenerate the partition "
+            "records rather than exporting a partition with a hole in it."
+        )
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except ValueError as exc:
+                raise ValueError(f"{path}:{number}: not valid JSON: {exc}") from exc
+    return rows
+
+
+def _check_plan_counts(plan: Dict[str, Any], *, abstain: int, fanout: int) -> None:
+    """Refuse an export whose input set differs from the plan's own record.
+
+    ``PLAN.json`` records the partition sizes it wrote, so a disagreement
+    means the records and the plan are from different runs. Publishing that
+    would land result rows for a partition no plan recorded, and "one row per
+    input" would be a claim about an input set nobody can reconstruct.
+    """
+    recorded = dict(plan.get("counts") or {})
+    disagreements = [
+        f"{key}: PLAN.json says {recorded[key]}, the file holds {observed}"
+        for key, observed in (("abstain", abstain), ("fanout", fanout))
+        if key in recorded and int(recorded[key]) != observed
+    ]
+    if disagreements:
+        raise ValueError(
+            "council_export: the plan's partition records disagree with "
+            f"{plan.get('run_id') or 'the plan'}'s own counts -- "
+            + "; ".join(disagreements)
+            + ". Re-run stage 1 rather than exporting against records from a "
+            "different plan."
+        )
+
+
+def _run_job_ids(run_dir: Path) -> Dict[str, List[str]]:
+    """The council job ids of a run, from ``RUN.json`` when there is one.
+
+    STAGE 4 OWNS ``RUN.json``'s contract; this reads only the job ids out of
+    it, and a caller passing ``job_ids=`` bypasses it entirely. Both spellings
+    the PRD uses are accepted -- a top-level ``job_id``/``job_ids`` and a
+    per-chunk ``job_id`` in a ``chunks`` list -- because the run appends that
+    file per chunk and a run that halted mid-way still has the chunks it did.
+
+    Returns ``{"job_ids": [...], "retry_job_ids": [...]}``, in file order with
+    repeats collapsed. An absent or unreadable ``RUN.json`` yields two empty
+    lists, and the caller refuses rather than exporting nothing silently.
+    """
+    path = run_dir / RUN_FILENAME
+    if not path.exists():
+        return {"job_ids": [], "retry_job_ids": []}
+    try:
+        run = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{path}: not valid JSON: {exc}") from exc
+    if not isinstance(run, dict):
+        raise ValueError(
+            f"{path}: expected a JSON object, got {type(run).__name__}"
+        )
+
+    def _ids(value: Any) -> List[str]:
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    job_ids = _ids(run.get("job_id")) + _ids(run.get("job_ids"))
+    retries = _ids(run.get("retry_job_id")) + _ids(run.get("retry_job_ids"))
+    for chunk in run.get("chunks") or ():
+        if not isinstance(chunk, dict):
+            continue
+        target = retries if chunk.get("retry") else job_ids
+        target.extend(_ids(chunk.get("job_id")))
+    return {"job_ids": _unique(job_ids), "retry_job_ids": _unique(retries)}
+
+
+def _unique(values: Sequence[str]) -> List[str]:
+    """*values* with repeats collapsed, first occurrence's order kept."""
+    seen: set = set()
+    out: List[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _refuse_inside_run_dir(out_path: Path, run_dir: Path) -> None:
+    """Refuse an export written into the Dropbox-synced run directory.
+
+    The run directory carries ``PLAN.json``, ``QUOTE.json``, ``APPROVED.json``
+    and ``RUN.json`` -- small, operator-readable JSON -- plus the published
+    ``shard/``. The verdict parquet is the shard's INPUT, not a published
+    artifact, and every byte on the sync surface needs an integrity gate; the
+    same refusal :func:`_scratch_dir` makes for the ranked and items files.
+    """
+    resolved_out = out_path.expanduser().resolve(strict=False)
+    resolved_run_dir = run_dir.expanduser().resolve(strict=False)
+    if resolved_run_dir == resolved_out or resolved_run_dir in resolved_out.parents:
+        raise ValueError(
+            f"council_export: {resolved_out} is inside the run directory "
+            f"{resolved_run_dir}. The run directory is a synced surface "
+            "carrying the small JSON stages and the published shard; the "
+            "verdict parquet is the shard's input and belongs on local "
+            "scratch. Pass out_path= under a scratch root, or omit it."
+        )
+    return out_path
 
 
 def _menu_of(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

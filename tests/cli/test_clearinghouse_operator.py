@@ -93,14 +93,27 @@ class _FakeIngestCapability:
         return self._locus_value
 
     def ingest_shards(
-        self, shard_dir, *, run_id=None, dry_run=False, reconcile=False
+        self,
+        shard_dir,
+        *,
+        run_id=None,
+        dry_run=False,
+        reconcile=False,
+        coverage_floor=None,
+        transfer_deadline_seconds=None,
     ):
+        # The two DECLARED thresholds are recorded, not just tolerated: the
+        # CLI's whole job for them is to hand the operator's declaration down
+        # to the capability, so a signature that swallowed them would let the
+        # option become a no-op silently.
         self.ingest_calls.append(
             {
                 "shard_dir": str(shard_dir),
                 "run_id": run_id,
                 "dry_run": dry_run,
                 "reconcile": reconcile,
+                "coverage_floor": coverage_floor,
+                "transfer_deadline_seconds": transfer_deadline_seconds,
             }
         )
         # The pre-write assertion runs in dry-run too (it is the operator's last
@@ -120,6 +133,12 @@ class _FakeIngestCapability:
             "state_dir": f"/tmp/state/{execution_id}",
             "dry_run": dry_run,
             "lock": {"namespace": "kbaseincubator.clearinghouse", "pid": 1},
+            "coverage_floor": 1.0 if coverage_floor is None else coverage_floor,
+            "transfer_deadline_seconds": (
+                6 * 60 * 60
+                if transfer_deadline_seconds is None
+                else transfer_deadline_seconds
+            ),
             "tables": [
                 {
                     "name": "gene_entity",
@@ -137,11 +156,16 @@ class _FakeIngestCapability:
         self.orphan_calls += 1
         return dict(self._orphans)
 
-    def verify_run(self, shard_dir, *, run_id):
-        self.verify_calls.append({"shard_dir": str(shard_dir), "run_id": run_id})
+    def verify_run(self, shard_dir, *, run_id, unit=None):
+        self.verify_calls.append(
+            {"shard_dir": str(shard_dir), "run_id": run_id, "unit": unit}
+        )
         return {
             "run_id": run_id,
+            "execution_id": run_id,
+            "source_run_id": "01SHARDRUN000000000000000",
             "namespace": "kbaseincubator.clearinghouse",
+            "unit": unit,
             "ok": True,
             "batches": [
                 {
@@ -155,8 +179,15 @@ class _FakeIngestCapability:
             ],
             "units": [{"unit_id": "u1", "ok": True, "missing_parameter_sets": []}],
             "tables": [
-                {"name": "gene_entity", "ledger_rows": 6, "live_rows": 6, "ok": True}
+                {
+                    "name": "gene_entity",
+                    "ledger_rows": 6,
+                    "live_rows": 6,
+                    "snapshot_ids": ["1001"],
+                    "ok": True,
+                }
             ],
+            "parameter_set_hashes": [],
             "discrepancies": [],
         }
 

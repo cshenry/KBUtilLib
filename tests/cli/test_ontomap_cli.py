@@ -49,7 +49,6 @@ ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 #: expected shape of progress through the five stages.
 STUB_VERBS = [
     "council-status",
-    "council-publish",
 ]
 
 #: The verbs that ARE implemented, so the registration test can assert the
@@ -62,6 +61,7 @@ IMPLEMENTED_VERBS = [
     "council-approve",
     "council-run",
     "council-export",
+    "council-publish",
 ]
 
 #: What a real ``mapping_version()`` returns, shaped like the production value
@@ -306,6 +306,36 @@ class TestStubsExitNonZero:
         registered = set(ontomap.ontomap_cmd.commands)
         assert registered == {*IMPLEMENTED_VERBS, *STUB_VERBS}
         assert [name for name, _ in ontomap._PLANNED_VERBS] == STUB_VERBS
+
+
+class TestCouncilPublishIsImplemented:
+    """Stage 5's producer half landed, so ``council-publish`` must not refuse.
+
+    The end-to-end behaviour is covered beside the function it delegates to
+    (``tests/domains/test_ontomap_council_publish.py``); what is pinned here
+    is only that this group no longer registers it as a stub, because a stub
+    that quietly came back would make the whole pipeline un-runnable from the
+    operator surface -- and a publish stage that exited 0 while publishing
+    nothing is the exact failure the stub convention exists to prevent.
+    """
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-publish" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-publish" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-publish", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_it_requires_a_run_dir_rather_than_refusing_outright(
+        self, runner: CliRunner
+    ) -> None:
+        """Invoked bare it is a USAGE error (no --run-dir), not a refusal."""
+        result = runner.invoke(main, ["ontomap", "council-publish"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--run-dir" in result.output
 
 
 class TestCouncilQuoteIsImplemented:

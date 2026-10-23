@@ -58,12 +58,22 @@ STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
 WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan``,
-``council-quote``, ``council-approve``, ``council-run`` and
-``council-export``. The remaining two pipeline verbs are REGISTERED but each
-exits non-zero with "not implemented yet" -- they are filled in by later
-tasks. A stub that exited 0 would be worse than no stub at all, because a
-rehearsal of the whole pipeline would pass straight over it and report
-success.
+``council-quote``, ``council-approve``, ``council-run``, ``council-export``
+and ``council-publish``. The one remaining pipeline verb (``council-status``)
+is REGISTERED but exits non-zero with "not implemented yet" -- it is filled in
+by a later task. A stub that exited 0 would be worse than no stub at all,
+because a rehearsal of the whole pipeline would pass straight over it and
+report success.
+
+``council-publish`` IS THE PRODUCER HALF OF STAGE 5 AND NOTHING MORE. It
+renders the shipped ``function-to-go-council`` preset for this run, gates it
+through ``kbu clearinghouse plan``'s own validator, and writes a shard run
+under ``<run-dir>/shard`` -- all of which runs ANYWHERE, because sharding
+needs CPU and disk and neither a pod nor credentials. The consumer half
+(``kbu clearinghouse load`` and ``verify``, both in-pod) runs on kbhub after
+Dropbox syncs the directory, and nothing in this module reaches for it. The
+logic lives in
+:mod:`kbutillib.domains.genome.ontology_mapping.council_publish`.
 
 ``council-run`` IS THE ONLY VERB THAT SPENDS A TOKEN, and it refuses to spend
 the first one until the approval gate passes (naming the check that failed)
@@ -1160,6 +1170,119 @@ def council_run_cmd(
 
 
 # ---------------------------------------------------------------------------
+# council-publish -- stage 5, the producer half
+# ---------------------------------------------------------------------------
+
+
+def _build_council_publish(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-publish`` envelope from the record it writes.
+
+    OWNS NO PUBLISH LOGIC. The render, the plan gate, the partition check, the
+    shard run and the inventory check-back all live in
+    :func:`~kbutillib.domains.genome.ontology_mapping.council_publish.council_publish`;
+    this builder calls it and carries its warnings through rather than
+    restating them -- a withheld item is a DEGRADED answer and the envelope
+    contract says ``warnings`` is never empty for one.
+
+    Deliberately does NOT go through :func:`_ontomap`: stage 5 ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_publish import council_publish
+
+    try:
+        record = dict(council_publish(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    return _envelope(
+        "council-publish", data=record, warnings=list(record.get("warnings") or [])
+    )
+
+
+@ontomap_cmd.command(name="council-publish")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json.",
+)
+@click.option(
+    "--verdicts",
+    "verdicts",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="The verdict parquet to publish. Default: verdicts.parquet in the "
+    "scratch directory PLAN.json names -- `council-export` refuses to write "
+    "it into the synced run directory, so it is never beside PLAN.json.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Where the shard run goes. Default: <run-dir>/shard, which is the "
+    "path Dropbox syncs to the consumer.",
+)
+@click.option(
+    "--target-bytes",
+    "target_bytes",
+    type=int,
+    default=None,
+    help="Target uncompressed bytes per shard (default ~512 MiB).",
+)
+@_json_option
+def council_publish_cmd(
+    run_dir: str,
+    verdicts: Optional[str],
+    out_dir: Optional[str],
+    target_bytes: Optional[int],
+    as_json: bool,
+) -> None:
+    """Stage 5: render the manifest, gate it, and shard the run's verdicts.
+
+    SPENDS NOTHING AND RUNS ANYWHERE. Sharding needs CPU and disk, "no pod and
+    no credentials" -- its own docstring says so -- so this runs here, beside
+    the run directory, and makes no transport call. The two IN-POD verbs are
+    the consumer's: Dropbox syncs `<run-dir>/shard/` to kbhub, where
+    `kbu clearinghouse load` (fill-only, idempotent, ledger-resumable) and
+    `kbu clearinghouse verify` run.
+
+    FOUR STEPS, each a reuse of something that already exists. The shipped
+    `function-to-go-council` preset is RENDERED into `<run-dir>/MANIFEST.toml`
+    with this run's query reference, bench fingerprint and mapping hash
+    substituted for the inert markers it ships; `kbu clearinghouse plan`'s own
+    validator then gates it, and the rendered `parameter_set_hash` is compared
+    against the one PLAN.json recorded -- a mismatch, or the documented inert
+    hash, refuses before a single row is written. Then `clearinghouse shard`
+    writes `<run-dir>/shard`, whose `run.json` carries a sha256, a row count,
+    a byte count and a hash range PER BATCH. That is the completeness contract
+    the consumer verifies against, and it already exists: there is no second
+    manifest format.
+
+    `PUBLISH.json` records the ITEM accounting the load receipt reconciles
+    against -- items submitted, items with a verdict, items unresolved, and
+    the declines by reason. Items are not rows in either direction: an item
+    whose every call failed produced no row at all and is invisible to the
+    shard run, and one item can carry several GO terms.
+
+    THE JOIN KEY is `query_id` -- the clearinghouse `entity_hash`, carried
+    through from the ranked file. NEVER the council's own
+    `items.entity_hash`, and never the definition text.
+    """
+    _emit(
+        _build_council_publish(
+            run_dir=run_dir,
+            verdicts=verdicts,
+            out_dir=out_dir,
+            target_bytes=target_bytes,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The remaining pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
@@ -1168,18 +1291,14 @@ def council_run_cmd(
 #: its help listing are settled before the stages land, and each one exits
 #: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
 #: pass over a missing stage and report success. ``council-plan``,
-#: ``council-quote``, ``council-approve``, ``council-run`` and
-#: ``council-export`` have LEFT this list -- stages 1, 2, 3, 4 and the first
-#: half of 5 landed -- which is the expected shape of progress through the
-#: five stages.
+#: ``council-quote``, ``council-approve``, ``council-run``,
+#: ``council-export`` and ``council-publish`` have LEFT this list -- stages
+#: 1, 2, 3, 4 and both halves of the producer side of 5 landed -- which is the
+#: expected shape of progress through the five stages.
 _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
     (
         "council-status",
         "Stage 4: report progress, spend and blockers for a running plan.",
-    ),
-    (
-        "council-publish",
-        "Stage 5: hand an export to the clearinghouse manifest/shard/load/verify chain.",
     ),
 )
 

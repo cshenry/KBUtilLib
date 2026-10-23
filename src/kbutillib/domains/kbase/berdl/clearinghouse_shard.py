@@ -6333,6 +6333,14 @@ def _batch_entry(report: ShardReport) -> dict[str, Any]:
         "batch_id": report.batch_id,
         "file": f"{report.table}/{report.path.name}",
         "rows": report.rows,
+        # THE FILE'S SIZE ON DISK, so the consumer's arrival check can report
+        # EXPECTED versus OBSERVED size and not only a digest mismatch. A
+        # partially-synced file is overwhelmingly a SHORT file, and "4.2 MB of
+        # an expected 9.1 MB" tells an operator to wait, where "the digests
+        # differ" reads as corruption. Additive: an inventory written before
+        # this field existed reports expected_bytes as null, which is honest
+        # rather than wrong.
+        "bytes": report.path.stat().st_size if report.path.is_file() else None,
         "rows_deduplicated": report.rows_deduplicated,
         "key_column": report.key_column,
         "hash_min": report.hash_min,

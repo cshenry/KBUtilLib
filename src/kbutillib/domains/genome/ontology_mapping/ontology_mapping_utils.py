@@ -34,6 +34,15 @@ here because they are those same two capabilities plus bookkeeping:
   writes PARQUET, one row per input ``query_id``, on local scratch. The row
   derivation itself is pure and lives in :mod:`.verdicts`, for the same
   reason :mod:`.unrun` is separate.
+* :func:`~.council_publish.council_publish` -- stage 5's second half, the
+  PRODUCER side of the hand-off. Renders the shipped
+  ``function-to-go-council`` manifest preset for this run, gates it through
+  ``kbu clearinghouse plan``'s own validator, and writes a shard run whose
+  ``run.json`` carries a sha256, a row count and a hash range per batch. It
+  lives in :mod:`.council_publish` and imports no numpy, for the same reason
+  :mod:`.council_run` does not: publishing ranks nothing. The CONSUMER side
+  (``kbu clearinghouse load`` and ``verify``, both in-pod) runs on the pod
+  after the directory syncs, and nothing here reaches for it.
 
 Stage 2 (the quote) is :func:`kbutillib.domains.ai.council.quote.quote_plan`,
 which READS the ``PLAN.json`` this module writes -- so the plan's contract is
@@ -73,6 +82,10 @@ from .unrun import (  # noqa: F401 - public re-export
 # make it unrunnable on a host that has no retrieval stack, for no reason.
 # See `council_run`'s own module docstring.
 from .council_run import council_run  # noqa: F401 - public re-export
+
+# Stage 5's producer half, re-exported for exactly the same reason: it belongs
+# beside the other stages, and publishing ranks nothing.
+from .council_publish import council_publish  # noqa: F401 - public re-export
 
 #: The backend name. Bump on any change to retrieval behaviour.
 BACKEND = "ontomap-go-text-union"

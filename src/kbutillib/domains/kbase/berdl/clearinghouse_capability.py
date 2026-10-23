@@ -1972,6 +1972,8 @@ class ClearinghouseCapability:
         dataset: str = NAMESPACE,
         adopt_source_batch_ids: bool = False,
         unit: str | None = None,
+        coverage_floor: float | None = None,
+        transfer_deadline_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Ingest a published shard run's batches, FILL-ONLY and resumably.
 
@@ -2056,6 +2058,36 @@ class ClearinghouseCapability:
         Without ``reconcile=True`` a ``started`` batch refuses
         (:class:`ClearinghouseLedgerAmbiguousError`) exactly as before.
 
+        THE PRE-COMMIT JOIN ASSERTIONS, PER BATCH, BEFORE ANYTHING IS
+        COMMITTED, and EVALUATED ON THE INPUTS. Four of them --
+        :func:`clearinghouse_ingest.join_assertions`, which is the whole
+        statement of the rule and reports a COUNT for each: the expected input
+        is non-empty, every join key is non-null, each target slot is claimed
+        by at most one source row, and the share of distinct source keys that
+        RESOLVE against the target's identity table is at or above
+        ``coverage_floor``. A non-empty batch resolving ZERO keys is fatal
+        whatever the floor.
+
+        They are on the INPUTS and not on the join's result because a
+        relationship test evaluated over an empty join passes vacuously, which
+        is exactly how the 0-of-19,268 hash mismatch would have been reported
+        as a clean idempotent no-op: fill-only commits a batch with no
+        survivors WITHOUT a write, and nothing distinguished that from a
+        re-run. A refused batch is ledgered ``failed`` and the ingest carries
+        on, exactly as a corrupt file is -- the report carries the counts and
+        the CLI exits non-zero.
+
+        ARRIVAL IS NOT PROVEN BY ``run.json`` EXISTING. Before each batch's
+        five-check gate, :func:`clearinghouse_ingest.transfer_state` asks
+        whether the file is THERE and whether its bytes are the published
+        bytes. A first mismatch is ``syncing`` -- a retry, with the first
+        sighting persisted to the ledger so the retry resumes rather than
+        restarting verification from nothing -- and past the transfer deadline
+        (``transfer_deadline_seconds``, default six hours from ``run.json``'s
+        mtime) the same mismatch is a FAILED DELIVERY, reported with the
+        batch, expected versus observed size and expected versus observed
+        digest.
+
         SCHEMA PREFLIGHT. Before the first batch, the target namespace's live
         columns are read and the ingest refuses -- writing nothing, calling no
         ``load()`` -- if any ``<type>_result`` table lacks
@@ -2100,6 +2132,14 @@ class ClearinghouseCapability:
             adopt_source_batch_ids: Keep the shard run's batch ids instead of
                 minting fresh ones -- only for a shard-and-load that is one
                 operation under one id.
+            coverage_floor: The declared floor for the share of a result
+                batch's distinct join keys that must resolve against
+                ``<type>_entity``. Default
+                :data:`clearinghouse_ingest.DEFAULT_COVERAGE_FLOOR`.
+            transfer_deadline_seconds: How long after ``run.json``'s mtime a
+                missing or mismatched batch is still "arriving" rather than a
+                failed delivery. Default
+                :data:`clearinghouse_ingest.DEFAULT_TRANSFER_DEADLINE_SECONDS`.
 
         Returns:
             A dict with ``'run_id'`` (the execution id), ``'execution_id'``,
@@ -2129,6 +2169,29 @@ class ClearinghouseCapability:
         self._require_in_pod("ingest_shards")
         shard_root = Path(shard_dir)
         run = ci.read_run_inventory(shard_root)
+        floor = (
+            ci.DEFAULT_COVERAGE_FLOOR if coverage_floor is None else float(coverage_floor)
+        )
+        # Validated HERE, before the first batch. _join_assertions turns a
+        # ValueError into a per-batch refusal (a batch with no join-key column
+        # IS a producer defect), and an out-of-range floor is an OPERATOR
+        # error, not that -- it would otherwise be reported once per batch as
+        # though the data were wrong.
+        if not 0.0 <= floor <= 1.0:
+            raise ValueError(
+                f"ingest_shards: coverage_floor={coverage_floor!r} is outside "
+                "[0, 1]. A floor is a share of the source keys, so a value "
+                "outside that range cannot be compared to one."
+            )
+        deadline = (
+            ci.DEFAULT_TRANSFER_DEADLINE_SECONDS
+            if transfer_deadline_seconds is None
+            else int(transfer_deadline_seconds)
+        )
+        # Read ONCE, before any batch: the deadline is measured from the
+        # marker's own date, so re-reading it per batch would let a sync that
+        # re-touched run.json mid-load reset the clock on every later batch.
+        manifest_mtime = ci.run_manifest_mtime(shard_root)
 
         # Pre-write assertion and schema preflight BEFORE anything is written,
         # so either refusal leaves load() called exactly zero times -- in
@@ -2174,8 +2237,16 @@ class ClearinghouseCapability:
                 "dry_run": True,
                 "lock": None,
                 "unit": unit,
+                "coverage_floor": floor,
+                "transfer_deadline_seconds": deadline,
                 "tables": self._dry_run_reports(
-                    inventory, shard_root=shard_root, write_ns=write_ns, unit=unit
+                    inventory,
+                    shard_root=shard_root,
+                    write_ns=write_ns,
+                    unit=unit,
+                    coverage_floor=floor,
+                    manifest_mtime=manifest_mtime,
+                    deadline_seconds=deadline,
                 ),
             }
 
@@ -2207,6 +2278,9 @@ class ClearinghouseCapability:
                 dataset=dataset,
                 execution_id=execution_id,
                 unit=unit,
+                coverage_floor=floor,
+                manifest_mtime=manifest_mtime,
+                deadline_seconds=deadline,
             )
         finally:
             lock.release()
@@ -2220,6 +2294,8 @@ class ClearinghouseCapability:
             "dry_run": False,
             "lock": lock_report,
             "unit": unit,
+            "coverage_floor": floor,
+            "transfer_deadline_seconds": deadline,
             "tables": reports,
         }
 
@@ -2232,14 +2308,21 @@ class ClearinghouseCapability:
         shard_root: Path,
         write_ns: str,
         unit: str | None = None,
+        coverage_floor: float = ci.DEFAULT_COVERAGE_FLOOR,
+        manifest_mtime: float | None = None,
+        deadline_seconds: int = ci.DEFAULT_TRANSFER_DEADLINE_SECONDS,
     ) -> list[dict[str, Any]]:
         """Report what each batch WOULD do, writing nothing.
 
-        Runs the real integrity checks and the real fill-only read, because a
-        dry run whose answer came from a different code path would not be
-        evidence about the run that follows. An integrity failure is REPORTED
-        here rather than ledgered -- a dry run writes no ledger line, by the
-        same guarantee ``clearinghouse_schema.bootstrap``'s dry-run makes.
+        Runs the real integrity checks, the real arrival check, the real
+        pre-commit join assertions and the real fill-only read, because a dry
+        run whose answer came from a different code path would not be evidence
+        about the run that follows. A failure is REPORTED here rather than
+        ledgered -- a dry run writes no ledger line, by the same guarantee
+        ``clearinghouse_schema.bootstrap``'s dry-run makes. THIS IS THE
+        OPERATOR'S GATE: ``--dry-run`` is where a wrong join key should be
+        caught, so the assertions have to run here or the gate would pass
+        exactly the load that fails.
         """
         reports: list[dict[str, Any]] = []
         for entry in inventory:
@@ -2250,12 +2333,34 @@ class ClearinghouseCapability:
                 "batch_id": entry.get("batch_id"),
                 "unit_id": entry.get("unit_id"),
             }
+            transfer = ci.transfer_state(
+                entry,
+                shard_root=shard_root,
+                manifest_mtime=manifest_mtime,
+                deadline_seconds=deadline_seconds,
+            )
+            if not ci.has_arrived(transfer):
+                report.update(
+                    {
+                        "action": "would_wait"
+                        if transfer["state"] == "syncing"
+                        else "would_refuse",
+                        "transfer": transfer,
+                        "error": ci.describe_transfer(transfer),
+                    }
+                )
+                reports.append(report)
+                continue
             try:
                 batch = ci.verify_batch_file(
                     entry,
                     shard_root=shard_root,
                     expected_batch_id=str(entry.get("source_batch_id")),
                     expected_sha256=str(entry.get("source_sha256") or ""),
+                    observed_sha256=transfer.get("observed_sha256"),
+                )
+                assertions = self._join_assertions(
+                    entry, batch=batch, write_ns=write_ns, coverage_floor=coverage_floor
                 )
                 _survivors, expected_rows = self._fill_only_survivors(
                     entry, batch=batch, write_ns=write_ns
@@ -2266,12 +2371,15 @@ class ClearinghouseCapability:
                 continue
             report.update(
                 {
-                    "action": "would_ingest",
+                    "action": "would_ingest" if assertions["ok"] else "would_refuse",
                     "rows_in": batch.num_rows,
                     "rows_dropped_present": batch.num_rows - expected_rows,
                     "rows_ingested": expected_rows,
+                    "join_assertions": assertions,
                 }
             )
+            if not assertions["ok"]:
+                report["error"] = "; ".join(assertions["failures"])
             reports.append(report)
         return reports
 
@@ -2286,6 +2394,9 @@ class ClearinghouseCapability:
         dataset: str,
         execution_id: str,
         unit: str | None = None,
+        coverage_floor: float = ci.DEFAULT_COVERAGE_FLOOR,
+        manifest_mtime: float | None = None,
+        deadline_seconds: int = ci.DEFAULT_TRANSFER_DEADLINE_SECONDS,
     ) -> list[dict[str, Any]]:
         """Ingest every batch of the derived inventory, in load order.
 
@@ -2296,13 +2407,15 @@ class ClearinghouseCapability:
         not committed) instead of writing results whose parameters nothing can
         explain, which is the correct answer rather than a limitation.
 
-        Three states drive it, and nothing else: ``committed`` is skipped,
+        Four states drive it, and nothing else: ``committed`` is skipped,
         ``started`` can only be a batch the reconcile pass decided RETRYABLE
-        (an undecided one raised there, before this ran), and anything else --
-        no line, or ``failed`` -- is ingested. A failed batch IS retried,
-        because the batch file is immutable and fill-only makes the retry
-        harmless; what a failed line must not do is disappear, and
-        :meth:`verify_run` blocks on one that was never resolved.
+        (an undecided one raised there, before this ran), ``syncing`` is a
+        batch whose bytes had not arrived last time and is RE-CHECKED from the
+        first sighting it persisted, and anything else -- no line, or
+        ``failed`` -- is ingested. A failed batch IS retried, because the batch
+        file is immutable and fill-only makes the retry harmless; what a failed
+        line must not do is disappear, and :meth:`verify_run` blocks on one
+        that was never resolved.
         """
         states = ledger.records()
         reports: list[dict[str, Any]] = []
@@ -2346,6 +2459,14 @@ class ClearinghouseCapability:
                 tenant=tenant,
                 dataset=dataset,
                 execution_id=execution_id,
+                coverage_floor=coverage_floor,
+                manifest_mtime=manifest_mtime,
+                deadline_seconds=deadline_seconds,
+                # THE PERSISTED PROGRESS a retry resumes from: a previous
+                # `syncing` line's first sighting, so the transfer deadline is
+                # measured against the first observation rather than restarted
+                # from nothing on every re-run.
+                prior=record,
             )
             reports.append(report)
         return reports
@@ -2395,8 +2516,28 @@ class ClearinghouseCapability:
         tenant: str,
         dataset: str,
         execution_id: str,
+        coverage_floor: float = ci.DEFAULT_COVERAGE_FLOOR,
+        manifest_mtime: float | None = None,
+        deadline_seconds: int = ci.DEFAULT_TRANSFER_DEADLINE_SECONDS,
+        prior: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Integrity-check, fill-only filter and append ONE batch."""
+        """Arrival-check, integrity-check, ASSERT, fill-only filter, append.
+
+        The order is the order that makes each step meaningful, and every one
+        of them happens BEFORE anything is committed for this batch:
+
+        1. ARRIVAL (:func:`clearinghouse_ingest.transfer_state`) -- are the
+           bytes here, and are they the published bytes? A first mismatch is
+           ``syncing`` and is ledgered as such with its first sighting, so a
+           retry resumes the deadline instead of restarting from nothing; past
+           the deadline it is a FAILED DELIVERY with the evidence.
+        2. The five-check integrity gate
+           (:func:`clearinghouse_ingest.verify_batch_file`).
+        3. THE PRE-COMMIT JOIN ASSERTIONS, on the INPUTS
+           (:meth:`_join_assertions`). A refusal is ledgered ``failed`` and
+           the ingest carries on to the next batch.
+        4. Retag, fill-only filter, durable ``started`` line, append.
+        """
         batch_id = ci.validate_batch_id(str(entry["batch_id"]))
         table = str(entry["table"])
         base = {
@@ -2408,12 +2549,51 @@ class ClearinghouseCapability:
             "source_batch_id": entry.get("source_batch_id"),
             "sha256": entry.get("source_sha256"),
         }
+        prior_record = dict(prior or {})
+        transfer = ci.transfer_state(
+            entry,
+            shard_root=shard_root,
+            manifest_mtime=manifest_mtime,
+            deadline_seconds=deadline_seconds,
+            first_observed_at=(
+                str(prior_record.get("first_observed_at"))
+                if prior_record.get("state") == ci.LEDGER_SYNCING
+                and prior_record.get("first_observed_at")
+                else None
+            ),
+        )
+        if not ci.has_arrived(transfer):
+            evidence = ci.describe_transfer(transfer)
+            syncing = transfer["state"] == "syncing"
+            # PERSIST THE PROGRESS EITHER WAY. The `syncing` line is what the
+            # retry resumes the deadline from; the `failed` line is what
+            # blocks verification so a lost file cannot be forgotten.
+            ledger.append(
+                {
+                    **base,
+                    "state": ci.LEDGER_SYNCING if syncing else ci.LEDGER_FAILED,
+                    "transfer": transfer,
+                    "first_observed_at": transfer["first_observed_at"],
+                    "error": evidence,
+                }
+            )
+            return {
+                "name": table,
+                "batch_id": batch_id,
+                "unit_id": entry.get("unit_id"),
+                "action": "syncing" if syncing else "failed",
+                "transfer": transfer,
+                "error": evidence,
+            }
         try:
             batch = ci.verify_batch_file(
                 entry,
                 shard_root=shard_root,
                 expected_batch_id=str(entry.get("source_batch_id")),
                 expected_sha256=str(entry.get("source_sha256") or ""),
+                # Already streamed by the arrival check, immediately above: a
+                # full-size batch is hashed once per load, not twice.
+                observed_sha256=transfer.get("observed_sha256"),
             )
         except ci.ClearinghouseBatchIntegrityError as exc:
             # REFUSE THIS BATCH, LEDGER IT, CARRY ON. One corrupt file does
@@ -2426,6 +2606,33 @@ class ClearinghouseCapability:
                 "unit_id": entry.get("unit_id"),
                 "action": "failed",
                 "error": str(exc),
+            }
+        assertions = self._join_assertions(
+            entry, batch=batch, write_ns=write_ns, coverage_floor=coverage_floor
+        )
+        if not assertions["ok"]:
+            # REFUSE THIS BATCH, LEDGER IT, CARRY ON -- the same shape a
+            # corrupt file takes, for the same reasons: one producer defect in
+            # one batch does not invalidate the batches that committed, and a
+            # ledgered failure blocks verify_run so it cannot be lost. The
+            # CLI's exit status is non-zero off the back of this report.
+            error = "; ".join(assertions["failures"])
+            ledger.append(
+                {
+                    **base,
+                    "state": ci.LEDGER_FAILED,
+                    "join_assertions": assertions,
+                    "error": error,
+                }
+            )
+            return {
+                "name": table,
+                "batch_id": batch_id,
+                "unit_id": entry.get("unit_id"),
+                "action": "refused",
+                "rows_in": batch.num_rows,
+                "join_assertions": assertions,
+                "error": error,
             }
         if not entry.get("adopted_source_batch_id"):
             batch = ci.retag_batch_ids(batch, batch_id)
@@ -2460,6 +2667,7 @@ class ClearinghouseCapability:
                 "rows_dropped_present": dropped,
                 "rows_ingested": 0,
                 "snapshot_id": None,
+                "join_assertions": assertions,
             }
 
         # The durable 'started' line: target namespace, checksum and the
@@ -2517,6 +2725,107 @@ class ClearinghouseCapability:
             "rows_dropped_present": dropped,
             "rows_ingested": expected_rows,
             "snapshot_id": snapshot_id,
+            "join_assertions": assertions,
+        }
+
+    # -- the pre-commit join assertions and the key space they resolve --
+
+    def _join_assertions(
+        self,
+        entry: Mapping[str, Any],
+        *,
+        batch: Any,
+        write_ns: str,
+        coverage_floor: float = ci.DEFAULT_COVERAGE_FLOOR,
+    ) -> dict[str, Any]:
+        """Run the four pre-commit assertions over one batch's INPUTS.
+
+        Thin over :func:`clearinghouse_ingest.join_assertions`, which is the
+        statement of the rule; what lives here is the one transport read the
+        coverage assertion needs (:meth:`_resolvable_join_keys`).
+
+        ON THE INPUTS, NEVER ON THE JOIN. ``batch`` is the source rows as the
+        inventory published them and the resolvable key set is read from the
+        target's identity table INDEPENDENTLY -- not from the fill-only
+        anti-join's output, whose emptiness is the very condition being
+        tested. A relationship test evaluated over an empty join passes
+        vacuously, and that is how a wrong join key reads as a clean no-op.
+        """
+        table = str(entry["table"])
+        batch_id = str(entry.get("batch_id"))
+        try:
+            return ci.join_assertions(
+                batch,
+                table=table,
+                batch_id=batch_id,
+                resolvable=self._resolvable_join_keys(entry, write_ns=write_ns),
+                coverage_floor=coverage_floor,
+            )
+        except ValueError as exc:
+            # A batch with no join-key column, or a table with no known key
+            # mode, is a PRODUCER defect of exactly the class this set
+            # reports -- so it becomes a failing report (ledgered, counted,
+            # non-zero exit) rather than a traceback that unwinds a load whose
+            # other batches are fine.
+            return {
+                "table": table,
+                "batch_id": batch_id,
+                "join_key": None,
+                "slot_key": [],
+                "source_rows": getattr(batch, "num_rows", None),
+                "source_keys": None,
+                "null_keys": None,
+                "ambiguous_slots": None,
+                "resolvable_keys": None,
+                "resolved_keys": None,
+                "unresolved_keys": None,
+                "coverage": None,
+                "coverage_floor": float(coverage_floor),
+                "coverage_checked": False,
+                "ok": False,
+                "failures": [f"{table} batch {batch_id}: {exc}"],
+            }
+
+    def _resolvable_join_keys(
+        self, entry: Mapping[str, Any], *, write_ns: str
+    ) -> set[str] | None:
+        """The target identity keys a result batch's join keys must land on.
+
+        ONE read per batch, restricted to the batch's own
+        ``[hash_min, hash_max]`` window on ``entity_hash``, exactly as
+        :meth:`_existing_keys` is and affordable for the same reason: the
+        sharder sorted the batch, so the keys that could possibly resolve are
+        a bounded slice of the hash space rather than the whole table. The
+        bounds are validated against ``^[0-9a-f]{64}$`` before being inlined,
+        because the read runs on Spark and there is no bind channel.
+
+        ``None`` for every table family that MINTS identity rather than
+        referencing it (:func:`clearinghouse_ingest.resolvable_source_table`),
+        which makes the coverage assertion record itself as skipped rather
+        than silently passed.
+        """
+        table = str(entry["table"])
+        source = ci.resolvable_source_table(table)
+        if source is None:
+            return None
+        column = ci.range_column_for_table(source)
+        hash_min = ci.validate_hex64(
+            str(entry.get("hash_min")),
+            where=f"batch {entry.get('batch_id')!r} hash_min",
+        )
+        hash_max = ci.validate_hex64(
+            str(entry.get("hash_max")),
+            where=f"batch {entry.get('batch_id')!r} hash_max",
+        )
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{source}", "spark")
+        rows = self._run(
+            f"SELECT {column} FROM {fqn} "
+            f"WHERE {column} BETWEEN '{hash_min}' AND '{hash_max}'",
+            params=None,
+            engine="spark",
+        )
+        return {
+            str(row.get(column)) for row in rows if row.get(column) is not None
         }
 
     # -- fill-only: the Spark anti-join and the keys it joins against ----
@@ -2899,8 +3208,10 @@ class ClearinghouseCapability:
             ``'live_rows'``, ``'state'``, ``'ok'``), a ``'units'`` list (per
             unit: ``'unit_id'``, ``'ok'``, ``'missing_parameter_sets'``), a
             ``'tables'`` list (per table: ``'name'``, ``'ledger_rows'``,
-            ``'live_rows'``, ``'ok'``, ``'missing_snapshots'``) kept for the
-            published CLI contract, a ``'discrepancies'`` list and
+            ``'live_rows'``, ``'snapshot_ids'``, ``'ok'``,
+            ``'missing_snapshots'``) kept for the published CLI contract,
+            ``'parameter_set_hashes'`` (every hash this execution's result
+            batches landed under), a ``'discrepancies'`` list and
             ``'parameter_set_integrity'``.
 
         Raises:
@@ -3085,6 +3396,12 @@ class ClearinghouseCapability:
                 "name": table,
                 "ledger_rows": per_table_rows.get(table),
                 "live_rows": table_live,
+                # THE SNAPSHOT IDS THE ROWS LANDED UNDER, from the ledger.
+                # The receipt carries them, and a receipt that named no
+                # snapshot could not be checked against the table's own
+                # Iceberg history -- which is the only thing that can say the
+                # acknowledged write is still there.
+                "snapshot_ids": sorted(per_table_snaps.get(table, set())),
                 "ok": all(
                     r["ok"] for r in batch_reports if r["name"] == table
                 )
@@ -3108,6 +3425,16 @@ class ClearinghouseCapability:
             "batches": batch_reports,
             "units": unit_reports,
             "tables": table_reports,
+            # THE PARAMETER SET THE ROWS LANDED UNDER, read off the batch
+            # files this execution loaded. The receipt carries it because
+            # "un-run" is defined as the absence of a current-state row at a
+            # PARTICULAR parameter_set_hash: a receipt that did not name the
+            # hash could not tell the producer which partition it filled, and
+            # the inert un-rendered hash the preset ships would be
+            # indistinguishable from the run's real one.
+            "parameter_set_hashes": sorted(
+                {value for values in unit_hashes.values() for value in values}
+            ),
             "discrepancies": discrepancies,
             "parameter_set_integrity": parameter_set_integrity,
         }

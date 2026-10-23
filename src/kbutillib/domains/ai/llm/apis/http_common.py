@@ -660,9 +660,13 @@ class HttpBackend:
                 f"rejected or is missing: {excerpt!r}"
             ).to_error()
         if status == 429:
+            # Still a retryable ``transport`` failure -- one 429 against a
+            # windowed limit is normal and is retried -- but FLAGGED, so a
+            # caller pacing the account can apply its own SUSTAINED rule
+            # without matching on this message (see ``LLMError.rate_limited``).
             return TransportError(
                 f"{self.name}: HTTP 429 (rate limited) from {self.base_url}: {excerpt!r}"
-            ).to_error()
+            ).to_error().model_copy(update={"rate_limited": True})
         if status >= 500:
             return TransportError(
                 f"{self.name}: HTTP {status} from {self.base_url}: {excerpt!r}"

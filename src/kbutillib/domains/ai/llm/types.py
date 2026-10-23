@@ -97,6 +97,17 @@ class LLMError(BaseModel):
     message: str = ""
     retryable: bool = False
     halts_endpoint: bool = False
+    #: This failure WAS the provider refusing for rate reasons (an HTTP 429).
+    #:
+    #: Additive, and a flag rather than a ``kind`` of its own, because a 429
+    #: is a ``transport`` failure for every purpose the taxonomy already has
+    #: -- it is retryable and it does not by itself halt anything.  What the
+    #: flag buys is that a CALLER PACING AN ACCOUNT can tell a rate refusal
+    #: apart from a dropped connection without matching on the message text:
+    #: a SUSTAINED run of them has to halt rather than be retried into (see
+    #: ``council.engine.worker._note_rate_limit``), and counting "any
+    #: transport failure" would halt on a flaky network instead.
+    rate_limited: bool = False
 
 
 class LLMException(KBUtilLibError):

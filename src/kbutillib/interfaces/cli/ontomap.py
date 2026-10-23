@@ -58,11 +58,25 @@ STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
 WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan``,
-``council-quote``, ``council-approve`` and ``council-export``. The remaining
-three pipeline verbs are REGISTERED but each exits non-zero with "not
-implemented yet" -- they are filled in by later tasks. A stub that exited 0
-would be worse than no stub at all, because a rehearsal of the whole pipeline
-would pass straight over it and report success.
+``council-quote``, ``council-approve``, ``council-run`` and
+``council-export``. The remaining two pipeline verbs are REGISTERED but each
+exits non-zero with "not implemented yet" -- they are filled in by later
+tasks. A stub that exited 0 would be worse than no stub at all, because a
+rehearsal of the whole pipeline would pass straight over it and report
+success.
+
+``council-run`` IS THE ONLY VERB THAT SPENDS A TOKEN, and it refuses to spend
+the first one until the approval gate passes (naming the check that failed)
+and until ``$ARGO_USER`` and the AMSC token both resolve -- neither is
+exported in any shell on this host and neither fails loudly mid-run. It
+drains ONE CHUNK AT A TIME behind ``.done`` markers (KBUtilLib issue 84; the
+daemon drains every claimable job, so submitting them all up front would
+rebuild the pending set the chunking exists to avoid), runs the retry pass as
+a declared stage, and RUNS IN THE FOREGROUND: on this host, detaching means
+``systemd-run --user --scope --collect``, which its help says, because
+``setsid``/``nohup``/``disown`` do not escape the launching unit's cgroup.
+The run logic itself lives in
+:mod:`kbutillib.domains.genome.ontology_mapping.council_run`.
 
 ``council-approve`` WRITES AN AUDIT TRAIL AND A BINDING CEILING, NOT AN
 AUTHENTICATION BOUNDARY. ``APPROVED.json`` is unsigned, there is no key
@@ -244,6 +258,68 @@ def _render(envelope: Dict[str, Any]) -> None:
         )
         return
 
+    if verb == "council-run":
+        summary = data.get("summary") or {}
+        retry = data.get("retry") or {}
+        halt = data.get("halt")
+        click.echo(f"run:             {data.get('run_file')}")
+        click.echo(f"query:           {data.get('query')}   run_id: {data.get('run_id')}")
+        click.echo(
+            f"approval:        {str(data.get('approved_quote_hash'))[:12]}  "
+            f"plan {str(data.get('plan_hash'))[:12]}"
+        )
+        click.echo(
+            f"complete:        {bool(data.get('complete'))}   "
+            f"chunks {summary.get('chunks_settled')}/{summary.get('chunks')} "
+            f"settled, {summary.get('retry_rounds')} retry round(s)"
+        )
+        click.echo(
+            "items:           "
+            f"{summary.get('items')} submitted, ok={summary.get('ok')}, "
+            f"error={summary.get('error')}, "
+            f"{float(summary.get('duration_s') or 0) / 3600:.2f} h"
+        )
+        _rows(
+            [
+                {
+                    "gateway": gateway,
+                    "ceiling_tokens": f"{int(ceiling):,}",
+                    "spent_tokens": f"{int((data.get('spend_by_gateway') or {}).get(gateway, 0)):,}",
+                    "endpoints": (data.get("endpoints_by_gateway") or {}).get(gateway, []),
+                }
+                for gateway, ceiling in sorted(
+                    (data.get("ceiling_tokens") or {}).items()
+                )
+            ],
+            ("gateway", "ceiling_tokens", "spent_tokens", "endpoints"),
+        )
+        _rows(
+            [
+                {
+                    "chunk": ("retry " if row.get("retry") else "") + str(row.get("index")),
+                    "job_id": row.get("job_id"),
+                    "items": row.get("items"),
+                    "ok": row.get("ok"),
+                    "error": row.get("error"),
+                    "duration_s": row.get("duration_s"),
+                    "outcome": row.get("outcome"),
+                    "pending_at_claim": (row.get("claim_probe") or {}).get("pending_calls"),
+                }
+                for row in data.get("chunks") or []
+                if isinstance(row, dict)
+            ],
+            ("chunk", "job_id", "items", "ok", "error", "duration_s", "outcome",
+             "pending_at_claim"),
+        )
+        click.echo(
+            f"retry pass:      ran={bool(retry.get('ran'))}, "
+            f"rounds={len(retry.get('rounds') or [])}/{retry.get('round_cap')}"
+            + (f" -- {retry.get('reason')}" if retry.get("reason") else "")
+        )
+        if halt:
+            click.echo(f"HALTED:          {halt.get('reason')}: {halt.get('detail')}")
+        return
+
     if verb == "council-export":
         counts = data.get("counts") or {}
         click.echo(f"export:          {data.get('out_path')}")
@@ -343,8 +419,12 @@ def ontomap_cmd() -> None:
                           per-gateway concurrency -- before anything is spent
     3. `council-approve`  a human approves one specific quote; stage 4 refuses
                           to run without an approval naming it
-    4. `council-run`      execute the approved plan (with the retry pass), and
-                          `council-status` to watch it
+    4. `council-run`      execute the approved plan -- one chunk at a time,
+                          behind a per-gateway token ceiling, with the retry
+                          pass -- and `council-status` to watch it. It runs in
+                          the FOREGROUND: see its help for the
+                          `systemd-run --user --scope --collect` this host
+                          requires to outlive the session.
     5. `council-publish`  `council-export` the verdicts, then hand them to the
                           clearinghouse manifest/shard/load/verify chain
 
@@ -880,7 +960,207 @@ def council_export_cmd(
 
 
 # ---------------------------------------------------------------------------
-# The remaining four pipeline verbs -- registered, NOT yet implemented
+# council-run -- stage 4
+# ---------------------------------------------------------------------------
+
+
+def _build_council_run(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-run`` envelope from the run record it writes.
+
+    OWNS NO RUN LOGIC. The gate, the ceiling, the chunk loop, the pacer and
+    the retry pass all live in
+    :func:`~kbutillib.domains.genome.ontology_mapping.council_run.council_run`;
+    this builder calls it, adds the derived headline numbers
+    (:func:`~kbutillib.domains.genome.ontology_mapping.council_run.run_summary`,
+    so the summary cannot drift from the chunk rows it summarises) and carries
+    the run's own warnings through rather than restating them.
+
+    Deliberately does NOT go through :func:`_ontomap`: stage 4 ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_run import council_run, run_summary
+
+    try:
+        record = dict(council_run(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+
+    warnings = list(record.get("warnings") or [])
+    data = {**record, "summary": run_summary(record)}
+    if not record.get("complete") and not warnings:
+        warnings.append(
+            "the run did not complete and said nothing about why; treat this "
+            "as a defect in the run record rather than as a finished run."
+        )
+    return _envelope("council-run", data=data, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-run")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json, QUOTE.json and APPROVED.json.",
+)
+@click.option(
+    "--no-resume",
+    "no_resume",
+    is_flag=True,
+    default=False,
+    help="Demand a FRESH, unconsumed approval and ignore the .done markers. "
+    "Default: resume, which is what honours them.",
+)
+@click.option(
+    "--profile",
+    default=None,
+    help="Re-route the bench. Default: the plan's own. A MODEL change is "
+    "refused by the approval gate; re-routing the same models is permitted.",
+)
+@click.option(
+    "--chunk-timeout",
+    "chunk_timeout",
+    default=None,
+    type=float,
+    metavar="SECONDS",
+    help="Per-chunk wall-clock budget, so one wedged chunk cannot hold the "
+    "run. Default: 21600 (6 h).",
+)
+@click.option(
+    "--poll-interval",
+    "poll_interval",
+    default=None,
+    type=float,
+    metavar="SECONDS",
+    help="How often the ceiling, the halts and the stop file are read. "
+    "Default: 5.",
+)
+@click.option(
+    "--retry-rounds",
+    "retry_rounds",
+    default=None,
+    type=int,
+    help="Cap on retry rounds over invalid_output items. Default: 2. 0 "
+    "declares the pass unnecessary, which is recorded as such.",
+)
+@click.option(
+    "--amsc-token",
+    "amsc_token",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Where the AMSC token is read from when the endpoint's api_key_env "
+    "is unset. Default: ~/.config/amsc/token.",
+)
+@click.option(
+    "--allow-unverified",
+    is_flag=True,
+    default=False,
+    help="Admit seats whose model nobody has confirmed serves what it claims.",
+)
+@click.option(
+    "--allow-unavailable",
+    is_flag=True,
+    default=False,
+    help="Queue a chunk even though an endpoint is unavailable here. Its "
+    "calls WAIT.",
+)
+@_json_option
+def council_run_cmd(
+    run_dir: str,
+    no_resume: bool,
+    profile: Optional[str],
+    chunk_timeout: Optional[float],
+    poll_interval: Optional[float],
+    retry_rounds: Optional[int],
+    amsc_token: Optional[str],
+    allow_unverified: bool,
+    allow_unavailable: bool,
+    as_json: bool,
+) -> None:
+    """Stage 4: execute an APPROVED plan, one chunk at a time, then retry.
+
+    SPENDS LLM TOKENS -- the only stage of this pipeline that does -- and
+    refuses to spend the first one until the approval gate passes and every
+    credential resolves.
+
+    \b
+    IT REFUSES TO START, NAMING THE CHECK, WHEN:
+      * any of the approval gate's six checks fails (approval_present,
+        quote_hash, plan_hash, bench_fingerprint, expires_at, consumed);
+      * `$ARGO_USER` is unset (`argo_user`) -- ARGO authenticates by ANL
+        username and it is exported in NO shell on this host;
+      * the AMSC token is neither in `$<api_key_env>` nor in
+        ~/.config/amsc/token (`amsc_token`).
+    Neither credential fails loudly once a run has started: the seats report
+    unavailable and the calls park, or the gateway answers 401 for nine
+    hours. This is what retires the `kbu-env.sh` wrapper -- the command
+    resolves what it needs and says where from.
+
+    ONE CHUNK AT A TIME, in plan order, with `.job`/`.done` markers: a
+    resumed run after a killed chunk re-executes only that chunk, against the
+    job it already submitted. One at a time is LOAD-BEARING, not caution --
+    the daemon drains every claimable job, so submitting them all up front
+    would rebuild the pending set the chunking exists to avoid (KBUtilLib
+    issue 84: claim cost 217 ms at 19k pending rows against 10.4 ms at 2k, a
+    10.8x throughput collapse).
+
+    THE RETRY PASS IS A DECLARED STAGE and the run is NOT reported complete
+    before it has run or been declared unnecessary. `invalid_output` is not
+    in the worker's RETRYABLE_KINDS and ARGO truncates silently, so a cut-off
+    reply is abandoned on its first attempt: 113 items failed that way in the
+    completed run and 105 came back on a plain retry, for 0.30% of run cost.
+
+    It HALTS on the approved per-gateway ceiling, on a gateway halt
+    (including a sustained rate limit) and on an operator stop -- a `STOP`
+    file in the run directory. Each halt is recorded with its reason on every
+    endpoint of the run; clear it with `kbu council endpoints reset-halt`
+    (and `reset-budget` for a ceiling halt) and resume.
+
+    \b
+    LAUNCHING A RUN THAT OUTLIVES ITS SESSION -- READ THIS.
+    THIS COMMAND RUNS IN THE FOREGROUND and detaching it is yours to do. On
+    this host a run that must survive the session has to be started under its
+    own scope:
+    \b
+        systemd-run --user --scope --collect \\
+            kbu ontomap council-run --run-dir <dir>
+    \b
+    `setsid`, `nohup` and `disown` DO NOT WORK here: none of them escapes the
+    launching unit's cgroup, and systemd kills everything in that cgroup when
+    the unit goes away -- without a trace in the run's own log. A 9-hour run
+    lost that way looks identical to a crash.
+    """
+    from ...domains.genome.ontology_mapping.council_run import (
+        AMSC_TOKEN_PATH,
+        DEFAULT_CHUNK_TIMEOUT_S,
+        DEFAULT_POLL_INTERVAL_S,
+        RETRY_ROUND_CAP,
+    )
+
+    _emit(
+        _build_council_run(
+            run_dir=run_dir,
+            resume=not no_resume,
+            profile=profile,
+            allow_unverified=allow_unverified,
+            allow_unavailable=allow_unavailable,
+            chunk_timeout_s=(
+                DEFAULT_CHUNK_TIMEOUT_S if chunk_timeout is None else chunk_timeout
+            ),
+            poll_interval_s=(
+                DEFAULT_POLL_INTERVAL_S if poll_interval is None else poll_interval
+            ),
+            retry_rounds=RETRY_ROUND_CAP if retry_rounds is None else retry_rounds,
+            amsc_token_path=amsc_token or AMSC_TOKEN_PATH,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The remaining pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
 #: The pipeline verbs this module registers but does not implement, with the
@@ -888,14 +1168,11 @@ def council_export_cmd(
 #: its help listing are settled before the stages land, and each one exits
 #: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
 #: pass over a missing stage and report success. ``council-plan``,
-#: ``council-quote``, ``council-approve`` and ``council-export`` have LEFT
-#: this list -- stages 1, 2, 3 and the first half of 5 landed -- which is the
-#: expected shape of progress through the five stages.
+#: ``council-quote``, ``council-approve``, ``council-run`` and
+#: ``council-export`` have LEFT this list -- stages 1, 2, 3, 4 and the first
+#: half of 5 landed -- which is the expected shape of progress through the
+#: five stages.
 _PLANNED_VERBS: tuple[tuple[str, str], ...] = (
-    (
-        "council-run",
-        "Stage 4: execute an approved plan, including the retry pass.",
-    ),
     (
         "council-status",
         "Stage 4: report progress, spend and blockers for a running plan.",

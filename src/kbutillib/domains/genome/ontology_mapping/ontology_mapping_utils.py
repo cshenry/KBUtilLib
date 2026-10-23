@@ -24,6 +24,11 @@ here because they are those same two capabilities plus bookkeeping:
   set from the clearinghouse, ranks it, partitions it three ways, chunks the
   submit side and writes ``PLAN.json``. The partition arithmetic itself is
   pure and lives in :mod:`.unrun`.
+* :func:`~.council_run.council_run` -- stage 4. Executes an APPROVED plan one
+  chunk at a time behind the approval gate and a per-gateway token ceiling,
+  then runs the retry pass. It lives in :mod:`.council_run` and is
+  re-exported here; it imports no numpy, because running a council is not
+  ranking.
 * :meth:`OntologyMappingUtils.council_export` -- stage 5's first half. Joins
   the plan's abstain and fanout records to the council store's verdicts and
   writes PARQUET, one row per input ``query_id``, on local scratch. The row
@@ -61,6 +66,13 @@ from .unrun import (  # noqa: F401 - public re-export
     unrun_items,
     unrun_set,
 )
+
+# Stage 4, re-exported for the same reason `unrun_set` is: the stage belongs
+# beside the other four, but the run stage does not RANK anything -- so
+# living here (where `go_text` pulls numpy/scikit-learn/joblib at import) would
+# make it unrunnable on a host that has no retrieval stack, for no reason.
+# See `council_run`'s own module docstring.
+from .council_run import council_run  # noqa: F401 - public re-export
 
 #: The backend name. Bump on any change to retrieval behaviour.
 BACKEND = "ontomap-go-text-union"

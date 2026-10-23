@@ -1112,6 +1112,22 @@ class CouncilConfig(BaseModel):
         self._queue_accounts = queue_accounts_final
         return self
 
+    def queue_account(self, queue: str) -> Optional[str]:
+        """The account *queue* was validated against, or ``None``.
+
+        :meth:`_validate_queues` already resolved every queue to exactly one
+        account (an enforced invariant) and recorded it; this exposes that
+        answer rather than letting a caller re-derive it from the queue's
+        seats, which is the derivation that could disagree.
+
+        The caller that needs it is the request pacer: a gateway's
+        requests-per-minute is an ACCOUNT limit, the account's queue children
+        are separate processes, and apportioning the rate between them means
+        knowing which of them share one account (see
+        ``daemon._queue_requests_per_minute``).
+        """
+        return self._queue_accounts.get(str(queue))
+
     def check_roster_against_queues(
         self, roster: Roster, *, job_id: Optional[str] = None
     ) -> None:

@@ -38,17 +38,16 @@ from kbutillib.cli import main
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
 #: The verbs still registered-but-not-implemented. ``council-quote``,
-#: ``council-plan``, ``council-approve`` and ``council-export`` have LEFT this
-#: list: stages 2, 1, 3 and the first half of 5 landed, so each is now a real
-#: verb -- one prices a plan, one writes one, one approves one with a ceiling
-#: on it, one exports the verdicts (see
-#: :class:`TestCouncilQuoteIsImplemented`,
+#: ``council-plan``, ``council-approve``, ``council-run`` and
+#: ``council-export`` have LEFT this list: stages 2, 1, 3, 4 and the first
+#: half of 5 landed, so each is now a real verb -- one prices a plan, one
+#: writes one, one approves one with a ceiling on it, one EXECUTES it, one
+#: exports the verdicts (see :class:`TestCouncilQuoteIsImplemented`,
 #: :class:`TestCouncilPlanIsImplemented`,
-#: :class:`TestCouncilApprove` and
+#: :class:`TestCouncilApprove`, :class:`TestCouncilRun` and
 #: :class:`TestCouncilExportIsImplemented`). A verb leaving this list is the
 #: expected shape of progress through the five stages.
 STUB_VERBS = [
-    "council-run",
     "council-status",
     "council-publish",
 ]
@@ -61,6 +60,7 @@ IMPLEMENTED_VERBS = [
     "council-plan",
     "council-quote",
     "council-approve",
+    "council-run",
     "council-export",
 ]
 
@@ -993,3 +993,293 @@ class TestCouncilApprove:
         assert "FileNotFoundError" in result.output
         assert "council-quote" in result.output
         assert "schema_version" not in result.output
+
+
+class TestCouncilRun:
+    """Stage 4 landed, so ``council-run`` must no longer refuse.
+
+    The run itself -- the gate, the ceiling, the chunk loop, the retry pass --
+    is covered beside the module that owns it
+    (``tests/domains/test_ontomap_council_run.py``). What is pinned here is
+    the OPERATOR SURFACE: that the verb is no longer a stub, that the help
+    documents the ``systemd-run`` this host requires (a 9-hour run started
+    with ``nohup`` is killed without a trace, which is the single most
+    expensive thing an operator can get wrong about this command), that the
+    options reach the library unchanged, and that a refusal is a clean CLI
+    error naming its check rather than a traceback.
+
+    Like ``council-approve``, this verb does NOT go through ``_ontomap()``:
+    stage 4 ranks nothing, so it must not pay for the retrieval backend's
+    numpy/scikit-learn/joblib stack. These tests therefore run on any host.
+    """
+
+    def test_it_is_not_registered_as_a_stub(self) -> None:
+        assert "council-run" not in [name for name, _ in ontomap._PLANNED_VERBS]
+        assert "council-run" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-run", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_invoked_bare_it_is_a_usage_error_not_a_refusal(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-run"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--run-dir" in result.output
+
+    def test_the_help_documents_the_systemd_run_requirement(
+        self, runner: CliRunner
+    ) -> None:
+        """`nohup` on this host loses a 9-hour run without a trace."""
+        result = runner.invoke(main, ["ontomap", "council-run", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "systemd-run --user --scope --collect" in result.output
+        for word in ("setsid", "nohup", "disown", "cgroup"):
+            assert word in result.output, f"the help does not mention {word}"
+        assert "FOREGROUND" in result.output
+
+    def test_the_help_names_both_credential_checks(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-run", "--help"])
+        assert "argo_user" in result.output
+        assert "amsc_token" in result.output
+        assert "ARGO_USER" in result.output
+
+    def test_the_help_says_the_retry_pass_gates_completeness(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-run", "--help"])
+        assert "RETRY PASS IS A DECLARED STAGE" in result.output
+        assert "issue 84" in result.output
+
+    def test_json_emits_exactly_one_envelope_carrying_the_run(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        record = {
+            "schema_version": 1,
+            "run_id": "2026-10-23-adp1",
+            "query": "go_mf@1",
+            "complete": True,
+            "chunks": [
+                {
+                    "index": 0,
+                    "job_id": "job-1",
+                    "items": 2,
+                    "ok": 2,
+                    "error": 0,
+                    "duration_s": 1.5,
+                    "tokens_by_gateway": {"argo": 10},
+                    "outcome": "settled",
+                }
+            ],
+            "retry": {"ran": False, "declared_unnecessary": True, "rounds": [],
+                      "round_cap": 2, "reason": "nothing to re-ask"},
+            "halt": None,
+            "warnings": [],
+            "run_file": str(tmp_path / "RUN.json"),
+        }
+        seen: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **kwargs: (seen.update(kwargs), record)[1],
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.output)
+        assert set(envelope) == ENVELOPE_KEYS
+        assert envelope["verb"] == "council-run"
+        assert envelope["data"]["run_id"] == "2026-10-23-adp1"
+        # The derived summary, so what an operator reads cannot drift from
+        # the chunk rows it is a summary OF.
+        assert envelope["data"]["summary"]["chunks"] == 1
+        assert envelope["data"]["summary"]["ok"] == 2
+
+    def test_the_operators_options_reach_the_library_unchanged(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        seen: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **kwargs: (seen.update(kwargs), {"complete": True, "warnings": []})[1],
+        )
+        result = runner.invoke(
+            main,
+            [
+                "ontomap", "council-run",
+                "--run-dir", str(tmp_path),
+                "--no-resume",
+                "--profile", "go_council_v3",
+                "--chunk-timeout", "60",
+                "--poll-interval", "0.5",
+                "--retry-rounds", "1",
+                "--amsc-token", str(tmp_path / "tok"),
+                "--allow-unverified",
+                "--allow-unavailable",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["run_dir"] == str(tmp_path)
+        assert seen["resume"] is False
+        assert seen["profile"] == "go_council_v3"
+        assert seen["chunk_timeout_s"] == 60.0
+        assert seen["poll_interval_s"] == 0.5
+        assert seen["retry_rounds"] == 1
+        assert seen["amsc_token_path"] == str(tmp_path / "tok")
+        assert seen["allow_unverified"] is True
+        assert seen["allow_unavailable"] is True
+
+    def test_the_defaults_are_the_librarys_own(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        from kbutillib.domains.genome.ontology_mapping.council_run import (
+            AMSC_TOKEN_PATH,
+            DEFAULT_CHUNK_TIMEOUT_S,
+            DEFAULT_POLL_INTERVAL_S,
+            RETRY_ROUND_CAP,
+        )
+
+        seen: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **kwargs: (seen.update(kwargs), {"complete": True, "warnings": []})[1],
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["resume"] is True
+        assert seen["chunk_timeout_s"] == DEFAULT_CHUNK_TIMEOUT_S
+        assert seen["poll_interval_s"] == DEFAULT_POLL_INTERVAL_S
+        assert seen["retry_rounds"] == RETRY_ROUND_CAP
+        assert seen["amsc_token_path"] == AMSC_TOKEN_PATH
+        assert seen["profile"] is None
+
+    def test_a_refusal_is_a_clean_cli_error_naming_its_check(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        from kbutillib.domains.genome.ontology_mapping.council_run import RunRefused
+
+        def _refuse(**_kwargs: Any) -> Any:
+            raise RunRefused("argo_user", "$ARGO_USER is unset or empty")
+
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run", _refuse
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "argo_user" in result.output
+        assert "schema_version" not in result.output
+
+    def test_an_approval_refusal_names_the_gate_check_it_failed(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        from kbutillib.domains.ai.council.approval import ApprovalRefused
+
+        def _refuse(**_kwargs: Any) -> Any:
+            raise ApprovalRefused("expires_at", "the approval expired")
+
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run", _refuse
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path)]
+        )
+        assert result.exit_code != 0
+        assert "expires_at" in result.output
+
+    def test_the_human_rendering_is_the_same_dict(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        record = {
+            "run_id": "2026-10-23-adp1",
+            "query": "go_mf@1",
+            "complete": False,
+            "ceiling_tokens": {"argo": 1500},
+            "spend_by_gateway": {"argo": 2000},
+            "endpoints_by_gateway": {"argo": ["argo"]},
+            "chunks": [
+                {
+                    "index": 0,
+                    "job_id": "job-1",
+                    "items": 2,
+                    "ok": 2,
+                    "error": 0,
+                    "duration_s": 1.0,
+                    "outcome": "halted",
+                    "tokens_by_gateway": {"argo": 2000},
+                    "claim_probe": {"pending_calls": 2},
+                }
+            ],
+            "retry": {"ran": False, "declared_unnecessary": False, "rounds": [],
+                      "round_cap": 2, "reason": "not run: the chunk pass halted"},
+            "halt": {"reason": "ceiling", "detail": "overshoot 500"},
+            "warnings": ["the run HALTED (ceiling)"],
+        }
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **_kw: record,
+        )
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(ontomap, "_render", lambda env: captured.update(env))
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert captured["verb"] == "council-run"
+        assert captured["data"]["halt"]["reason"] == "ceiling"
+
+    def test_the_human_rendering_names_the_halt_and_the_ceiling(
+        self, runner: CliRunner, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **_kw: {
+                "run_id": "r",
+                "query": "go_mf@1",
+                "complete": False,
+                "ceiling_tokens": {"argo": 1500},
+                "spend_by_gateway": {"argo": 2000},
+                "endpoints_by_gateway": {"argo": ["argo"]},
+                "chunks": [],
+                "retry": {"ran": False, "round_cap": 2, "rounds": [], "reason": "not run"},
+                "halt": {"reason": "ceiling", "detail": "overshoot 500"},
+                "warnings": [],
+            },
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "complete:" in result.output
+        assert "HALTED:" in result.output
+        assert "ceiling" in result.output
+        assert "1,500" in result.output and "2,000" in result.output
+        assert "retry pass:" in result.output
+
+    def test_an_incomplete_run_that_says_nothing_is_warned_about(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """``warnings`` is never empty for a degraded answer."""
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_run.council_run",
+            lambda **_kw: {"complete": False, "warnings": []},
+        )
+        # Separated streams: the warning goes to stderr and stdout must still
+        # carry exactly one envelope (``_emit``'s stdout discipline).
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-run", "--run-dir", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["warnings"], (
+            "an incomplete run with no stated reason must not read as clean"
+        )

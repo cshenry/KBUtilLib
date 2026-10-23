@@ -532,6 +532,33 @@ class TestRunIdentity:
             assert row["roster_fingerprint"] == plan["roster_fingerprint"]
             assert row["job_ids"] == ["job-chunk-0"]
 
+    def test_every_row_carries_the_plans_per_seat_routes_as_provenance(
+        self, run_dir: Path, scratch: Path
+    ) -> None:
+        """The plan's transport_allocation reaches the published payload.
+
+        Stage 1 records WHICH gateway each seat was routed over because that
+        is the thing the pipeline iterates on to allocate token cost; the
+        published row carries the per-seat route_fingerprint so it can still
+        say where its answer came from. It is provenance, never a key --
+        ``clearinghouse_parameters.COUNCIL_REFUSED_KEYS`` refuses it in the
+        parameter set, because a re-routed seat must re-select nothing.
+        """
+        from kbutillib.domains.genome.ontology_mapping.verdicts import (
+            route_fingerprint_cells,
+        )
+
+        stage, plan = _planned(run_dir, scratch)
+        expected = route_fingerprint_cells(plan["transport_allocation"])
+        assert expected, "the plan recorded no route fingerprints to publish"
+        export = stage.council_export(
+            run_dir, scratch / "verdicts.parquet", job_ids=["job-chunk-0"]
+        )
+        rows = _read(export["out_path"])
+        assert rows
+        for row in rows:
+            assert row["route_fingerprints"] == expected
+
     def test_the_export_record_names_the_parameter_set_it_belongs_to(
         self, run_dir: Path, scratch: Path
     ) -> None:

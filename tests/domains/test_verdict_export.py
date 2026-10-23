@@ -525,6 +525,71 @@ class TestRunIdentity:
         assert "roster_fingerprint" in vx.EXPORT_IDENTITY_FIELDS
         assert "bench_fingerprint" not in vx.EXPORT_COLUMNS
 
+    def test_the_per_seat_route_is_published_as_provenance_too(self) -> None:
+        """Beside the roster fingerprint, and for the same reason.
+
+        ``route_fingerprint``'s own docstring puts it as "where did this come
+        from", not "is this the same question", so it rides in the published
+        PAYLOAD and is refused as a parameter-set key
+        (``clearinghouse_parameters.COUNCIL_REFUSED_KEYS``).
+        """
+        transport = [
+            {
+                "role": "critic",
+                "seat_name": "critic",
+                "endpoint": "argo",
+                "gateway": "argo",
+                "route_fingerprint": "e" * 64,
+            }
+        ]
+        built = _build(
+            abstain=[_abstain(9, "hypothetical protein", "placeholder")],
+            fanout=[_fanout(1, "t0", "glucokinase")],
+            verdicts={"t0": _settled(_unanimous_verdict())},
+            route_fingerprints=transport,
+        )
+        assert built["rows"], "expected rows on both partitions"
+        for row in built["rows"]:
+            # Three published fields, not the whole allocation: the endpoint
+            # and gateway names are deployment facts, not result provenance,
+            # and they do not belong on 47,341 clearinghouse rows.
+            assert row["route_fingerprints"] == [
+                {
+                    "role": "critic",
+                    "seat_name": "critic",
+                    "route_fingerprint": "e" * 64,
+                }
+            ]
+
+    def test_a_run_with_no_recorded_transport_still_publishes(self) -> None:
+        """An empty list, not a missing column and not a refusal.
+
+        ``route_fingerprints`` is deliberately NOT in
+        :data:`vx.EXPORT_IDENTITY_FIELDS`: a run whose plan recorded no
+        transport allocation is still publishable, and an empty list is the
+        honest cell for it.
+        """
+        assert "route_fingerprints" not in vx.EXPORT_IDENTITY_FIELDS
+        built = _build(fanout=[_fanout(1, "t0", "glucokinase")],
+                       verdicts={"t0": _settled(_unanimous_verdict())})
+        (row,) = built["rows"]
+        assert row["route_fingerprints"] == []
+
+    def test_a_seat_with_no_route_fingerprint_is_dropped_not_blanked(self) -> None:
+        """A published row claiming a route fingerprint of "" is a record of
+        nothing, so the seat is left out instead."""
+        cells = vx.route_fingerprint_cells(
+            [
+                {"role": "proposer_1", "seat_name": "p1", "route_fingerprint": ""},
+                {"role": "critic", "seat_name": "c", "route_fingerprint": "f" * 64},
+                "not a mapping",
+            ]
+        )
+        assert cells == [
+            {"role": "critic", "seat_name": "c", "route_fingerprint": "f" * 64}
+        ]
+        assert vx.route_fingerprint_cells(None) == []
+
 
 # ---------------------------------------------------------------------------
 # The content flag

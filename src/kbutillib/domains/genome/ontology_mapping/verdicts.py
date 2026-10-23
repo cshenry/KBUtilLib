@@ -85,6 +85,7 @@ __all__ = [
     "export_rows",
     "export_schema",
     "no_functional_content",
+    "route_fingerprint_cells",
     "verdicts_by_item",
     "write_verdict_parquet",
 ]
@@ -110,6 +111,7 @@ EXPORT_COLUMNS: Tuple[str, ...] = (
     "query_name",
     "query_version",
     "roster_fingerprint",
+    "route_fingerprints",
     "mapping_hash",
     "job_ids",
     "retried",
@@ -120,7 +122,10 @@ EXPORT_COLUMNS: Tuple[str, ...] = (
 #: the corpus and the transport does not, so a seat re-routed to a different
 #: gateway must not re-partition all 47,341 clearinghouse functions (see
 #: :func:`~kbutillib.domains.ai.council.types.bench_fingerprint`). It rides
-#: along here so a published row can still say which roster produced it.
+#: along here so a published row can still say which roster produced it, as
+#: does the per-seat ``route_fingerprints`` column -- which is NOT in this
+#: tuple, because a run whose plan recorded no transport allocation is still
+#: publishable and an empty list is the honest cell for it.
 EXPORT_IDENTITY_FIELDS: Tuple[str, ...] = (
     "query_name",
     "query_version",
@@ -159,6 +164,7 @@ def export_rows(
     abstained_at: Optional[str] = None,
     genomes: Optional[Mapping[str, Sequence[str]]] = None,
     retry_job_ids: Sequence[str] = (),
+    route_fingerprints: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Build the export's rows, one per input ``query_id``.
 
@@ -195,6 +201,11 @@ def export_rows(
             empty list rather than absent.
         retry_job_ids: job ids belonging to the run's retry pass. A row whose
             verdict came from one of them is marked ``retried``.
+        route_fingerprints: the plan's ``transport_allocation`` rows, from
+            which :func:`route_fingerprint_cells` projects the per-seat
+            ``route_fingerprint``. PROVENANCE, never a key -- see
+            :data:`EXPORT_IDENTITY_FIELDS`. Omitted or empty, the column is
+            an empty list on every row.
 
     Returns:
         ``{"rows": [...], "counts": {...}}``. ``counts`` carries ``inputs``,
@@ -220,6 +231,11 @@ def export_rows(
         )
 
     identity_cells = {key: str(identity[key]) for key in EXPORT_IDENTITY_FIELDS}
+    # Beside the identity, not part of it: the per-seat route is PROVENANCE,
+    # the same value on every row of one run, and it travels in the published
+    # result PAYLOAD because the clearinghouse parameter set refuses it as a
+    # key (clearinghouse_parameters.COUNCIL_REFUSED_KEYS).
+    identity_cells["route_fingerprints"] = route_fingerprint_cells(route_fingerprints)
     all_job_ids = [str(jid) for jid in job_ids]
     retry = {str(jid) for jid in retry_job_ids}
     genome_map = {str(k): list(v or ()) for k, v in dict(genomes or {}).items()}
@@ -414,6 +430,40 @@ def no_functional_content(verdict: Mapping[str, Any]) -> Optional[bool]:
 # ---------------------------------------------------------------------------
 
 
+def route_fingerprint_cells(
+    transport: Optional[Iterable[Mapping[str, Any]]],
+) -> List[Dict[str, str]]:
+    """Project ``PLAN.json``'s ``transport_allocation`` to the export's cells.
+
+    Stage 1 records the whole allocation per seat -- endpoint, gateway, route
+    spelling, canonical model, ``route_fingerprint`` -- because WHICH gateway
+    a seat is routed over is the thing the pipeline iterates on to allocate
+    token cost. Only three of those fields are published per row: the role,
+    the seat name, and the route fingerprint that stands for the rest. The
+    endpoint and gateway names are deployment facts, not result provenance,
+    and they do not belong on 47,341 clearinghouse rows.
+
+    A seat with no recorded ``route_fingerprint`` is DROPPED rather than
+    written with an empty digest: a published row claiming a route fingerprint
+    of ``""`` would be a provenance record of nothing.
+    """
+    cells: List[Dict[str, str]] = []
+    for seat in transport or ():
+        if not isinstance(seat, Mapping):
+            continue
+        fingerprint = str(seat.get("route_fingerprint") or "")
+        if not fingerprint:
+            continue
+        cells.append(
+            {
+                "role": str(seat.get("role") or ""),
+                "seat_name": str(seat.get("seat_name") or ""),
+                "route_fingerprint": fingerprint,
+            }
+        )
+    return cells
+
+
 def _pick_confidences(
     verdict: Mapping[str, Any], go_ids: Sequence[str]
 ) -> List[Optional[str]]:
@@ -602,6 +652,18 @@ def export_schema() -> Any:
         "query_name": pa.string(),
         "query_version": pa.string(),
         "roster_fingerprint": pa.string(),
+        # DECLARED as a list of structs, the same shape `votes` uses, so an
+        # export of a run with no recorded transport does not infer
+        # list<null> and make two files of one source disagree.
+        "route_fingerprints": pa.list_(
+            pa.struct(
+                [
+                    ("role", pa.string()),
+                    ("seat_name", pa.string()),
+                    ("route_fingerprint", pa.string()),
+                ]
+            )
+        ),
         "mapping_hash": pa.string(),
         "job_ids": pa.list_(pa.string()),
         "retried": pa.bool_(),

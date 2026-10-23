@@ -818,6 +818,12 @@ class OntologyMappingUtils(SharedEnvUtils):
             abstained_at=str(plan.get("generated_at") or "") or None,
             genomes=genomes,
             retry_job_ids=resolved_retries,
+            # PROVENANCE into the published payload: the per-seat route the
+            # plan recorded. It is deliberately NOT in the parameter set --
+            # clearinghouse_parameters.COUNCIL_REFUSED_KEYS refuses it there,
+            # because a seat re-routed to another gateway must not
+            # re-partition the corpus.
+            route_fingerprints=plan.get("transport_allocation"),
         )
         written = write_verdict_parquet(built["rows"], out_path)
 

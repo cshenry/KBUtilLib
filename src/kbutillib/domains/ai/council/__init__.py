@@ -67,6 +67,7 @@ __all__ = [
     "data_hash",
     "prompt_hash",
     "route_fingerprint",
+    "bench_fingerprint",
     "default_reuse_namespace",
     "seat_generation_params",
     # protocols
@@ -142,6 +143,7 @@ _MODULE_MAP: dict[str, str] = {
     "data_hash": "types",
     "prompt_hash": "types",
     "route_fingerprint": "types",
+    "bench_fingerprint": "types",
     "default_reuse_namespace": "types",
     "seat_generation_params": "types",
     # -- protocols ------------------------------------------------------

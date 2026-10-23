@@ -15,6 +15,7 @@ import pytest
 
 from kbutillib.domains.ai.council import (
     Ballot,
+    bench_fingerprint,
     CompletionRequest,
     ConfigError,
     CouncilError,
@@ -293,6 +294,93 @@ class TestRosterFingerprint:
             proposers=list(reversed(base.proposers)),
         )
         assert swapped.fingerprint() != base.fingerprint()
+
+
+class TestBenchFingerprint:
+    """bench_fingerprint PARTITIONS a corpus, so only a model may move it.
+
+    The whole point of the amendment it implements (Chris, 2026-10-22): the
+    bench partitions the corpus and the transport does not.  A seat moving
+    from the codex CLI to MAG is a cost optimisation, and if it moved this
+    hash it would re-partition all 47,341 clearinghouse functions and
+    re-charge ~199M tokens.
+    """
+
+    # ``roster_moves`` is whether the PROVENANCE fingerprint moves for the
+    # same edit.  Every field here leaves the bench alone; the five that do
+    # move Roster.fingerprint() are exactly why it cannot be the partition
+    # key, and the endpoint ALIAS moves neither (it never was in either).
+    @pytest.mark.parametrize(
+        "field,value,roster_moves",
+        [
+            ("endpoint_kind", "openai", True),
+            ("model", "a-different-route-spelling", True),
+            ("max_output_tokens", 8000, True),
+            ("temperature", 0.7, True),
+            ("extra", {"top_p": 0.5}, True),
+            ("endpoint", "anl-argo", False),
+        ],
+    )
+    def test_a_transport_only_change_leaves_it_unchanged(
+        self, field, value, roster_moves
+    ):
+        base = minimal_roster()
+        moved = minimal_roster(
+            critic=seat("critic", "anthropic/claude-sonnet-5", **{field: value})
+        )
+        assert bench_fingerprint(moved) == bench_fingerprint(base)
+        assert (moved.fingerprint() != base.fingerprint()) is roster_moves
+
+    def test_a_base_url_or_account_change_leaves_it_unchanged(self):
+        """The endpoint CONFIG never reaches it: it is not a seat field."""
+        base = minimal_roster()
+        spec = base.critic
+        assert route_fingerprint(
+            spec, {"kind": "argo", "base_url": "https://argo.example/v1", "account": "a"}
+        ) != route_fingerprint(
+            spec, {"kind": "openai", "base_url": "https://mag.example/v1", "account": "b"}
+        )
+        assert bench_fingerprint(base) == bench_fingerprint(minimal_roster())
+
+    def test_a_canonical_model_change_moves_it(self):
+        base = minimal_roster()
+        rebenched = minimal_roster(
+            critic=seat("critic", "anthropic/claude-sonnet-6")
+        )
+        assert bench_fingerprint(rebenched) != bench_fingerprint(base)
+
+    def test_a_seat_moving_role_moves_it(self):
+        base = minimal_roster()
+        swapped = minimal_roster(proposers=list(reversed(base.proposers)))
+        assert bench_fingerprint(swapped) != bench_fingerprint(base)
+
+    def test_it_is_a_function_of_role_and_canonical_model_alone(self):
+        """Two rosters agreeing on (role, canonical_model) and nothing else."""
+        argo_bench = minimal_roster()
+        mixed_bench = Roster(
+            proposers=[
+                seat(
+                    "p1",
+                    "google/gemini-3.5-flash",
+                    endpoint="mag",
+                    endpoint_kind="openai",
+                    model="gemini-3.5-flash-latest",
+                    max_output_tokens=12000,
+                    temperature=0.4,
+                    extra={"top_p": 0.8},
+                ),
+                seat("p2", "openai/gpt-5.4", endpoint="codex", endpoint_kind="codex_cli"),
+            ],
+            critic=seat(
+                "cr", "anthropic/claude-sonnet-5", endpoint="cli", endpoint_kind="claude_cli"
+            ),
+            meta=seat("mt", "anthropic/claude-opus-5", endpoint="mag", endpoint_kind="openai"),
+        )
+        assert bench_fingerprint(mixed_bench) == bench_fingerprint(argo_bench)
+        assert mixed_bench.fingerprint() != argo_bench.fingerprint()
+
+    def test_it_is_a_sha256_hex_digest(self):
+        assert len(bench_fingerprint(minimal_roster())) == 64
 
 
 class TestContentHashes:

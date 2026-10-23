@@ -1303,6 +1303,49 @@ class CouncilUtils(SharedEnvUtils):
         """List models.  The synchronous :meth:`models_async`."""
         return _run_sync(self.models_async(endpoint))
 
+    # -- the token model a quote is priced from ---------------------------
+
+    def token_model(
+        self,
+        profile: Optional[str] = None,
+        upper_percentile: Optional[float] = None,
+        **seat_overrides: Any,
+    ) -> Dict[str, Any]:
+        """Fit this store's measured token model for a profile's bench.
+
+        Spends NOTHING and contacts nothing: it is a read of the store's own
+        ``attempts``/``calls`` history (see
+        :func:`~.council.quote.fit_token_model`).  A seat this store has never
+        run is reported with ``basis = "projected"`` and the fallback it was
+        drawn from, never as zero.
+
+        Returns:
+            The published ``data`` shape: ``profile``, ``bench_fingerprint``,
+            ``roster_fingerprint`` and the fit's own
+            :meth:`~.council.quote.TokenModel.to_dict` keys
+            (``upper_percentile``, ``seats`` with a sample size each,
+            ``n_measured``, ``n_projected``).
+        """
+        from .council.quote import DEFAULT_UPPER_PERCENTILE, fit_token_model
+        from .council.types import bench_fingerprint
+
+        store = self.require_schema()
+        roster = self.roster(profile, **seat_overrides)
+        model = fit_token_model(
+            store,
+            seats=roster,
+            upper_percentile=(
+                DEFAULT_UPPER_PERCENTILE if upper_percentile is None else float(upper_percentile)
+            ),
+        )
+        data: Dict[str, Any] = {
+            "profile": profile or self.config().default_profile,
+            "bench_fingerprint": bench_fingerprint(roster),
+            "roster_fingerprint": roster.fingerprint(),
+        }
+        data.update(model.to_dict())
+        return data
+
     # -- the deployed GO council service ----------------------------------
 
     def service_client(self, **kwargs: Any) -> Any:

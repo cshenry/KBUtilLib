@@ -935,3 +935,107 @@ class TestDaemonVerbs:
         )
         assert result.exit_code != 0
         assert "kbu council db init" in result.output
+
+
+class TestTokenModel:
+    """``token-model`` is the fit a quote is priced from, and it spends nothing."""
+
+    def test_an_empty_store_projects_every_seat_and_warns(
+        self, runner: CliRunner, fake_council: List[str]
+    ) -> None:
+        envelope = _envelope(runner.invoke(main, fake_council + ["token-model", "--json"]))
+        assert envelope["verb"] == "token-model"
+        data = envelope["data"]
+        assert data["profile"] == "test"
+        assert len(data["bench_fingerprint"]) == 64
+        assert data["bench_fingerprint"] != data["roster_fingerprint"]
+        assert [seat["seat_name"] for seat in data["seats"]] == [
+            "proposer_1",
+            "proposer_2",
+            "proposer_3",
+            "critic",
+            "meta",
+        ]
+        assert data["n_measured"] == 0 and data["n_projected"] == 5
+        for seat in data["seats"]:
+            assert seat["basis"] == "projected"
+            assert seat["n_attempts"] == 0
+            assert seat["input_tokens_per_char"] > 0
+            assert seat["fallback"]
+        # Rule 3 of the output contract: a degraded answer is also a warning.
+        assert len(envelope["warnings"]) == 5
+
+    def test_a_worked_job_makes_the_seats_that_ran_measured(
+        self,
+        runner: CliRunner,
+        fake_council: List[str],
+        items_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The fit comes from the store's own attempts, with sample sizes.
+
+        The fake reports token counts the way a gateway does, which is all the
+        fit reads -- ``FakeBackend``'s own default usage is zeroes, and a zero
+        is not a sample.
+        """
+        backend = _ServingFake(
+            _script, usage={"prompt_tokens": 1500, "completion_tokens": 120}
+        )
+        monkeypatch.setattr(
+            CouncilUtils,
+            "build_backends",
+            lambda self, roster, allow_unverified=None: {"local": backend},
+        )
+        run = _envelope(
+            runner.invoke(
+                main, fake_council + ["run", "--query", "go_mf", "--input", str(items_file), "--json"]
+            )
+        )
+        assert run["data"]["status"] == "done"
+
+        envelope = _envelope(runner.invoke(main, fake_council + ["token-model", "--json"]))
+        by_seat = {seat["seat_name"]: seat for seat in envelope["data"]["seats"]}
+        for name in ("proposer_1", "proposer_2", "proposer_3", "critic"):
+            seat = by_seat[name]
+            assert seat["basis"] == "measured", name
+            assert seat["n_attempts"] == 2, name
+            assert seat["fallback"] is None
+            # 1500 input tokens over the two items' prompt characters.
+            assert seat["input_tokens_per_char"] > 0
+            assert seat["output_tokens_mean"] == 120.0
+            assert seat["output_tokens_upper"] == 120.0
+        # The proposers were unanimous, so meta never ran: no history, and
+        # the fit says projected rather than inventing a zero.
+        assert by_seat["meta"]["basis"] == "projected"
+        assert envelope["warnings"] == [
+            "meta (meta) has no measured history in this store; projected from "
+            + str(by_seat["meta"]["fallback"])
+        ]
+
+    def test_the_human_rendering_is_a_rendering_of_the_same_dict(
+        self, runner: CliRunner, fake_council: List[str]
+    ) -> None:
+        result = runner.invoke(main, fake_council + ["token-model"])
+        assert result.exit_code == 0, result.output
+        assert "n_attempts" in result.output
+        assert "projected seats: 5" in result.output
+        assert "meta fallback:" in result.output
+
+    def test_a_schemaless_store_sends_the_user_to_db_init(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        config_path = _write_config(tmp_path, _fake_council_config(tmp_path))
+        result = runner.invoke(
+            main,
+            [
+                "council",
+                "--config",
+                str(config_path),
+                "--store",
+                f"sqlite:///{tmp_path}/council.sqlite",
+                "token-model",
+                "--json",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "db init" in result.output

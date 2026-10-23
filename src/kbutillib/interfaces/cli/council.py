@@ -273,6 +273,33 @@ def _render(envelope: Dict[str, Any]) -> None:
             _rows(rows, ("alias", "endpoint", "kind", "served_name", "canonical", "verified"))
         return
 
+    if verb == "token-model":
+        click.echo(
+            f"profile: {data.get('profile')}   bench: {str(data.get('bench_fingerprint'))[:12]}"
+            f"   roster: {str(data.get('roster_fingerprint'))[:12]}"
+        )
+        _rows(
+            data.get("seats") or [],
+            (
+                "seat_name",
+                "role",
+                "input_tokens_per_char",
+                "output_tokens_mean",
+                "output_tokens_upper",
+                "n_attempts",
+                "basis",
+            ),
+        )
+        click.echo(
+            f"output band: p{data.get('upper_percentile')}   "
+            f"measured seats: {data.get('n_measured')}   "
+            f"projected seats: {data.get('n_projected')}"
+        )
+        for seat in data.get("seats") or []:
+            if seat.get("fallback"):
+                click.echo(f"{seat.get('seat_name')} fallback: {seat['fallback']}")
+        return
+
     click.echo(json.dumps(data, indent=2, sort_keys=True, default=_jsonable))
 
 
@@ -1313,3 +1340,69 @@ def models_list_cmd(ctx: click.Context, endpoint: Optional[str], as_json: bool) 
         ),
         as_json=as_json,
     )
+
+
+# ---------------------------------------------------------------------------
+# token-model
+# ---------------------------------------------------------------------------
+
+
+def _build_token_model(
+    util: Any, *, profile: Optional[str], seat: Sequence[str], upper_percentile: Optional[float]
+) -> Dict[str, Any]:
+    """Build the ``token-model`` envelope: the fit, its sample sizes, its gaps.
+
+    Every PROJECTED seat is also a warning, per the module's third structural
+    rule: a quote priced off a seat this store has never run is a degraded
+    answer, and an operator approving the cost has to see that before the
+    number, not after it.
+    """
+    data = dict(
+        util.token_model(
+            profile, upper_percentile=upper_percentile, **_parse_seats(seat)
+        )
+    )
+    warnings = [
+        f"{seat_fit.get('seat_name')} ({seat_fit.get('role')}) has no measured history "
+        f"in this store; projected from {seat_fit.get('fallback')}"
+        for seat_fit in data.get("seats") or []
+        if seat_fit.get("basis") == "projected"
+    ]
+    return _envelope("token-model", data=data, warnings=warnings)
+
+
+@council_cmd.command(name="token-model")
+@click.option("--profile", default=None, help="Profile whose bench to fit. Default: the configured default.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--upper-percentile",
+    default=None,
+    type=float,
+    help="Percentile for the output-token upper band. Default: 95.",
+)
+@_json_option
+@click.pass_context
+def token_model_cmd(
+    ctx: click.Context,
+    profile: Optional[str],
+    seat: Sequence[str],
+    upper_percentile: Optional[float],
+    as_json: bool,
+) -> None:
+    """Show the fitted token model a quote is priced from, with sample sizes.
+
+    Reads this store's own measured history and SPENDS NOTHING -- it contacts
+    no gateway and makes no call. A seat with no history is reported
+    ``projected`` against a named fallback, and as a warning.
+    """
+    util = _ready(ctx)
+    try:
+        envelope = _build_token_model(
+            util,
+            profile=profile,
+            seat=seat,
+            upper_percentile=upper_percentile,
+        )
+    except Exception as exc:  # noqa: BLE001 - a config or store failure is a CLI error
+        raise _fail(exc) from exc
+    _emit(envelope, as_json=as_json)

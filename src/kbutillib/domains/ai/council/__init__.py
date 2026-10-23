@@ -70,6 +70,11 @@ __all__ = [
     "bench_fingerprint",
     "default_reuse_namespace",
     "seat_generation_params",
+    # quote
+    "SeatTokenFit",
+    "TokenModel",
+    "fit_token_model",
+    "item_prompt_chars",
     # protocols
     "Backend",
     "QueryRenderer",
@@ -146,6 +151,11 @@ _MODULE_MAP: dict[str, str] = {
     "bench_fingerprint": "types",
     "default_reuse_namespace": "types",
     "seat_generation_params": "types",
+    # -- quote (the token model a cost quote is priced from) -------------
+    "SeatTokenFit": "quote",
+    "TokenModel": "quote",
+    "fit_token_model": "quote",
+    "item_prompt_chars": "quote",
     # -- protocols ------------------------------------------------------
     "Backend": "protocols",
     "QueryRenderer": "protocols",

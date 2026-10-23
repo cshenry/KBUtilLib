@@ -1080,7 +1080,6 @@ def _refuse_inside_run_dir(out_path: Path, run_dir: Path) -> None:
             "verdict parquet is the shard's input and belongs on local "
             "scratch. Pass out_path= under a scratch root, or omit it."
         )
-    return out_path
 
 
 def _menu_of(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

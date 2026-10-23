@@ -88,6 +88,28 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def _separated_runner() -> CliRunner:
+    """A runner that keeps stdout and stderr APART.
+
+    Only for tests that parse ``result.stdout`` as JSON while a warning is
+    also emitted (warnings go to stderr; see ``_emit``'s stdout discipline).
+    The plain ``runner`` fixture above deliberately keeps click's default
+    (mixed streams under click < 8.2), because the rest of this file's tests
+    -- the ``ClickException`` and stub-verb cases -- check ``result.output``
+    expecting the error text that ``click.ClickException`` writes to stderr
+    to be folded into it.
+
+    Click 8.2 removed ``mix_stderr`` and made separate streams the only
+    behaviour, so it is probed rather than assumed (see the same pattern in
+    ``tests/cli/test_clearinghouse_backfill_cli.py`` and
+    ``tests/cli/test_council_cli.py``).
+    """
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:  # pragma: no cover - depends on the installed click
+        return CliRunner()
+
+
 @pytest.fixture
 def fake(monkeypatch: pytest.MonkeyPatch) -> _FakeOntomap:
     """Patch the ONE factory every verb builds its facade through."""
@@ -403,10 +425,10 @@ class TestCouncilPlanIsImplemented:
         assert "--run-dir" in result.output
 
     def test_json_emits_exactly_one_envelope_carrying_the_plan(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._planner(monkeypatch)
-        result = runner.invoke(
+        result = _separated_runner().invoke(
             main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
         )
         assert result.exit_code == 0, result.output
@@ -422,11 +444,11 @@ class TestCouncilPlanIsImplemented:
         assert data["roster_fingerprint"] == "r" * 64
 
     def test_the_abstained_set_is_warned_about_rather_than_passed_over(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """760 declined functions are not a silent 760-function shortfall."""
         self._planner(monkeypatch)
-        result = runner.invoke(
+        result = _separated_runner().invoke(
             main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
         )
         (warning,) = json.loads(result.stdout)["warnings"]
@@ -434,7 +456,7 @@ class TestCouncilPlanIsImplemented:
         assert "abstained:*" in warning
 
     def test_an_empty_submit_set_is_a_warning_not_a_silent_success(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         payload = {
             **self.FAKE_PLAN,
@@ -450,7 +472,7 @@ class TestCouncilPlanIsImplemented:
         }
         planner = self._FakePlanner(payload)
         monkeypatch.setattr(ontomap, "_ontomap", lambda: planner)
-        result = runner.invoke(
+        result = _separated_runner().invoke(
             main, ["ontomap", "council-plan", "--run-dir", "/runs/x", "--json"]
         )
         assert result.exit_code == 0, result.output

@@ -57,13 +57,26 @@ Three structural rules, carried over verbatim:
 STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
 else; warnings are mirrored to stderr for the human.
 
-WHAT IS IMPLEMENTED HERE. The group, ``version``, ``council-plan``,
-``council-quote``, ``council-approve``, ``council-run``, ``council-export``
-and ``council-publish``. The one remaining pipeline verb (``council-status``)
-is REGISTERED but exits non-zero with "not implemented yet" -- it is filled in
-by a later task. A stub that exited 0 would be worse than no stub at all,
-because a rehearsal of the whole pipeline would pass straight over it and
-report success.
+WHAT IS IMPLEMENTED HERE. The group and ALL EIGHT VERBS: ``version``,
+``council-plan``, ``council-quote``, ``council-approve``, ``council-run``,
+``council-status``, ``council-export`` and ``council-publish``. The
+registered-but-not-implemented stub convention (``_PLANNED_VERBS``) is kept
+with an EMPTY list rather than deleted: a stub that exited 0 would be worse
+than no stub at all -- a rehearsal of the whole pipeline would pass straight
+over a missing stage and report success -- so the next verb to be designed
+ahead of its implementation has somewhere to go.
+
+``council-status`` IS THE ONLY VERB THAT READS ACROSS RUNS, which is why it
+takes a runs ROOT rather than a run directory. A corpus under a versioned
+transform is always partly stale, so it reports coverage TWICE: by lifecycle
+state (work that has been PAID FOR but has not LANDED is invisible in both a
+"what is un-run" count and a "what is loaded" count, and that is exactly what
+a crashed run leaves behind) and by ``parameter_set_hash`` (partial-version
+coverage is TOLERATED, not normalised away -- re-running 47,341 functions on
+every bump is unaffordable -- so it must be REPORTED). It also surfaces a
+SECOND CONCURRENT RUN, because two run directories in stage 4 interleave their
+chunks through the one daemon and defeat the chunking entirely. The logic lives
+in :mod:`kbutillib.domains.genome.ontology_mapping.council_status`.
 
 ``council-publish`` IS THE PRODUCER HALF OF STAGE 5 AND NOTHING MORE. It
 renders the shipped ``function-to-go-council`` preset for this run, gates it
@@ -330,6 +343,76 @@ def _render(envelope: Dict[str, Any]) -> None:
             click.echo(f"HALTED:          {halt.get('reason')}: {halt.get('detail')}")
         return
 
+    if verb == "council-status":
+        lifecycle = data.get("lifecycle") or {}
+        partition = data.get("by_parameter_set") or {}
+        corpus = data.get("corpus") or {}
+        click.echo(f"query:           {data.get('query')}   source: {data.get('source')}")
+        click.echo(
+            f"parameter_set:   {str(data.get('parameter_set_hash') or '(unresolved)')[:12]}"
+        )
+        click.echo(
+            f"corpus:          {_cell(corpus.get('functions'))} function(s) "
+            f"(function_entity {_cell(corpus.get('entity_rows'))}, "
+            f"function_content {_cell(corpus.get('content_rows'))})"
+        )
+        click.echo("")
+        click.echo("BY LIFECYCLE")
+        _rows(lifecycle.get("states") or [], ("state", "functions", "runs", "share"))
+        click.echo(
+            f"paid for, NOT landed: {_cell(lifecycle.get('paid_for_not_landed'))} "
+            "function(s) -- running plus exported-not-loaded. Tokens spent, "
+            "nothing in the clearinghouse."
+        )
+        if lifecycle.get("un_run_is_a_floor"):
+            click.echo(
+                f"un-run is a FLOOR: the run directories overclaim by "
+                f"{_cell(lifecycle.get('overclaimed'))} function(s)."
+            )
+        click.echo("")
+        click.echo("BY parameter_set_hash")
+        _rows(
+            [
+                {
+                    "parameter_set_hash": str(row.get("parameter_set_hash"))[:16],
+                    "current": "yes" if row.get("current") else "-",
+                    "functions": row.get("functions"),
+                    "share": row.get("share"),
+                }
+                for row in partition.get("parameter_sets") or []
+            ],
+            ("parameter_set_hash", "current", "functions", "share"),
+        )
+        click.echo(
+            "covered only by an OLDER parameter set: "
+            f"{_cell(partition.get('covered_only_by_an_older_parameter_set'))}"
+            f"   never covered: {_cell(partition.get('uncovered'))}"
+        )
+        click.echo("")
+        click.echo("RUNS")
+        # The hash is truncated to the same 12 characters the two blocks above
+        # use: a 64-character column pushes every other field off a terminal,
+        # and the full value is in the `--json` envelope for anything that
+        # needs to compare it.
+        _rows(
+            [
+                {**row, "parameter_set_hash": str(row.get("parameter_set_hash"))[:12]}
+                for row in data.get("runs") or []
+                if isinstance(row, dict)
+            ],
+            ("run_id", "state", "functions", "complete", "published",
+             "rows_at_parameter_set", "parameter_set_hash"),
+        )
+        if data.get("concurrent_runs"):
+            click.echo(
+                "TWO RUNS IN STAGE 4: "
+                + ", ".join(
+                    str(row.get("run_dir")) for row in data["concurrent_runs"]
+                )
+                + " -- they interleave their chunks through the one daemon."
+            )
+        return
+
     if verb == "council-export":
         counts = data.get("counts") or {}
         click.echo(f"export:          {data.get('out_path')}")
@@ -431,10 +514,13 @@ def ontomap_cmd() -> None:
                           to run without an approval naming it
     4. `council-run`      execute the approved plan -- one chunk at a time,
                           behind a per-gateway token ceiling, with the retry
-                          pass -- and `council-status` to watch it. It runs in
-                          the FOREGROUND: see its help for the
-                          `systemd-run --user --scope --collect` this host
-                          requires to outlive the session.
+                          pass. It runs in the FOREGROUND: see its help for
+                          the `systemd-run --user --scope --collect` this
+                          host requires to outlive the session.
+       `council-status`   coverage by LIFECYCLE state and by
+                          parameter_set_hash, across every run directory --
+                          including a second run in stage 4, which defeats
+                          the chunking
     5. `council-publish`  `council-export` the verdicts, then hand them to the
                           clearinghouse manifest/shard/load/verify chain
 
@@ -1283,24 +1369,163 @@ def council_publish_cmd(
 
 
 # ---------------------------------------------------------------------------
+# council-status -- stage 4's report, and the only verb that reads ACROSS runs
+# ---------------------------------------------------------------------------
+
+
+def _build_council_status(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-status`` envelope from the status record.
+
+    OWNS NO STATUS LOGIC. The lifecycle classification, the two coverage
+    arithmetics and the concurrent-run check all live in
+    :mod:`kbutillib.domains.genome.ontology_mapping.council_status`; this
+    builder calls it and carries its warnings through rather than restating
+    them -- an unresolved parameter set, a failed read and a second run in
+    stage 4 are all DEGRADED answers, and the envelope contract says
+    ``warnings`` is never empty for one.
+
+    Deliberately does NOT go through :func:`_ontomap`: status ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_status import council_status
+
+    try:
+        record = dict(council_status(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    warnings = list(record.get("warnings") or [])
+    if not record.get("runs"):
+        warnings.append(
+            "no run directories were found, so every lifecycle state between "
+            "un-run and loaded reads zero. That is a statement about the "
+            "directories this verb was pointed at, NOT about the "
+            "clearinghouse: a run directory that has not synced yet holds "
+            "work that is already in flight."
+        )
+    return _envelope("council-status", data=record, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-status")
+@click.option(
+    "--runs-root",
+    "runs_root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="The directory HOLDING the per-run directories. Every run under it "
+    "is classified.",
+)
+@click.option(
+    "--run-dir",
+    "run_dir",
+    multiple=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="One run directory (repeatable), instead of or as well as a root.",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>", which fixes the clearinghouse '
+    "source. Default: the newest discovered plan's, else go_mf@1.",
+)
+@click.option(
+    "--parameter-set-hash",
+    "parameter_set_hash",
+    default=None,
+    help="The CURRENT parameter set. Default: the one the newest discovered "
+    "plan records.",
+)
+@_json_option
+def council_status_cmd(
+    runs_root: Optional[str],
+    run_dir: Sequence[str],
+    query: Optional[str],
+    parameter_set_hash: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 4: coverage by LIFECYCLE state and by `parameter_set_hash`.
+
+    SPENDS NOTHING, WRITES NOTHING, AND RUNS ANYWHERE. Two clearinghouse
+    reads -- a `COUNT(*)` for the corpus and one current-state read for this
+    source -- plus six `stat` calls per run directory. The reads work from
+    h100 off-pod over the BERDL delta API, so this is not gated on the locus;
+    only `load` and `verify` are in-pod.
+
+    \b
+    A CORPUS UNDER A VERSIONED TRANSFORM IS ALWAYS PARTLY STALE, so one
+    coverage number is the wrong answer and this reports two:
+
+    \b
+      BY LIFECYCLE -- un-run, planned-not-quoted, quoted-not-approved,
+      approved-not-run, running, exported-not-loaded, loaded. The MIDDLE-LATE
+      states are the ones that go missing: work that has been PAID FOR and
+      has not LANDED is invisible in both a "what is un-run" count (the plan
+      took it out of the un-run set) and a "what is loaded" count (nothing
+      landed), and that is exactly what a crashed 199M-token run leaves
+      behind. `paid_for_not_landed` is that number.
+
+    \b
+      BY parameter_set_hash -- how much of the corpus is current, and how
+      much is covered ONLY by an older parameter set. Partial-version
+      coverage is TOLERATED, NOT NORMALISED AWAY: re-running all 47,341
+      functions on every bench, query-version or mapping_hash bump is
+      unaffordable. So it is REPORTED, because "is this dataset consistent?"
+      is unanswerable otherwise.
+
+    IT SURFACES A SECOND CONCURRENT RUN. Two run directories both in stage 4
+    interleave their chunks through the one daemon and defeat the chunking
+    entirely (KBUtilLib issue 84: claim cost 217 ms at 19k pending rows
+    against 10.4 ms at 2k, a 10.8x throughput collapse). Neither run can see
+    the other; this verb can. The remedy is a `STOP` file in one of them.
+
+    THE STATE IS READ OFF THE FILES. Each stage writes exactly one artifact
+    into the synced run directory -- PLAN.json, QUOTE.json, APPROVED.json,
+    RUN.json, PUBLISH.json, and the consumer's LOADED.json -- so the
+    lifecycle is a function of which of those exist. `loaded` comes from the
+    CLEARINGHOUSE and not from the receipts, which is what catches the
+    crash-after-commit case: the Iceberg commit and the LOADED.json write
+    have no transaction between them, so a published run with no receipt
+    whose rows are already in the table needs its receipt RE-EXPORTED
+    (`verify --receipt`), not a reload.
+    """
+    if not runs_root and not run_dir:
+        raise click.UsageError(
+            "pass --runs-root (the directory holding the per-run "
+            "directories) and/or --run-dir. Status is a report ACROSS runs -- "
+            "a second concurrent run is one of the things it exists to "
+            "surface -- so it cannot be scoped to nothing."
+        )
+    _emit(
+        _build_council_status(
+            runs_root=runs_root,
+            run_dirs=list(run_dir) or None,
+            query=query,
+            parameter_set_hash=parameter_set_hash,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The remaining pipeline verbs -- registered, NOT yet implemented
 # ---------------------------------------------------------------------------
 
 #: The pipeline verbs this module registers but does not implement, with the
-#: stage each belongs to. They are registered NOW so the operator surface and
-#: its help listing are settled before the stages land, and each one exits
+#: stage each belongs to. A verb is registered here so the operator surface and
+#: its help listing are settled before its stage lands, and each one exits
 #: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
-#: pass over a missing stage and report success. ``council-plan``,
-#: ``council-quote``, ``council-approve``, ``council-run``,
-#: ``council-export`` and ``council-publish`` have LEFT this list -- stages
-#: 1, 2, 3, 4 and both halves of the producer side of 5 landed -- which is the
-#: expected shape of progress through the five stages.
-_PLANNED_VERBS: tuple[tuple[str, str], ...] = (
-    (
-        "council-status",
-        "Stage 4: report progress, spend and blockers for a running plan.",
-    ),
-)
+#: pass over a missing stage and report success.
+#:
+#: **IT IS NOW EMPTY, AND THAT IS THE END STATE, NOT A GAP.** All five stages
+#: and all eight verbs have landed, ``council-status`` last; every name that
+#: was ever on this list has LEFT it, which is the expected shape of progress
+#: through the five stages. The machinery below is kept rather than deleted so
+#: that the next verb designed ahead of its implementation has somewhere to go
+#: -- the convention is what stops a rehearsal reporting success over a stage
+#: that does not exist, and it is cheaper to keep than to re-derive.
+_PLANNED_VERBS: tuple[tuple[str, str], ...] = ()
 
 
 def _register_stub(name: str, summary: str) -> None:

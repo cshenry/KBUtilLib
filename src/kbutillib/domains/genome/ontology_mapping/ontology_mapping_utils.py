@@ -43,6 +43,11 @@ here because they are those same two capabilities plus bookkeeping:
   :mod:`.council_run` does not: publishing ranks nothing. The CONSUMER side
   (``kbu clearinghouse load`` and ``verify``, both in-pod) runs on the pod
   after the directory syncs, and nothing here reaches for it.
+* :func:`~.council_status.council_status` -- the report beside stage 4, and
+  the only verb that reads ACROSS run directories. Reports corpus coverage by
+  LIFECYCLE state and by ``parameter_set_hash``, and surfaces a second
+  concurrent run. It lives in :mod:`.council_status` and imports no numpy,
+  for the same reason the two above do not: status ranks nothing.
 
 Stage 2 (the quote) is :func:`kbutillib.domains.ai.council.quote.quote_plan`,
 which READS the ``PLAN.json`` this module writes -- so the plan's contract is
@@ -86,6 +91,11 @@ from .council_run import council_run  # noqa: F401 - public re-export
 # Stage 5's producer half, re-exported for exactly the same reason: it belongs
 # beside the other stages, and publishing ranks nothing.
 from .council_publish import council_publish  # noqa: F401 - public re-export
+
+# The status report, re-exported for the same reason again. Its own
+# `council_status` imports two constants back OUT of this module, lazily and
+# inside the function, so this module-level import is not a cycle.
+from .council_status import council_status  # noqa: F401 - public re-export
 
 #: The backend name. Bump on any change to retrieval behaviour.
 BACKEND = "ontomap-go-text-union"

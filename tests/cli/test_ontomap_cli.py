@@ -24,7 +24,7 @@ The published envelope (from ``ontomap.py``'s docstring)::
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pytest
 from click.testing import CliRunner
@@ -37,19 +37,16 @@ from kbutillib.cli import main
 #: deliberate edit here rather than a silent contract change.
 ENVELOPE_KEYS = {"schema_version", "verb", "generated_at", "data", "warnings"}
 
-#: The verbs still registered-but-not-implemented. ``council-quote``,
-#: ``council-plan``, ``council-approve``, ``council-run`` and
-#: ``council-export`` have LEFT this list: stages 2, 1, 3, 4 and the first
-#: half of 5 landed, so each is now a real verb -- one prices a plan, one
-#: writes one, one approves one with a ceiling on it, one EXECUTES it, one
-#: exports the verdicts (see :class:`TestCouncilQuoteIsImplemented`,
-#: :class:`TestCouncilPlanIsImplemented`,
-#: :class:`TestCouncilApprove`, :class:`TestCouncilRun` and
-#: :class:`TestCouncilExportIsImplemented`). A verb leaving this list is the
-#: expected shape of progress through the five stages.
-STUB_VERBS = [
-    "council-status",
-]
+#: The verbs still registered-but-not-implemented. **EMPTY, and that is the
+#: END STATE rather than a gap**: every pipeline verb has LEFT this list, with
+#: ``council-status`` the last to go (see :class:`TestCouncilStatus`). Stages
+#: 1, 2, 3, 4 and both halves of 5's producer side have all landed.
+#:
+#: Kept as a list, and the stub machinery kept with it, so the next verb
+#: designed ahead of its implementation has somewhere to go -- the convention
+#: is what stops a rehearsal of the whole pipeline reporting success over a
+#: stage that does not exist.
+STUB_VERBS: List[str] = []
 
 #: The verbs that ARE implemented, so the registration test can assert the
 #: registered set is exactly the two lists together -- a new verb must land in
@@ -60,6 +57,7 @@ IMPLEMENTED_VERBS = [
     "council-quote",
     "council-approve",
     "council-run",
+    "council-status",
     "council-export",
     "council-publish",
 ]
@@ -1313,3 +1311,203 @@ class TestCouncilRun:
         assert json.loads(result.stdout)["warnings"], (
             "an incomplete run with no stated reason must not read as clean"
         )
+
+
+class TestCouncilStatus:
+    """``council-status`` landed, so this group registers NO stubs at all.
+
+    Like ``council-approve``, ``council-run`` and ``council-publish``, this
+    verb does NOT go through ``_ontomap()``: status ranks nothing, so it must
+    not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack. These tests therefore run on any host.
+    """
+
+    def test_no_verb_is_registered_as_a_stub_any_more(self) -> None:
+        assert ontomap._PLANNED_VERBS == ()
+        assert "council-status" in ontomap.ontomap_cmd.commands
+
+    def test_it_does_not_answer_not_implemented(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ontomap", "council-status", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "not implemented yet" not in result.output
+
+    def test_invoked_bare_it_is_a_usage_error_naming_both_ways_to_scope_it(
+        self, runner: CliRunner
+    ) -> None:
+        """Status is a report ACROSS runs, so it cannot be scoped to nothing."""
+        result = runner.invoke(main, ["ontomap", "council-status"])
+        assert result.exit_code != 0
+        assert "not implemented yet" not in result.output
+        assert "--runs-root" in result.output
+        assert "--run-dir" in result.output
+
+    def test_the_help_states_both_halves_of_the_report(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-status", "--help"])
+        assert result.exit_code == 0, result.output
+        for state in (
+            "un-run",
+            "planned-not-quoted",
+            "quoted-not-approved",
+            "approved-not-run",
+            "running",
+            "exported-not-loaded",
+            "loaded",
+        ):
+            assert state in result.output, f"the help does not name {state}"
+        assert "parameter_set_hash" in result.output
+        assert "PAID FOR" in result.output
+        assert "TOLERATED" in result.output
+
+    def test_the_help_explains_why_a_second_concurrent_run_matters(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["ontomap", "council-status", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "KBUtilLib issue 84" in result.output
+        assert "STOP" in result.output
+
+    def test_it_renders_both_halves_and_the_run_rows(
+        self, tmp_path: Any, monkeypatch: Any, runner: CliRunner
+    ) -> None:
+        """One dict, rendered. The ``--json`` path serialises the same object."""
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_status.council_status",
+            lambda **_kw: _STATUS_RECORD,
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-status", "--runs-root", str(tmp_path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "BY LIFECYCLE" in result.output
+        assert "BY parameter_set_hash" in result.output
+        assert "paid for, NOT landed: 20" in result.output
+        assert "exported-not-loaded" in result.output
+        assert "2026-10-23-one" in result.output
+        assert "TWO RUNS IN STAGE 4" in result.output
+
+    def test_under_json_it_emits_exactly_one_envelope(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_status.council_status",
+            lambda **_kw: _STATUS_RECORD,
+        )
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-status", "--runs-root", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.stdout)
+        assert set(envelope) == ENVELOPE_KEYS
+        assert envelope["verb"] == "council-status"
+        assert envelope["data"]["lifecycle"]["paid_for_not_landed"] == 20
+
+    def test_a_runs_root_holding_no_runs_is_warned_about_rather_than_read_as_empty(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """"No run directories here" is not "nothing is in flight".
+
+        A run directory that has not synced yet holds work that is already
+        running, and reporting zero for every middle state without saying so
+        would be the exact invisibility this verb exists to remove.
+        """
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_status.council_status",
+            lambda **_kw: {**_STATUS_RECORD, "runs": [], "concurrent_runs": []},
+        )
+        result = _separated_runner().invoke(
+            main, ["ontomap", "council-status", "--runs-root", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        warnings = json.loads(result.stdout)["warnings"]
+        assert any("no run directories were found" in line for line in warnings)
+
+    def test_a_refusal_is_a_clean_cli_error_and_not_a_traceback(
+        self, tmp_path: Any, monkeypatch: Any, runner: CliRunner
+    ) -> None:
+        from kbutillib.domains.genome.ontology_mapping.council_status import (
+            StatusRefused,
+        )
+
+        def _refuse(**_kw: Any) -> Any:
+            raise StatusRefused("runs_root", "that is not a directory")
+
+        monkeypatch.setattr(
+            "kbutillib.domains.genome.ontology_mapping.council_status.council_status",
+            _refuse,
+        )
+        result = runner.invoke(
+            main, ["ontomap", "council-status", "--runs-root", str(tmp_path)]
+        )
+        assert result.exit_code != 0
+        assert "StatusRefused" in result.output
+        assert "Traceback" not in result.output
+
+
+#: A status record shaped like the real one, for the renderer tests. Held as a
+#: module constant rather than built per test so the renderer and the ``--json``
+#: assertions are made against the SAME object -- which is the point of the
+#: one-envelope contract.
+_STATUS_RECORD: Dict[str, Any] = {
+    "schema_version": 1,
+    "generated_at": "2026-10-23T12:00:00Z",
+    "query": "go_mf@1",
+    "source": "council/go_mf@1",
+    "parameter_set_hash": "c" * 64,
+    "corpus": {"entity_rows": 100, "content_rows": 100, "functions": 100},
+    "lifecycle": {
+        "corpus": 100,
+        "states": [
+            {"state": "un-run", "functions": 60, "runs": None, "share": 0.6},
+            {"state": "planned-not-quoted", "functions": 0, "runs": 0, "share": 0.0},
+            {"state": "quoted-not-approved", "functions": 0, "runs": 0, "share": 0.0},
+            {"state": "approved-not-run", "functions": 0, "runs": 0, "share": 0.0},
+            {"state": "running", "functions": 15, "runs": 2, "share": 0.15},
+            {"state": "exported-not-loaded", "functions": 5, "runs": 1, "share": 0.05},
+            {"state": "loaded", "functions": 20, "runs": None, "share": 0.2},
+        ],
+        "paid_for_not_landed": 20,
+        "overclaimed": 0,
+        "un_run_is_a_floor": False,
+    },
+    "by_parameter_set": {
+        "current": "c" * 64,
+        "parameter_sets": [
+            {"parameter_set_hash": "c" * 64, "current": True, "functions": 20,
+             "share": 0.2},
+            {"parameter_set_hash": "0" * 64, "current": False, "functions": 30,
+             "share": 0.3},
+        ],
+        "covered_at_all": 45,
+        "covered_only_by_an_older_parameter_set": 25,
+        "uncovered": 55,
+    },
+    "runs": [
+        {
+            "run_id": "2026-10-23-one",
+            "run_dir": "/runs/2026-10-23-one",
+            "state": "running",
+            "functions": 10,
+            "complete": False,
+            "published": False,
+            "rows_at_parameter_set": 20,
+            "parameter_set_hash": "c" * 64,
+        },
+        {
+            "run_id": "2026-10-23-two",
+            "run_dir": "/runs/2026-10-23-two",
+            "state": "running",
+            "functions": 5,
+            "complete": False,
+            "published": False,
+            "rows_at_parameter_set": 20,
+            "parameter_set_hash": "c" * 64,
+        },
+    ],
+    "concurrent_runs": [
+        {"run_id": "2026-10-23-one", "run_dir": "/runs/2026-10-23-one"},
+        {"run_id": "2026-10-23-two", "run_dir": "/runs/2026-10-23-two"},
+    ],
+    "warnings": [],
+}

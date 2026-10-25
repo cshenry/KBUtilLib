@@ -161,6 +161,12 @@ _TOP_KEYS = frozenset(
         "rates",
         "default_profile",
         "store",
+        # The store's DECLARED ARCHIVE IDENTITY. Absent from this set until
+        # KBUtilLib#93: CouncilConfig carried the field, but an unknown
+        # top-level key is dropped with only a WARNING, so a store_id written
+        # in a config file never reached the config object and the store's
+        # configured-vs-stored refusal had nothing to compare.
+        "store_id",
         "user",
         "query_dirs",
         "cli_temp_root",
@@ -1577,6 +1583,14 @@ def load_council_config(
         rates=rates,
         default_profile=default_profile,
         store=_resolve_store_url(raw.get("store")),
+        # Blank-to-None like `user` below: an empty value in a config file
+        # means "do not compare", not an id of "". The id's SHAPE is validated
+        # by the store at open time (SqliteStore.__init__ -> validate_store_id),
+        # which is where a typo has to surface -- the store is the only thing
+        # that can also check it against the record inside the database.
+        store_id=(
+            (str(raw["store_id"]).strip() or None) if raw.get("store_id") else None
+        ),
         cli_temp_root=cli_temp_root,
         user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
         query_dirs=_resolve_query_dirs(raw.get("query_dirs"), source),

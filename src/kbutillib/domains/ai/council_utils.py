@@ -218,11 +218,40 @@ class CouncilUtils(SharedEnvUtils):
         the store before any verb looks a query type up.  A one-off open
         (``db migrate``) skips that: a migration must not be running
         registrations against a schema it is in the middle of changing.
+
+        The CONFIGURED ARCHIVE IDENTITY (``CouncilConfig.store_id``) is fed
+        in here, on EVERY open including a one-off, because this is the only
+        place production opens a store.  Without it the store's
+        configured-vs-stored comparison
+        (``SqliteStore.require_store_identity``) never sees a configured
+        value, so the ``StoreIdentityMismatch`` branch is unreachable and a
+        store that was copied and then written to under the wrong declared id
+        archives silently -- the one case the identity check exists to stop
+        (KBUtilLib#93).
+
+        It is passed as its OWN argument ALONGSIDE ``**kwargs`` and is
+        deliberately NOT folded into ``kwargs``: the TRUTHINESS of ``kwargs``
+        is this method's one-off-open flag, so a ``kwargs["store_id"] = ...``
+        would make every open a one-off -- never cached (a fresh
+        ``open_store`` per ``.store()`` call) and never query-dir-loaded (so
+        every spec file in a configured ``query_dirs`` would go
+        unregistered).  Neither of those raises, which is why the obvious
+        fix is worse than the bug.
+
+        A caller that passes ``store_id=`` explicitly WINS: an explicit
+        argument is a deliberate override of config, and such a call is a
+        one-off like any other kwarg-bearing call.
         """
         if self._store is None or kwargs:
             from .council.store import open_store
 
-            store = open_store(self.store_url(), **kwargs)
+            # Built separately from `kwargs` so the one-off decision below
+            # reads the caller's ORIGINAL kwargs, unmodified.
+            options = dict(kwargs)
+            if "store_id" not in options:
+                options["store_id"] = getattr(self.config(), "store_id", None)
+
+            store = open_store(self.store_url(), **options)
             if kwargs:
                 # A one-off open (migrate) is NOT cached: its options are not
                 # the ones every other verb wants.

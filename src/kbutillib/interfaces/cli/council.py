@@ -1605,6 +1605,64 @@ def quote_cmd(
 
 
 # ---------------------------------------------------------------------------
+# snapshot -- the ONLY sanctioned way to copy a live council store
+# ---------------------------------------------------------------------------
+#
+# THERE IS NO COPY-BASED PATH HERE, AND THERE MAY NEVER BE ONE. A live
+# council store is a database PLUS a write-ahead log, and a plain `cp` of the
+# pair mid-transaction yields a file that VERIFIES AS VALID SQLITE, OPENS
+# WITHOUT ERROR, AND CONTAINS AN INCONSISTENT VIEW. That silent failure is
+# why this is a store method behind a verb rather than an operator
+# instruction: an operator cannot tell a torn backup from a good one, and
+# neither can the archiver that reads it.
+#
+# The store method (SqliteStore.snapshot) uses SQLite's own BACKUP API and
+# refuses before writing anything when the store carries no declared archive
+# identity -- every archived row is keyed on store_id, and an invented id
+# looks joinable and cannot be corrected once a clearinghouse payload carries
+# it. This verb adds argv parsing and the envelope, nothing else.
+
+
+@council_cmd.command(name="snapshot")
+@click.argument("destination", type=click.Path(dir_okay=False))
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    default=False,
+    help="Permit replacing an existing destination file.",
+)
+@_json_option
+@click.pass_context
+def snapshot_cmd(
+    ctx: click.Context, destination: str, overwrite: bool, as_json: bool
+) -> None:
+    """Write a CONSISTENT read-only snapshot of the store, via the backup API.
+
+    \b
+    Never copy a live store with `cp`. A WAL database is the main file plus
+    its log; a copy taken mid-transaction opens fine and is WRONG, and
+    nothing downstream can tell.
+
+    REFUSES when the store carries no declared archive identity, or when the
+    configured and stored identities disagree -- naming both. Neither is
+    auto-healed: a mismatch usually means a store file was copied and then
+    written to, which is the one case that must not be papered over.
+
+    The manifest's `snapshot_id` is the VERIFIED sha256 of the snapshot as
+    written. That is the value every archived row is keyed on, so it comes
+    from here and never from a filename.
+    """
+    util = _ready(ctx)
+    try:
+        manifest = util.store().snapshot(destination, overwrite=overwrite)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    _emit(_envelope("snapshot", data=dict(manifest)), as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
 # disposition -- which jobs are a RESULT
 # ---------------------------------------------------------------------------
 #

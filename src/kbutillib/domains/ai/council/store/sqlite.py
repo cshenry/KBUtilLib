@@ -506,6 +506,34 @@ def _serves(worker: Mapping[str, Any], endpoint: str) -> bool:
     return endpoint in set(declared)
 
 
+def _snapshot_row_counts(path: Path) -> Dict[str, int]:
+    """``{table: row count}`` read out of a snapshot FILE.
+
+    Opened read-only with ``sqlite3`` rather than through this store, so the
+    counts describe the bytes that were written and cannot pick up a write
+    transaction the caller still has open.  A table absent from the file is
+    omitted rather than reported as zero: "no such table" and "a table with
+    no rows" are different facts about a snapshot.
+    """
+    counts: Dict[str, int] = {}
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        present = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        for name in sch.TABLE_NAMES:
+            if name in present:
+                counts[name] = int(
+                    connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+                )
+    finally:
+        connection.close()
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # The store
 # ---------------------------------------------------------------------------
@@ -2296,7 +2324,17 @@ class SqliteStore:
             "snapshot_id": digest.hexdigest(),
             "store_host": socket.gethostname(),
             "taken_at": _utcnow().isoformat(),
-            "row_counts": self._row_counts(),
+            # Counted FROM THE SNAPSHOT, not from this store.  The live
+            # counts can differ: `_row_counts` reads through this store's
+            # connection, which JOINS a write transaction the caller already
+            # has open (``transaction()`` is re-entrant), so it sees
+            # uncommitted rows that the backup API deliberately leaves out.
+            # A manifest whose row counts describe a state the snapshot does
+            # not contain is the same class of silent wrongness as the torn
+            # file copy this method exists to prevent -- and it is worse,
+            # because an archiver reconciling against it would conclude the
+            # snapshot was short.
+            "row_counts": _snapshot_row_counts(target),
         }
 
     def export(

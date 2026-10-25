@@ -70,9 +70,9 @@ from .council_schema import (
     COUNCIL_NAMESPACE,
     NAMESPACE,
     TENANT,
-    column_names,
-    table_configs,
-    table_name,
+    column_names as _schema_column_names,
+    table_configs as _schema_table_configs,
+    table_name as _schema_table_name,
 )
 
 __all__ = [
@@ -83,7 +83,115 @@ __all__ = [
     "SqliteCouncilSink",
     "BerdlCouncilSink",
     "open_sink",
+    "register_table",
+    "column_names",
+    "table_name",
+    "table_configs",
 ]
+
+
+# --------------------------------------------------------------------------
+# Tables declared outside council_schema
+# --------------------------------------------------------------------------
+#
+# ``council_schema`` declares NINE tables and that number is load-bearing: it
+# is the archive of a council store, and its tests assert the nine. The
+# publication bundle (``genome.ontology_mapping.council_bundle``) lands in
+# the same namespace but is NOT part of that archive -- it is a per-campaign
+# artifact about which jobs resolve which functions, authored by the
+# publisher and not derived from any snapshot. Declaring it as a tenth entry
+# in ``council_schema`` would make "the council archive" mean two things.
+#
+# So it registers itself HERE instead, at import, and the sink carries it
+# like any other table. Registration is idempotent and a CONFLICTING
+# re-registration is refused rather than silently winning, because two
+# column lists for one physical table is the drift this module exists to
+# prevent. A writer of a registered table calls ``bootstrap()`` itself, so
+# there is no import-order hazard: a sink built before the bundle module was
+# imported simply does not carry the table yet, and the first write creates
+# it.
+
+_EXTRA_TABLES: dict[str, tuple[tuple[str, str], ...]] = {}
+_EXTRA_PARTITION_BY: dict[str, str] = {}
+
+
+def register_table(
+    name: str,
+    columns: Sequence[tuple[str, str]],
+    *,
+    partition_by: str | None = None,
+) -> None:
+    """Declare a non-``council_schema`` table the sinks may carry.
+
+    Args:
+        name: The physical table name.
+        columns: Ordered ``(name, sql_type)`` pairs -- the WHOLE column list,
+            identity columns included. Nothing is prefixed for you: this
+            table is not a mirror of a store table and has no reason to
+            carry the archive's identity block unless its own declaration
+            says so.
+        partition_by: A single bare stored column name, or ``None`` for
+            unpartitioned. Iceberg partition TRANSFORMS are not expressible
+            through this write path, so only bare names may ever be passed.
+
+    Raises:
+        CouncilSinkError: *name* collides with a ``council_schema`` table, or
+            is already registered with a DIFFERENT column list.
+    """
+    declared = tuple((str(column), str(sql_type)) for column, sql_type in columns)
+    if name in ARCHIVED_TABLES:
+        raise CouncilSinkError(
+            f"register_table: {name!r} is already a council_schema table; "
+            "declare it there or pick another name."
+        )
+    existing = _EXTRA_TABLES.get(name)
+    if existing is not None and existing != declared:
+        raise CouncilSinkError(
+            f"register_table: {name!r} is already registered with a "
+            "different column list. Two column lists for one physical table "
+            "is exactly the drift one declaration site prevents."
+        )
+    if any("(" in sql_type or "(" in column for column, sql_type in declared):
+        raise CouncilSinkError(
+            f"register_table: {name!r} declares a parenthesised value. No "
+            "config value in this namespace may contain a parenthesis -- it "
+            "is the guard against an Iceberg partition-transform expression "
+            "leaking into a config."
+        )
+    _EXTRA_TABLES[name] = declared
+    if partition_by is not None:
+        _EXTRA_PARTITION_BY[name] = str(partition_by)
+
+
+def table_name(table: str) -> str:
+    """The physical table name, from either declaration site."""
+    if table in _EXTRA_TABLES:
+        return table
+    return _schema_table_name(table)
+
+
+def column_names(table: str) -> tuple[str, ...]:
+    """One table's ordered column names, from either declaration site."""
+    declared = _EXTRA_TABLES.get(table)
+    if declared is not None:
+        return tuple(name for name, _sql_type in declared)
+    return _schema_column_names(table)
+
+
+def table_configs() -> list[dict[str, Any]]:
+    """``council_schema``'s nine configs, plus every registered table."""
+    configs = _schema_table_configs()
+    for name, declared in _EXTRA_TABLES.items():
+        config: dict[str, Any] = {
+            "name": name,
+            "schema_sql": ", ".join(
+                f"{column} {sql_type}" for column, sql_type in declared
+            ),
+        }
+        if name in _EXTRA_PARTITION_BY:
+            config["partition_by"] = _EXTRA_PARTITION_BY[name]
+        configs.append(config)
+    return configs
 
 
 class CouncilSinkError(RuntimeError):

@@ -84,25 +84,17 @@ log()
 log("## Q1 COVERAGE (annotation locus prefix -> object store)")
 log()
 t0 = time.time()
-objs = KBDLServiceUtils().list_objects()
-log(f"`list_objects()` returned {len(objs)} objects in {time.time()-t0:.1f}s.")
-oid_key = None
-for k in ("object_id", "id", "sha256"):
-    if objs and k in objs[0]:
-        oid_key = k
-        break
-assert oid_key, f"no object id key in {objs[:1]}"
-log(f"Object id field: `{oid_key}`. Example record keys: {sorted(objs[0])}.")
-pref = collections.defaultdict(set)
-for o in objs:
-    pref[o[oid_key][:16]].add(o[oid_key])
-log()
+objs = None
+list_error = None
+try:
+    objs = KBDLServiceUtils().list_objects()
+except Exception as e:  # noqa: BLE001
+    list_error = f"{type(e).__name__}: {e}"
 
 ann_dir = RESULTS / "KBDLGenomeAnnotation"
-exactly1 = multi = none = 0
-bad = []  # files with no / inconsistent prefix
+file_prefix = {}  # job_id -> locus prefix (first key[:16])
+bad = []
 inconsistent = 0
-examined = 0
 for p in sorted(ann_dir.glob("*.json.gz")):
     try:
         with gzip.open(p, "rt") as fh:
@@ -111,51 +103,75 @@ for p in sorted(ann_dir.glob("*.json.gz")):
         bad.append((p.name, repr(e)))
         continue
     keys = list(data) if isinstance(data, dict) else []
-    prefixes = {k[:16] for k in keys}
     if not keys:
         bad.append((p.name, "empty or non-dict result"))
         continue
-    if len(prefixes) != 1:
+    if len({k[:16] for k in keys}) != 1:
         inconsistent += 1
-    pf = keys[0][:16]
-    examined += 1
-    n = len(pref.get(pf, ()))
-    if n == 1:
-        exactly1 += 1
-    elif n > 1:
-        multi += 1
-    else:
-        none += 1
+    file_prefix[p.name[: -len(".json.gz")]] = keys[0][:16]
 total_files = len(list(ann_dir.glob("*.json.gz")))
+examined = len(file_prefix)
 log(f"Annotation result files on disk: {total_files}; examined (parsed, non-empty): {examined}; "
-    f"unreadable/empty: {len(bad)}; files whose keys carry >1 distinct 16-char prefix: {inconsistent}.")
+    f"unreadable/empty: {len(bad)}; files whose keys carry >1 distinct 16-char prefix: {inconsistent}; "
+    f"distinct locus prefixes among examined files: {len(set(file_prefix.values()))}.")
 log()
-log("| resolution | count |")
-log("|---|---|")
-log(f"| resolved to exactly one object | {exactly1} |")
-log(f"| resolved to more than one object (collision) | {multi} |")
-log(f"| resolved to none | {none} |")
-log(f"| **sum** | **{exactly1+multi+none}** |")
-log()
-if bad:
-    log("Unexamined files: " + "; ".join(f"{n} ({e})" for n, e in bad[:10]))
+pref = collections.defaultdict(set)
+if objs is None:
+    log(f"**BLOCKED: `KBDLServiceUtils().list_objects()` failed after {time.time()-t0:.1f}s: `{list_error}`.**")
+    log("The KBase token at `~/.kbase/token` (mtime 2026-10-23) is rejected by the KBase auth service. "
+        "Q1 and Q2 therefore have NO object-store numbers; rerun the script with a valid token "
+        "(no other change needed).")
     log()
-log(f"Fraction resolved to exactly one: {exactly1}/{examined} = {exactly1/max(examined,1):.4f}.")
-log()
-
-log("## Q2 COLLISION (16-hex prefixes shared by >=2 object ids)")
-log()
-coll = {k: v for k, v in pref.items() if len(v) > 1}
-log(f"Distinct object ids: {sum(len(v) for v in pref.values())}; distinct 16-char prefixes: {len(pref)}.")
-log(f"**Colliding 16-hex prefixes: {len(coll)}**")
-for k, v in list(coll.items())[:10]:
-    log(f"- `{k}`: {sorted(v)}")
-log()
+    log("## Q2 COLLISION")
+    log()
+    log("**BLOCKED** for the same reason (needs the full object listing).")
+    log()
+else:
+    log(f"`list_objects()` returned {len(objs)} objects in {time.time()-t0:.1f}s.")
+    oid_key = None
+    for k in ("object_id", "id", "sha256"):
+        if objs and k in objs[0]:
+            oid_key = k
+            break
+    assert oid_key, f"no object id key in {objs[:1]}"
+    log(f"Object id field: `{oid_key}`. Example record keys: {sorted(objs[0])}.")
+    for o in objs:
+        pref[o[oid_key][:16]].add(o[oid_key])
+    log()
+    exactly1 = multi = none = 0
+    for pf in file_prefix.values():
+        n = len(pref.get(pf, ()))
+        if n == 1:
+            exactly1 += 1
+        elif n > 1:
+            multi += 1
+        else:
+            none += 1
+    log("| resolution | count |")
+    log("|---|---|")
+    log(f"| resolved to exactly one object | {exactly1} |")
+    log(f"| resolved to more than one object (collision) | {multi} |")
+    log(f"| resolved to none | {none} |")
+    log(f"| **sum** | **{exactly1+multi+none}** |")
+    log()
+    if bad:
+        log("Unexamined files: " + "; ".join(f"{n} ({e})" for n, e in bad[:10]))
+        log()
+    log(f"Fraction resolved to exactly one: {exactly1}/{examined} = {exactly1/max(examined,1):.4f}.")
+    log()
+    log("## Q2 COLLISION (16-hex prefixes shared by >=2 object ids)")
+    log()
+    coll = {k: v for k, v in pref.items() if len(v) > 1}
+    log(f"Distinct object ids: {sum(len(v) for v in pref.values())}; distinct 16-char prefixes: {len(pref)}.")
+    log(f"**Colliding 16-hex prefixes: {len(coll)}**")
+    for k, v in list(coll.items())[:10]:
+        log(f"- `{k}`: {sorted(v)}")
+    log()
 
 # ---- Q3: overlap with arc store -------------------------------------------
 log("## Q3 OVERLAP (existing arc-store rows keyed on an indexable KBDL job id)")
 log()
-store = KorosArcStore()
+store = KorosArcStore(runs_root=os.environ.get("KOROS_HOME_RUNS") or (HOME / "Dropbox" / "Science" / "runs"))
 runs_root = store.runs_root
 log(f"Runs root: `{runs_root}`; run database: `{store.db.db_path}`.")
 indexable_ledger = {j for j, (t, _o) in ledger.items() if t in INDEXABLE}
@@ -184,6 +200,8 @@ log(f"**Overlap (run_uid in ledger with job_type BuildGenome/GenomeAnnotation): 
 log(f"Overlap against the wider ledger-union-result-file population: {len(ov_union)}.")
 log(f"Rows whose run_uid is ANY ledger job id: {sum(1 for r in rows if r.run_uid in ledger)}.")
 log()
+log("Wider-population overlap by producer: " + json.dumps(dict(collections.Counter(r.producer for r in ov_union))))
+log("Wider-population overlap by kind: " + json.dumps(dict(collections.Counter(r.kind for r in ov_union))))
 log("Overlap by kind: " + json.dumps(dict(collections.Counter(r.kind for r in ov_ledger))))
 log("Overlap by producer: " + json.dumps(dict(collections.Counter(r.producer for r in ov_ledger))))
 log("Overlap by (project, arc): " + json.dumps(

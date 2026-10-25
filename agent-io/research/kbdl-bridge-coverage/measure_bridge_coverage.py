@@ -8,6 +8,7 @@ Run from the KBUtilLib repo root:
 Writes report.md next to itself. Writes no arc-store record and calls no
 submit_* method. Answers four questions (see report.md).
 """
+import argparse
 import collections
 import gzip
 import json
@@ -29,6 +30,11 @@ from kbutillib.domains.external.kbdl_service_utils import KBDLServiceUtils  # no
 HOME = Path.home()
 LEDGER = HOME / ".kbdl" / "sweep_ledger.jsonl"
 RESULTS = HOME / ".kbdl" / "job-results"
+ap = argparse.ArgumentParser()
+ap.add_argument("--token-file", default=str(HOME / ".kbase" / "token"),
+                help="file holding the KBase token passed explicitly to KBDLServiceUtils "
+                     "(the pod env var is stale and would otherwise win); never printed")
+ARGS = ap.parse_args()
 HEX32 = re.compile(rb"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 INDEXABLE = ("KBDLBuildGenome", "KBDLGenomeAnnotation")
 out = []
@@ -87,7 +93,7 @@ t0 = time.time()
 objs = None
 list_error = None
 try:
-    objs = KBDLServiceUtils().list_objects()
+    objs = KBDLServiceUtils(token=Path(ARGS.token_file).read_text().strip()).list_objects()
 except Exception as e:  # noqa: BLE001
     list_error = f"{type(e).__name__}: {e}"
 
@@ -117,7 +123,7 @@ log(f"Annotation result files on disk: {total_files}; examined (parsed, non-empt
 log()
 pref = collections.defaultdict(set)
 if objs is None:
-    log(f"**BLOCKED: `KBDLServiceUtils().list_objects()` failed after {time.time()-t0:.1f}s: `{list_error}`.**")
+    log(f"**BLOCKED: `KBDLServiceUtils(token=<file>).list_objects()` failed after {time.time()-t0:.1f}s: `{list_error}`.**")
     log("The KBase token at `~/.kbase/token` (mtime 2026-10-23) is rejected by the KBase auth service. "
         "Q1 and Q2 therefore have NO object-store numbers; rerun the script with a valid token "
         "(no other change needed).")

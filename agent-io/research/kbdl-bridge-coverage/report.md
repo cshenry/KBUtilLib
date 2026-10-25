@@ -1,6 +1,6 @@
 # KBDL bridge coverage report
 
-Generated 2026-10-25T06:01:09Z on kbhub by `measure_bridge_coverage.py` (read-only).
+Generated 2026-10-25T21:54:40Z on kbhub by `measure_bridge_coverage.py` (read-only).
 kbutillib imported from: `/home/chenry/.maestro/worktrees/measure-bridge-coverage/src/kbutillib/__init__.py`
 
 ## Populations
@@ -24,12 +24,22 @@ Ledger: 185126 lines, 175943 distinct job ids.
 
 Annotation result files on disk: 3302; examined (parsed, non-empty): 3302; unreadable/empty: 0; files whose keys carry >1 distinct 16-char prefix: 1; distinct locus prefixes among examined files: 2203.
 
-**BLOCKED: `KBDLServiceUtils().list_objects()` failed after 44.0s: `KBDLAuthenticationError: {'error': 'invalid_token', 'message': 'KBase auth service rejected the token (HTTP 401)'}`.**
-The KBase token at `~/.kbase/token` (mtime 2026-10-23) is rejected by the KBase auth service. Q1 and Q2 therefore have NO object-store numbers; rerun the script with a valid token (no other change needed).
+`list_objects()` returned 94051 objects in 48.8s.
+Object id field: `object_id`. Example record keys: ['added_at', 'name', 'object_id', 'object_type', 'owner', 'size_bytes', 'storage_kind', 'visibility'].
 
-## Q2 COLLISION
+| resolution | count |
+|---|---|
+| resolved to exactly one object | 3194 |
+| resolved to more than one object (collision) | 0 |
+| resolved to none | 108 |
+| **sum** | **3302** |
 
-**BLOCKED** for the same reason (needs the full object listing).
+Fraction resolved to exactly one: 3194/3302 = 0.9673.
+
+## Q2 COLLISION (16-hex prefixes shared by >=2 object ids)
+
+Distinct object ids: 94051; distinct 16-char prefixes: 94051.
+**Colliding 16-hex prefixes: 0**
 
 ## Q3 OVERLAP (existing arc-store rows keyed on an indexable KBDL job id)
 
@@ -66,7 +76,7 @@ Overlap by (project, arc): {"None/None": 1, "inner-loop/fitness-genome-analysis"
 
 ## Q4 ATTRIBUTION COVERAGE (job ids mentioned in arcs of the runs tree)
 
-Scanned 5239 regular files (2.56 GB) in 45s; 52 of them lie outside `<project>/arcs/<slug>/` and are not attributed to any arc; 0 unreadable.
+Scanned 5239 regular files (2.56 GB) in 48s; 52 of them lie outside `<project>/arcs/<slug>/` and are not attributed to any arc; 0 unreadable.
 
 ### Population A: ledger job ids only (distinct ids per ledger job_type)
 
@@ -100,10 +110,13 @@ Scanned 5239 regular files (2.56 GB) in 45s; 52 of them lie outside `<project>/a
 
 Hand-measurement to confirm or correct: 70/835 GenomeAnnotation and 49/4654 BuildGenome ledger jobs mentioned, zero multi-arc. Compare against Population A rows above (mentioned = exactly 1 + more than 1).
 
+
 ## Summary and notes (hand-written after the run; a rerun of the script overwrites this section)
 
-1. Q1 (coverage): NOT MEASURED. The KBase token in `~/.kbase/token` is rejected (HTTP 401), so `list_objects()` could not run. What was measured: 3302 annotation result files on disk (not 2997; the sweeper has kept adding), all parsed, carrying 2203 distinct locus prefixes; one file has keys with more than one 16-char prefix. The exactly-one / multiple / none split needs a valid token; rerun the script.
-2. Q2 (collision): NOT MEASURED, same cause.
+Token: the pod env var KBASE_AUTH_TOKEN is stale (401 at kbase.us) and SharedEnvUtils prefers it over ~/.kbase/token; the script passes the file token explicitly (`--token-file`, default ~/.kbase/token) at Chris's direction. The token is never printed or written.
+
+1. Q1 (coverage), population 3302 annotation result files on disk, all parsed: 3194 resolve to exactly one object, 0 to more than one, 108 to none (sum 3302; 96.7% exactly one). The object listing has 94051 objects. The 108 unresolved files are not diagnosed here; the prefix is absent from the current store (deleted objects or another owner are possible causes).
+2. Q2 (collision): 0 colliding 16-hex prefixes among 94051 object ids (94051 distinct prefixes), as expected.
 3. Q3 (overlap): 51 existing rows have a run_uid that is a ledger job id of type BuildGenome/GenomeAnnotation (50 BuildGenome rows by producer `koros.fitness-genome-analysis` in arc `inner-loop/fitness-genome-analysis`, plus 1 GenomeAnnotation row by `kbdl-job-api-backfill`, unattributed). This is not the 92 stated in the brief. Against the wider population (ledger ids plus result-file stems) the overlap is 517: 419 rows by `kbdl-job-api-backfill` and 98 by the hand script, so most existing rows key on jobs absent from the ledger. The run database holds 528 rows; 527 were reachable through `list_analyses` over the 34 known (project, arc) pairs, so one row sits under a project/arc pair not present in the tree.
    Provenance carried by the hand-script rows that a mechanical indexer cannot derive from the job result and ledger: `bridge_kind: user_assertion`, `gene_id_space: fitness_browser`, `source: berdl_inner_loop.V2_Genes (source='fitnessDB')`, `recalling: false`, `metric n_gene_calls_in` (the input gene-call count from the external fitness database), `trust_tier: verified`, and the project/arc attribution itself. A BuildGenome result supplies genome_object_id and feature counts, but not these.
 4. Q4 (attribution): Population A (ledger ids) confirms the round-1 numbers for annotation: 70/835 GenomeAnnotation mentioned, none in more than one arc. BuildGenome is corrected from 49 to 51 of 4654. Zero multi-arc mentions for every job type. Population B (ledger union result files) gives 387/3317 GenomeAnnotation and 277/4889 BuildGenome. The difference against A is mostly the 98+ rows the hand script wrote for jobs absent from the ledger.

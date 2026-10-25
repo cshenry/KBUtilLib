@@ -140,17 +140,51 @@ def main():
                          'A no-op pass costs one list_jobs call, so a short '
                          'interval is cheap; 21600 (6h) is ample against a '
                          'retention window measured in weeks.')
+    ap.add_argument('--index', action='store_true',
+                    help='after each sweep pass, index swept BuildGenome/GenomeAnnotation '
+                         'results into the arc store (writes to the run DB; opt-in). '
+                         'Single-threaded, same process, same schedule.')
     args = ap.parse_args()
 
     if args.loop:
         while True:
-            try:
-                sweep_once(args)
-            except Exception as exc:                       # noqa: BLE001
-                print(f'PASS FAILED {type(exc).__name__}: {exc}', flush=True)
+            run_pass(args)
             time.sleep(args.loop)
     else:
         sweep_once(args)
+        if args.index:
+            index_phase(args)
+
+
+def run_pass(args):
+    """One loop pass: sweep, then index what was swept. Each phase is fail-soft
+    on its own, so an index failure never stops the next sweep and a sweep
+    failure still lets already-swept results be indexed."""
+    try:
+        sweep_once(args)
+    except Exception as exc:                               # noqa: BLE001
+        print(f'PASS FAILED {type(exc).__name__}: {exc}', flush=True)
+    if getattr(args, 'index', False):
+        try:
+            index_phase(args)
+        except Exception as exc:                           # noqa: BLE001
+            print(f'INDEX FAILED {type(exc).__name__}: {exc}', flush=True)
+
+
+def index_phase(args):
+    """Index swept results into the arc store; inputs are built fresh each run.
+
+    Single-threaded by design: the run DB is multi-writer, and be836b9 (silent
+    record loss under concurrent writers) is the only thing making that safe.
+    """
+    from kbutillib.kbdl_index.run import run_index
+    from kbutillib.koros_arc_store import KorosArcStore
+
+    store = KorosArcStore()
+    res = run_index(store, KBDLServiceUtils(), LEDGER, ROOT, str(store.runs_root),
+                    dry_run=bool(getattr(args, 'dry_run', False)))
+    print('index: ' + res.report.summary(), flush=True)
+    return res
 
 
 def dead_job_ids():

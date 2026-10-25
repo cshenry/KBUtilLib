@@ -30,6 +30,7 @@ from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
 from .jobdaemon import jobdaemon_cmd
 from .jobs import jobs_cmd
+from .kbdl_index import kbdl_index_cmd
 from ._aliases import AliasedGroup
 from .kind import kind_cmd
 from .migrate import migrate_cmd
@@ -80,6 +81,7 @@ main.add_command(init_command, name="init")
 main.add_command(init_notebook_cmd, name="init-notebook")
 main.add_command(jobs_cmd, name="jobs")
 main.add_command(jobdaemon_cmd, name="jobdaemon")
+main.add_command(kbdl_index_cmd, name="kbdl-index")
 main.add_command(kind_cmd, name="kind")
 main.add_command(migrate_cmd, name="migrate")
 main.add_command(model_cmd, name="model")

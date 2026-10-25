@@ -29,7 +29,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Collection, Dict, Mapping, Optional
 
 from kbutillib.koros_arc_store import CONTRACT_VERSION, AnalysisRecord
 from kbutillib.koros_arc_store.identity import derive_analysis_id, derive_record_id
@@ -152,8 +152,14 @@ def _load_result(path):
 
 def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
                      dry_run: bool = False,
-                     job_meta: Optional[Mapping[str, dict]] = None) -> IndexReport:
-    """Index swept KBDL jobs into ``store``. See the module docstring."""
+                     job_meta: Optional[Mapping[str, dict]] = None,
+                     job_types: Optional[Collection[str]] = None) -> IndexReport:
+    """Index swept KBDL jobs into ``store``. See the module docstring.
+
+    ``job_types`` (optional) restricts indexing to those job types: ledger jobs
+    of other types are counted in ``skipped_by_type``; file-only jobs of other
+    types are not counted at all.
+    """
     report = IndexReport(dry_run=dry_run)
     job_meta = job_meta or {}
     ledger = _read_ledger(ledger_path)
@@ -162,12 +168,15 @@ def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
     for jid, ent in ledger.items():
         report.jobs_seen += 1
         report.from_ledger += 1
-        if ent['job_type'] not in INDEXABLE:
+        if ent['job_type'] not in INDEXABLE or (
+                job_types and ent['job_type'] not in job_types):
             report.skipped_by_type[ent['job_type']] = \
                 report.skipped_by_type.get(ent['job_type'], 0) + 1
             continue
         work.append((jid, ent['job_type'], ent))
     for jid, jtype in _file_only_jobs(results_root, set(ledger)).items():
+        if job_types and jtype not in job_types:
+            continue
         report.jobs_seen += 1
         report.from_files_only += 1
         work.append((jid, jtype, None))

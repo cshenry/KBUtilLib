@@ -254,11 +254,6 @@ SPARK_LOCAL_RELATION_CACHE_THRESHOLD_BYTES = 1 << 20
 #: sized by BYTES and never by row count.
 MAX_BATCH_BYTES = SPARK_LOCAL_RELATION_CACHE_THRESHOLD_BYTES // 2
 
-#: A batch always carries at least one row, even one larger than
-#: :data:`MAX_BATCH_BYTES`. A single oversized row cannot be split, and
-#: silently dropping it would lose a reply; it is reported in the batch
-#: inventory as oversized so an operator sees it before the pod does.
-_MIN_BATCH_ROWS = 1
 
 
 # --------------------------------------------------------------------------
@@ -701,12 +696,20 @@ def _batched(
     *,
     max_bytes: int,
 ) -> Iterator[list[dict[str, Any]]]:
-    """Group *rows* into batches whose encoded size stays under *max_bytes*."""
+    """Group *rows* into batches whose encoded size stays under *max_bytes*.
+
+    A batch ALWAYS carries at least one row, even one larger than
+    *max_bytes*: a single oversized row cannot be split, and dropping it
+    would lose a reply. :func:`build_inventory` flags such a batch
+    ``oversized`` so an operator sees it before the pod does.
+    """
     batch: list[dict[str, Any]] = []
     size = 0
     for row in rows:
         row_size = _row_bytes(table, row)
-        if batch and size + row_size > max_bytes and len(batch) >= _MIN_BATCH_ROWS:
+        # `batch` non-empty is what guarantees the at-least-one-row rule:
+        # an oversized first row is appended before this test can fire.
+        if batch and size + row_size > max_bytes:
             yield batch
             batch, size = [], 0
         batch.append(dict(row))

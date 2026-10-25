@@ -652,17 +652,19 @@ C. tests/berdl/ + tests/cli/test_council_cli.py
 D. tests/berdl/ + tests/domains/ + tests/cli/test_council_cli.py   (-rf)
      base   a789bba : 7 failed, 3341 passed, 6 skipped  (158.94s)
      branch cc0ad1f : 7 failed, 3571 passed, 6 skipped  (164.50s)
-     FAILED node-id diff: EMPTY  -- 7 unique ids on each side, identical
+     branch 5261473 : 7 failed, 3571 passed, 6 skipped  (164.61s)
+     FAILED node-id diff, BOTH runs: EMPTY  -- 7 unique ids each side
 ```
 
-`cc0ad1f` is the last commit that changes behaviour. The three commits after
-it (`dea0093`, `5261473`, `2ad37e3`) are a dead conjunct, two imports and a
-docstring; each was verified against the targeted suites of everything it
-touches (`tests/berdl/test_council_archive.py`,
-`tests/domains/test_council_bundle.py`,
-`tests/domains/ai/council/test_store_identity.py` — 123–224 tests depending
-on the commit, all passing) and selection D was **not** re-run for them. Say
-so rather than quote a number I did not measure at the final SHA.
+Selection D was run TWICE on the branch: once at `cc0ad1f` (the last commit
+that changes behaviour) and again at `5261473`, after the two housekeeping
+commits. Node-id-identical to the base both times, and to each other.
+
+The only commit NOT covered by a selection-D run is `2ad37e3`, which adds a
+docstring to `SqliteStore._row_counts` and changes no code. It was verified
+against `tests/domains/ai/council/test_store_identity.py` +
+`tests/berdl/test_council_archive.py` (123 passed, exit 0). Stated rather
+than papered over with a number measured at a different SHA.
 
 Commands, verbatim:
 
@@ -674,7 +676,8 @@ cd /scratch/chenry/base-council-tranche2 && TMPDIR=/scratch/chenry/tmp \
   -q -p no:cacheprovider --no-header -rf
 → 7 failed, 3341 passed, 6 skipped                      exit 0
 
-# branch, in this worktree at cc0ad1f
+# branch, in this worktree -- run at cc0ad1f and again at 5261473,
+# both giving the same figures below and the same 7 node ids
 TMPDIR=/scratch/chenry/tmp PYTHONPATH=$PWD/src \
   /home/chenry/venvs/kbdl/bin/python -m pytest \
   tests/berdl/ tests/domains/ tests/cli/test_council_cli.py \

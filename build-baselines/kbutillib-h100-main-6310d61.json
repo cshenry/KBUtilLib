@@ -25,16 +25,19 @@
     "core": 2
   },
   "MACHINE_LOCAL_FAILURES_NOT_PRODUCT_DEFECTS": {
-    "count": 4,
+    "count": 6,
     "nodeids": [
       "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_cli_endpoints_default_to_one_call_at_a_time",
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_codex_seats_are_marked_unverified",
+      "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_default_profile_is_mixed_subscription",
       "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_every_packaged_profile_builds_a_roster",
       "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_on_a_fresh_machine_with_no_kbutillib_config",
       "tests/domains/ai/council/test_types_config.py::TestPackagedDefaultConfig::test_the_packaged_config_declares_no_poplar_endpoint"
     ],
     "cause": "The h100 user config /home/chenry/.kbutillib/config.yaml leaks into these tests DESPITE their monkeypatched HOME. Proven: the resolved CouncilConfig reports source='packaged default + user ai_council section' with store='sqlite:////scratch/chenry/council/council.sqlite' and query_dirs=['/scratch/chenry/council/queries'], while the test had set HOME to an empty tmp_path. The extra 'mag' endpoint and 'smoke' profile come from the USER config (lines 150 and 206); the packaged default_config.yaml has mag COMMENTED OUT (line 59) and no smoke profile.",
     "consequence": "These 4 would PASS on a clean machine. Do not fix them inside a council task and do not count them as regressions. test_types_config.py's h100 baseline is 4 failed / 93 passed / 2.35 s, NOT all-passing.",
-    "underlying_defect": "The config loader does not honour a monkeypatched HOME for the user ai_council section, so these tests are not hermetic. Filed separately; it is NOT this PRD's to fix."
+    "underlying_defect": "The config loader does not honour a monkeypatched HOME for the user ai_council section, so these tests are not hermetic. Filed separately; it is NOT this PRD's to fix.",
+    "CORRECTION_2026-10-25": "This entry read count=4 and listed four node ids from its authoring on 2026-10-19 until 2026-10-25. The real set is SIX, and it was six at BOTH commits this file measures -- a transcription error in the original record, NOT later drift. Re-measured by miles (g session ce863a40) while gating council-lakehouse-t1-t4, after the developer reported six against a prompt that said four. Evidence, all on h100 with ~/venvs/kbdl/bin/python3, each in its own detached worktree: (1) at 6310d61, this file's base_commit: '6 failed, 91 passed'. (2) at 35f2687, the commit the targeted entry below was measured at: '6 failed, 91 passed' -- identical. That entry recorded '93 passed, 4 failed'; both total 97, so the original run saw six and the record wrote four. (3) at main b518979f: '6 failed, 123 passed' (the file has grown to 107 test defs since). (4) at b518979f with HOME pointed at an empty directory: '129 passed, 0 failed' -- which PROVES the 'these would pass on a clean machine' claim for all six rather than asserting it for four. The two that were missing are test_default_profile_is_mixed_subscription and test_codex_seats_are_marked_unverified. Both already existed at 6310d61 and at 35f2687, so neither is a new test. Left uncorrected they read as two phantom regressions to any reviewer who diffs a branch against this file."
   },
   "targeted_baselines_measured_this_run": {
     "tests/domains/ai/council/test_execlock.py": {
@@ -51,10 +54,10 @@
     },
     "tests/domains/ai/council/test_types_config.py": {
       "at": "35f2687",
-      "passed": 93,
-      "failed": 4,
+      "passed": 91,
+      "failed": 6,
       "duration_s": 2.35,
-      "note": "the 4 are the machine-local set above"
+      "note": "the 6 are the machine-local set above. CORRECTED 2026-10-25: this read '93 passed, 4 failed' and 'the 4 are the machine-local set above'. Re-measured at 35f2687 itself, in a detached worktree: 6 failed, 91 passed. Same 97 total."
     }
   },
   "supersedes_note": "build-baselines/kbutillib.json is from 2026-09-13 at commit 0f84803 with a DIFFERENT command (seven --ignore flags) captured in a minimal task venv missing optional scientific deps. Its 99-failure figure is NOT comparable to this run's 69.",

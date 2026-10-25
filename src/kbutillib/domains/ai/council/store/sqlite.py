@@ -25,6 +25,13 @@ Four SQLite-specific things are handled here and nowhere else:
   that silently does not hold, which corrupts a WAL database under
   concurrency.  The filesystem type of the store path's nearest existing
   ancestor is checked at open time (see :func:`refuse_network_filesystem`).
+* **The store's declared ARCHIVE IDENTITY.**  A store that is going to be
+  archived into ``kbaseincubator.council`` needs a durable ``store_id``,
+  because ``job_id`` is unique only WITHIN one store (which is also why
+  ``endpoint_state.user`` is the fixed literal :data:`STORE_IDENTITY`).  That
+  id is persisted INSIDE the database file -- see "Archive identity" further
+  down -- so a file copy carries it, and :meth:`SqliteStore.snapshot` and
+  :meth:`SqliteStore.export` refuse to run without it.
 
 The queue half -- claiming, completing, releasing and reclaiming calls, and
 the job control built on them -- is here too, but its SQL is not: every
@@ -35,10 +42,13 @@ IMMEDIATE``, above) that makes a claim atomic.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
 import socket
+import sqlite3
 import sys
 import threading
 import uuid
@@ -66,12 +76,22 @@ from .errors import (
     QueryTypeExists,
     SchemaVersionMismatch,
     StaleClaim,
+    StoreError,
     StorePathRefused,
 )
 
 __all__ = [
     "SqliteStore",
     "STORE_IDENTITY",
+    "STORE_IDENTITY_TABLE",
+    "STORE_IDENTITY_RECORD_VERSION",
+    "POPLAR_COUNCIL_STORE_ID",
+    "StoreIdentityError",
+    "StoreIdentityMissing",
+    "StoreIdentityMismatch",
+    "StoreIdentityAlreadyDeclared",
+    "validate_store_id",
+    "declare_identity_once",
     "NETWORK_FILESYSTEMS",
     "ALLOW_NETWORK_FS_ENV",
     "filesystem_type_of",
@@ -87,6 +107,258 @@ STORE_IDENTITY = q.STORE_IDENTITY
 
 #: Window ``job_status`` reports throughput over.
 _THROUGHPUT_WINDOW = timedelta(minutes=10)
+
+
+# ---------------------------------------------------------------------------
+# Archive identity
+# ---------------------------------------------------------------------------
+#
+# WHY A STORE NEEDS A DECLARED ID.  Every row archived into the
+# ``kbaseincubator.council`` Iceberg namespace is keyed on ``store_id``
+# (see ``kbutillib.domains.kbase.berdl.council_schema``), because ``job_id``
+# is unique only WITHIN one store -- the same reason ``endpoint_state.user``
+# is hard-coded to the literal ``STORE_IDENTITY`` above rather than being a
+# per-person key.  Three failure modes follow from getting the id wrong, and
+# each one is silent:
+#
+#   * A PATH-DERIVED id breaks every join the moment the store moves off
+#     ``/scratch`` -- and the production store lived on a volume that was at
+#     83% of 8.8T, so moving it was always going to happen.
+#   * A FRESH id per copy breaks idempotency: re-archiving the same snapshot
+#     from a moved file would duplicate every row under a second id instead
+#     of landing on the same primary key.
+#   * ONE id shared between two INDEPENDENTLY WRITABLE forks silently merges
+#     two unrelated histories, and the collision surfaces as a primary-key
+#     clash on rows that look legitimate.
+#
+# And it cannot be corrected after the fact: the clearinghouse slot key
+# ``(entity_hash, entity_type, result_type, source, parameter_set_hash)``
+# deliberately EXCLUDES ``result_type_version``, so once a payload carrying
+# this id lands, a corrected payload in the same slot is silently dropped as
+# already-present.  So the id is DECLARED BY A HUMAN, ONCE, and never
+# changes.
+#
+# THERE IS DELIBERATELY NO AUTOMATIC DEFAULT.  Not the hostname, not the
+# store path, not a ``uuid4``, not a digest of anything.  An automatic value
+# would be indistinguishable from a correct one right up until the first
+# store moved, at which point every already-written clearinghouse payload
+# would be unjoinable and unfixable.  :func:`validate_store_id` therefore
+# also REFUSES values that look automatically derived (a filesystem path, a
+# bare uuid, a database filename), because the cheapest way to get an
+# automatic default back is for somebody to pass one in by hand.
+#
+# WHERE THE RECORD LIVES.  Inside the database file, in its own
+# :data:`STORE_IDENTITY_TABLE` table -- not in the config, not in a sidecar.
+# Config is per-machine and would not travel with a copied file; a sidecar
+# would be dropped by every ``cp`` that did not know about it.  Binding the
+# record to the database is what makes "a move or a read-only snapshot
+# RETAINS the identity" true by construction rather than by procedure.
+#
+# WHY THAT TABLE IS NOT IN :mod:`.schema`.  It is deliberately outside the
+# versioned ``MetaData`` and carries its OWN record version
+# (:data:`STORE_IDENTITY_RECORD_VERSION`), for two reasons.  First, every
+# store that already exists -- including the one this is for -- was created
+# at ``SCHEMA_VERSION = 2`` without it, and ``migrate()`` adds columns and
+# indexes, not tables; an identity you can only get by migrating is an
+# identity the existing store cannot have.  Second, the identity must be
+# READABLE from a store whose schema version this code does not accept
+# (``check_version=False``), because "which store did these bytes come
+# from" is exactly the question asked about an old file.
+#
+# The table is APPEND-ONLY and the current identity is its highest
+# ``declared_seq``.  A fork's re-declaration therefore keeps the superseded
+# id visible instead of erasing it, which is the only way a later reader can
+# tell a fork from a store that always had its current id.
+
+#: Name of the identity table inside the store database.
+STORE_IDENTITY_TABLE = "store_identity"
+
+#: Version of the identity RECORD shape (not of the council schema).  Bumped
+#: only if the record's own columns change; see the note above for why it is
+#: versioned separately from :data:`.schema.SCHEMA_VERSION`.
+STORE_IDENTITY_RECORD_VERSION = 1
+
+#: The id declared for the EXISTING poplar council store (the one that
+#: produced the 2026-10-19 function_to_go run), named here so the one-off
+#: migration quotes a constant rather than a string literal typed twice.
+#:
+#: This is NOT a default and nothing applies it automatically.  The
+#: documented, idempotent one-off is::
+#:
+#:     python -c "from kbutillib.domains.ai.council.store.sqlite import \
+#:         declare_identity_once, POPLAR_COUNCIL_STORE_ID; \
+#:         print(declare_identity_once(
+#:             '/scratch/chenry/council/council.sqlite',
+#:             POPLAR_COUNCIL_STORE_ID, declared_by='chenry'))"
+#:
+#: Running it twice is a no-op; running it against a store already carrying
+#: a DIFFERENT id raises :class:`StoreIdentityAlreadyDeclared` rather than
+#: overwriting, and exits non-zero.
+POPLAR_COUNCIL_STORE_ID = "poplar/council-1"
+
+#: The longest a declared store id may be.  Not a storage limit -- an id this
+#: long is a sign somebody pasted a path.
+_MAX_STORE_ID_LEN = 128
+
+#: Characters a declared store id may contain.  ``/`` is allowed because the
+#: declared ids are namespaced (``poplar/council-1``); whitespace is not,
+#: because an id with a space in it will be silently mangled by every shell
+#: that touches it.
+_STORE_ID_ALLOWED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+#: A bare ``uuid4().hex`` -- 32 hex characters with no structure.
+_BARE_UUID_HEX = re.compile(r"^[0-9a-fA-F]{32}$")
+
+#: A canonical dashed UUID.
+_DASHED_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+#: Sentinel meaning "use the identity this store was opened with".  A plain
+#: ``None`` cannot mean that, because ``None`` is the meaningful value "no
+#: configured identity was supplied, so do not compare".
+_USE_CONFIGURED = object()
+
+
+class StoreIdentityError(StoreError):
+    """Base class for every archive-identity refusal."""
+
+
+class StoreIdentityMissing(StoreIdentityError):
+    """The store carries no declared identity, so it may not be archived.
+
+    Raised by :meth:`SqliteStore.snapshot` and :meth:`SqliteStore.export`.
+    Deliberately NOT auto-assigned: a snapshot taken under an invented id is
+    worse than no snapshot, because it looks joinable.
+    """
+
+
+class StoreIdentityMismatch(StoreIdentityError):
+    """The configured identity and the stored identity disagree.
+
+    NEVER auto-healed.  A mismatch means somebody copied a store and kept
+    writing to it -- which is exactly the independently-writable-fork case
+    that must not be papered over -- or pointed a config at the wrong file.
+    Both values are named in the message so the operator can tell which.
+    """
+
+
+class StoreIdentityAlreadyDeclared(StoreIdentityError):
+    """A different identity is already declared for this store.
+
+    :meth:`SqliteStore.assign_store_identity` is idempotent for the SAME id
+    and refuses a different one.  Replacing a declared identity is the
+    independently-writable-fork case and needs the explicit act,
+    :meth:`SqliteStore.redeclare_store_identity`.
+    """
+
+
+def validate_store_id(value: Any) -> str:
+    """Return *value* as a valid declared store id, or raise.
+
+    The whole value of ``store_id`` is that a human declared it and it never
+    changes, so this refuses not only malformed values but values that look
+    AUTOMATICALLY DERIVED -- a filesystem path, a bare uuid, a database
+    filename.  Those are the shapes an automatic default would have, and
+    letting one in by hand reintroduces exactly the failure the absence of a
+    default exists to prevent.
+
+    Args:
+        value: The candidate id.
+
+    Returns:
+        The id, stripped of surrounding whitespace.
+
+    Raises:
+        ValueError: The value is not a non-empty string, contains
+            whitespace or a disallowed character, is too long, looks like a
+            filesystem path or a database filename, or is a bare uuid.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"store_id must be a string a human declared, got "
+            f"{type(value).__name__}"
+        )
+    text = value.strip()
+    if not text:
+        raise ValueError(
+            "store_id is empty; it must be declared explicitly (there is "
+            "deliberately no automatic default -- see "
+            "kbutillib.domains.ai.council.store.sqlite's 'Archive identity' "
+            "note)"
+        )
+    if len(text) > _MAX_STORE_ID_LEN:
+        raise ValueError(
+            f"store_id {text[:40]!r}... is {len(text)} characters, over the "
+            f"{_MAX_STORE_ID_LEN} limit; an id this long is usually a pasted "
+            "path"
+        )
+    if text.startswith("/") or text.startswith("~") or text.startswith("."):
+        raise ValueError(
+            f"store_id {text!r} looks like a filesystem path. A path-derived "
+            "id breaks every archived join the moment the store moves, which "
+            "is the one thing a declared id exists to prevent. Declare a "
+            "stable name instead, e.g. 'poplar/council-1'."
+        )
+    if text.endswith(".sqlite") or text.endswith(".db"):
+        raise ValueError(
+            f"store_id {text!r} is a database filename, not a declared "
+            "identity. Declare a stable name instead, e.g. "
+            "'poplar/council-1'."
+        )
+    if _BARE_UUID_HEX.match(text) or _DASHED_UUID.match(text):
+        raise ValueError(
+            f"store_id {text!r} is a uuid. A fresh id per copy breaks "
+            "idempotency: re-archiving the same snapshot would duplicate "
+            "every row under a second id. Declare a stable name instead, "
+            "e.g. 'poplar/council-1'."
+        )
+    if not _STORE_ID_ALLOWED.match(text):
+        raise ValueError(
+            f"store_id {text!r} must match {_STORE_ID_ALLOWED.pattern} -- "
+            "letters, digits, '.', '_', '-' and '/' only, starting with a "
+            "letter or digit. No whitespace: an id with a space in it is "
+            "mangled by every shell that touches it."
+        )
+    return text
+
+
+def declare_identity_once(
+    url: str,
+    store_id: str,
+    *,
+    declared_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Declare *store_id* for the store at *url*, idempotently.
+
+    The documented one-off migration path, and the only runnable entry point
+    for it -- see :data:`POPLAR_COUNCIL_STORE_ID` for the exact command.
+    Opens with ``check_version=False`` on purpose: a store whose schema
+    version this code does not accept still needs an identity, because
+    "which store did these bytes come from" is precisely the question asked
+    about an old file.
+
+    Idempotent: declaring the id a store already carries returns the existing
+    record and writes nothing.
+
+    Args:
+        url: The store's SQLite URL or bare path.
+        store_id: The id to declare, validated by :func:`validate_store_id`.
+        declared_by: Who declared it.  Recorded as-is; ``None`` falls back to
+            the OS user, since the point of the field is accountability.
+
+    Returns:
+        The current identity record.
+
+    Raises:
+        ValueError: *store_id* is not a valid declared id.
+        StoreIdentityAlreadyDeclared: the store already carries a DIFFERENT
+            id.  Not overwritten -- see
+            :meth:`SqliteStore.redeclare_store_identity`.
+    """
+    with SqliteStore(url, check_version=False) as store:
+        return store.assign_store_identity(store_id, declared_by=declared_by)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +448,21 @@ def _filled(table: sa.Table, row: Mapping[str, Any]) -> Dict[str, Any]:
     return full
 
 
+def _export_row(row: Any) -> Dict[str, Any]:
+    """One result row as a JSON-serialisable dict, for :meth:`SqliteStore.export`.
+
+    Distinct from :func:`_dict` on purpose: that one hands rows to the
+    council's own code, which wants real ``datetime`` objects back.  An
+    export has to survive ``json.dumps``, so timestamps become ISO-8601
+    strings here and nothing else is touched -- JSON columns are already
+    plain Python by the time SQLAlchemy returns them.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in row._mapping.items():
+        out[key] = value.isoformat() if isinstance(value, datetime) else value
+    return out
+
+
 def _dict(row: Any) -> Dict[str, Any]:
     return dict(row._mapping)
 
@@ -237,10 +524,20 @@ class SqliteStore:
         check_version: Verify the stored schema version at open time.  Pass
             ``False`` from ``kbu council db migrate``, which must be able to
             open precisely the databases this check rejects.
+        store_id: The CONFIGURED archive identity -- what the caller believes
+            this store is (typically ``CouncilConfig.store_id``).  Optional,
+            and there is deliberately NO automatic default (see the
+            "Archive identity" note in this module).  When supplied it is
+            validated immediately and then CHECKED against the identity
+            stored inside the database by :meth:`snapshot` and
+            :meth:`export`, which refuse on a disagreement rather than
+            auto-healing it.  Passing it does NOT assign it: assignment is an
+            explicit act (:meth:`assign_store_identity`).
 
     Raises:
         StorePathRefused: the path has a Dropbox component.
         SchemaVersionMismatch: the file carries a different schema version.
+        ValueError: *store_id* was supplied and is not a valid declared id.
     """
 
     #: Dialect name, for callers that branch on it.
@@ -252,7 +549,15 @@ class SqliteStore:
         *,
         create_parents: bool = True,
         check_version: bool = True,
+        store_id: Optional[str] = None,
     ) -> None:
+        #: The configured identity, validated at open time so a typo in
+        #: config fails when the store is opened rather than when an archive
+        #: run is half-finished.  ``None`` means "no configured identity was
+        #: supplied", which is NOT the same as "the store has none".
+        self.configured_store_id = (
+            None if store_id is None else validate_store_id(store_id)
+        )
         self.url, self.path = _resolve_sqlite_url(url)
         if create_parents and self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1646,6 +1951,448 @@ class SqliteStore:
         """
         with self._read() as conn:
             return _dicts(conn.execute(q.select_results(job_id, include_pending)))
+
+    # -- archive identity -------------------------------------------------
+    #
+    # See the "Archive identity" note near the top of this module for why a
+    # store needs a declared id at all, why there is no automatic default,
+    # and why the record lives in its own table outside the versioned
+    # MetaData.
+
+    def _create_store_identity_table(self, conn: sa.Connection) -> None:
+        """Create the identity table if it is absent.  WRITE path only.
+
+        Called by the two writers and never by a reader: a reader that
+        created the table could not run against a read-only snapshot, and
+        reading the identity off a read-only file is a thing that has to work
+        (see :meth:`store_identity`).
+        """
+        conn.exec_driver_sql(
+            f"CREATE TABLE IF NOT EXISTS {STORE_IDENTITY_TABLE} ("
+            "declared_seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_version INTEGER NOT NULL, "
+            "store_id TEXT NOT NULL, "
+            "declared_at TEXT NOT NULL, "
+            "declared_by TEXT, "
+            "supersedes TEXT)"
+        )
+
+    def _store_identity_table_exists(self, conn: sa.Connection) -> bool:
+        row = conn.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (STORE_IDENTITY_TABLE,),
+        ).first()
+        return row is not None
+
+    def store_identity(self) -> Optional[Dict[str, Any]]:
+        """Return this store's declared identity record, or ``None``.
+
+        READ-ONLY, and safe on a store whose identity table does not exist
+        (every store created before this feature) -- an absent table reads as
+        "no identity declared", not as an error, and nothing is written.
+
+        The record is the APPEND-ONLY table's highest ``declared_seq``, so a
+        fork's re-declaration supersedes the previous row without erasing it.
+
+        Returns:
+            ``{"store_id", "declared_at", "declared_by", "record_version",
+            "declared_seq", "supersedes"}`` for the current record, or
+            ``None`` when this store carries no declared identity.
+        """
+        with self._read() as conn:
+            if not self._store_identity_table_exists(conn):
+                return None
+            row = conn.exec_driver_sql(
+                "SELECT declared_seq, record_version, store_id, declared_at, "
+                f"declared_by, supersedes FROM {STORE_IDENTITY_TABLE} "
+                "ORDER BY declared_seq DESC LIMIT 1"
+            ).first()
+        if row is None:
+            return None
+        return {
+            "declared_seq": row[0],
+            "record_version": row[1],
+            "store_id": row[2],
+            "declared_at": row[3],
+            "declared_by": row[4],
+            "supersedes": row[5],
+        }
+
+    def assign_store_identity(
+        self,
+        store_id: str,
+        *,
+        declared_by: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Declare this store's archive identity.  IDEMPOTENT.
+
+        Declaring the id the store already carries writes nothing and returns
+        the existing record, so a migration script may be run any number of
+        times.  Declaring a DIFFERENT id over an existing one RAISES: that is
+        the independently-writable-fork case, and it needs the explicit act
+        (:meth:`redeclare_store_identity`) rather than happening because
+        somebody re-ran a command with a changed argument.
+
+        Args:
+            store_id: The id to declare, validated by
+                :func:`validate_store_id`.  Nothing here invents one.
+            declared_by: Who declared it.  ``None`` falls back to the OS
+                user; the field exists for accountability, so it is never
+                left blank.
+            now: Timestamp to record.  Defaults to now, UTC.
+
+        Returns:
+            The current identity record, as :meth:`store_identity` returns.
+
+        Raises:
+            ValueError: *store_id* is not a valid declared id.
+            StoreIdentityAlreadyDeclared: a DIFFERENT id is already declared.
+        """
+        declared = validate_store_id(store_id)
+        existing = self.store_identity()
+        if existing is not None:
+            if existing["store_id"] == declared:
+                return existing
+            raise StoreIdentityAlreadyDeclared(
+                f"this store already declares store_id "
+                f"{existing['store_id']!r} (declared "
+                f"{existing['declared_at']} by "
+                f"{existing['declared_by']!r}); refusing to replace it with "
+                f"{declared!r}. A declared identity never changes -- every "
+                "row already archived under the old id is keyed on it, and "
+                "the clearinghouse payload carrying it is frozen on first "
+                "write. If this really is an independently writable FORK of "
+                "that store, say so explicitly with "
+                "redeclare_store_identity()."
+            )
+        return self._write_store_identity(
+            declared,
+            declared_by=declared_by,
+            now=now,
+            supersedes=None,
+        )
+
+    def redeclare_store_identity(
+        self,
+        store_id: str,
+        *,
+        declared_by: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Declare a NEW identity for an independently writable fork.
+
+        THE EXPLICIT ACT, and the only way a declared identity is ever
+        replaced.  A copied store file carries the original identity, which
+        is correct for a MOVE or a read-only snapshot -- the identity must
+        survive those.  It is wrong the moment the copy starts taking writes
+        of its own: two independently writable stores sharing one id silently
+        merge two unrelated histories into one archived table.
+
+        The previous id is recorded in ``supersedes`` and its row is left in
+        place, because a later reader has no other way to tell a fork from a
+        store that always had its current id.
+
+        Idempotent in the same way as :meth:`assign_store_identity`:
+        re-declaring the id already current writes nothing.
+
+        Args:
+            store_id: The fork's NEW id, validated by
+                :func:`validate_store_id`.  Must differ from the current one
+                unless it is the current one (in which case this is a no-op).
+            declared_by: Who declared it.  ``None`` falls back to the OS user.
+            now: Timestamp to record.  Defaults to now, UTC.
+
+        Returns:
+            The new current identity record.
+
+        Raises:
+            ValueError: *store_id* is not a valid declared id.
+        """
+        declared = validate_store_id(store_id)
+        existing = self.store_identity()
+        if existing is not None and existing["store_id"] == declared:
+            return existing
+        return self._write_store_identity(
+            declared,
+            declared_by=declared_by,
+            now=now,
+            supersedes=None if existing is None else existing["store_id"],
+        )
+
+    def _write_store_identity(
+        self,
+        store_id: str,
+        *,
+        declared_by: Optional[str],
+        now: Optional[datetime],
+        supersedes: Optional[str],
+    ) -> Dict[str, Any]:
+        """Append one identity record.  The only writer of that table."""
+        when = (now or _utcnow()).astimezone(timezone.utc).isoformat()
+        who = declared_by or os.environ.get("USER") or "unknown"
+        with self.transaction() as conn:
+            self._create_store_identity_table(conn)
+            conn.exec_driver_sql(
+                f"INSERT INTO {STORE_IDENTITY_TABLE} "
+                "(record_version, store_id, declared_at, declared_by, "
+                "supersedes) VALUES (?, ?, ?, ?, ?)",
+                (
+                    STORE_IDENTITY_RECORD_VERSION,
+                    store_id,
+                    when,
+                    who,
+                    supersedes,
+                ),
+            )
+        record = self.store_identity()
+        assert record is not None  # just written
+        return record
+
+    def require_store_identity(
+        self,
+        *,
+        operation: str,
+        store_id: Any = _USE_CONFIGURED,
+    ) -> Dict[str, Any]:
+        """Return the stored identity, or refuse.  The archive gate.
+
+        Two refusals, and NEITHER is auto-healed:
+
+        * no identity is declared at all -- the store may not be archived,
+          because every archived row is keyed on an id that does not exist;
+        * a configured identity disagrees with the stored one -- which means
+          either somebody copied a store and kept writing to it, or a config
+          is pointed at the wrong file.  The message names BOTH values so the
+          operator can tell which, and nothing is rewritten: silently
+          preferring either side is how two histories get merged.
+
+        Args:
+            operation: What is being refused ("snapshot", "export", ...).
+                Quoted in the message, so the refusal says what did not run.
+            store_id: The configured identity to compare against.  Defaults
+                to the one this store was opened with
+                (``self.configured_store_id``).  Pass ``None`` explicitly to
+                skip the comparison and only require presence.
+
+        Returns:
+            The stored identity record.
+
+        Raises:
+            StoreIdentityMissing: no identity is declared.
+            StoreIdentityMismatch: the configured and stored ids differ.
+        """
+        configured = (
+            self.configured_store_id if store_id is _USE_CONFIGURED else store_id
+        )
+        record = self.store_identity()
+        if record is None:
+            raise StoreIdentityMissing(
+                f"refusing to {operation} {self.url!r}: this store carries NO "
+                "declared archive identity, and every row archived from it "
+                "is keyed on store_id. Declare one explicitly first -- "
+                "store.assign_store_identity('<declared-id>', "
+                "declared_by='<you>') -- or, for the existing poplar store, "
+                "run the documented one-off (see POPLAR_COUNCIL_STORE_ID). "
+                "Nothing is assigned automatically: an invented id looks "
+                "joinable and cannot be corrected once a clearinghouse "
+                "payload carries it."
+            )
+        if configured is not None and configured != record["store_id"]:
+            raise StoreIdentityMismatch(
+                f"refusing to {operation} {self.url!r}: the CONFIGURED "
+                f"store_id is {configured!r} but the identity STORED in this "
+                f"database is {record['store_id']!r} (declared "
+                f"{record['declared_at']} by {record['declared_by']!r}). "
+                "These must agree and this is NOT auto-healed. A mismatch "
+                "usually means a store file was copied and then written to, "
+                "which is the one case that must not be papered over -- if "
+                "this really is an independently writable fork, declare its "
+                "new identity explicitly with redeclare_store_identity(); if "
+                "the config is pointed at the wrong file, fix the config."
+            )
+        return record
+
+    def snapshot(
+        self,
+        destination: Any,
+        *,
+        store_id: Any = _USE_CONFIGURED,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        """Write a consistent read-only snapshot of this store, and describe it.
+
+        Uses SQLite's own BACKUP API rather than copying the file: a live
+        store is a database plus a write-ahead log, and a plain ``cp`` of the
+        pair mid-transaction produces a database that opens and is wrong.
+        The snapshot carries the identity record with it, because the record
+        is a table inside the file -- which is the whole point of putting it
+        there.
+
+        REFUSES before writing anything when this store has no declared
+        identity, or when the configured and stored identities disagree (see
+        :meth:`require_store_identity`).
+
+        Args:
+            destination: Path to write the snapshot to.
+            store_id: Configured identity to check.  See
+                :meth:`require_store_identity`.
+            overwrite: Permit replacing an existing destination file.  Off by
+                default: silently overwriting somebody's archive source is
+                not a thing this should do by accident.
+
+        Returns:
+            A manifest dict: ``store_id`` and the full ``identity`` record,
+            the destination ``path``, ``bytes``, the VERIFIED
+            ``snapshot_id`` (the sha256 of the snapshot file as written,
+            which is what ``council_schema``'s ``snapshot_id`` column holds),
+            ``store_host``, ``taken_at``, and per-table ``row_counts``.
+
+        Raises:
+            StoreIdentityMissing: no identity is declared.
+            StoreIdentityMismatch: configured and stored ids differ.
+            FileExistsError: the destination exists and *overwrite* is False.
+            StoreError: this is an in-memory store, which has no file to
+                snapshot.
+        """
+        identity = self.require_store_identity(
+            operation="snapshot", store_id=store_id
+        )
+        if self.path is None:
+            raise StoreError(
+                "refusing to snapshot an in-memory store: there is no file "
+                "to snapshot and nothing would be archivable from the result"
+            )
+        target = Path(destination).expanduser()
+        if target.exists() and not overwrite:
+            raise FileExistsError(
+                f"refusing to overwrite {str(target)!r}; pass overwrite=True "
+                "if replacing it is really what you mean"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # The backup API runs against the live database and produces a
+        # transactionally consistent copy, WAL included.
+        source = sqlite3.connect(str(self.path))
+        try:
+            written = sqlite3.connect(str(target))
+            try:
+                source.backup(written)
+            finally:
+                written.close()
+        finally:
+            source.close()
+
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+        return {
+            "store_id": identity["store_id"],
+            "identity": identity,
+            "path": str(target),
+            "bytes": target.stat().st_size,
+            "snapshot_id": digest.hexdigest(),
+            "store_host": socket.gethostname(),
+            "taken_at": _utcnow().isoformat(),
+            "row_counts": self._row_counts(),
+        }
+
+    def export(
+        self,
+        destination: Any,
+        *,
+        store_id: Any = _USE_CONFIGURED,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        """Export every store table as JSONL into *destination*, and describe it.
+
+        One ``<table>.jsonl`` per table of :data:`.schema.TABLE_NAMES`, plus a
+        ``MANIFEST.json`` carrying the declared identity, a per-file sha256
+        and a per-table row count.  The identity is in the manifest rather
+        than only in the filenames because a directory of JSONL carries no
+        database to read it back out of -- which is exactly why an export,
+        like a snapshot, may not run without one.
+
+        REFUSES before writing anything when this store has no declared
+        identity, or when the configured and stored identities disagree.
+
+        Args:
+            destination: Directory to write into.  Created if absent.
+            store_id: Configured identity to check.  See
+                :meth:`require_store_identity`.
+            overwrite: Permit writing into a directory that already holds an
+                export (i.e. a ``MANIFEST.json``).
+
+        Returns:
+            The manifest dict, as also written to ``MANIFEST.json``.
+
+        Raises:
+            StoreIdentityMissing: no identity is declared.
+            StoreIdentityMismatch: configured and stored ids differ.
+            FileExistsError: the destination already holds an export and
+                *overwrite* is False.
+        """
+        identity = self.require_store_identity(
+            operation="export", store_id=store_id
+        )
+        target = Path(destination).expanduser()
+        manifest_path = target / "MANIFEST.json"
+        if manifest_path.exists() and not overwrite:
+            raise FileExistsError(
+                f"refusing to overwrite the export already in "
+                f"{str(target)!r}; pass overwrite=True if replacing it is "
+                "really what you mean"
+            )
+        target.mkdir(parents=True, exist_ok=True)
+
+        files: Dict[str, Any] = {}
+        with self._read() as conn:
+            for name in sch.TABLE_NAMES:
+                table = sch.metadata.tables[name]
+                path = target / f"{name}.jsonl"
+                rows = 0
+                digest = hashlib.sha256()
+                with path.open("w", encoding="utf-8") as handle:
+                    for row in conn.execute(sa.select(table)):
+                        line = json.dumps(
+                            _export_row(row), sort_keys=True, default=str
+                        )
+                        handle.write(line + "\n")
+                        digest.update((line + "\n").encode("utf-8"))
+                        rows += 1
+                files[f"{name}.jsonl"] = {
+                    "rows": rows,
+                    "sha256": digest.hexdigest(),
+                }
+
+        manifest = {
+            "store_id": identity["store_id"],
+            "identity": identity,
+            "store_host": socket.gethostname(),
+            "exported_at": _utcnow().isoformat(),
+            "schema_version": sch.SCHEMA_VERSION,
+            "files": files,
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    def _row_counts(self) -> Dict[str, int]:
+        """``{table: row count}`` over every table of the council schema."""
+        counts: Dict[str, int] = {}
+        with self._read() as conn:
+            for name in sch.TABLE_NAMES:
+                table = sch.metadata.tables[name]
+                counts[name] = int(
+                    conn.execute(
+                        sa.select(sa.func.count()).select_from(table)
+                    ).scalar_one()
+                )
+        return counts
 
     def cancel_job(self, job_id: str, user: Optional[str] = None) -> None:
         """Cancel a job in ONE transaction.  Terminal and idempotent.

@@ -807,6 +807,30 @@ class CouncilConfig(BaseModel):
     rates: Dict[str, RateConfig] = {}
     default_profile: Optional[str] = None
     store: str = DEFAULT_STORE_URL
+    #: The store's DECLARED ARCHIVE IDENTITY -- what this config believes the
+    #: store at :attr:`store` is, for the ``kbaseincubator.council`` archive.
+    #:
+    #: There is deliberately NO DEFAULT, and none may ever be added. Not the
+    #: hostname, not a slug of :attr:`store`, not a ``uuid4``: every row
+    #: archived out of a store is keyed on ``store_id``, ``job_id`` is unique
+    #: only WITHIN one store, and the clearinghouse payload that carries the
+    #: id is frozen on first write (the slot key excludes
+    #: ``result_type_version``, so a corrected payload in the same slot is
+    #: silently dropped). A path-derived id breaks every join the moment the
+    #: store moves off ``/scratch``; a fresh id per copy breaks idempotency;
+    #: one id shared between two independently writable forks silently merges
+    #: unrelated histories. An automatic value would be indistinguishable
+    #: from a correct one until the first store moved, by which time nothing
+    #: could be fixed.
+    #:
+    #: This is NOT the authoritative record. The authority is the identity
+    #: persisted INSIDE the store database
+    #: (``store.sqlite.SqliteStore.store_identity``), so that a file copy
+    #: carries it. This field is the CONFIGURED value checked against that
+    #: record: ``snapshot`` and ``export`` refuse when the two disagree,
+    #: naming both, and never auto-heal. Leaving it ``None`` means "do not
+    #: compare" -- the store's own record still has to exist.
+    store_id: Optional[str] = None
     #: Root directory a CLI backend writes its prompt file under (story 17:
     #: delivering the Claude CLI's prompt by file rather than by stdin, so a
     #: busy event loop cannot cause a 3-second stdin timeout). Declared here

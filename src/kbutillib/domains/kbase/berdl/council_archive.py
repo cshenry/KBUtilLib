@@ -105,13 +105,15 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from .council_schema import (
-    ARCHIVED_TABLES,
-    COUNCIL_NAMESPACE,
     COUNCIL_ENTITY_HASH_COLUMN,
+    COUNCIL_NAMESPACE,
     IDENTITY_COLUMN_NAMES,
     JOB_DISPOSITION_TABLE,
     ROLE_BRIEF_TABLE,
     ROLE_BRIEF_UNEXTRACTABLE,
+    # RE-EXPORTED, not used here: `attempt_query_name` raises it and
+    # `archive_snapshot` documents raising it, so a caller that wants to
+    # catch it should not have to know it lives in council_schema.
     ContradictoryQueryNameError,
     attempt_query_name,
     column_names,
@@ -122,6 +124,7 @@ from .council_sink import encode_row
 
 __all__ = [
     "ARCHIVER_TABLES",
+    "ContradictoryQueryNameError",
     "NOT_WRITTEN_BY_THE_ARCHIVER",
     "STATE_DIR_ENV",
     "DEFAULT_STATE_ROOT",

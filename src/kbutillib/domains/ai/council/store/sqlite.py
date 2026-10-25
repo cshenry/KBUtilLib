@@ -2420,7 +2420,17 @@ class SqliteStore:
         return manifest
 
     def _row_counts(self) -> Dict[str, int]:
-        """``{table: row count}`` over every table of the council schema."""
+        """``{table: row count}`` over every table of the council schema.
+
+        THESE ARE THE LIVE STORE'S COUNTS AND MUST NOT BE USED TO DESCRIBE A
+        SNAPSHOT.  ``_read()`` goes through this store's connection, and
+        :meth:`transaction` is RE-ENTRANT, so a call made inside a write
+        transaction the caller already has open sees UNCOMMITTED rows --
+        which the sqlite3 backup API deliberately leaves out of a snapshot.
+        :meth:`snapshot` used to build its manifest from here and reported 2
+        rows where its own snapshot held 1; it now uses
+        :func:`_snapshot_row_counts`, which reads the written file.
+        """
         counts: Dict[str, int] = {}
         with self._read() as conn:
             for name in sch.TABLE_NAMES:

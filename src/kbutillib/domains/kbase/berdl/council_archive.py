@@ -1297,11 +1297,16 @@ def require_complete_delivery(
     status = reconcile_delivery(sink, ledger)
     if status["complete"]:
         return receipt(sink, ledger)
+    # `status["tables"]` is EMPTY when there is no delivery binding at all,
+    # which is the commonest incomplete case (a snapshot nobody archived
+    # here). Reported with its reason rather than per-table counts -- and
+    # never as "complete by default".
+    counted = [table for table in status["incomplete"] if table in status["tables"]]
     detail = ", ".join(
         f"{table}: {status['tables'][table]['observed_rows']} of "
         f"{status['tables'][table]['expected_rows']} rows"
-        for table in status["incomplete"]
-    ) or status.get("reason", "no delivery binding")
+        for table in counted
+    ) or str(status.get("reason") or "no delivery binding")
     raise DeliveryIncompleteError(
         f"snapshot {snapshot_id!r} of store {store_id!r} is NOT completely "
         f"archived and may not be published from. Unreconciled -- {detail}. "

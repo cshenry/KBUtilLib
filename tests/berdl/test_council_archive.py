@@ -981,6 +981,20 @@ class TestCrashBetweenTables:
             )
         assert "attempts" in str(excinfo.value)
 
+    def test_a_snapshot_with_NO_delivery_at_all_is_refused_with_its_reason(
+        self, sink, state_root
+    ) -> None:
+        """No ledger is not "complete by default", and the refusal must not
+        trip over its own empty per-table report."""
+        with pytest.raises(DeliveryIncompleteError) as excinfo:
+            require_complete_delivery(
+                sink,
+                store_id=STORE_ID,
+                snapshot_id="f" * 64,
+                state_root=state_root,
+            )
+        assert "no delivery binding" in str(excinfo.value)
+
     def test_the_failed_batch_is_recorded_as_failed_not_silently_retried(
         self, crashed, state_root
     ) -> None:

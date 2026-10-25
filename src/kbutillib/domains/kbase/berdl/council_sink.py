@@ -485,13 +485,20 @@ class BerdlCouncilSink:
         return f"{self.namespace}.{table_name(table)}"
 
     def bootstrap(self, tables: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-        """Delegate to ``council_schema.bootstrap`` -- never a second copy."""
+        """Delegate to ``council_schema.bootstrap`` -- never a second copy.
+
+        ``tables`` defaults to THIS MODULE's :func:`table_configs`, not
+        ``council_schema``'s: the two sinks must bootstrap the same set, or a
+        table that exists locally (``publication_bundle``) would be missing
+        in the pod and the first write there would fail on a namespace that
+        had just reported itself bootstrapped.
+        """
         from .council_schema import bootstrap as _bootstrap
 
         return _bootstrap(
             self._capability,
             namespace=self.namespace,
-            tables=tables,
+            tables=table_configs() if tables is None else tables,
             dataset=self.dataset,
             tenant=self.tenant,
             pipeline_name=self.pipeline_name,

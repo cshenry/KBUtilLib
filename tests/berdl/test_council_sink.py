@@ -251,3 +251,89 @@ class TestOpenSink:
                 assert sink.table_exists(table), table
         finally:
             sink.close()
+
+
+class TestBothSinksBootstrapTheSameSet:
+    """A table that exists locally and not in the pod is the worst outcome.
+
+    ``publication_bundle`` is registered outside ``council_schema`` (see
+    ``register_table``), so a pod sink that defaulted to ``council_schema``'s
+    nine would report a bootstrapped namespace and then fail on the first
+    bundle write.
+    """
+
+    class _Recording:
+        def __init__(self):
+            self.calls = []
+
+        def table_exists(self, name, *, namespace):
+            return False
+
+        def table_partition_spec(self, name, *, namespace):
+            return []
+
+        def load(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"created_or_appended": [t["name"] for t in kwargs["tables"]]}
+
+    def test_the_pod_sink_bootstraps_every_registered_table_too(self):
+        from kbutillib.domains.genome.ontology_mapping.council_bundle import (
+            PUBLICATION_BUNDLE_TABLE,
+        )
+
+        capability = self._Recording()
+        BerdlCouncilSink(capability).bootstrap()
+        requested = {t["name"] for call in capability.calls for t in call["tables"]}
+        assert set(ARCHIVED_TABLES) <= requested
+        assert PUBLICATION_BUNDLE_TABLE in requested
+
+    def test_the_local_sink_creates_the_same_set(self, sink):
+        from kbutillib.domains.genome.ontology_mapping.council_bundle import (
+            PUBLICATION_BUNDLE_TABLE,
+        )
+
+        for table in (*ARCHIVED_TABLES, PUBLICATION_BUNDLE_TABLE):
+            assert sink.table_exists(table), table
+
+
+class TestRegisterTable:
+    def test_a_name_that_collides_with_council_schema_is_refused(self):
+        from kbutillib.domains.kbase.berdl.council_sink import register_table
+
+        with pytest.raises(Exception) as excinfo:
+            register_table("jobs", (("x", "STRING"),))
+        assert "council_schema" in str(excinfo.value)
+
+    def test_re_registering_the_SAME_columns_is_idempotent(self):
+        from kbutillib.domains.kbase.berdl.council_sink import register_table
+
+        from kbutillib.domains.kbase.berdl.council_sink import (
+            column_names as sink_column_names,
+        )
+
+        register_table("t_sink_probe", (("a", "STRING"), ("b", "INT")))
+        register_table("t_sink_probe", (("a", "STRING"), ("b", "INT")))
+        # The SINK's resolver, which answers for both declaration sites;
+        # council_schema's own still refuses an unknown name, as it should.
+        assert sink_column_names("t_sink_probe") == ("a", "b")
+        with pytest.raises(ValueError):
+            column_names("t_sink_probe")
+
+    def test_re_registering_DIFFERENT_columns_is_refused(self):
+        """Two column lists for one physical table is the drift one
+        declaration site prevents."""
+        from kbutillib.domains.kbase.berdl.council_sink import register_table
+
+        register_table("t_sink_conflict", (("a", "STRING"),))
+        with pytest.raises(Exception) as excinfo:
+            register_table("t_sink_conflict", (("a", "INT"),))
+        assert "different column list" in str(excinfo.value)
+
+    def test_a_parenthesised_type_is_refused(self):
+        """No config value here may contain a parenthesis -- it is the guard
+        against an Iceberg partition-transform expression leaking in."""
+        from kbutillib.domains.kbase.berdl.council_sink import register_table
+
+        with pytest.raises(Exception) as excinfo:
+            register_table("t_sink_paren", (("a", "DECIMAL(10,2)"),))
+        assert "parenthesis" in str(excinfo.value)

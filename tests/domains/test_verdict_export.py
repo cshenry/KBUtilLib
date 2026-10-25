@@ -41,6 +41,13 @@ IDENTITY: Dict[str, Any] = {
     "mapping_hash": MAPPING_HASH,
 }
 
+#: The council store's DECLARED identity, which every council-decided row
+#: publishes as part of its ``council`` reference. Declared here because
+#: ``export_rows`` REFUSES to publish a decided row without one rather than
+#: writing a partial triple that looks joinable -- so a fixture has to state
+#: it, exactly as production resolves it off the store.
+STORE_ID = "poplar/council-1"
+
 PLANNED_AT = "2026-10-22T09:00:00Z"
 #: Spelled the way the store spells it -- ``datetime.isoformat()``, so
 #: ``+00:00`` rather than ``Z``. The export normalises it.
@@ -195,6 +202,7 @@ def _build(**kwargs: Any) -> Dict[str, Any]:
     kwargs.setdefault("identity", IDENTITY)
     kwargs.setdefault("job_ids", ["job-a"])
     kwargs.setdefault("abstained_at", PLANNED_AT)
+    kwargs.setdefault("store_id", STORE_ID)
     return vx.export_rows(**kwargs)
 
 

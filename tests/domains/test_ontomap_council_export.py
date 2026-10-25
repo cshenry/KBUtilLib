@@ -127,18 +127,63 @@ def _roster() -> Roster:
     )
 
 
+#: The council store's DECLARED identity, as the stage reads it back off the
+#: store. Stated here because ``verdicts.export_rows`` refuses to publish a
+#: decided row without one: ``(store_id, job_id, item_id)`` is the whole join
+#: key into ``kbaseincubator.council``, and a partial triple looks joinable.
+STORE_ID = "poplar/council-1"
+
+
+class _FakeStore:
+    """The one store surface stage 5 reads: the DECLARED archive identity.
+
+    Shaped exactly like ``SqliteStore.store_identity()``'s return value, so
+    the stage's resolution path is the real one. The record is tested against
+    the real store code in ``tests/domains/ai/council/test_store_identity.py``
+    and end to end against a real store in
+    ``tests/domains/test_verdict_council_reference.py``; here it only has to
+    be present.
+    """
+
+    def __init__(self, store_id: Optional[str] = STORE_ID) -> None:
+        self._store_id = store_id
+
+    def store_identity(self) -> Optional[Dict[str, Any]]:
+        if self._store_id is None:
+            return None
+        return {
+            "declared_seq": 1,
+            "record_version": 1,
+            "store_id": self._store_id,
+            "declared_at": "2026-10-22T09:00:00+00:00",
+            "declared_by": "chenry",
+            "supersedes": None,
+        }
+
+
 class _FakeCouncil:
-    """The council surfaces the two stages use: config/roster, and results.
+    """The council surfaces the two stages use: config/roster, results, store.
 
     ``results`` records the job ids it was asked for, because "which jobs did
     the export read" is the whole of the run identity this stage contributes.
+    ``store`` exposes the DECLARED archive identity the published ``council``
+    reference is built from.
     """
 
-    def __init__(self, results_by_job: Dict[str, List[Dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        results_by_job: Dict[str, List[Dict[str, Any]]],
+        *,
+        store_id: Optional[str] = STORE_ID,
+    ) -> None:
         self._config = _FakeConfig()
         self._roster = _roster()
         self.results_by_job = results_by_job
         self.asked: List[str] = []
+        self._store = _FakeStore(store_id)
+
+    def store(self, **_kw: Any) -> _FakeStore:
+        return self._store
 
     def config(self) -> _FakeConfig:
         return self._config

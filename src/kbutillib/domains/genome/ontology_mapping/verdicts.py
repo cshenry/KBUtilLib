@@ -81,9 +81,11 @@ from kbutillib.domains.ai.council.engine.decide import content_flag
 __all__ = [
     "EXPORT_COLUMNS",
     "EXPORT_IDENTITY_FIELDS",
+    "COUNCIL_REFERENCE_FIELDS",
     "DECLINE_CLASSES",
     "export_rows",
     "export_schema",
+    "council_reference",
     "no_functional_content",
     "route_fingerprint_cells",
     "verdicts_by_item",
@@ -115,6 +117,28 @@ EXPORT_COLUMNS: Tuple[str, ...] = (
     "mapping_hash",
     "job_ids",
     "retried",
+    # ADDED for the council reference (PRD council-record-lakehouse-v1).
+    # APPENDED, never interleaved: every pre-existing column keeps its name
+    # and its position, because the shipped preset names columns out of this
+    # list and a reader of an older parquet must still find them where they
+    # were.
+    #
+    # ``status`` is the COUNCIL ITEM's status, not the export row's
+    # disposition: ``export_rows`` only emits a fanout row when the item
+    # settled ``ok``, so a decided row reads ``"ok"`` and an ABSTENTION reads
+    # null, because retrieval declined before any council item existed.
+    "status",
+    # ``council`` is the WINNING item's reference -- the one whose verdict was
+    # published -- as a STRUCT of ``(store_id, job_id, item_id)``, or NULL.
+    # One nullable struct rather than three nullable columns, and that is
+    # forced by the write path rather than preferred: the shipped preset emits
+    # its payload with ``@json(col, ...)``, which builds ``{col: row[col]}``
+    # (clearinghouse_shard._derive) and cannot assemble a NESTED object out of
+    # three flat columns. Three nulls side by side is also not the same
+    # statement as ``council = null`` -- the first says "three unknown
+    # fields", the second says "there is no council item", which is the fact
+    # an abstention has to publish.
+    "council",
 )
 
 #: The RUN IDENTITY columns -- the same value on every row of one export.
@@ -132,6 +156,19 @@ EXPORT_IDENTITY_FIELDS: Tuple[str, ...] = (
     "roster_fingerprint",
     "mapping_hash",
 )
+
+#: The fields of the ``council`` struct: the WINNING council item's reference.
+#: The join key into the ``kbaseincubator.council`` archive is exactly this
+#: triple, and all three parts are load-bearing: ``items`` has primary key
+#: ``(job_id, item_id)``, so ``job_id`` alone names a job of 19,276 items
+#: rather than a function, and ``job_id`` is unique only WITHIN one store --
+#: hence ``store_id``, which is the store's DECLARED identity
+#: (``ai.council.store.sqlite.SqliteStore.store_identity``) and never a path,
+#: a hostname or a uuid.
+#:
+#: Declared once here; :func:`export_schema` builds the struct from it and
+#: :func:`export_rows` builds the cell from it, so the two cannot disagree.
+COUNCIL_REFERENCE_FIELDS: Tuple[str, ...] = ("store_id", "job_id", "item_id")
 
 #: The three decline classes, each written as a row with ``go_ids = []``.
 #: ``abstained`` is a PREFIX -- the published value is
@@ -165,6 +202,7 @@ def export_rows(
     genomes: Optional[Mapping[str, Sequence[str]]] = None,
     retry_job_ids: Sequence[str] = (),
     route_fingerprints: Optional[Iterable[Mapping[str, Any]]] = None,
+    store_id: str = "",
 ) -> Dict[str, Any]:
     """Build the export's rows, one per input ``query_id``.
 
@@ -206,6 +244,12 @@ def export_rows(
             ``route_fingerprint``. PROVENANCE, never a key -- see
             :data:`EXPORT_IDENTITY_FIELDS`. Omitted or empty, the column is
             an empty list on every row.
+        store_id: The council store's DECLARED identity, published as part of
+            every council-decided row's ``council`` reference. REQUIRED
+            whenever this call produces a decided row, and deliberately not
+            defaulted to anything derivable: see :func:`council_reference`.
+            An export of nothing but abstentions needs none, because an
+            abstention has no council item and publishes ``council = null``.
 
     Returns:
         ``{"rows": [...], "counts": {...}}``. ``counts`` carries ``inputs``,
@@ -301,6 +345,22 @@ def export_rows(
                 **identity_cells,
                 "job_ids": list(all_job_ids),
                 "retried": False,
+                # No council item exists for a retrieval abstention: the plan
+                # declined this function BEFORE anything was submitted (see
+                # the abstain partition in ``council_plan``), so there is no
+                # (store_id, job_id, item_id) to name.
+                "status": None,
+                # NULL, and this nullable case is the POINT of the council
+                # reference rather than an edge of it. Emitting a non-null
+                # triple here -- even one assembled out of the run's store and
+                # one of its job ids -- would FABRICATE provenance: it would
+                # assert that a council deliberated this function and that
+                # its record can be read back out of
+                # ``kbaseincubator.council``, and both are false. The decline
+                # fields above (``decline_reason`` in the
+                # ``"abstained:<reason>"`` spelling, ``go_ids = []``) are what
+                # this row actually knows, and they are retained unchanged.
+                "council": None,
             }
         )
 
@@ -355,6 +415,38 @@ def export_rows(
                 **identity_cells,
                 "job_ids": list(all_job_ids),
                 "retried": retried,
+                # The COUNCIL ITEM's own status. Only an item that settled
+                # ``ok`` reaches here (the no-verdict case was withheld
+                # above), so this reads ``"ok"`` on every decided row; it is
+                # published explicitly rather than implied so a reader of one
+                # row does not have to know that rule.
+                "status": status,
+                # THE WINNING COUNCIL ITEM -- the one whose verdict was
+                # published, not a list. ``job_ids`` above remains the list of
+                # every job the export read; this is the single item the row's
+                # answer came from, which is the only thing that can be joined
+                # back to ``kbaseincubator.council``. ``verdicts_by_item``
+                # lets a later job overwrite an earlier one's entry for an
+                # ``item_id``, so ``settled["job_id"]`` IS the winning job --
+                # which is how a retried item names its retry job and not the
+                # chunk job that failed.
+                #
+                # DO NOT expect the 19,268 rows ALREADY LOADED under this
+                # result_type to gain this reference. The clearinghouse slot
+                # key is (entity_hash, entity_type, result_type, source,
+                # parameter_set_hash) and deliberately EXCLUDES
+                # result_type_version, so a payload shape is frozen once
+                # written: re-publishing those rows with a council block in
+                # the same slot is silently dropped as already-present. They
+                # remain joinable only by the documented convention that
+                # exactly ONE store produced them -- the poplar store, whose
+                # declared identity is
+                # ``store.sqlite.POPLAR_COUNCIL_STORE_ID``. If you are reading
+                # a pre-existing row and finding no council block, that is
+                # this, and not a bug.
+                "council": council_reference(
+                    store_id=store_id, job_id=job_id, item_id=item_id
+                ),
             }
         )
 
@@ -428,6 +520,64 @@ def no_functional_content(verdict: Mapping[str, Any]) -> Optional[bool]:
 # ---------------------------------------------------------------------------
 # Cell helpers
 # ---------------------------------------------------------------------------
+
+
+def council_reference(
+    *, store_id: str, job_id: str, item_id: str
+) -> Dict[str, str]:
+    """The ``council`` cell for ONE published row: the winning item's reference.
+
+    Every part is REQUIRED and none is defaulted, because a partial reference
+    is worse than no reference: it looks joinable. ``items`` has primary key
+    ``(job_id, item_id)``, so ``job_id`` alone names a job of 19,276 items
+    rather than a function; and ``job_id`` is unique only WITHIN one store, so
+    without ``store_id`` the triple does not identify a row in
+    ``kbaseincubator.council`` at all.
+
+    Args:
+        store_id: The store's DECLARED identity -- what
+            ``SqliteStore.store_identity()`` returns, never a path, a hostname
+            or a uuid (see that method for why an automatic value cannot be
+            corrected once a clearinghouse payload carries it).
+        job_id: The WINNING job -- the one whose verdict was published.
+        item_id: The council item within that job.
+
+    Returns:
+        ``{"store_id", "job_id", "item_id"}``.
+
+    Raises:
+        ValueError: Any part is empty. In particular an empty ``store_id``
+            means the caller never resolved the store's declared identity,
+            and publishing ``store_id = ""`` would assert a store that does
+            not exist. For a RETRIEVAL ABSTENTION the answer is not an empty
+            triple but ``council = null`` -- there is no council item -- and
+            :func:`export_rows` writes that directly without calling this.
+    """
+    missing = [
+        name
+        for name, value in (
+            ("store_id", store_id),
+            ("job_id", job_id),
+            ("item_id", item_id),
+        )
+        if not str(value or "").strip()
+    ]
+    if missing:
+        raise ValueError(
+            f"council_reference: {', '.join(missing)} is empty, so this row "
+            "cannot name the council item its verdict came from. A partial "
+            "reference is worse than none: (store_id, job_id, item_id) is the "
+            "whole join key into kbaseincubator.council -- items are keyed "
+            "(job_id, item_id) and job_id is unique only within one store. "
+            "Resolve the store's DECLARED identity (store.store_identity()) "
+            "and pass store_id= to export_rows. An abstention is not this "
+            "case: it publishes council = null."
+        )
+    return {
+        "store_id": str(store_id),
+        "job_id": str(job_id),
+        "item_id": str(item_id),
+    }
 
 
 def route_fingerprint_cells(
@@ -667,6 +817,16 @@ def export_schema() -> Any:
         "mapping_hash": pa.string(),
         "job_ids": pa.list_(pa.string()),
         "retried": pa.bool_(),
+        "status": pa.string(),
+        # DECLARED, like every other column here, and declared as a STRUCT so
+        # the whole reference can be NULL as one value. An export in which
+        # every row happened to abstain would otherwise infer ``null`` for
+        # this column and a shard reading two such files would see two
+        # different schemas for one source -- the same failure
+        # ``route_fingerprints`` is declared to avoid.
+        "council": pa.struct(
+            [(name, pa.string()) for name in COUNCIL_REFERENCE_FIELDS]
+        ),
     }
     return pa.schema([(name, fields[name]) for name in EXPORT_COLUMNS])
 

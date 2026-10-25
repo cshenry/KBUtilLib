@@ -352,6 +352,14 @@ def _isolated_ingest_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv(ci.LOCK_DIR_ENV, str(tmp_path / "ingest-locks"))
 
 
+#: The rehearsal store's DECLARED archive identity. A declared NAME, never a
+#: path, a hostname or a uuid: every row archived into
+#: ``kbaseincubator.council`` is keyed on it and the clearinghouse payload
+#: that carries it is frozen on first write. Deliberately NOT the real
+#: ``poplar/council-1``, so a rehearsal row is recognisable as one.
+REHEARSAL_STORE_ID = "rehearsal/council-0"
+
+
 @pytest.fixture
 def council(tmp_path: Path) -> Iterator[Any]:
     """A REAL ``CouncilUtils``: real config, real SQLite store, shipped go_mf@1."""
@@ -367,6 +375,16 @@ def council(tmp_path: Path) -> Iterator[Any]:
         kbase_token_file=None,
     )
     utils.db_init()
+    # DECLARE THE STORE'S ARCHIVE IDENTITY, exactly as the one-off migration
+    # does for the real poplar store. Stage 5 publishes it in every
+    # council-decided row's `council` reference, and `verdicts.export_rows`
+    # REFUSES to publish a decided row without it rather than writing a
+    # partial triple that looks joinable -- so a rehearsal of the real
+    # pipeline has to declare one, and a rehearsal that did not would be
+    # rehearsing something production cannot do.
+    utils.store().assign_store_identity(
+        REHEARSAL_STORE_ID, declared_by="rehearsal"
+    )
     seeded = {
         f"{query.name}@{query.version}" for query in utils.registry().seed_builtins()
     }

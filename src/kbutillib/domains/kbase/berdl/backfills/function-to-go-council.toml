@@ -170,7 +170,12 @@
 # clearinghouse knows, so they would join to nothing. Written with the
 # export's own `verdicts.write_verdict_parquet` over
 # `verdicts.EXPORT_COLUMNS`, so the fixture cannot drift from the real
-# artifact's schema. They also carry `query_version = "0"`, which agrees with
+# artifact's schema. Their `council.store_id` is the inert
+# `example/council-0` and NOT the real poplar store id, so a fixture row that
+# somehow reached the lake is recognisable as one; the four council-decided
+# rows carry a full triple and `status = "ok"`, and the `abstained:` row
+# carries `council = null` with a null status, which is what makes the
+# nullable case visible in a smoke run of the preset as shipped. They also carry `query_version = "0"`, which agrees with
 # the un-rendered `source` below: a smoke run of this preset as shipped lands
 # at the inert parameter-set hash named above, which is exactly the row a
 # promotion gate should refuse. Run it against a scratch dataset.
@@ -249,7 +254,39 @@ observed_at_column = "decided_at"
   # would re-select them forever. roster_fingerprint and route_fingerprints
   # ride here BECAUSE they are refused as parameter-set keys: provenance
   # belongs on the row, identity belongs in the partition.
-  payload             = "@json(function_text, go_ids, go_confidences, final_confidence, decided_by, no_functional_content, decline_reason, n_valid_proposers, votes, roster_fingerprint, route_fingerprints)"
+  #
+  # THE COUNCIL REFERENCE. `council` is the WINNING council item --
+  # {store_id, job_id, item_id} -- or NULL. It is the pointer from the
+  # high-level assertion this row carries into the FULL deliberation archived
+  # in `kbaseincubator.council`: every proposer ballot with its free-text
+  # "why", the critic audit, the meta adjudication, the candidate menu each
+  # seat was shown. All three parts are needed: `items` is keyed
+  # (job_id, item_id) so `job_id` alone names a job of 19,276 items, and
+  # `job_id` is unique only within one store.
+  #
+  # `council` IS NULL FOR A RETRIEVAL ABSTENTION, and that is the point of it
+  # rather than an edge case: retrieval declined before anything was
+  # submitted, so no council item exists, and a non-null triple there would
+  # fabricate provenance. The abstention's own decline fields
+  # (decline_reason = "abstained:<reason>", go_ids = []) are unchanged.
+  #
+  # `status` and `retried` are published EXPLICITLY. `status` is the council
+  # ITEM's status (null on an abstention, which never had one); `retried`
+  # says the published verdict came from the run's retry pass -- 105 of the
+  # 113 items that failed on a truncated ARGO response came back on a plain
+  # retry, and a reader comparing two rows needs to know which answer is
+  # which.
+  #
+  # ONE THING THIS CANNOT FIX. The clearinghouse slot key is (entity_hash,
+  # entity_type, result_type, source, parameter_set_hash) and deliberately
+  # EXCLUDES result_type_version, so a payload shape is FROZEN once written:
+  # the 19,268 rows already loaded under this result_type can never gain the
+  # council block, because a corrected payload in the same slot is silently
+  # dropped as already-present. They stay joinable only by the documented
+  # convention that exactly ONE store produced them (the poplar store,
+  # `store.sqlite.POPLAR_COUNCIL_STORE_ID`). A reader finding no council
+  # block on an old row is seeing that, not a bug.
+  payload             = "@json(function_text, go_ids, go_confidences, final_confidence, decided_by, no_functional_content, decline_reason, n_valid_proposers, votes, roster_fingerprint, route_fingerprints, status, retried, council)"
   # RENDERED PER RUN. NOT {} -- see the header, section 2; {} is refused for a
   # council source and would collapse every run into one slot.
   parameter_set       = { query = "go_mf@0", bench_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000", mapping_hash = "0000000000000000000000000000000000000000000000000000000000000000" }

@@ -729,6 +729,7 @@ class OntologyMappingUtils(SharedEnvUtils):
         retry_job_ids: Optional[Sequence[str]] = None,
         genomes: Optional[Dict[str, Sequence[str]]] = None,
         scratch_dir: Optional[Union[str, Path]] = None,
+        store_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Stage 5: write the run's verdicts as parquet, one row per input.
 
@@ -770,6 +771,15 @@ class OntologyMappingUtils(SharedEnvUtils):
                 this today, and the column is an empty list without it.
             scratch_dir: Local ROOT for the default ``out_path``, resolved the
                 same way :meth:`council_plan` resolves it.
+            store_id: The council store's DECLARED identity, published in
+                every council-decided row's ``council`` reference. Default:
+                read off the store itself
+                (``SqliteStore.store_identity()``). Pass it explicitly to
+                publish from a store copy whose identity you know. There is
+                deliberately no derived fallback -- not the hostname, not the
+                store path -- because the clearinghouse payload carrying this
+                id is frozen on first write and a wrong id cannot be
+                corrected in place.
 
         Returns:
             The export record: ``out_path``, ``rows``, ``bytes``, ``counts``,
@@ -781,8 +791,10 @@ class OntologyMappingUtils(SharedEnvUtils):
                 names an abstain/fanout file that is gone (``/scratch`` is
                 ephemeral on this host and is not backed up).
             ValueError: No job ids were given and ``RUN.json`` names none,
-                ``out_path`` is inside ``run_dir``, or the abstain/fanout
-                records disagree with the counts ``PLAN.json`` recorded.
+                ``out_path`` is inside ``run_dir``, the abstain/fanout
+                records disagree with the counts ``PLAN.json`` recorded, or
+                the run produced a council-decided row and no ``store_id``
+                could be resolved (see :func:`~.verdicts.council_reference`).
         """
         from kbutillib.domains.ai.council.quote import PLAN_FILENAME
 
@@ -831,6 +843,16 @@ class OntologyMappingUtils(SharedEnvUtils):
         for job in ordered:
             verdicts_by_item(council.results(job), job_id=job, into=settled)
 
+        # THE STORE'S DECLARED IDENTITY, for the published council reference.
+        # Resolved from the store itself rather than from config or the
+        # hostname: config is per-machine and would not travel with a copied
+        # file, and a derived id breaks every archived join the moment the
+        # store moves off /scratch (see
+        # ai.council.store.sqlite's "Archive identity" note). An explicit
+        # store_id= overrides it, which is how an operator publishes from a
+        # store copy whose identity they know.
+        resolved_store_id = str(store_id or "") or _declared_store_id(council)
+
         if out_path is None:
             out_path = _scratch_dir(run_dir, scratch_dir) / "verdicts.parquet"
         out_path = Path(out_path).expanduser()
@@ -859,6 +881,11 @@ class OntologyMappingUtils(SharedEnvUtils):
             # because a seat re-routed to another gateway must not
             # re-partition the corpus.
             route_fingerprints=plan.get("transport_allocation"),
+            # The WINNING council item's reference rides in the payload as
+            # council = {store_id, job_id, item_id}; export_rows refuses to
+            # publish a decided row without a store_id rather than writing a
+            # partial triple that looks joinable.
+            store_id=resolved_store_id,
         )
         written = write_verdict_parquet(built["rows"], out_path)
 
@@ -914,6 +941,31 @@ class OntologyMappingUtils(SharedEnvUtils):
         from kbutillib.domains.ai.council_utils import CouncilUtils
 
         return CouncilUtils(config_file=False, token_file=None, kbase_token_file=None)
+
+
+def _declared_store_id(council: Any) -> str:
+    """The council store's DECLARED identity, or ``""`` if it has none.
+
+    Returns the empty string rather than raising, because an export of
+    nothing but retrieval abstentions legitimately needs no store id -- an
+    abstention has no council item and publishes ``council = null``. The
+    refusal belongs where the fabrication would happen, which is
+    :func:`~.verdicts.council_reference` on the first DECIDED row.
+
+    Tolerant of a council object that exposes no store (which is what the
+    stage's injected test doubles are), for the same reason: absence is
+    reported, not raised on.
+    """
+    store_factory = getattr(council, "store", None)
+    if not callable(store_factory):
+        return ""
+    reader = getattr(store_factory(), "store_identity", None)
+    if not callable(reader):
+        return ""
+    record = reader()
+    if not record:
+        return ""
+    return str(record.get("store_id") or "")
 
 
 def _split_query_ref(query: str) -> tuple:

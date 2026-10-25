@@ -121,6 +121,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 import click
@@ -711,6 +712,16 @@ def _build_council_plan(util: Any, **kwargs: Any) -> Dict[str, Any]:
     default=None,
     help='Council query as "<name>@<version>". Default: the shipped go_mf@1.',
 )
+@click.option(
+    "--bundle",
+    default=None,
+    type=click.Path(exists=True),
+    help="EXPLICIT path to an un-run input bundle (its directory or its "
+    "BUNDLE.json) written in-pod by `council-unrun-bundle`. With it, this "
+    "command reads no clearinghouse and needs no BERDL credential. There is "
+    "no default and no latest-bundle search: using whatever is newest is how "
+    "a run silently plans the wrong parameter set.",
+)
 @click.option("--profile", default=None, help="Bench to plan against. Default: the configured one.")
 @click.option(
     "--chunk-size",
@@ -729,6 +740,7 @@ def _build_council_plan(util: Any, **kwargs: Any) -> Dict[str, Any]:
 def council_plan_cmd(
     run_dir: str,
     query: Optional[str],
+    bundle: Optional[str],
     profile: Optional[str],
     chunk_size: Optional[int],
     scratch_dir: Optional[str],
@@ -736,9 +748,22 @@ def council_plan_cmd(
 ) -> None:
     """Stage 1: detect the un-run functions and write the run plan.
 
-    SPENDS NO LLM TOKENS. It reads the clearinghouse, runs the retrieval
-    stage locally and writes `PLAN.json`; the first token is spent in stage 4,
-    behind a quote and an approval.
+    SPENDS NO LLM TOKENS. It runs the retrieval stage locally and writes
+    `PLAN.json`; the first token is spent in stage 4, behind a quote and an
+    approval.
+
+    WITH `--bundle` it reads the un-run set from an immutable file produced
+    IN-POD by `council-unrun-bundle` and CONSTRUCTS NO BERDL CLIENT -- which
+    is what the scheduled, unattended stage must use, because the off-pod
+    read failed on 2026-10-23 when poplar's ~/.kbase/token expired at 27 days
+    old and an unattended stage that cannot read silently produces no plan.
+    The bundle's sha256 inventory is verified and its parameter set is
+    checked against this run's BEFORE any retrieval: consuming a bundle built
+    for a different bench or query version would skip work that needs doing.
+
+    WITHOUT `--bundle` it does the two clearinghouse reads itself, which is
+    the original single-command path -- fine locally with a live credential
+    and a human watching, and not for the scheduled stage.
 
     "Un-run" means no current-state `function_result` row at this run's
     clearinghouse `parameter_set_hash`, over the parameter set
@@ -767,10 +792,136 @@ def council_plan_cmd(
             util,
             run_dir=run_dir,
             query=query or DEFAULT_COUNCIL_QUERY,
+            bundle=bundle,
             chunk_size=PLAN_CHUNK_SIZE if chunk_size is None else chunk_size,
             profile=profile,
             scratch_dir=scratch_dir,
         ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-unrun-bundle -- stage 1a, IN-POD
+# ---------------------------------------------------------------------------
+
+
+def _parse_parameter_set(raw: str) -> Dict[str, Any]:
+    """``--parameter-set`` as a dict: inline JSON, or ``@path`` to a JSON file.
+
+    A file is supported because the parameter set is produced on h100 (it
+    needs the council roster and the retrieval mapping version) and consumed
+    in the pod, so it travels as a small file rather than as a shell
+    argument that a quoting mistake could silently truncate.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise click.ClickException(
+            "--parameter-set is empty. The un-run read is defined BY the "
+            "parameter set -- 'un-run' means no current-state result at this "
+            "parameter_set_hash -- so there is no default and an empty set is "
+            "refused for a council source anyway."
+        )
+    if text.startswith("@"):
+        path = Path(text[1:]).expanduser()
+        if not path.is_file():
+            raise click.ClickException(
+                f"--parameter-set @{path} does not exist."
+            )
+        text = path.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise click.ClickException(
+            f"--parameter-set is not valid JSON: {exc}. Expected an object "
+            'like {"query": "go_mf@4", "bench_fingerprint": "...", '
+            '"mapping_hash": "..."} or @path/to/parameter-set.json'
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise click.ClickException(
+            f"--parameter-set must be a JSON object, got a "
+            f"{type(parsed).__name__}."
+        )
+    return parsed
+
+
+@ontomap_cmd.command(name="council-unrun-bundle")
+@click.option(
+    "--bundle-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Directory the bundle is written into (created if absent).",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>". Default: the shipped go_mf@1.',
+)
+@click.option(
+    "--parameter-set",
+    "parameter_set",
+    required=True,
+    help="The run's parameter set as JSON, or @path to a JSON file. "
+    'Normally {"query": "<name>@<version>", "bench_fingerprint": "...", '
+    '"mapping_hash": "..."}. REQUIRED and never derived here: deriving it '
+    "needs the council roster and the retrieval mapping version, which are "
+    "exactly the requirements this in-pod step keeps out of the pod.",
+)
+@_json_option
+def council_unrun_bundle_cmd(
+    bundle_dir: str,
+    query: Optional[str],
+    parameter_set: str,
+    as_json: bool,
+) -> None:
+    """Stage 1a, IN-POD: read the clearinghouse and emit an un-run bundle.
+
+    SPENDS NO LLM TOKENS and performs NO RETRIEVAL. This is the only part of
+    stage 1 that touches the lake, and it is deliberately the smallest piece
+    that must work inside the pod.
+
+    WHY IT IS SEPARATE. The off-pod read worked from h100 on 2026-10-22 and
+    failed on 2026-10-23 with an auth error: poplar's ~/.kbase/token had
+    expired at 27 days old. Stage 1 is schedulable and UNATTENDED, so an
+    expiry means the plan silently is not produced and nobody learns until
+    somebody looks. After this split h100 holds no BERDL credential at all:
+    the read happens where the credential lives and an immutable file
+    crosses.
+
+    WHAT IT WRITES: `BUNDLE.json` (the version, the query and source, the
+    canonical parameter set and its hash, the extraction time, the row
+    counts, and a sha256 inventory over its own files) plus `unrun.jsonl`
+    (query_id and the EXACT definition text per un-run function). It does not
+    rank, partition, chunk or prepare a quote -- `council-plan --bundle`
+    does all of that off-pod.
+    """
+    from ...domains.genome.ontology_mapping.ontology_mapping_utils import (
+        DEFAULT_COUNCIL_QUERY,
+    )
+
+    resolved = _parse_parameter_set(parameter_set)
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    try:
+        record = dict(
+            util.council_unrun_bundle(
+                bundle_dir,
+                query=query or DEFAULT_COUNCIL_QUERY,
+                parameter_set=resolved,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable bundle is a CLI error
+        raise _fail(exc) from exc
+
+    warnings = list(record.pop("warnings", []) or [])
+    _emit(
+        _envelope("council-unrun-bundle", data=record, warnings=warnings),
         as_json=as_json,
     )
 

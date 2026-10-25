@@ -124,6 +124,25 @@ COUNCIL_SOURCE_PREFIX = "council/"
 #: becomes permanent silently, with nothing recording why it was ever there.
 PLAN_CHUNK_SIZE = 2000
 
+#: Filename of the un-run input bundle's MANIFEST, inside the bundle
+#: directory. The bundle is what the IN-POD un-run read hands to the
+#: off-pod planner, and this is the file a caller names.
+UNRUN_BUNDLE_FILENAME = "BUNDLE.json"
+
+#: Filename of the bundle's un-run rows, beside its manifest. JSONL, one
+#: ``{"query_id", "text", "source"}`` row per un-run function, streamed --
+#: a 19k-function un-run set is small but a 10M-function one is not, and the
+#: producer must never need the whole set in memory twice.
+UNRUN_BUNDLE_ROWS_FILENAME = "unrun.jsonl"
+
+#: Version of the un-run bundle's own format. VERSIONED because the bundle
+#: CROSSES MACHINES and the two ends are deployed independently: the pod can
+#: be running a newer package than h100 for days. A consumer that read an
+#: unversioned bundle would have to guess, and guessing wrong here means
+#: planning the wrong work. Bumped whenever the manifest's required keys
+#: change; :func:`read_unrun_bundle` refuses a version it does not know.
+UNRUN_BUNDLE_SCHEMA_VERSION = 1
+
 #: The file STAGE 4 appends per chunk inside the run directory. Stage 5 reads
 #: it for one thing only -- which council jobs the run used -- so that
 #: ``council_export`` can be pointed at a run directory rather than told the
@@ -441,11 +460,178 @@ class OntologyMappingUtils(SharedEnvUtils):
 
     # -- pipeline stage 1: the run plan --------------------------------------
 
+    def council_unrun_bundle(
+        self,
+        bundle_dir: Union[str, Path],
+        *,
+        query: str,
+        parameter_set: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Stage 1a, IN-POD: read the clearinghouse, emit an un-run input bundle.
+
+        Spends NO LLM tokens and performs NO retrieval. This is the ONLY part
+        of stage 1 that touches the lake, and it is deliberately the smallest
+        piece that must work inside the pod -- the first in-pod component of
+        this PRD, so the in-pod read path is proven before the archiver and
+        the scanner depend on it.
+
+        WHY IT IS SEPARATE. The off-pod read worked from h100 on 2026-10-22
+        12:03 CDT and FAILED on 2026-10-23 00:35 CDT with an auth error:
+        ``~/.kbase/token`` on poplar had expired at 27 days old. Stage 1 is
+        SCHEDULABLE and UNATTENDED, so an expiry means the plan silently is
+        not produced and nobody learns until somebody looks. After this
+        split, h100 holds no BERDL credential at all: the read happens in the
+        pod, where the credential lives, and what crosses to h100 is an
+        immutable file.
+
+        WHY THE BOUNDARY IS EXACTLY HERE. Sending a full PLAN would move
+        retrieval (scikit-learn, the vendored GO artifacts) and the council
+        config into the pod. Sending only the definition TEXT would discard
+        the canonical parameter-set hash, and the hash is what makes "un-run"
+        mean anything -- so the bundle carries both, and the planner's
+        parameter-set check is mandatory rather than advisory.
+
+        WHAT IT DOES NOT DO: it does not rank, partition, chunk or prepare a
+        quote, and it never constructs a council store or reads the council
+        namespace. Those all belong to the off-pod planner.
+
+        THE PARAMETER SET IS AN INPUT, NOT DERIVED HERE, and that is the
+        point: ``{query, bench_fingerprint, mapping_hash}`` needs the council
+        roster and the retrieval mapping version, which are exactly the
+        requirements this split keeps out of the pod. It is canonicalised and
+        hashed through the CLEARINGHOUSE's own
+        :func:`~kbutillib.domains.kbase.berdl.clearinghouse_parameters.result_parameter_set_identity`
+        -- a pure function, no retrieval, no council config -- so the hash in
+        the bundle is the same hash the planner will recompute and compare.
+
+        Args:
+            bundle_dir: Directory the bundle is written into (created if
+                absent). An EXPLICIT path; nothing here invents one.
+            query: ``"<name>@<version>"``. The version is REQUIRED -- it is
+                part of the parameter set, so a bundle that left it to be
+                guessed could be planned against one spec and run against
+                another.
+            parameter_set: The run's parameter set, REQUIRED and supplied by
+                the caller. See above for why it is not derived in the pod.
+
+        Returns:
+            The manifest as written, plus ``bundle_file``, ``bundle_dir``,
+            ``rows_path`` and ``warnings`` -- non-empty when the un-run set
+            came back EMPTY, which the planner refuses outright (see
+            :func:`read_unrun_bundle`).
+
+        Raises:
+            ValueError: ``query`` names no version, or ``parameter_set`` is
+                empty -- an empty parameter set is refused for a council
+                source by the clearinghouse's own identity function, because
+                it would collapse every run into one slot.
+        """
+        from kbutillib.domains.kbase.berdl.clearinghouse_parameters import (
+            result_parameter_set_identity,
+        )
+
+        name, version = _split_query_ref(query)
+        query_ref = f"{name}@{version}"
+        source = f"{COUNCIL_SOURCE_PREFIX}{query_ref}"
+        canonical_json, parameter_set_hash = result_parameter_set_identity(
+            dict(parameter_set),
+            source=source,
+            where="council_unrun_bundle parameter_set",
+        )
+
+        # -- the two clearinghouse reads, and nothing else ------------------
+        clearinghouse = self._clearinghouse()
+        universe = list(clearinghouse.universe("function"))
+        done = list(
+            clearinghouse.current_state(
+                "function",
+                sources=[source],
+                parameter_set_hashes=[parameter_set_hash],
+            )
+        )
+        # The SAME set difference stage 1 has always used, so the bundle path
+        # and the direct path select identically. Nothing is ranked here.
+        items = unrun_items(universe, done)
+
+        target = Path(bundle_dir).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        rows_path = target / UNRUN_BUNDLE_ROWS_FILENAME
+        # The EXACT definition text, as the clearinghouse gave it. Not
+        # normalised, not stripped: the text is what the council is asked
+        # about, and query_id is the clearinghouse's own digest of it, so a
+        # text this bundle "tidied" would no longer be the function the key
+        # names.
+        written = _write_jsonl(
+            rows_path,
+            (
+                {
+                    "query_id": row["query_id"],
+                    "text": row["text"],
+                    "source": row["source"],
+                }
+                for row in items
+            ),
+        )
+
+        manifest: Dict[str, Any] = {
+            "schema_version": UNRUN_BUNDLE_SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "query": query_ref,
+            "source": source,
+            "parameter_set": dict(parameter_set),
+            "parameter_set_canonical_json": canonical_json,
+            "parameter_set_hash": parameter_set_hash,
+            "rows_file": UNRUN_BUNDLE_ROWS_FILENAME,
+            "counts": {
+                "universe": len(universe),
+                "done": len(done),
+                "unrun": written,
+            },
+            # THE INVENTORY, over the bundle's own files. BUNDLE.json itself
+            # is not in it: a file cannot carry its own digest, and the
+            # manifest is the thing the digests are read FROM.
+            "inventory": {
+                UNRUN_BUNDLE_ROWS_FILENAME: {
+                    "bytes": rows_path.stat().st_size,
+                    "rows": written,
+                    "sha256": _sha256_of(rows_path),
+                }
+            },
+        }
+
+        bundle_file = target / UNRUN_BUNDLE_FILENAME
+        tmp = bundle_file.with_name(bundle_file.name + ".partial")
+        tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        # Atomic: the bundle is IMMUTABLE once named, and a reader on the
+        # other side of a file copy must never see a half-written manifest.
+        tmp.replace(bundle_file)
+
+        warnings: List[str] = []
+        if not written:
+            warnings.append(
+                f"the un-run set is EMPTY: the clearinghouse universe held "
+                f"{len(universe)} function(s) and {len(done)} already have a "
+                f"current-state result at parameter_set_hash "
+                f"{parameter_set_hash}. `council-plan` REFUSES an empty "
+                "bundle -- an empty un-run set is a producer failure, not a "
+                "clean 'nothing to do' -- so check this read before "
+                "shipping the bundle."
+            )
+
+        return {
+            **manifest,
+            "bundle_file": str(bundle_file),
+            "bundle_dir": str(target),
+            "rows_path": str(rows_path),
+            "warnings": warnings,
+        }
+
     def council_plan(
         self,
         run_dir: Union[str, Path],
         *,
         query: str,
+        bundle: Optional[Union[str, Path]] = None,
         parameter_set: Optional[Dict[str, Any]] = None,
         chunk_size: int = PLAN_CHUNK_SIZE,
         profile: Optional[str] = None,
@@ -459,18 +645,40 @@ class OntologyMappingUtils(SharedEnvUtils):
         stage locally and writes files; the first token is spent in stage 4,
         behind a quote and an approval.
 
+        TWO WAYS IN, AND THE BUNDLE IS THE ONE THE SCHEDULED STAGE USES.
+
+        * ``bundle=`` -- the un-run set arrives as an immutable file written
+          IN-POD by :meth:`council_unrun_bundle`, and this call CONSTRUCTS NO
+          BERDL CLIENT at all. This is the path the unattended, schedulable
+          stage takes, and the reason is a measured failure: the off-pod read
+          worked from h100 on 2026-10-22 12:03 CDT and failed on 2026-10-23
+          00:35 CDT because ``~/.kbase/token`` on poplar had expired at 27
+          days old. An unattended stage that cannot read silently produces no
+          plan. With a bundle, h100 holds no BERDL credential.
+        * ``bundle=None`` -- the ORIGINAL single-command path: this call does
+          the two clearinghouse reads itself. Kept for local and interactive
+          use, where a live credential is present and a human is watching, and
+          it is what the bundle path is tested for equivalence AGAINST. It
+          must not be used for the scheduled stage.
+
+        The bundle is VALIDATED against the parameter set this call resolved
+        BEFORE any retrieval happens, and its sha256 inventory is verified
+        first -- see :func:`read_unrun_bundle` for the four refusals and why
+        the parameter-set check is mandatory rather than advisory.
+
         THE STEPS, each one a reuse of something that already exists:
 
         1. **Universe** -- :meth:`ClearinghouseCapability.universe`
            (``function_entity`` joined to ``function_content``). This works
            from h100 OFF-POD over the BERDL delta API, measured 2026-10-22, so
            it is deliberately NOT gated on the locus: only ``load`` and
-           ``verify`` are in-pod verbs.
+           ``verify`` are in-pod verbs. SKIPPED entirely on the bundle path.
         2. **Done** -- :meth:`ClearinghouseCapability.current_state` for
            ``function``, filtered to this run's ``source`` AND its
            ``parameter_set_hash``. A result at a DIFFERENT parameter set is a
-           different experiment and leaves the function un-run.
-        3. **Un-run** = universe - done.
+           different experiment and leaves the function un-run. SKIPPED
+           entirely on the bundle path -- the pod already applied it.
+        3. **Un-run** = universe - done, or the bundle's rows.
         4. **Rank** -- :meth:`function_to_go` over the un-run set,
            :meth:`write_ranked` to a LOCAL scratch path.
         5. **Partition** -- :func:`~.unrun.unrun_set`, three ways, all three
@@ -509,6 +717,13 @@ class OntologyMappingUtils(SharedEnvUtils):
                 of the parameter set and of every prompt hash, so a plan that
                 left it to be guessed could be quoted against one spec and run
                 against another.
+            bundle: An EXPLICIT path to an un-run input bundle (its directory
+                or its ``BUNDLE.json``) written by
+                :meth:`council_unrun_bundle` in the pod. When given, this
+                call reads no clearinghouse and constructs no BERDL client.
+                There is deliberately no default and no "latest bundle"
+                search: picking up whatever happens to be newest is how a run
+                silently uses the wrong parameter set.
             parameter_set: Override the resolved parameter set. For tests and
                 for re-deriving a historical partition; the default is the one
                 the pipeline means.
@@ -530,8 +745,13 @@ class OntologyMappingUtils(SharedEnvUtils):
 
         Raises:
             ValueError: ``query`` names no version, ``chunk_size`` is below 1,
-                the scratch path is inside ``run_dir``, or the un-run set and
-                the ranking disagree (see :func:`~.unrun.unrun_set`).
+                the scratch path is inside ``run_dir``, the un-run set and
+                the ranking disagree (see :func:`~.unrun.unrun_set`), or a
+                supplied ``bundle`` fails any of its four checks -- unknown
+                schema version, digest mismatch, parameter-set mismatch, or
+                an empty un-run set (see :func:`read_unrun_bundle`).
+            FileNotFoundError: ``bundle`` was given and names no manifest, or
+                its inventory names a file that is absent.
         """
         from kbutillib.domains.ai.council.quote import (
             PLAN_FILENAME,
@@ -597,17 +817,44 @@ class OntologyMappingUtils(SharedEnvUtils):
             parameter_set, source=source, where="council_plan parameter_set"
         )
 
-        # -- the two clearinghouse reads, thin, around a pure derivation ----
-        clearinghouse = self._clearinghouse()
-        universe = list(clearinghouse.universe("function"))
-        done = list(
-            clearinghouse.current_state(
-                "function",
-                sources=[source],
-                parameter_set_hashes=[parameter_set_hash],
+        # -- where the un-run set comes from --------------------------------
+        if bundle is not None:
+            # IN-POD BUNDLE. Verified and parameter-set-checked BEFORE any
+            # retrieval runs, and NO BERDL client is constructed on this
+            # branch -- self._clearinghouse() is never called, which is the
+            # whole point: h100 holds no BERDL credential.
+            read = read_unrun_bundle(
+                bundle,
+                source=source,
+                parameter_set_hash=parameter_set_hash,
             )
-        )
+            bundle_file = read["bundle_file"]
+            bundle_counts = read["counts"]
+            # The bundle's rows are ALREADY the set difference, deduped and
+            # ordered by query_id, so re-deriving it is a no-op by
+            # construction: unrun_items(rows, []) returns exactly those rows.
+            # Running them through the same function anyway is deliberate --
+            # it is the ONE definition of the set, it validates every row
+            # carries a query_id and a definition, and it is what makes the
+            # bundle path and the direct path produce an identical plan.
+            universe_rows: List[Dict[str, Any]] = list(read["rows"])
+            done_rows: List[Any] = []
+        else:
+            # The ORIGINAL single-command path: the two clearinghouse reads,
+            # thin, around a pure derivation.
+            bundle_file = None
+            bundle_counts = {}
+            clearinghouse = self._clearinghouse()
+            universe_rows = list(clearinghouse.universe("function"))
+            done_rows = list(
+                clearinghouse.current_state(
+                    "function",
+                    sources=[source],
+                    parameter_set_hashes=[parameter_set_hash],
+                )
+            )
 
+        universe, done = universe_rows, done_rows
         items = unrun_items(universe, done)
         ranked = self.function_to_go(items, max_candidates=max_candidates)
         ranked_written = self.write_ranked(ranked, scratch / "ranked.jsonl.gz")
@@ -690,9 +937,13 @@ class OntologyMappingUtils(SharedEnvUtils):
             # (Chris, 2026-10-22), so it is written down per run rather than
             # inferred from whatever the config happened to say later.
             "transport_allocation": transport,
+            # The bundle path takes universe/done from the BUNDLE's recorded
+            # counts, because the pod applied the set difference and h100
+            # never saw either set. They are the same two numbers the direct
+            # path reports, which is what keeps the two plans equivalent.
             "counts": {
-                "universe": len(universe),
-                "done": len(done),
+                "universe": int(bundle_counts.get("universe", len(universe))),
+                "done": int(bundle_counts.get("done", len(done))),
                 "unrun": len(items),
                 "submit": len(parts["submit"]),
                 "abstain": len(parts["abstain"]),
@@ -708,6 +959,11 @@ class OntologyMappingUtils(SharedEnvUtils):
             "abstain_file": str(abstain_file),
             "fanout_file": str(fanout_file),
             "ranked_file": str(ranked_written["path"]),
+            # PROVENANCE: which bundle this plan was built from, or null on
+            # the direct-read path. Recorded so a plan can be traced back to
+            # the exact in-pod read that produced its universe -- and so a
+            # reader can tell at a glance which path was taken.
+            "unrun_bundle_file": bundle_file,
             "plan_hash": plan_object.plan_hash,
         }
 
@@ -941,6 +1197,166 @@ class OntologyMappingUtils(SharedEnvUtils):
         from kbutillib.domains.ai.council_utils import CouncilUtils
 
         return CouncilUtils(config_file=False, token_file=None, kbase_token_file=None)
+
+
+def _sha256_of(path: Path) -> str:
+    """The sha256 of a file, streamed a megabyte at a time."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_unrun_bundle(
+    bundle: Union[str, Path],
+    *,
+    source: str,
+    parameter_set_hash: str,
+) -> Dict[str, Any]:
+    """Read and VERIFY an un-run input bundle. Refuses rather than degrades.
+
+    The bundle crosses machines -- written in the pod on kbhub, read on h100
+    -- so nothing about it is assumed. Four refusals, in this order, all
+    BEFORE a single row is handed to retrieval:
+
+    1. A manifest whose ``schema_version`` this code does not know. The two
+       ends are deployed independently, so a version skew is expected; what
+       must not happen is a consumer guessing at a shape it has not seen.
+    2. A DIGEST MISMATCH anywhere in the inventory, reported with the
+       EXPECTED and the OBSERVED digest. A bundle truncated in transit reads
+       as a smaller un-run set, which plans less work and looks like
+       progress.
+    3. A PARAMETER SET that is not the one asked for -- a different
+       ``source`` or a different ``parameter_set_hash``. This is MANDATORY
+       rather than advisory: "un-run" is defined as the absence of a
+       current-state result AT THIS PARAMETER SET, so consuming a bundle
+       produced for a different bench or query version would incorrectly
+       SKIP work that needs doing, and the skip is invisible.
+    4. An EMPTY un-run set. That is a PRODUCER FAILURE, not a clean "nothing
+       to do": the same class of defect as a loader that joins on the wrong
+       key and silently loads nothing. A genuinely finished corpus is
+       recorded by a plan with zero submit items, not by a bundle with zero
+       rows.
+
+    Args:
+        bundle: The bundle directory, or its :data:`UNRUN_BUNDLE_FILENAME`
+            manifest, as an EXPLICIT path. Nothing here globs, sorts by
+            mtime, or picks a "latest" bundle: consuming whatever happens to
+            be newest is how a run silently uses the wrong parameter set.
+        source: The clearinghouse ``source`` the caller is planning for --
+            ``"council/<name>@<version>"``.
+        parameter_set_hash: The ``parameter_set_hash`` the caller resolved
+            for this run, from the clearinghouse's own identity function.
+
+    Returns:
+        ``{"manifest", "rows", "bundle_file", "bundle_dir", "counts"}``.
+        ``rows`` are the un-run ``{"query_id", "text", "source"}`` rows in
+        the bundle's own order.
+
+    Raises:
+        FileNotFoundError: The manifest, or a file its inventory names, is
+            absent.
+        ValueError: Any of the four refusals above.
+    """
+    path = Path(bundle).expanduser()
+    bundle_dir = path if path.is_dir() else path.parent
+    bundle_file = path / UNRUN_BUNDLE_FILENAME if path.is_dir() else path
+    if not bundle_file.is_file():
+        raise FileNotFoundError(
+            f"no un-run bundle manifest at {bundle_file}. The in-pod reader "
+            "writes it: `kbu ontomap council-unrun-bundle`."
+        )
+    manifest = json.loads(bundle_file.read_text(encoding="utf-8"))
+
+    found_version = manifest.get("schema_version")
+    if found_version != UNRUN_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            f"un-run bundle {bundle_file} declares schema_version "
+            f"{found_version!r}; this code reads "
+            f"{UNRUN_BUNDLE_SCHEMA_VERSION!r}. The bundle crosses machines "
+            "and the two ends are deployed independently, so refusing a "
+            "version this code has not seen is deliberate -- guessing at the "
+            "shape would mean planning the wrong work. Re-produce the bundle "
+            "with a matching package version."
+        )
+
+    inventory = dict(manifest.get("inventory") or {})
+    if not inventory:
+        raise ValueError(
+            f"un-run bundle {bundle_file} carries no sha256 inventory. The "
+            "inventory is the only thing that distinguishes a complete "
+            "bundle from one truncated in transit, and a truncated bundle "
+            "reads as a smaller un-run set -- which plans less work and "
+            "looks like progress."
+        )
+    for name in sorted(inventory):
+        entry = dict(inventory[name] or {})
+        member = bundle_dir / name
+        if not member.is_file():
+            raise FileNotFoundError(
+                f"un-run bundle {bundle_file} names {name!r} in its "
+                f"inventory, but {member} does not exist."
+            )
+        expected = str(entry.get("sha256") or "")
+        observed = _sha256_of(member)
+        if expected != observed:
+            raise ValueError(
+                f"un-run bundle {bundle_file} member {name!r} FAILED its "
+                f"sha256 check: expected {expected!r}, observed "
+                f"{observed!r}. The bundle crossed a machine boundary, so a "
+                "mismatch means it was truncated or rewritten in transit -- "
+                "refusing rather than planning against whatever arrived. "
+                "Re-produce it in the pod and copy it again."
+            )
+
+    bundle_source = str(manifest.get("source") or "")
+    bundle_hash = str(manifest.get("parameter_set_hash") or "")
+    if bundle_source != source or bundle_hash != parameter_set_hash:
+        raise ValueError(
+            f"un-run bundle {bundle_file} was produced for source "
+            f"{bundle_source!r} at parameter_set_hash {bundle_hash!r}, but "
+            f"this run is planning source {source!r} at "
+            f"{parameter_set_hash!r}. This check is MANDATORY, not "
+            "advisory: 'un-run' means the absence of a current-state result "
+            "AT THIS PARAMETER SET, so a bundle produced for a different "
+            "bench, query version or mapping hash would make this plan SKIP "
+            "work that needs doing -- invisibly. Produce a bundle for this "
+            "parameter set, or plan the parameter set the bundle was built "
+            "for."
+        )
+
+    rows_name = str(manifest.get("rows_file") or UNRUN_BUNDLE_ROWS_FILENAME)
+    rows = _read_jsonl(bundle_dir / rows_name)
+    if not rows:
+        raise ValueError(
+            f"un-run bundle {bundle_file} holds an EMPTY un-run set. That is "
+            "a PRODUCER FAILURE, not a clean 'nothing to do' -- it is the "
+            "same class of defect as a loader that joins on the wrong key "
+            "and silently loads nothing, and accepting it here would write a "
+            "plan that reads as a completed stage. A genuinely finished "
+            "corpus is recorded by a PLAN with zero submit items, produced "
+            "from a bundle that held the universe. Check the pod's "
+            "clearinghouse read before re-planning."
+        )
+
+    declared_rows = int(dict(inventory.get(rows_name) or {}).get("rows") or 0)
+    if declared_rows and declared_rows != len(rows):
+        raise ValueError(
+            f"un-run bundle {bundle_file} declares {declared_rows} rows in "
+            f"{rows_name!r} but {len(rows)} were read. The digests matched, "
+            "so this is a manifest the producer wrote wrong rather than a "
+            "transport failure; either way the row count is part of the "
+            "bundle's contract and is not reconciled here."
+        )
+
+    return {
+        "manifest": manifest,
+        "rows": rows,
+        "bundle_file": str(bundle_file),
+        "bundle_dir": str(bundle_dir),
+        "counts": dict(manifest.get("counts") or {}),
+    }
 
 
 def _declared_store_id(council: Any) -> str:

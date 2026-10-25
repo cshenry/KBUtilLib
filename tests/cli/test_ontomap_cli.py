@@ -53,6 +53,10 @@ STUB_VERBS: List[str] = []
 #: one of them rather than appearing unnoticed.
 IMPLEMENTED_VERBS = [
     "version",
+    # Stage 1a, the IN-POD half of stage 1: it reads the clearinghouse and
+    # emits an immutable un-run bundle, so the scheduled off-pod planner
+    # needs no BERDL credential.
+    "council-unrun-bundle",
     "council-plan",
     "council-quote",
     "council-approve",
@@ -552,6 +556,11 @@ class TestCouncilPlanIsImplemented:
         assert planner.kwargs == {
             "run_dir": "/runs/x",
             "query": "go_mf@2",
+            # None, because no --bundle was given: this invocation is the
+            # original single-command path, which reads the clearinghouse
+            # itself. The bundle path is covered beside the facade, in
+            # tests/domains/test_ontomap_unrun_bundle.py.
+            "bundle": None,
             "profile": "cheap",
             "chunk_size": 500,
             "scratch_dir": "/scratch/here",

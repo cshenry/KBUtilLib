@@ -138,7 +138,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
@@ -386,6 +388,7 @@ class KBDLServiceUtils(SharedEnvUtils):
         base_url: Optional[str] = None,
         timeout: float = 60.0,
         session: Optional[requests.Session] = None,
+        arc: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the KBDL service client.
@@ -401,10 +404,15 @@ class KBDLServiceUtils(SharedEnvUtils):
                 stand-in with a compatible ``.request()``), so tests can
                 inject a fake HTTP transport without making real network
                 calls.
+            arc: Optional KOROS arc (bare ``slug`` or ``project/slug``) that
+                submitted jobs are stamped with. Absent, the arc is resolved
+                from ``KOROS_ARC`` or the cwd; if none resolves, nothing is
+                stamped.
             **kwargs: Additional arguments passed to ``SharedEnvUtils``
                 (e.g. ``token="..."`` to set the KBase token directly).
         """
         super().__init__(**kwargs)
+        self._arc = arc
         resolved = (
             base_url
             or os.environ.get(KBDL_SERVICE_URL_ENV_VAR)
@@ -531,7 +539,41 @@ class KBDLServiceUtils(SharedEnvUtils):
             "params": params,
         }
         response = self._request("POST", "/jobs", json=package)
-        return response.json()["job_id"]
+        job_id = response.json()["job_id"]
+        self._stamp_submission(job_id, job_type)
+        return job_id
+
+    def _stamp_submission(self, job_id: str, job_type: str) -> None:
+        """Record the submitting arc for *job_id*; never raises.
+
+        Writes nothing when no arc resolves. Any failure (import, no runs
+        tree, locked DB) is logged and swallowed so ``_submit`` is unaffected.
+        """
+        try:
+            from datetime import datetime, timezone
+
+            from ...arc_context import resolve_current_arc
+            from ...koros_arc_store.store import KorosArcStore
+
+            resolved = resolve_current_arc(explicit=self._arc)
+            if resolved is None:
+                return
+            project, arc_slug = resolved
+            submitted_at = (
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+            )
+            KorosArcStore().record_submission(
+                job_id,
+                job_type,
+                project,
+                arc_slug,
+                submitted_at,
+                socket.gethostname(),
+            )
+        except Exception as exc:  # noqa: BLE001 - stamping must never fail a submit
+            logging.getLogger(__name__).warning(
+                "kbdl submission stamp failed job_id=%s error=%r", job_id, exc
+            )
 
     # ── job submission (one method per job type) ────────────────────────
 

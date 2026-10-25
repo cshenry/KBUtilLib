@@ -210,6 +210,15 @@ class RunDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_runs_analysis_created
                 ON runs (analysis_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS job_submissions (
+                job_id       TEXT PRIMARY KEY,
+                job_type     TEXT,
+                project      TEXT,
+                arc_slug     TEXT,
+                submitted_at TEXT,
+                host         TEXT
+            );
             """
         )
         conn.commit()
@@ -555,6 +564,72 @@ class RunDatabase:
         finally:
             if conn is not None:
                 conn.close()
+
+    def record_submission(
+        self,
+        job_id: str,
+        job_type: Optional[str],
+        project: Optional[str],
+        arc_slug: Optional[str],
+        submitted_at: Optional[str],
+        host: Optional[str],
+    ) -> None:
+        """Upsert which arc/project a KBDL job was submitted from (keyed on job_id).
+
+        Follows the write discipline of :meth:`record_analysis`: gated on
+        :attr:`enabled`, and FAIL-SOFT -- any failure logs a line starting with
+        :data:`SOFT_FAIL_PREFIX`, increments :attr:`failed_write_count` and
+        returns. Never raises.
+        """
+        if not self.enabled:
+            return
+        conn = None
+        try:
+            conn = self._connect()
+            self._ensure_initialized_for_write(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO job_submissions
+                    (job_id, job_type, project, arc_slug, submitted_at, host)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    job_type=excluded.job_type,
+                    project=excluded.project,
+                    arc_slug=excluded.arc_slug,
+                    submitted_at=excluded.submitted_at,
+                    host=excluded.host
+                """,
+                (job_id, job_type, project, arc_slug, submitted_at, host),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - deliberate fail-soft catch-all
+            self.failed_write_count += 1
+            logger.warning(
+                "%s job_id=%s db_path=%s error=%r",
+                SOFT_FAIL_PREFIX,
+                job_id,
+                self.db_path,
+                exc,
+            )
+            return
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def list_submissions(self) -> Dict[str, Any]:
+        """Return ``{job_id: (project, arc_slug)}``. RAISES if the DB is unopenable."""
+        conn = self._open_for_read()
+        try:
+            rows = conn.execute(
+                "SELECT job_id, project, arc_slug FROM job_submissions"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r["job_id"]: (r["project"], r["arc_slug"]) for r in rows}
 
     def delete_record(self, record_id: str) -> bool:
         """Hard-delete a run row and its detail blob in one transaction (S24).

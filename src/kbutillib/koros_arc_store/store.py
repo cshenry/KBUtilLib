@@ -305,6 +305,24 @@ class KorosArcStore:
         """Record one run into the run database — see :meth:`RunDatabase.record_analysis`."""
         self._db.record_analysis(project, arc, record, detail)
 
+    def record_submission(
+        self,
+        job_id: str,
+        job_type: Optional[str],
+        project: Optional[str],
+        arc_slug: Optional[str],
+        submitted_at: Optional[str],
+        host: Optional[str],
+    ) -> None:
+        """Record a KBDL job's submitting arc -- see :meth:`RunDatabase.record_submission`."""
+        self._db.record_submission(
+            job_id, job_type, project, arc_slug, submitted_at, host
+        )
+
+    def list_submissions(self) -> Dict[str, Any]:
+        """Map job_id to (project, arc_slug) -- see :meth:`RunDatabase.list_submissions`."""
+        return self._db.list_submissions()
+
     def list_analyses(
         self,
         project: Optional[str],

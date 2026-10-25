@@ -1602,3 +1602,268 @@ def quote_cmd(
     except Exception as exc:  # noqa: BLE001 - a bad plan or store is a CLI error
         raise _fail(exc) from exc
     _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# disposition -- which jobs are a RESULT
+# ---------------------------------------------------------------------------
+#
+# The store cannot answer this. `jobs.status` and `jobs.deleted_at` do not
+# distinguish a published chunk from a cancelled 19,276-item look-alike, and
+# the biggest, most authoritative-looking job in the production store is one
+# of the two that must never be loaded. These verbs are the curated layer:
+# `seed` and `declare` write the append-only declaration ledger, `publish`
+# projects it into `council.job_disposition`, and `check` is the gate a
+# publisher calls -- it exits NON-ZERO and NAMES every job that is not
+# declared `published`, including one that has no declaration at all.
+
+
+def _declared_by(ctx: click.Context, declared_by: Optional[str]) -> str:
+    """Who is declaring.  The flag, else the facade's provenance user."""
+    if declared_by:
+        return declared_by
+    return str(_council(ctx).user())
+
+
+def _ledger(store_id: str, root: Optional[str]) -> Any:
+    from ...domains.kbase.berdl.council_disposition import (
+        DispositionLedger,
+        resolve_ledger_path,
+    )
+
+    return DispositionLedger(resolve_ledger_path(store_id, root=root))
+
+
+def _sink(lakehouse: Optional[str]) -> Any:
+    from ...domains.kbase.berdl.council_sink import open_sink
+
+    return open_sink(lakehouse)
+
+
+def _store_id_option(function: Any) -> Any:
+    return click.option(
+        "--store-id",
+        required=True,
+        help="The store's DECLARED archive identity. Never derived from a "
+        "path: a store that moves must keep its id or every archived row "
+        "becomes unjoinable.",
+    )(function)
+
+
+def _ledger_root_option(function: Any) -> Any:
+    return click.option(
+        "--ledger-root",
+        default=None,
+        type=click.Path(file_okay=False),
+        help="Root for declaration ledgers. Default: $KBU_COUNCIL_DISPOSITION_DIR, "
+        "else ~/.kbu/council/dispositions.",
+    )(function)
+
+
+def _lakehouse_option(function: Any) -> Any:
+    return click.option(
+        "--lakehouse",
+        default=None,
+        help="Where council.job_disposition lives: a local SQLite staging "
+        "file, or 'berdl' for the live namespace (in-pod only). Default: berdl.",
+    )(function)
+
+
+@council_cmd.group(name="disposition")
+def disposition_cmd() -> None:
+    """Declare and resolve what each job's output is FOR.
+
+    \b
+    A job with NO declaration is NOT publishable. Absence never reads as an
+    implicit `published`, because the two cancelled 19,276-item jobs in the
+    production store look authoritative by label, by size and by status, and
+    a clearinghouse slot is frozen on first write.
+
+    A `published` disposition is NECESSARY BUT NOT SUFFICIENT: the publisher
+    also requires the job to be listed in its campaign's publication bundle.
+    """
+
+
+@disposition_cmd.command(name="seed")
+@click.argument("provenance", type=click.Path(exists=True, dir_okay=False))
+@_store_id_option
+@click.option("--declared-by", default=None, help="Who is declaring. Default: the config/OS user.")
+@_ledger_root_option
+@_json_option
+@click.pass_context
+def disposition_seed_cmd(
+    ctx: click.Context,
+    provenance: str,
+    store_id: str,
+    declared_by: Optional[str],
+    ledger_root: Optional[str],
+    as_json: bool,
+) -> None:
+    """Seed declarations from a provenance JSON file. IDEMPOTENT.
+
+    Every disposition is DERIVED from the file's own structure -- its
+    `LOAD_THESE` list and each job's prose -- and a shape that classifies to
+    nothing is refused rather than guessed at. Re-seeding the same file
+    appends nothing and restamps nothing.
+    """
+    from ...domains.kbase.berdl.council_disposition import seed_from_provenance
+
+    try:
+        report = seed_from_provenance(
+            _ledger(store_id, ledger_root),
+            provenance,
+            declared_by=_declared_by(ctx, declared_by),
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad seed file is a CLI error
+        raise _fail(exc) from exc
+    report["store_id"] = store_id
+    _emit(_envelope("disposition seed", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="declare")
+@click.argument("job_id")
+@click.argument("disposition")
+@_store_id_option
+@click.option("--reason", required=True, help="Why. Stored verbatim.")
+@click.option("--declared-by", default=None, help="Who is declaring. Default: the config/OS user.")
+@_ledger_root_option
+@_json_option
+@click.pass_context
+def disposition_declare_cmd(
+    ctx: click.Context,
+    job_id: str,
+    disposition: str,
+    store_id: str,
+    reason: str,
+    declared_by: Optional[str],
+    ledger_root: Optional[str],
+    as_json: bool,
+) -> None:
+    """Declare ONE job's disposition, recording who said so and when.
+
+    A change keeps the superseded declaration: the ledger is append-only, so
+    "who said this was a pilot before somebody published it" stays
+    answerable.
+    """
+    from ...domains.kbase.berdl.council_disposition import declare
+
+    try:
+        report = declare(
+            _ledger(store_id, ledger_root),
+            job_id=job_id,
+            disposition=disposition,
+            reason=reason,
+            declared_by=_declared_by(ctx, declared_by),
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad disposition is a CLI error
+        raise _fail(exc) from exc
+    report["store_id"] = store_id
+    _emit(_envelope("disposition declare", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="list")
+@_store_id_option
+@_ledger_root_option
+@_json_option
+def disposition_list_cmd(store_id: str, ledger_root: Optional[str], as_json: bool) -> None:
+    """List the CURRENT declaration per job, from the ledger."""
+    ledger = _ledger(store_id, ledger_root)
+    current = ledger.current()
+    rows = [
+        {
+            "job_id": job_id,
+            "disposition": record.get("disposition"),
+            "declared_by": record.get("declared_by"),
+            "declared_at": record.get("declared_at"),
+            "reason": record.get("reason"),
+        }
+        for job_id, record in sorted(current.items())
+    ]
+    data = {
+        "store_id": store_id,
+        "ledger": str(ledger.path),
+        "jobs": len(rows),
+        "declarations": rows,
+        "published": [r["job_id"] for r in rows if r["disposition"] == "published"],
+    }
+    _emit(_envelope("disposition list", data=data), as_json=as_json)
+
+
+@disposition_cmd.command(name="publish")
+@_store_id_option
+@click.option("--snapshot-id", required=True, help="The VERIFIED digest of the snapshot these rows belong to.")
+@click.option("--snapshot-seq", required=True, type=int, help="The explicit monotonic sequence for this snapshot.")
+@click.option("--load-batch-id", required=True, help="This load's batch id (idempotency + provenance).")
+@click.option("--store-host", default=None, help="Where the snapshot was taken. Default: this host.")
+@_ledger_root_option
+@_lakehouse_option
+@_json_option
+def disposition_publish_cmd(
+    store_id: str,
+    snapshot_id: str,
+    snapshot_seq: int,
+    load_batch_id: str,
+    store_host: Optional[str],
+    ledger_root: Optional[str],
+    lakehouse: Optional[str],
+    as_json: bool,
+) -> None:
+    """Write the ledger's current projection into council.job_disposition.
+
+    REFUSES a second write for the same (store_id, snapshot_id): the table is
+    keyed one-disposition-per-job-per-snapshot, so a second projection would
+    duplicate every job.
+    """
+    import socket
+
+    from ...domains.kbase.berdl.council_disposition import write_dispositions
+
+    try:
+        report = write_dispositions(
+            _sink(lakehouse),
+            _ledger(store_id, ledger_root),
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            snapshot_seq=snapshot_seq,
+            store_host=store_host or socket.gethostname(),
+            load_batch_id=load_batch_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a refused write is a CLI error
+        raise _fail(exc) from exc
+    _emit(_envelope("disposition publish", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="check")
+@click.argument("job_ids", nargs=-1, required=True)
+@click.option("--store-id", default=None, help="Restrict to one store's dispositions.")
+@click.option("--snapshot-id", default=None, help="Read one snapshot instead of the current one.")
+@_lakehouse_option
+@_json_option
+def disposition_check_cmd(
+    job_ids: Sequence[str],
+    store_id: Optional[str],
+    snapshot_id: Optional[str],
+    lakehouse: Optional[str],
+    as_json: bool,
+) -> None:
+    """THE GATE. Exit non-zero, naming every job that is not published.
+
+    Goes through the real resolver against the real table. An undeclared job
+    fails here by name -- which is the whole point, because nothing else in
+    the store would have stopped it.
+    """
+    from ...domains.kbase.berdl.council_disposition import require_published
+
+    try:
+        resolved = require_published(
+            _sink(lakehouse),
+            job_ids,
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - the refusal IS this verb's answer
+        raise _fail(exc) from exc
+    _emit(
+        _envelope("disposition check", data={"published": resolved, "jobs": len(resolved)}),
+        as_json=as_json,
+    )

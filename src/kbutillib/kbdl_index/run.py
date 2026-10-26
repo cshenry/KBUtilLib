@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from kbutillib.kbdl_index.attribution import (
     build_attributor, load_existing_rows, scan_arc_tree_mentions)
 from kbutillib.kbdl_index.indexer import (
-    INDEXABLE, IndexReport, _file_only_jobs, _read_ledger, index_swept_jobs)
+    INDEXABLE, PRODUCER, IndexReport, _file_only_jobs, _read_ledger, index_swept_jobs)
 from kbutillib.kbdl_index.subject import build_resolver
 
 FINISHED_KEYS = ('finished_at', 'completed_at')
@@ -127,13 +127,42 @@ class RunResult:
     finished_at_filled: int = 0
 
 
+def existing_rows_by_run_uid(store) -> Dict[str, list]:
+    """Every existing row keyed by run_uid -> [(project, arc, record)].
+
+    Reads only through the store's public list_* API: all projects/arcs, plus
+    list_analyses(None, None) for unattributed rows.
+    """
+    existing: Dict[str, list] = {}
+    pairs = [(None, None)]
+    for proj in store.list_projects():
+        for arc in store.list_arcs(proj.name):
+            pairs.append((proj.name, arc.slug))
+    for p, a in pairs:
+        for rec in store.list_analyses(p, a):
+            if rec.run_uid:
+                existing.setdefault(rec.run_uid, []).append((p, a, rec))
+    return existing
+
+
+def foreign_run_uids(existing: Dict[str, list]) -> set:
+    """run_uids with at least one row from a producer other than the indexer.
+
+    The indexer's own rows are excluded so a re-index keeps upserting them by
+    record_id (a job first indexed unattributed can still move into its arc).
+    """
+    return {uid for uid, rows in existing.items()
+            if any(rec.producer != PRODUCER for _p, _a, rec in rows)}
+
+
 def run_index(store, kbdl, ledger_path, results_root, runs_root, *, dry_run=False,
               job_types=None, fetch_finished=False, finished_limit=0,
-              log: Callable = print) -> RunResult:
+              skip_existing=True, log: Callable = print) -> RunResult:
     """Run the index once. In a dry run nothing reaches ``store``: the indexer
     writes to a CaptureStore, so the exact records it WOULD write are available
     (needed for the replace-vs-duplicate overlap check), and the report is
-    relabelled would_write."""
+    relabelled would_write. With ``skip_existing`` (default) jobs that already have
+    a row from another producer are not written."""
     meta = job_meta_from_list_jobs(kbdl.list_jobs())
     filled = 0
     if fetch_finished:
@@ -142,14 +171,17 @@ def run_index(store, kbdl, ledger_path, results_root, runs_root, *, dry_run=Fals
             limit=finished_limit, log=log)
     resolver, attributor = build_inputs(store, kbdl, ledger_path, results_root,
                                         runs_root, job_types)
+    skip = foreign_run_uids(existing_rows_by_run_uid(store)) if skip_existing else None
     if dry_run:
         cap = CaptureStore()
         rep = index_swept_jobs(cap, resolver, attributor, ledger_path, results_root,
-                               dry_run=False, job_meta=meta, job_types=job_types)
+                               dry_run=False, job_meta=meta, job_types=job_types,
+                               skip_existing_run_uids=skip)
         rep.would_write, rep.records_written, rep.dry_run = rep.records_written, 0, True
         return RunResult(rep, meta, cap.captured, filled)
     rep = index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
-                           dry_run=False, job_meta=meta, job_types=job_types)
+                           dry_run=False, job_meta=meta, job_types=job_types,
+                               skip_existing_run_uids=skip)
     return RunResult(rep, meta, [], filled)
 
 
@@ -161,22 +193,16 @@ def created_at_sources(captured) -> Dict[str, int]:
     return out
 
 
-def overlap_vs_existing(store, captured, population=None, examples=5) -> Dict[str, Any]:
+def overlap_vs_existing(store, captured, population=None, examples=5,
+                        existing=None) -> Dict[str, Any]:
     """For captured (would-be) records, compare against existing rows by run_uid.
 
     replace   = existing row with the same record_id (the write would overwrite it)
     duplicate = existing row for the same run_uid with a different record_id
     Reads only through the store's public list_* API.
     """
-    existing: Dict[str, list] = {}
-    pairs = [(None, None)]
-    for proj in store.list_projects():
-        for arc in store.list_arcs(proj.name):
-            pairs.append((proj.name, arc.slug))
-    for p, a in pairs:
-        for rec in store.list_analyses(p, a):
-            if rec.run_uid:
-                existing.setdefault(rec.run_uid, []).append((p, a, rec))
+    if existing is None:
+        existing = existing_rows_by_run_uid(store)
     replace, duplicate = [], []
     for np_, na, new in captured:
         for op, oa, old in existing.get(new.run_uid, ()):

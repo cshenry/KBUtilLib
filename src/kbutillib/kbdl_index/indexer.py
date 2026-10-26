@@ -61,6 +61,7 @@ class IndexReport:
     expired: int = 0
     ledger_errors: int = 0          # ledger outcome neither saved nor expired, no file
     write_failed: int = 0           # store soft-failed (failed_write_count rose)
+    skipped_existing: int = 0       # job already has a row from another producer
     skipped_by_type: Dict[str, int] = field(default_factory=dict)
     attributed_by_source: Dict[str, int] = field(
         default_factory=lambda: {s: 0 for s in ATTRIBUTION_SOURCES})
@@ -81,6 +82,7 @@ class IndexReport:
                 f'would_write={self.would_write} unresolved={self.unresolved} '
                 f'undated={self.undated} expired={self.expired} '
                 f'ledger_errors={self.ledger_errors} write_failed={self.write_failed} '
+                f'skipped_existing={self.skipped_existing} '
                 f'skipped_by_type={self.skipped_by_type} '
                 f'attributed={self.attributed_by_source} '
                 f'disagreeing={self.disagreeing_jobs} '
@@ -153,12 +155,20 @@ def _load_result(path):
 def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
                      dry_run: bool = False,
                      job_meta: Optional[Mapping[str, dict]] = None,
-                     job_types: Optional[Collection[str]] = None) -> IndexReport:
+                     job_types: Optional[Collection[str]] = None,
+                     skip_existing_run_uids: Optional[Collection[str]] = None
+                     ) -> IndexReport:
     """Index swept KBDL jobs into ``store``. See the module docstring.
 
     ``job_types`` (optional) restricts indexing to those job types: ledger jobs
     of other types are counted in ``skipped_by_type``; file-only jobs of other
     types are not counted at all.
+
+    ``skip_existing_run_uids`` (optional): job ids that already have a row written
+    by another producer; those jobs are not written and are counted in
+    ``skipped_existing``. The caller computes the set (this function never queries
+    the store) and must leave out this indexer's own rows so re-attribution still
+    upserts by record_id.
     """
     report = IndexReport(dry_run=dry_run)
     job_meta = job_meta or {}
@@ -181,7 +191,11 @@ def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
         report.from_files_only += 1
         work.append((jid, jtype, None))
 
+    skip_uids = frozenset(skip_existing_run_uids or ())
     for jid, jtype, ent in work:
+        if jid in skip_uids:
+            report.skipped_existing += 1
+            continue
         kind, tier = INDEXABLE[jtype]
         meta = job_meta.get(jid) or {}
         path = os.path.join(results_root, jtype, jid + '.json.gz')

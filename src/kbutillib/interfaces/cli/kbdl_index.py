@@ -39,6 +39,10 @@ def _read_token(path: Optional[str]) -> Optional[str]:
                    "(fail-soft; default off, otherwise submitted_at is used).")
 @click.option("--max-finished-calls", "finished_limit", type=int, default=0,
               help="Bound the number of check_job calls (0 = unbounded).")
+@click.option("--skip-existing/--no-skip-existing", "skip_existing", default=True,
+              help="Do not write a job that already has a row from another producer "
+                   "(matched by run_uid). The indexer's own rows are never skipped, so "
+                   "re-attribution still works. Default on.")
 @click.option("--results-root", default=None, help="Default: ~/.kbdl/job-results.")
 @click.option("--ledger", "ledger_path", default=None,
               help="Default: ~/.kbdl/sweep_ledger.jsonl.")
@@ -47,7 +51,7 @@ def _read_token(path: Optional[str]) -> Optional[str]:
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit the result as JSON.")
 def kbdl_index_cmd(dry_run: bool, job_types: Tuple[str, ...], token_file: Optional[str],
-                   fetch_finished: bool, finished_limit: int,
+                   fetch_finished: bool, finished_limit: int, skip_existing: bool,
                    results_root: Optional[str], ledger_path: Optional[str],
                    runs_root: Optional[str], as_json: bool) -> None:
     """Index swept KBDL BuildGenome / GenomeAnnotation results into the arc store."""
@@ -69,11 +73,14 @@ def kbdl_index_cmd(dry_run: bool, job_types: Tuple[str, ...], token_file: Option
 
     res = run_index(store, kbdl, ledger_path, results_root, str(store.runs_root),
                     dry_run=dry_run, job_types=types, fetch_finished=fetch_finished,
-                    finished_limit=finished_limit, log=click.echo)
+                    finished_limit=finished_limit, skip_existing=skip_existing,
+                    log=click.echo)
     out = {"report": res.report.__dict__, "summary": res.report.summary()}
     if dry_run:
         out["dated_from"] = created_at_sources(res.captured)
         out["finished_at_filled"] = res.finished_at_filled
+        out["skip_existing"] = skip_existing
+        out["skipped_existing"] = res.report.skipped_existing
         out["overlap"] = overlap_vs_existing(
             store, res.captured, population_ids(ledger_path, results_root, types))
     if as_json:
@@ -82,6 +89,8 @@ def kbdl_index_cmd(dry_run: bool, job_types: Tuple[str, ...], token_file: Option
         click.echo(out["summary"])
         if dry_run:
             click.echo(f"dated_from={out['dated_from']} undated={res.report.undated}")
+            click.echo(f"skip_existing={skip_existing} "
+                       f"skipped_existing={res.report.skipped_existing}")
             ov = out["overlap"]
             click.echo("overlap: " + ", ".join(
                 f"{k}={v}" for k, v in ov.items() if not k.endswith("examples")))

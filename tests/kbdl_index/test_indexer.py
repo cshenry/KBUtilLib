@@ -207,3 +207,97 @@ def test_build_genome_is_verified_tier(store, env):
     run(store, env)
     r = rows(store)[0]
     assert (r.kind, r.trust_tier, r.subject) == ('kbdl.build_genome', 'verified', 'g.fasta')
+
+
+# ---- skip-existing (foreign-producer rows block a write) -------------------------
+
+from kbutillib.kbdl_index.run import (  # noqa: E402
+    existing_rows_by_run_uid, foreign_run_uids)
+
+
+def foreign_row(store, jid, project=None, arc=None):
+    from kbutillib.kbdl_index.indexer import (
+        AnalysisRecord, CONTRACT_VERSION, derive_analysis_id, derive_record_id)
+    aid = derive_analysis_id('annotation', 'ANA3', {'job_type': 'x'})
+    rec = AnalysisRecord(
+        record_id=derive_record_id(aid, jid), analysis_id=aid, run_uid=jid,
+        kind='annotation', created_at='2026-10-01T00:00:00.000000Z', producer='koros.fitness-genome-analysis',
+        producer_version='9', subject='ANA3', status='ok', artifacts={},
+        payload={'curated': True}, trust_tier='verified',
+        provenance={'hand': 'curated'}, contract_version=CONTRACT_VERSION)
+    store.record_analysis(project, arc, rec)
+    return rec
+
+
+def skip_set(store):
+    return foreign_run_uids(existing_rows_by_run_uid(store))
+
+
+def test_foreign_row_blocks_write_and_is_untouched(store, env):
+    put(env, 'KBDLGenomeAnnotation', J[0], ann())
+    ledger(env, led(J[0]))
+    foreign_row(store, J[0])
+    before = [r.to_dict() if hasattr(r, 'to_dict') else repr(r) for r in rows(store)]
+    assert len(before) == 1
+    rep = run(store, env, skip_existing_run_uids=skip_set(store))
+    assert rep.skipped_existing == 1 and rep.records_written == 0
+    after = [r.to_dict() if hasattr(r, 'to_dict') else repr(r) for r in rows(store)]
+    assert after == before
+    assert rows(store)[0].producer == 'koros.fitness-genome-analysis'
+    assert 'skipped_existing=1' in rep.summary()
+
+
+def test_without_skip_the_duplicate_is_written(store, env):
+    put(env, 'KBDLGenomeAnnotation', J[0], ann())
+    ledger(env, led(J[0]))
+    foreign_row(store, J[0])
+    rep = run(store, env)
+    assert rep.skipped_existing == 0 and rep.records_written == 1
+    assert len(rows(store)) == 2
+
+
+def test_own_row_not_in_skip_set_and_reattribution_still_moves(store, env):
+    put(env, 'KBDLGenomeAnnotation', J[0], ann())
+    ledger(env, led(J[0]))
+    run(store, env)
+    assert skip_set(store) == set()
+    rep = run(store, env, build_attributor({J[0]: ARC}, {}, {}),
+              skip_existing_run_uids=skip_set(store))
+    assert rep.skipped_existing == 0
+    assert len(rows(store, *ARC)) == 1
+    assert len(rows(store, None, None)) == 0
+
+
+def test_cli_dry_run_default_reports_duplicate_zero(store, env, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from kbutillib.domains.external import kbdl_service_utils
+    from kbutillib.interfaces.cli.kbdl_index import kbdl_index_cmd
+
+    class Stub:
+        def __init__(self, *a, **k):
+            pass
+
+        def list_jobs(self):
+            return []
+
+        def list_objects(self):
+            return [{'object_id': A, 'name': 'g.fasta'}]
+
+    monkeypatch.setattr(kbdl_service_utils, 'KBDLServiceUtils', Stub)
+    monkeypatch.setenv('KBDL_RUN_DB', str(tmp_path / 'runs.sqlite'))
+    monkeypatch.setenv('KBDL_RUN_DB_ENABLED', '1')
+    put(env, 'KBDLGenomeAnnotation', J[0], ann())
+    put(env, 'KBDLGenomeAnnotation', J[1], ann())
+    ledger(env, led(J[0]), led(J[1]))
+    foreign_row(store, J[0])
+    args = ['--dry-run', '--json', '--results-root', str(env['root']),
+            '--ledger', str(env['ledger']), '--runs-root', str(store.runs_root)]
+    res = CliRunner().invoke(kbdl_index_cmd, args)
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert out['overlap']['duplicate'] == 0
+    assert out['skipped_existing'] == 1 and out['report']['would_write'] == 1
+    res = CliRunner().invoke(kbdl_index_cmd, args + ['--no-skip-existing'])
+    out = json.loads(res.output)
+    assert out['overlap']['duplicate'] == 1 and out['skipped_existing'] == 0
+    assert len(rows(store)) == 1       # dry run wrote nothing

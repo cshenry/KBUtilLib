@@ -164,6 +164,7 @@ def test_cli_dry_run_overlap_replace_vs_duplicate(env, tmp_path, monkeypatch):
     assert len(env['store'].list_analyses('proj', 'arc1')) == 1
     before = env['db'].stat().st_size
     result = CliRunner().invoke(main, ['kbdl-index', '--dry-run', '--json',
+                                       '--no-skip-existing',
                                        '--token-file', str(tok),
                                        '--results-root', env['root'],
                                        '--ledger', env['ledger']])

@@ -119,16 +119,29 @@ no equivalent table at all. Retiring `inner_loop` wholesale would drop that laye
 (4,891 completed / 10 failed) and `KBDLGenomeAnnotation` (3,341 completed / 33 failed).
 There is no incumbent loader to preserve compatibility with.
 
+**12. The external scan confirmed the central finding, supplied the constant, and found a defect I had.**
+Three results worth promoting out of the linked scan. (a) Independently of me it concluded that the
+write path, not the partition spec, is the defect -- "adding partitions to the current writer
+MULTIPLIES the file count". (b) ~512 MB is Iceberg's own documented default
+`write.target-file-size-bytes` (536,870,912), so the sharder's target is the spec default rather than
+a transfer from a foreign corpus. (c) **It found a real collision in this PRD's first draft**: keying
+`gene` on `gene_id` alone is unsound, because `genome_id` is derived from the assembly content hash
+and `genome_registry._lookup_existing_genome_id` dedupes on `content_hash`, so a rebuild under a
+different `gene_caller` reuses the same `{genome_id}_{N}` id space with different coordinates. The
+measured analogue is stark: Siqueira et al. 2025 found 897 genes -- ~16% of ORFs -- with IDENTICAL
+locus tags at DIFFERENT positions between the GenBank and RefSeq annotations of one identical
+assembly. That produced the `genome_build` table and Q4, and it is the clearest return on the
+research step in this session.
+
 ### Links to full research output
 
 - [External prior-art scan](research/external-prior-art-scan.md) — Iceberg partitioning and file
   sizing at 10^9 rows, genome-annotation data-model prior art (RefSeq, Ensembl, Chado, GFF3/INSDC,
   GA4GH refget/seqcol), identifier-carriage practice, negative-result provenance, and lakehouse
   deprecation practice. **Ran on the CLAUDE backend, not codex** -- see the quality report.
-  **STATUS AT DRAFT COMMIT: dispatched as `task-86c02ac1` and still running.** The file is not in
-  this commit, so the link above dangles until the scan lands and is folded in a follow-up commit.
-  Said here rather than left to be discovered, because a dangling link in a Research Report is
-  otherwise indistinguishable from a scan that was never dispatched.
+  **LANDED** (86,906 bytes) and folded -- see finding 12, and Q2/Q3/Q4, each of which it changed.
+  Note it was verified by reading the committed artifact off the task branch, NOT by Maestro's
+  status field, which still read `running` after the artifact was committed.
 - [Live lake measurement](research/live-lake-measurement.md) — every number quoted above, with the
   query that produced it.
 
@@ -241,9 +254,10 @@ loaded by one loader from one source, and it joins outward to
 `kbaseincubator.clearinghouse` for entity identity and to the KBDL object store for bytes. It
 stores no sequences of its own.
 
-Seventeen tables in five layers:
+Eighteen tables in six layers:
 
 **Identity and structure** — `assembly`, `contig`, `genome`, `genome_alias`.
+**Builds** — `genome_build` (the annotation-run entity; see Q4).
 **Features** — `gene`, `gene_qualifier`.
 **Provenance** — `genome_build_provenance`, `genome_caller_run`.
 **Annotation** — `function`, `function_annotation`, `ontology_term`, `ontology_annotation`,
@@ -443,10 +457,36 @@ written), and the two have different retention and partitioning. If `entity_alia
 over `entity_type`, `genome_alias` becomes a projection of it rather than a second source of truth —
 see Q8's "If you disagree".
 
+### Table: `genome_build`
+
+```
+build_id STRING,          -- sha256 over (genome_id, gene_caller, caller versions, bakta_db,
+                          --  bakta_image, bakta_driver_sha256, cds_overlap_drop_fraction)
+genome_id STRING,
+gene_caller STRING,       -- 'bakta' | 'inprocess' | NULL (annotated source)
+built_at TIMESTAMP,
+built_by_job_id STRING,
+is_current BOOLEAN,       -- exactly one TRUE per genome_id; a MUTABLE pointer, see below
+<provenance tail>
+```
+
+**This table exists because of the research scan, and it fixes a collision the first draft had.**
+It is the `analysis` / `annotation_run` entity that Chado (`analysis` keyed on
+`(program, programversion, sourcename)`, with `analysisfeature unique (feature_id, analysis_id)`)
+and Ensembl (`analysis`, plus a parallel `otherfeatures` database on the same core schema) have both
+carried for twenty years, and that INSDC expresses as two accessions for one assembly
+(GCA = submitter annotation, GCF = NCBI PGAP re-annotation). See Q4.
+
+`is_current` is the one MUTABLE column in the namespace and it is deliberate: every other table is
+append-only, and "which build should a reader use by default" is a question append-only data cannot
+answer. It is a pointer, not a fact, and it carries the usual consequence — flipping it changes what
+an unqualified query returns without changing any row of `gene`.
+
 ### Table: `gene`
 
 ```
 gene_id STRING,          -- KBDL feature id verbatim: {genome_id}_{N} or {genome_id}_nc{N}
+build_id STRING,         -- WHICH BUILD called this gene set; see Q4
 genome_id STRING,
 locus_id STRING,         -- CanonicalFeature.source_id / CanonicalNonCodingFeature.source_id; NULL for ab initio
 contig_id STRING,
@@ -486,7 +526,7 @@ an ncRNA.
 ### Table: `gene_qualifier`
 
 ```
-gene_id STRING, qualifier STRING, value STRING,
+build_id STRING, gene_id STRING, qualifier STRING, value STRING,
 <provenance tail>
 ```
 
@@ -503,9 +543,11 @@ promotion decision has evidence.
 
 ### Table: `genome_build_provenance`
 
-One row per genome; `NonCodingProvenance`'s nine fields plus the gene-caller identity:
+One row per BUILD -- not per genome, see Q4 -- carrying `NonCodingProvenance`'s nine fields
+plus the gene-caller identity:
 
 ```
+build_id STRING,         -- THE PRIMARY KEY
 genome_id STRING,
 non_coding_source STRING,            -- 'called' | 'source' | 'none'
 gene_caller STRING,                  -- 'bakta' | 'inprocess' | NULL (annotated source)
@@ -524,7 +566,8 @@ reproduces a call is which database *content* was used.
 ### Table: `genome_caller_run`
 
 ```
-genome_id STRING, caller_package STRING, caller_version STRING, features_called BIGINT,
+build_id STRING, genome_id STRING, caller_package STRING, caller_version STRING,
+features_called BIGINT,
 <provenance tail>
 ```
 
@@ -763,6 +806,28 @@ unjoinable; keeping the name `assembly_hash` for rule A means every KBDL-side re
 `content_hash` as "the assembly hash" joins wrongly and gets zero rows (the benign failure) or, when
 order happens to match, the right rows for the wrong reason (the dangerous one). The `assembly`,
 `contig`, `genome` tables and both loader hash paths change.
+**The external scan disagrees with which rule should be PRIMARY, and the objection is a good one.**
+GA4GH refget's seqcol spec explicitly CONSIDERED and REJECTED "digest each sequence, sort the
+digests, concatenate, digest that" as its primary collection identifier -- in its own words, it
+"would work perfectly fine for the simple use case of asserting two sets of sequences match in
+content, [but] this is not the only use case", because for many aligners sequence ORDER and NAMES
+matter, so "the final digest should differ if the underlying sequences had different order". Its
+governing principle is that "the final digest representing a sequence collection can only answer ONE
+such question." By that standard rule A answers "same content?" and cannot answer "same reference?",
+and the scan recommends making the primary digest order-dependent and self-describing with a
+separately-named order-independent digest beside it.
+**The decision stands, and here is the honest reason it is not simply conceded.** This PRD carries
+BOTH digests under rule-naming columns, which satisfies seqcol's real complaint -- that one digest
+was being asked two questions. Which one is the JOIN KEY is a different matter, and rule A is already
+the clearinghouse's `entity_hash` fleet-wide, is what `clearinghouse.genome_entity` is keyed on, is
+what the in-flight `clearinghouse-entity-alias-v1` keys `entity_alias` on, and has now been measured
+to be what live `fitness.assembly_hash` already holds. Making rule B primary would re-key the
+clearinghouse, not just this namespace, and that is out of this PRD's scope. The scan's point is
+recorded here so that a future seqcol adoption (Out of Scope, and `genome-identity-v1` Q13) starts
+from it rather than rediscovering it. Also noted from the scan and worth acting on independently:
+"the normalization rule is half the specification" -- rule A's case handling, whitespace stripping,
+empty-contig dropping and header exclusion are all specified in `_standardize_genome`, which is good,
+but they are specified in CODE and nowhere in prose that a lake reader would find.
 **Confidence:** high, and raised during this session from high-on-the-rule to
 high-on-the-rule-AND-on-the-live-data by the three-assembly recomputation above. Both rules are read
 from source, the divergence condition (contig order) is explicit in each, and the live column has
@@ -785,12 +850,67 @@ the cost of every reader having to compute the shard from the genome id before q
 more column on `gene`, `function_annotation`, `ontology_annotation` and the three fitness tables,
 plus a derivation rule that is then frozen forever. Changing this after load is a full table
 rewrite — ~723 MB today for `propagated_fitness` alone, and multi-terabyte at ATB scale.
-**Confidence:** medium — high on the constraint analysis, which is read from source; medium on the
-~512 MB target, which is transferred from `clearinghouse_shard.py` rather than measured on this
-corpus and on this query mix. The external prior-art scan (`task-646181ed`) was dispatched
-specifically to test it, and a figure from that scan should displace this one if they disagree.
+**Confidence:** medium, and the external scan moved it in both directions at once.
+**It CONFIRMED the central claim and supplied the constant.** Independently of me, the scan's first
+recommendation is to "fix write batching and compaction BEFORE you touch the partition spec -- the
+observed layout is an artefact of commit granularity and writer task fan-out, not of missing
+partitions", and that "adding partitions to the current writer MULTIPLIES the file count". And
+~512 MB turns out not to be a foreign transfer at all: it is Iceberg's own documented default
+`write.target-file-size-bytes` (536,870,912). Both of those raise confidence.
+**It DISAGREED on the partition spec**, and the disagreement deserves reading rather than
+dismissing: it recommends `partitioning = ARRAY['bucket(N, genome_id)']` on the per-gene tables and
+`ARRAY['tool', 'bucket(N, genome_id)']` on the annotation tables, with N sized from BYTES rather than
+genome count -- N=256 for `gene`, N=256 per-tool, N=4096 for `propagated_fitness`. That is better
+advice about ICEBERG than this decision is. It is simply not available through OUR write path, which
+can request only a bare stored column. So the decision stands as written, and the scan has named the
+target to aim at if the write path is ever widened -- which is now a worthwhile piece of work with a
+concrete payoff attached.
+**The scan also supplied a trap I did not know, and it applies to the `genome_shard` alternative
+above:** Trino's `iceberg.max-partitions-per-writer` defaults to **100** and will REFUSE a write to a
+table exceeding it, so the 256-value shard column would need that setting raised FIRST or the first
+load fails. It further recommends a Parquet bloom filter on `genome_id` and an explicit write-side
+sort order; neither is expressible here, which is the same ceiling restated twice more.
+What would raise this to high: file counts and per-genome query cost measured on this corpus after
+the sharder lands, which is the acceptance rehearsal's job.
 
-### Q4. Does the companion namespace store sequences? -- DECIDED: no. `sequence` is not carried; `gene.protein_seq_hash` and `gene.dna_seq_hash` are foreign keys into `clearinghouse.protein_content` and `clearinghouse.gene_content`, and `assembly.fasta_reference` is a pointer into the KBDL object store.
+### Q4. Is `gene_id` a key, given that one assembly can be annotated more than once? -- DECIDED: NO. Gene identity is scoped by an annotation run: a `genome_build` entity, and `gene` keyed on `(build_id, gene_id)`.
+**Blast radius:** IRREVERSIBLE
+**Why:** **This decision is the external research scan's doing, and the first draft of this PRD had
+the defect it names.** I had `gene` keyed on `gene_id` alone, reasoning that KBDL mints
+`{genome_id}_{N}` uniquely within a genome. That reasoning has a hole: `genome_id` is derived from the
+assembly content hash and does NOT change when the caller changes, and `genome_registry`'s
+`_lookup_existing_genome_id` DEDUPES ON `content_hash` -- a HIT returns the EXISTING `genome_id`. So
+rebuilding one assembly with `gene_caller='bakta'` after an `inprocess` build yields the SAME
+`genome_id`, hence the SAME `{genome_id}_{N}` id space, with DIFFERENT coordinates. Two rows, one key,
+silently.
+And the disagreement is not hypothetical or small. Siqueira et al. 2025
+(doi:10.1101/2025.05.27.656432) compared the GenBank and RefSeq annotations of a *single, identical*
+*P. putida* KT2440 assembly: 159 genes only in one, 81 only in the other, and **897 genes -- ~16% of
+total ORFs -- carrying IDENTICAL locus tags at DIFFERENT genomic positions** (455 differing in start
+codon, 442 in stop, offsets from <=27 bp to a few hundred). Every schema that faces this keeps the
+sets apart rather than merging them: INSDC gives one assembly two accessions (GCA submitter vs GCF
+PGAP), Ensembl puts the alternative set in a parallel `otherfeatures` database on the same schema,
+and Chado makes the analysis part of feature identity (`analysisfeature unique (feature_id,
+analysis_id)`, `analysis` keyed on `(program, programversion, sourcename)`). There is no prior art
+anywhere for reconciling competing structural callers onto one feature row.
+**If you disagree:** keying on `gene_id` alone is what the first draft did and it is survivable ONLY
+while exactly one build per genome ever reaches the lake -- which is true TODAY (KBDL holds one
+`genome_object_id` per genome) and stops being true the first time a genome is rebuilt under a
+different `gene_caller`, which `kbdl-build-genome-bakta-calling-v1` exists to make routine. Dropping
+`build_id` removes the `genome_build` table, un-keys `gene`, `gene_qualifier`,
+`genome_build_provenance` and `genome_caller_run`, and removes the `is_current` pointer -- and makes
+the first Bakta rebuild of an in-process genome a silent key collision rather than a second row.
+Adding it back afterwards is a full rewrite of the four largest tables, because a `build_id` cannot
+be inferred for rows already written.
+**Confidence:** high on the need, **medium on the shape.** High because the collision is mechanical
+and I can point at the dedup that causes it. Medium because `build_id`'s composition (a hash over
+caller identity plus database and driver digests) is my construction, not something the scan or any
+cited schema specifies -- Chado keys its `analysis` on `(program, programversion, sourcename)`, which
+is coarser and would not distinguish two Bakta runs against different databases. What would raise it:
+one real rebuild of an existing genome under a different caller, loaded end to end, with the
+acceptance rehearsal asserting two builds and two gene sets.
+
+### Q5. Does the companion namespace store sequences? -- DECIDED: no. `sequence` is not carried; `gene.protein_seq_hash` and `gene.dna_seq_hash` are foreign keys into `clearinghouse.protein_content` and `clearinghouse.gene_content`, and `assembly.fasta_reference` is a pointer into the KBDL object store.
 **Blast radius:** IRREVERSIBLE
 **Why:** `fitness.sequence` has **0 rows** against 228,709 genes, so the "typed sequence table" the
 scheme appears to offer has never actually been exercised and nothing depends on it. Meanwhile the
@@ -807,7 +927,7 @@ makes the namespace loadable without the clearinghouse, which is the one real ar
 wants genes and sequences now writes a cross-namespace join, and I did not measure what that costs
 in Trino here.
 
-### Q5. `feature_type` as a column or a separate table? -- DECIDED: one `feature_type` column on `gene`, with SEVEN values: `CDS` plus the six `NonCodingType` members.
+### Q6. `feature_type` as a column or a separate table? -- DECIDED: one `feature_type` column on `gene`, with SEVEN values: `CDS` plus the six `NonCodingType` members.
 **Blast radius:** MEDIUM
 **Why:** The brief said five non-coding values; the source says six — `repeat_region` was added for
 Bakta calling and is a CRISPR array, not an RNA gene. A column rather than a table because the
@@ -823,7 +943,7 @@ delete.
 **Confidence:** high — the vocabulary is read from `NonCodingType` in source, including the sixth
 member the brief omitted.
 
-### Q6. Where do the RNA qualifiers live? -- DECIDED: six named nullable columns on `gene` (`product`, `partial`, `amino_acid`, `anticodon`, `ncrna_class`, `rfam`, `rpt_family`) PLUS a narrow `gene_qualifier(gene_id, qualifier, value)` sidecar for the `extra="allow"` passthrough.
+### Q7. Where do the RNA qualifiers live? -- DECIDED: six named nullable columns on `gene` (`product`, `partial`, `amino_acid`, `anticodon`, `ncrna_class`, `rfam`, `rpt_family`) PLUS a narrow `gene_qualifier(gene_id, qualifier, value)` sidecar for the `extra="allow"` passthrough.
 **Blast radius:** MEDIUM
 **Why:** The named qualifiers are what define a tRNA, so they must be retrievable without a join on
 a 10^9-row table. Sparsity is nearly free: in Parquet with ZSTD an all-null column is a
@@ -838,7 +958,7 @@ would catch because the dropped keys are by definition the ones nobody enumerate
 **Confidence:** high on the shape; **medium on the Parquet null-cost claim**, which is a
 well-established property of the format but which I did not measure on this deployment's writer.
 
-### Q7. Where does caller provenance live? -- DECIDED: three places, because there are three different facts. Per-feature `caller`/`caller_version` columns on `gene`; one `genome_build_provenance` row per genome; one `genome_caller_run` row per caller per genome, INCLUDING zero-hit runs.
+### Q8. Where does caller provenance live? -- DECIDED: three places, because there are three different facts. Per-feature `caller`/`caller_version` columns on `gene`; one `genome_build_provenance` row per genome; one `genome_caller_run` row per caller per genome, INCLUDING zero-hit runs.
 **Blast radius:** MEDIUM
 **Why:** "Which tool produced this feature" is a property of the feature; "which gene caller and
 which Bakta database built this genome" is a property of the genome; "which callers ran, and what
@@ -854,7 +974,7 @@ pyaragorn 0.3.0" unqueryable; dropping `genome_caller_run` loses the zero-hit fa
 because it is not recoverable from the feature rows (there are none) or from the genome row.
 **Confidence:** high — the three-way split mirrors the source model exactly.
 
-### Q8. Does the genome alias table live here or in `clearinghouse.entity_alias`? -- DECIDED: here, as `genome_alias`, append-only, multi-valued, no uniqueness, with a fixed `alias_source` vocabulary validated at the write boundary.
+### Q9. Does the genome alias table live here or in `clearinghouse.entity_alias`? -- DECIDED: here, as `genome_alias`, append-only, multi-valued, no uniqueness, with a fixed `alias_source` vocabulary validated at the write boundary.
 **Blast radius:** MEDIUM
 **Why:** This is Chris's decision (3) and it must be satisfiable before `entity_alias` exists —
 that is a separate PRD, not yet written, and this namespace should not be blocked on it. The need
@@ -875,7 +995,7 @@ session writing `clearinghouse-entity-alias-v1` (session `44109e55`, in a worktr
 `main` as of 22:26 CDT) may land a generic table that makes the projection the better answer. It has
 been messaged about exactly this.
 
-### Q9. Are `annotation` and `evidence` carried forward? -- DECIDED: neither. Both are dropped. `evidence`'s only non-redundant content, a score, becomes a nullable `score` column on the annotation rows.
+### Q10. Are `annotation` and `evidence` carried forward? -- DECIDED: neither. Both are dropped. `evidence`'s only non-redundant content, a score, becomes a nullable `score` column on the annotation rows.
 **Blast radius:** MEDIUM
 **Why:** Measured, not inferred. `annotation`: 272,076 rows, of which **272,076 are orphans** against
 `gene` — its `feature_id` is `organism:locus` while `gene.gene_id` is `{uuid}.{locus}`, and it spans
@@ -893,7 +1013,7 @@ from `organism:locus` to `{genome_id}_{N}` that nobody has written, for a table 
 **Confidence:** high on `evidence` — the reconciliation is exact across all six tools.
 **Medium on `annotation`**: I proved it does not join, not that nobody wants what it holds.
 
-### Q10. How does the lake consume genome-object supersession? -- DECIDED: resolve transitively at load time, and store BOTH — the resolved current id in `fasta_reference`, the id as observed in the snapshot in `fasta_reference_observed`.
+### Q11. How does the lake consume genome-object supersession? -- DECIDED: resolve transitively at load time, and store BOTH — the resolved current id in `fasta_reference`, the id as observed in the snapshot in `fasta_reference_observed`.
 **Blast radius:** MEDIUM
 **Why:** Storing only the observed id pins the lake to objects that may have been recompressed away;
 storing only the resolved id destroys the ability to reproduce what the snapshot actually said,
@@ -908,7 +1028,7 @@ specification rather than on observed behaviour, and the first real supersession
 test. What would raise confidence: one end-to-end enrichment that actually supersedes a registered
 genome object.
 
-### Q11. What does "every row carries ingest provenance" mean concretely? -- DECIDED: the six-column tail `store_id, snapshot_id, snapshot_seq, load_batch_id, observed_at, loaded_at` on every table, with `store_id` never derived from a filesystem path.
+### Q12. What does "every row carries ingest provenance" mean concretely? -- DECIDED: the six-column tail `store_id, snapshot_id, snapshot_seq, load_batch_id, observed_at, loaded_at` on every table, with `store_id` never derived from a filesystem path.
 **Blast radius:** MEDIUM
 **Why:** `fitness` carries only `created_at`, and its values are clustered at two instants, which
 tells you a bulk load happened and nothing else — not which store, not which snapshot, not whether
@@ -921,7 +1041,7 @@ pair) saves four columns per row and loses the ability to attribute a row to a s
 what makes a bad load retractable.
 **Confidence:** high.
 
-### Q12. What is retired, and what is not? -- DECIDED: this namespace supersedes only the genome / gene / annotation / fitness subset of `inner_loop`'s `v2_*` tables. The modelling tables are explicitly NOT retired and keep `inner_loop` as their home.
+### Q13. What is retired, and what is not? -- DECIDED: this namespace supersedes only the genome / gene / annotation / fitness subset of `inner_loop`'s `v2_*` tables. The modelling tables are explicitly NOT retired and keep `inner_loop` as their home.
 **Blast radius:** MEDIUM
 **Why:** Measured: `inner_loop` holds **39** `v2_*` tables, and they are not a relabelled `fitness`.
 They include `v2_models`, `v2_model_reactions`, `v2_model_fva`, `v2_model_gapfill_media`,
@@ -936,7 +1056,7 @@ fourteen-item agenda asked for.
 not measure who reads `inner_loop` or `fitness` today, so the length of the compatibility window in
 the retirement path is asserted, not evidenced. See the terminal entry.
 
-### Q13. Who writes the tables? -- DECIDED: an in-pod loader reading a delivered KBDL snapshot, following `council-record-lakehouse-v1`'s pattern. `KBDLStoreLoad` is retired unbuilt.
+### Q14. Who writes the tables? -- DECIDED: an in-pod loader reading a delivered KBDL snapshot, following `council-record-lakehouse-v1`'s pattern. `KBDLStoreLoad` is retired unbuilt.
 **Blast radius:** MEDIUM
 **Why:** The lakehouse write path runs in-pod; KBDL on poplar reaches the lake over a KBase token
 that expires on a ~27-day cycle and has already lapsed silently once mid-build; and the delivery
@@ -949,7 +1069,7 @@ leasing for free, but puts the expiring credential on the critical path of every
 GAA in the dependency graph.
 **Confidence:** high.
 
-### Q14. How do KBDL feature ids map to lake gene ids? -- DECIDED: `gene.gene_id` is the KBDL feature id verbatim (`{genome_id}_{N}` for CDS, `{genome_id}_nc{N}` for non-coding); `gene.locus_id` is the upstream `source_id`, NULL for ab initio calls.
+### Q15. How do KBDL feature ids map to lake gene ids? -- DECIDED: `gene.gene_id` is the KBDL feature id verbatim (`{genome_id}_{N}` for CDS, `{genome_id}_nc{N}` for non-coding); `gene.locus_id` is the upstream `source_id`, NULL for ab initio calls.
 **Blast radius:** LOW
 **Why:** Verbatim carriage means an id in the lake is pasteable into KBDL and vice versa, with no
 translation table to go stale. The two independent counters are safe rather than dangerous: `_1`
@@ -961,7 +1081,7 @@ identifier — `CanonicalFeature.source_id` is `str | None` for exactly that rea
 cross-system question a join.
 **Confidence:** high — the minting is read from `genome_normalize.py` at the two sites that do it.
 
-### Q15. Is "exists in the namespace" the same as "is a result"? -- DECIDED: no. A `genome_disposition` table carries `published | pilot | trial | superseded | excluded`, and absence of a row means NOT publishable.
+### Q16. Is "exists in the namespace" the same as "is a result"? -- DECIDED: no. A `genome_disposition` table carries `published | pilot | trial | superseded | excluded`, and absence of a row means NOT publishable.
 **Blast radius:** MEDIUM
 **Why:** `council-record-lakehouse-v1` paid for this with twenty-one jobs of which two cancelled
 19,276-item runs looked authoritative by label and size. KBDL has its own instance already:
@@ -973,7 +1093,7 @@ is visible and fixable, wrongly publishing a trial is neither.
 `load_batch_id` heuristics, which is how a trial load becomes a finding.
 **Confidence:** high.
 
-### Q16. Is overlap between features legal? -- DECIDED: yes. No coordinate-uniqueness constraint on `gene`; the overlap tally persists in `genome_build_provenance.cds_dropped_overlapping_rna` with the threshold it was produced under.
+### Q17. Is overlap between features legal? -- DECIDED: yes. No coordinate-uniqueness constraint on `gene`; the overlap tally persists in `genome_build_provenance.cds_dropped_overlapping_rna` with the threshold it was produced under.
 **Blast radius:** LOW
 **Why:** `kbdl-add-non-coding-to-existing-genome-v1` deliberately does *not* drop a CDS that
 overlaps an added RNA, so that existing CDS ids stay valid — which means gene rows for one genome
@@ -986,7 +1106,7 @@ original any-overlap rule.
 today, which is consistent with both rules; the decision rests on the upstream PRD's stated
 behaviour rather than on current data.
 
-### Q17. What I could not decide and did not guess
+### Q18. What I could not decide and did not guess
 
 Four external facts are unreconciled, and none of them blocks the build:
 
@@ -1063,6 +1183,20 @@ for tool version in the live namespace and nothing has ever populated it. This d
 `tool_version`, `caller_version` and `parameter_set_hash`, all of which can be `NULL` as easily.
 Schema does not make provenance happen; the loader's write-boundary validators do, which is why
 they are specified as rejections rather than as defaults.
+
+**`genome_build.is_current` is the one mutable column, and flipping it silently changes query answers.**
+Every other table here is append-only, so a reader can reason about `snapshot_seq` and get a stable
+answer. `is_current` cannot work that way -- "which build should an unqualified query use" is not a
+fact a snapshot can carry. The consequence: flipping it rewrites the meaning of every query that
+does not name a `build_id`, while changing not one row of `gene`. Any dashboard or notebook that
+reads `gene` without joining `genome_build` will change its numbers under a rebuild and give no sign
+that anything happened.
+
+**A rebuild makes the corpus grow without any genome being added.** Because gene identity is scoped
+by `build_id` (Q4), re-annotating the existing 4,865 genomes under a second caller DOUBLES `gene`,
+`gene_qualifier`, `genome_build_provenance` and `genome_caller_run` -- and leaves `genome`,
+`assembly` and `contig` untouched. "Rows in `gene` divided by rows in `genome`" is therefore not a
+mean gene count, and will drift upward over time for reasons that have nothing to do with biology.
 
 **Two genomes sharing one assembly means per-assembly aggregates double-count.**
 `SELECT COUNT(*) FROM genome JOIN assembly USING (assembly_entity_hash)` returns 48 on the current

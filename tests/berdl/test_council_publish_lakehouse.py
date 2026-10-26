@@ -1251,3 +1251,341 @@ class TestTheCli:
         assert result.exit_code != 0
         assert "ZERO of 4" in result.output
         assert not (tmp_path / "publish" / "shard").exists()
+
+
+# --------------------------------------------------------------------------
+# BUNDLE v2 AT PUBLISH: the three refusals and the abstention date
+# (KBUtilLib#97)
+# --------------------------------------------------------------------------
+
+
+def _v1(bundle: dict) -> dict:
+    """The same campaign as a v1 bundle: no abstention texts, no plan_origin.
+
+    Built by DEGRADING a real v2 bundle rather than by hand, so it is the
+    shape a v1 bundle actually had -- a hand-written dict would prove that the
+    publisher reads a field, not that the field means what v1 wrote.
+    """
+    degraded = {
+        **bundle,
+        "schema_version": 1,
+        "abstentions": [
+            {k: v for k, v in row.items() if k != "text"}
+            for row in bundle["abstentions"]
+        ],
+    }
+    degraded.pop("plan_origin", None)
+    degraded["bundle_digest"] = cb.content_digest(degraded)
+    return degraded
+
+
+class TestTheAbstentionTextRefusal:
+    """A. A blank abstention text is a refusal that NAMES the query_ids."""
+
+    def test_a_BLANKED_text_refuses_and_names_the_query_id(
+        self, sink, plan, archived, state_root
+    ) -> None:
+        blanked = _bundle(
+            plan,
+            archived,
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": "",
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                }
+            ],
+        )
+        cb.publish_bundle(sink, blanked, archive_state_root=state_root)
+        selection = lp.select_verdicts(sink, blanked, state_root=state_root)
+        with pytest.raises(lp.AbstentionTextMissingError) as caught:
+            lp.lakehouse_export_rows(blanked, selection)
+        message = str(caught.value)
+        assert ABSTAIN in message
+        assert "1 of 1" in message
+        assert "FIRST WRITE" in message
+
+    def test_a_WHITESPACE_ONLY_text_is_blank_too(
+        self, sink, plan, archived, state_root
+    ) -> None:
+        blanked = _bundle(
+            plan,
+            archived,
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": " \t \n ",
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                }
+            ],
+        )
+        cb.publish_bundle(sink, blanked, archive_state_root=state_root)
+        selection = lp.select_verdicts(sink, blanked, state_root=state_root)
+        with pytest.raises(lp.AbstentionTextMissingError):
+            lp.lakehouse_export_rows(blanked, selection)
+
+    def test_the_WHOLE_PUBLISH_refuses_and_writes_nothing(
+        self, sink, plan, archived, state_root, tmp_path
+    ) -> None:
+        """It is a refusal, not a count in the receipt: no parquet, no shard."""
+        blanked = _bundle(
+            plan,
+            archived,
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": "",
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                }
+            ],
+        )
+        cb.publish_bundle(sink, blanked, archive_state_root=state_root)
+        out = tmp_path / "publish-blanked"
+        with pytest.raises(lp.AbstentionTextMissingError):
+            lp.publish_from_lakehouse(
+                sink, blanked, publish_dir=out, state_root=state_root
+            )
+        assert not (out / "verdicts.parquet").exists()
+        assert not (out / "shard").exists()
+
+    def test_the_refusal_names_EVERY_blank_one_not_just_the_first(
+        self, sink, plan, archived, state_root
+    ) -> None:
+        second = qid("abstain2")
+        blanked = _bundle(
+            plan,
+            archived,
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": "",
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                },
+                {
+                    "query_id": second,
+                    "text": "",
+                    "abstain_reason": "placeholder",
+                    "decline_reason": "abstained:placeholder",
+                },
+            ],
+        )
+        cb.publish_bundle(sink, blanked, archive_state_root=state_root)
+        selection = lp.select_verdicts(sink, blanked, state_root=state_root)
+        with pytest.raises(lp.AbstentionTextMissingError) as caught:
+            lp.lakehouse_export_rows(blanked, selection)
+        message = str(caught.value)
+        assert ABSTAIN in message and second in message
+        assert "2 of 2" in message
+
+    def test_a_GOOD_bundle_reports_abstentions_without_text_as_EMPTY(
+        self, sink, bundle, state_root
+    ) -> None:
+        """The receipt key survives and is now structurally []: a blank raises."""
+        selection = lp.select_verdicts(sink, bundle, state_root=state_root)
+        assert (
+            lp.lakehouse_export_rows(bundle, selection)["abstentions_without_text"]
+            == []
+        )
+
+
+class TestTheV1BundleRefusal:
+    """A. A v1 bundle that carries abstentions is refused, with a rebuild."""
+
+    def test_a_v1_bundle_WITH_abstentions_is_refused_told_to_REBUILD(
+        self, sink, bundle, state_root
+    ) -> None:
+        with pytest.raises(lp.StaleBundleSchemaError) as caught:
+            lp.require_publishable_bundle(_v1(bundle))
+        message = str(caught.value)
+        assert "schema_version 1" in message
+        assert "REBUILD" in message
+        assert "build_bundle_from_run" in message
+        assert "FIRST WRITE" in message
+
+    def test_it_is_refused_at_PUBLISH_before_anything_is_written(
+        self, sink, bundle, state_root, tmp_path
+    ) -> None:
+        out = tmp_path / "publish-v1"
+        with pytest.raises(lp.StaleBundleSchemaError):
+            lp.publish_from_lakehouse(
+                sink, _v1(bundle), publish_dir=out, state_root=state_root
+            )
+        assert not (out / "verdicts.parquet").exists()
+        assert not (out / "shard").exists()
+
+    def test_the_v1_refusal_WINS_over_the_blank_text_one(
+        self, sink, bundle, state_root
+    ) -> None:
+        """A v1 bundle's abstentions have no text at all, so the blank-text
+        check would also fire -- and its message ("fix it in the plan's
+        abstain record") is the wrong instruction. The schema check runs
+        first so the operator is told to rebuild."""
+        selection = lp.select_verdicts(sink, bundle, state_root=state_root)
+        with pytest.raises(lp.StaleBundleSchemaError):
+            lp.lakehouse_export_rows(_v1(bundle), selection)
+
+    def test_a_v1_bundle_with_NO_abstentions_is_NOT_refused(
+        self, sink, plan, archived, state_root
+    ) -> None:
+        """There is nothing it could be missing."""
+        v1 = _v1(_bundle(plan, archived, abstain=[]))
+        assert v1["schema_version"] == 1
+        assert lp.require_publishable_bundle(v1) == {}
+
+
+class TestTheEmptyPlanHashRefusal:
+    """B. ``plan_hash == ''`` is refused unless the origin says
+    ``reconstructed``."""
+
+    def test_a_blank_plan_hash_with_a_STAGE1_origin_is_REFUSED(
+        self, plan, archived
+    ) -> None:
+        built = _bundle({**plan, "plan_hash": ""}, archived)
+        assert built["plan_origin"]["kind"] == "stage1"
+        with pytest.raises(lp.UnreconstructedPlanError) as caught:
+            lp.require_publishable_bundle(built)
+        message = str(caught.value)
+        assert "EMPTY plan_hash" in message
+        assert "'stage1'" in message
+        assert "reconstructed" in message
+
+    def test_a_blank_plan_hash_DECLARED_RECONSTRUCTED_is_accepted(
+        self, plan, archived
+    ) -> None:
+        """The 2026-10-19 campaign's case: its plan was hand-assembled, so it
+        has no plan_hash and never will. Accepted and RECORDED as what it is
+        rather than regenerated."""
+        built = cb.build_bundle(
+            {**plan, "plan_hash": ""},
+            campaign_id="camp-1",
+            store_id=STORE_ID,
+            snapshot_id=archived["snapshot_id"],
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": ABSTAIN_TEXT,
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                }
+            ],
+            fanout=[{"query_id": F1, "item_id": "i1"}],
+            job_ids=["job-chunk1"],
+            plan_origin={
+                "kind": "reconstructed",
+                "assembled_on": "2026-10-19",
+                "reason": "the campaign predates stage 1",
+                "generated_at": "2026-10-19T04:12:07Z",
+                "generated_at_source": "min(council.jobs.submitted_at)",
+            },
+            written_by="miles",
+        )
+        assert lp.require_publishable_bundle(built)["kind"] == "reconstructed"
+
+    def test_a_NON_BLANK_plan_hash_needs_no_declaration(self, bundle) -> None:
+        assert bundle["plan_hash"]
+        assert lp.require_publishable_bundle(bundle)["kind"] == "stage1"
+
+    def test_it_is_refused_at_PUBLISH_before_anything_is_written(
+        self, sink, plan, archived, state_root, tmp_path
+    ) -> None:
+        built = _bundle({**plan, "plan_hash": ""}, archived)
+        cb.publish_bundle(sink, built, archive_state_root=state_root)
+        out = tmp_path / "publish-hashless"
+        with pytest.raises(lp.UnreconstructedPlanError):
+            lp.publish_from_lakehouse(
+                sink, built, publish_dir=out, state_root=state_root
+            )
+        assert not (out / "verdicts.parquet").exists()
+
+
+class TestTheAbstentionDecidedAt:
+    """B. Every abstention's ``decided_at`` is ``plan_origin.generated_at``.
+
+    The preset maps ``decided_at`` onto the clearinghouse ``observed_at`` and
+    that slot freezes on first write, so this value is the PERMANENT
+    observation time of the abstention. ``verdicts.export_rows`` would
+    otherwise fall back to ``now()``, making it the publish date.
+    """
+
+    def test_it_comes_from_plan_origin_NOT_from_the_plans_own_date(
+        self, sink, plan, archived, state_root
+    ) -> None:
+        """The plan says 2026-10-25; the declared origin says 2026-10-19. The
+        ORIGIN wins -- for a reconstruction the plan's date is just when
+        somebody wrote the file."""
+        assert plan["generated_at"] == "2026-10-25T12:00:00Z"
+        built = cb.build_bundle(
+            {**plan, "plan_hash": ""},
+            campaign_id="camp-1",
+            store_id=STORE_ID,
+            snapshot_id=archived["snapshot_id"],
+            abstain=[
+                {
+                    "query_id": ABSTAIN,
+                    "text": ABSTAIN_TEXT,
+                    "abstain_reason": "no_candidates",
+                    "decline_reason": "abstained:no_candidates",
+                }
+            ],
+            fanout=[{"query_id": F1, "item_id": "i1"}],
+            job_ids=("job-chunk1",),
+            retry_job_ids=("job-retry",),
+            plan_origin={
+                "kind": "reconstructed",
+                "assembled_on": "2026-10-19",
+                "reason": "the campaign predates stage 1",
+                "generated_at": "2026-10-19T04:12:07Z",
+                "generated_at_source": "min(council.jobs.submitted_at)",
+            },
+            written_by="miles",
+        )
+        cb.publish_bundle(sink, built, archive_state_root=state_root)
+        selection = lp.select_verdicts(sink, built, state_root=state_root)
+        rows = {
+            row["query_id"]: row
+            for row in lp.lakehouse_export_rows(built, selection)["rows"]
+        }
+        assert rows[ABSTAIN]["decided_at"].startswith("2026-10-19T04:12:07")
+        assert not rows[ABSTAIN]["decided_at"].startswith("2026-10-25")
+
+    def test_EVERY_abstention_carries_exactly_that_value(
+        self, sink, bundle, state_root
+    ) -> None:
+        selection = lp.select_verdicts(sink, bundle, state_root=state_root)
+        built = lp.lakehouse_export_rows(bundle, selection)
+        generated_at = cb.bundle_plan_origin(bundle)["generated_at"]
+        abstained = [row for row in built["rows"] if row["council"] is None]
+        assert abstained
+        for row in abstained:
+            assert row["decided_at"] == vx._iso(generated_at)
+
+    def test_the_receipt_carries_the_origin_so_the_claim_is_auditable(
+        self, sink, bundle, state_root, tmp_path
+    ) -> None:
+        receipt = lp.publish_from_lakehouse(
+            sink,
+            bundle,
+            publish_dir=tmp_path / "publish-origin",
+            state_root=state_root,
+        )
+        assert receipt["plan_origin"] == cb.bundle_plan_origin(bundle)
+        assert receipt["plan_origin"]["generated_at"]
+
+
+class TestTheCoverageFloorHelpText:
+    """C. The help text's submitted inventory is 20,036, not 19,276."""
+
+    def test_the_help_text_counts_the_abstentions_in_the_submitted_set(self) -> None:
+        result = CliRunner().invoke(
+            main, ["ontomap", "council-publish-lakehouse", "--help"]
+        )
+        assert result.exit_code == 0, result.output
+        collapsed = " ".join(result.output.split())
+        assert "8 of 20,036 submitted query_ids" in collapsed
+        assert "19,276 fanout + 760 abstentions" in collapsed
+        # The old wording described the campaign MINUS its abstentions.
+        assert "of 19,276 inputs" not in collapsed

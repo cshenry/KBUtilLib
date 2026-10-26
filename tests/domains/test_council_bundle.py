@@ -39,13 +39,17 @@ from kbutillib.domains.genome.ontology_mapping.council_bundle import (  # noqa: 
     BUNDLE_CONTENT_FIELDS,
     BUNDLE_FILENAME,
     BUNDLE_SCHEMA_VERSION,
+    PLAN_ORIGIN_FIELDS,
+    PLAN_ORIGIN_KINDS,
     PUBLICATION_BUNDLE_TABLE,
     BundleConflictError,
     BundleDigestError,
     BundleIncompleteSnapshotError,
     JobNotInBundleError,
+    PlanOriginError,
     PublicationBundleError,
     abstentions,
+    bundle_plan_origin,
     build_bundle,
     build_bundle_from_run,
     bundle_query_ids,
@@ -955,3 +959,330 @@ class TestBuildFromARunDirectory:
                 snapshot_id="a" * 64,
             )
         assert "abstain_file" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# SCHEMA v2: the abstention texts and the plan's origin (KBUtilLib#97)
+# --------------------------------------------------------------------------
+
+
+class TestTheAbstentionTexts:
+    """A. The bundle carries each abstention's function text.
+
+    It is the ONLY durable source: retrieval declined before anything was
+    submitted, so no council item exists and no ``items.evidence`` in the
+    archive holds it. The clearinghouse slot an abstention's row lands in
+    freezes on first write, so a text that is not carried here is lost for
+    good rather than merely late.
+    """
+
+    def test_the_schema_version_is_2(self) -> None:
+        assert BUNDLE_SCHEMA_VERSION == 2
+        assert _bundle()["schema_version"] == 2
+
+    def test_every_abstention_carries_the_PLAN_ROWS_text_verbatim(self) -> None:
+        carried = {row["query_id"]: row["text"] for row in abstentions(_bundle())}
+        assert carried == {row["query_id"]: row["text"] for row in ABSTAIN}
+        assert carried[_hash(90)] == "hypothetical protein"
+        assert carried[_hash(91)] == "DUF1234 family protein"
+
+    def test_a_plan_row_with_no_text_yields_an_abstention_with_an_EMPTY_one(
+        self,
+    ) -> None:
+        """Not a build-time refusal: the bundle records what the plan held.
+
+        The refusal belongs at PUBLISH, where it can say which rows would land
+        in a frozen slot -- see
+        ``berdl.council_publish.AbstentionTextMissingError``. Refusing here
+        would also make a bundle unbuildable for inspection, which is the
+        artifact a human needs in order to FIX the plan.
+        """
+        blanked = [{**ABSTAIN[0], "text": ""}, ABSTAIN[1]]
+        rows = abstentions(_bundle(abstain=blanked))
+        assert [row["text"] for row in rows] == ["", "DUF1234 family protein"]
+
+    def test_the_text_survives_a_disk_round_trip(self, tmp_path: Path) -> None:
+        bundle = _bundle()
+        write_bundle(bundle, tmp_path / BUNDLE_FILENAME)
+        back = read_bundle(tmp_path / BUNDLE_FILENAME)
+        assert [row["text"] for row in abstentions(back)] == [
+            "hypothetical protein",
+            "DUF1234 family protein",
+        ]
+
+    def test_the_text_is_covered_by_the_digest(self) -> None:
+        """Changing an abstention's text makes a DIFFERENT bundle."""
+        edited = [{**ABSTAIN[0], "text": "something else"}, ABSTAIN[1]]
+        assert _bundle(abstain=edited)["bundle_digest"] != _bundle()["bundle_digest"]
+
+
+class TestThePlanOrigin:
+    """B. Whether the plan came from stage 1 or was RECONSTRUCTED afterwards."""
+
+    def test_plan_origin_is_a_declared_content_field(self) -> None:
+        assert "plan_origin" in BUNDLE_CONTENT_FIELDS
+        assert set(bundle_plan_origin(_bundle())) == set(PLAN_ORIGIN_FIELDS)
+
+    def test_a_stage1_plan_needs_no_declaration_and_takes_the_plans_own_date(
+        self,
+    ) -> None:
+        """The ONE thing ever derived: a stage-1 plan's generated_at IS the
+        moment retrieval ran."""
+        origin = bundle_plan_origin(_bundle())
+        assert origin["kind"] == "stage1"
+        assert origin["generated_at"] == "2026-10-22T09:00:00Z"
+        assert "stage 1" in origin["generated_at_source"]
+        assert origin["assembled_on"] == ""
+        assert origin["reason"] == ""
+
+    def test_the_only_two_kinds(self) -> None:
+        assert PLAN_ORIGIN_KINDS == ("stage1", "reconstructed")
+
+    def test_an_unknown_kind_is_refused_naming_the_two(self) -> None:
+        with pytest.raises(PlanOriginError) as caught:
+            _bundle(plan_origin={"kind": "handmade"})
+        assert "handmade" in str(caught.value)
+        assert "reconstructed" in str(caught.value)
+
+    def test_a_MISSPELLED_field_is_refused_rather_than_dropped(self) -> None:
+        """generated_at is the field most worth refusing a typo on: it becomes
+        the permanent observed_at of every abstention."""
+        with pytest.raises(PlanOriginError) as caught:
+            _bundle(
+                plan_origin={
+                    "kind": "reconstructed",
+                    "assembled_on": "2026-10-19",
+                    "reason": "predates stage 1",
+                    "generated_on": "2026-10-19T00:00:00Z",  # NOT generated_at
+                    "generated_at_source": "min(jobs.submitted_at)",
+                }
+            )
+        assert "generated_on" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "omitted",
+        ["assembled_on", "reason", "generated_at", "generated_at_source"],
+    )
+    def test_a_reconstructed_origin_must_declare_ALL_FOUR(self, omitted: str) -> None:
+        declared = {
+            "kind": "reconstructed",
+            "assembled_on": "2026-10-19",
+            "reason": "the campaign predates stage 1",
+            "generated_at": "2026-10-19T04:12:07Z",
+            "generated_at_source": "min(council.jobs.submitted_at) over the base jobs",
+        }
+        declared[omitted] = ""
+        with pytest.raises(PlanOriginError) as caught:
+            _bundle(plan_origin=declared)
+        assert omitted in str(caught.value)
+
+    def test_a_reconstructed_origin_is_carried_WHOLE_and_nothing_is_inferred(
+        self,
+    ) -> None:
+        """The plan here carries generated_at = 2026-10-22; the DECLARED value
+        wins, because for a reconstruction the plan's own date is whenever the
+        person assembling it happened to write the file."""
+        declared = {
+            "kind": "reconstructed",
+            "assembled_on": "2026-10-19",
+            "reason": "the campaign predates stage 1",
+            "generated_at": "2026-10-19T04:12:07Z",
+            "generated_at_source": "min(council.jobs.submitted_at) over the base jobs",
+        }
+        assert bundle_plan_origin(_bundle(plan_origin=declared)) == declared
+
+    def test_a_campaign_WITH_abstentions_may_not_have_a_blank_generated_at(
+        self,
+    ) -> None:
+        """The now() hole, closed at the source.
+
+        verdicts.export_rows falls back to now(); the preset maps decided_at
+        onto observed_at; the slot freezes on first write. A blank here would
+        make the PUBLISH DATE the permanent observation time of every
+        abstention, so the bundle refuses to be built.
+        """
+        plan = _plan()
+        plan.pop("generated_at")
+        with pytest.raises(PlanOriginError) as caught:
+            build_bundle(
+                plan,
+                campaign_id=CAMPAIGN,
+                store_id=STORE_ID,
+                snapshot_id="a" * 64,
+                abstain=ABSTAIN,
+                fanout=FANOUT,
+                job_ids=BASE_JOBS,
+            )
+        message = str(caught.value)
+        assert "generated_at" in message and "FREEZES ON FIRST WRITE" in message
+
+    def test_a_campaign_with_NO_abstentions_may(self) -> None:
+        """There is no abstention to mis-stamp, so nothing is at risk."""
+        plan = _plan()
+        plan.pop("generated_at")
+        bundle = build_bundle(
+            plan,
+            campaign_id=CAMPAIGN,
+            store_id=STORE_ID,
+            snapshot_id="a" * 64,
+            abstain=[],
+            fanout=FANOUT,
+            job_ids=BASE_JOBS,
+        )
+        assert bundle_plan_origin(bundle)["generated_at"] == ""
+
+    def test_the_origin_is_covered_by_the_digest(self) -> None:
+        reconstructed = _bundle(
+            plan_origin={
+                "kind": "reconstructed",
+                "assembled_on": "2026-10-19",
+                "reason": "the campaign predates stage 1",
+                "generated_at": "2026-10-22T09:00:00Z",
+                "generated_at_source": "min(council.jobs.submitted_at)",
+            }
+        )
+        assert reconstructed["bundle_digest"] != _bundle()["bundle_digest"]
+
+
+class TestBuildFromARunDirectoryInfersNoOrigin:
+    """``build_bundle_from_run`` takes the reconstruction fields as EXPLICIT
+    arguments and never infers them.
+
+    A run directory is the wrong place to guess from: a hand-assembled
+    PLAN.json is indistinguishable from a stage-1 one on disk, so any
+    heuristic -- does it carry run_id? is plan_hash blank? -- would silently
+    classify a reconstruction as stage 1 and hand every abstention ``now()``
+    as its permanent observed_at.
+    """
+
+    @pytest.fixture
+    def hand_assembled(self, tmp_path: Path) -> Path:
+        """A run directory like the real 2026-10-19 one: NO generated_at, NO
+        plan_hash, no run_id -- and 2 abstentions that still carry their text."""
+        from kbutillib.domains.ai.council.quote import PLAN_FILENAME
+
+        directory = tmp_path / "xport.hand"
+        directory.mkdir(parents=True, exist_ok=True)
+        abstain_file = directory / "abstain.jsonl"
+        abstain_file.write_text(
+            "".join(json.dumps(row) + "\n" for row in ABSTAIN), encoding="utf-8"
+        )
+        fanout_file = directory / "fanout.jsonl"
+        fanout_file.write_text(
+            "".join(json.dumps(row) + "\n" for row in FANOUT), encoding="utf-8"
+        )
+        plan = _plan(
+            abstain_file=str(abstain_file),
+            fanout_file=str(fanout_file),
+            job_ids=BASE_JOBS,
+            retry_job_ids=RETRY_JOBS,
+        )
+        for absent in ("generated_at", "run_id", "plan_hash"):
+            plan.pop(absent, None)
+        (directory / PLAN_FILENAME).write_text(
+            json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return directory
+
+    def test_it_REFUSES_a_hand_assembled_plan_passed_off_as_stage1(
+        self, hand_assembled: Path
+    ) -> None:
+        """The default kind is stage1 and it does NOT quietly become
+        'reconstructed' just because the plan looks hand-made."""
+        with pytest.raises(PlanOriginError) as caught:
+            build_bundle_from_run(
+                hand_assembled,
+                campaign_id=CAMPAIGN,
+                store_id=STORE_ID,
+                snapshot_id="a" * 64,
+                written_by="miles",
+            )
+        assert "generated_at" in str(caught.value)
+
+    def test_declaring_reconstructed_WITHOUT_the_four_is_still_refused(
+        self, hand_assembled: Path
+    ) -> None:
+        with pytest.raises(PlanOriginError) as caught:
+            build_bundle_from_run(
+                hand_assembled,
+                campaign_id=CAMPAIGN,
+                store_id=STORE_ID,
+                snapshot_id="a" * 64,
+                plan_origin_kind="reconstructed",
+                written_by="miles",
+            )
+        for field in ("assembled_on", "reason", "generated_at", "generated_at_source"):
+            assert field in str(caught.value)
+
+    def test_the_four_declared_EXPLICITLY_build_the_bundle(
+        self, hand_assembled: Path
+    ) -> None:
+        bundle = build_bundle_from_run(
+            hand_assembled,
+            campaign_id=CAMPAIGN,
+            store_id=STORE_ID,
+            snapshot_id="a" * 64,
+            plan_origin_kind="reconstructed",
+            assembled_on="2026-10-19",
+            plan_origin_reason="the campaign predates stage 1",
+            generated_at="2026-10-19T04:12:07Z",
+            generated_at_source="min(council.jobs.submitted_at) over the base jobs",
+            written_by="miles",
+        )
+        assert bundle_plan_origin(bundle) == {
+            "kind": "reconstructed",
+            "assembled_on": "2026-10-19",
+            "reason": "the campaign predates stage 1",
+            "generated_at": "2026-10-19T04:12:07Z",
+            "generated_at_source": "min(council.jobs.submitted_at) over the base jobs",
+        }
+        # The plan is ACCEPTED AND RECORDED, not regenerated: its plan_hash is
+        # still the empty string and no date was invented for it.
+        assert bundle["plan_hash"] == ""
+        assert "generated_at" not in bundle["plan"]
+        assert [row["text"] for row in abstentions(bundle)] == [
+            "hypothetical protein",
+            "DUF1234 family protein",
+        ]
+
+    def test_a_STAGE1_run_directory_still_needs_no_declaration(
+        self, tmp_path: Path
+    ) -> None:
+        """The common path is unchanged: a real stage-1 plan carries its own
+        generated_at and the origin falls out of it."""
+        from kbutillib.domains.ai.council.quote import PLAN_FILENAME
+
+        directory = tmp_path / "xport.stage1"
+        directory.mkdir(parents=True, exist_ok=True)
+        abstain_file = directory / "abstain.jsonl"
+        abstain_file.write_text(
+            "".join(json.dumps(row) + "\n" for row in ABSTAIN), encoding="utf-8"
+        )
+        fanout_file = directory / "fanout.jsonl"
+        fanout_file.write_text(
+            "".join(json.dumps(row) + "\n" for row in FANOUT), encoding="utf-8"
+        )
+        (directory / PLAN_FILENAME).write_text(
+            json.dumps(
+                _plan(
+                    abstain_file=str(abstain_file),
+                    fanout_file=str(fanout_file),
+                    job_ids=BASE_JOBS,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        origin = bundle_plan_origin(
+            build_bundle_from_run(
+                directory,
+                campaign_id=CAMPAIGN,
+                store_id=STORE_ID,
+                snapshot_id="a" * 64,
+                written_by="miles",
+            )
+        )
+        assert origin["kind"] == "stage1"
+        assert origin["generated_at"] == "2026-10-22T09:00:00Z"

@@ -45,6 +45,8 @@ separately.
 from __future__ import annotations
 
 import abc
+import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +58,101 @@ if TYPE_CHECKING:
     # never forces berdl_notebook_utils to exist off-pod, and never forces
     # KBBERDLUtils to be imported at module scope either.
     from kbutillib.domains.kbase.kb_berdl_utils import KBBERDLUtils
+
+
+#: Sentinel for "this kwarg may be dropped whatever its value".
+_DROP_ANY = object()
+
+#: Sentinel for "there is no drop rule for this kwarg at all".
+_NO_RULE = object()
+
+#: What may be dropped from a call when the INSTALLED ``berdl_notebook_utils``
+#: helper does not accept it.
+#:
+#: The BERDL image dated 2026-10-19 removed parameters that this module had
+#: always passed (``delta_lake``, ``use_hive`` and ``tenant_name`` from
+#: ``get_spark_session``; ``connector`` from ``get_trino_connection``), so
+#: every call raised ``TypeError`` before doing anything -- KBUtilLib#91. The
+#: fix is to pass a kwarg only when the installed helper accepts it, which
+#: leaves older images byte-for-byte unchanged. But "unaccepted" is not the
+#: same as "harmless to drop": a kwarg that SELECTED something must not be
+#: dropped silently if the caller selected a non-default.
+#:
+#: The value here is the single value that may be dropped; ``_DROP_ANY`` means
+#: any value may be. A kwarg with no entry is never dropped.
+_DROPPABLE_WHEN_UNACCEPTED: dict[str, Any] = {
+    # The legacy Hive metastore / Delta catalogs these two selected no longer
+    # exist in the new image, so neither value can change any outcome.
+    "delta_lake": _DROP_ANY,
+    "use_hive": _DROP_ANY,
+    # ``None`` means "no tenant catalog asked for", which is exactly what the
+    # new image does unconditionally. A NON-None tenant_name has no equivalent
+    # there, and dropping it would quietly write to the personal catalog
+    # instead of the tenant's -- so it is refused, never dropped.
+    "tenant_name": None,
+    # The new image is Iceberg-only and the personal catalog is its default,
+    # so ``'iceberg'`` is what the call gets anyway. Any other connector would
+    # be silently upgraded to Iceberg, so it is refused.
+    "connector": "iceberg",
+}
+
+
+def _accepted_kwargs(
+    helper: Any, kwargs: Mapping[str, Any], *, where: str
+) -> dict[str, Any]:
+    """The subset of ``kwargs`` that ``helper`` actually accepts.
+
+    The installed helper's signature is read with :func:`inspect.signature`
+    at CALL time, not at import time, so one wheel of KBUtilLib works against
+    both the pre- and post-2026-10-19 BERDL images without a version check.
+    On an image whose helper still accepts every name, nothing is filtered and
+    the call is identical to what it has always been.
+
+    Args:
+        helper: The installed ``berdl_notebook_utils`` function about to be
+            called.
+        kwargs: Every kwarg this wrapper would pass, by name.
+        where: The wrapper method's name, for the refusal message.
+
+    Returns:
+        ``kwargs`` minus the names the helper does not accept AND that
+        :data:`_DROPPABLE_WHEN_UNACCEPTED` permits dropping at their given
+        value.
+
+    Raises:
+        ValueError: The helper does not accept a kwarg whose value cannot be
+            dropped without changing where the call reads or writes. Raised
+            BEFORE the helper is called, so nothing happens at all.
+    """
+    parameters = inspect.signature(helper).parameters
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        # A ``**kwargs`` helper accepts everything by construction; filtering
+        # against its named parameters would drop kwargs it does handle.
+        return dict(kwargs)
+
+    passed: dict[str, Any] = {}
+    for name, value in kwargs.items():
+        if name in parameters:
+            passed[name] = value
+            continue
+        droppable = _DROPPABLE_WHEN_UNACCEPTED.get(name, _NO_RULE)
+        if droppable is _DROP_ANY or (
+            droppable is not _NO_RULE and value == droppable
+        ):
+            continue
+        raise ValueError(
+            f"{where}: the installed berdl_notebook_utils."
+            f"{getattr(helper, '__name__', helper)} does not accept "
+            f"{name}={value!r}, and dropping it would change where this call "
+            "reads or writes. The BERDL image dated 2026-10-19 removed this "
+            "parameter, and there is no equivalent for the value given, so "
+            "the call is refused rather than silently redirected. See "
+            "KBUtilLib#91."
+        )
+    return passed
 
 
 class BerdlTransport(abc.ABC):
@@ -152,19 +249,53 @@ class InPodTransport(BerdlTransport):
         use_spark_connect: bool = True,
         override: Any = None,
     ) -> Any:
-        """Get (or create) a Spark session. ``berdl_notebook_utils.get_spark_session``."""
-        return self._bnu.get_spark_session(
-            app_name=app_name,
-            local=local,
-            delta_lake=delta_lake,
-            scheduler_pool=scheduler_pool,
-            use_s3=use_s3,
-            use_hive=use_hive,
-            settings=settings,
-            tenant_name=tenant_name,
-            use_spark_connect=use_spark_connect,
-            override=override,
+        """Get (or create) a Spark session. ``berdl_notebook_utils.get_spark_session``.
+
+        The signature here is the UNION of what the helper has accepted
+        across BERDL images, and every kwarg is passed through
+        :func:`_accepted_kwargs` first: the image dated 2026-10-19 dropped
+        ``delta_lake``, ``use_hive`` and ``tenant_name``, and passing them to
+        it raised ``TypeError`` before anything ran (KBUtilLib#91). On an
+        older image that still accepts them, all ten are passed exactly as
+        before.
+
+        Raises:
+            ValueError: ``tenant_name`` is non-``None`` on an image that no
+                longer accepts it -- there is no equivalent, and dropping it
+                would write to the personal catalog instead.
+        """
+        helper = self._bnu.get_spark_session
+        session = helper(
+            **_accepted_kwargs(
+                helper,
+                {
+                    "app_name": app_name,
+                    "local": local,
+                    "delta_lake": delta_lake,
+                    "scheduler_pool": scheduler_pool,
+                    "use_s3": use_s3,
+                    "use_hive": use_hive,
+                    "settings": settings,
+                    "tenant_name": tenant_name,
+                    "use_spark_connect": use_spark_connect,
+                    "override": override,
+                },
+                where="InPodTransport.spark_session",
+            )
         )
+        # The Spark Connect server in the 2026-10-19 image sets
+        # spark.sql.session.localRelationCacheThreshold to 1 MiB, so any
+        # spark.createDataFrame over roughly that size is shipped via the
+        # AddArtifacts RPC instead of inline -- and that RPC fails
+        # deterministically ("Not enough bytes in channel"), which took out
+        # every non-trivial clearinghouse backfill. 64 MiB keeps a real batch
+        # inline. Session-scoped runtime conf, and NOT guarded: a session
+        # whose threshold could not be raised is not safe to hand back.
+        # KBUtilLib#91.
+        session.conf.set(
+            "spark.sql.session.localRelationCacheThreshold", str(64 * 1024 * 1024)
+        )
+        return session
 
     def create_namespace_if_not_exists(
         self,
@@ -268,15 +399,39 @@ class InPodTransport(BerdlTransport):
     ) -> Any:
         """Get a Trino connection. ``berdl_notebook_utils.get_trino_connection``.
 
-        ``connector`` has no default here on purpose: the underlying
-        helper defaults to ``connector='delta_lake'`` (legacy), not
-        Iceberg, and the guides never mention the parameter at all. Taking
-        that default would silently connect through the legacy connector,
-        so callers must state their choice explicitly (typically
-        ``'iceberg'``) rather than relying on this wrapper to pick one.
+        ``connector`` has no default here on purpose, and what it guards
+        against is image-dependent:
+
+        - On images BEFORE 2026-10-19 the helper accepts ``connector`` and
+          defaults it to ``'delta_lake'`` (legacy), not Iceberg, and the
+          guides never mention the parameter at all. Taking that default
+          would silently connect through the legacy connector, so callers
+          must state their choice explicitly (typically ``'iceberg'``).
+        - The image dated 2026-10-19 REMOVED ``connector`` entirely: Trino is
+          Iceberg-only there and the personal catalog is the default, so
+          passing it raised ``TypeError`` (KBUtilLib#91). It is dropped for
+          ``'iceberg'`` -- which is what that image does anyway -- and
+          refused for anything else rather than being silently upgraded.
+
+        Either way the caller still states the connector it wants, and this
+        wrapper never picks one for it.
+
+        Raises:
+            ValueError: ``connector`` is not ``'iceberg'`` on an image that
+                no longer accepts the parameter.
         """
-        return self._bnu.get_trino_connection(
-            host=host, port=port, connector=connector, settings=settings
+        helper = self._bnu.get_trino_connection
+        return helper(
+            **_accepted_kwargs(
+                helper,
+                {
+                    "host": host,
+                    "port": port,
+                    "connector": connector,
+                    "settings": settings,
+                },
+                where="InPodTransport.trino_connection",
+            )
         )
 
     def refresh_spark_environment(self, *args: Any, **kwargs: Any) -> Any:

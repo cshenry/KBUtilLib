@@ -30,6 +30,9 @@ from .errors import (
     NotOwner,
     QueryTypeExists,
     SchemaVersionMismatch,
+    SeedDestinationNotEmpty,
+    SeedError,
+    SeedMultiOrigin,
     StaleClaim,
     StoreError,
     StorePathRefused,
@@ -47,6 +50,9 @@ __all__ = [
     "StaleClaim",
     "NotOwner",
     "JobCancelled",
+    "SeedError",
+    "SeedMultiOrigin",
+    "SeedDestinationNotEmpty",
 ]
 
 #: Install hint used by every ImportError this module raises.

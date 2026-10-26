@@ -1727,6 +1727,137 @@ def _lakehouse_option(function: Any) -> Any:
     )(function)
 
 
+# ---------------------------------------------------------------------------
+# seed-store -- rebuild a wiped store's REUSE CACHE from the archive
+# ---------------------------------------------------------------------------
+#
+# The store is not only a record, it is the reuse cache: `calls.prompt_hash`
+# is the reuse key and `find_reusable` serves any status='ok' row carrying it.
+# So wiping a store destroys paid answers -- re-running the ADP1+PMI set
+# (19,276 items) at the same query version and roster against an empty store
+# re-pays on the order of 199M tokens. This verb converts "wiping a store
+# loses money" into "wiping a store is free", which is the only reason
+# archiving a store and then deleting it is safe to do at all.
+#
+# `--from-lakehouse` is the ONLY source. There is no "seed from another store
+# file" mode and there may never be one by that route: the reuse cache has to
+# come from provenance that has been proved COMPLETE, and completeness is a
+# property of the archive's load ledger, not of a file on disk.
+
+
+@council_cmd.command(name="seed-store")
+@click.option(
+    "--from-lakehouse",
+    "from_lakehouse",
+    is_flag=True,
+    default=False,
+    required=True,
+    help="Read the rows from the council archive. The only source.",
+)
+@_store_id_option
+@click.option(
+    "--snapshot-id",
+    required=True,
+    help="The ONE snapshot to seed from -- its VERIFIED uncompressed digest, "
+    "which must be marked complete in the archive's load ledger. Never "
+    "'whatever is current': a seed of that is not reproducible.",
+)
+@click.option(
+    "--query-name",
+    default=None,
+    help="Import only this council kind's answers.",
+)
+@click.option(
+    "--query-version",
+    default=None,
+    help="Import only this query version's answers. A reuse hit is only valid "
+    "at the SAME version, because query_version is inside prompt_hash. "
+    "Requires --query-name.",
+)
+@_lakehouse_option
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the archive's delivery state directories, for the "
+    "completeness check. Default: $KBU_COUNCIL_ARCHIVE_DIR, else "
+    "~/.kbu/council/archive/runs.",
+)
+@click.option(
+    "--receipt",
+    "receipt_out",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Write the seed receipt here as JSON.",
+)
+@_json_option
+@click.pass_context
+def seed_store_cmd(
+    ctx: click.Context,
+    from_lakehouse: bool,
+    store_id: str,
+    snapshot_id: str,
+    query_name: Optional[str],
+    query_version: Optional[str],
+    lakehouse: Optional[str],
+    state_root: Optional[str],
+    receipt_out: Optional[str],
+    as_json: bool,
+) -> None:
+    """Rebuild a REUSE-ONLY store from one archived snapshot.
+
+    \b
+    Imports every status='ok' answer REGARDLESS OF DISPOSITION -- a pilot or
+    trial answer is still a paid answer -- and excludes live=0 rows, which
+    `find_reusable` would otherwise serve as current answers because it does
+    not filter `live` itself.
+
+    NOTHING IMPORTED IS CLAIMABLE. Only answered calls are imported, and every
+    imported job is tombstoned, which `select_claimable` refuses and
+    `select_reusable` deliberately includes. A worker cannot execute an
+    archived call; a new job can still reuse its answer.
+
+    ONE store_id and ONE COMPLETED snapshot_id, into an EMPTY destination.
+    Multi-origin seeding is refused: call_id is unique only within its own
+    store, so merging origins can collide two different calls onto one id.
+    Re-seeding the SAME origin and scope into a store that holds exactly that
+    seed is a no-op.
+    """
+    from ...domains.kbase.berdl.council_seed import read_seed_rows
+
+    util = _ready(ctx)
+    try:
+        sink = _sink(lakehouse)
+        read = read_seed_rows(
+            sink,
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            query_name=query_name,
+            query_version=query_version,
+            state_root=state_root,
+        )
+        receipt = util.store().seed_from_rows(
+            read["rows"],
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            query_name=query_name,
+            query_version=query_version,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    data = dict(receipt)
+    data["read"] = read["counts"]
+    if receipt_out:
+        Path(receipt_out).expanduser().write_text(
+            json.dumps(data, indent=2, sort_keys=True, default=_jsonable) + "\n",
+            encoding="utf-8",
+        )
+        data["receipt_path"] = str(Path(receipt_out).expanduser())
+    _emit(_envelope("seed-store", data=data), as_json=as_json)
+
+
 @council_cmd.group(name="disposition")
 def disposition_cmd() -> None:
     """Declare and resolve what each job's output is FOR.

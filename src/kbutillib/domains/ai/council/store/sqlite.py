@@ -75,6 +75,9 @@ from .errors import (
     JobCancelled,
     QueryTypeExists,
     SchemaVersionMismatch,
+    SeedDestinationNotEmpty,
+    SeedError,
+    SeedMultiOrigin,
     StaleClaim,
     StoreError,
     StorePathRefused,
@@ -83,6 +86,9 @@ from .errors import (
 __all__ = [
     "SqliteStore",
     "STORE_IDENTITY",
+    "SEED_JOB_STATUS",
+    "SEED_PROVENANCE_KEY",
+    "SEED_TABLES",
     "STORE_IDENTITY_TABLE",
     "STORE_IDENTITY_RECORD_VERSION",
     "POPLAR_COUNCIL_STORE_ID",
@@ -532,6 +538,220 @@ def _snapshot_row_counts(path: Path) -> Dict[str, int]:
     finally:
         connection.close()
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Seeding a reuse-only store from archived rows
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS, IN MONEY.  The store is not only a record, it is the REUSE
+# CACHE: ``calls.prompt_hash`` is the reuse key and :func:`queries.select_reusable`
+# serves any ``status='ok'`` row carrying it, across jobs and users.  So wiping
+# a store destroys answers somebody paid for -- re-running the ADP1+PMI set
+# (19,276 items) at the same query version and roster against an EMPTY store
+# re-pays on the order of 199M tokens, where the intact store costs
+# approximately nothing.  :meth:`SqliteStore.seed_from_rows` turns "wiping a
+# store loses money" into "wiping a store is free", which is the only reason
+# archiving a store and then deleting it is a safe thing to do.
+#
+# FOUR TABLES, AND WHY NOT THE OTHER FOUR.  ``calls`` is the cache; ``jobs``,
+# ``items`` and ``query_types`` come along because the imported calls carry
+# foreign keys to them (``fk_calls_item`` and ``items.job_id``) and would not
+# be referentially valid without them.  ``attempts`` is NOT imported: it
+# records what each try cost, which is a fact about the ORIGINAL run and is
+# archived in the lakehouse, and importing it would make a seeded store look
+# as though this machine had spent that money.  ``endpoint_state`` is
+# deliberately not imported for the same reason and a sharper one -- its
+# counters are MUTABLE CUMULATIVE totals, so importing them would charge this
+# machine's budget for another machine's spend.  ``workers`` describes
+# processes that no longer exist.
+
+#: The ``jobs.status`` every imported job carries.  Not one of the queue's
+#: own statuses (``queued``/``running``/``done``/``cancelled``/``paused``) on
+#: purpose: a seeded job is not work, and a reader seeing it should not think
+#: this machine ran it.
+SEED_JOB_STATUS = "seeded"
+
+#: The ``jobs.options`` key an imported job's seed provenance is recorded
+#: under.  The record lives INSIDE the store (rather than only in a receipt
+#: file beside it) because that is what makes a second seed able to tell "this
+#: store already holds exactly this seed" from "this store holds somebody
+#: else's work", which is the difference between an idempotent no-op and a
+#: silent identity collision.
+SEED_PROVENANCE_KEY = "kbu_seed"
+
+#: The tables :meth:`SqliteStore.seed_from_rows` reads from its input, in
+#: insert order (parents before children).
+SEED_TABLES: tuple[str, ...] = ("query_types", "jobs", "items", "calls")
+
+#: Tables whose presence in a destination means it is NOT empty.
+#: ``query_types`` is excluded deliberately: it is an immutable registry that
+#: every initialised store legitimately carries (``put_query_type`` is
+#: idempotent for an identical spec and raises for a conflicting one), so its
+#: rows are not evidence of work.
+_SEED_EMPTINESS_TABLES: tuple[str, ...] = ("jobs", "items", "calls", "attempts")
+
+#: ``{table: {archived column: store column}}`` -- the archive's one rename.
+#: ``items.entity_hash`` is published as ``council_entity_hash`` so nobody
+#: joins it to a clearinghouse ``entity_hash`` (the two matched 0 of 19,268
+#: times); coming back the other way it is the store column it always was.
+_SEED_RENAMES: Dict[str, Dict[str, str]] = {
+    "items": {"council_entity_hash": "entity_hash"},
+}
+
+#: Archive identity columns, which are the seed's ORIGIN and never a store
+#: column.  Named here rather than imported from ``kbase.berdl``: the store
+#: layer does not depend on the lakehouse layer, and a seed must work from any
+#: source that can produce rows of this shape.
+_SEED_IDENTITY_COLUMNS: tuple[str, ...] = (
+    "store_id",
+    "snapshot_id",
+    "snapshot_seq",
+    "store_host",
+    "loaded_at",
+    "load_batch_id",
+)
+
+
+def _seed_datetime(column: str, value: Any) -> Optional[datetime]:
+    """Parse one archived TIMESTAMP back into an aware UTC datetime.
+
+    Accepts what either sink can hand back: a ``datetime`` (the pod sink's
+    TIMESTAMP columns), or the TEXT a SQLite store holds.  SQLAlchemy's SQLite
+    DATETIME writes ``YYYY-MM-DD HH:MM:SS.ffffff`` and DISCARDS ``tzinfo``
+    (see :class:`.schema.UtcDateTime`), so an archived timestamp is naive text
+    that is known to be UTC -- it is re-tagged, never shifted.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except ValueError as exc:
+            raise SeedError(
+                f"{column}: {value!r} is not a timestamp this seed can read. "
+                "Archived TIMESTAMP columns are ISO-8601; a value that is not "
+                "parseable would otherwise be imported as NULL and read as "
+                "'never answered'."
+            ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _seed_json(column: str, value: Any) -> Any:
+    """Parse one archived JSON column back into Python, PRESERVING JSON null.
+
+    The archive reads the store's JSON columns as RAW TEXT, because the store
+    writes a Python ``None`` into an ``sa.JSON`` column as the TEXT ``'null'``
+    while a real SQL NULL is NULL, and a typed read collapses the two.  Coming
+    back, ``'null'`` must therefore parse to ``None`` and be re-written as
+    JSON null -- which is what ``_prepare`` does with a ``None`` in a JSON
+    column.  Round-tripping ``calls.normalised`` through here is what keeps a
+    reused answer's record of what was repaired in it intact; losing that
+    column silently changes what a reused answer reports about itself, because
+    the reuse path falls back to the SOURCE's ``normalised`` entries when
+    re-normalisation produces no new repairs.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (Mapping, list, tuple, bool, int, float)):
+        return value
+    text = str(value)
+    if text == "":
+        return None
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise SeedError(
+            f"{column}: {text[:80]!r} is not JSON. An archived JSON column "
+            "that cannot be parsed must not be imported as a bare string: "
+            "the reuse path would then read a repair record as free text."
+        ) from exc
+
+
+def _seed_text(value: Any) -> Optional[str]:
+    """One archived value as the text a scope comparison can use.
+
+    MEASURED, not defensive.  The archived tables declare these columns
+    ``STRING``, and SQLite's type-affinity rules give a column declared
+    ``STRING`` NUMERIC affinity (the name contains none of ``INT``, ``CHAR``,
+    ``CLOB``, ``TEXT``, ``BLOB``, ``REAL``, ``FLOA``, ``DOUB``) -- so the
+    local staging sink hands a digit-only value back as a NUMBER.
+    ``query_version`` is exactly that: the production run's is ``"4"``, which
+    reads back as the integer ``4``, and ``4 != "4"`` would silently scope a
+    seed to nothing.  The stored column is ``String(64)`` with TEXT affinity,
+    so the value written INTO the store is text either way; only the
+    comparison needs this.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _seed_bool(value: Any) -> Optional[bool]:
+    """Coerce an archived BOOLEAN back to ``bool``.
+
+    SQLite stores booleans as 0/1 integers and the archive carries whatever
+    the snapshot held, so ``live`` arrives as ``0``/``1``, ``False``/``True``
+    or (through a text-typed column) ``'0'``/``'1'``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "t", "yes"):
+        return True
+    if text in ("0", "false", "f", "no", ""):
+        return False
+    raise SeedError(f"{value!r} is not a boolean an archived row may carry")
+
+
+def _seed_row(table: sa.Table, row: Mapping[str, Any]) -> Dict[str, Any]:
+    """One archived row as a store row of *table*: renamed, typed, identity dropped.
+
+    Unknown columns are DROPPED rather than refused, and that is the one place
+    this path is permissive: the archived tables carry the six identity
+    columns and two deliberate ``query_name`` denormalisations that have no
+    store column, and a future archive column must not make a seed impossible
+    to run.  Every column that DOES map is type-converted rather than passed
+    through, because a JSON column bound as raw text would be double-encoded
+    and a naive datetime is refused outright by :class:`.schema.UtcDateTime`.
+    """
+    renames = _SEED_RENAMES.get(table.name, {})
+    out: Dict[str, Any] = {}
+    for key, value in row.items():
+        name = renames.get(key, key)
+        if name in _SEED_IDENTITY_COLUMNS or name not in table.c:
+            continue
+        column_type = table.c[name].type
+        if isinstance(column_type, sa.JSON):
+            out[name] = _seed_json(f"{table.name}.{name}", value)
+        elif isinstance(column_type, sch.UtcDateTime):
+            out[name] = _seed_datetime(f"{table.name}.{name}", value)
+        elif isinstance(column_type, sa.Boolean):
+            out[name] = _seed_bool(value)
+        elif isinstance(column_type, sa.String):
+            # The staging sink's STRING columns have NUMERIC affinity, so a
+            # digit-only value (`query_version`, every `"4"` in the production
+            # run) comes back as a number.  Coerced here rather than left to
+            # the destination column's TEXT affinity, so the row this method
+            # returns is already the row the store holds.
+            out[name] = _seed_text(value)
+        else:
+            out[name] = value
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1780,6 +2000,478 @@ class SqliteStore:
         with self._read() as conn:
             row = conn.execute(q.select_reusable(prompt_hash)).first()
         return _dict(row) if row is not None else None
+
+    # -- seeding the reuse cache ------------------------------------------
+
+    def seed_records(self) -> List[Dict[str, Any]]:
+        """Every DISTINCT seed this store was built from, newest-written last.
+
+        Read out of the imported jobs' ``options[SEED_PROVENANCE_KEY]``, which
+        is where :meth:`seed_from_rows` records what it imported.  A store
+        nobody seeded returns ``[]``; a reuse-only store returns exactly one
+        record.
+        """
+        with self._read() as conn:
+            rows = _dicts(
+                conn.execute(sa.select(sch.jobs.c.job_id, sch.jobs.c.options))
+            )
+        out: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for row in rows:
+            options = row.get("options")
+            if not isinstance(options, Mapping):
+                continue
+            record = options.get(SEED_PROVENANCE_KEY)
+            if not isinstance(record, Mapping):
+                continue
+            key = _canonical({k: v for k, v in record.items() if k != "seeded_at"})
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(dict(record))
+        return out
+
+    def seed_from_rows(
+        self,
+        rows: Mapping[str, Sequence[Mapping[str, Any]]],
+        *,
+        store_id: str,
+        snapshot_id: str,
+        snapshot_seq: Optional[int] = None,
+        query_name: Optional[str] = None,
+        query_version: Optional[str] = None,
+        seeded_by: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Rebuild a REUSE-ONLY store from one store's archived rows.
+
+        *rows* is ``{table: [archived row, ...]}`` over
+        :data:`SEED_TABLES`, in the column shape ``council_schema`` declares
+        (identity columns and the ``query_name`` denormalisations are dropped,
+        ``council_entity_hash`` is renamed back, JSON/TIMESTAMP/BOOLEAN values
+        are converted).  Nothing here reads a lakehouse: the store layer does
+        not depend on ``kbase.berdl``, and any source that can produce rows of
+        that shape can seed a store.  The lakehouse reader is
+        ``kbutillib.domains.kbase.berdl.council_seed.read_seed_rows``.
+
+        SEVEN RULES, each of which costs money or correctness if broken.
+
+        1. ONE ``store_id`` AND ONE ``snapshot_id``, into an EMPTY
+           destination.  Multi-origin seeding is REFUSED
+           (:class:`.errors.SeedMultiOrigin`) until a deterministic identity
+           remapping contract exists: ``calls.call_id`` is an UNQUALIFIED
+           primary key carrying foreign keys to ``items``/``jobs``, while the
+           lakehouse guarantees only STORE-SCOPED identity, so dropping
+           ``store_id`` can collide two calls onto one id.
+        2. EVERY ``status='ok'`` ANSWER IS IMPORTED REGARDLESS OF
+           DISPOSITION.  A pilot or trial answer is still a paid answer, and
+           restricting the import to ``disposition='published'`` would discard
+           legitimate cached work.  This method is given rows and asks nothing
+           about dispositions; the identity rows the imported calls need
+           (``jobs``, ``items``, ``query_types``) come with them so the result
+           is referentially valid.
+        3. ``live=0`` ROWS ARE EXCLUDED HERE.
+           :func:`queries.select_reusable` accepts ``status='ok'`` across all
+           jobs and does NOT filter ``live``, so a superseded answer imported
+           into a reuse cache WOULD BE SERVED as a current one.  The filter
+           therefore belongs in this method, and it is applied to the rows as
+           given rather than trusted to the caller.
+        4. NO IMPORTED ROW IS CLAIMABLE, enforced twice.  Only
+           ``status='ok'`` calls are imported, and
+           :func:`queries.select_claimable` claims only ``status='pending'``
+           rows -- so there is nothing of the right status to claim.  AND
+           every imported job is TOMBSTONED (``deleted_at`` set) with
+           ``status`` :data:`SEED_JOB_STATUS`, and ``select_claimable``
+           additionally requires ``jobs.deleted_at IS NULL`` -- so even a
+           pending call later attached to a seeded job could not be claimed.
+           Tombstoning is exactly the right existing mechanism rather than a
+           new one: ``select_reusable`` deliberately INCLUDES tombstoned jobs
+           ("deleting a job must not throw away an answer somebody paid for"),
+           and ``list_jobs`` excludes them, so an imported job is reusable and
+           invisible to the queue at the same time.
+        5. ``normalised`` IS CARRIED THROUGH INTACT, including the difference
+           between JSON null and a repair list -- see :func:`_seed_json`.
+        6. A reuse hit is only valid at the SAME query version, because
+           ``query_version`` is inside ``prompt_hash``.  *query_name* /
+           *query_version* scope the import, and what was seeded is RECORDED
+           in each imported job's ``options[SEED_PROVENANCE_KEY]`` and
+           returned in the receipt.
+        7. IDEMPOTENT.  Seeding the SAME ``(store_id, snapshot_id, scope)``
+           into a store that holds exactly that seed and nothing else is a
+           NO-OP returning ``"imported": False`` -- not a refusal, which would
+           make rule 1's empty-destination requirement and idempotency
+           contradict each other.
+
+        Args:
+            rows: ``{table: [archived row, ...]}``.  A table absent from the
+                mapping is treated as empty.
+            store_id: The source store's DECLARED archive identity.
+            snapshot_id: The source snapshot's verified digest.  The caller is
+                responsible for having established that the snapshot is
+                COMPLETELY archived -- there is one completeness test,
+                ``council_archive.require_complete_delivery``, and the
+                lakehouse reader calls it.
+            snapshot_seq: The snapshot's sequence, recorded if given.
+            query_name: Import only calls of this council kind.
+            query_version: Import only calls of this query version.  Requires
+                *query_name*.
+            seeded_by: Who ran the seed.  Recorded for accountability.
+            now: Timestamp to record.  Defaults to now, UTC.
+
+        Returns:
+            A receipt: ``origin``, ``scope``, ``imported``, per-table
+            ``counts``, ``skipped`` (by reason) and ``seeded_at``.
+
+        Raises:
+            SeedMultiOrigin: the rows or the destination carry a second
+                origin.
+            SeedDestinationNotEmpty: the destination holds work that is not
+                this seed.
+            SeedError: a row the import needs is missing or unreadable.
+            QueryTypeExists: an incoming query type conflicts with one the
+                destination already holds.
+        """
+        origin_store = str(store_id or "").strip()
+        origin_snapshot = str(snapshot_id or "").strip()
+        if not origin_store or not origin_snapshot:
+            raise SeedError(
+                "a seed names ONE store_id and ONE snapshot_id; got "
+                f"store_id={store_id!r}, snapshot_id={snapshot_id!r}. Neither "
+                "is ever derived from a path or a filename -- every archived "
+                "row is keyed on them."
+            )
+        if query_version is not None and not query_name:
+            raise SeedError(
+                "query_version without query_name does not scope anything: "
+                "versions are per query type, so `4` alone names no rows"
+            )
+        stamp = now or _utcnow()
+        scope = {"query_name": query_name, "query_version": query_version}
+        origin = {
+            "store_id": origin_store,
+            "snapshot_id": origin_snapshot,
+            "snapshot_seq": None if snapshot_seq is None else int(snapshot_seq),
+        }
+
+        self._refuse_second_origin(rows, origin_store, origin_snapshot)
+
+        record = {
+            "store_id": origin_store,
+            "snapshot_id": origin_snapshot,
+            "snapshot_seq": origin["snapshot_seq"],
+            "query_name": query_name,
+            "query_version": query_version,
+            "seeded_by": seeded_by or os.environ.get("USER") or "unknown",
+            "seeded_at": stamp.isoformat(),
+        }
+        identity = _canonical({k: v for k, v in record.items() if k != "seeded_at"})
+
+        existing = self.seed_records()
+        foreign = self._non_seed_counts()
+        if existing:
+            keys = {
+                _canonical({k: v for k, v in one.items() if k != "seeded_at"})
+                for one in existing
+            }
+            if keys != {identity}:
+                raise SeedMultiOrigin(
+                    f"this store was already seeded from {sorted(keys)!r} and "
+                    f"this seed is {identity!r}. One store, one origin: an "
+                    "imported row keeps its source call_id, which is unique "
+                    "only within its own store."
+                )
+            if not any(foreign.values()):
+                return {
+                    "origin": origin,
+                    "scope": scope,
+                    "imported": False,
+                    "idempotent": True,
+                    "reason": "this store already holds exactly this seed",
+                    "counts": self._seed_counts(),
+                    "skipped": {},
+                    "seeded_at": stamp.isoformat(),
+                    "record": existing[0],
+                }
+        if any(foreign.values()):
+            raise SeedDestinationNotEmpty(
+                f"the destination store holds {foreign!r} row(s) that are not "
+                "part of this seed. A seed rebuilds an EMPTY store's reuse "
+                "cache: imported rows keep their source job_id/call_id, so "
+                "importing on top of existing work can collide two different "
+                "calls onto one primary key."
+            )
+
+        plan = self._plan_seed(rows, scope=scope)
+        job_rows = [
+            _filled(
+                sch.jobs,
+                {
+                    **row,
+                    "status": SEED_JOB_STATUS,
+                    # Rule 4's second enforcement, and the reason an imported
+                    # answer stays reusable anyway: select_claimable refuses a
+                    # tombstoned job, select_reusable includes one.
+                    "deleted_at": stamp,
+                    "n_items": len(plan["items_by_job"].get(row["job_id"], ())),
+                    "options": {
+                        **(row.get("options") or {}),
+                        SEED_PROVENANCE_KEY: record,
+                    },
+                },
+            )
+            for row in plan["jobs"]
+        ]
+        item_rows = [_filled(sch.items, row) for row in plan["items"]]
+        call_rows = [_filled(sch.calls, row) for row in plan["calls"]]
+
+        with self.transaction() as conn:
+            for row in plan["query_types"]:
+                self._seed_query_type(conn, row)
+            if job_rows:
+                conn.execute(sch.jobs.insert(), job_rows)
+            if item_rows:
+                conn.execute(sch.items.insert(), item_rows)
+            if call_rows:
+                conn.execute(sch.calls.insert(), call_rows)
+
+        return {
+            "origin": origin,
+            "scope": scope,
+            "imported": True,
+            "idempotent": False,
+            "counts": {
+                "query_types": len(plan["query_types"]),
+                "jobs": len(job_rows),
+                "items": len(item_rows),
+                "calls": len(call_rows),
+            },
+            "skipped": plan["skipped"],
+            "reusable_prompt_hashes": plan["reusable_prompt_hashes"],
+            "seeded_at": stamp.isoformat(),
+            "record": record,
+        }
+
+    @staticmethod
+    def _refuse_second_origin(
+        rows: Mapping[str, Sequence[Mapping[str, Any]]],
+        store_id: str,
+        snapshot_id: str,
+    ) -> None:
+        """Refuse rows carrying an identity other than the declared one.
+
+        The archived rows lead with ``(store_id, snapshot_id)``, so a caller
+        that read two snapshots -- or two stores -- into one mapping is
+        detectable HERE, before anything is written, rather than as a primary
+        key collision part-way through an insert.
+        """
+        stores: Set[str] = set()
+        snapshots: Set[str] = set()
+        for table in SEED_TABLES:
+            for row in rows.get(table) or ():
+                if row.get("store_id") is not None:
+                    stores.add(str(row["store_id"]))
+                if row.get("snapshot_id") is not None:
+                    snapshots.add(str(row["snapshot_id"]))
+        for label, found, declared in (
+            ("store_id", stores, store_id),
+            ("snapshot_id", snapshots, snapshot_id),
+        ):
+            if found and found != {declared}:
+                raise SeedMultiOrigin(
+                    f"the rows offered to this seed carry {label} "
+                    f"{sorted(found)!r} and the seed declares {declared!r}. "
+                    "ONE store and ONE snapshot per seed: call_id is "
+                    "store-scoped, so merging origins can collide two "
+                    "different calls onto one id."
+                )
+
+    def _plan_seed(
+        self,
+        rows: Mapping[str, Sequence[Mapping[str, Any]]],
+        *,
+        scope: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Decide exactly which rows are imported, and why the rest are not.
+
+        Separate from the write so the whole decision is one readable pass and
+        so the receipt's ``skipped`` counts come from the same place the
+        filtering does.
+        """
+        jobs_by_id = {
+            str(row["job_id"]): _seed_row(sch.jobs, row)
+            for row in rows.get("jobs") or ()
+        }
+        job_query = {
+            job_id: (_seed_text(row.get("query_name")), _seed_text(row.get("query_version")))
+            for job_id, row in jobs_by_id.items()
+        }
+        wanted_name = _seed_text(scope.get("query_name"))
+        wanted_version = _seed_text(scope.get("query_version"))
+
+        skipped = {
+            "not_ok": 0,
+            "not_live": 0,
+            "out_of_scope": 0,
+            "no_prompt_hash": 0,
+        }
+        kept: List[Dict[str, Any]] = []
+        hashes: Set[str] = set()
+        for raw in rows.get("calls") or ():
+            if str(raw.get("status") or "") != "ok":
+                skipped["not_ok"] += 1
+                continue
+            if _seed_bool(raw.get("live")) is False:
+                # Rule 3.  find_reusable does not filter `live`, so a
+                # superseded answer imported here would be served as current.
+                skipped["not_live"] += 1
+                continue
+            call = _seed_row(sch.calls, raw)
+            job_id = str(call.get("job_id") or "")
+            fallback_name, fallback_version = job_query.get(job_id, (None, None))
+            name = _seed_text(call.get("query_name")) or _seed_text(fallback_name)
+            version = _seed_text(call.get("query_version")) or _seed_text(
+                fallback_version
+            )
+            if wanted_name is not None and name != wanted_name:
+                skipped["out_of_scope"] += 1
+                continue
+            if wanted_version is not None and version != wanted_version:
+                skipped["out_of_scope"] += 1
+                continue
+            if not call.get("prompt_hash"):
+                # Imported anyway -- it is a paid answer and part of the
+                # record -- but counted, because it can never be a reuse HIT:
+                # find_reusable keys on prompt_hash and returns None for an
+                # empty one.
+                skipped["no_prompt_hash"] += 1
+            else:
+                hashes.add(str(call["prompt_hash"]))
+            kept.append(call)
+
+        job_ids = {str(call["job_id"]) for call in kept}
+        missing_jobs = sorted(job_ids - set(jobs_by_id))
+        if missing_jobs:
+            raise SeedError(
+                f"no jobs row was offered for {missing_jobs!r}, which "
+                f"{len(kept)} imported call(s) refer to. An imported call "
+                "without its job is not referentially valid (items.job_id and "
+                "fk_calls_item), and the store has foreign keys ON."
+            )
+
+        items_by_job: Dict[str, List[Dict[str, Any]]] = {}
+        wanted_items = {(str(c["job_id"]), str(c["item_id"])) for c in kept}
+        seen_items: Set[tuple] = set()
+        item_rows: List[Dict[str, Any]] = []
+        for raw in rows.get("items") or ():
+            key = (str(raw.get("job_id")), str(raw.get("item_id")))
+            if key not in wanted_items or key in seen_items:
+                continue
+            seen_items.add(key)
+            item = _seed_row(sch.items, raw)
+            item_rows.append(item)
+            items_by_job.setdefault(key[0], []).append(item)
+        missing_items = sorted(wanted_items - seen_items)
+        if missing_items:
+            raise SeedError(
+                f"no items row was offered for {missing_items[:5]!r} "
+                f"({len(missing_items)} in total), which imported calls refer "
+                "to through fk_calls_item."
+            )
+
+        query_type_rows = []
+        wanted_types = {
+            job_query[job_id] for job_id in job_ids if job_id in job_query
+        }
+        for raw in rows.get("query_types") or ():
+            typed = _seed_row(sch.query_types, raw)
+            key = (_seed_text(typed.get("name")), _seed_text(typed.get("version")))
+            if key in wanted_types:
+                query_type_rows.append(typed)
+
+        return {
+            "query_types": query_type_rows,
+            "jobs": [jobs_by_id[job_id] for job_id in sorted(job_ids)],
+            "items": item_rows,
+            "items_by_job": items_by_job,
+            "calls": kept,
+            "skipped": skipped,
+            "reusable_prompt_hashes": len(hashes),
+        }
+
+    @staticmethod
+    def _seed_query_type(conn: sa.Connection, row: Mapping[str, Any]) -> None:
+        """Insert one imported query type, or verify the one already there.
+
+        Query types are immutable (``put_query_type``): an identical spec is a
+        no-op and a DIFFERENT spec under the same ``(name, version)`` raises,
+        because a finished job's verdicts only mean anything against the exact
+        spec that produced them -- and a reuse hit is only valid at the same
+        version for the same reason.
+        """
+        existing = conn.execute(
+            sa.select(sch.query_types.c.spec).where(
+                sch.query_types.c.name == row.get("name"),
+                sch.query_types.c.version == row.get("version"),
+            )
+        ).first()
+        if existing is not None:
+            if _canonical(existing[0]) != _canonical(row.get("spec")):
+                raise QueryTypeExists(
+                    f"query type {row.get('name')!r} version "
+                    f"{row.get('version')!r} is already in the destination "
+                    "with a DIFFERENT spec; query types are immutable, and a "
+                    "reuse hit is only valid against the spec that produced it"
+                )
+            return
+        conn.execute(sch.query_types.insert(), _filled(sch.query_types, dict(row)))
+
+    def _non_seed_counts(self) -> Dict[str, int]:
+        """Row counts, per table, of work that is NOT part of a seed.
+
+        A seeded job is identified by its provenance record, so this is "what
+        would collide": jobs this store ran itself, and the items, calls and
+        attempts hanging off them.
+        """
+        seeded = sa.select(sch.jobs.c.job_id).where(
+            sa.func.json_extract(sch.jobs.c.options, f"$.{SEED_PROVENANCE_KEY}")
+            .is_not(None)
+        )
+        with self._read() as conn:
+            seeded_ids = {row[0] for row in conn.execute(seeded)}
+            counts = {
+                "jobs": self._count(
+                    conn, sch.jobs, sch.jobs.c.job_id.notin_(seeded_ids)
+                ),
+                "items": self._count(
+                    conn, sch.items, sch.items.c.job_id.notin_(seeded_ids)
+                ),
+                "calls": self._count(
+                    conn, sch.calls, sch.calls.c.job_id.notin_(seeded_ids)
+                ),
+            }
+            # attempts.call_id has a foreign key to calls, so an attempt whose
+            # call belongs to no seeded job is the only kind that can exist
+            # outside a seed.
+            seed_calls = sa.select(sch.calls.c.call_id).where(
+                sch.calls.c.job_id.in_(seeded_ids)
+            )
+            counts["attempts"] = self._count(
+                conn, sch.attempts, sch.attempts.c.call_id.notin_(seed_calls)
+            )
+        return counts
+
+    def _seed_counts(self) -> Dict[str, int]:
+        """Row counts, per seeded table, of what a seed put here."""
+        counts = self._row_counts()
+        return {name: counts.get(name, 0) for name in _SEED_EMPTINESS_TABLES}
+
+    @staticmethod
+    def _count(conn: sa.Connection, table: sa.Table, predicate: Any) -> int:
+        return int(
+            conn.execute(
+                sa.select(sa.func.count()).select_from(table).where(predicate)
+            ).scalar_one()
+        )
 
     def reclaim_stale(
         self, now: Optional[datetime] = None, max_age: timedelta = timedelta(minutes=10)

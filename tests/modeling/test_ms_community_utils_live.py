@@ -93,7 +93,7 @@ def community_util():
     return MSCommunityUtils(config_file=False, token_file=None, kbase_token_file=None)
 
 
-def _modelseed_member(model_id):
+def _modelseed_member(model_id, glucose_transport_ub=1000):
     """A minimal ModelSEED-shaped cobra model that ``mscommunity`` can merge.
 
     The shared ``mini_model`` (tests/conftest.py) cannot be used here: its ids are
@@ -109,6 +109,13 @@ def _modelseed_member(model_id):
     grow -- the carbon-free control the growth assertions rest on.  ``rxn00062``
     (ATP hydrolysis) is present because real ModelSEED models carry it and
     MSCommunity otherwise tries to build it from a ``cpd00067`` it cannot find.
+
+    ``glucose_transport_ub`` caps this member's glucose transport.  The cap sits
+    on the transport, not the exchange, because the merge collapses every
+    member's ``EX_*_e0`` into one shared exchange while the transport stays
+    per-member (``rxn99001_c<i>``).  Two members with the same cap are identical,
+    and a community of identical members predicts exactly the uniform split it
+    started with -- so nothing that tests a CHANGE in abundances can use them.
     """
     import cobra
 
@@ -134,7 +141,7 @@ def _modelseed_member(model_id):
             rxn("EX_cpd00027_e0", {glc_e: -1}, lb=-10),
             rxn("EX_cpd00029_e0", {ac_e: -1}, lb=0),
             # glucose and acetate transport
-            rxn("rxn99001_c0", {glc_e: -1, glc_c: 1}),
+            rxn("rxn99001_c0", {glc_e: -1, glc_c: 1}, ub=glucose_transport_ub),
             rxn("rxn99002_c0", {ac_c: -1, ac_e: 1}),
             # lumped glycolysis: glucose + 2 ADP + 2 Pi -> 2 acetate + 2 ATP + 2 H2O
             rxn(
@@ -157,8 +164,16 @@ def _modelseed_member(model_id):
 
 @pytest.fixture
 def member_models():
-    """Two ModelSEED-shaped members with distinct ids, in a fixed order."""
-    return [_modelseed_member("member_one"), _modelseed_member("member_two")]
+    """Two ModelSEED-shaped members with distinct ids, in a fixed order.
+
+    member_two takes up at most 3 glucose (vs. 10 on offer), so it can make at
+    most 2 biomass while member_one takes the rest: the predicted split is
+    asymmetric, unlike the uniform 0.5/0.5 the community is built with.
+    """
+    return [
+        _modelseed_member("member_one"),
+        _modelseed_member("member_two", glucose_transport_ub=3),
+    ]
 
 
 @pytest.fixture

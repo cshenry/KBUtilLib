@@ -1715,6 +1715,106 @@ def test_coverage_is_skipped_rather_than_passed_for_identity_batches():
     assert report["ok"]
 
 
+def test_the_coverage_refusal_names_the_unresolved_keys_not_only_their_count():
+    """WHICH ones, not just how many.
+
+    At the default floor the real go_mf@4 campaign was correctly refused
+    because 8 of 20,036 query_ids did not resolve -- and the only way to see
+    WHICH eight was to lower the floor, which means bypassing the gate in
+    order to inspect what it caught. The report and the message now name them.
+    """
+    seeds = ["g1", "g2", "bad1", "bad2", "bad3"]
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(seeds, _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1"), _hash("g2")},
+    )
+    expected = sorted(_hash(seed) for seed in ("bad1", "bad2", "bad3"))
+    assert not report["ok"]
+    assert report["unresolved_keys"] == 3
+    assert isinstance(report["unresolved_keys"], int)
+    assert report["unresolved_sample"] == expected
+    assert report["unresolved_sample_truncated"] is False
+    # The operator reads the FAILURE, not the report dict, so the keys have to
+    # be in the message too.
+    assert "below the declared floor" in report["failures"][0]
+    for key in expected:
+        assert key in report["failures"][0]
+
+
+def test_the_unresolved_sample_is_bounded_and_says_that_it_was_cut():
+    """A 20,036-key batch must not turn its refusal into a 20,036-key line.
+
+    Truncation is RECORDED rather than silent: a sample that is all of them
+    and a sample that is the first 20 of 25 are different facts.
+    """
+    bad = [f"bad{index:03d}" for index in range(25)]
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["g1", *bad], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+    )
+    assert not report["ok"]
+    assert report["unresolved_keys"] == 25
+    assert len(report["unresolved_sample"]) == ci.UNRESOLVED_SAMPLE_LIMIT == 20
+    assert report["unresolved_sample_truncated"] is True
+    # Sorted, and the sample is the FIRST 20 of that order -- not an arbitrary
+    # 20 of a set, which would differ run to run.
+    everything = sorted(_hash(seed) for seed in bad)
+    assert report["unresolved_sample"] == everything[:20]
+    assert "first 20 of 25" in report["failures"][0]
+
+
+def test_an_unchecked_coverage_reports_no_sample_rather_than_an_empty_one():
+    """``None`` means "not asked"; ``[]`` would mean "asked, none unresolved".
+
+    An entity batch MINTS identity and has nothing to resolve against, so the
+    honest value for both new fields is ``None``.
+    """
+    report = ci.join_assertions(
+        _arrow([_entity_row("a", _B1)]), table="gene_entity", batch_id=_B1
+    )
+    assert report["coverage_checked"] is False
+    assert report["unresolved_sample"] is None
+    assert report["unresolved_sample_truncated"] is None
+    assert report["ok"]
+
+
+def test_full_coverage_reports_an_empty_sample_not_none():
+    """The other side: coverage WAS checked and nothing was unresolved."""
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["g1"], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+    )
+    assert report["ok"]
+    assert report["unresolved_sample"] == []
+    assert report["unresolved_sample_truncated"] is False
+
+
+def test_the_wrong_join_key_message_is_left_alone():
+    """Zero resolution is a WRONG JOIN KEY, and listing keys adds nothing.
+
+    Every key is unresolved there, so the sample would just be the batch. The
+    report still carries it; the message deliberately does not.
+    """
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["wrong1", "wrong2"], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("right1")},
+        coverage_floor=0.0,
+    )
+    assert "WRONG JOIN KEY" in report["failures"][0]
+    assert "Unresolved" not in report["failures"][0]
+    assert report["unresolved_sample"] == sorted(
+        _hash(seed) for seed in ("wrong1", "wrong2")
+    )
+
+
 def test_a_missing_join_key_column_refuses_rather_than_passing():
     with pytest.raises(ValueError, match="no join key column"):
         ci.join_assertions(

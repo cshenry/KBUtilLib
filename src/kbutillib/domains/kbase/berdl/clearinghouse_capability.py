@@ -2779,6 +2779,8 @@ class ClearinghouseCapability:
                 "resolvable_keys": None,
                 "resolved_keys": None,
                 "unresolved_keys": None,
+                "unresolved_sample": None,
+                "unresolved_sample_truncated": None,
                 "coverage": None,
                 "coverage_floor": float(coverage_floor),
                 "coverage_checked": False,

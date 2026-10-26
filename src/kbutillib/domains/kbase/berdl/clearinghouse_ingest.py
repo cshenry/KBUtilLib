@@ -404,6 +404,15 @@ def fill_only_survivors(
 #: load, and the report says what the measured coverage was either way.
 DEFAULT_COVERAGE_FLOOR = 1.0
 
+#: How many of the unresolved keys the coverage refusal NAMES.
+#:
+#: The refusal used to carry only a count, so an operator looking at "8 of
+#: 20,036 do not resolve" could not see WHICH eight without lowering the floor
+#: -- which means bypassing the gate in order to inspect what it caught. A
+#: bounded sample names them in the message and the report without turning a
+#: 20,036-key batch's refusal into a 20,036-element log line.
+UNRESOLVED_SAMPLE_LIMIT = 20
+
 
 def resolvable_source_table(table: str) -> str | None:
     """The table a batch's join keys must RESOLVE against, or ``None``.
@@ -423,6 +432,27 @@ def resolvable_source_table(table: str) -> str | None:
     if table.endswith("_result"):
         return f"{table[: -len('_result')]}_entity"
     return None
+
+
+def _unresolved_clause(sample: Sequence[Any], total: int) -> str:
+    """The "which ones" clause appended to the coverage refusal.
+
+    Args:
+        sample: The sorted, bounded sample of unresolved keys.
+        total: How many were unresolved in all, which is what makes the
+            sample's incompleteness visible rather than implied.
+
+    Returns:
+        ``"Unresolved (first N of M): k1, k2, ..."``, or ``"Unresolved: k1,
+        k2"`` when the sample IS all of them. Empty string for an empty
+        sample, so a caller cannot append a dangling label.
+    """
+    if not sample:
+        return ""
+    listed = ", ".join(str(key) for key in sample)
+    if len(sample) < total:
+        return f"Unresolved (first {len(sample)} of {total}): {listed}."
+    return f"Unresolved: {listed}."
 
 
 def join_assertions(
@@ -481,8 +511,18 @@ def join_assertions(
         The report: ``table``, ``batch_id``, ``join_key``, ``source_rows``,
         ``source_keys`` (distinct, non-null), ``null_keys``,
         ``ambiguous_slots``, ``resolvable_keys``, ``resolved_keys``,
-        ``unresolved_keys``, ``coverage``, ``coverage_floor``,
+        ``unresolved_keys``, ``unresolved_sample``,
+        ``unresolved_sample_truncated``, ``coverage``, ``coverage_floor``,
         ``coverage_checked``, ``ok`` and ``failures``.
+
+        ``unresolved_keys`` is the COUNT; ``unresolved_sample`` is the first
+        :data:`UNRESOLVED_SAMPLE_LIMIT` of the unresolved keys themselves,
+        sorted, with ``unresolved_sample_truncated`` saying whether there were
+        more. Both are ``None`` when coverage was not checked. A refusal that
+        only counts the keys it refused over leaves the operator no way to see
+        WHICH ones without lowering the floor -- i.e. without bypassing the
+        gate to inspect what it caught (found by the
+        council-record-lakehouse-v1 t11 acceptance rehearsal).
 
     Raises:
         ValueError: ``batch`` has no join-key column, or ``coverage_floor`` is
@@ -520,11 +560,19 @@ def join_assertions(
     resolvable_keys = None if resolvable is None else len(set(resolvable))
     resolved_keys: int | None = None
     unresolved_keys: int | None = None
+    unresolved_sample: list[Any] | None = None
+    unresolved_sample_truncated: bool | None = None
     coverage: float | None = None
     if coverage_checked:
         held = set(resolvable or ())
         resolved_keys = len(distinct_keys & held)
         unresolved_keys = len(distinct_keys) - resolved_keys
+        # NAMED, not just counted. ``key=str`` because a join key is whatever
+        # the source column holds -- hex digests here, but a mixed-type set
+        # has no total order of its own and sorted() would raise on it.
+        unresolved = sorted(distinct_keys - held, key=str)
+        unresolved_sample = unresolved[:UNRESOLVED_SAMPLE_LIMIT]
+        unresolved_sample_truncated = len(unresolved) > UNRESOLVED_SAMPLE_LIMIT
         coverage = (
             1.0 if not distinct_keys else resolved_keys / len(distinct_keys)
         )
@@ -571,7 +619,8 @@ def join_assertions(
             f"{coverage:.6f}, below the declared floor {floor:.6f}. "
             f"{unresolved_keys} key(s) name no entity the clearinghouse "
             "holds, and a result row whose entity nothing can find is an "
-            "orphan."
+            "orphan. "
+            + _unresolved_clause(unresolved_sample or [], unresolved_keys or 0)
         )
 
     return {
@@ -586,6 +635,8 @@ def join_assertions(
         "resolvable_keys": resolvable_keys,
         "resolved_keys": resolved_keys,
         "unresolved_keys": unresolved_keys,
+        "unresolved_sample": unresolved_sample,
+        "unresolved_sample_truncated": unresolved_sample_truncated,
         "coverage": coverage,
         "coverage_floor": floor,
         "coverage_checked": coverage_checked,

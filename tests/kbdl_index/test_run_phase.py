@@ -201,8 +201,10 @@ GATE = 'arc-store run DB is disabled (set KBDL_RUN_DB_ENABLED=1, or KB_POD)'
 
 @pytest.fixture
 def disabled_env(env, monkeypatch):
-    for var in ('KBDL_RUN_DB_ENABLED', 'KB_POD', 'KBDL_POD'):
+    for var in ('KB_POD', 'KBDL_POD'):
         monkeypatch.delenv(var, raising=False)
+    # The pod's default is ENABLED (46c789b), so "disabled" must be asked for.
+    monkeypatch.setenv('KBDL_RUN_DB_ENABLED', '0')
     env['store'] = KorosArcStore(runs_root=env['runs'], db_path=env['db'])
     assert env['store'].db.enabled is False
     return env

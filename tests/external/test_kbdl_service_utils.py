@@ -1169,7 +1169,7 @@ def test_status_many_posts_the_ids_and_merges_the_response():
     assert len(session.calls) == 1
     call = session.calls[0]
     assert call["method"] == "POST"
-    assert call["url"] == "http://127.0.0.1:8791/jobs/status"
+    assert call["url"] == f"{TEST_BASE_URL}/jobs/status"
     assert call["json"] == {"job_ids": ["j1", "j2", "j3"]}
     assert set(out["jobs"]) == {"j1", "j2"}
     assert out["unknown"] == ["j3"]

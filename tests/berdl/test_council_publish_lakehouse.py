@@ -84,6 +84,11 @@ def qid(label: str) -> str:
 #: count) and one retrieval abstention, which has no council item at all.
 F1, F2, F2B, ABSTAIN = qid("f1"), qid("f2"), qid("f2b"), qid("abstain")
 
+#: The abstention's function text, as the plan's abstain record carries it.
+#: A retrieval abstention has no council item, so this is the ONLY durable
+#: source for it -- which is why the bundle carries it from v2 on.
+ABSTAIN_TEXT = "DUF1234 family protein"
+
 #: A fanout key whose item never settled -- the "eight residual items" case.
 F_UNRESOLVED = qid("f-unresolved")
 
@@ -371,11 +376,18 @@ def _bundle(
         campaign_id=campaign_id,
         store_id=STORE_ID,
         snapshot_id=snapshot_id or archived["snapshot_id"],
+        # UPDATED FOR BUNDLE v2 (KBUtilLib#97): the abstain row carries its
+        # `text`. It always did in the plan's abstain record -- this fixture
+        # simply omitted the field, which v1 tolerated because the publisher
+        # took abstention texts from a `texts=` kwarg and counted the ones it
+        # did not get. v2 carries the text IN THE BUNDLE and refuses a blank
+        # one by name, so a fixture without it now (correctly) refuses.
         abstain=abstain
         if abstain is not None
         else [
             {
                 "query_id": ABSTAIN,
+                "text": ABSTAIN_TEXT,
                 "abstain_reason": "no_candidates",
                 "decline_reason": "abstained:no_candidates",
             }
@@ -701,24 +713,33 @@ class TestThePayload:
         assert rows[F1]["function_text"] == "Glucokinase (EC 2.7.1.2)"
         assert rows[F2]["function_text"] == "Hexokinase"
 
-    def test_an_abstentions_text_is_absent_and_said_to_be_absent(
+    def test_an_abstentions_text_COMES_FROM_THE_BUNDLE(
         self, sink, bundle, state_root
     ) -> None:
-        """A retrieval abstention has no council item, so the lake has no text.
+        """REWRITTEN FOR BUNDLE v2 (KBUtilLib#97).
 
-        Reported rather than smoothed over: the clearinghouse slot is frozen
-        on first write, so an empty ``function_text`` published once stays
-        empty.
+        It used to assert the v1 behaviour: the lake has no text for an
+        abstention, so the publisher reported ``abstentions_without_text`` and
+        a caller could fill it with ``texts=``. Both halves of that are now
+        wrong by design -- the text rides IN THE BUNDLE, copied from the plan's
+        abstain record, and a caller who forgets a kwarg is exactly how 760
+        permanently-empty cells would have been published. The kwarg is now a
+        FANOUT-ONLY override and is not consulted for abstentions, which the
+        second half of this test pins.
         """
         selection = lp.select_verdicts(sink, bundle, state_root=state_root)
         built = lp.lakehouse_export_rows(bundle, selection)
-        assert built["abstentions_without_text"] == [ABSTAIN]
-        supplied = lp.lakehouse_export_rows(
-            bundle, selection, texts={ABSTAIN: "A declined function"}
+        assert built["abstentions_without_text"] == []
+        rows = {row["query_id"]: row for row in built["rows"]}
+        assert rows[ABSTAIN]["function_text"] == ABSTAIN_TEXT
+
+        # texts= CANNOT override an abstention: the bundle is the one source.
+        overridden = lp.lakehouse_export_rows(
+            bundle, selection, texts={ABSTAIN: "something else entirely"}
         )
-        assert supplied["abstentions_without_text"] == []
-        rows = {row["query_id"]: row for row in supplied["rows"]}
-        assert rows[ABSTAIN]["function_text"] == "A declined function"
+        assert {
+            row["query_id"]: row["function_text"] for row in overridden["rows"]
+        }[ABSTAIN] == ABSTAIN_TEXT
 
 
 # --------------------------------------------------------------------------

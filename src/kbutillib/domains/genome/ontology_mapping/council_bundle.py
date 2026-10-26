@@ -16,8 +16,14 @@ every field of the bundle exists because of one of these three:
    ``council = null`` (``verdicts.py``'s abstain loop inside
    :func:`~.verdicts.export_rows`). The SUBMITTED set is therefore not
    derivable from the council projection either, which is why the bundle
-   carries the abstentions WITH THEIR DECLINE REASONS and a submitted
-   inventory.
+   carries the abstentions WITH THEIR DECLINE REASONS, THEIR FUNCTION TEXTS
+   and a submitted inventory. The text is carried for a sharper reason than
+   completeness: nothing else holds it. No ``items.evidence`` row exists for
+   a function that was never submitted, so the plan's abstain record is its
+   only durable source -- and the clearinghouse slot an abstention's row
+   lands in FREEZES ON FIRST WRITE, so one published with an empty text stays
+   empty for good. Carried since v2 (KBUtilLib#97); before that the publisher
+   took it from a kwarg and merely counted what it did not get.
 3. LATER VERDICTS WIN BY DECLARED ORDER. The exporter resolves winners from
    an EXPLICIT ordered job list (``OntologyMappingUtils.council_export``
    puts the retry jobs LAST so their verdicts supersede the chunk jobs'):
@@ -88,11 +94,14 @@ __all__ = [
     "PUBLICATION_BUNDLE_TABLE",
     "BUNDLE_FILENAME",
     "BUNDLE_CONTENT_FIELDS",
+    "PLAN_ORIGIN_KINDS",
+    "PLAN_ORIGIN_FIELDS",
     "PublicationBundleError",
     "BundleConflictError",
     "BundleDigestError",
     "BundleIncompleteSnapshotError",
     "JobNotInBundleError",
+    "PlanOriginError",
     "canonical_json",
     "content_digest",
     "build_bundle",
@@ -104,6 +113,7 @@ __all__ = [
     "fanout_map",
     "bundle_query_ids",
     "abstentions",
+    "bundle_plan_origin",
     "ordered_job_ids",
     "require_bundle_listed",
     "require_publishable",
@@ -112,7 +122,23 @@ __all__ = [
 #: Bumped only on a BREAKING change to the bundle's content shape. The digest
 #: covers the version, so a consumer that read a v1 bundle cannot be handed a
 #: v2 one under the same digest.
-BUNDLE_SCHEMA_VERSION = 1
+#:
+#: v1 -> v2 (KBUtilLib#97) is BREAKING IN BOTH DIRECTIONS and added two things:
+#:
+#: 1. Each abstention carries its own ``text``. A retrieval abstention has no
+#:    council item, so its function text exists in exactly one durable place
+#:    -- the plan's abstain record -- and a v1 bundle simply does not carry
+#:    it. The publisher used to take it from a ``texts=`` kwarg and merely
+#:    COUNT the ones it did not get; the clearinghouse slot freezes on first
+#:    write, so an abstention published with an empty text stays empty
+#:    forever. A v1 bundle THAT CARRIES ABSTENTIONS is therefore refused at
+#:    publish rather than published text-less
+#:    (``berdl.council_publish.require_publishable_bundle``).
+#: 2. :data:`PLAN_ORIGIN_FIELDS` -- ``plan_origin``, which says whether the
+#:    bundle's plan was written by stage 1 or RECONSTRUCTED afterwards, and
+#:    carries the ``generated_at`` that stamps every abstention's
+#:    ``decided_at``.
+BUNDLE_SCHEMA_VERSION = 2
 
 #: Where the lakehouse copy lands, in the council namespace. See the module
 #: docstring's "WHERE IT LANDS".
@@ -137,6 +163,7 @@ BUNDLE_CONTENT_FIELDS: tuple[str, ...] = (
     "parameter_set_hash",
     "plan_hash",
     "plan",
+    "plan_origin",
     "fanout",
     "abstentions",
     "submitted",
@@ -145,6 +172,43 @@ BUNDLE_CONTENT_FIELDS: tuple[str, ...] = (
     "ordered_job_ids",
     "written_at",
     "written_by",
+)
+
+#: What a bundle's ``plan_origin.kind`` may say, and nothing else.
+#:
+#: ``stage1``: ``PLAN.json`` was written by ``OntologyMappingUtils.
+#: council_plan``, so its ``generated_at`` IS the moment retrieval ran and
+#: declined the abstentions.
+#:
+#: ``reconstructed``: the plan was assembled AFTER the run it describes, by
+#: hand or by a later tool, because the campaign predates stage 1. The
+#: 2026-10-19 ADP1+PMI campaign is one: it was driven by ``kbu submit
+#: --query go_mf@4 --input chunkNN.jsonl`` from ``run_chunks.sh``, and its
+#: plan was hand-assembled on 2026-10-19 to drive the export. Such a plan is
+#: ACCEPTED AND RECORDED AS WHAT IT IS, not regenerated: re-running
+#: ``council-plan`` would read TODAY'S universe, describe a run that never
+#: happened, and stamp today's date on 760 abstentions whose observation time
+#: freezes on first write.
+PLAN_ORIGIN_KINDS: tuple[str, ...] = ("stage1", "reconstructed")
+
+#: Every field of ``plan_origin``, declared once.
+#:
+#: ``generated_at`` IS THE FIELD THAT MATTERS and the reason the block exists.
+#: ``verdicts.export_rows`` stamps an abstained row's ``decided_at`` from the
+#: ``abstained_at`` it is given and falls back to ``now()`` when given
+#: nothing; the shipped ``function-to-go-council`` preset maps ``decided_at``
+#: onto the clearinghouse ``observed_at``; and that slot freezes on first
+#: write. So a publish that could not say when retrieval declined would make
+#: its own PUBLISH DATE the permanent observation time of every abstention.
+#: ``generated_at_source`` says where the value came from, because for a
+#: reconstructed plan it is a DERIVED claim about a past run rather than
+#: something a tool stamped, and a reader has to be able to see which.
+PLAN_ORIGIN_FIELDS: tuple[str, ...] = (
+    "kind",
+    "assembled_on",
+    "reason",
+    "generated_at",
+    "generated_at_source",
 )
 
 #: The lakehouse table's columns. ``content`` holds the canonical JSON of the
@@ -218,6 +282,19 @@ class JobNotInBundleError(PublicationBundleError):
     """
 
 
+class PlanOriginError(PublicationBundleError):
+    """A bundle's ``plan_origin`` block is absent, unknown or incomplete.
+
+    NOTHING IN IT IS INFERRED. A ``reconstructed`` origin is a claim about a
+    run that already happened -- when the plan was assembled, why, and where
+    its ``generated_at`` was derived from -- and every one of those is a fact
+    only the person reconstructing it holds. Guessing ``assembled_on`` from a
+    file's mtime or ``generated_at`` from the plan a human just wrote would
+    manufacture provenance, and ``generated_at`` in particular becomes the
+    permanent ``observed_at`` of every abstention in the campaign.
+    """
+
+
 def _utcnow_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
@@ -260,6 +337,91 @@ def _split_query_ref(ref: str) -> tuple[str, str]:
     return name, version
 
 
+def _resolve_plan_origin(
+    plan: Mapping[str, Any],
+    declared: Mapping[str, Any] | None,
+    *,
+    has_abstentions: bool,
+) -> dict[str, Any]:
+    """Validate a declared ``plan_origin``, or derive the ``stage1`` one.
+
+    THE ONLY THING EVER DERIVED is a ``stage1`` plan's own ``generated_at``,
+    read straight off ``PLAN.json`` -- because for a stage-1 plan that field
+    IS the moment retrieval ran. Every field of a ``reconstructed`` origin is
+    required from the caller: see :class:`PlanOriginError`.
+
+    Raises:
+        PlanOriginError: the kind is not one of :data:`PLAN_ORIGIN_KINDS`; the
+            block carries a field that is not in :data:`PLAN_ORIGIN_FIELDS`;
+            a ``reconstructed`` origin omits any of its four; or the campaign
+            has abstentions and ``generated_at`` resolved blank.
+    """
+    block = dict(declared or {})
+    unknown = sorted(set(block) - set(PLAN_ORIGIN_FIELDS))
+    if unknown:
+        raise PlanOriginError(
+            f"plan_origin carries unknown field(s) {unknown!r}. Its fields "
+            f"are exactly {list(PLAN_ORIGIN_FIELDS)} -- a misspelled one "
+            "would be dropped silently, and the field most likely to be "
+            "misspelled is generated_at, which becomes the permanent "
+            "observed_at of every abstention."
+        )
+    kind = str(block.get("kind") or "stage1")
+    if kind not in PLAN_ORIGIN_KINDS:
+        raise PlanOriginError(
+            f"plan_origin.kind {kind!r} is not one of "
+            f"{list(PLAN_ORIGIN_KINDS)}. A bundle whose plan could not say "
+            "whether stage 1 wrote it or a human reconstructed it afterwards "
+            "cannot be read as provenance."
+        )
+    origin = {
+        "kind": kind,
+        "assembled_on": str(block.get("assembled_on") or ""),
+        "reason": str(block.get("reason") or ""),
+        "generated_at": str(block.get("generated_at") or ""),
+        "generated_at_source": str(block.get("generated_at_source") or ""),
+    }
+    if kind == "reconstructed":
+        blank = [
+            field
+            for field in ("assembled_on", "reason", "generated_at", "generated_at_source")
+            if not origin[field].strip()
+        ]
+        if blank:
+            raise PlanOriginError(
+                f"plan_origin.kind is 'reconstructed' and {blank!r} "
+                "is/are blank. A reconstructed plan describes a run that "
+                "already happened, so when it was assembled, why, and where "
+                "its generated_at came from are facts only the caller holds. "
+                "None of them is inferred from the plan: build_bundle_from_"
+                "run takes them as explicit arguments."
+            )
+    else:
+        # The ONE derivation, and only for a stage-1 plan: its own
+        # generated_at is the moment retrieval ran.
+        if not origin["generated_at"]:
+            origin["generated_at"] = str(plan.get("generated_at") or "")
+            if origin["generated_at"]:
+                origin["generated_at_source"] = (
+                    origin["generated_at_source"]
+                    or "PLAN.json generated_at, as stage 1 stamped it"
+                )
+    if has_abstentions and not origin["generated_at"].strip():
+        raise PlanOriginError(
+            "the campaign has abstentions and plan_origin.generated_at is "
+            "blank. verdicts.export_rows stamps an abstained row's "
+            "decided_at from it and falls back to now() when given nothing; "
+            "the shipped function-to-go-council preset maps decided_at onto "
+            "the clearinghouse observed_at, and that slot FREEZES ON FIRST "
+            "WRITE. A blank here would make the publish date the permanent "
+            "observation time of every abstention. For a plan stage 1 wrote, "
+            "this is PLAN.json's own generated_at; for a reconstructed one, "
+            "declare it (e.g. min(council.jobs.submitted_at) over the "
+            "campaign's base jobs) and say so in generated_at_source."
+        )
+    return origin
+
+
 def build_bundle(
     plan: Mapping[str, Any],
     *,
@@ -270,6 +432,7 @@ def build_bundle(
     fanout: Iterable[Mapping[str, Any]],
     job_ids: Sequence[str],
     retry_job_ids: Sequence[str] = (),
+    plan_origin: Mapping[str, Any] | None = None,
     written_by: str = "",
     written_at: str | None = None,
 ) -> dict[str, Any]:
@@ -298,12 +461,23 @@ def build_bundle(
             deliberation is archived under. Checked for completeness by
             :func:`publish_bundle`.
         abstain: The plan's abstain rows. Each contributes an abstention
-            carrying its decline reason and NO item id.
+            carrying its decline reason, ITS FUNCTION TEXT and NO item id.
+            The ``text`` is COPIED FROM THE PLAN ROW because this is the one
+            durable place it exists: an abstention has no council item, so no
+            ``items.evidence`` in the archive holds it, and the clearinghouse
+            slot its row lands in freezes on first write. A row carrying no
+            text yields an abstention with ``text = ''``, which the publisher
+            then REFUSES by name rather than publishing permanently empty.
         fanout: The plan's fanout rows -- one per un-run non-declined
             function, so one ``item_id`` legitimately appears under several
             ``query_id``s.
         job_ids: The base job ids, IN DECLARED ORDER.
         retry_job_ids: The retry-pass job ids, IN DECLARED ORDER.
+        plan_origin: :data:`PLAN_ORIGIN_FIELDS`, or ``None`` for a plan stage
+            1 wrote -- in which case the block is ``kind='stage1'`` with
+            ``generated_at`` read off the plan. A ``reconstructed`` origin
+            must declare all four of its other fields; nothing about it is
+            inferred (:class:`PlanOriginError`).
         written_by: Who built this bundle.
         written_at: ISO-8601 timestamp. Defaults to now (UTC).
 
@@ -317,6 +491,8 @@ def build_bundle(
             (they are disjoint by construction, so an overlap means the two
             files came from different plans and the campaign would claim two
             answers for one function).
+        PlanOriginError: ``plan_origin`` is unknown or incomplete, or the
+            campaign has abstentions and no ``generated_at`` resolved.
     """
     for label, value in (
         ("campaign_id", campaign_id),
@@ -360,6 +536,14 @@ def build_bundle(
         declines.append(
             {
                 "query_id": query_id,
+                # THE ABSTENTION'S FUNCTION TEXT, carried from the plan row.
+                # v2 (KBUtilLib#97). It is not in the archive and cannot be
+                # re-derived: retrieval declined before anything was
+                # submitted, so there is no council item and no
+                # items.evidence for it. Carried here so the publisher has
+                # ONE source for it rather than a kwarg the caller may
+                # forget -- the slot freezes on first write.
+                "text": str(row.get("text") or ""),
                 "abstain_reason": reason,
                 # The spelling export_rows publishes, used as written rather
                 # than re-derived, so the bundle and the export agree.
@@ -420,6 +604,13 @@ def build_bundle(
         "parameter_set_hash": str(plan.get("parameter_set_hash") or ""),
         "plan_hash": str(plan.get("plan_hash") or ""),
         "plan": dict(plan),
+        # WHETHER THAT PLAN IS STAGE 1'S OR A RECONSTRUCTION, and the
+        # generated_at that stamps every abstention's decided_at. Resolved
+        # AFTER the abstain loop because a campaign with abstentions may not
+        # have a blank generated_at. See _resolve_plan_origin.
+        "plan_origin": _resolve_plan_origin(
+            plan, plan_origin, has_abstentions=bool(declines)
+        ),
         "fanout": pairs,
         "abstentions": declines,
         # SUBMITTED, not exported. Reconciliation has to be against what was
@@ -469,6 +660,11 @@ def build_bundle_from_run(
     snapshot_id: str,
     job_ids: Sequence[str] | None = None,
     retry_job_ids: Sequence[str] | None = None,
+    plan_origin_kind: str = "stage1",
+    assembled_on: str = "",
+    plan_origin_reason: str = "",
+    generated_at: str = "",
+    generated_at_source: str = "",
     written_by: str = "",
 ) -> dict[str, Any]:
     """Build a bundle from a run directory's ``PLAN.json`` and its records.
@@ -477,12 +673,41 @@ def build_bundle_from_run(
     ``abstain_file`` and ``fanout_file`` -- so the bundle's submitted set and
     the export's ``inputs`` cannot disagree.
 
+    THE RECONSTRUCTION FIELDS ARE EXPLICIT ARGUMENTS AND NOTHING INFERS THEM.
+    A run directory is exactly the wrong place to guess them from: a
+    hand-assembled ``PLAN.json`` looks like a stage-1 one on disk, so a
+    heuristic (does it carry ``run_id``? is ``plan_hash`` blank?) would
+    silently classify a reconstruction as stage 1 and -- with
+    ``generated_at`` absent -- hand every abstention ``now()`` as its
+    permanent ``observed_at``. Declaring ``plan_origin_kind='reconstructed'``
+    is therefore the caller's act, and it then owes the other four.
+
+    Args:
+        run_dir: The run directory holding ``PLAN.json``.
+        campaign_id: See :func:`build_bundle`.
+        store_id: See :func:`build_bundle`.
+        snapshot_id: See :func:`build_bundle`.
+        job_ids: Base job ids in declared order. Defaults to the plan's.
+        retry_job_ids: Retry job ids in declared order. Defaults to the
+            plan's.
+        plan_origin_kind: One of :data:`PLAN_ORIGIN_KINDS`.
+        assembled_on: When the plan was assembled. ``reconstructed`` only.
+        plan_origin_reason: Why it was reconstructed rather than regenerated.
+            ``reconstructed`` only.
+        generated_at: When retrieval ran and declined the abstentions. For a
+            campaign that predates stage 1 this is a DERIVED claim -- for the
+            2026-10-19 ADP1+PMI campaign it is
+            ``min(council.jobs.submitted_at)`` over the base jobs.
+        generated_at_source: How *generated_at* was obtained, in words.
+        written_by: Who built this bundle.
+
     Raises:
         FileNotFoundError: no ``PLAN.json``, or the plan names a record file
             that is gone (``/scratch`` is ephemeral on this host and is not
             backed up).
         PublicationBundleError: the plan names no job ids and none were
             given.
+        PlanOriginError: the origin fields are unknown or incomplete.
     """
     from kbutillib.domains.ai.council.quote import PLAN_FILENAME
 
@@ -537,6 +762,13 @@ def build_bundle_from_run(
         fanout=records["fanout_file"],
         job_ids=resolved_jobs,
         retry_job_ids=resolved_retries,
+        plan_origin={
+            "kind": plan_origin_kind,
+            "assembled_on": assembled_on,
+            "reason": plan_origin_reason,
+            "generated_at": generated_at,
+            "generated_at_source": generated_at_source,
+        },
         written_by=written_by,
     )
 
@@ -787,8 +1019,28 @@ def bundle_query_ids(bundle: Mapping[str, Any]) -> list[str]:
 
 
 def abstentions(bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The retrieval abstentions, with decline reasons and no item ids."""
+    """The retrieval abstentions, with their texts, decline reasons and no
+    item ids.
+
+    ``text`` is present from v2 on (:data:`BUNDLE_SCHEMA_VERSION`) and is
+    ABSENT, not empty, in a v1 bundle -- which is why the publisher
+    distinguishes the two cases: a v1 bundle carrying abstentions is told to
+    REBUILD, and a v2 one with a blank text is told WHICH ``query_id``s are
+    blank.
+    """
     return [dict(row) for row in bundle.get("abstentions") or ()]
+
+
+def bundle_plan_origin(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """The bundle's ``plan_origin`` block -- :data:`PLAN_ORIGIN_FIELDS`.
+
+    ``{}`` for a v1 bundle, which has no such block. A caller that needs
+    ``generated_at`` must therefore handle the empty mapping rather than
+    reading through it to ``None``: see
+    ``berdl.council_publish.lakehouse_export_rows``, where that value becomes
+    every abstention's permanent ``observed_at``.
+    """
+    return dict(bundle.get("plan_origin") or {})
 
 
 def ordered_job_ids(bundle: Mapping[str, Any]) -> list[str]:

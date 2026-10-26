@@ -114,8 +114,12 @@ __all__ = [
     "CouncilPublishError",
     "WrongQueryKindError",
     "UnresolvedRosterError",
+    "StaleBundleSchemaError",
+    "UnreconstructedPlanError",
+    "AbstentionTextMissingError",
     "select_verdicts",
     "require_query_kind",
+    "require_publishable_bundle",
     "resolvable_query_ids",
     "guard_join",
     "lakehouse_export_rows",
@@ -184,6 +188,55 @@ class UnresolvedRosterError(CouncilPublishError):
     cases that produce it -- gated jobs disagreeing about their roster, or an
     archive whose ``jobs.roster_fingerprint`` is NULL -- are both facts a
     human has to resolve.
+    """
+
+
+class StaleBundleSchemaError(CouncilPublishError):
+    """A bundle too old to carry what this publisher needs, and it has
+    abstentions.
+
+    A v1 bundle (``schema_version < 2``) does not carry its abstentions'
+    function texts, because v1 had no place for them: the publisher used to
+    take them from a ``texts=`` kwarg and merely COUNT the ones it did not
+    get. The clearinghouse slot an abstention's row lands in freezes on first
+    write, so publishing from a v1 bundle would write 760 permanently empty
+    ``function_text`` cells that no later correction can reach. REFUSED with
+    an instruction to REBUILD the bundle -- the run directory's abstain
+    record still holds every text, so the rebuild recovers them; nothing here
+    can.
+
+    A v1 bundle with NO abstentions is not refused: there is nothing it could
+    be missing.
+    """
+
+
+class UnreconstructedPlanError(CouncilPublishError):
+    """``plan_hash`` is empty and the bundle does not admit to a
+    reconstruction.
+
+    A stage-1 plan always carries a ``plan_hash``; a blank one means the plan
+    was assembled some other way. That is PERMITTED -- a campaign older than
+    stage 1 has no stage-1 plan to produce and reconstructing its plan is the
+    right answer (``plan_origin.kind == 'reconstructed'``) -- but it has to be
+    DECLARED, because the bundle carries that plan whole and the publisher
+    re-writes it beside its output as the campaign's ``PLAN.json``. A blank
+    ``plan_hash`` with ``kind == 'stage1'`` is instead a plan claiming an
+    origin it does not have, and the likeliest cause is a hand-assembled plan
+    passed through without the origin block being filled in.
+    """
+
+
+class AbstentionTextMissingError(CouncilPublishError):
+    """One or more abstentions carry no function text. NAMES THE query_ids.
+
+    NOT A COUNT IN THE RECEIPT, which is what it used to be. A retrieval
+    abstention's text exists in exactly one durable place -- the plan's
+    abstain record, carried into the bundle from v2 -- and the clearinghouse
+    slot is frozen on first write, so an abstention published with ``''``
+    stays text-less permanently and reads to a consumer as a function with no
+    description rather than as a bug. The ``query_id``s are named because the
+    fix is per-row: find those rows in the plan's abstain record and rebuild
+    the bundle.
     """
 
 
@@ -599,6 +652,73 @@ def guard_join(
 # --------------------------------------------------------------------------
 
 
+def require_publishable_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """The TWO BUNDLE-LEVEL refusals, evaluated before anything is read.
+
+    Both are about what the bundle can and cannot say, so neither needs the
+    archive, the snapshot or the lake -- which is why they run FIRST, ahead of
+    :func:`select_verdicts`. Pure; returns the ``plan_origin`` block it
+    validated, so a caller does not read it twice.
+
+    1. A v1 bundle THAT CARRIES ABSTENTIONS is refused and told to rebuild
+       (:class:`StaleBundleSchemaError`). v1 has no place for an abstention's
+       function text and the slot freezes on first write.
+    2. ``plan_hash == ''`` is refused unless ``plan_origin.kind ==
+       'reconstructed'`` (:class:`UnreconstructedPlanError`). A blank hash is
+       legitimate for a campaign older than stage 1, but it has to be
+       declared as a reconstruction rather than passed off as a stage-1 plan.
+
+    Returns:
+        The bundle's ``plan_origin`` block (``{}`` on a v1 bundle with no
+        abstentions, which is the one case that gets this far without one).
+
+    Raises:
+        StaleBundleSchemaError: see 1.
+        UnreconstructedPlanError: see 2.
+    """
+    from ...genome.ontology_mapping.council_bundle import (
+        BUNDLE_SCHEMA_VERSION,
+        abstentions,
+        bundle_plan_origin,
+    )
+
+    version = int(bundle.get("schema_version") or 0)
+    declines = abstentions(bundle)
+    if version < 2 and declines:
+        raise StaleBundleSchemaError(
+            f"the bundle for campaign {bundle.get('campaign_id')!r} declares "
+            f"schema_version {version} and carries {len(declines)} "
+            "abstention(s). A v1 bundle does not carry their function texts, "
+            "and an abstention has no council item -- so no items.evidence "
+            "in the archive holds one and nothing here can recover it. The "
+            "clearinghouse slot freezes on FIRST WRITE, so publishing from "
+            "this bundle would write "
+            f"{len(declines)} permanently empty function_text cells. REBUILD "
+            f"the bundle at schema_version {BUNDLE_SCHEMA_VERSION} from the "
+            "run directory -- `council_bundle.build_bundle_from_run` reads "
+            "the plan's abstain record, which still holds every text."
+        )
+
+    origin = bundle_plan_origin(bundle)
+    if not str(bundle.get("plan_hash") or "").strip():
+        if str(origin.get("kind") or "") != "reconstructed":
+            raise UnreconstructedPlanError(
+                f"the bundle for campaign {bundle.get('campaign_id')!r} "
+                "carries an EMPTY plan_hash and its plan_origin.kind is "
+                f"{str(origin.get('kind') or '') or 'absent'!r}. Stage 1 "
+                "always stamps a plan_hash, so a blank one means the plan "
+                "was assembled some other way -- which is allowed for a "
+                "campaign older than stage 1, but has to be DECLARED: "
+                "rebuild with plan_origin_kind='reconstructed' and its four "
+                "fields (assembled_on, reason, generated_at, "
+                "generated_at_source). The publisher re-writes this plan "
+                "beside its output as the campaign's PLAN.json, so a plan "
+                "claiming an origin it does not have would be published as "
+                "the run's own record."
+            )
+    return origin
+
+
 def lakehouse_export_rows(
     bundle: Mapping[str, Any],
     selection: Mapping[str, Any],
@@ -614,28 +734,77 @@ def lakehouse_export_rows(
     exporter writes. A second row builder would be free to drift from it, and
     the clearinghouse slot it writes into is frozen on first write.
 
-    ``function_text`` FOR AN ABSTENTION IS NOT IN THE LAKEHOUSE. A retrieval
-    abstention has no council item, so no ``items.evidence`` holds its text,
-    and the bundle carries only its ``query_id`` and decline reason. Decided
-    rows get their text from ``items.evidence``; an abstention's is ``''``
-    unless *texts* supplies it. That difference is REPORTED in the receipt
-    (``abstentions_without_text``) rather than smoothed over, because the slot
-    is frozen on first write and an empty text published once stays empty.
+    AN ABSTENTION'S ``function_text`` COMES FROM THE BUNDLE, AND FROM NOWHERE
+    ELSE. A retrieval abstention has no council item, so no ``items.evidence``
+    holds its text; the bundle carries it from v2 on (KBUtilLib#97), copied
+    out of the plan's abstain record. A blank one is a REFUSAL THAT NAMES THE
+    ``query_id``s (:class:`AbstentionTextMissingError`), not a count in the
+    receipt: the slot freezes on first write, so an empty text published once
+    is empty for good, and the fix is per-row in the plan's abstain record.
+    *texts* is NOT consulted for abstentions -- it was, in v1, and a caller
+    forgetting to pass it is exactly how 760 empty cells would have been
+    published.
+
+    ``decided_at`` FOR AN ABSTENTION IS ``plan_origin.generated_at``, when
+    retrieval declined it -- not ``plan['generated_at']``, which a
+    reconstructed plan does not have, and not ``now()``, which
+    ``verdicts.export_rows`` would otherwise fall back to. The preset maps
+    ``decided_at`` onto ``observed_at`` and that slot freezes on first write,
+    so the fallback would make the PUBLISH DATE the permanent observation time
+    of every abstention. :func:`require_publishable_bundle` is what guarantees
+    a value is there to pass.
+
+    ``genomes`` IS NEVER PUBLISHED FROM HERE, DELIBERATELY AND PERMANENTLY
+    (KBUtilLib#98). ``verdicts.export_rows`` takes an optional ``genomes=``
+    map and this function does not pass one, so every row's ``genomes`` is
+    ``[]``. Three independent reasons, and the third is decisive:
+
+    1. The shipped ``function-to-go-council`` preset's ``[source.result]``
+       payload already OMITS the column, and neither export path has ever
+       published it. There is nothing to preserve.
+    2. The genome set GROWS as genomes are added, while the clearinghouse slot
+       freezes on first write. A frozen list would go stale the first time a
+       new genome carried the function, and read as authoritative while doing
+       so.
+    3. The only in-pipeline source is ``priority_adp1_pmi.tsv`` -- a join on
+       the definition TEXT, which the preset refuses by name. Measured
+       2026-10-21: the council's ``items.entity_hash`` matched 0 of 19,268
+       clearinghouse hashes while the text matched 19,268 of 19,268, so the
+       text join LOOKS like the one that works and is still the wrong key.
+       Filling ``genomes`` from it inside the publisher would be that join by
+       another name.
+
+    Which genomes carry a function is a READ-TIME join through
+    ``protein_result``, and that is where it belongs.
+    ``verdicts.EXPORT_COLUMNS`` KEEPS the column so the run-directory parquet
+    stays byte-compatible; the column is empty, not absent.
 
     Args:
-        bundle: The campaign's bundle.
+        bundle: The campaign's bundle, at schema_version >= 2 if it carries
+            abstentions.
         selection: :func:`select_verdicts`'s return value.
-        texts: ``{query_id: function text}``, for abstentions (and as an
-            override for decided rows). A caller holding the run's ranked or
-            abstain file passes it.
+        texts: ``{query_id: function text}``, an override FOR FANOUT ROWS
+            ONLY, ahead of the ``item_texts`` the selection read out of
+            ``items.evidence``. A caller holding the run's ranked file passes
+            it. Abstentions ignore it -- see above.
 
     Returns:
         ``verdicts.export_rows``'s ``{"rows", "counts"}``, plus
-        ``abstentions_without_text``.
+        ``abstentions_without_text``, which is now ALWAYS ``[]`` because a
+        missing text raises instead. The key is kept so a receipt reader sees
+        the field answered rather than absent.
+
+    Raises:
+        AbstentionTextMissingError: an abstention's text is blank, naming the
+            ``query_id``s.
+        StaleBundleSchemaError: a v1 bundle carrying abstentions.
+        UnreconstructedPlanError: a blank ``plan_hash`` not declared as a
+            reconstruction.
     """
     from ...genome.ontology_mapping.council_bundle import abstentions
     from ...genome.ontology_mapping.verdicts import export_rows
 
+    origin = require_publishable_bundle(bundle)
     by_query = {str(k): str(v) for k, v in dict(texts or {}).items()}
     item_texts = dict(selection.get("item_texts") or {})
 
@@ -643,8 +812,8 @@ def lakehouse_export_rows(
     missing_text: list[str] = []
     for row in abstentions(bundle):
         query_id = str(row["query_id"])
-        text = by_query.get(query_id, "")
-        if not text:
+        text = str(row.get("text") or "")
+        if not text.strip():
             missing_text.append(query_id)
         abstain_rows.append(
             {
@@ -654,6 +823,17 @@ def lakehouse_export_rows(
                 "decline_reason": row.get("decline_reason"),
             }
         )
+    if missing_text:
+        raise AbstentionTextMissingError(
+            f"{len(missing_text)} of {len(abstain_rows)} abstention(s) in the "
+            f"bundle for campaign {bundle.get('campaign_id')!r} carry no "
+            "function text, and the clearinghouse slot freezes on FIRST "
+            "WRITE -- publishing them now would leave those cells empty "
+            "permanently. The text exists only in the plan's abstain record; "
+            "fix it there and rebuild the bundle. The query_id(s): "
+            f"{missing_text}"
+        )
+
     fanout_rows = [
         {
             "query_id": str(pair["query_id"]),
@@ -672,9 +852,10 @@ def lakehouse_export_rows(
         identity=selection["identity"],
         job_ids=selection["ordered_job_ids"],
         retry_job_ids=[str(jid) for jid in bundle.get("retry_job_ids") or ()],
-        abstained_at=str(
-            (bundle.get("plan") or {}).get("generated_at") or ""
-        ) or None,
+        # plan_origin.generated_at, NOT plan['generated_at']: a reconstructed
+        # plan has none, and export_rows' now() fallback would freeze the
+        # publish date as every abstention's observed_at.
+        abstained_at=str(origin.get("generated_at") or "") or None,
         store_id=selection["store_id"],
     )
     return {**built, "abstentions_without_text": missing_text}
@@ -747,6 +928,11 @@ def publish_from_lakehouse(
 
     THE ORDER IS THE DESIGN:
 
+    0. :func:`require_publishable_bundle` -- the two refusals that need
+       NOTHING but the bundle: a v1 bundle carrying abstentions, and a blank
+       ``plan_hash`` not declared as a reconstruction. First, because they
+       cost nothing and the alternative is discovering them after a snapshot
+       read and three gates.
     1. :func:`select_verdicts` -- pin the snapshot (refusing an incomplete
        one), apply all three gates, resolve winners by the bundle's declared
        order.
@@ -779,7 +965,8 @@ def publish_from_lakehouse(
         state_root: Root of the archiver's delivery state.
         query_name: Gate 1's required council kind.
         roster_fingerprint: Override the run identity's roster fingerprint.
-        texts: ``{query_id: function text}`` -- see
+        texts: ``{query_id: function text}``, an override FOR FANOUT ROWS
+            ONLY -- abstentions take their text from the bundle. See
             :func:`lakehouse_export_rows`.
         coverage_floor: The guard's floor. Defaults to the existing
             ``DEFAULT_COVERAGE_FLOOR`` of 1.0.
@@ -788,10 +975,18 @@ def publish_from_lakehouse(
     Returns:
         The receipt (see :func:`receipt`), including ``publish`` -- the
         existing publish record -- and ``guard``.
+
+    Raises:
+        StaleBundleSchemaError: a v1 bundle carrying abstentions.
+        UnreconstructedPlanError: a blank ``plan_hash`` not declared as a
+            reconstruction.
+        AbstentionTextMissingError: an abstention carries no function text.
     """
     from ...genome.ontology_mapping.council_publish import council_publish
     from ...genome.ontology_mapping.verdicts import write_verdict_parquet
 
+    # Step 0: the bundle-only refusals, before a single row is read.
+    require_publishable_bundle(bundle)
     out = Path(publish_dir).expanduser()
     selection = select_verdicts(
         sink,
@@ -857,7 +1052,11 @@ def receipt(
     ``kbu clearinghouse load`` makes IN THE POD; this half of stage 5 runs
     off-pod and claiming a value for it would be inventing one.
     """
-    from ...genome.ontology_mapping.council_bundle import abstentions, bundle_query_ids
+    from ...genome.ontology_mapping.council_bundle import (
+        abstentions,
+        bundle_plan_origin,
+        bundle_query_ids,
+    )
 
     submitted = {str(query_id) for query_id in bundle_query_ids(bundle)}
     rows = list(built.get("rows") or ())
@@ -897,7 +1096,16 @@ def receipt(
         "items_submitted": (bundle.get("submitted") or {}).get("counts", {}).get("items"),
         "inputs_submitted": (bundle.get("submitted") or {}).get("counts", {}).get("inputs"),
         "abstentions": len(abstentions(bundle)),
+        # ALWAYS [] from v2 on: a blank text RAISES
+        # (AbstentionTextMissingError) rather than being counted here. Kept
+        # so a receipt reader sees the question answered rather than absent.
         "abstentions_without_text": list(built.get("abstentions_without_text") or ()),
+        # WHERE THE ABSTENTIONS' observed_at CAME FROM. For a reconstructed
+        # plan, generated_at is a DERIVED claim about a past run rather than
+        # something a tool stamped, and it freezes as the permanent
+        # observation time of every abstention -- so the receipt carries the
+        # claim and its stated source, and an operator can audit both.
+        "plan_origin": bundle_plan_origin(bundle),
         "declines_by_reason": declines,
         "export_counts": dict(built.get("counts") or {}),
         "parameter_set_hash": str(bundle.get("parameter_set_hash") or ""),

@@ -1757,7 +1757,8 @@ for _verb_name, _verb_summary in _PLANNED_VERBS:
     help="The pre-join guard's resolution floor. Default: the existing "
     "clearinghouse DEFAULT_COVERAGE_FLOOR of 1.0. Lower it only for a "
     "deliberately partial publish -- the measured production campaign has 8 "
-    "of 19,276 inputs unresolved, and those eight are the interesting number.",
+    "of 20,036 submitted query_ids (19,276 fanout + 760 abstentions) "
+    "unresolved, and those eight are the interesting number.",
 )
 @click.option(
     "--roster-fingerprint",

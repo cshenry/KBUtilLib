@@ -270,6 +270,32 @@ observed_at_column = "decided_at"
   # fabricate provenance. The abstention's own decline fields
   # (decline_reason = "abstained:<reason>", go_ids = []) are unchanged.
   #
+  # `genomes` IS NOT IN THIS PAYLOAD AND NEVER WILL BE (KBUtilLib#98,
+  # decided 2026-10-26). `verdicts.EXPORT_COLUMNS` carries the column and
+  # `verdicts.export_rows` takes an optional `genomes=` map, so the question
+  # is live every time someone reads either; the answer is permanent. Three
+  # reasons, the third decisive:
+  #
+  #   1. This preset has ALWAYS omitted it and neither export path --
+  #      `OntologyMappingUtils.council_export` nor
+  #      `berdl.council_publish.lakehouse_export_rows` -- has ever published
+  #      it. There is nothing to preserve.
+  #   2. THE SET GROWS AND THE SLOT DOES NOT. Genomes are added over time;
+  #      the clearinghouse slot (entity_hash, entity_type, result_type,
+  #      source, parameter_set_hash) freezes on FIRST WRITE. A published
+  #      genome list would go stale the first time a new genome carried the
+  #      function, and would keep reading as authoritative while stale.
+  #   3. THE ONLY IN-PIPELINE SOURCE IS A TEXT JOIN. Nothing but
+  #      `priority_adp1_pmi.tsv` associates a function with genomes here, and
+  #      reaching it means joining on the definition TEXT -- the key this
+  #      file refuses by name in section 1 above, for reasons that do not
+  #      weaken just because the column being filled is provenance.
+  #
+  # Which genomes carry a function is a READ-TIME join through
+  # `protein_result`, which is also where `entity_type = "function"` says it
+  # belongs. The column stays in EXPORT_COLUMNS so the run-directory parquet
+  # stays byte-compatible: it is published EMPTY, not dropped.
+  #
   # `status` and `retried` are published EXPLICITLY. `status` is the council
   # ITEM's status (null on an abstention, which never had one); `retried`
   # says the published verdict came from the run's retry pass -- 105 of the

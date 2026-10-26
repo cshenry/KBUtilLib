@@ -53,7 +53,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -442,6 +442,41 @@ CHUNK_JOB_IDS: tuple[str, ...] = (
 RETRY_JOB_IDS: tuple[str, ...] = (
     "4bba63453f284182aa1505af6bc7dcfa",
     "52149f84f3404b9da747fd525433fa38",
+)
+
+#: THE CAMPAIGN'S PLAN IS A RECONSTRUCTION, and the bundle records it as one
+#: rather than hiding it (KBUtilLib#97, PRD council-record-lakehouse-v1 Q21).
+#:
+#: The 2026-10-19 run was driven by ``kbu submit --query go_mf@4 --input
+#: chunkNN.jsonl`` from ``run_chunks.sh`` and PREDATES stage 1 entirely; its
+#: ``PLAN.json`` was hand-assembled on 2026-10-19 to drive the export, and
+#: carries neither ``run_id`` nor ``generated_at`` nor a ``plan_hash``. That
+#: plan is ACCEPTED AND RECORDED, NOT REGENERATED: ``council-plan`` would read
+#: TODAY'S clearinghouse universe, describe a run that never happened, and
+#: stamp today's date -- which, because the preset maps ``decided_at`` onto
+#: ``observed_at`` and that slot freezes on first write, would make the
+#: publish date the permanent observation time of all 760 abstentions.
+PLAN_ASSEMBLED_ON = "2026-10-19"
+PLAN_RECONSTRUCTION_REASON = (
+    "the 2026-10-19 go_mf@4 ADP1+PMI campaign predates stage 1: it was driven "
+    "by `kbu submit --query go_mf@4 --input chunkNN.jsonl` from run_chunks.sh, "
+    "so no stage-1 PLAN.json was ever written and regenerating one would "
+    "describe today's universe rather than the run that happened"
+)
+
+#: How the campaign's ``generated_at`` is DERIVED, stated in the bundle so a
+#: reader can see that it is a derivation rather than something a tool
+#: stamped. ``council.jobs.submitted_at`` is the column (NOT ``created_at``,
+#: which the jobs table does not have), and the MINIMUM over the campaign's
+#: ten BASE jobs is the moment the first chunk was submitted -- the closest
+#: durable bound on when retrieval ran and declined the 760. The retry jobs
+#: are excluded: they were submitted days later, and the abstentions were
+#: declined before any of it.
+GENERATED_AT_SOURCE = (
+    "min(council.jobs.submitted_at) over the bundle's ten base job ids, read "
+    "from the archived snapshot. The campaign predates stage 1, so no plan "
+    "stamped a generated_at; this is the closest durable bound on when "
+    "retrieval declined the 760 abstentions."
 )
 
 
@@ -1377,15 +1412,48 @@ class Rehearsal:
 
     # -- step 5 ---------------------------------------------------------
 
+    def _campaign_generated_at(self, step: Step) -> str:
+        """``min(council.jobs.submitted_at)`` over the campaign's BASE jobs.
+
+        THE DERIVATION, done by direct query against the archived snapshot
+        rather than declared as a literal, so the date the 760 abstentions
+        freeze at is measured from the record. The column is
+        ``submitted_at``; ``jobs`` has no ``created_at``.
+        """
+        rows = self.sink.select_rows(
+            "jobs",
+            where={"job_id": list(CHUNK_JOB_IDS)},
+            columns=["job_id", "submitted_at"],
+        )
+        stamps = sorted(
+            str(row["submitted_at"]) for row in rows if row.get("submitted_at")
+        )
+        step.check(
+            "all ten BASE jobs are in the archive and carry a submitted_at, "
+            "so min() is over the whole campaign and not a subset",
+            (10, 10),
+            (len(rows), len(stamps)),
+            evidence=f"earliest={stamps[0] if stamps else None}",
+        )
+        return stamps[0] if stamps else ""
+
     def step_5_bundle(self, step: Step) -> None:
         """Produce the publication bundle and assert its fanout reconstructs
-        every query_id in the submitted inventory."""
+        every query_id in the submitted inventory.
+
+        THE BUNDLE IS v2 AND ITS PLAN IS DECLARED A RECONSTRUCTION
+        (KBUtilLib#97). Every reconstruction field is passed EXPLICITLY --
+        nothing infers them, because a hand-assembled PLAN.json is
+        indistinguishable from a stage-1 one on disk.
+        """
         from ...genome.ontology_mapping.council_bundle import (
             BUNDLE_FILENAME,
+            BUNDLE_SCHEMA_VERSION,
             BundleConflictError,
             JobNotInBundleError,
             abstentions,
             build_bundle_from_run,
+            bundle_plan_origin,
             bundle_query_ids,
             content_digest,
             fanout_map,
@@ -1400,6 +1468,7 @@ class Rehearsal:
         if self._needs_run_dir(step, "bundle production"):
             return
 
+        generated_at = self._campaign_generated_at(step)
         bundle = build_bundle_from_run(
             self.run_dir,
             campaign_id=CAMPAIGN_ID,
@@ -1407,9 +1476,67 @@ class Rehearsal:
             snapshot_id=str(self.snapshot_id),
             job_ids=list(CHUNK_JOB_IDS),
             retry_job_ids=list(RETRY_JOB_IDS),
+            # EXPLICIT, all five. See PLAN_ASSEMBLED_ON above.
+            plan_origin_kind="reconstructed",
+            assembled_on=PLAN_ASSEMBLED_ON,
+            plan_origin_reason=PLAN_RECONSTRUCTION_REASON,
+            generated_at=generated_at,
+            generated_at_source=GENERATED_AT_SOURCE,
             written_by=self.declared_by,
         )
         self.bundle = bundle
+
+        step.check(
+            "the bundle is SCHEMA v2 -- the version that carries abstention "
+            "texts and the plan's origin",
+            (2, 2),
+            (int(BUNDLE_SCHEMA_VERSION), int(bundle["schema_version"])),
+        )
+        origin = bundle_plan_origin(bundle)
+        step.check(
+            "the plan is RECORDED AS A RECONSTRUCTION, with when it was "
+            "assembled and why -- not regenerated and not passed off as "
+            "stage 1's",
+            ("reconstructed", PLAN_ASSEMBLED_ON, True, True),
+            (
+                str(origin.get("kind")),
+                str(origin.get("assembled_on")),
+                bool(str(origin.get("reason") or "").strip()),
+                bool(str(origin.get("generated_at_source") or "").strip()),
+            ),
+            evidence=f"reason={str(origin.get('reason'))[:120]}",
+        )
+        step.check(
+            "plan_origin.generated_at IS min(council.jobs.submitted_at) over "
+            "the ten base jobs -- the date all 760 abstentions freeze at",
+            generated_at,
+            str(origin.get("generated_at")),
+            ok=bool(generated_at) and str(origin.get("generated_at")) == generated_at,
+            evidence=GENERATED_AT_SOURCE,
+        )
+        step.check(
+            "the hand-assembled plan is carried WHOLE and UNEDITED: its "
+            "plan_hash is still the empty string and no generated_at was "
+            "invented for it",
+            ("", False),
+            (
+                str(bundle["plan_hash"]),
+                "generated_at" in (bundle.get("plan") or {}),
+            ),
+        )
+        step.check(
+            "EVERY abstention carries its function text IN THE BUNDLE -- the "
+            "only durable source for it, since no council item exists",
+            (760, 760),
+            (
+                len(abstentions(bundle)),
+                sum(
+                    1
+                    for row in abstentions(bundle)
+                    if str(row.get("text") or "").strip()
+                ),
+            ),
+        )
 
         submitted = [str(q) for q in bundle_query_ids(bundle)]
         pairs = fanout_map(bundle)
@@ -1570,11 +1697,19 @@ class Rehearsal:
             DEFAULT_COVERAGE_FLOOR,
             ClearinghouseJoinAssertionError,
         )
-        from ...genome.ontology_mapping.council_bundle import bundle_query_ids
-        from ...genome.ontology_mapping.verdicts import COUNCIL_REFERENCE_FIELDS
+        from ...genome.ontology_mapping.council_bundle import (
+            bundle_plan_origin,
+            bundle_query_ids,
+            content_digest,
+        )
+        from ...genome.ontology_mapping.council_bundle import (
+            abstentions as bundle_abstentions,
+        )
+        from ...genome.ontology_mapping.verdicts import COUNCIL_REFERENCE_FIELDS, _iso
         from .council_publish import (
             FROZEN_RESULT_TYPE,
             RESULT_TYPE,
+            AbstentionTextMissingError,
             publish_from_lakehouse,
             resolvable_query_ids,
             select_verdicts,
@@ -1585,12 +1720,15 @@ class Rehearsal:
         bundle = self.bundle
         assert bundle is not None
 
-        # The abstention texts, from the plan's OWN abstain record -- the
-        # only place they exist. An abstention has no council item, so its
-        # function_text is NOT in the lakehouse, and the clearinghouse slot
-        # is frozen on first write: an empty text published once stays empty.
+        # THE ABSTENTION TEXTS COME FROM THE BUNDLE AND NO `texts=` KWARG IS
+        # PASSED (KBUtilLib#97). An abstention has no council item, so its
+        # function_text is not in the lakehouse; v2 carries it in the bundle,
+        # copied from the plan's abstain record at build time. The kwarg this
+        # used to pass is now a fanout-only override -- and a caller
+        # forgetting it is exactly how 760 permanently-empty cells would have
+        # been published, since the clearinghouse slot freezes on first write.
         plan = dict(bundle.get("plan") or {})
-        texts = {
+        from_record = {
             str(row["query_id"]): str(row.get("text") or "")
             for raw in Path(str(plan["abstain_file"])).read_text(
                 encoding="utf-8"
@@ -1598,11 +1736,28 @@ class Rehearsal:
             if raw.strip()
             for row in (json.loads(raw),)
         }
+        in_bundle = {
+            str(row["query_id"]): str(row.get("text") or "")
+            for row in bundle_abstentions(bundle)
+        }
+        disagreeing = sorted(
+            query_id
+            for query_id, text in from_record.items()
+            if in_bundle.get(query_id) != text
+        )
         step.check(
-            "a function text is sourced for EVERY abstention, from the plan's "
-            "abstain record",
-            760,
-            sum(1 for value in texts.values() if value.strip()),
+            "the bundle's abstention texts are the plan abstain record's, "
+            "all 760, carried verbatim -- so the publisher needs no kwarg",
+            {"abstentions": 760, "non_empty": 760, "disagreeing": []},
+            {
+                "abstentions": len(in_bundle),
+                "non_empty": sum(1 for text in in_bundle.values() if text.strip()),
+                "disagreeing": disagreeing[:10],
+            },
+            evidence=(
+                f"{len(from_record)} rows in {plan['abstain_file']}, compared "
+                "key by key against the bundle"
+            ),
         )
 
         selection = select_verdicts(
@@ -1641,7 +1796,6 @@ class Rehearsal:
                 bundle,
                 publish_dir=out_a,
                 state_root=self.state_root,
-                texts=texts,
             )
         except ClearinghouseJoinAssertionError as exc:
             refusal = str(exc)
@@ -1700,7 +1854,6 @@ class Rehearsal:
             bundle,
             publish_dir=out_b,
             state_root=self.state_root,
-            texts=texts,
             coverage_floor=floor,
         )
         step.check(
@@ -1809,6 +1962,108 @@ class Rehearsal:
             "before any council item existed",
             0,
             sum(1 for row in abstained if row.get("status") is not None),
+        )
+
+        # -- THE DATE (KBUtilLib#97 B) -----------------------------------
+        origin = bundle_plan_origin(bundle)
+        expected_decided_at = _iso(str(origin.get("generated_at") or ""))
+        off_date = sorted(
+            {
+                str(row.get("decided_at"))
+                for row in abstained
+                if str(row.get("decided_at")) != expected_decided_at
+            }
+        )
+        step.check(
+            "6b: EVERY abstention's decided_at is plan_origin.generated_at -- "
+            "the preset maps decided_at onto observed_at and that slot "
+            "FREEZES on first write, so this is their permanent observation "
+            "time and must not be the publish date",
+            (760, []),
+            (
+                sum(
+                    1
+                    for row in abstained
+                    if str(row.get("decided_at")) == expected_decided_at
+                ),
+                off_date[:10],
+            ),
+            evidence=(
+                f"plan_origin.generated_at={origin.get('generated_at')} -> "
+                f"decided_at={expected_decided_at}"
+            ),
+        )
+        step.check(
+            "6b: that date is NOT today -- the publish date would be the "
+            "wrong answer and is what the now() fallback would have given",
+            False,
+            expected_decided_at.startswith(
+                datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            ),
+            evidence=f"decided_at={expected_decided_at}",
+        )
+
+        # -- 6c: A BLANKED TEXT REFUSES, IT IS NOT COUNTED ----------------
+        # The acceptance bullet. A FIXTURE blanks ONE abstention's text in a
+        # COPY of the bundle -- the real bundle is untouched -- and the
+        # publish must refuse by name rather than publish an empty cell into
+        # a slot that freezes on first write.
+        victim = str(bundle_abstentions(bundle)[0]["query_id"])
+        blanked = dict(bundle)
+        blanked["abstentions"] = [
+            {**row, "text": ""} if str(row["query_id"]) == victim else dict(row)
+            for row in bundle_abstentions(bundle)
+        ]
+        blanked["bundle_digest"] = content_digest(blanked)
+        out_c = require_scratch_target(
+            self.work_root / "publish-blanked-text", what="publish dir"
+        )
+        if out_c.exists():
+            shutil.rmtree(out_c)
+        out_c.mkdir(parents=True, exist_ok=True)
+        blank_refusal = None
+        try:
+            publish_from_lakehouse(
+                self.sink,
+                blanked,
+                publish_dir=out_c,
+                state_root=self.state_root,
+                coverage_floor=floor,
+            )
+        except AbstentionTextMissingError as exc:
+            blank_refusal = str(exc)
+        step.check(
+            "6c: blanking ONE abstention's text makes the publish REFUSE -- "
+            "it is no longer merely counted in the receipt",
+            "AbstentionTextMissingError",
+            "AbstentionTextMissingError" if blank_refusal else "published anyway",
+            ok=blank_refusal is not None,
+            evidence=(blank_refusal or "")[:300],
+        )
+        step.check(
+            "6c: the refusal NAMES the query_id, so the operator can find "
+            "that row in the plan's abstain record",
+            True,
+            victim in (blank_refusal or ""),
+            evidence=f"query_id={victim}",
+        )
+        step.check(
+            "6c: it refused BEFORE writing -- no parquet and no shard",
+            (False, False),
+            ((out_c / "verdicts.parquet").exists(), (out_c / "shard").exists()),
+        )
+        step.check(
+            "6c: the real bundle is UNTOUCHED by the fixture -- 760 texts "
+            "still present and its digest unchanged",
+            (760, str(bundle["bundle_digest"])),
+            (
+                sum(
+                    1
+                    for row in bundle_abstentions(bundle)
+                    if str(row.get("text") or "").strip()
+                ),
+                content_digest(bundle),
+            ),
         )
         step.check(
             "6b: NO payload carries council_entity_hash -- the council's own "
@@ -2410,7 +2665,6 @@ class Rehearsal:
 
     def run(self, *, only: Sequence[str] | None = None) -> dict[str, Any]:
         """Run every step (or only the named ones) and return the report."""
-        from datetime import datetime, timezone
 
         plan: list[tuple[str, str, Callable[[Step], None]]] = [
             ("0", "find the run directory", self.step_0_run_directory),

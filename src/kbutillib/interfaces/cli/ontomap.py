@@ -1699,3 +1699,149 @@ def _register_stub(name: str, summary: str) -> None:
 
 for _verb_name, _verb_summary in _PLANNED_VERBS:
     _register_stub(_verb_name, _verb_summary)
+
+
+# ---------------------------------------------------------------------------
+# council-publish-lakehouse -- stage 5's producer half, from DURABLE data
+# ---------------------------------------------------------------------------
+#
+# Same output, different source. `council-publish` above reads the verdict
+# parquet a finished run's export wrote beside its PLAN.json; this verb
+# rebuilds that parquet out of the archived deliberation in
+# `kbaseincubator.council` plus the campaign's publication bundle, so the
+# publish is reproducible and re-runnable after the run directory, the scratch
+# export and the SQLite store are all gone. It then hands off to EXACTLY the
+# verb above: same render, same plan gate, same shard, same shipped preset,
+# same in-pod loader. There is no second loader and no second manifest format.
+
+
+@ontomap_cmd.command(name="council-publish-lakehouse")
+@click.option(
+    "--bundle",
+    required=True,
+    type=click.Path(dir_okay=False, exists=True),
+    help="The campaign's publication bundle (BUNDLE.json). Its digest is "
+    "verified on read.",
+)
+@click.option(
+    "--lakehouse",
+    default=None,
+    help="Where the council namespace lives: a local SQLite staging file, or "
+    "'berdl' for the live namespace (in-pod only). Default: berdl.",
+)
+@click.option(
+    "--publish-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Where PLAN.json, MANIFEST.toml, PUBLISH.json and shard/ go. Written "
+    "from the bundle, so no original run directory is needed.",
+)
+@click.option(
+    "--snapshot-id",
+    default=None,
+    help="Override the snapshot the bundle names. Still ONE snapshot, and "
+    "still refused unless the archive's load ledger marks it complete.",
+)
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the archiver's delivery state directories, for the "
+    "completeness check.",
+)
+@click.option(
+    "--coverage-floor",
+    "coverage_floor",
+    type=float,
+    default=None,
+    help="The pre-join guard's resolution floor. Default: the existing "
+    "clearinghouse DEFAULT_COVERAGE_FLOOR of 1.0. Lower it only for a "
+    "deliberately partial publish -- the measured production campaign has 8 "
+    "of 19,276 inputs unresolved, and those eight are the interesting number.",
+)
+@click.option(
+    "--roster-fingerprint",
+    default=None,
+    help="Override the run identity's roster_fingerprint. Only needed when "
+    "the gated jobs disagree or the archive recorded none.",
+)
+@click.option(
+    "--target-bytes",
+    "target_bytes",
+    type=int,
+    default=None,
+    help="Target uncompressed bytes per shard (default ~512 MiB).",
+)
+@_json_option
+def council_publish_lakehouse_cmd(
+    bundle: str,
+    lakehouse: Optional[str],
+    publish_dir: str,
+    snapshot_id: Optional[str],
+    state_root: Optional[str],
+    coverage_floor: Optional[float],
+    roster_fingerprint: Optional[str],
+    target_bytes: Optional[int],
+    as_json: bool,
+) -> None:
+    """Stage 5 from the LAKEHOUSE: a pinned snapshot plus a bundle in, shards out.
+
+    THREE GATES, ALL REQUIRED, and a job must pass every one: `query_name` is
+    `go_mf`; the job is LISTED in the campaign's publication bundle; and its
+    disposition is `published`. A job with NO disposition row is NOT
+    publishable -- absence never reads as published -- and a job named here
+    that is undispositioned or unlisted fails NON-ZERO with its id. The two
+    cancelled 19,276-item jobs in the production store look authoritative by
+    label, by size and by status; one of them carries 49 genuine but
+    superseded verdicts.
+
+    PINNED TO ONE COMPLETED SNAPSHOT, never "whatever is current": that makes
+    a re-publish non-reproducible. An incompletely-archived snapshot is
+    refused naming the tables that did not reconcile.
+
+    WINNERS RESOLVE BY THE BUNDLE'S DECLARED ORDER -- not by parent_job_id,
+    not by insertion order, not by latest timestamp.
+
+    THE GUARD RUNS BEFORE THE JOIN. A relationship test evaluated over an
+    empty join passes vacuously, so the four assertions (non-empty input,
+    non-null keys, at most one row per target slot, coverage at or above the
+    floor) are evaluated on the SOURCE side and each reports a count. A
+    non-empty input that resolves nothing exits non-zero whatever the floor.
+
+    THE LOAD IS NOT PERFORMED HERE and is not claimed. Everything this verb
+    does runs off-pod. `kbu clearinghouse load` and `kbu clearinghouse verify`
+    are the consumer machine's verbs and the receipt names them; it reports
+    the load as AWAITING OPERATOR ACCEPTANCE.
+    """
+    from ...domains.genome.ontology_mapping.council_bundle import read_bundle
+    from ...domains.kbase.berdl.council_publish import publish_from_lakehouse
+    from ...domains.kbase.berdl.council_sink import open_sink
+
+    kwargs: Dict[str, Any] = {}
+    if coverage_floor is not None:
+        kwargs["coverage_floor"] = coverage_floor
+    try:
+        record = dict(
+            publish_from_lakehouse(
+                open_sink(lakehouse),
+                read_bundle(bundle),
+                publish_dir=publish_dir,
+                snapshot_id=snapshot_id,
+                state_root=state_root,
+                roster_fingerprint=roster_fingerprint,
+                target_bytes=target_bytes,
+                **kwargs,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _envelope(
+            "council-publish-lakehouse",
+            data=record,
+            warnings=list((record.get("publish") or {}).get("warnings") or []),
+        ),
+        as_json=as_json,
+    )

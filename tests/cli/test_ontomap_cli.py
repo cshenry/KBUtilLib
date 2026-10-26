@@ -64,6 +64,11 @@ IMPLEMENTED_VERBS = [
     "council-status",
     "council-export",
     "council-publish",
+    # Stage 5's producer half AGAIN, but sourced from the LAKEHOUSE rather
+    # than from a finished run's directory: a pinned council snapshot plus the
+    # campaign's publication bundle in, the same rendered preset and the same
+    # shard run out. Registered here because it is implemented, not planned.
+    "council-publish-lakehouse",
 ]
 
 #: What a real ``mapping_version()`` returns, shaped like the production value

@@ -186,6 +186,7 @@ def _drop_a_delivery(
         snapshot_file="council-snapshot.sqlite",
         snapshot_seq=snapshot_seq,
         snapshot_schema_version=2,
+        store_host="poplar",
         created_at=created_at,
         deadline=None if legacy else deadline,
         bundle=(
@@ -266,6 +267,7 @@ class TestManifestV1:
         assert read["store_id"] == STORE_ID
         assert read["snapshot_seq"] == 1
         assert read["snapshot_schema_version"] == 2
+        assert read["store_host"] == "poplar"
         assert cdel.manifest_digest(read) == delivery["digest"]
 
     def test_the_inventory_is_measured_and_relative(
@@ -397,6 +399,28 @@ class TestArrival:
         # codebase, not a second opinion from this module.
         ledger = ArchiveLedger(report["state_dir"])
         assert reconcile_delivery(sink, ledger)["complete"] is True
+
+    def test_the_declared_store_host_reaches_every_archived_row(
+        self, drop_root: Path, sink, state_root: Path, tmp_path: Path
+    ) -> None:
+        """"Where the snapshot was taken" is in the archive's identity block.
+
+        The delivery is the only thing in the rail that knows it, which is why
+        v1 carries it: without it every row archived through this loop would
+        say the host was ``''``, silently.
+        """
+        delivery = _drop_a_delivery(drop_root, tmp_path)
+        _scanner(drop_root, sink, state_root, tmp_path).tick(now=NOW)
+        rows = sink.select_rows(
+            "calls",
+            where={
+                "store_id": STORE_ID,
+                "snapshot_id": delivery["manifest"]["snapshot_id"],
+            },
+            columns=("store_host",),
+        )
+        assert rows
+        assert {row["store_host"] for row in rows} == {"poplar"}
 
     def test_a_missing_file_inside_the_deadline_is_a_retry_not_a_failure(
         self, drop_root: Path, sink, state_root: Path, tmp_path: Path

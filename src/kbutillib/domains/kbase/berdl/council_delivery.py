@@ -17,18 +17,21 @@ compressed/uncompressed checksum record for ONE file; it is not a multi-file
 delivery descriptor and must not be pressed into service as one. v1
 (:func:`build_manifest`) carries: ``delivery_id``; ``store_id``;
 ``snapshot_id`` and ``snapshot_file``; ``snapshot_seq``; the snapshot's schema
-version; producer ``created_at`` AND ``deadline_at``, both UTC; a RELATIVE
-file inventory of ``(path, bytes, sha256)``; and optionally the
-publication-bundle identity.
+version; ``store_host``; producer ``created_at`` AND ``deadline_at``, both
+UTC; a RELATIVE file inventory of ``(path, bytes, sha256)``; and optionally
+the publication-bundle identity.
 
-(``snapshot_id`` and ``snapshot_file`` are additions to the field list the
-design named, and they are forced rather than chosen: the archiver keys every
-archived row AND its whole delivery-state directory on
+(``snapshot_id``, ``snapshot_file`` and ``store_host`` are additions to the
+field list the design named, and all three are forced rather than chosen. The
+archiver keys every archived row AND its whole delivery-state directory on
 ``(store_id, snapshot_id)`` (``council_archive.delivery_state_dir``), and
 ``prepare_snapshot`` verifies the uncompressed digest against a declared
-``snapshot_id`` before anything is archived. A delivery that could not say
-which of its files is the snapshot, or what that snapshot's verified digest
-is, could not be archived at all.)
+``snapshot_id`` before anything is archived -- so a delivery that could not
+say which of its files is the snapshot, or what that snapshot's verified
+digest is, could not be archived at all. ``store_host`` is in the archive's
+own identity block on every row -- "where the snapshot was taken" -- and the
+delivery is the ONLY thing in the rail that knows it; without it every row
+archived through this loop would carry an empty host, silently.)
 
 THE FOUR CONTRACT RULES, each here because of an observed failure:
 
@@ -207,6 +210,7 @@ MANIFEST_FIELDS: tuple[str, ...] = (
     "snapshot_file",
     "snapshot_seq",
     "snapshot_schema_version",
+    "store_host",
     "created_at",
     "deadline_at",
     "files",
@@ -379,6 +383,7 @@ def build_manifest(
     snapshot_file: str,
     snapshot_seq: int,
     snapshot_schema_version: int,
+    store_host: str = "",
     files: Iterable[Any] | None = None,
     created_at: Any = None,
     deadline_at: Any = None,
@@ -402,6 +407,9 @@ def build_manifest(
             path. Required: the archiver has to be handed one file.
         snapshot_seq: The explicit monotonic sequence for this snapshot.
         snapshot_schema_version: The snapshot's store schema version.
+        store_host: Where the snapshot was taken. Carried because it is in
+            the archive's identity block on every row and the delivery is the
+            only thing in the rail that knows it.
         files: Relative paths to inventory. Default: every file in
             *drop_dir*, recursively, except the manifest itself.
         created_at: Producer timestamp, UTC. Defaults to now.
@@ -477,6 +485,7 @@ def build_manifest(
         "snapshot_file": str(snapshot_file),
         "snapshot_seq": int(snapshot_seq),
         "snapshot_schema_version": int(snapshot_schema_version),
+        "store_host": str(store_host or ""),
         "created_at": created.isoformat(),
         "deadline_at": deadline_text,
         "files": inventory,
@@ -551,13 +560,16 @@ def read_manifest(path: Any) -> dict[str, Any]:
     missing = [
         field
         for field in MANIFEST_FIELDS
-        if field not in ("deadline_at", "bundle") and raw.get(field) in (None, "")
+        if field not in ("deadline_at", "bundle", "store_host")
+        and raw.get(field) in (None, "")
     ]
     if missing:
         raise DeliveryManifestError(
-            f"{target}: omits {missing!r}. ``deadline_at`` and ``bundle`` are "
-            "the only optional fields -- an absent deadline is the LEGACY "
-            "form, whose deadline the consumer freezes on first observation."
+            f"{target}: omits {missing!r}. ``deadline_at``, ``bundle`` and "
+            "``store_host`` are the only fields that may be absent or empty "
+            "-- an absent deadline is the LEGACY form, whose deadline the "
+            "consumer freezes on first observation, and an empty store_host "
+            "is an honest 'not captured' rather than a guess."
         )
     files = raw.get("files")
     if not isinstance(files, Sequence) or isinstance(files, (str, bytes)) or not files:

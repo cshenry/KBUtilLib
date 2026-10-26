@@ -1,0 +1,53 @@
+{
+  "version": "6.9",
+  "hitCount": 2,
+  "request": {
+    "queryString": "(EXT_ID:15210978 AND SRC:MED) OR (PMCID:PMC2828762) OR (DOI:\"10.1038/nsmb.1583\")",
+    "resultType": "core",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "format": "json",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "15210978",
+        "source": "MED",
+        "pmid": "15210978",
+        "pmcid": "PMC443546",
+        "doi": "10.1093/nar/gkh626",
+        "title": "Unique features revealed by the genome sequence of Acinetobacter sp. ADP1, a versatile and naturally transformation competent bacterium.",
+        "journalInfo": {
+          "yearOfPublication": 2004,
+          "journal": {
+            "title": "Nucleic acids research",
+            "medlineAbbreviation": "Nucleic Acids Res"
+          }
+        },
+        "pubYear": "2004",
+        "abstractText": "The genome of Acinetobacter sp. ADP1 reveals catabolic diversity and a dnaA-proximal origin of replication.",
+        "isOpenAccess": "Y",
+        "citedByCount": 412
+      },
+      {
+        "id": "PMC2828762",
+        "source": "PMC",
+        "pmcid": "PMC2828762",
+        "doi": "10.1186/1471-2164-11-S1-S5",
+        "title": "A genome-scale reconstruction of Acinetobacter baylyi ADP1 metabolism.",
+        "journalInfo": {
+          "yearOfPublication": 2010,
+          "journal": {
+            "title": "BMC genomics",
+            "medlineAbbreviation": "BMC Genomics"
+          }
+        },
+        "pubYear": "2010",
+        "abstractText": "We reconstructed the metabolic network of ADP1 from its annotated genome.",
+        "isOpenAccess": "Y",
+        "citedByCount": 143
+      }
+    ]
+  }
+}

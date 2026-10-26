@@ -31,6 +31,7 @@ is recorded here so downstream consumers understand the choice.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -111,6 +112,18 @@ class AnnotationResult:
             (includes defaults).
         records: List of per-gene annotation records; genes with zero
             called annotations may be absent.
+        version_kind: What ``tool_version`` actually identifies --
+            ``"tool-version"`` (a release of the tool, e.g. ``"1.14.6"``),
+            ``"artifact-digest"`` (a content hash of the artifact that ran,
+            e.g. ``"kbutillib/transyt@sha256:<64 hex>"``), or ``None``
+            meaning ``tool_version`` (if any) does NOT identify the tool
+            version -- it is a path, a floating tag, a runner version, or
+            absent.  See :func:`classify_version`.
+        version_asserted_by: ``None`` when ``tool_version`` was OBSERVED
+            (read back out of the tool or the image).  Otherwise a dict
+            ``{"who": str, "date": str | None, "basis": str}`` naming who
+            asserted the value and on what grounds, for a version the code
+            cannot observe (see ``rast_utils._DEFAULT_KMER_DATASET``).
     """
 
     tool: str
@@ -120,6 +133,10 @@ class AnnotationResult:
     command: str
     parameters: dict[str, Any]
     records: list[AnnotationRecord] = field(default_factory=list)
+    #: See the class docstring.  Added with a default so every existing
+    #: positional or keyword construction keeps working unchanged.
+    version_kind: str | None = None
+    version_asserted_by: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +283,69 @@ def docker_image_identity(image: str, *, timeout: float = 10.0) -> str:
                 # verbatim avoids "<image>@<repo>@sha256:...".
                 return value if "@" in value else f"{image}@{value}"
     return image
+
+
+# A full digest reference: "<artifact>@sha256:<64 hex>".  Anchored at both
+# ends by :func:`re.fullmatch` below -- a PREFIX match would accept
+# "img@sha256:<64 hex>-dirty" and a 65-hex string, both of which name nothing
+# resolvable.
+_DIGEST_RE = re.compile(r".+@sha256:[0-9a-fA-F]{64}")
+
+
+def classify_version(value: str | None, *, from_image: bool) -> str | None:
+    """Classify what a ``tool_version`` string actually identifies.
+
+    Callers of :class:`AnnotationResult` currently get one free-form
+    version string that mixes three unrelated things: a semver tool
+    release, an image content digest, and strings that identify neither
+    (an executable path, a floating tag, a *runner* version).  This
+    returns the ``version_kind`` for a value so a consumer can tell them
+    apart instead of guessing from the shape of the string.
+
+    Rules:
+
+    * ``None``, empty, or whitespace-only -> ``None``.
+    * ``from_image=True`` (the value came from
+      :func:`docker_image_identity`): a FULL match of
+      ``<artifact>@sha256:<exactly 64 hex>`` -> ``"artifact-digest"``.
+      Anything else -> ``None``.  That "anything else" is the case that
+      matters: ``docker_image_identity`` degrades to the bare tag when
+      ``docker image inspect`` cannot be run, and a bare tag such as
+      ``kbutillib/transyt:latest`` names a different set of bytes after
+      every rebuild.
+    * ``from_image=False``: a value starting with ``"nextflow/"`` ->
+      ``None`` (that is the RUNNER's version, not the tool's -- see
+      ``dram2_utils._parse_nextflow_engine_version``); an absolute
+      filesystem path -> ``None`` (an executable path is not a version);
+      anything else -> ``"tool-version"``.
+
+    SCOPE.  This covers the formats the wired annotators actually emit.
+    It is not a general-purpose version validator and does not judge
+    arbitrary strings: ``from_image=False`` returns ``"tool-version"`` for
+    any value that is not a runner label or an absolute path, including
+    strings that are not versions at all.  Widening it means adding the
+    new producer's format here, deliberately.
+
+    Args:
+        value: The ``tool_version`` string the annotator is about to
+            record, or None.
+        from_image: True when *value* came from a Docker image identity
+            (i.e. from :func:`docker_image_identity`) rather than from the
+            tool reporting its own version.
+
+    Returns:
+        ``"tool-version"``, ``"artifact-digest"``, or None.  Never raises
+        -- provenance classification must not fail a run.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if from_image:
+        return "artifact-digest" if _DIGEST_RE.fullmatch(value) else None
+    if value.startswith("nextflow/"):
+        return None
+    if os.path.isabs(value):
+        return None
+    return "tool-version"
 
 
 def describe_or_accession(

@@ -182,6 +182,71 @@ def test_criterion_a_current_state_queries_result_table(entity_type):
     assert table_name(entity_type, "result") in fake.calls[0].sql
 
 
+@pytest.mark.parametrize("entity_type", ENTITY_TYPES)
+def test_criterion_a_universe_joins_the_entity_and_content_tables(entity_type):
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.universe(entity_type)
+    sql = fake.calls[0].sql
+    # Both tables, by the name table_name() gives them (Rule 2), and no
+    # other type's.
+    assert table_name(entity_type, "content") in sql
+    assert table_name(entity_type, "entity") in sql
+    for other in ENTITY_TYPES:
+        if other != entity_type:
+            assert table_name(other, "content") not in sql
+    assert table_name(entity_type, "result") not in sql
+
+
+def test_universe_orders_by_entity_hash_so_off_pod_paging_is_stable():
+    # An unordered relational scan may return rows in a different order per
+    # page, which would silently both drop and duplicate rows across page
+    # boundaries of the limit/offset paging the off-pod path uses.
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.universe("function")
+    assert "ORDER BY" in fake.calls[0].sql.upper()
+
+
+def test_universe_defaults_to_spark_like_the_other_whole_table_read():
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.universe("function")
+    assert fake.calls[0].engine == "spark"
+    cap.universe("function", engine="trino")
+    assert fake.calls[1].engine == "trino"
+
+
+def test_universe_binds_no_parameters_and_inlines_no_hash():
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.universe("function")
+    assert fake.calls[0].params is None
+    assert not _HEX_RUN_RE.search(fake.calls[0].sql)
+
+
+def test_universe_off_pod_pages_to_completion_on_a_short_page():
+    rows = [{"entity_hash": _hash(i), "definition": f"f{i}"} for i in range(7000)]
+
+    def responder(call):
+        return rows[call.offset : call.offset + (call.limit or len(rows))]
+
+    fake = _FakeCapability(locus="off_pod", responder=responder)
+    cap = ClearinghouseCapability(fake)
+    out = cap.universe("function")
+    assert len(out) == 7000
+    assert [call.offset for call in fake.calls] == [0, OFFPOD_PAGE_CAP]
+    assert all(call.limit == OFFPOD_PAGE_CAP for call in fake.calls)
+
+
+def test_universe_refuses_an_unknown_entity_type_before_any_query():
+    fake = _FakeCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ValueError, match="unknown entity_type"):
+        cap.universe("funktion")
+    assert fake.calls == []
+
+
 def test_criterion_a_content_all_types_uses_union_view():
     fake = _FakeCapability()
     cap = ClearinghouseCapability(fake)
@@ -1220,6 +1285,66 @@ def test_register_non_transyt_source_accepts_a_default_parameter_set():
     (rows_index,) = _loads_of(fake, "gene_result")
     (stored,) = fake.load_calls[rows_index]["dataframes"]["gene_result"]
     assert stored["parameter_set_hash"] == DEFAULT_PARAMETER_SET_HASH
+
+
+# -- the shared AI-COUNCIL validator, in register() -------------------------
+#
+# The third write path. `register()` goes through
+# `result_parameter_set_identity`, which runs EVERY declared tool rule, so the
+# council rule is enforced here for free -- and these tests are what make
+# "for free" a claim rather than a hope.
+
+_COUNCIL_SET = {
+    "query": "go_mf@1",
+    "bench_fingerprint": "a" * 64,
+    "mapping_hash": "b" * 64,
+}
+
+
+@pytest.mark.parametrize("source", ["council/go_mf@1", "Council/go_mf@1"])
+def test_register_council_refuses_a_default_parameter_set(source):
+    """{} would land every council run in one parameter_set_hash slot."""
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "function", [_result_row(parameter_set={}, source=source)], kind="result"
+        )
+    assert "bench_fingerprint" in str(exc.value)
+    assert fake.load_calls == []
+
+
+def test_register_council_refuses_the_roster_fingerprint_as_a_key():
+    """Provenance used as identity: the defect bench_fingerprint fixes.
+
+    `Roster.fingerprint()` moves when a seat is re-routed to another gateway,
+    so using it as the partition key would re-charge the whole corpus for a
+    pure cost optimisation.
+    """
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    params = {**_COUNCIL_SET, "roster_fingerprint": "c" * 64}
+    with pytest.raises(ParameterSetError) as exc:
+        cap.register(
+            "function",
+            [_result_row(parameter_set=params, source="council/go_mf@1")],
+            kind="result",
+        )
+    assert "roster_fingerprint" in str(exc.value)
+    assert fake.load_calls == []
+
+
+def test_register_council_accepts_the_run_identity():
+    fake = _FakeWriteCapability()
+    cap = ClearinghouseCapability(fake)
+    cap.register(
+        "function",
+        [_result_row(parameter_set=_COUNCIL_SET, source="council/go_mf@1")],
+        kind="result",
+    )
+    (rows_index,) = _loads_of(fake, "function_result")
+    (stored,) = fake.load_calls[rows_index]["dataframes"]["function_result"]
+    assert stored["parameter_set_hash"] == parameter_set_hash(_COUNCIL_SET)
 
 
 # --------------------------------------------------------------------------

@@ -57,6 +57,7 @@ __all__ = [
     "ModelConfig",
     "ProfileConfig",
     "QueueConfig",
+    "RateConfig",
     "CouncilConfig",
     "default_canonical",
     "expand_vars",
@@ -132,6 +133,7 @@ _ENDPOINT_KEYS = frozenset(
         "billing",
         "account",
         "max_concurrency",
+        "max_requests_per_minute",
         "max_total_tokens",
         "reuse_namespace",
         "deployment_revision",
@@ -156,11 +158,29 @@ _TOP_KEYS = frozenset(
         "models",
         "profiles",
         "queues",
+        "rates",
         "default_profile",
         "store",
+        # The store's DECLARED ARCHIVE IDENTITY. Absent from this set until
+        # KBUtilLib#93: CouncilConfig carried the field, but an unknown
+        # top-level key is dropped with only a WARNING, so a store_id written
+        # in a config file never reached the config object and the store's
+        # configured-vs-stored refusal had nothing to compare.
+        "store_id",
         "user",
         "query_dirs",
         "cli_temp_root",
+    }
+)
+
+#: Keys one ``rates`` entry may carry (see :class:`RateConfig`).
+_RATE_KEYS = frozenset(
+    {
+        "input_per_mtok",
+        "output_per_mtok",
+        "currency",
+        "provenance",
+        "is_floor",
     }
 )
 
@@ -590,6 +610,15 @@ class EndpointConfig(BaseModel):
     billing: Literal["subscription", "api"] = "subscription"
     account: Optional[str] = None
     max_concurrency: Optional[int] = None
+    #: Requests per minute this endpoint's ACCOUNT will accept, when that is
+    #: a separate ceiling from ``max_concurrency``.  MAG enforces both and
+    #: account-wide: 20 parallel requests AND 120 requests per minute
+    #: (measured 2026-10-21 -- a config asking 24 parallel errored 427 of 500
+    #: pilot items over 1,925 transport attempts).  Concurrency alone cannot
+    #: express the second ceiling, and a wall-clock estimate that ignored it
+    #: would promise a throughput the gateway refuses.  ``None`` means "no
+    #: separate per-minute limit known", not "unlimited".
+    max_requests_per_minute: Optional[float] = None
     max_total_tokens: Optional[int] = None
     reuse_namespace: Optional[str] = None
     deployment_revision: str = ""
@@ -712,6 +741,57 @@ class QueueConfig(BaseModel):
     max_output_tokens_per_item: Optional[int] = None
 
 
+class RateConfig(BaseModel):
+    """What one GATEWAY charges per million tokens, and where that came from.
+
+    OPT-IN AND NEVER GUESSED.  A gateway with no entry here is reported
+    ``unpriced`` by the quote stage -- not priced at the vendor's public list
+    rate -- and the reason is measured, not cautious: every ARGO and MAG
+    usage, billing, pricing and quota path 404s, MAG's ``/models/<id>``
+    returns 401 "Only proxy admin", and a $350/month ARGO cap was exhausted
+    in a week by ordinary traffic, which cannot happen at pass-through.  So
+    ARGO's effective multiple over list is unknown and above 1, and a
+    list-derived figure is a FLOOR.  Presenting one as a cost is an error
+    this project has already made once.
+
+    ``provenance`` is therefore REQUIRED: a dollar figure with no stated
+    source is the failure mode this class exists to prevent, so a rate that
+    does not say where it came from is refused at load time rather than
+    published unlabelled.  ``is_floor`` marks a rate known to understate (a
+    vendor list price standing in for a gateway's own multiple); the quote
+    carries it through to every figure derived from this rate.
+    """
+
+    #: Dollars per million INPUT tokens.  Input is 86% of all tokens on the
+    #: measured ``function_to_go`` run, so this is the field that matters.
+    input_per_mtok: float
+    #: Dollars per million OUTPUT tokens.
+    output_per_mtok: float
+    currency: str = "USD"
+    #: Where this number came from, in the operator's own words.  Required.
+    provenance: str
+    #: True when this rate is known to be a LOWER BOUND on what is charged.
+    is_floor: bool = False
+
+    @model_validator(mode="after")
+    def _check(self) -> "RateConfig":
+        """Refuse a rate that is unlabelled or negative."""
+        if not str(self.provenance).strip():
+            raise ConfigError(
+                "a rate must declare its `provenance`: an unlabelled dollar "
+                "figure is exactly the error the quote stage refuses to make. "
+                "Say where the number came from (an invoice, a balance delta, "
+                "a vendor list page) and whether it is a floor."
+            )
+        for field in ("input_per_mtok", "output_per_mtok"):
+            if float(getattr(self, field)) < 0:
+                raise ConfigError(
+                    f"rate {field} is {getattr(self, field)!r}; a price per "
+                    "million tokens cannot be negative"
+                )
+        return self
+
+
 class CouncilConfig(BaseModel):
     """A validated council configuration.
 
@@ -726,8 +806,37 @@ class CouncilConfig(BaseModel):
     #: worker, every seat" -- today's behaviour, unchanged (point 6 of the
     #: design: this section is additive).
     queues: Dict[str, QueueConfig] = {}
+    #: Per-GATEWAY token prices, keyed by the gateway a quote groups spend
+    #: under: an endpoint's ``account`` when it declares one, else the
+    #: endpoint name.  Empty is the normal state and means every gateway is
+    #: reported ``unpriced`` (see :class:`RateConfig`).
+    rates: Dict[str, RateConfig] = {}
     default_profile: Optional[str] = None
     store: str = DEFAULT_STORE_URL
+    #: The store's DECLARED ARCHIVE IDENTITY -- what this config believes the
+    #: store at :attr:`store` is, for the ``kbaseincubator.council`` archive.
+    #:
+    #: There is deliberately NO DEFAULT, and none may ever be added. Not the
+    #: hostname, not a slug of :attr:`store`, not a ``uuid4``: every row
+    #: archived out of a store is keyed on ``store_id``, ``job_id`` is unique
+    #: only WITHIN one store, and the clearinghouse payload that carries the
+    #: id is frozen on first write (the slot key excludes
+    #: ``result_type_version``, so a corrected payload in the same slot is
+    #: silently dropped). A path-derived id breaks every join the moment the
+    #: store moves off ``/scratch``; a fresh id per copy breaks idempotency;
+    #: one id shared between two independently writable forks silently merges
+    #: unrelated histories. An automatic value would be indistinguishable
+    #: from a correct one until the first store moved, by which time nothing
+    #: could be fixed.
+    #:
+    #: This is NOT the authoritative record. The authority is the identity
+    #: persisted INSIDE the store database
+    #: (``store.sqlite.SqliteStore.store_identity``), so that a file copy
+    #: carries it. This field is the CONFIGURED value checked against that
+    #: record: ``snapshot`` and ``export`` refuse when the two disagree,
+    #: naming both, and never auto-heal. Leaving it ``None`` means "do not
+    #: compare" -- the store's own record still has to exist.
+    store_id: Optional[str] = None
     #: Root directory a CLI backend writes its prompt file under (story 17:
     #: delivering the Claude CLI's prompt by file rather than by stdin, so a
     #: busy event loop cannot cause a 3-second stdin timeout). Declared here
@@ -1032,6 +1141,22 @@ class CouncilConfig(BaseModel):
 
         self._queue_accounts = queue_accounts_final
         return self
+
+    def queue_account(self, queue: str) -> Optional[str]:
+        """The account *queue* was validated against, or ``None``.
+
+        :meth:`_validate_queues` already resolved every queue to exactly one
+        account (an enforced invariant) and recorded it; this exposes that
+        answer rather than letting a caller re-derive it from the queue's
+        seats, which is the derivation that could disagree.
+
+        The caller that needs it is the request pacer: a gateway's
+        requests-per-minute is an ACCOUNT limit, the account's queue children
+        are separate processes, and apportioning the rate between them means
+        knowing which of them share one account (see
+        ``daemon._queue_requests_per_minute``).
+        """
+        return self._queue_accounts.get(str(queue))
 
     def check_roster_against_queues(
         self, roster: Roster, *, job_id: Optional[str] = None
@@ -1425,6 +1550,24 @@ def load_council_config(
             "by name, because a typo would then silently seat a different model."
         )
 
+    # -- rates ----------------------------------------------------------------
+    # Keyed by GATEWAY, not by endpoint alias: MAG's limits and MAG's bill are
+    # account-wide, so two endpoint aliases on one account are one payer.
+    raw_rates = raw.get("rates") or {}
+    rates: Dict[str, RateConfig] = {}
+    for name, entry in raw_rates.items():
+        if not isinstance(entry, Mapping):
+            raise ConfigError(
+                f"rate {name!r} must be a mapping, got {type(entry).__name__}"
+            )
+        fields = _warn_unknown("rate", name, entry, _RATE_KEYS)
+        try:
+            rates[str(name)] = RateConfig(**fields)
+        except ConfigError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a bad rate is a config error
+            raise ConfigError(f"rate {name!r} is unusable: {exc}") from exc
+
     default_profile = raw.get("default_profile")
     if default_profile is not None and default_profile not in profiles:
         raise ConfigError(
@@ -1437,8 +1580,17 @@ def load_council_config(
         models=models,
         profiles=profiles,
         queues=queues,
+        rates=rates,
         default_profile=default_profile,
         store=_resolve_store_url(raw.get("store")),
+        # Blank-to-None like `user` below: an empty value in a config file
+        # means "do not compare", not an id of "". The id's SHAPE is validated
+        # by the store at open time (SqliteStore.__init__ -> validate_store_id),
+        # which is where a typo has to surface -- the store is the only thing
+        # that can also check it against the record inside the database.
+        store_id=(
+            (str(raw["store_id"]).strip() or None) if raw.get("store_id") else None
+        ),
         cli_temp_root=cli_temp_root,
         user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
         query_dirs=_resolve_query_dirs(raw.get("query_dirs"), source),

@@ -4611,7 +4611,7 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
         text, column = args
         value = row.get(column)
         # NULL IN, NULL OUT. A prefixed null would become the literal
-        # pointer "kbdl:obj:None" -- a reference to an object that does not
+        # pointer "obj://None" -- a reference to an object that does not
         # exist, and indistinguishable in the lake from a real one. A missing
         # pointer stays missing.
         return None if value is None else f"{text}{value}"
@@ -4625,7 +4625,7 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
             value = row.get(args[index + 1])
             # NULL IN, NULL OUT, across EVERY named column, for the same
             # reason @prefix is null-preserving: a pointer assembled from a
-            # missing half ("kbdl:archive:None:x") is a reference to nothing
+            # missing half ("obj://None#x") is a reference to nothing
             # and is indistinguishable in the lake from a real one.
             if value is None:
                 return None
@@ -4992,8 +4992,8 @@ def _build_row(
     - STATIC ``parameter_set``: the hash the plan computed ONCE at plan time,
       not re-derived per row. When the plan's result ``source`` is a
       derivation rather than a ``@const(...)``, the tool was unknown at plan
-      time, so the shared TRANSYT result-boundary validator
-      (:func:`clearinghouse_parameters.validate_transyt_parameter_set`) runs
+      time, so the shared per-tool result-boundary layer
+      (:func:`clearinghouse_parameters.validate_tool_parameter_set`) runs
       HERE, against this row's resolved ``source``.
     - PER-ROW ``parameter_set_column``: the row's OWN set, canonicalised and
       hashed here through
@@ -5001,9 +5001,9 @@ def _build_row(
       same function the static form uses at plan time, which is what makes
       the two forms produce byte-identical canonical text and an identical
       hash for an equal set. Both layers (the generic parameter-set rule and
-      the tool-specific TRANSYT rule) run, against this row's resolved
-      ``source``, and a refusal is a :class:`ShardParameterSetError` that
-      skips THIS ROW rather than failing the run.
+      every declared tool rule) run, against this row's resolved ``source``,
+      and a refusal is a :class:`ShardParameterSetError` that skips THIS ROW
+      rather than failing the run.
 
     ``parameter_sets`` is the per-row form's only other output: the sharder
     must register every DISTINCT set it saw, and the canonical text that
@@ -5026,7 +5026,10 @@ def _build_row(
         else:
             out["parameter_set_hash"] = plan.parameter_set_hash
             if cm.constant_result_source(plan.columns) is None:
-                cp.validate_transyt_parameter_set(
+                # EVERY tool rule, not TRANSYT's by name: a tool declared
+                # later must not be enforced at plan time and silently absent
+                # here.
+                cp.validate_tool_parameter_set(
                     plan.parameter_set or {},
                     source=out.get("source"),
                     where=(
@@ -6330,6 +6333,14 @@ def _batch_entry(report: ShardReport) -> dict[str, Any]:
         "batch_id": report.batch_id,
         "file": f"{report.table}/{report.path.name}",
         "rows": report.rows,
+        # THE FILE'S SIZE ON DISK, so the consumer's arrival check can report
+        # EXPECTED versus OBSERVED size and not only a digest mismatch. A
+        # partially-synced file is overwhelmingly a SHORT file, and "4.2 MB of
+        # an expected 9.1 MB" tells an operator to wait, where "the digests
+        # differ" reads as corruption. Additive: an inventory written before
+        # this field existed reports expected_bytes as null, which is honest
+        # rather than wrong.
+        "bytes": report.path.stat().st_size if report.path.is_file() else None,
         "rows_deduplicated": report.rows_deduplicated,
         "key_column": report.key_column,
         "hash_min": report.hash_min,

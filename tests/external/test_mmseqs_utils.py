@@ -720,6 +720,84 @@ class TestSearchProteins:
         assert search_cmd[search_cmd.index("-s") + 1] == "6.5"
 
 
+    def test_search_proteins_default_call_passes_no_evalue_or_max_seqs(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that the new options are absent from the command by default."""
+        captured_cmds = []
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._mock_run_factory([])(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=mock_run):
+            mock_utils.search_proteins(
+                sample_proteins, fake_db_path, min_seq_id=0.5, coverage=0.5
+            )
+
+        search_cmd = next(c for c in captured_cmds if len(c) > 1 and c[1] == "search")
+        assert "-e" not in search_cmd
+        assert "--max-seqs" not in search_cmd
+
+        convertalis_cmd = next(
+            c for c in captured_cmds if len(c) > 1 and c[1] == "convertalis"
+        )
+        # The default column set must not acquire tcov.
+        assert convertalis_cmd[-1] == "query,target,pident,qcov,evalue,bits"
+
+    def test_search_proteins_passes_evalue_and_max_hits(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that evalue and max_hits reach mmseqs as -e and --max-seqs."""
+        captured_cmds = []
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._mock_run_factory([])(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=mock_run):
+            mock_utils.search_proteins(
+                sample_proteins, fake_db_path,
+                min_seq_id=0.5, coverage=0.5, evalue=1e-3, max_hits=25
+            )
+
+        search_cmd = next(c for c in captured_cmds if len(c) > 1 and c[1] == "search")
+        assert search_cmd[search_cmd.index("-e") + 1] == "0.001"
+        assert search_cmd[search_cmd.index("--max-seqs") + 1] == "25"
+
+    def test_search_proteins_include_subject_coverage_requests_and_returns_tcov(
+        self, mock_utils, sample_proteins, fake_db_path
+    ):
+        """Test that include_subject_coverage adds the tcov column and key."""
+        captured_cmds = []
+        # query,target,pident,qcov,evalue,bits,tcov
+        tsv_rows = [("query1", "target1", "90.000", "0.950", "1e-40", "180.0", "0.330")]
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return self._mock_run_factory(tsv_rows)(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=mock_run):
+            hits = mock_utils.search_proteins(
+                sample_proteins, fake_db_path,
+                min_seq_id=0.5, coverage=0.5, include_subject_coverage=True
+            )
+
+        convertalis_cmd = next(
+            c for c in captured_cmds if len(c) > 1 and c[1] == "convertalis"
+        )
+        assert convertalis_cmd[-1] == "query,target,pident,qcov,evalue,bits,tcov"
+
+        assert len(hits) == 1
+        assert set(hits[0].keys()) == {
+            "query_id", "target_id", "identity", "coverage", "evalue", "bits",
+            "subject_coverage"
+        }
+        # Query coverage and subject coverage are distinct quantities.
+        assert hits[0]["coverage"] == pytest.approx(0.95)
+        assert hits[0]["subject_coverage"] == pytest.approx(0.33)
+
+
 class TestParseSearchTsv:
     """Test suite for the _parse_search_tsv helper."""
 
@@ -777,6 +855,30 @@ class TestParseSearchTsv:
         assert set(hits[0].keys()) == {
             "query_id", "target_id", "identity", "coverage", "evalue", "bits"
         }
+
+
+    def test_parse_search_tsv_keeps_subject_coverage_separate(self, mock_utils, temp_dir):
+        """Test that tcov is read into subject_coverage, not merged into coverage."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t85.0\t1.0\t1e-20\t100.0\t0.25\n")
+
+        hits = mock_utils._parse_search_tsv(
+            tsv_file, min_seq_id=0.0, coverage=0.0, include_subject_coverage=True
+        )
+
+        assert len(hits) == 1
+        assert hits[0]["coverage"] == pytest.approx(1.0)
+        assert hits[0]["subject_coverage"] == pytest.approx(0.25)
+
+    def test_parse_search_tsv_missing_tcov_column_raises(self, mock_utils, temp_dir):
+        """Test that asking for subject coverage without a tcov column fails loudly."""
+        tsv_file = Path(temp_dir) / "results.tsv"
+        tsv_file.write_text("q1\tt1\t85.0\t1.0\t1e-20\t100.0\n")
+
+        with pytest.raises(ValueError, match="tcov"):
+            mock_utils._parse_search_tsv(
+                tsv_file, min_seq_id=0.0, coverage=0.0, include_subject_coverage=True
+            )
 
 
 @pytest.mark.integration

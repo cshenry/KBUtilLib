@@ -1,0 +1,87 @@
+{
+  "version": "6.9",
+  "hitCount": 3,
+  "nextCursorMark": "AoJwz9CqMyk1NzYyNDcyNA==",
+  "request": {
+    "queryString": "\"dnaA\" AND (\"Acinetobacter baylyi\" OR \"ADP1\")",
+    "resultType": "core",
+    "cursorMark": "*",
+    "pageSize": 2,
+    "format": "json",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "15210978",
+        "source": "MED",
+        "pmid": "15210978",
+        "pmcid": "PMC443546",
+        "doi": "10.1093/nar/gkh626",
+        "title": "Unique features revealed by the genome sequence of Acinetobacter sp. ADP1, a versatile and naturally transformation competent bacterium.",
+        "authorString": "Barbe V, Vallenet D, Fonknechten N, et al.",
+        "journalInfo": {
+          "issue": "19",
+          "volume": "32",
+          "journalIssueId": 1234567,
+          "dateOfPublication": "2004 ",
+          "monthOfPublication": 0,
+          "yearOfPublication": 2004,
+          "printPublicationDate": "2004-01-01",
+          "journal": {
+            "title": "Nucleic acids research",
+            "medlineAbbreviation": "Nucleic Acids Res",
+            "essn": "1362-4962",
+            "issn": "0305-1048",
+            "isoabbreviation": "Nucleic Acids Res.",
+            "nlmid": "0411011"
+          }
+        },
+        "pubYear": "2004",
+        "abstractText": "The genome of Acinetobacter sp. ADP1 reveals catabolic diversity and a dnaA-proximal origin of replication.",
+        "affiliation": "Genoscope, Evry, France",
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "inPMC": "N",
+        "hasPDF": "Y",
+        "citedByCount": 412,
+        "firstIndexDate": "2004-06-25",
+        "firstPublicationDate": "2004-01-01"
+      },
+      {
+        "id": "19383134",
+        "source": "MED",
+        "pmid": "19383134",
+        "doi": "10.1038/nsmb.1583",
+        "title": "Regulation of the replication initiator DnaA in Acinetobacter baylyi ADP1.",
+        "authorString": "de Berardinis V, Durot M, Weissenbach J, Salanoubat M.",
+        "journalInfo": {
+          "issue": "4",
+          "volume": "16",
+          "journalIssueId": 2345678,
+          "dateOfPublication": "2009 Apr",
+          "monthOfPublication": 4,
+          "yearOfPublication": 2009,
+          "printPublicationDate": "2009-04-01",
+          "journal": {
+            "title": "Nature structural & molecular biology",
+            "medlineAbbreviation": "Nat Struct Mol Biol",
+            "essn": "1545-9985",
+            "issn": "1545-9993",
+            "isoabbreviation": "Nat. Struct. Mol. Biol.",
+            "nlmid": "101186374"
+          }
+        },
+        "pubYear": "2009",
+        "abstractText": "DnaA binding at oriC was measured across growth conditions in ADP1.",
+        "isOpenAccess": "N",
+        "inEPMC": "N",
+        "inPMC": "N",
+        "hasPDF": "N",
+        "citedByCount": 57,
+        "firstIndexDate": "2009-04-22",
+        "firstPublicationDate": "2009-04-01"
+      }
+    ]
+  }
+}

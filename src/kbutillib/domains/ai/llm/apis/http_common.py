@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import httpx
 
 from ..types import (
+    WEB_SEARCH_PARAM,
     AuthError,
     CallTimeout,
     InvalidOutput,
@@ -48,6 +49,7 @@ from ..types import (
     TransportError,
     as_llm_error,
     as_llm_request,
+    wants_web_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,6 +263,13 @@ class HttpBackend:
     kind: str = "openai"
     default_base_url: Optional[str] = None
 
+    #: Optional ``ApiType`` member (see :mod:`..protocol`): can this API type
+    #: run a call with live web search?  ``False`` for every HTTP backend
+    #: this repository ships -- neither ARGO nor a local OpenAI-compatible
+    #: server exposes a search tool -- and a request that asks for one is
+    #: refused by :meth:`_complete` BEFORE anything is sent.
+    supports_web_search: bool = False
+
     def __init__(
         self,
         config: Optional[Mapping[str, Any]] = None,
@@ -377,7 +386,25 @@ class HttpBackend:
     # -- the request ------------------------------------------------------
 
     async def _complete(self, req: LLMRequest, started: float) -> LLMResult:
-        """The real body of :meth:`complete`, minus the never-raise guard."""
+        """The real body of :meth:`complete`, minus the never-raise guard.
+
+        The web-search refusal comes FIRST, before the credential is even
+        resolved, because the point of it is that nothing is sent: a caller
+        that asked for the live web and was quietly served the model's
+        training data has no way to tell it happened, so the only honest
+        answer from a backend with no search tool is ``ok=False``.  Reported
+        as ``invalid_output`` and NOT retryable -- a second identical attempt
+        would be refused identically, and the fix is on the caller's side
+        (put what you found in the prompt, i.e. context mode).
+        """
+        if wants_web_search(req) and not self.supports_web_search:
+            return self._failed(
+                InvalidOutput(
+                    f"{self.kind} has no web search; use context mode"
+                ).to_error(),
+                started,
+            )
+
         bearer, auth_error = self._bearer()
         if auth_error is not None:
             return self._failed(auth_error, started)
@@ -569,13 +596,25 @@ class HttpBackend:
         return params
 
     def _model_params(self, req: LLMRequest) -> Dict[str, Any]:
-        """The request's own provider params (``req.params`` minus ``extra_body``).
+        """The request's own provider params, minus the two that are not params.
 
         ``CouncilConfig._seat`` puts a model's ``params:`` block on the seat,
         which the request carries here, so dropping them would silently
         discard a configured ``top_p``.
+
+        Two keys are dropped because they are not generation parameters at
+        all: ``extra_body`` (raw body additions, merged separately by
+        :meth:`_extra_body`) and :data:`~..types.WEB_SEARCH_PARAM`, which is
+        an instruction to the API TYPE about how to make the call.  Dropping
+        ``web_search`` matters even though a truthy one is refused above:
+        a caller that writes ``web_search=False`` on every request must not
+        have ``{"web_search": false}`` posted into a chat-completions body,
+        where a strict server answers 400 for an unknown field.
         """
-        return {k: v for k, v in dict(req.params or {}).items() if k != "extra_body"}
+        dropped = ("extra_body", WEB_SEARCH_PARAM)
+        return {
+            k: v for k, v in dict(req.params or {}).items() if k not in dropped
+        }
 
     def _extra_body(self, req: LLMRequest) -> Dict[str, Any]:
         """Raw body additions: the endpoint's, overridden by the request's."""
@@ -621,9 +660,13 @@ class HttpBackend:
                 f"rejected or is missing: {excerpt!r}"
             ).to_error()
         if status == 429:
+            # Still a retryable ``transport`` failure -- one 429 against a
+            # windowed limit is normal and is retried -- but FLAGGED, so a
+            # caller pacing the account can apply its own SUSTAINED rule
+            # without matching on this message (see ``LLMError.rate_limited``).
             return TransportError(
                 f"{self.name}: HTTP 429 (rate limited) from {self.base_url}: {excerpt!r}"
-            ).to_error()
+            ).to_error().model_copy(update={"rate_limited": True})
         if status >= 500:
             return TransportError(
                 f"{self.name}: HTTP {status} from {self.base_url}: {excerpt!r}"

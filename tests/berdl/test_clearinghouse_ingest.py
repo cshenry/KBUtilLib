@@ -109,6 +109,30 @@ def _result_row(
     }
 
 
+def _preloaded_entities(*seeds: str, entity_type: str = "gene") -> dict:
+    """``{<type>_entity: [...]}`` for a ``_FakeLake``: identity already there.
+
+    A ``<type>_result`` batch's join keys must RESOLVE against
+    ``<type>_entity`` -- the pre-commit coverage assertion
+    (:func:`clearinghouse_ingest.join_assertions`) -- because a result row
+    whose ``entity_hash`` names no entity is an orphan: the hash is opaque, so
+    nothing can say what the result is ABOUT.
+
+    So a result-batch fixture has to declare which entities the clearinghouse
+    already knows, which is also the only state a real load is ever in: the
+    entity and content rows are loaded first (47,341 of each, for
+    ``function``), and stage 1 reads the universe out of them before anything
+    is submitted. A result load into a target with NO entities is the
+    0-of-19,268 wrong-key case, not a normal run.
+    """
+    return {
+        f"{entity_type}_entity": [
+            _entity_row(seed, "PRELOADED", entity_type=entity_type)
+            for seed in seeds
+        ]
+    }
+
+
 def _registry_row(batch_id: str, parameter_set: str = "p1") -> dict:
     return {
         "parameter_set_hash": _hash(parameter_set),
@@ -133,6 +157,9 @@ def _write_batch(root: Path, table: str, batch_id: str, rows: list[dict]) -> dic
         "batch_id": batch_id,
         "file": f"{table}/{path.name}",
         "rows": len(rows),
+        # Mirrors what publish_unit records, so the arrival check's
+        # expected-versus-observed SIZE evidence is a real number here too.
+        "bytes": path.stat().st_size,
         "rows_deduplicated": 0,
         "key_column": key_column,
         "hash_min": keys[0],
@@ -871,7 +898,15 @@ def test_the_ledger_is_written_under_the_state_dir_with_the_row_accounting(
         assert record["sha256"]
 
 
-def test_a_sha256_mismatch_refuses_that_batch_ledgers_it_and_carries_on(tmp_path):
+def _mismatched_run(tmp_path, *, age_s: float = 0.0):
+    """A two-batch run whose FIRST batch's bytes are not its published sha256.
+
+    ``age_s`` back-dates ``run.json``'s mtime, which is what the transfer
+    deadline is measured from -- so the same on-disk condition can be posed
+    both as "the hand-off is minutes old" and as "the hand-off is a day old".
+    """
+    import os as _os
+
     root = _publish_run(
         tmp_path,
         [
@@ -879,19 +914,121 @@ def test_a_sha256_mismatch_refuses_that_batch_ledgers_it_and_carries_on(tmp_path
             ("gene_content", _B2, [_entity_row("a", _B2)]),
         ],
     )
-    run = json.loads((root / "run.json").read_text())
+    path = root / "run.json"
+    run = json.loads(path.read_text())
     run["batches"][0]["sha256"] = _hash("tampered")
-    (root / "run.json").write_text(json.dumps(run))
+    path.write_text(json.dumps(run))
+    if age_s:
+        stamp = path.stat().st_mtime - age_s
+        _os.utime(path, (stamp, stamp))
+    return root
+
+
+def test_a_sha256_mismatch_past_the_deadline_is_a_failed_delivery(tmp_path):
+    """Past the deadline the batch FAILS, is ledgered, and the others carry on.
+
+    The evidence is the point: which batch, expected versus observed digest,
+    expected versus observed size. "The digests differ" alone cannot tell an
+    operator whether to wait, re-sync or re-shard.
+    """
+    root = _mismatched_run(tmp_path, age_s=ci.DEFAULT_TRANSFER_DEADLINE_SECONDS + 60)
     fake = _FakeLake(spark=_FakeSpark())
     result = _capability(fake).ingest_shards(root)
     by_table = {report["name"]: report for report in result["tables"]}
     assert by_table["gene_entity"]["action"] == "failed"
-    assert "sha256" in by_table["gene_entity"]["error"]
+    error = by_table["gene_entity"]["error"]
+    assert "FAILED DELIVERY" in error
+    assert "sha256" in error
+    transfer = by_table["gene_entity"]["transfer"]
+    assert transfer["state"] == "failed_delivery"
+    assert transfer["reason"] == ci.TRANSFER_DIGEST_MISMATCH
+    assert transfer["expected_sha256"] == _hash("tampered")
+    assert transfer["observed_sha256"] != transfer["expected_sha256"]
+    # Expected versus observed SIZE, both real numbers: the sharder records
+    # each batch's byte count in run.json for exactly this report.
+    assert isinstance(transfer["expected_bytes"], int)
+    assert isinstance(transfer["observed_bytes"], int)
+
+    # One bad batch does not invalidate the others.
     assert by_table["gene_content"]["action"] == "ingest"
     assert [call["tables"][0]["name"] for call in fake.load_calls] == ["gene_content"]
     ledger = ci.ExecutionLedger(Path(result["state_dir"])).records()
     failed = [r for r in ledger.values() if r["state"] == ci.LEDGER_FAILED]
     assert len(failed) == 1 and failed[0]["table"] == "gene_entity"
+
+
+def test_a_first_sha256_mismatch_is_still_syncing_and_is_retried(tmp_path):
+    """Inside the deadline the SAME condition is a retry, not corruption.
+
+    The sync client does not guarantee the producer's write order, so
+    ``run.json`` can arrive before the bytes it describes -- and the client's
+    own "up to date" is not a completeness signal either. A FIRST observation
+    cannot tell sync lag from a lost file; only elapsed time can.
+    """
+    root = _mismatched_run(tmp_path)
+    fake = _FakeLake(spark=_FakeSpark())
+    result = _capability(fake).ingest_shards(root)
+    by_table = {report["name"]: report for report in result["tables"]}
+    assert by_table["gene_entity"]["action"] == "syncing"
+    assert "STILL SYNCING" in by_table["gene_entity"]["error"]
+    assert by_table["gene_entity"]["transfer"]["state"] == "syncing"
+    # NOT a terminal failure: the state is `syncing`, so a re-run re-checks it.
+    ledger = ci.ExecutionLedger(Path(result["state_dir"])).records()
+    states = {record["table"]: record["state"] for record in ledger.values()}
+    assert states["gene_entity"] == ci.LEDGER_SYNCING
+    assert states["gene_content"] == ci.LEDGER_COMMITTED
+
+
+def test_a_retry_resumes_the_deadline_from_the_persisted_first_sighting(tmp_path):
+    """PROGRESS IS PERSISTED: the retry does not restart verification.
+
+    Two things are proven here. The first sighting's timestamp survives into
+    the retry (so the deadline is measured from when the mismatch was FIRST
+    seen, not from this attempt), and the batches that already committed are
+    not re-verified or re-appended.
+    """
+    root = _mismatched_run(tmp_path)
+    fake = _FakeLake(spark=_FakeSpark())
+    cap = _capability(fake)
+    first = cap.ingest_shards(root)
+    ledger = ci.ExecutionLedger(Path(first["state_dir"]))
+    first_seen = [
+        record["first_observed_at"]
+        for record in ledger.records().values()
+        if record["state"] == ci.LEDGER_SYNCING
+    ]
+    assert len(first_seen) == 1
+
+    second = cap.ingest_shards(root, run_id=first["run_id"])
+    by_table = {report["name"]: report for report in second["tables"]}
+    # Still syncing, and carrying the ORIGINAL first sighting.
+    assert by_table["gene_entity"]["action"] == "syncing"
+    assert by_table["gene_entity"]["transfer"]["first_observed_at"] == first_seen[0]
+    # The committed batch is skipped, not re-appended: one load() in total.
+    assert by_table["gene_content"]["action"] == "skip"
+    assert len(fake.load_calls) == 1
+
+
+def test_an_absent_batch_file_inside_the_deadline_is_also_still_syncing(tmp_path):
+    """The marker can arrive before the bytes, so an ABSENT file is a wait.
+
+    ``run.json`` EXISTING is not proof that the batches arrived. The observed
+    failure mode was precisely this: the client reported the hand-off
+    directory up to date while one of its three files was absent.
+    """
+    root = _publish_run(
+        tmp_path,
+        [("gene_entity", _B1, [_entity_row("a", _B1)])],
+    )
+    run = json.loads((root / "run.json").read_text())
+    (root / run["batches"][0]["file"]).unlink()
+    fake = _FakeLake(spark=_FakeSpark())
+    result = _capability(fake).ingest_shards(root)
+    [report] = result["tables"]
+    assert report["action"] == "syncing"
+    assert report["transfer"]["reason"] == ci.TRANSFER_ABSENT
+    assert report["transfer"]["observed_sha256"] is None
+    assert fake.load_calls == []
 
 
 def test_dry_run_writes_nothing_at_all(tmp_path):
@@ -944,7 +1081,7 @@ def test_the_registry_batch_is_ingested_first_even_when_listed_last(tmp_path):
         ],
         units=["u1", "u1"],
     )
-    fake = _FakeLake(spark=_FakeSpark())
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1"))
     result = _capability(fake).ingest_shards(root)
     assert [call["tables"][0]["name"] for call in fake.load_calls] == [
         PARAMETER_SET_TABLE,
@@ -965,10 +1102,14 @@ def test_a_re_run_ingests_zero_registry_rows(tmp_path):
         ],
         units=["u1", "u1"],
     )
-    fake = _FakeLake(spark=_FakeSpark())
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1"))
     cap = _capability(fake)
     cap.ingest_shards(root)
     assert len(fake.rows[PARAMETER_SET_TABLE]) == 1
+    # The result batch actually landed; without the preloaded entity it would
+    # have been refused by the coverage assertion and this test would be
+    # asserting registry counts over a result batch that never ingested.
+    assert len(fake.rows["gene_result"]) == 1
     second = cap.ingest_shards(root)
     assert len(fake.rows[PARAMETER_SET_TABLE]) == 1
     registry_report = [
@@ -1257,7 +1398,7 @@ def test_a_unit_whose_result_hash_is_not_in_the_registry_is_not_complete(tmp_pat
         [("gene_result", _B1, [_result_row("g1", _B1)])],
         units=["u1"],
     )
-    fake = _FakeLake(spark=_FakeSpark())
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1"))
     cap = _capability(fake)
     result = cap.ingest_shards(root)
     verified = cap.verify_run(root, run_id=result["run_id"])
@@ -1507,3 +1648,845 @@ def test_verify_told_a_dataset_the_execution_did_not_write_says_so(tmp_path):
         f"bound to namespace {_SCRATCH_NS!r}" in line
         for line in verified["discrepancies"]
     )
+
+
+# ===========================================================================
+# 6. THE PRE-COMMIT JOIN ASSERTIONS -- AND THE VACUITY THEY EXIST TO BEAT
+# ===========================================================================
+#
+# The defect: a load that joins nothing SUCCEEDS. Fill-only commits a batch
+# with no surviving rows WITHOUT a write at all, which is exactly right for a
+# re-run of a landed run and exactly wrong for a wrong join key -- and the two
+# are the same envelope, the same zero and the same exit status. Measured
+# 2026-10-21 on the function_to_go council run: the council's own
+# `items.entity_hash` matched 0 of 19,268 clearinghouse hashes, and that load
+# would have been reported as a clean idempotent no-op.
+#
+# THE TRAP, and it is why this defect class survives having tests: A
+# RELATIONSHIP TEST EVALUATED OVER AN EMPTY JOIN PASSES VACUOUSLY. So the
+# tests below prove the assertions are evaluated on the INPUTS, including the
+# contrast with the same claim evaluated on the join's result.
+
+
+def _result_rows_keyed(seeds, batch_id, *, entity_type="gene"):
+    """Result rows whose entity_hash is the hash of each of ``seeds``.
+
+    The seed is the COLUMN the producer hashed. Pass the right column's values
+    and the keys resolve; pass the wrong column's and none of them do, which
+    is the whole 0-of-19,268 case in one argument.
+    """
+    return [
+        _result_row(seed, batch_id, entity_type=entity_type) for seed in seeds
+    ]
+
+
+def _wrong_column_run(tmp_path, *, right, wrong):
+    """A shard run whose result batch was keyed on the WRONG column.
+
+    ``right`` names the entities the target actually holds; ``wrong`` names
+    what the producer hashed instead -- a definition text, say, or the
+    council's own item hash. Returns ``(shard_root, fake_lake)``.
+    """
+    root = _publish_run(
+        tmp_path,
+        [
+            (PARAMETER_SET_TABLE, _BP, [_registry_row(_BP)]),
+            ("gene_result", _B1, _result_rows_keyed(wrong, _B1)),
+        ],
+        units=["u1", "u1"],
+    )
+    return root, _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities(*right))
+
+
+# -- the pure rule, one assertion at a time ---------------------------------
+
+
+def test_an_empty_batch_is_a_producer_failure_not_a_clean_load():
+    schema = _arrow([_entity_row("a", _B1)]).schema
+    report = ci.join_assertions(
+        pa.Table.from_pylist([], schema=schema),
+        table="gene_entity",
+        batch_id=_B1,
+    )
+    assert report["source_rows"] == 0
+    assert not report["ok"]
+    assert "EMPTY" in " ".join(report["failures"])
+
+
+def test_a_null_join_key_is_reported_with_its_count():
+    rows = [_entity_row("a", _B1), {**_entity_row("b", _B1), "entity_hash": None}]
+    report = ci.join_assertions(_arrow(rows), table="gene_entity", batch_id=_B1)
+    assert report["source_rows"] == 2
+    assert report["null_keys"] == 1
+    assert report["source_keys"] == 1
+    assert not report["ok"]
+    assert "NULL entity_hash" in " ".join(report["failures"])
+
+
+def test_two_rows_claiming_one_target_slot_are_ambiguous():
+    """The slot key is the whole five-tuple, so this is a genuine collision.
+
+    Which of the two the current-state derivation picks is then decided by an
+    observed_at tie-break rather than by the producer -- and the sharder
+    deduplicates within a batch, so a violation is a producer bug.
+    """
+    rows = _result_rows_keyed(["g1", "g1"], _B1)
+    report = ci.join_assertions(_arrow(rows), table="gene_result", batch_id=_B1)
+    assert report["slot_key"] == list(SLOT_KEY_COLUMNS)
+    assert report["ambiguous_slots"] == 1
+    assert not report["ok"]
+    assert "claimed by more than one source row" in " ".join(report["failures"])
+
+
+def test_two_slots_for_one_key_are_not_ambiguous():
+    """One entity legitimately carries results under two parameter sets.
+
+    The arc preset's TRANSYT rows do exactly this -- the parameter set varies
+    per record -- so a check that refused it would refuse a correct producer.
+    """
+    rows = [
+        _result_row("g1", _B1, parameter_set="p1"),
+        _result_row("g1", _B1, parameter_set="p2"),
+    ]
+    report = ci.join_assertions(
+        _arrow(rows),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+    )
+    assert report["ambiguous_slots"] == 0
+    assert report["source_keys"] == 1
+    assert report["coverage"] == 1.0
+    assert report["ok"]
+
+
+def test_coverage_is_counted_and_full_coverage_passes():
+    rows = _result_rows_keyed(["g1", "g2"], _B1)
+    report = ci.join_assertions(
+        _arrow(rows),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1"), _hash("g2"), _hash("g3")},
+    )
+    assert (report["source_keys"], report["resolved_keys"]) == (2, 0 + 2)
+    assert report["unresolved_keys"] == 0
+    assert report["resolvable_keys"] == 3
+    assert report["coverage"] == 1.0
+    assert report["ok"]
+
+
+def test_partial_coverage_fails_the_default_floor_and_says_how_short():
+    rows = _result_rows_keyed(["g1", "g2"], _B1)
+    report = ci.join_assertions(
+        _arrow(rows), table="gene_result", batch_id=_B1, resolvable={_hash("g1")}
+    )
+    assert (report["resolved_keys"], report["unresolved_keys"]) == (1, 1)
+    assert report["coverage"] == 0.5
+    assert report["coverage_floor"] == ci.DEFAULT_COVERAGE_FLOOR == 1.0
+    assert not report["ok"]
+    assert "below the declared floor" in " ".join(report["failures"])
+    # A DECLARED floor is what makes a partial load expressible.
+    relaxed = ci.join_assertions(
+        _arrow(rows),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+        coverage_floor=0.5,
+    )
+    assert relaxed["ok"]
+
+
+def test_zero_resolution_is_fatal_whatever_the_floor_says():
+    """A floor expresses tolerance for a PARTIAL mismatch.
+
+    Total non-resolution is not partial: it is a wrong join key, and
+    ``--coverage-floor 0`` must not be a way to wave it through.
+    """
+    rows = _result_rows_keyed(["wrong1", "wrong2"], _B1)
+    report = ci.join_assertions(
+        _arrow(rows),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("right1")},
+        coverage_floor=0.0,
+    )
+    assert report["resolved_keys"] == 0
+    assert report["coverage"] == 0.0
+    assert not report["ok"]
+    assert "ZERO of 2" in " ".join(report["failures"])
+    assert "WRONG JOIN KEY" in " ".join(report["failures"])
+    with pytest.raises(ci.ClearinghouseJoinAssertionError, match="ZERO of 2"):
+        ci.raise_for_join_report(report)
+
+
+def test_coverage_is_skipped_rather_than_passed_for_identity_batches():
+    """An entity batch MINTS identity, so it has nothing to resolve against.
+
+    Recorded as skipped and not as passing: "this check did not apply" and
+    "this check succeeded" are different facts, and only the first one is true.
+    """
+    report = ci.join_assertions(
+        _arrow([_entity_row("a", _B1)]), table="gene_entity", batch_id=_B1
+    )
+    assert report["coverage_checked"] is False
+    assert report["coverage"] is None and report["resolved_keys"] is None
+    assert report["ok"]
+
+
+def test_the_coverage_refusal_names_the_unresolved_keys_not_only_their_count():
+    """WHICH ones, not just how many.
+
+    At the default floor the real go_mf@4 campaign was correctly refused
+    because 8 of 20,036 query_ids did not resolve -- and the only way to see
+    WHICH eight was to lower the floor, which means bypassing the gate in
+    order to inspect what it caught. The report and the message now name them.
+    """
+    seeds = ["g1", "g2", "bad1", "bad2", "bad3"]
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(seeds, _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1"), _hash("g2")},
+    )
+    expected = sorted(_hash(seed) for seed in ("bad1", "bad2", "bad3"))
+    assert not report["ok"]
+    assert report["unresolved_keys"] == 3
+    assert isinstance(report["unresolved_keys"], int)
+    assert report["unresolved_sample"] == expected
+    assert report["unresolved_sample_truncated"] is False
+    # The operator reads the FAILURE, not the report dict, so the keys have to
+    # be in the message too.
+    assert "below the declared floor" in report["failures"][0]
+    for key in expected:
+        assert key in report["failures"][0]
+
+
+def test_the_unresolved_sample_is_bounded_and_says_that_it_was_cut():
+    """A 20,036-key batch must not turn its refusal into a 20,036-key line.
+
+    Truncation is RECORDED rather than silent: a sample that is all of them
+    and a sample that is the first 20 of 25 are different facts.
+    """
+    bad = [f"bad{index:03d}" for index in range(25)]
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["g1", *bad], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+    )
+    assert not report["ok"]
+    assert report["unresolved_keys"] == 25
+    assert len(report["unresolved_sample"]) == ci.UNRESOLVED_SAMPLE_LIMIT == 20
+    assert report["unresolved_sample_truncated"] is True
+    # Sorted, and the sample is the FIRST 20 of that order -- not an arbitrary
+    # 20 of a set, which would differ run to run.
+    everything = sorted(_hash(seed) for seed in bad)
+    assert report["unresolved_sample"] == everything[:20]
+    assert "first 20 of 25" in report["failures"][0]
+
+
+def test_an_unchecked_coverage_reports_no_sample_rather_than_an_empty_one():
+    """``None`` means "not asked"; ``[]`` would mean "asked, none unresolved".
+
+    An entity batch MINTS identity and has nothing to resolve against, so the
+    honest value for both new fields is ``None``.
+    """
+    report = ci.join_assertions(
+        _arrow([_entity_row("a", _B1)]), table="gene_entity", batch_id=_B1
+    )
+    assert report["coverage_checked"] is False
+    assert report["unresolved_sample"] is None
+    assert report["unresolved_sample_truncated"] is None
+    assert report["ok"]
+
+
+def test_full_coverage_reports_an_empty_sample_not_none():
+    """The other side: coverage WAS checked and nothing was unresolved."""
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["g1"], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("g1")},
+    )
+    assert report["ok"]
+    assert report["unresolved_sample"] == []
+    assert report["unresolved_sample_truncated"] is False
+
+
+def test_the_wrong_join_key_message_is_left_alone():
+    """Zero resolution is a WRONG JOIN KEY, and listing keys adds nothing.
+
+    Every key is unresolved there, so the sample would just be the batch. The
+    report still carries it; the message deliberately does not.
+    """
+    report = ci.join_assertions(
+        _arrow(_result_rows_keyed(["wrong1", "wrong2"], _B1)),
+        table="gene_result",
+        batch_id=_B1,
+        resolvable={_hash("right1")},
+        coverage_floor=0.0,
+    )
+    assert "WRONG JOIN KEY" in report["failures"][0]
+    assert "Unresolved" not in report["failures"][0]
+    assert report["unresolved_sample"] == sorted(
+        _hash(seed) for seed in ("wrong1", "wrong2")
+    )
+
+
+def test_a_missing_join_key_column_refuses_rather_than_passing():
+    with pytest.raises(ValueError, match="no join key column"):
+        ci.join_assertions(
+            _arrow([{"ingest_batch_id": _B1}]), table="gene_entity", batch_id=_B1
+        )
+
+
+# -- THE TRAP, proven: inputs versus the join's result ----------------------
+
+
+def test_the_assertion_is_on_the_inputs_not_on_the_join_result(tmp_path):
+    """THE PROOF. The same claim is vacuous on the join and decisive on the inputs.
+
+    "Every key that resolved is non-null and unambiguous" is TRUE of zero
+    rows, so a relationship test evaluated over the resolution join's output
+    passes on exactly the input that is broken. The assertion here is computed
+    from the batch's own rows and the target's key space read independently,
+    so it reports 0 of 3 and fails.
+    """
+    wrong = ["wrong1", "wrong2", "wrong3"]
+    batch = _arrow(_result_rows_keyed(wrong, _B1))
+    resolvable = {_hash("right1"), _hash("right2"), _hash("right3")}
+
+    # (a) The RESULT of the resolution join: empty, because nothing matches.
+    joined = [
+        key
+        for key in batch.column("entity_hash").to_pylist()
+        if key in resolvable
+    ]
+    assert joined == []
+    # Every relationship claim over it is vacuously true.
+    assert all(key is not None for key in joined)
+    assert len(set(joined)) == len(joined)
+
+    # (b) The same claims on the INPUTS: decisive.
+    report = ci.join_assertions(
+        batch, table="gene_result", batch_id=_B1, resolvable=resolvable
+    )
+    assert report["source_keys"] == 3 and report["resolved_keys"] == 0
+    assert not report["ok"]
+
+
+# -- end to end: a wrong-column shard run exits non-zero -------------------
+
+
+def test_a_wrong_column_shard_run_is_refused_before_anything_is_committed(
+    tmp_path,
+):
+    """Hash the WRONG column and the result batch never reaches load().
+
+    The registry batch ahead of it still lands -- one producer defect in one
+    batch does not invalidate the batches that committed -- and the refusal is
+    LEDGERED, so verify_run blocks on it and it cannot be lost.
+    """
+    root, fake = _wrong_column_run(
+        tmp_path, right=["g1", "g2"], wrong=["text:g1", "text:g2"]
+    )
+    cap = _capability(fake)
+    result = cap.ingest_shards(root)
+    by_table = {report["name"]: report for report in result["tables"]}
+
+    refused = by_table["gene_result"]
+    assert refused["action"] == "refused"
+    assert refused["join_assertions"]["resolved_keys"] == 0
+    assert refused["join_assertions"]["source_keys"] == 2
+    assert "ZERO of 2" in refused["error"]
+    # Nothing was committed for it: no rows, and load() was never called.
+    assert "gene_result" not in fake.rows
+    assert [call["tables"][0]["name"] for call in fake.load_calls] == [
+        PARAMETER_SET_TABLE
+    ]
+    # Ledgered as FAILED, with the counts, so it blocks verification.
+    ledger = ci.ExecutionLedger(Path(result["state_dir"])).records()
+    failed = [r for r in ledger.values() if r["state"] == ci.LEDGER_FAILED]
+    assert len(failed) == 1
+    assert failed[0]["join_assertions"]["coverage"] == 0.0
+    assert not cap.verify_run(root, run_id=result["run_id"])["ok"]
+
+
+def test_the_same_run_keyed_on_the_right_column_lands(tmp_path):
+    """The control. Without it the test above could be passing for any reason."""
+    root, fake = _wrong_column_run(tmp_path, right=["g1", "g2"], wrong=["g1", "g2"])
+    result = _capability(fake).ingest_shards(root)
+    by_table = {report["name"]: report for report in result["tables"]}
+    assert by_table["gene_result"]["action"] == "ingest"
+    assert by_table["gene_result"]["rows_ingested"] == 2
+    assert by_table["gene_result"]["join_assertions"]["coverage"] == 1.0
+    assert len(fake.rows["gene_result"]) == 2
+
+
+def test_the_dry_run_gate_catches_a_wrong_column_too(tmp_path):
+    """--dry-run is the operator's last gate, so it must run the assertions.
+
+    A gate that passed exactly the load that fails would be worse than no gate.
+    """
+    root, fake = _wrong_column_run(
+        tmp_path, right=["g1"], wrong=["council-item:g1"]
+    )
+    result = _capability(fake).ingest_shards(root, dry_run=True)
+    by_table = {report["name"]: report for report in result["tables"]}
+    assert by_table["gene_result"]["action"] == "would_refuse"
+    assert by_table["gene_result"]["join_assertions"]["resolved_keys"] == 0
+    # Genuinely read-only: no load(), no ledger.
+    assert fake.load_calls == []
+    assert not (Path(result["state_dir"]) / ci.LEDGER_FILENAME).exists()
+
+
+def test_the_declared_floor_and_deadline_are_echoed_in_the_result(tmp_path):
+    """A coverage number with no floor beside it cannot be judged."""
+    root, fake = _wrong_column_run(tmp_path, right=["g1"], wrong=["g1"])
+    result = _capability(fake).ingest_shards(
+        root, coverage_floor=0.75, transfer_deadline_seconds=99
+    )
+    assert result["coverage_floor"] == 0.75
+    assert result["transfer_deadline_seconds"] == 99
+
+
+def test_an_out_of_range_floor_is_an_operator_error_not_a_batch_refusal(tmp_path):
+    """Raised ONCE, before the first batch, and never ledgered.
+
+    ``_join_assertions`` turns a ValueError into a per-batch refusal because a
+    batch with no join-key column genuinely is a producer defect. An
+    out-of-range floor is not -- reporting it once per batch would read as the
+    DATA being wrong.
+    """
+    root, fake = _wrong_column_run(tmp_path, right=["g1"], wrong=["g1"])
+    with pytest.raises(ValueError, match="outside"):
+        _capability(fake).ingest_shards(root, coverage_floor=1.5)
+    assert fake.load_calls == []
+
+
+def test_kbu_clearinghouse_load_exits_nonzero_on_a_wrong_column_run(tmp_path, monkeypatch):
+    """THROUGH THE CLI, because the exit status is what a script reads.
+
+    Before this, a non-empty shard run that resolved zero rows exited 0: the
+    envelope said an action and a zero, and "nothing was written" was
+    indistinguishable from "everything was already there".
+    """
+    from click.testing import CliRunner
+
+    from kbutillib.interfaces.cli import clearinghouse as ch
+
+    root, fake = _wrong_column_run(
+        tmp_path, right=["g1", "g2"], wrong=["text:g1", "text:g2"]
+    )
+    cap = _capability(fake)
+    monkeypatch.setattr(ch, "_capability", lambda: cap)
+    result = CliRunner().invoke(
+        ch.clearinghouse_cmd, ["load", str(root), "--json"], catch_exceptions=False
+    )
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    refused = [
+        row for row in envelope["data"]["tables"] if row["action"] == "refused"
+    ]
+    assert len(refused) == 1
+    assert refused[0]["join_assertions"]["resolved_keys"] == 0
+    # The envelope is STILL published -- the operator needs the counts -- and
+    # the failure is in warnings, which the contract says is never empty for a
+    # degraded answer.
+    assert any("ZERO of 2" in line for line in envelope["warnings"])
+    assert envelope["data"]["coverage_floor"] == 1.0
+
+
+def test_kbu_clearinghouse_load_exits_nonzero_while_a_batch_is_still_syncing(
+    tmp_path, monkeypatch
+):
+    """A load that has not finished arriving is not a completed load."""
+    from click.testing import CliRunner
+
+    from kbutillib.interfaces.cli import clearinghouse as ch
+
+    root = _mismatched_run(tmp_path)
+    cap = _capability(_FakeLake(spark=_FakeSpark()))
+    monkeypatch.setattr(ch, "_capability", lambda: cap)
+    result = CliRunner().invoke(
+        ch.clearinghouse_cmd, ["load", str(root), "--json"], catch_exceptions=False
+    )
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert any("STILL SYNCING" in line for line in envelope["warnings"])
+    assert envelope["data"]["transfer_deadline_seconds"] == (
+        ci.DEFAULT_TRANSFER_DEADLINE_SECONDS
+    )
+
+
+# ===========================================================================
+# 7. THE RECEIPT -- reconciled against ITEMS, and RE-EXPORTABLE
+# ===========================================================================
+
+
+def _publish_record(tmp_path, counts, *, declines=None):
+    """Write a producer PUBLISH.json beside a shard dir, as council-publish does."""
+    path = tmp_path / ci.PUBLISH_RECORD_FILENAME
+    path.write_text(
+        json.dumps(
+            {"counts": dict(counts), "declines_by_reason": dict(declines or {})}
+        )
+    )
+    return path
+
+
+def test_the_receipt_reconciles_against_items_submitted_not_rows_written(tmp_path):
+    """"Loaded 19,268" is not a reconciliation when the plan submitted 19,276.
+
+    The eight residual items are the interesting number, and only the producer
+    can count them: an item whose every call failed produced NO row, so it is
+    invisible to the shard run and to everything downstream of the export.
+    """
+    root = _publish_run(
+        tmp_path,
+        [
+            (PARAMETER_SET_TABLE, _BP, [_registry_row(_BP)]),
+            ("gene_result", _B1, _result_rows_keyed(["g1", "g2"], _B1)),
+        ],
+        units=["u1", "u1"],
+    )
+    _publish_record(
+        tmp_path,
+        {
+            "items_submitted": 3,
+            "items_with_verdict": 2,
+            "items_unresolved": 1,
+        },
+        declines={"abstained:no_candidates": 1},
+    )
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1", "g2"))
+    cap = _capability(fake)
+    loaded = cap.ingest_shards(root)
+    verified = cap.verify_run(root, run_id=loaded["run_id"])
+    receipt = ci.build_receipt(
+        verified, publish_record=ci.read_publish_record(root)
+    )
+
+    assert receipt["items_submitted"] == 3
+    assert receipt["items_with_verdict"] == 2
+    assert receipt["items_unresolved"] == 1
+    # ROWS, which are not items: one item can carry several GO terms, so the
+    # two are reported separately and neither stands in for the other.
+    assert receipt["result_rows_written"] == 2
+    assert receipt["declines_by_reason"] == {"abstained:no_candidates": 1}
+    assert receipt["parameter_set_hashes"] == [_hash("p1")]
+    assert receipt["snapshot_ids"]["gene_result"]
+    assert receipt["reconciled"] is True
+    assert receipt["ok"] is True
+    # The residual is SAID, not swallowed.
+    assert any("UNRESOLVED" in note for note in receipt["notes"])
+
+
+def test_the_receipt_declines_to_guess_an_item_count_it_does_not_have(tmp_path):
+    """No PUBLISH.json: the item fields are null with a note, never a row count."""
+    root, fake = _wrong_column_run(tmp_path, right=["g1"], wrong=["g1"])
+    cap = _capability(fake)
+    loaded = cap.ingest_shards(root)
+    verified = cap.verify_run(root, run_id=loaded["run_id"])
+    receipt = ci.build_receipt(
+        verified, publish_record=ci.read_publish_record(root)
+    )
+    assert receipt["items_submitted"] is None
+    assert receipt["items_with_verdict"] is None
+    assert receipt["result_rows_written"] == 1
+    assert receipt["reconciled"] is False
+    assert any(ci.PUBLISH_RECORD_FILENAME in note for note in receipt["notes"])
+
+
+def test_the_receipt_is_re_exportable_and_reproduces_byte_for_byte(tmp_path):
+    """RE-EXPORTABLE, NOT A ONE-SHOT.
+
+    The Iceberg commit and the LOADED.json write are two unrelated writes with
+    no transaction between them, so a crash in the gap loses the
+    ACKNOWLEDGEMENT while the data sits safely landed -- and a producer that
+    read "no receipt" as "not loaded" would ask for a reload of rows that are
+    already there. Verify is derivable from the ledger and the snapshot
+    history, so re-running it reproduces the same receipt.
+    """
+    root = _publish_run(
+        tmp_path,
+        [
+            (PARAMETER_SET_TABLE, _BP, [_registry_row(_BP)]),
+            ("gene_result", _B1, _result_rows_keyed(["g1"], _B1)),
+        ],
+        units=["u1", "u1"],
+    )
+    _publish_record(
+        tmp_path,
+        {"items_submitted": 1, "items_with_verdict": 1, "items_unresolved": 0},
+    )
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1"))
+    cap = _capability(fake)
+    loaded = cap.ingest_shards(root)
+    publish = ci.read_publish_record(root)
+
+    first = ci.build_receipt(
+        cap.verify_run(root, run_id=loaded["run_id"]), publish_record=publish
+    )
+    # The acknowledgement is lost: written, then gone.
+    path = ci.write_receipt(tmp_path / ci.RECEIPT_FILENAME, first)
+    body = path.read_text()
+    path.unlink()
+
+    # Re-exported from nothing but the ledger, the inventory and the table.
+    second = ci.build_receipt(
+        cap.verify_run(root, run_id=loaded["run_id"]), publish_record=publish
+    )
+    assert second == first
+    assert ci.write_receipt(path, second).read_text() == body
+    # No timestamp and no nonce in the body -- that is what makes it
+    # comparable to the receipt that was lost.
+    assert "generated_at" not in body
+
+
+def test_kbu_clearinghouse_verify_carries_the_receipt_and_can_write_it(
+    tmp_path, monkeypatch
+):
+    """Through the CLI: data.receipt is the receipt, and --receipt files it."""
+    from click.testing import CliRunner
+
+    from kbutillib.interfaces.cli import clearinghouse as ch
+
+    root = _publish_run(
+        tmp_path,
+        [
+            (PARAMETER_SET_TABLE, _BP, [_registry_row(_BP)]),
+            ("gene_result", _B1, _result_rows_keyed(["g1"], _B1)),
+        ],
+        units=["u1", "u1"],
+    )
+    _publish_record(
+        tmp_path,
+        {"items_submitted": 2, "items_with_verdict": 1, "items_unresolved": 1},
+        declines={"contentless": 1},
+    )
+    fake = _FakeLake(spark=_FakeSpark(), rows=_preloaded_entities("g1"))
+    cap = _capability(fake)
+    loaded = cap.ingest_shards(root)
+    monkeypatch.setattr(ch, "_capability", lambda: cap)
+
+    receipt_path = tmp_path / ci.RECEIPT_FILENAME
+    result = CliRunner().invoke(
+        ch.clearinghouse_cmd,
+        [
+            "verify",
+            str(root),
+            "--run-id",
+            loaded["run_id"],
+            "--receipt",
+            str(receipt_path),
+            "--json",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    receipt = envelope["data"]["receipt"]
+    assert receipt["items_submitted"] == 2
+    assert receipt["items_unresolved"] == 1
+    assert receipt["declines_by_reason"] == {"contentless": 1}
+    assert receipt["parameter_set_hashes"] == [_hash("p1")]
+    assert envelope["data"]["receipt_file"] == str(receipt_path)
+    assert json.loads(receipt_path.read_text()) == receipt
+
+
+# ===========================================================================
+# 8. THE ARRIVAL DECISION, as pure arithmetic over run.json's mtime
+# ===========================================================================
+
+
+def _entry_for(root, table="gene_entity", batch_id=None):
+    run = json.loads((root / "run.json").read_text())
+    entry = dict(run["batches"][0])
+    # The ingest reads the digest under its PROVENANCE name, because a load
+    # execution mints its own batch ids and keeps the sharder's as source.
+    entry["source_sha256"] = entry["sha256"]
+    return entry
+
+
+def test_an_arrived_batch_hands_back_the_digest_it_streamed(tmp_path):
+    """So the five-check gate does not hash a full-size batch a second time."""
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = _entry_for(root)
+    state = ci.transfer_state(
+        entry, shard_root=root, manifest_mtime=ci.run_manifest_mtime(root)
+    )
+    assert ci.has_arrived(state)
+    assert state["observed_sha256"] == entry["source_sha256"]
+    # The gate accepts it instead of re-reading, and its answer is unchanged.
+    table = ci.verify_batch_file(
+        entry,
+        shard_root=root,
+        expected_batch_id=_B1,
+        expected_sha256=entry["source_sha256"],
+        observed_sha256=state["observed_sha256"],
+    )
+    assert table.num_rows == 1
+    # And a WRONG pre-computed digest still refuses -- the check is the same
+    # check, not a check that was skipped.
+    with pytest.raises(ci.ClearinghouseBatchIntegrityError, match="sha256"):
+        ci.verify_batch_file(
+            entry,
+            shard_root=root,
+            expected_batch_id=_B1,
+            expected_sha256=entry["source_sha256"],
+            observed_sha256=_hash("not the bytes"),
+        )
+
+
+@pytest.mark.parametrize(
+    "elapsed_s,expected",
+    [
+        (0, "syncing"),
+        (ci.DEFAULT_TRANSFER_DEADLINE_SECONDS - 1, "syncing"),
+        (ci.DEFAULT_TRANSFER_DEADLINE_SECONDS, "syncing"),
+        (ci.DEFAULT_TRANSFER_DEADLINE_SECONDS + 1, "failed_delivery"),
+    ],
+)
+def test_only_elapsed_time_separates_sync_lag_from_a_lost_file(
+    tmp_path, elapsed_s, expected
+):
+    """A FIRST OBSERVATION CANNOT TELL THEM APART.
+
+    The on-disk condition is identical in all four rows: the file is absent.
+    What changes is how long it has been absent SINCE RUN.JSON WAS WRITTEN --
+    which is the only thing that can distinguish normal sync lag from a
+    delivery that will never complete.
+    """
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = _entry_for(root)
+    (root / entry["file"]).unlink()
+    mtime = ci.run_manifest_mtime(root)
+    state = ci.transfer_state(
+        entry, shard_root=root, manifest_mtime=mtime, now=mtime + elapsed_s
+    )
+    assert state["state"] == expected
+    assert state["reason"] == ci.TRANSFER_ABSENT
+    assert state["elapsed_s"] == elapsed_s
+    assert state["deadline_seconds"] == ci.DEFAULT_TRANSFER_DEADLINE_SECONDS
+
+
+def test_the_deadline_is_measured_from_the_marker_and_not_from_the_attempt(
+    tmp_path,
+):
+    """Otherwise every re-run would reset the clock and nothing would ever fail.
+
+    An operator re-running a stuck load is the EXPECTED response to "still
+    syncing", so a deadline measured from the attempt would make the
+    failed-delivery verdict unreachable in exactly the case it exists for.
+    """
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = _entry_for(root)
+    (root / entry["file"]).unlink()
+    marker = ci.run_manifest_mtime(root)
+    old = marker - ci.DEFAULT_TRANSFER_DEADLINE_SECONDS * 2
+    os.utime(root / "run.json", (old, old))
+    state = ci.transfer_state(
+        entry, shard_root=root, manifest_mtime=ci.run_manifest_mtime(root), now=marker
+    )
+    assert state["state"] == "failed_delivery"
+
+
+def test_a_vanished_run_json_is_not_a_transfer_in_progress(tmp_path):
+    """No marker means no clock to be patient against."""
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = _entry_for(root)
+    (root / entry["file"]).unlink()
+    state = ci.transfer_state(entry, shard_root=root, manifest_mtime=None)
+    assert state["state"] == "failed_delivery"
+    assert state["elapsed_s"] is None
+    with pytest.raises(ci.ClearinghouseFailedDeliveryError):
+        ci.raise_for_transfer(state)
+
+
+def test_a_path_that_escapes_the_root_is_not_waited_out(tmp_path):
+    """It is refused outright by the normal gate; waiting could never fix it."""
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = {**_entry_for(root), "file": "../outside.parquet"}
+    state = ci.transfer_state(entry, shard_root=root, manifest_mtime=None)
+    assert ci.has_arrived(state)
+    # NO digest is handed on: the gate must re-read and refuse, rather than be
+    # given a digest for a file outside the root.
+    assert state["observed_sha256"] is None
+    with pytest.raises(ci.ClearinghouseBatchIntegrityError, match="OUTSIDE"):
+        ci.verify_batch_file(
+            entry,
+            shard_root=root,
+            expected_batch_id=_B1,
+            expected_sha256=entry["source_sha256"],
+            observed_sha256=state["observed_sha256"],
+        )
+
+
+def test_the_syncing_message_tells_the_operator_what_to_do(tmp_path):
+    root = _publish_run(tmp_path, [("gene_entity", _B1, [_entity_row("a", _B1)])])
+    entry = _entry_for(root)
+    (root / entry["file"]).unlink()
+    mtime = ci.run_manifest_mtime(root)
+    syncing = ci.transfer_state(
+        entry, shard_root=root, manifest_mtime=mtime, now=mtime
+    )
+    message = ci.describe_transfer(syncing)
+    assert "STILL SYNCING" in message
+    assert "Re-run the load" in message
+    assert str(entry["batch_id"]) in message
+    with pytest.raises(ci.ClearinghouseTransferIncompleteError):
+        ci.raise_for_transfer(syncing)
+
+    failed = ci.transfer_state(
+        entry,
+        shard_root=root,
+        manifest_mtime=mtime,
+        now=mtime + ci.DEFAULT_TRANSFER_DEADLINE_SECONDS + 1,
+    )
+    evidence = ci.describe_transfer(failed)
+    assert "FAILED DELIVERY" in evidence
+    assert "re-sync the shard directory" in evidence
+    # Expected versus observed, both sides, both fields.
+    assert f"expected sha256 {entry['source_sha256']}" in evidence
+    assert f"{entry['bytes']} byte(s)" in evidence
+
+
+def test_the_human_render_prints_a_count_for_every_assertion(tmp_path):
+    """The COUNTS are the diagnostic, so they must survive the human path too.
+
+    Projected out of the same dict --json serialises (output-contract rule 1),
+    never recomputed; a nested report in a fixed-width cell is unreadable.
+    """
+    import click.testing
+
+    from kbutillib.interfaces.cli import clearinghouse as ch
+
+    root, fake = _wrong_column_run(
+        tmp_path, right=["g1", "g2"], wrong=["text:g1", "text:g2"]
+    )
+    envelope = ch._build_load(
+        _capability(fake),
+        shard_dir=str(root),
+        run_id=None,
+        dry_run=True,
+        reconcile=False,
+    )
+    runner = click.testing.CliRunner()
+    with runner.isolation() as streams:
+        ch._render(envelope)
+    text = streams[0].getvalue().decode()
+    assert "coverage floor=1.0" in text
+    line = [row for row in text.splitlines() if row.startswith("assertions ")][-1]
+    for field in (
+        "rows=2",
+        "keys=2",
+        "null_keys=0",
+        "ambiguous_slots=0",
+        "resolved=0",
+        "coverage=0.0",
+        "ok=False",
+    ):
+        assert field in line, line
+    # The nested report is NOT left in the fixed-width table.
+    assert "join_assertions" not in text

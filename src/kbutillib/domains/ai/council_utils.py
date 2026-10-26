@@ -218,11 +218,40 @@ class CouncilUtils(SharedEnvUtils):
         the store before any verb looks a query type up.  A one-off open
         (``db migrate``) skips that: a migration must not be running
         registrations against a schema it is in the middle of changing.
+
+        The CONFIGURED ARCHIVE IDENTITY (``CouncilConfig.store_id``) is fed
+        in here, on EVERY open including a one-off, because this is the only
+        place production opens a store.  Without it the store's
+        configured-vs-stored comparison
+        (``SqliteStore.require_store_identity``) never sees a configured
+        value, so the ``StoreIdentityMismatch`` branch is unreachable and a
+        store that was copied and then written to under the wrong declared id
+        archives silently -- the one case the identity check exists to stop
+        (KBUtilLib#93).
+
+        It is passed as its OWN argument ALONGSIDE ``**kwargs`` and is
+        deliberately NOT folded into ``kwargs``: the TRUTHINESS of ``kwargs``
+        is this method's one-off-open flag, so a ``kwargs["store_id"] = ...``
+        would make every open a one-off -- never cached (a fresh
+        ``open_store`` per ``.store()`` call) and never query-dir-loaded (so
+        every spec file in a configured ``query_dirs`` would go
+        unregistered).  Neither of those raises, which is why the obvious
+        fix is worse than the bug.
+
+        A caller that passes ``store_id=`` explicitly WINS: an explicit
+        argument is a deliberate override of config, and such a call is a
+        one-off like any other kwarg-bearing call.
         """
         if self._store is None or kwargs:
             from .council.store import open_store
 
-            store = open_store(self.store_url(), **kwargs)
+            # Built separately from `kwargs` so the one-off decision below
+            # reads the caller's ORIGINAL kwargs, unmodified.
+            options = dict(kwargs)
+            if "store_id" not in options:
+                options["store_id"] = getattr(self.config(), "store_id", None)
+
+            store = open_store(self.store_url(), **options)
             if kwargs:
                 # A one-off open (migrate) is NOT cached: its options are not
                 # the ones every other verb wants.
@@ -1302,6 +1331,189 @@ class CouncilUtils(SharedEnvUtils):
     def models(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
         """List models.  The synchronous :meth:`models_async`."""
         return _run_sync(self.models_async(endpoint))
+
+    # -- the token model a quote is priced from ---------------------------
+
+    def token_model(
+        self,
+        profile: Optional[str] = None,
+        upper_percentile: Optional[float] = None,
+        **seat_overrides: Any,
+    ) -> Dict[str, Any]:
+        """Fit this store's measured token model for a profile's bench.
+
+        Spends NOTHING and contacts nothing: it is a read of the store's own
+        ``attempts``/``calls`` history (see
+        :func:`~.council.quote.fit_token_model`).  A seat this store has never
+        run is reported with ``basis = "projected"`` and the fallback it was
+        drawn from, never as zero.
+
+        Returns:
+            The published ``data`` shape: ``profile``, ``bench_fingerprint``,
+            ``roster_fingerprint`` and the fit's own
+            :meth:`~.council.quote.TokenModel.to_dict` keys
+            (``upper_percentile``, ``seats`` with a sample size each,
+            ``n_measured``, ``n_projected``).
+        """
+        from .council.quote import DEFAULT_UPPER_PERCENTILE, fit_token_model
+        from .council.types import bench_fingerprint
+
+        store = self.require_schema()
+        roster = self.roster(profile, **seat_overrides)
+        model = fit_token_model(
+            store,
+            seats=roster,
+            upper_percentile=(
+                DEFAULT_UPPER_PERCENTILE if upper_percentile is None else float(upper_percentile)
+            ),
+        )
+        data: Dict[str, Any] = {
+            "profile": profile or self.config().default_profile,
+            "bench_fingerprint": bench_fingerprint(roster),
+            "roster_fingerprint": roster.fingerprint(),
+        }
+        data.update(model.to_dict())
+        return data
+
+    # -- the quote a run is approved against ------------------------------
+
+    def quote_plan(
+        self,
+        plan: Any,
+        profile: Optional[str] = None,
+        meta_fire_rate: Optional[float] = None,
+        upper_percentile: Optional[float] = None,
+        **seat_overrides: Any,
+    ) -> Any:
+        """Price a run plan.  SPENDS NOTHING and reaches no network.
+
+        Stage 2 of the standing ``function_to_go`` pipeline: it renders every
+        proposer prompt locally, counts reuse exactly against the store's
+        ``ix_calls_prompt_hash_status`` index, projects only meta and the
+        repair pass, and returns a :class:`~.council.quote.Quote` carrying
+        the plan hash an approval binds to.
+
+        No backend is built -- not "none is called", none is BUILT: the
+        reuse namespace and the effective params come from
+        :func:`~.council.types.default_reuse_namespace` and
+        :func:`~.council.types.seat_generation_params`, which exist so a
+        prompt hash can be computed without instantiating one.
+
+        Args:
+            plan: a :class:`~.council.quote.Plan`, a run directory, a path to
+                a ``PLAN.json``, or an already-parsed mapping.
+            profile: the bench.  Defaults to the plan's own ``profile``, then
+                to the configured default.
+            meta_fire_rate: fraction of items reaching meta.  Defaults to the
+                measured :data:`~.council.quote.META_FIRE_RATE`.
+            upper_percentile: percentile for the token model's upper band.
+            **seat_overrides: roster overrides, keyed by seat name.
+
+        Returns:
+            A :class:`~.council.quote.Quote`.
+        """
+        from .council.quote import (
+            DEFAULT_UPPER_PERCENTILE,
+            META_FIRE_RATE,
+            fit_token_model,
+            load_plan,
+            quote_plan,
+        )
+        from .council.quote import Plan as _Plan
+
+        store = self.require_schema()
+        if not isinstance(plan, _Plan):
+            plan = load_plan(plan)
+        roster = self.roster(profile or plan.profile, **seat_overrides)
+        token_model = fit_token_model(
+            store,
+            seats=roster,
+            upper_percentile=(
+                DEFAULT_UPPER_PERCENTILE
+                if upper_percentile is None
+                else float(upper_percentile)
+            ),
+        )
+        return quote_plan(
+            plan,
+            store=store,
+            config=self.config(),
+            token_model=token_model,
+            meta_fire_rate=(
+                META_FIRE_RATE if meta_fire_rate is None else float(meta_fire_rate)
+            ),
+            roster=roster,
+            effective_params=self._effective_params_resolver(),
+        )
+
+    def _effective_params_resolver(self) -> Any:
+        """``(seat) -> params`` reporting what a seat's api type would send.
+
+        THE REUSE COUNT DEPENDS ON THIS BEING RIGHT.  ``prompt_hash`` keys on
+        the effective generation params, and an api type returns the WIRE
+        spelling (``max_tokens``) while
+        :func:`~.council.types.seat_generation_params` returns the
+        provider-independent one (``max_output_tokens``); ARGO additionally
+        forces ``temperature: 1`` on some models whatever was asked for.  A
+        quote that used the latter would compute a different hash from the
+        worker for every HTTP seat and report zero reuse on a corpus that is
+        almost entirely already paid for.
+
+        It lives HERE and not in :mod:`.council.quote` because this is the
+        object that already builds api types; the quote module may not, so
+        that "the quote cannot spend" stays a property of its import graph
+        rather than a promise.  ``effective_params`` is specified as
+        deterministic, generation-only and call-free
+        (:meth:`~.llm.protocol.LLMApi.effective_params`), so resolving it
+        opens no socket -- which the quote tests assert with the socket
+        module poisoned.
+
+        Falls back per seat to the provider-independent params when no api
+        type can be built (an endpoint this installation cannot serve), which
+        keeps a quote possible on a machine that could not run the job.
+        """
+        from .council.types import seat_generation_params
+
+        cache: Dict[str, Any] = {}
+
+        def _resolve(seat: Any) -> Dict[str, Any]:
+            endpoint = str(getattr(seat, "endpoint", "") or "")
+            if endpoint not in cache:
+                cache[endpoint] = self.endpoint_api(
+                    endpoint, str(getattr(seat, "endpoint_kind", "") or "")
+                )
+            api = cache[endpoint]
+            if api is None:
+                return dict(seat_generation_params(seat))
+            try:
+                return dict(api.effective_params(self._seat_request(seat)))
+            except Exception as exc:  # noqa: BLE001 - never fail a quote over this
+                self.log_debug(
+                    f"council quote: {endpoint!r} could not report effective "
+                    f"params ({exc}); falling back to the seat's own"
+                )
+                return dict(seat_generation_params(seat))
+
+        return _resolve
+
+    @staticmethod
+    def _seat_request(seat: Any) -> Any:
+        """A prompt-less :class:`LLMRequest` carrying only *seat*'s params.
+
+        The same shape ``CouncilWorker._seat_request`` builds, and for the
+        same reason: ``effective_params`` is computed per seat, before any
+        role's prompts exist, so the request it reads carries the parameters
+        and no prompts.
+        """
+        from .llm.types import LLMRequest
+
+        return LLMRequest(
+            model=seat.model,
+            max_output_tokens=seat.max_output_tokens,
+            temperature=seat.temperature,
+            params=dict(getattr(seat, "extra", None) or {}),
+            timeout_s=seat.timeout_s,
+        )
 
     # -- the deployed GO council service ----------------------------------
 

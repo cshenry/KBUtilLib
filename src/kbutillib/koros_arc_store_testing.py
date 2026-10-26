@@ -107,6 +107,9 @@ class FakeKorosArcStore:
         self._blobs: Dict[str, Dict[str, Any]] = {}
         self._updated_at: Dict[str, str] = {}
 
+        # Job submissions: {job_id: (project, arc_slug)} (real store: job_submissions).
+        self._submissions: Dict[str, Any] = {}
+
         # Fail-soft counter, mirroring the real store's public attribute.
         self.failed_write_count: int = 0
 
@@ -258,6 +261,24 @@ class FakeKorosArcStore:
         # Detail blob only when supplied; else leave any existing one (S6).
         if detail is not None:
             self._blobs[record.record_id] = copy.deepcopy(detail)
+
+    def record_submission(
+        self,
+        job_id: str,
+        job_type: Optional[str],
+        project: Optional[str],
+        arc_slug: Optional[str],
+        submitted_at: Optional[str],
+        host: Optional[str],
+    ) -> None:
+        """Upsert a job's submitting arc; a no-op when disabled. Never raises."""
+        if not self.enabled:
+            return
+        self._submissions[job_id] = (project, arc_slug)
+
+    def list_submissions(self) -> Dict[str, Any]:
+        """Map job_id to (project, arc_slug)."""
+        return dict(self._submissions)
 
     @staticmethod
     def _utc_now() -> str:

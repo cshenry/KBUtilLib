@@ -195,11 +195,57 @@ def _render(envelope: dict[str, Any]) -> None:
             f"shard run={data.get('source_run_id')} "
             f"ledger={data.get('state_dir')}"
         )
-        rows = data.get("tables")
+        click.echo(
+            f"coverage floor={data.get('coverage_floor')} "
+            f"transfer deadline={data.get('transfer_deadline_seconds')}s"
+        )
+        # THE FOUR ASSERTIONS, WITH A COUNT FOR EACH, one line per batch.
+        # Printed rather than left in the table because the counts ARE the
+        # diagnostic -- "0 of 19,268 resolve" and "19,268 of 19,268 resolve"
+        # are otherwise the same row -- and because a nested dict in a
+        # fixed-width cell is unreadable. Nothing is recomputed: every number
+        # comes out of the same dict --json serialises (rule 1).
+        for report in data.get("tables") or []:
+            assertions = report.get("join_assertions") or {}
+            if assertions:
+                click.echo(
+                    f"assertions {assertions.get('table')} "
+                    f"{assertions.get('batch_id')}: "
+                    f"rows={assertions.get('source_rows')} "
+                    f"keys={assertions.get('source_keys')} "
+                    f"null_keys={assertions.get('null_keys')} "
+                    f"ambiguous_slots={assertions.get('ambiguous_slots')} "
+                    f"resolved={assertions.get('resolved_keys')} "
+                    f"coverage={assertions.get('coverage')} "
+                    f"ok={assertions.get('ok')}"
+                )
+            if report.get("transfer"):
+                click.echo(f"arrival: {report.get('error')}")
+        rows = _without(data.get("tables"), "join_assertions", "transfer", "error")
     elif verb == "verify":
         click.echo(f"run_id={data.get('run_id')} namespace={data.get('namespace')}")
         for line in data.get("discrepancies", []):
             click.echo(f"discrepancy: {line}")
+        receipt = data.get("receipt") or {}
+        if receipt:
+            # THE RECEIPT, reconciled against ITEMS and not rows: one item can
+            # carry several result rows, so both numbers are shown and neither
+            # stands in for the other.
+            click.echo(
+                f"receipt: items submitted={receipt.get('items_submitted')} "
+                f"with_verdict={receipt.get('items_with_verdict')} "
+                f"unresolved={receipt.get('items_unresolved')} "
+                f"result_rows={receipt.get('result_rows_written')} "
+                f"reconciled={receipt.get('reconciled')}"
+            )
+            for reason, count in sorted(
+                (receipt.get("declines_by_reason") or {}).items()
+            ):
+                click.echo(f"  decline {reason}: {count}")
+            for value in receipt.get("parameter_set_hashes") or []:
+                click.echo(f"  parameter_set_hash: {value}")
+            if data.get("receipt_file"):
+                click.echo(f"  receipt written to {data['receipt_file']}")
         rows = data.get("tables")
     elif verb == "backfill-list":
         rows = data.get("presets")
@@ -236,6 +282,24 @@ def _render(envelope: dict[str, Any]) -> None:
         return
 
     _render_table(rows)
+
+
+def _without(
+    rows: Optional[list[dict[str, Any]]], *keys: str
+) -> Optional[list[dict[str, Any]]]:
+    """``rows`` with ``keys`` projected out, for the fixed-width renderer.
+
+    A PROJECTION of the serialised dict, never a second computation of it
+    (output-contract rule 1): the dropped keys are the nested reports printed
+    above as their own lines, and a nested dict in a fixed-width cell is
+    unreadable. ``--json`` still carries all of them.
+    """
+    if rows is None:
+        return None
+    return [
+        {key: value for key, value in row.items() if key not in keys}
+        for row in rows
+    ]
 
 
 def _render_table(rows: list[dict[str, Any]]) -> None:
@@ -379,6 +443,41 @@ def _exit_on_integrity_failure(envelope: dict[str, Any]) -> None:
     """
     report = envelope.get("data", {}).get("parameter_set_integrity") or {}
     if report.get("failures"):
+        raise SystemExit(1)
+
+
+def _load_failures(envelope: dict[str, Any]) -> list[str]:
+    """Every batch of a ``load`` envelope that was NOT accepted, with its why.
+
+    Two classes, both of which a load used to be able to exit zero over:
+
+    - A batch REFUSED by the pre-commit join assertions. A non-empty shard run
+      that resolves zero keys is a wrong join key, and fill-only's "a batch
+      with no surviving rows is committed without a write" made it look like a
+      clean idempotent no-op.
+    - A batch whose bytes have not arrived -- ``syncing`` (re-run; the ledger
+      resumes) or a failed delivery past the transfer deadline. Neither is a
+      completed load, so neither may exit zero: "nothing was written" and
+      "everything was already there" are the same envelope otherwise.
+    """
+    lines: list[str] = []
+    for report in envelope.get("data", {}).get("tables") or ():
+        assertions = report.get("join_assertions") or {}
+        if assertions and not assertions.get("ok", True):
+            lines.extend(str(line) for line in assertions.get("failures") or ())
+        transfer = report.get("transfer")
+        if transfer:
+            lines.append(str(report.get("error") or transfer))
+    return lines
+
+
+def _exit_on_load_failure(envelope: dict[str, Any]) -> None:
+    """Exit non-zero when any batch was refused or had not arrived.
+
+    After :func:`_emit`, for the same reason :func:`_exit_on_integrity_failure`
+    is: the operator needs the per-batch counts, and only then the status.
+    """
+    if _load_failures(envelope):
         raise SystemExit(1)
 
 
@@ -1257,6 +1356,8 @@ def _build_load(
     run_id: Optional[str],
     dry_run: bool,
     reconcile: bool,
+    coverage_floor: Optional[float] = None,
+    transfer_deadline_seconds: Optional[int] = None,
 ) -> dict[str, Any]:
     """Build the ``load`` envelope: the ledger's outcome for each shard batch.
 
@@ -1296,8 +1397,14 @@ def _build_load(
         run_id=run_id,
         dry_run=dry_run,
         reconcile=reconcile,
+        coverage_floor=coverage_floor,
+        transfer_deadline_seconds=transfer_deadline_seconds,
     )
     warnings: list[str] = []
+    # A refused or not-yet-arrived batch is a DEGRADED answer, and the
+    # envelope contract says warnings is never empty for one. The exit status
+    # follows from the same list (_exit_on_load_failure).
+    warnings.extend(_load_failures({"data": result}))
     if dry_run:
         warnings.append(
             "dry-run: no rows were ingested and no ledger line was written; "
@@ -1323,6 +1430,11 @@ def _build_load(
             "dry_run": result.get("dry_run", dry_run),
             "reconcile": reconcile,
             "lock": result.get("lock"),
+            # ECHOED, because they are DECLARED thresholds: a coverage number
+            # with no floor beside it cannot be judged, and a "still syncing"
+            # with no deadline beside it cannot be waited on.
+            "coverage_floor": result.get("coverage_floor"),
+            "transfer_deadline_seconds": result.get("transfer_deadline_seconds"),
             "tables": result.get("tables", []),
             "parameter_set_integrity": cap.parameter_set_orphans(),
         },
@@ -1357,12 +1469,34 @@ def _build_load(
     help="Resolve an ambiguous 'started' batch against the table's Iceberg "
     "snapshot history instead of refusing.",
 )
+@click.option(
+    "--coverage-floor",
+    "coverage_floor",
+    type=float,
+    default=None,
+    help="The DECLARED floor for the share of a result batch's distinct join "
+    "keys that must resolve against <type>_entity (default 1.0 -- a result "
+    "row whose entity_hash names no entity is an orphan). Lower it for a "
+    "deliberately partial load; it can never waive a non-empty batch that "
+    "resolves ZERO keys, which is a wrong join key.",
+)
+@click.option(
+    "--transfer-deadline-hours",
+    "transfer_deadline_hours",
+    type=float,
+    default=None,
+    help="How long after run.json's mtime a missing or mismatched batch is "
+    "still ARRIVING rather than a failed delivery (default 6). run.json "
+    "existing is not proof that the batches arrived.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
 def load_cmd(
     shard_dir: str,
     run_id: Optional[str],
     dry_run: bool,
     reconcile: bool,
+    coverage_floor: Optional[float],
+    transfer_deadline_hours: Optional[float],
     as_json: bool,
 ) -> None:
     """Ingest a published shard run (IN-POD ONLY), fill-only and resumably.
@@ -1375,6 +1509,23 @@ def load_cmd(
     Every batch is filtered against the keys the target already holds before
     it is appended, so re-running this command is cheap and changes nothing;
     a batch with no surviving rows is committed without a write at all.
+
+    THAT IS ALSO WHY THE PRE-COMMIT ASSERTIONS EXIST. "No surviving rows"
+    is right for a re-run and wrong for a wrong join key, and the two are
+    otherwise the same envelope and the same exit status. Before any batch is
+    committed, and REPORTING A COUNT FOR EACH, this asserts on the INPUTS:
+    the expected input is non-empty, every join key is non-null, each target
+    slot is claimed by at most one source row, and the share of source keys
+    that resolve against the target's identity table is at or above
+    --coverage-floor. A non-empty batch resolving ZERO keys exits non-zero
+    whatever the floor says.
+
+    It also checks that the batches ARRIVED: run.json existing is not proof,
+    because a sync client does not guarantee the producer's write order. A
+    batch whose bytes are missing or do not match its published sha256 is
+    retried as still-syncing (with progress persisted, so a re-run resumes)
+    until --transfer-deadline-hours, after which it is reported as a FAILED
+    DELIVERY naming the batch and the expected versus observed digest.
 
     Runs in the FOREGROUND to completion and is expected to be killed by a pod
     restart. It is NOT a daemon; resumability comes from the ledger under
@@ -1394,12 +1545,21 @@ def load_cmd(
         run_id=run_id,
         dry_run=dry_run,
         reconcile=reconcile,
+        coverage_floor=coverage_floor,
+        transfer_deadline_seconds=(
+            None
+            if transfer_deadline_hours is None
+            else int(transfer_deadline_hours * 3600)
+        ),
     )
     _emit(envelope, as_json=as_json)
     # The namespace-wide orphan check's findings are a FAILURE, so the exit
     # code says so -- after the envelope is emitted, so the operator sees what
     # is broken. The per-batch results in it are untouched.
     _exit_on_integrity_failure(envelope)
+    # So is a batch the pre-commit assertions refused, and so is one whose
+    # bytes have not arrived. A load that joined nothing used to exit zero.
+    _exit_on_load_failure(envelope)
 
 
 # ---------------------------------------------------------------------------
@@ -1407,7 +1567,9 @@ def load_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
+def _build_verify(
+    cap: Any, *, shard_dir: str, run_id: str, unit: Optional[str] = None
+) -> dict[str, Any]:
     """Build the ``verify`` envelope: a completed run re-checked against its ledger.
 
     IN-POD ONLY (the refusal is in :func:`verify_cmd`, before this). Thin over
@@ -1428,8 +1590,30 @@ def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
     non-zero when any is present. ``data.discrepancies`` keeps the complete
     combined list, exactly as ``verify_run`` returned it, so nothing a
     consumer already reads disappears.
+
+    THE ENVELOPE IS THE RECEIPT, in ``data.receipt``
+    (:func:`clearinghouse_ingest.build_receipt`), and it RECONCILES AGAINST
+    ITEMS SUBMITTED rather than against rows written: "loaded 19,268" is not a
+    complete reconciliation when the plan submitted 19,276, and the eight
+    residual items are the interesting number. One item can also carry several
+    GO terms, so a ``<type>_result`` row count is not an item count -- the two
+    are reported separately and neither stands in for the other. The item half
+    comes from the producer's ``PUBLISH.json`` beside the shard directory,
+    because an item with no verdict produced no row and is invisible to
+    anything downstream of the export; without that file the item fields are
+    ``null`` with a note, never a row count in disguise.
     """
-    result = cap.verify_run(shard_dir, run_id=run_id)
+    from ...domains.kbase.berdl import clearinghouse_ingest as ci
+
+    kwargs = {} if unit is None else {"unit": unit}
+    result = cap.verify_run(shard_dir, run_id=run_id, **kwargs)
+    # THE RECEIPT. Derived from the verify result and the producer's own
+    # PUBLISH.json, both of which are stable, so re-running verify reproduces
+    # the same body -- see clearinghouse_ingest.build_receipt for why that is
+    # the requirement and not a nicety.
+    receipt = ci.build_receipt(
+        result, publish_record=ci.read_publish_record(shard_dir)
+    )
     discrepancies = list(result.get("discrepancies", []))
     integrity = result.get("parameter_set_integrity") or {}
     integrity_failures = set(integrity.get("failures", []))
@@ -1444,10 +1628,14 @@ def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
             "run_id": result.get("run_id", run_id),
             "namespace": result.get("namespace"),
             "tables": result.get("tables", []),
+            "batches": result.get("batches", []),
+            "units": result.get("units", []),
+            "parameter_set_hashes": result.get("parameter_set_hashes", []),
+            "receipt": receipt,
             "discrepancies": discrepancies,
             "parameter_set_integrity": integrity,
         },
-        warnings=ledger_discrepancies,
+        warnings=ledger_discrepancies + list(receipt.get("notes") or []),
     )
 
 
@@ -1459,13 +1647,51 @@ def _build_verify(cap: Any, *, shard_dir: str, run_id: str) -> dict[str, Any]:
     default=None,
     help="Run id to verify (default: derived from the shard-dir name).",
 )
+@click.option("--unit", "unit", default=None, help="Verify only this unit.")
+@click.option(
+    "--receipt",
+    "receipt_path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Also write the receipt here (conventionally "
+    "<run-dir>/LOADED.json, beside the shard directory). RE-EXPORTABLE: the "
+    "receipt is derived from the ledger, the inventory and the target's "
+    "snapshot history, so re-running verify reproduces the same body -- a "
+    "crash between the Iceberg commit and the receipt write loses the "
+    "acknowledgement, not the data, and this is how it is recovered.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
-def verify_cmd(shard_dir: str, run_id: Optional[str], as_json: bool) -> None:
-    """Re-check a completed run's row counts and snapshots against the ledger (IN-POD ONLY)."""
+def verify_cmd(
+    shard_dir: str,
+    run_id: Optional[str],
+    unit: Optional[str],
+    receipt_path: Optional[str],
+    as_json: bool,
+) -> None:
+    """Re-check a completed run's row counts and snapshots against the ledger (IN-POD ONLY).
+
+    The envelope's ``data.receipt`` is the LOAD RECEIPT: items submitted,
+    items with a verdict, items unresolved, result rows written, declines by
+    reason, the target table's snapshot ids and the parameter_set_hash the
+    rows landed under. ``--receipt`` writes it where the producer reads it
+    back. Re-running this command reproduces the same receipt.
+
+    WRITING IT IS OPT-IN because this verb otherwise WRITES NOTHING -- no
+    load(), no ledger line, no file -- and that guarantee is what makes it
+    safe to run against a namespace an operator is unsure about. The
+    producer's PUBLISH.json declares the path to pass.
+    """
     cap = _capability()
     _require_in_pod_or_refuse(cap, "verify")
     resolved_run_id = run_id or _default_run_id(shard_dir)
-    envelope = _build_verify(cap, shard_dir=shard_dir, run_id=resolved_run_id)
+    envelope = _build_verify(
+        cap, shard_dir=shard_dir, run_id=resolved_run_id, unit=unit
+    )
+    if receipt_path is not None:
+        from ...domains.kbase.berdl import clearinghouse_ingest as ci
+
+        written = ci.write_receipt(receipt_path, envelope["data"]["receipt"])
+        envelope["data"]["receipt_file"] = str(written)
     _emit(envelope, as_json=as_json)
     _exit_on_integrity_failure(envelope)
 

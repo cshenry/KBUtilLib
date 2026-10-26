@@ -1450,3 +1450,113 @@ class TestTheCliBillingGateFollowsItsFiles:
         """
         llm.register_api_type("scripted", ScriptedApi)
         assert run(llm.preflight("scripted", {}))["state"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Web-search capability
+# ---------------------------------------------------------------------------
+
+
+class SearchingApi(ScriptedApi):
+    """A third-party api type that DOES declare the optional attribute."""
+
+    supports_web_search = True
+
+
+def _builtin_endpoint(name: str) -> Dict[str, Any]:
+    """An endpoint mapping for built-in *name* that constructs without a network."""
+    if name in ("argo", "openai"):
+        return {"name": name, "kind": name, "base_url": "http://127.0.0.1:9/v1"}
+    return {"name": name, "kind": name, "executable": "no-such-cli"}
+
+
+class TestWebSearchCapability:
+    """``llm.supports_web_search`` -- an OPTIONAL member, read defensively.
+
+    The capability is a class attribute rather than a probe, so the answer is
+    free: nothing is constructed beyond the api type instance itself, no
+    provider is asked and no token is spent.
+    """
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("argo", False),
+            ("openai", False),
+            ("claude_cli", True),
+            ("codex_cli", True),
+        ],
+    )
+    def test_each_builtin_reports_its_own_answer(
+        self, name: str, expected: bool
+    ) -> None:
+        assert llm.supports_web_search(name, _builtin_endpoint(name)) is expected
+        run(llm.aclose_all())
+
+    def test_only_the_two_cli_types_can_search(self) -> None:
+        """Stated as a set, so a new built-in cannot quietly join the true side."""
+        searching = {
+            name
+            for name in llm.BUILTIN_API_TYPES
+            if llm.supports_web_search(name, _builtin_endpoint(name))
+        }
+        run(llm.aclose_all())
+        assert searching == {"claude_cli", "codex_cli"}
+
+    def test_every_builtin_exposes_the_attribute_on_its_instance(self) -> None:
+        for name in llm.BUILTIN_API_TYPES:
+            api = llm.get_api(name, _builtin_endpoint(name))
+            assert isinstance(api.supports_web_search, bool), name
+        run(llm.aclose_all())
+
+    def test_a_third_party_type_without_the_attribute_registers_and_reports_false(
+        self,
+    ) -> None:
+        """The compatibility claim, in one test.
+
+        ``ScriptedApi`` supplies ONLY the two required members -- no
+        ``preflight``, no ``models``, no ``aclose`` and no
+        ``supports_web_search``.  It must still register, still satisfy the
+        runtime-checkable protocol, and answer ``False`` rather than raise
+        ``AttributeError`` at the one place a caller asks.
+        """
+        assert not hasattr(ScriptedApi, "supports_web_search")
+
+        llm.register_api_type("scripted", ScriptedApi)
+
+        api = llm.get_api("scripted", {})
+        assert isinstance(api, ApiType), "an optional member cannot break isinstance"
+        assert llm.supports_web_search("scripted", {}) is False
+
+    def test_a_third_party_type_may_declare_it_true(self) -> None:
+        """The attribute is the whole contract: no registration, no subclass."""
+        llm.register_api_type("searching", SearchingApi)
+        assert llm.supports_web_search("searching", {}) is True
+
+    def test_it_is_not_a_required_member(self) -> None:
+        """Required means "registration refuses you without it", which this is not."""
+        assert "supports_web_search" not in llm.REQUIRED_MEMBERS
+        assert llm.REQUIRED_MEMBERS == ("complete", "effective_params")
+        # And the protocol itself does not demand it either, which is what
+        # keeps ``isinstance`` usable as the sanity check it is advertised as.
+        assert "supports_web_search" not in getattr(
+            ApiType, "__protocol_attrs__", set()
+        )
+
+    def test_an_unknown_api_type_raises_keyerror_like_every_other_verb(self) -> None:
+        with pytest.raises(KeyError) as excinfo:
+            llm.supports_web_search("gemini_direct", {})
+        assert "gemini_direct" in str(excinfo.value)
+
+    def test_it_is_part_of_the_published_surface(self) -> None:
+        assert "supports_web_search" in llm.__all__
+
+    def test_asking_costs_nothing_and_sends_nothing(self) -> None:
+        """A capability question must not become a call.
+
+        ``ScriptedApi`` records every request any instance has ever been
+        asked, so an empty log is evidence that asking is free.
+        """
+        llm.register_api_type("scripted", ScriptedApi)
+        llm.supports_web_search("scripted", {})
+        assert ScriptedApi.seen == []

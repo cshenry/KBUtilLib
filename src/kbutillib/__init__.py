@@ -248,6 +248,36 @@ except ImportError as e:
     MMSeqsUtils = None
 
 try:
+    from .domains.literature.annotate import (
+        Evidence,
+        Gene,
+        GeneLiteratureUtils,
+        Organism,
+        PaperAnnotation,
+    )
+except ImportError as e:
+    _import_error("gene_literature", e)
+    Evidence = None
+    Gene = None
+    GeneLiteratureUtils = None
+    Organism = None
+    PaperAnnotation = None
+
+try:
+    from .domains.literature.facts import (
+        Citation,
+        Fact,
+        GeneFacts,
+        GeneFactsUtils,
+    )
+except ImportError as e:
+    _import_error("gene_facts", e)
+    Citation = None
+    Fact = None
+    GeneFacts = None
+    GeneFactsUtils = None
+
+try:
     from .domains.genome.annotation.annotator_utils import (
         AnnotationRecord,
         AnnotationResult,
@@ -556,6 +586,15 @@ __all__ = [
     "DRAM2Utils",
     "MMSeqsUtils",
     "ProkkaUtils",
+    "Evidence",
+    "Gene",
+    "GeneLiteratureUtils",
+    "Organism",
+    "PaperAnnotation",
+    "Citation",
+    "Fact",
+    "GeneFacts",
+    "GeneFactsUtils",
     "ModelStandardizationUtils",
     "MSBiochemUtils",
     "MSReactionSimilarityUtils",

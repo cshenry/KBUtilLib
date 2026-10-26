@@ -656,7 +656,10 @@ class MMSeqsUtils(SharedEnvUtils):
         min_seq_id: float,
         coverage: float,
         threads: int = 1,
-        sensitivity: Optional[float] = None
+        sensitivity: Optional[float] = None,
+        evalue: Optional[float] = None,
+        max_hits: Optional[int] = None,
+        include_subject_coverage: bool = False
     ) -> List[Dict[str, Any]]:
         """Search protein sequences against a prebuilt MMseqs2 database.
 
@@ -692,6 +695,16 @@ class MMSeqsUtils(SharedEnvUtils):
             threads: Number of threads to use. Default: 1
             sensitivity: Sensitivity parameter (-s). Higher is more
                 sensitive but slower. If None, uses MMseqs2's default.
+            evalue: Maximum e-value a hit may have, passed to ``mmseqs
+                search`` as ``-e``. If None, uses MMseqs2's default.
+            max_hits: Maximum alignments to keep per query, passed to
+                ``mmseqs search`` as ``--max-seqs``. If None, uses
+                MMseqs2's default.
+            include_subject_coverage: When True, additionally request the
+                ``tcov`` column from ``convertalis`` and add a
+                ``subject_coverage`` key to every returned hit. Default
+                False, which keeps the returned keys exactly as documented
+                below -- callers that do not ask for it see no change.
 
         Returns:
             List of hit dicts, one per accepted alignment, each with
@@ -704,6 +717,11 @@ class MMSeqsUtils(SharedEnvUtils):
                 - coverage: float -- query coverage as a fraction (0.0-1.0]
                 - evalue: float
                 - bits: float
+            plus, and ONLY when include_subject_coverage=True:
+                - subject_coverage: float -- coverage of the TARGET
+                  sequence as a fraction (mmseqs ``tcov``), which is a
+                  different quantity from ``coverage`` above and is kept
+                  separate from it.
             Only hits meeting BOTH min_seq_id and coverage are included.
 
         Raises:
@@ -729,7 +747,10 @@ class MMSeqsUtils(SharedEnvUtils):
                 "min_seq_id": min_seq_id,
                 "coverage": coverage,
                 "threads": threads,
-                "sensitivity": sensitivity
+                "sensitivity": sensitivity,
+                "evalue": evalue,
+                "max_hits": max_hits,
+                "include_subject_coverage": include_subject_coverage
             },
             print_params=True
         )
@@ -801,6 +822,10 @@ class MMSeqsUtils(SharedEnvUtils):
             ]
             if sensitivity is not None:
                 search_cmd.extend(["-s", str(sensitivity)])
+            if evalue is not None:
+                search_cmd.extend(["-e", str(evalue)])
+            if max_hits is not None:
+                search_cmd.extend(["--max-seqs", str(max_hits)])
 
             result = subprocess.run(
                 search_cmd,
@@ -812,15 +837,19 @@ class MMSeqsUtils(SharedEnvUtils):
                 self.log_error(f"search failed: {result.stderr}")
                 raise RuntimeError(f"mmseqs search failed: {result.stderr}")
 
-            # Step 3: Convert results to a tabular report
-            self.log_info("Converting search results to tabular format...")
+            # Step 3: Convert results to a tabular report. The tcov column is
+            # appended only when asked for, so the default column set -- and
+            # therefore the default returned keys -- is unchanged.
+            format_columns = "query,target,pident,qcov,evalue,bits"
+            if include_subject_coverage:
+                format_columns += ",tcov"
             convertalis_cmd = [
                 self.mmseqs_executable, "convertalis",
                 str(query_db_path),
                 str(db_path),
                 str(result_db_path),
                 str(tsv_output),
-                "--format-output", "query,target,pident,qcov,evalue,bits"
+                "--format-output", format_columns
             ]
             result = subprocess.run(
                 convertalis_cmd,
@@ -834,7 +863,10 @@ class MMSeqsUtils(SharedEnvUtils):
 
             # Step 4: Parse and filter results
             hits = self._parse_search_tsv(
-                tsv_output, min_seq_id=min_seq_id, coverage=coverage
+                tsv_output,
+                min_seq_id=min_seq_id,
+                coverage=coverage,
+                include_subject_coverage=include_subject_coverage
             )
 
             self.log_info(f"Search complete: {len(hits)} hits passed filters")
@@ -852,12 +884,14 @@ class MMSeqsUtils(SharedEnvUtils):
         self,
         tsv_path: Path,
         min_seq_id: float,
-        coverage: float
+        coverage: float,
+        include_subject_coverage: bool = False
     ) -> List[Dict[str, Any]]:
         """Parse MMseqs2 convertalis tabular output into filtered hit dicts.
 
         Expects rows produced with
-        ``--format-output query,target,pident,qcov,evalue,bits``.
+        ``--format-output query,target,pident,qcov,evalue,bits``, or with
+        ``,tcov`` appended when *include_subject_coverage* is True.
 
         The ``pident`` column emitted by ``mmseqs convertalis`` is a
         PERCENTAGE in the range 0-100 (as distinct from the ``fident``
@@ -869,11 +903,18 @@ class MMSeqsUtils(SharedEnvUtils):
             tsv_path: Path to the convertalis TSV output.
             min_seq_id: Minimum identity fraction (0.0-1.0) a hit must meet.
             coverage: Minimum query-coverage fraction (0.0-1.0) a hit must meet.
+            include_subject_coverage: When True, read the trailing ``tcov``
+                column and add it as ``subject_coverage``.
 
         Returns:
             List of hit dicts with keys: query_id, target_id, identity,
-            coverage, evalue, bits. Only hits meeting both min_seq_id and
-            coverage are included.
+            coverage, evalue, bits -- plus subject_coverage when
+            include_subject_coverage is True. Only hits meeting both
+            min_seq_id and coverage are included.
+
+        Raises:
+            ValueError: If include_subject_coverage is True but a row does
+                not carry the tcov column.
         """
         hits: List[Dict[str, Any]] = []
 
@@ -901,14 +942,27 @@ class MMSeqsUtils(SharedEnvUtils):
                 if identity < min_seq_id or hit_coverage < coverage:
                     continue
 
-                hits.append({
+                hit = {
                     "query_id": query_id,
                     "target_id": target_id,
                     "identity": identity,
                     "coverage": hit_coverage,
                     "evalue": evalue,
                     "bits": bits
-                })
+                }
+
+                if include_subject_coverage:
+                    if len(parts) < 7:
+                        raise ValueError(
+                            f"Expected a 7th 'tcov' column in {tsv_path} when "
+                            f"subject coverage was requested, got "
+                            f"{len(parts)} columns: {parts!r}"
+                        )
+                    # tcov is coverage of the TARGET sequence; it is reported
+                    # alongside, never merged into, the query coverage above.
+                    hit["subject_coverage"] = float(parts[6])
+
+                hits.append(hit)
 
         return hits
 

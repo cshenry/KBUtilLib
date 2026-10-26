@@ -273,6 +273,107 @@ def _render(envelope: Dict[str, Any]) -> None:
             _rows(rows, ("alias", "endpoint", "kind", "served_name", "canonical", "verified"))
         return
 
+    if verb == "quote":
+        headline = data.get("headline") or {}
+        point = headline.get("point") or {}
+        upper = headline.get("upper") or {}
+        click.echo(
+            f"plan: {data.get('plan_hash', '')[:12]}   "
+            f"query: {(data.get('parameter_set') or {}).get('query')}   "
+            f"items: {(data.get('plan') or {}).get('n_items')}"
+        )
+        click.echo(
+            "bench_fingerprint (the PARTITION key): "
+            f"{str((data.get('parameter_set') or {}).get('bench_fingerprint'))[:12]}"
+        )
+        # The projected fraction FIRST: it says how much of what follows is a
+        # measurement and how much is an extrapolation.
+        click.echo(
+            f"PROJECTED FRACTION OF TOTAL: "
+            f"{float(headline.get('projected_fraction_of_total') or 0.0):.1%}"
+        )
+        click.echo(
+            f"tokens: point {int(point.get('total_tokens') or 0):,}   "
+            f"upper {int(upper.get('total_tokens') or 0):,}   "
+            f"(input {int(point.get('input_tokens') or 0):,})"
+        )
+        click.echo(
+            f"calls: {headline.get('calls_total')} total, "
+            f"{headline.get('calls_reused')} reused, "
+            f"{headline.get('calls_paid')} paid"
+        )
+        _rows(
+            data.get("call_graph") or [],
+            (
+                "line",
+                "role",
+                "basis",
+                "calls_total",
+                "calls_reused",
+                "calls_paid",
+                "input_tokens_point",
+                "output_tokens_point",
+                "total_tokens_upper",
+            ),
+        )
+        misses = (data.get("reuse") or {}).get("misses") or {}
+        click.echo(
+            "reuse misses: "
+            f"new_item {misses.get('new_item', 0)}, "
+            f"bench_change {misses.get('bench_change', 0)}, "
+            f"transport_change {misses.get('transport_change', 0)}"
+        )
+        wall = data.get("wall_clock") or {}
+        click.echo(
+            f"wall clock: {wall.get('hours_point')} h point / "
+            f"{wall.get('hours_upper')} h upper, set by the SLOWEST queue "
+            f"{wall.get('binding_queue')!r} (limit: {wall.get('binding_limit')})"
+        )
+        _rows(
+            data.get("gateways") or [],
+            ("gateway", "total_tokens_point", "priced", "dollars_point", "dollars_upper"),
+        )
+        for gateway in data.get("gateways") or []:
+            if not gateway.get("priced"):
+                click.echo(f"{gateway.get('gateway')}: unpriced")
+            elif gateway.get("is_floor"):
+                click.echo(
+                    f"{gateway.get('gateway')}: FLOOR, not a cost "
+                    f"({gateway.get('rate_provenance')})"
+                )
+        rate = data.get("meta_fire_rate") or {}
+        click.echo(
+            f"meta fire rate: {float(rate.get('rate') or 0.0):.1%} (n={rate.get('n')})"
+        )
+        return
+
+    if verb == "token-model":
+        click.echo(
+            f"profile: {data.get('profile')}   bench: {str(data.get('bench_fingerprint'))[:12]}"
+            f"   roster: {str(data.get('roster_fingerprint'))[:12]}"
+        )
+        _rows(
+            data.get("seats") or [],
+            (
+                "seat_name",
+                "role",
+                "input_tokens_per_char",
+                "output_tokens_mean",
+                "output_tokens_upper",
+                "n_attempts",
+                "basis",
+            ),
+        )
+        click.echo(
+            f"output band: p{data.get('upper_percentile')}   "
+            f"measured seats: {data.get('n_measured')}   "
+            f"projected seats: {data.get('n_projected')}"
+        )
+        for seat in data.get("seats") or []:
+            if seat.get("fallback"):
+                click.echo(f"{seat.get('seat_name')} fallback: {seat['fallback']}")
+        return
+
     click.echo(json.dumps(data, indent=2, sort_keys=True, default=_jsonable))
 
 
@@ -1311,5 +1412,767 @@ def models_list_cmd(ctx: click.Context, endpoint: Optional[str], as_json: bool) 
             data={"endpoint": endpoint, "n_models": len(rows), "models": [dict(r) for r in rows]},
             warnings=warnings,
         ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# token-model
+# ---------------------------------------------------------------------------
+
+
+def _build_token_model(
+    util: Any, *, profile: Optional[str], seat: Sequence[str], upper_percentile: Optional[float]
+) -> Dict[str, Any]:
+    """Build the ``token-model`` envelope: the fit, its sample sizes, its gaps.
+
+    Every PROJECTED seat is also a warning, per the module's third structural
+    rule: a quote priced off a seat this store has never run is a degraded
+    answer, and an operator approving the cost has to see that before the
+    number, not after it.
+    """
+    data = dict(
+        util.token_model(
+            profile, upper_percentile=upper_percentile, **_parse_seats(seat)
+        )
+    )
+    warnings = [
+        f"{seat_fit.get('seat_name')} ({seat_fit.get('role')}) has no measured history "
+        f"in this store; projected from {seat_fit.get('fallback')}"
+        for seat_fit in data.get("seats") or []
+        if seat_fit.get("basis") == "projected"
+    ]
+    return _envelope("token-model", data=data, warnings=warnings)
+
+
+@council_cmd.command(name="token-model")
+@click.option("--profile", default=None, help="Profile whose bench to fit. Default: the configured default.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--upper-percentile",
+    default=None,
+    type=float,
+    help="Percentile for the output-token upper band. Default: 95.",
+)
+@_json_option
+@click.pass_context
+def token_model_cmd(
+    ctx: click.Context,
+    profile: Optional[str],
+    seat: Sequence[str],
+    upper_percentile: Optional[float],
+    as_json: bool,
+) -> None:
+    """Show the fitted token model a quote is priced from, with sample sizes.
+
+    Reads this store's own measured history and SPENDS NOTHING -- it contacts
+    no gateway and makes no call. A seat with no history is reported
+    ``projected`` against a named fallback, and as a warning.
+    """
+    util = _ready(ctx)
+    try:
+        envelope = _build_token_model(
+            util,
+            profile=profile,
+            seat=seat,
+            upper_percentile=upper_percentile,
+        )
+    except Exception as exc:  # noqa: BLE001 - a config or store failure is a CLI error
+        raise _fail(exc) from exc
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# quote
+# ---------------------------------------------------------------------------
+
+
+def build_quote(
+    util: Any,
+    *,
+    plan: str,
+    profile: Optional[str] = None,
+    seat: Sequence[str] = (),
+    meta_fire_rate: Optional[float] = None,
+    out: Optional[str] = None,
+    write: bool = True,
+) -> Dict[str, Any]:
+    """Build the ``quote`` envelope, and write ``QUOTE.json`` beside the plan.
+
+    PUBLIC because ``kbu ontomap council-quote`` delegates to this very
+    function rather than reimplementing the stage: two code paths that both
+    priced a plan would be two numbers that could disagree, and the one an
+    operator approved would be whichever CLI they happened to type.
+
+    Every projected seat in the token model is a warning, and so is every
+    unpriced gateway: both are degraded answers, and the third structural
+    rule of this module's output contract is that a degraded answer never
+    has an empty ``warnings``.
+    """
+    quote = util.quote_plan(
+        plan, profile=profile, meta_fire_rate=meta_fire_rate, **_parse_seats(seat)
+    )
+    data = quote.to_dict()
+    warnings = list(data.get("warnings") or [])
+    for seat_fit in (data.get("token_model") or {}).get("seats") or []:
+        if seat_fit.get("basis") == "projected":
+            warnings.append(
+                f"{seat_fit.get('seat_name')} ({seat_fit.get('role')}) has no "
+                f"measured history in this store; its tokens are projected "
+                f"from {seat_fit.get('fallback')}"
+            )
+    if write:
+        destination = out or (quote.plan.get("run_dir") if quote.plan else None)
+        if not destination:
+            raise click.ClickException(
+                "the plan was not loaded from a directory, so there is nowhere "
+                "to write QUOTE.json; pass --out"
+            )
+        data["written_to"] = str(quote.write(destination))
+    return _envelope("quote", data=data, warnings=warnings)
+
+
+@council_cmd.command(name="quote")
+@click.option(
+    "--plan",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run directory holding PLAN.json, or the plan file itself.",
+)
+@click.option("--profile", default=None, help="Bench to quote. Default: the plan's own, then the configured default.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--meta-fire-rate",
+    default=None,
+    type=float,
+    help="Fraction of items reaching meta. Default: 0.241, measured over n=19,268.",
+)
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(),
+    help="Where to write QUOTE.json. Default: the run directory the plan came from.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Compute and print the quote without writing QUOTE.json.",
+)
+@_json_option
+@click.pass_context
+def quote_cmd(
+    ctx: click.Context,
+    plan: str,
+    profile: Optional[str],
+    seat: Sequence[str],
+    meta_fire_rate: Optional[float],
+    out: Optional[str],
+    no_write: bool,
+    as_json: bool,
+) -> None:
+    """Price a run plan and write QUOTE.json. SPENDS NOTHING.
+
+    Stage 2 of the standing pipeline. Every proposer prompt is rendered
+    locally and hashed with the same `prompt_hash` the worker uses, so reuse
+    is COUNTED rather than guessed; only meta's volume and the repair pass
+    are projected, and every line says which it is.
+
+    \b
+    What the quote will not do:
+      - it will not price a gateway that has no rate in `ai_council.rates`;
+        it reports `unpriced`. A vendor list rate is a FLOOR, not a cost.
+      - it will not add the queues together for a wall clock. Queues run
+        concurrently, so the estimate is the slowest one.
+    """
+    util = _ready(ctx)
+    try:
+        envelope = build_quote(
+            util,
+            plan=plan,
+            profile=profile,
+            seat=seat,
+            meta_fire_rate=meta_fire_rate,
+            out=out,
+            write=not no_write,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a bad plan or store is a CLI error
+        raise _fail(exc) from exc
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# snapshot -- the ONLY sanctioned way to copy a live council store
+# ---------------------------------------------------------------------------
+#
+# THERE IS NO COPY-BASED PATH HERE, AND THERE MAY NEVER BE ONE. A live
+# council store is a database PLUS a write-ahead log, and a plain `cp` of the
+# pair mid-transaction yields a file that VERIFIES AS VALID SQLITE, OPENS
+# WITHOUT ERROR, AND CONTAINS AN INCONSISTENT VIEW. That silent failure is
+# why this is a store method behind a verb rather than an operator
+# instruction: an operator cannot tell a torn backup from a good one, and
+# neither can the archiver that reads it.
+#
+# The store method (SqliteStore.snapshot) uses SQLite's own BACKUP API and
+# refuses before writing anything when the store carries no declared archive
+# identity -- every archived row is keyed on store_id, and an invented id
+# looks joinable and cannot be corrected once a clearinghouse payload carries
+# it. This verb adds argv parsing and the envelope, nothing else.
+
+
+@council_cmd.command(name="snapshot")
+@click.argument("destination", type=click.Path(dir_okay=False))
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    default=False,
+    help="Permit replacing an existing destination file.",
+)
+@_json_option
+@click.pass_context
+def snapshot_cmd(
+    ctx: click.Context, destination: str, overwrite: bool, as_json: bool
+) -> None:
+    """Write a CONSISTENT read-only snapshot of the store, via the backup API.
+
+    \b
+    Never copy a live store with `cp`. A WAL database is the main file plus
+    its log; a copy taken mid-transaction opens fine and is WRONG, and
+    nothing downstream can tell.
+
+    REFUSES when the store carries no declared archive identity, or when the
+    configured and stored identities disagree -- naming both. Neither is
+    auto-healed: a mismatch usually means a store file was copied and then
+    written to, which is the one case that must not be papered over.
+
+    The manifest's `snapshot_id` is the VERIFIED sha256 of the snapshot as
+    written. That is the value every archived row is keyed on, so it comes
+    from here and never from a filename.
+    """
+    util = _ready(ctx)
+    try:
+        manifest = util.store().snapshot(destination, overwrite=overwrite)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    _emit(_envelope("snapshot", data=dict(manifest)), as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# disposition -- which jobs are a RESULT
+# ---------------------------------------------------------------------------
+#
+# The store cannot answer this. `jobs.status` and `jobs.deleted_at` do not
+# distinguish a published chunk from a cancelled 19,276-item look-alike, and
+# the biggest, most authoritative-looking job in the production store is one
+# of the two that must never be loaded. These verbs are the curated layer:
+# `seed` and `declare` write the append-only declaration ledger, `publish`
+# projects it into `council.job_disposition`, and `check` is the gate a
+# publisher calls -- it exits NON-ZERO and NAMES every job that is not
+# declared `published`, including one that has no declaration at all.
+
+
+def _declared_by(ctx: click.Context, declared_by: Optional[str]) -> str:
+    """Who is declaring.  The flag, else the facade's provenance user."""
+    if declared_by:
+        return declared_by
+    return str(_council(ctx).user())
+
+
+def _ledger(store_id: str, root: Optional[str]) -> Any:
+    from ...domains.kbase.berdl.council_disposition import (
+        DispositionLedger,
+        resolve_ledger_path,
+    )
+
+    return DispositionLedger(resolve_ledger_path(store_id, root=root))
+
+
+def _sink(lakehouse: Optional[str]) -> Any:
+    from ...domains.kbase.berdl.council_sink import open_sink
+
+    return open_sink(lakehouse)
+
+
+def _store_id_option(function: Any) -> Any:
+    return click.option(
+        "--store-id",
+        required=True,
+        help="The store's DECLARED archive identity. Never derived from a "
+        "path: a store that moves must keep its id or every archived row "
+        "becomes unjoinable.",
+    )(function)
+
+
+def _ledger_root_option(function: Any) -> Any:
+    return click.option(
+        "--ledger-root",
+        default=None,
+        type=click.Path(file_okay=False),
+        help="Root for declaration ledgers. Default: $KBU_COUNCIL_DISPOSITION_DIR, "
+        "else ~/.kbu/council/dispositions.",
+    )(function)
+
+
+def _lakehouse_option(function: Any) -> Any:
+    return click.option(
+        "--lakehouse",
+        default=None,
+        help="Where council.job_disposition lives: a local SQLite staging "
+        "file, or 'berdl' for the live namespace (in-pod only). Default: berdl.",
+    )(function)
+
+
+# ---------------------------------------------------------------------------
+# seed-store -- rebuild a wiped store's REUSE CACHE from the archive
+# ---------------------------------------------------------------------------
+#
+# The store is not only a record, it is the reuse cache: `calls.prompt_hash`
+# is the reuse key and `find_reusable` serves any status='ok' row carrying it.
+# So wiping a store destroys paid answers -- re-running the ADP1+PMI set
+# (19,276 items) at the same query version and roster against an empty store
+# re-pays on the order of 199M tokens. This verb converts "wiping a store
+# loses money" into "wiping a store is free", which is the only reason
+# archiving a store and then deleting it is safe to do at all.
+#
+# `--from-lakehouse` is the ONLY source. There is no "seed from another store
+# file" mode and there may never be one by that route: the reuse cache has to
+# come from provenance that has been proved COMPLETE, and completeness is a
+# property of the archive's load ledger, not of a file on disk.
+
+
+@council_cmd.command(name="seed-store")
+@click.option(
+    "--from-lakehouse",
+    "from_lakehouse",
+    is_flag=True,
+    default=False,
+    required=True,
+    help="Read the rows from the council archive. The only source.",
+)
+@_store_id_option
+@click.option(
+    "--snapshot-id",
+    required=True,
+    help="The ONE snapshot to seed from -- its VERIFIED uncompressed digest, "
+    "which must be marked complete in the archive's load ledger. Never "
+    "'whatever is current': a seed of that is not reproducible.",
+)
+@click.option(
+    "--query-name",
+    default=None,
+    help="Import only this council kind's answers.",
+)
+@click.option(
+    "--query-version",
+    default=None,
+    help="Import only this query version's answers. A reuse hit is only valid "
+    "at the SAME version, because query_version is inside prompt_hash. "
+    "Requires --query-name.",
+)
+@_lakehouse_option
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the archive's delivery state directories, for the "
+    "completeness check. Default: $KBU_COUNCIL_ARCHIVE_DIR, else "
+    "~/.kbu/council/archive/runs.",
+)
+@click.option(
+    "--receipt",
+    "receipt_out",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Write the seed receipt here as JSON.",
+)
+@_json_option
+@click.pass_context
+def seed_store_cmd(
+    ctx: click.Context,
+    from_lakehouse: bool,
+    store_id: str,
+    snapshot_id: str,
+    query_name: Optional[str],
+    query_version: Optional[str],
+    lakehouse: Optional[str],
+    state_root: Optional[str],
+    receipt_out: Optional[str],
+    as_json: bool,
+) -> None:
+    """Rebuild a REUSE-ONLY store from one archived snapshot.
+
+    \b
+    Imports every status='ok' answer REGARDLESS OF DISPOSITION -- a pilot or
+    trial answer is still a paid answer -- and excludes live=0 rows, which
+    `find_reusable` would otherwise serve as current answers because it does
+    not filter `live` itself.
+
+    NOTHING IMPORTED IS CLAIMABLE. Only answered calls are imported, and every
+    imported job is tombstoned, which `select_claimable` refuses and
+    `select_reusable` deliberately includes. A worker cannot execute an
+    archived call; a new job can still reuse its answer.
+
+    ONE store_id and ONE COMPLETED snapshot_id, into an EMPTY destination.
+    Multi-origin seeding is refused: call_id is unique only within its own
+    store, so merging origins can collide two different calls onto one id.
+    Re-seeding the SAME origin and scope into a store that holds exactly that
+    seed is a no-op.
+    """
+    from ...domains.kbase.berdl.council_seed import read_seed_rows
+
+    util = _ready(ctx)
+    try:
+        sink = _sink(lakehouse)
+        read = read_seed_rows(
+            sink,
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            query_name=query_name,
+            query_version=query_version,
+            state_root=state_root,
+        )
+        receipt = util.store().seed_from_rows(
+            read["rows"],
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            query_name=query_name,
+            query_version=query_version,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    data = dict(receipt)
+    data["read"] = read["counts"]
+    if receipt_out:
+        Path(receipt_out).expanduser().write_text(
+            json.dumps(data, indent=2, sort_keys=True, default=_jsonable) + "\n",
+            encoding="utf-8",
+        )
+        data["receipt_path"] = str(Path(receipt_out).expanduser())
+    _emit(_envelope("seed-store", data=data), as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# delivery-scan -- the restartable consumer loop
+# ---------------------------------------------------------------------------
+#
+# THE LOOP SCANS, IT DOES NOT WATCH. kbhub has no user systemd, so this is
+# booked to a Jupyter startup routine and is restarted at arbitrary points: it
+# cannot assume it observed any file arrival. Every tick enumerates the
+# deliveries present, resolves each against the archiver's load ledger and the
+# persisted stage outcomes, and completes whatever is incomplete.
+#
+# A VERB IN A REPOSITORY IS NOT AN INSTALLED SERVICE. What an operator must do
+# to register this with kbhub's Jupyter startup facility is NOT in this tree --
+# see council_delivery.OPERATOR_INSTALL, which names it as a gap rather than
+# inventing a command that would read exactly like a working one until the pod
+# restarted and nothing came back.
+
+
+@council_cmd.command(name="delivery-scan")
+@click.option(
+    "--drop-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="The directory Dropbox syncs COUNCIL-DELIVERY directories into.",
+)
+@click.option(
+    "--scratch-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Where a compressed snapshot is decompressed. Explicit: which "
+    "filesystem absorbs ~900 MB is an operator's decision.",
+)
+@_lakehouse_option
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the delivery state directories -- the SAME root the "
+    "archiver uses. Default: $KBU_COUNCIL_ARCHIVE_DIR, else "
+    "~/.kbu/council/archive/runs.",
+)
+@click.option(
+    "--poll-seconds",
+    type=float,
+    default=None,
+    help="Seconds between ticks. Default 300: the real latency is a tick "
+    "interval plus a Dropbox sync, not seconds.",
+)
+@click.option(
+    "--ticks",
+    "max_ticks",
+    type=int,
+    default=1,
+    help="How many ticks to run. 1 (the default) is one reconciliation pass "
+    "by hand; 0 means run forever, which is what a registered routine does.",
+)
+@_json_option
+@click.pass_context
+def delivery_scan_cmd(
+    ctx: click.Context,
+    drop_dir: str,
+    scratch_dir: str,
+    lakehouse: Optional[str],
+    state_root: Optional[str],
+    poll_seconds: Optional[float],
+    max_ticks: int,
+    as_json: bool,
+) -> None:
+    """Reconcile the drop directory against the lakehouse, once or forever.
+
+    \b
+    A MANIFEST'S PRESENCE IS NOT PROOF OF ARRIVAL: a delivery is complete
+    only when every file its inventory lists is present and sha256-matches. A
+    first mismatch is a RETRY (normal sync lag) with progress persisted; past
+    the deadline it is a FAILED delivery, raised with per-file expected vs
+    observed size and digest. A legacy mtime-derived deadline is FROZEN on
+    first observation, because consumer-side mtime can reset on sync and a
+    deadline recomputed every tick never expires.
+
+    ARCHIVAL AND PUBLICATION ARE PERSISTED SEPARATELY and each incomplete
+    stage is retried even when the other has a receipt. A receipt on disk is a
+    CACHE whose identity must match the manifest digest -- never an authority.
+
+    SAFE TO RUN CONCURRENTLY WITH ITSELF: each delivery is claimed with an
+    O_EXCL lock in its state directory and the loser skips it for one tick.
+    """
+    from ...domains.kbase.berdl.council_delivery import (
+        DEFAULT_POLL_SECONDS,
+        CouncilDeliveryScanner,
+    )
+
+    try:
+        scanner = CouncilDeliveryScanner(
+            drop_dir=drop_dir,
+            scratch_dir=scratch_dir,
+            sink=_sink(lakehouse),
+            state_root=state_root,
+            poll_seconds=DEFAULT_POLL_SECONDS if poll_seconds is None else poll_seconds,
+        )
+        ticks = scanner.run(max_ticks=None if max_ticks == 0 else max_ticks)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    last = ticks[-1] if ticks else {}
+    data = {
+        "drop_dir": str(drop_dir),
+        "ticks": len(ticks),
+        "deliveries": last.get("deliveries", 0),
+        "counts": last.get("counts", {}),
+        "reports": last.get("reports", []),
+    }
+    warnings = [
+        f"delivery {report.get('delivery_id')!r}: {report.get('stage')} -- "
+        f"{report.get('detail')}"
+        for report in data["reports"]
+        if report.get("state") == "failed"
+    ]
+    _emit(_envelope("delivery-scan", data=data, warnings=warnings), as_json=as_json)
+
+
+@council_cmd.group(name="disposition")
+def disposition_cmd() -> None:
+    """Declare and resolve what each job's output is FOR.
+
+    \b
+    A job with NO declaration is NOT publishable. Absence never reads as an
+    implicit `published`, because the two cancelled 19,276-item jobs in the
+    production store look authoritative by label, by size and by status, and
+    a clearinghouse slot is frozen on first write.
+
+    A `published` disposition is NECESSARY BUT NOT SUFFICIENT: the publisher
+    also requires the job to be listed in its campaign's publication bundle.
+    """
+
+
+@disposition_cmd.command(name="seed")
+@click.argument("provenance", type=click.Path(exists=True, dir_okay=False))
+@_store_id_option
+@click.option("--declared-by", default=None, help="Who is declaring. Default: the config/OS user.")
+@_ledger_root_option
+@_json_option
+@click.pass_context
+def disposition_seed_cmd(
+    ctx: click.Context,
+    provenance: str,
+    store_id: str,
+    declared_by: Optional[str],
+    ledger_root: Optional[str],
+    as_json: bool,
+) -> None:
+    """Seed declarations from a provenance JSON file. IDEMPOTENT.
+
+    Every disposition is DERIVED from the file's own structure -- its
+    `LOAD_THESE` list and each job's prose -- and a shape that classifies to
+    nothing is refused rather than guessed at. Re-seeding the same file
+    appends nothing and restamps nothing.
+    """
+    from ...domains.kbase.berdl.council_disposition import seed_from_provenance
+
+    try:
+        report = seed_from_provenance(
+            _ledger(store_id, ledger_root),
+            provenance,
+            declared_by=_declared_by(ctx, declared_by),
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad seed file is a CLI error
+        raise _fail(exc) from exc
+    report["store_id"] = store_id
+    _emit(_envelope("disposition seed", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="declare")
+@click.argument("job_id")
+@click.argument("disposition")
+@_store_id_option
+@click.option("--reason", required=True, help="Why. Stored verbatim.")
+@click.option("--declared-by", default=None, help="Who is declaring. Default: the config/OS user.")
+@_ledger_root_option
+@_json_option
+@click.pass_context
+def disposition_declare_cmd(
+    ctx: click.Context,
+    job_id: str,
+    disposition: str,
+    store_id: str,
+    reason: str,
+    declared_by: Optional[str],
+    ledger_root: Optional[str],
+    as_json: bool,
+) -> None:
+    """Declare ONE job's disposition, recording who said so and when.
+
+    A change keeps the superseded declaration: the ledger is append-only, so
+    "who said this was a pilot before somebody published it" stays
+    answerable.
+    """
+    from ...domains.kbase.berdl.council_disposition import declare
+
+    try:
+        report = declare(
+            _ledger(store_id, ledger_root),
+            job_id=job_id,
+            disposition=disposition,
+            reason=reason,
+            declared_by=_declared_by(ctx, declared_by),
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad disposition is a CLI error
+        raise _fail(exc) from exc
+    report["store_id"] = store_id
+    _emit(_envelope("disposition declare", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="list")
+@_store_id_option
+@_ledger_root_option
+@_json_option
+def disposition_list_cmd(store_id: str, ledger_root: Optional[str], as_json: bool) -> None:
+    """List the CURRENT declaration per job, from the ledger."""
+    ledger = _ledger(store_id, ledger_root)
+    current = ledger.current()
+    rows = [
+        {
+            "job_id": job_id,
+            "disposition": record.get("disposition"),
+            "declared_by": record.get("declared_by"),
+            "declared_at": record.get("declared_at"),
+            "reason": record.get("reason"),
+        }
+        for job_id, record in sorted(current.items())
+    ]
+    data = {
+        "store_id": store_id,
+        "ledger": str(ledger.path),
+        "jobs": len(rows),
+        "declarations": rows,
+        "published": [r["job_id"] for r in rows if r["disposition"] == "published"],
+    }
+    _emit(_envelope("disposition list", data=data), as_json=as_json)
+
+
+@disposition_cmd.command(name="publish")
+@_store_id_option
+@click.option("--snapshot-id", required=True, help="The VERIFIED digest of the snapshot these rows belong to.")
+@click.option("--snapshot-seq", required=True, type=int, help="The explicit monotonic sequence for this snapshot.")
+@click.option("--load-batch-id", required=True, help="This load's batch id (idempotency + provenance).")
+@click.option("--store-host", default=None, help="Where the snapshot was taken. Default: this host.")
+@_ledger_root_option
+@_lakehouse_option
+@_json_option
+def disposition_publish_cmd(
+    store_id: str,
+    snapshot_id: str,
+    snapshot_seq: int,
+    load_batch_id: str,
+    store_host: Optional[str],
+    ledger_root: Optional[str],
+    lakehouse: Optional[str],
+    as_json: bool,
+) -> None:
+    """Write the ledger's current projection into council.job_disposition.
+
+    REFUSES a second write for the same (store_id, snapshot_id): the table is
+    keyed one-disposition-per-job-per-snapshot, so a second projection would
+    duplicate every job.
+    """
+    import socket
+
+    from ...domains.kbase.berdl.council_disposition import write_dispositions
+
+    try:
+        report = write_dispositions(
+            _sink(lakehouse),
+            _ledger(store_id, ledger_root),
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+            snapshot_seq=snapshot_seq,
+            store_host=store_host or socket.gethostname(),
+            load_batch_id=load_batch_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a refused write is a CLI error
+        raise _fail(exc) from exc
+    _emit(_envelope("disposition publish", data=report), as_json=as_json)
+
+
+@disposition_cmd.command(name="check")
+@click.argument("job_ids", nargs=-1, required=True)
+@click.option("--store-id", default=None, help="Restrict to one store's dispositions.")
+@click.option("--snapshot-id", default=None, help="Read one snapshot instead of the current one.")
+@_lakehouse_option
+@_json_option
+def disposition_check_cmd(
+    job_ids: Sequence[str],
+    store_id: Optional[str],
+    snapshot_id: Optional[str],
+    lakehouse: Optional[str],
+    as_json: bool,
+) -> None:
+    """THE GATE. Exit non-zero, naming every job that is not published.
+
+    Goes through the real resolver against the real table. An undeclared job
+    fails here by name -- which is the whole point, because nothing else in
+    the store would have stopped it.
+    """
+    from ...domains.kbase.berdl.council_disposition import require_published
+
+    try:
+        resolved = require_published(
+            _sink(lakehouse),
+            job_ids,
+            store_id=store_id,
+            snapshot_id=snapshot_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - the refusal IS this verb's answer
+        raise _fail(exc) from exc
+    _emit(
+        _envelope("disposition check", data={"published": resolved, "jobs": len(resolved)}),
         as_json=as_json,
     )

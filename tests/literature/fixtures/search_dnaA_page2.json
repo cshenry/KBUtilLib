@@ -1,0 +1,48 @@
+{
+  "version": "6.9",
+  "hitCount": 3,
+  "nextCursorMark": "AoJwz9CqMyk1NzYyNDcyNA==",
+  "request": {
+    "queryString": "\"dnaA\" AND (\"Acinetobacter baylyi\" OR \"ADP1\")",
+    "resultType": "core",
+    "cursorMark": "AoJwz9CqMyk1NzYyNDcyNA==",
+    "pageSize": 2,
+    "format": "json",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "PMC2828762",
+        "source": "PMC",
+        "pmcid": "PMC2828762",
+        "doi": "10.1186/1471-2164-11-S1-S5",
+        "title": "A genome-scale reconstruction of Acinetobacter baylyi ADP1 metabolism.",
+        "authorString": "Durot M, Le Fevre F, de Berardinis V, et al.",
+        "journalInfo": {
+          "volume": "11",
+          "journalIssueId": 3456789,
+          "dateOfPublication": "2010 ",
+          "monthOfPublication": 0,
+          "yearOfPublication": 2010,
+          "journal": {
+            "title": "BMC genomics",
+            "medlineAbbreviation": "BMC Genomics",
+            "essn": "1471-2164",
+            "isoabbreviation": "BMC Genomics",
+            "nlmid": "100965258"
+          }
+        },
+        "pubYear": "2010",
+        "abstractText": "We reconstructed the metabolic network of ADP1 from its annotated genome.",
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "inPMC": "Y",
+        "hasPDF": "Y",
+        "citedByCount": 143,
+        "firstIndexDate": "2010-02-10",
+        "firstPublicationDate": "2010-01-01"
+      }
+    ]
+  }
+}

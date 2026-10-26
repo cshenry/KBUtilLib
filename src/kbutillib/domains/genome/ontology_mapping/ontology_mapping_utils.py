@@ -15,12 +15,53 @@ to Vibhav's Type 4 fusion once it can score new text). Every result therefore
 carries ``mapping_version`` and ``mapping_hash``: a backend swap changes them,
 and anything that caches or hashes results (the function clearinghouse) must
 fold them into its own key.
+
+On top of those two capabilities sit the STAGES of the standing, quoted,
+operator-approved ``function_to_go`` pipeline (``kbu ontomap``), which live
+here because they are those same two capabilities plus bookkeeping:
+
+* :meth:`OntologyMappingUtils.council_plan` -- stage 1. Derives the un-run
+  set from the clearinghouse, ranks it, partitions it three ways, chunks the
+  submit side and writes ``PLAN.json``. The partition arithmetic itself is
+  pure and lives in :mod:`.unrun`.
+* :func:`~.council_run.council_run` -- stage 4. Executes an APPROVED plan one
+  chunk at a time behind the approval gate and a per-gateway token ceiling,
+  then runs the retry pass. It lives in :mod:`.council_run` and is
+  re-exported here; it imports no numpy, because running a council is not
+  ranking.
+* :meth:`OntologyMappingUtils.council_export` -- stage 5's first half. Joins
+  the plan's abstain and fanout records to the council store's verdicts and
+  writes PARQUET, one row per input ``query_id``, on local scratch. The row
+  derivation itself is pure and lives in :mod:`.verdicts`, for the same
+  reason :mod:`.unrun` is separate.
+* :func:`~.council_publish.council_publish` -- stage 5's second half, the
+  PRODUCER side of the hand-off. Renders the shipped
+  ``function-to-go-council`` manifest preset for this run, gates it through
+  ``kbu clearinghouse plan``'s own validator, and writes a shard run whose
+  ``run.json`` carries a sha256, a row count and a hash range per batch. It
+  lives in :mod:`.council_publish` and imports no numpy, for the same reason
+  :mod:`.council_run` does not: publishing ranks nothing. The CONSUMER side
+  (``kbu clearinghouse load`` and ``verify``, both in-pod) runs on the pod
+  after the directory syncs, and nothing here reaches for it.
+* :func:`~.council_status.council_status` -- the report beside stage 4, and
+  the only verb that reads ACROSS run directories. Reports corpus coverage by
+  LIFECYCLE state and by ``parameter_set_hash``, and surfaces a second
+  concurrent run. It lives in :mod:`.council_status` and imports no numpy,
+  for the same reason the two above do not: status ranks nothing.
+
+Stage 2 (the quote) is :func:`kbutillib.domains.ai.council.quote.quote_plan`,
+which READS the ``PLAN.json`` this module writes -- so the plan's contract is
+that module's :func:`~kbutillib.domains.ai.council.quote.load_plan`, and
+``plan_hash`` is its :attr:`~kbutillib.domains.ai.council.quote.Plan.plan_hash`
+rather than a second hashing rule that could disagree with it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -30,10 +71,88 @@ from kbutillib.core.shared_env_utils import SharedEnvUtils
 from . import go_text
 from .placeholder import PLACEHOLDER_RULES_VERSION, placeholder_reason
 
+# Re-exported so `unrun_set` is reachable beside the stage that uses it,
+# while the pure derivation itself stays in a module that imports no numpy
+# (see `unrun`'s docstring): a partition test living here would be skipped
+# on every host without the retrieval stack.
+from .unrun import (  # noqa: F401 - public re-export
+    UNRUN_PARTITIONS,
+    unrun_items,
+    unrun_set,
+)
+
+# Stage 4, re-exported for the same reason `unrun_set` is: the stage belongs
+# beside the other four, but the run stage does not RANK anything -- so
+# living here (where `go_text` pulls numpy/scikit-learn/joblib at import) would
+# make it unrunnable on a host that has no retrieval stack, for no reason.
+# See `council_run`'s own module docstring.
+from .council_run import council_run  # noqa: F401 - public re-export
+
+# Stage 5's producer half, re-exported for exactly the same reason: it belongs
+# beside the other stages, and publishing ranks nothing.
+from .council_publish import council_publish  # noqa: F401 - public re-export
+
+# The status report, re-exported for the same reason again. Its own
+# `council_status` imports two constants back OUT of this module, lazily and
+# inside the function, so this module-level import is not a cycle.
+from .council_status import council_status  # noqa: F401 - public re-export
+
 #: The backend name. Bump on any change to retrieval behaviour.
 BACKEND = "ontomap-go-text-union"
 BACKEND_VERSION = "1.0.0"
 DEFAULT_COUNCIL_QUERY = "go_mf@1"
+
+#: The clearinghouse ``source`` a council run publishes under:
+#: ``"council/<query_name>@<version>"``. It is the partition value of
+#: ``function_result``, and it is also what stage 1 filters ``current_state``
+#: by -- so the two must be spelled in exactly one place.
+COUNCIL_SOURCE_PREFIX = "council/"
+
+#: Submit items per chunk, written INTO ``PLAN.json`` as the run's own
+#: setting rather than read from here by the run stage.
+#:
+#: THIS IS A WORKAROUND FOR KBUtilLib ISSUE 84, NOT A DESIGN. The council
+#: store's ``claim_calls`` is synchronous on the worker event loop and its
+#: cost is linear in the pending set: measured 217 ms at 19k pending rows
+#: against 10.4 ms at 2k. That inflated service times 6-9x on BOTH gateways
+#: at once -- with queue wait at 0.00, which is how it was identified -- and
+#: collapsed throughput 10.8x. Chunking to ~2,000 items with ONE chunk in
+#: flight keeps the pending set small enough that the claim stays cheap.
+#:
+#: It is a DEFAULT here and a VALUE in the plan precisely because it must
+#: change the day issue 84 is fixed: a workaround baked in as a code constant
+#: becomes permanent silently, with nothing recording why it was ever there.
+PLAN_CHUNK_SIZE = 2000
+
+#: Filename of the un-run input bundle's MANIFEST, inside the bundle
+#: directory. The bundle is what the IN-POD un-run read hands to the
+#: off-pod planner, and this is the file a caller names.
+UNRUN_BUNDLE_FILENAME = "BUNDLE.json"
+
+#: Filename of the bundle's un-run rows, beside its manifest. JSONL, one
+#: ``{"query_id", "text", "source"}`` row per un-run function, streamed --
+#: a 19k-function un-run set is small but a 10M-function one is not, and the
+#: producer must never need the whole set in memory twice.
+UNRUN_BUNDLE_ROWS_FILENAME = "unrun.jsonl"
+
+#: Version of the un-run bundle's own format. VERSIONED because the bundle
+#: CROSSES MACHINES and the two ends are deployed independently: the pod can
+#: be running a newer package than h100 for days. A consumer that read an
+#: unversioned bundle would have to guess, and guessing wrong here means
+#: planning the wrong work. Bumped whenever the manifest's required keys
+#: change; :func:`read_unrun_bundle` refuses a version it does not know.
+UNRUN_BUNDLE_SCHEMA_VERSION = 1
+
+#: The file STAGE 4 appends per chunk inside the run directory. Stage 5 reads
+#: it for one thing only -- which council jobs the run used -- so that
+#: ``council_export`` can be pointed at a run directory rather than told the
+#: job ids by hand. Stage 4 owns everything else about its contract.
+RUN_FILENAME = "RUN.json"
+
+#: Chunks the run stage may have outstanding at once. One, for the same
+#: reason: the daemon drains every claimable job, so two chunks in flight is
+#: one large pending set again (see :data:`PLAN_CHUNK_SIZE`).
+PLAN_CHUNKS_IN_FLIGHT = 1
 
 FunctionsArg = Union[Sequence[str], Sequence[Dict[str, Any]], Dict[str, str]]
 
@@ -339,10 +458,1259 @@ class OntologyMappingUtils(SharedEnvUtils):
         tmp.replace(path)
         return {"path": str(path), "rows": len(council_out["results"])}
 
+    # -- pipeline stage 1: the run plan --------------------------------------
+
+    def council_unrun_bundle(
+        self,
+        bundle_dir: Union[str, Path],
+        *,
+        query: str,
+        parameter_set: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Stage 1a, IN-POD: read the clearinghouse, emit an un-run input bundle.
+
+        Spends NO LLM tokens and performs NO retrieval. This is the ONLY part
+        of stage 1 that touches the lake, and it is deliberately the smallest
+        piece that must work inside the pod -- the first in-pod component of
+        this PRD, so the in-pod read path is proven before the archiver and
+        the scanner depend on it.
+
+        WHY IT IS SEPARATE. The off-pod read worked from h100 on 2026-10-22
+        12:03 CDT and FAILED on 2026-10-23 00:35 CDT with an auth error:
+        ``~/.kbase/token`` on poplar had expired at 27 days old. Stage 1 is
+        SCHEDULABLE and UNATTENDED, so an expiry means the plan silently is
+        not produced and nobody learns until somebody looks. After this
+        split, h100 holds no BERDL credential at all: the read happens in the
+        pod, where the credential lives, and what crosses to h100 is an
+        immutable file.
+
+        WHY THE BOUNDARY IS EXACTLY HERE. Sending a full PLAN would move
+        retrieval (scikit-learn, the vendored GO artifacts) and the council
+        config into the pod. Sending only the definition TEXT would discard
+        the canonical parameter-set hash, and the hash is what makes "un-run"
+        mean anything -- so the bundle carries both, and the planner's
+        parameter-set check is mandatory rather than advisory.
+
+        WHAT IT DOES NOT DO: it does not rank, partition, chunk or prepare a
+        quote, and it never constructs a council store or reads the council
+        namespace. Those all belong to the off-pod planner.
+
+        THE PARAMETER SET IS AN INPUT, NOT DERIVED HERE, and that is the
+        point: ``{query, bench_fingerprint, mapping_hash}`` needs the council
+        roster and the retrieval mapping version, which are exactly the
+        requirements this split keeps out of the pod. It is canonicalised and
+        hashed through the CLEARINGHOUSE's own
+        :func:`~kbutillib.domains.kbase.berdl.clearinghouse_parameters.result_parameter_set_identity`
+        -- a pure function, no retrieval, no council config -- so the hash in
+        the bundle is the same hash the planner will recompute and compare.
+
+        Args:
+            bundle_dir: Directory the bundle is written into (created if
+                absent). An EXPLICIT path; nothing here invents one.
+            query: ``"<name>@<version>"``. The version is REQUIRED -- it is
+                part of the parameter set, so a bundle that left it to be
+                guessed could be planned against one spec and run against
+                another.
+            parameter_set: The run's parameter set, REQUIRED and supplied by
+                the caller. See above for why it is not derived in the pod.
+
+        Returns:
+            The manifest as written, plus ``bundle_file``, ``bundle_dir``,
+            ``rows_path`` and ``warnings`` -- non-empty when the un-run set
+            came back EMPTY, which the planner refuses outright (see
+            :func:`read_unrun_bundle`).
+
+        Raises:
+            ValueError: ``query`` names no version, or ``parameter_set`` is
+                empty -- an empty parameter set is refused for a council
+                source by the clearinghouse's own identity function, because
+                it would collapse every run into one slot.
+        """
+        from kbutillib.domains.kbase.berdl.clearinghouse_parameters import (
+            result_parameter_set_identity,
+        )
+
+        name, version = _split_query_ref(query)
+        query_ref = f"{name}@{version}"
+        source = f"{COUNCIL_SOURCE_PREFIX}{query_ref}"
+        canonical_json, parameter_set_hash = result_parameter_set_identity(
+            dict(parameter_set),
+            source=source,
+            where="council_unrun_bundle parameter_set",
+        )
+
+        # -- the two clearinghouse reads, and nothing else ------------------
+        clearinghouse = self._clearinghouse()
+        universe = list(clearinghouse.universe("function"))
+        done = list(
+            clearinghouse.current_state(
+                "function",
+                sources=[source],
+                parameter_set_hashes=[parameter_set_hash],
+            )
+        )
+        # The SAME set difference stage 1 has always used, so the bundle path
+        # and the direct path select identically. Nothing is ranked here.
+        items = unrun_items(universe, done)
+
+        target = Path(bundle_dir).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        rows_path = target / UNRUN_BUNDLE_ROWS_FILENAME
+        # The EXACT definition text, as the clearinghouse gave it. Not
+        # normalised, not stripped: the text is what the council is asked
+        # about, and query_id is the clearinghouse's own digest of it, so a
+        # text this bundle "tidied" would no longer be the function the key
+        # names.
+        written = _write_jsonl(
+            rows_path,
+            (
+                {
+                    "query_id": row["query_id"],
+                    "text": row["text"],
+                    "source": row["source"],
+                }
+                for row in items
+            ),
+        )
+
+        manifest: Dict[str, Any] = {
+            "schema_version": UNRUN_BUNDLE_SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "query": query_ref,
+            "source": source,
+            "parameter_set": dict(parameter_set),
+            "parameter_set_canonical_json": canonical_json,
+            "parameter_set_hash": parameter_set_hash,
+            "rows_file": UNRUN_BUNDLE_ROWS_FILENAME,
+            "counts": {
+                "universe": len(universe),
+                "done": len(done),
+                "unrun": written,
+            },
+            # THE INVENTORY, over the bundle's own files. BUNDLE.json itself
+            # is not in it: a file cannot carry its own digest, and the
+            # manifest is the thing the digests are read FROM.
+            "inventory": {
+                UNRUN_BUNDLE_ROWS_FILENAME: {
+                    "bytes": rows_path.stat().st_size,
+                    "rows": written,
+                    "sha256": _sha256_of(rows_path),
+                }
+            },
+        }
+
+        bundle_file = target / UNRUN_BUNDLE_FILENAME
+        tmp = bundle_file.with_name(bundle_file.name + ".partial")
+        tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        # Atomic: the bundle is IMMUTABLE once named, and a reader on the
+        # other side of a file copy must never see a half-written manifest.
+        tmp.replace(bundle_file)
+
+        warnings: List[str] = []
+        if not written:
+            warnings.append(
+                f"the un-run set is EMPTY: the clearinghouse universe held "
+                f"{len(universe)} function(s) and {len(done)} already have a "
+                f"current-state result at parameter_set_hash "
+                f"{parameter_set_hash}. `council-plan` REFUSES an empty "
+                "bundle -- an empty un-run set is a producer failure, not a "
+                "clean 'nothing to do' -- so check this read before "
+                "shipping the bundle."
+            )
+
+        return {
+            **manifest,
+            "bundle_file": str(bundle_file),
+            "bundle_dir": str(target),
+            "rows_path": str(rows_path),
+            "warnings": warnings,
+        }
+
+    def council_plan(
+        self,
+        run_dir: Union[str, Path],
+        *,
+        query: str,
+        bundle: Optional[Union[str, Path]] = None,
+        parameter_set: Optional[Dict[str, Any]] = None,
+        chunk_size: int = PLAN_CHUNK_SIZE,
+        profile: Optional[str] = None,
+        scratch_dir: Optional[Union[str, Path]] = None,
+        concurrency: Optional[Dict[str, Any]] = None,
+        max_candidates: int = go_text.UNION_MAX_CANDIDATES,
+    ) -> Dict[str, Any]:
+        """Stage 1: derive the un-run set, rank it, chunk it, write ``PLAN.json``.
+
+        Spends NO LLM tokens. It reads the clearinghouse, runs the retrieval
+        stage locally and writes files; the first token is spent in stage 4,
+        behind a quote and an approval.
+
+        TWO WAYS IN, AND THE BUNDLE IS THE ONE THE SCHEDULED STAGE USES.
+
+        * ``bundle=`` -- the un-run set arrives as an immutable file written
+          IN-POD by :meth:`council_unrun_bundle`, and this call CONSTRUCTS NO
+          BERDL CLIENT at all. This is the path the unattended, schedulable
+          stage takes, and the reason is a measured failure: the off-pod read
+          worked from h100 on 2026-10-22 12:03 CDT and failed on 2026-10-23
+          00:35 CDT because ``~/.kbase/token`` on poplar had expired at 27
+          days old. An unattended stage that cannot read silently produces no
+          plan. With a bundle, h100 holds no BERDL credential.
+        * ``bundle=None`` -- the ORIGINAL single-command path: this call does
+          the two clearinghouse reads itself. Kept for local and interactive
+          use, where a live credential is present and a human is watching, and
+          it is what the bundle path is tested for equivalence AGAINST. It
+          must not be used for the scheduled stage.
+
+        The bundle is VALIDATED against the parameter set this call resolved
+        BEFORE any retrieval happens, and its sha256 inventory is verified
+        first -- see :func:`read_unrun_bundle` for the four refusals and why
+        the parameter-set check is mandatory rather than advisory.
+
+        THE STEPS, each one a reuse of something that already exists:
+
+        1. **Universe** -- :meth:`ClearinghouseCapability.universe`
+           (``function_entity`` joined to ``function_content``). This works
+           from h100 OFF-POD over the BERDL delta API, measured 2026-10-22, so
+           it is deliberately NOT gated on the locus: only ``load`` and
+           ``verify`` are in-pod verbs. SKIPPED entirely on the bundle path.
+        2. **Done** -- :meth:`ClearinghouseCapability.current_state` for
+           ``function``, filtered to this run's ``source`` AND its
+           ``parameter_set_hash``. A result at a DIFFERENT parameter set is a
+           different experiment and leaves the function un-run. SKIPPED
+           entirely on the bundle path -- the pod already applied it.
+        3. **Un-run** = universe - done, or the bundle's rows.
+        4. **Rank** -- :meth:`function_to_go` over the un-run set,
+           :meth:`write_ranked` to a LOCAL scratch path.
+        5. **Partition** -- :func:`~.unrun.unrun_set`, three ways, all three
+           recorded (the abstained set is never dropped).
+        6. **Chunk** -- the submit set into ordered chunks of ``chunk_size``.
+        7. **Write** ``PLAN.json`` into ``run_dir``.
+
+        WHAT CROSSES DROPBOX AND WHAT DOES NOT. ``run_dir`` is a synced
+        directory, and ``PLAN.json`` -- small, operator-readable -- is the only
+        thing this stage puts there. The ranked file, the plan's items file and
+        the abstain/fanout records go to ``scratch_dir``: the items of a
+        19k-item plan are ~130 MB of evidence and menus (6.9 kB each,
+        measured), nothing off-machine reads them, and every byte on the sync
+        surface needs an integrity gate. ``PLAN.json`` names them by ABSOLUTE
+        path, which is the ``items_file`` spelling
+        :func:`~kbutillib.domains.ai.council.quote.load_plan` supports for
+        exactly this reason.
+
+        THE PARAMETER SET IS ``{query, bench_fingerprint, mapping_hash}`` and
+        is hashed by the CLEARINGHOUSE's own
+        :func:`~kbutillib.domains.kbase.berdl.clearinghouse_parameters.result_parameter_set_identity`,
+        never by a hashing rule of this module's own. ``bench_fingerprint``
+        and NOT ``roster_fingerprint``: the bench partitions the corpus, the
+        transport does not. ``Roster.fingerprint()`` covers the endpoint kind,
+        the route spelling, the token ceiling, the temperature and the extras,
+        so moving one seat from the codex CLI to MAG moves it -- which would
+        re-partition all 47,341 clearinghouse functions and re-charge ~199M
+        tokens for a pure cost optimisation. ``roster_fingerprint`` and the
+        per-seat ``route_fingerprint`` are still RECORDED in the plan, as
+        provenance; they are simply not keys. See
+        :func:`~kbutillib.domains.ai.council.types.bench_fingerprint`.
+
+        Args:
+            run_dir: Where ``PLAN.json`` is written (created if absent).
+            query: ``"<name>@<version>"``. The version is REQUIRED: it is part
+                of the parameter set and of every prompt hash, so a plan that
+                left it to be guessed could be quoted against one spec and run
+                against another.
+            bundle: An EXPLICIT path to an un-run input bundle (its directory
+                or its ``BUNDLE.json``) written by
+                :meth:`council_unrun_bundle` in the pod. When given, this
+                call reads no clearinghouse and constructs no BERDL client.
+                There is deliberately no default and no "latest bundle"
+                search: picking up whatever happens to be newest is how a run
+                silently uses the wrong parameter set.
+            parameter_set: Override the resolved parameter set. For tests and
+                for re-deriving a historical partition; the default is the one
+                the pipeline means.
+            chunk_size: Submit items per chunk. See :data:`PLAN_CHUNK_SIZE` --
+                it is a workaround for KBUtilLib issue 84 and the plan records
+                why.
+            profile: The bench to plan against. Default: the configured one.
+            scratch_dir: Local ROOT for the ranked file, the items file and
+                the abstain/fanout records; ``function-to-go/<run-id>/`` is
+                appended. Default: ``$KBU_SCRATCH_DIR``, else
+                ``/scratch/<user>``, else the system temporary directory. Must
+                not be inside ``run_dir``.
+            concurrency: Override the concurrency block written into the plan.
+            max_candidates: Cap on each ranked candidate list.
+
+        Returns:
+            The plan, exactly as written to ``PLAN.json``, plus
+            ``plan_file`` / ``counts`` / the three partition records' paths.
+
+        Raises:
+            ValueError: ``query`` names no version, ``chunk_size`` is below 1,
+                the scratch path is inside ``run_dir``, the un-run set and
+                the ranking disagree (see :func:`~.unrun.unrun_set`), or a
+                supplied ``bundle`` fails any of its four checks -- unknown
+                schema version, digest mismatch, parameter-set mismatch, or
+                an empty un-run set (see :func:`read_unrun_bundle`).
+            FileNotFoundError: ``bundle`` was given and names no manifest, or
+                its inventory names a file that is absent.
+        """
+        from kbutillib.domains.ai.council.quote import (
+            PLAN_FILENAME,
+            PLAN_SCHEMA_VERSION,
+            Plan,
+            PlanItem,
+        )
+        from kbutillib.domains.ai.council.types import (
+            bench_fingerprint,
+            route_fingerprint,
+            seat_generation_params,
+        )
+        from kbutillib.domains.kbase.berdl.clearinghouse_parameters import (
+            result_parameter_set_identity,
+        )
+
+        if int(chunk_size) < 1:
+            raise ValueError(
+                f"council_plan: chunk_size={chunk_size}; a chunk must hold at "
+                "least one item"
+            )
+        chunk_size = int(chunk_size)
+        name, version = _split_query_ref(query)
+        query_ref = f"{name}@{version}"
+        source = f"{COUNCIL_SOURCE_PREFIX}{query_ref}"
+
+        run_dir = Path(run_dir).expanduser()
+        scratch = _scratch_dir(run_dir, scratch_dir)
+
+        # -- identity: the bench partitions, the transport is provenance ----
+        council = self._council()
+        config = council.config()
+        roster = council.roster(profile)
+        resolved_profile = str(profile or getattr(config, "default_profile", "") or "") or None
+        transport = [
+            {
+                "role": role,
+                "seat_name": seat.seat_name,
+                "endpoint": seat.endpoint,
+                "endpoint_kind": seat.endpoint_kind,
+                "gateway": _gateway_of(config, seat),
+                "model": seat.model,
+                "canonical_model": seat.canonical_model,
+                "route_fingerprint": route_fingerprint(
+                    seat, config.endpoint(seat.endpoint), seat_generation_params(seat)
+                ),
+            }
+            for role, seat in roster.seats()
+        ]
+
+        version_report = self.mapping_version()
+        mapping_hash = str(version_report["mapping_hash"])
+        bench = bench_fingerprint(roster)
+        if parameter_set is None:
+            parameter_set = {
+                "query": query_ref,
+                "bench_fingerprint": bench,
+                "mapping_hash": mapping_hash,
+            }
+        else:
+            parameter_set = dict(parameter_set)
+        canonical_json, parameter_set_hash = result_parameter_set_identity(
+            parameter_set, source=source, where="council_plan parameter_set"
+        )
+
+        # -- where the un-run set comes from --------------------------------
+        if bundle is not None:
+            # IN-POD BUNDLE. Verified and parameter-set-checked BEFORE any
+            # retrieval runs, and NO BERDL client is constructed on this
+            # branch -- self._clearinghouse() is never called, which is the
+            # whole point: h100 holds no BERDL credential.
+            read = read_unrun_bundle(
+                bundle,
+                source=source,
+                parameter_set_hash=parameter_set_hash,
+            )
+            bundle_file = read["bundle_file"]
+            bundle_counts = read["counts"]
+            # The bundle's rows are ALREADY the set difference, deduped and
+            # ordered by query_id, so re-deriving it is a no-op by
+            # construction: unrun_items(rows, []) returns exactly those rows.
+            # Running them through the same function anyway is deliberate --
+            # it is the ONE definition of the set, it validates every row
+            # carries a query_id and a definition, and it is what makes the
+            # bundle path and the direct path produce an identical plan.
+            universe_rows: List[Dict[str, Any]] = list(read["rows"])
+            done_rows: List[Any] = []
+        else:
+            # The ORIGINAL single-command path: the two clearinghouse reads,
+            # thin, around a pure derivation.
+            bundle_file = None
+            bundle_counts = {}
+            clearinghouse = self._clearinghouse()
+            universe_rows = list(clearinghouse.universe("function"))
+            done_rows = list(
+                clearinghouse.current_state(
+                    "function",
+                    sources=[source],
+                    parameter_set_hashes=[parameter_set_hash],
+                )
+            )
+
+        universe, done = universe_rows, done_rows
+        items = unrun_items(universe, done)
+        ranked = self.function_to_go(items, max_candidates=max_candidates)
+        ranked_written = self.write_ranked(ranked, scratch / "ranked.jsonl.gz")
+        parts = unrun_set(universe, done, ranked)
+
+        # -- the plan ---------------------------------------------------------
+        plan_items = tuple(
+            PlanItem(
+                item_id=row["item_id"],
+                evidence={"text": row["text"], "source": row["source"]},
+                menu=_menu_of(row["candidates"]),
+                query_id=row["query_id"],
+            )
+            for row in parts["submit"]
+        )
+        plan_object = Plan(
+            query_name=name,
+            query_version=version,
+            items=plan_items,
+            mapping_hash=mapping_hash,
+            profile=resolved_profile,
+        )
+
+        items_file = scratch / "items.jsonl"
+        _write_jsonl(
+            items_file,
+            (
+                {
+                    "item_id": item.item_id,
+                    "query_id": item.query_id,
+                    "evidence": dict(item.evidence),
+                    "menu": [dict(entry) for entry in item.menu],
+                }
+                for item in plan_items
+            ),
+        )
+        abstain_file = scratch / "abstain.jsonl"
+        _write_jsonl(abstain_file, parts["abstain"])
+        fanout_file = scratch / "fanout.jsonl"
+        _write_jsonl(fanout_file, parts["fanout"])
+
+        chunks = [
+            {
+                "index": index,
+                "offset": offset,
+                "items": len(plan_items[offset : offset + chunk_size]),
+                "first_item_id": plan_items[offset].item_id,
+                "last_item_id": plan_items[
+                    min(offset + chunk_size, len(plan_items)) - 1
+                ].item_id,
+            }
+            for index, offset in enumerate(range(0, len(plan_items), chunk_size))
+        ]
+
+        plan: Dict[str, Any] = {
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "run_dir": str(run_dir),
+            "run_id": run_dir.name,
+            "query": query_ref,
+            "source": source,
+            "profile": resolved_profile,
+            "mapping_version": version_report["mapping_version"],
+            "mapping_hash": mapping_hash,
+            # The one in the PARAMETER SET, which is the one that partitions
+            # the corpus. It is the roster's own unless the caller overrode
+            # the parameter set to re-derive a historical partition; the
+            # seated bench is recorded either way, in transport_allocation.
+            "bench_fingerprint": str(parameter_set.get("bench_fingerprint") or bench),
+            "parameter_set": dict(parameter_set),
+            "parameter_set_hash": parameter_set_hash,
+            "parameter_set_canonical_json": canonical_json,
+            # PROVENANCE, NOT KEYS. roster_fingerprint and route_fingerprint
+            # answer "was this configured identically" and "where did this
+            # come from"; bench_fingerprint answers "is this the same
+            # experiment", and only that one partitions the corpus.
+            "roster_fingerprint": roster.fingerprint(),
+            # EXPECTED TO DIFFER BETWEEN RUNS. Which gateway each seat is
+            # routed over is the thing we iterate on to allocate token cost
+            # (Chris, 2026-10-22), so it is written down per run rather than
+            # inferred from whatever the config happened to say later.
+            "transport_allocation": transport,
+            # The bundle path takes universe/done from the BUNDLE's recorded
+            # counts, because the pod applied the set difference and h100
+            # never saw either set. They are the same two numbers the direct
+            # path reports, which is what keeps the two plans equivalent.
+            "counts": {
+                "universe": int(bundle_counts.get("universe", len(universe))),
+                "done": int(bundle_counts.get("done", len(done))),
+                "unrun": len(items),
+                "submit": len(parts["submit"]),
+                "abstain": len(parts["abstain"]),
+                "fanout": len(parts["fanout"]),
+            },
+            "chunks": chunks,
+            "concurrency": (
+                dict(concurrency)
+                if concurrency is not None
+                else _plan_concurrency(chunk_size, config)
+            ),
+            "items_file": str(items_file),
+            "abstain_file": str(abstain_file),
+            "fanout_file": str(fanout_file),
+            "ranked_file": str(ranked_written["path"]),
+            # PROVENANCE: which bundle this plan was built from, or null on
+            # the direct-read path. Recorded so a plan can be traced back to
+            # the exact in-pod read that produced its universe -- and so a
+            # reader can tell at a glance which path was taken.
+            "unrun_bundle_file": bundle_file,
+            "plan_hash": plan_object.plan_hash,
+        }
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        plan_file = run_dir / PLAN_FILENAME
+        tmp = plan_file.with_name(plan_file.name + ".partial")
+        tmp.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+        tmp.replace(plan_file)  # atomic: a reader never sees a half-written plan
+        return {**plan, "plan_file": str(plan_file)}
+
+    # -- pipeline stage 5: the verdict export --------------------------------
+
+    def council_export(
+        self,
+        run_dir: Union[str, Path],
+        out_path: Optional[Union[str, Path]] = None,
+        *,
+        job_ids: Optional[Sequence[str]] = None,
+        retry_job_ids: Optional[Sequence[str]] = None,
+        genomes: Optional[Dict[str, Sequence[str]]] = None,
+        scratch_dir: Optional[Union[str, Path]] = None,
+        store_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Stage 5: write the run's verdicts as parquet, one row per input.
+
+        Spends NO LLM tokens: it reads ``PLAN.json``, the plan's abstain and
+        fanout records and the council store, and writes one file.
+
+        ONE ROW PER INPUT ``query_id`` -- the whole un-run set the plan
+        recorded, which is ``abstain`` plus ``fanout`` (a text shared by three
+        ``query_id``s is answered once and published three times). All three
+        decline classes are written with ``go_ids = []``; the only thing
+        withheld is an item with NO VERDICT, which is still un-run. The row
+        derivation and the reasons for each cell live in :mod:`.verdicts`,
+        which is pure and testable without the retrieval stack.
+
+        THE JOIN KEY IS ``query_id``, taken from the plan's fanout and abstain
+        records -- which carry it through from the ranked file, because
+        :func:`~.unrun.unrun_items` reads it off the clearinghouse universe
+        row and never discards it. It is NOT resolved through a text join and
+        NOT the council's own ``items.entity_hash``: measured 2026-10-21, that
+        hash matched 0 of 19,268 clearinghouse hashes while the definition
+        text matched 19,268 of 19,268, and the fix is to stop discarding the
+        key rather than to join on the text.
+
+        Args:
+            run_dir: The run directory holding ``PLAN.json``.
+            out_path: Where the parquet goes. Default:
+                ``<scratch>/verdicts.parquet``. A path inside ``run_dir`` is
+                REFUSED -- the published artifact is the shard run, and the
+                verdict parquet is its input, not a sync artifact.
+            job_ids: The council jobs to read verdicts from, in order; a later
+                job's verdict for an ``item_id`` supersedes an earlier one's.
+                Default: whatever ``RUN.json`` names (see
+                :func:`_run_job_ids`).
+            retry_job_ids: Which of those belong to the retry pass. A row
+                whose verdict came from one is marked ``retried``. Default:
+                ``RUN.json``'s.
+            genomes: Optional ``query_id -> [genome_id, ...]``. See
+                :func:`~.verdicts.export_rows` -- nothing in-pipeline can fill
+                this today, and the column is an empty list without it.
+            scratch_dir: Local ROOT for the default ``out_path``, resolved the
+                same way :meth:`council_plan` resolves it.
+            store_id: The council store's DECLARED identity, published in
+                every council-decided row's ``council`` reference. Default:
+                read off the store itself
+                (``SqliteStore.store_identity()``). Pass it explicitly to
+                publish from a store copy whose identity you know. There is
+                deliberately no derived fallback -- not the hostname, not the
+                store path -- because the clearinghouse payload carrying this
+                id is frozen on first write and a wrong id cannot be
+                corrected in place.
+
+        Returns:
+            The export record: ``out_path``, ``rows``, ``bytes``, ``counts``,
+            the run identity, the job ids read, and ``warnings`` -- non-empty
+            whenever anything was withheld.
+
+        Raises:
+            FileNotFoundError: ``run_dir`` holds no ``PLAN.json``, or the plan
+                names an abstain/fanout file that is gone (``/scratch`` is
+                ephemeral on this host and is not backed up).
+            ValueError: No job ids were given and ``RUN.json`` names none,
+                ``out_path`` is inside ``run_dir``, the abstain/fanout
+                records disagree with the counts ``PLAN.json`` recorded, or
+                the run produced a council-decided row and no ``store_id``
+                could be resolved (see :func:`~.verdicts.council_reference`).
+        """
+        from kbutillib.domains.ai.council.quote import PLAN_FILENAME
+
+        from .verdicts import export_rows, verdicts_by_item, write_verdict_parquet
+
+        run_dir = Path(run_dir).expanduser()
+        plan_file = run_dir / PLAN_FILENAME
+        if not plan_file.exists():
+            raise FileNotFoundError(
+                f"no plan at {plan_file}. Stage 1 writes it: "
+                "`kbu ontomap council-plan`"
+            )
+        plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        name, version = _split_query_ref(str(plan.get("query") or ""))
+
+        abstain = _read_jsonl(_plan_path(plan, "abstain_file", run_dir))
+        fanout = _read_jsonl(_plan_path(plan, "fanout_file", run_dir))
+        _check_plan_counts(plan, abstain=len(abstain), fanout=len(fanout))
+
+        declared = _run_job_ids(run_dir)
+        resolved_jobs = (
+            [str(jid) for jid in job_ids] if job_ids is not None else declared["job_ids"]
+        )
+        resolved_retries = (
+            [str(jid) for jid in retry_job_ids]
+            if retry_job_ids is not None
+            else declared["retry_job_ids"]
+        )
+        if not resolved_jobs:
+            raise ValueError(
+                f"council_export: no council job ids. {run_dir / RUN_FILENAME} "
+                "names none (stage 4 writes it), so pass job_ids= explicitly. "
+                "Exporting with no job would write every item as withheld and "
+                "publish nothing, which reads as a completed export."
+            )
+        # Retry jobs LAST, so their verdicts supersede the chunk jobs' --
+        # measured: 105 of the 113 items that failed on a silently truncated
+        # ARGO response came back on a plain retry, and the retry's answer is
+        # the run's answer for those items.
+        retries = set(resolved_retries)
+        ordered = [jid for jid in resolved_jobs if jid not in retries]
+        ordered.extend(jid for jid in resolved_retries if jid not in set(ordered))
+
+        council = self._council()
+        settled: Dict[str, Dict[str, Any]] = {}
+        for job in ordered:
+            verdicts_by_item(council.results(job), job_id=job, into=settled)
+
+        # THE STORE'S DECLARED IDENTITY, for the published council reference.
+        # Resolved from the store itself rather than from config or the
+        # hostname: config is per-machine and would not travel with a copied
+        # file, and a derived id breaks every archived join the moment the
+        # store moves off /scratch (see
+        # ai.council.store.sqlite's "Archive identity" note). An explicit
+        # store_id= overrides it, which is how an operator publishes from a
+        # store copy whose identity they know.
+        resolved_store_id = str(store_id or "") or _declared_store_id(council)
+
+        if out_path is None:
+            out_path = _scratch_dir(run_dir, scratch_dir) / "verdicts.parquet"
+        out_path = Path(out_path).expanduser()
+        _refuse_inside_run_dir(out_path, run_dir)
+
+        built = export_rows(
+            abstain=abstain,
+            fanout=fanout,
+            verdicts=settled,
+            identity={
+                "query_name": name,
+                "query_version": version,
+                "roster_fingerprint": str(plan.get("roster_fingerprint") or ""),
+                "mapping_hash": str(plan.get("mapping_hash") or ""),
+            },
+            job_ids=ordered,
+            # The time RETRIEVAL declined, which is when the plan was written.
+            # The shard SKIPS a row whose observed_at is null, so an abstained
+            # row needs a real timestamp or it would vanish at shard time.
+            abstained_at=str(plan.get("generated_at") or "") or None,
+            genomes=genomes,
+            retry_job_ids=resolved_retries,
+            # PROVENANCE into the published payload: the per-seat route the
+            # plan recorded. It is deliberately NOT in the parameter set --
+            # clearinghouse_parameters.COUNCIL_REFUSED_KEYS refuses it there,
+            # because a seat re-routed to another gateway must not
+            # re-partition the corpus.
+            route_fingerprints=plan.get("transport_allocation"),
+            # The WINNING council item's reference rides in the payload as
+            # council = {store_id, job_id, item_id}; export_rows refuses to
+            # publish a decided row without a store_id rather than writing a
+            # partial triple that looks joinable.
+            store_id=resolved_store_id,
+        )
+        written = write_verdict_parquet(built["rows"], out_path)
+
+        counts = dict(built["counts"])
+        warnings: List[str] = []
+        if counts["withheld"]:
+            warnings.append(
+                f"{counts['withheld']} of {counts['inputs']} input function(s) "
+                "were WITHHELD: their council item has no verdict (every call "
+                "failed, or it never settled). They are not results, so they "
+                "are not in the export and the next `council-plan` will "
+                "re-select them -- run the retry pass before publishing if "
+                "that is not what you want."
+            )
+        return {
+            "out_path": written["path"],
+            "rows": written["rows"],
+            "bytes": written["bytes"],
+            "counts": counts,
+            "plan_file": str(plan_file),
+            "plan_hash": str(plan.get("plan_hash") or ""),
+            "query": f"{name}@{version}",
+            "query_name": name,
+            "query_version": version,
+            "source": str(plan.get("source") or ""),
+            "parameter_set_hash": str(plan.get("parameter_set_hash") or ""),
+            "mapping_hash": str(plan.get("mapping_hash") or ""),
+            "roster_fingerprint": str(plan.get("roster_fingerprint") or ""),
+            "job_ids": ordered,
+            "retry_job_ids": resolved_retries,
+            "warnings": warnings,
+        }
+
+    def _clearinghouse(self) -> Any:
+        """The clearinghouse READ surface this stage derives its universe from.
+
+        One factory, so a test can inject a fake by patching one name, and a
+        lazy import, so neither ``kbu ontomap version`` nor the two retrieval
+        capabilities pay for the BERDL stack.
+
+        NOT gated on the locus. The clearinghouse reads work from h100
+        off-pod over the BERDL delta API (measured 2026-10-22); only ``load``
+        and ``verify`` are in-pod, and ``_require_in_pod_or_refuse`` guards
+        exactly those two.
+        """
+        from kbutillib.domains.kbase.berdl.clearinghouse_capability import (
+            ClearinghouseCapability,
+        )
+
+        return ClearinghouseCapability()
+
     def _council(self) -> Any:
         from kbutillib.domains.ai.council_utils import CouncilUtils
 
         return CouncilUtils(config_file=False, token_file=None, kbase_token_file=None)
+
+
+def _sha256_of(path: Path) -> str:
+    """The sha256 of a file, streamed a megabyte at a time."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_unrun_bundle(
+    bundle: Union[str, Path],
+    *,
+    source: str,
+    parameter_set_hash: str,
+) -> Dict[str, Any]:
+    """Read and VERIFY an un-run input bundle. Refuses rather than degrades.
+
+    The bundle crosses machines -- written in the pod on kbhub, read on h100
+    -- so nothing about it is assumed. Four refusals, in this order, all
+    BEFORE a single row is handed to retrieval:
+
+    1. A manifest whose ``schema_version`` this code does not know. The two
+       ends are deployed independently, so a version skew is expected; what
+       must not happen is a consumer guessing at a shape it has not seen.
+    2. A DIGEST MISMATCH anywhere in the inventory, reported with the
+       EXPECTED and the OBSERVED digest. A bundle truncated in transit reads
+       as a smaller un-run set, which plans less work and looks like
+       progress.
+    3. A PARAMETER SET that is not the one asked for -- a different
+       ``source`` or a different ``parameter_set_hash``. This is MANDATORY
+       rather than advisory: "un-run" is defined as the absence of a
+       current-state result AT THIS PARAMETER SET, so consuming a bundle
+       produced for a different bench or query version would incorrectly
+       SKIP work that needs doing, and the skip is invisible.
+    4. An EMPTY un-run set. That is a PRODUCER FAILURE, not a clean "nothing
+       to do": the same class of defect as a loader that joins on the wrong
+       key and silently loads nothing. A genuinely finished corpus is
+       recorded by a plan with zero submit items, not by a bundle with zero
+       rows.
+
+    Args:
+        bundle: The bundle directory, or its :data:`UNRUN_BUNDLE_FILENAME`
+            manifest, as an EXPLICIT path. Nothing here globs, sorts by
+            mtime, or picks a "latest" bundle: consuming whatever happens to
+            be newest is how a run silently uses the wrong parameter set.
+        source: The clearinghouse ``source`` the caller is planning for --
+            ``"council/<name>@<version>"``.
+        parameter_set_hash: The ``parameter_set_hash`` the caller resolved
+            for this run, from the clearinghouse's own identity function.
+
+    Returns:
+        ``{"manifest", "rows", "bundle_file", "bundle_dir", "counts"}``.
+        ``rows`` are the un-run ``{"query_id", "text", "source"}`` rows in
+        the bundle's own order.
+
+    Raises:
+        FileNotFoundError: The manifest, or a file its inventory names, is
+            absent.
+        ValueError: Any of the four refusals above.
+    """
+    path = Path(bundle).expanduser()
+    bundle_dir = path if path.is_dir() else path.parent
+    bundle_file = path / UNRUN_BUNDLE_FILENAME if path.is_dir() else path
+    if not bundle_file.is_file():
+        raise FileNotFoundError(
+            f"no un-run bundle manifest at {bundle_file}. The in-pod reader "
+            "writes it: `kbu ontomap council-unrun-bundle`."
+        )
+    manifest = json.loads(bundle_file.read_text(encoding="utf-8"))
+
+    found_version = manifest.get("schema_version")
+    if found_version != UNRUN_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            f"un-run bundle {bundle_file} declares schema_version "
+            f"{found_version!r}; this code reads "
+            f"{UNRUN_BUNDLE_SCHEMA_VERSION!r}. The bundle crosses machines "
+            "and the two ends are deployed independently, so refusing a "
+            "version this code has not seen is deliberate -- guessing at the "
+            "shape would mean planning the wrong work. Re-produce the bundle "
+            "with a matching package version."
+        )
+
+    inventory = dict(manifest.get("inventory") or {})
+    if not inventory:
+        raise ValueError(
+            f"un-run bundle {bundle_file} carries no sha256 inventory. The "
+            "inventory is the only thing that distinguishes a complete "
+            "bundle from one truncated in transit, and a truncated bundle "
+            "reads as a smaller un-run set -- which plans less work and "
+            "looks like progress."
+        )
+    for name in sorted(inventory):
+        entry = dict(inventory[name] or {})
+        member = bundle_dir / name
+        if not member.is_file():
+            raise FileNotFoundError(
+                f"un-run bundle {bundle_file} names {name!r} in its "
+                f"inventory, but {member} does not exist."
+            )
+        expected = str(entry.get("sha256") or "")
+        observed = _sha256_of(member)
+        if expected != observed:
+            raise ValueError(
+                f"un-run bundle {bundle_file} member {name!r} FAILED its "
+                f"sha256 check: expected {expected!r}, observed "
+                f"{observed!r}. The bundle crossed a machine boundary, so a "
+                "mismatch means it was truncated or rewritten in transit -- "
+                "refusing rather than planning against whatever arrived. "
+                "Re-produce it in the pod and copy it again."
+            )
+
+    bundle_source = str(manifest.get("source") or "")
+    bundle_hash = str(manifest.get("parameter_set_hash") or "")
+    if bundle_source != source or bundle_hash != parameter_set_hash:
+        raise ValueError(
+            f"un-run bundle {bundle_file} was produced for source "
+            f"{bundle_source!r} at parameter_set_hash {bundle_hash!r}, but "
+            f"this run is planning source {source!r} at "
+            f"{parameter_set_hash!r}. This check is MANDATORY, not "
+            "advisory: 'un-run' means the absence of a current-state result "
+            "AT THIS PARAMETER SET, so a bundle produced for a different "
+            "bench, query version or mapping hash would make this plan SKIP "
+            "work that needs doing -- invisibly. Produce a bundle for this "
+            "parameter set, or plan the parameter set the bundle was built "
+            "for."
+        )
+
+    rows_name = str(manifest.get("rows_file") or UNRUN_BUNDLE_ROWS_FILENAME)
+    rows = _read_jsonl(bundle_dir / rows_name)
+    if not rows:
+        raise ValueError(
+            f"un-run bundle {bundle_file} holds an EMPTY un-run set. That is "
+            "a PRODUCER FAILURE, not a clean 'nothing to do' -- it is the "
+            "same class of defect as a loader that joins on the wrong key "
+            "and silently loads nothing, and accepting it here would write a "
+            "plan that reads as a completed stage. A genuinely finished "
+            "corpus is recorded by a PLAN with zero submit items, produced "
+            "from a bundle that held the universe. Check the pod's "
+            "clearinghouse read before re-planning."
+        )
+
+    declared_rows = int(dict(inventory.get(rows_name) or {}).get("rows") or 0)
+    if declared_rows and declared_rows != len(rows):
+        raise ValueError(
+            f"un-run bundle {bundle_file} declares {declared_rows} rows in "
+            f"{rows_name!r} but {len(rows)} were read. The digests matched, "
+            "so this is a manifest the producer wrote wrong rather than a "
+            "transport failure; either way the row count is part of the "
+            "bundle's contract and is not reconciled here."
+        )
+
+    return {
+        "manifest": manifest,
+        "rows": rows,
+        "bundle_file": str(bundle_file),
+        "bundle_dir": str(bundle_dir),
+        "counts": dict(manifest.get("counts") or {}),
+    }
+
+
+def _declared_store_id(council: Any) -> str:
+    """The council store's DECLARED identity, or ``""`` if it has none.
+
+    Returns the empty string rather than raising, because an export of
+    nothing but retrieval abstentions legitimately needs no store id -- an
+    abstention has no council item and publishes ``council = null``. The
+    refusal belongs where the fabrication would happen, which is
+    :func:`~.verdicts.council_reference` on the first DECIDED row.
+
+    Tolerant of a council object that exposes no store (which is what the
+    stage's injected test doubles are), for the same reason: absence is
+    reported, not raised on.
+    """
+    store_factory = getattr(council, "store", None)
+    if not callable(store_factory):
+        return ""
+    reader = getattr(store_factory(), "store_identity", None)
+    if not callable(reader):
+        return ""
+    record = reader()
+    if not record:
+        return ""
+    return str(record.get("store_id") or "")
+
+
+def _split_query_ref(query: str) -> tuple:
+    """``("go_mf", "1")`` from ``"go_mf@1"``, refusing a version-less query.
+
+    The same rule :func:`~kbutillib.domains.ai.council.quote._plan_query_ref`
+    enforces when it reads the plan back, stated here so the refusal lands
+    BEFORE the clearinghouse is read rather than at quote time: the query
+    version is part of the parameter set and of every prompt hash, so a plan
+    that left it to be guessed could be quoted against one spec and run
+    against another. Used by stage 1, which gets it from the operator, and by
+    stage 5, which gets it back off ``PLAN.json`` -- so the message names the
+    query rather than a stage.
+    """
+    name, _, version = str(query or "").strip().partition("@")
+    name, version = name.strip(), version.strip()
+    if not name:
+        raise ValueError('query is empty; expected "<name>@<version>"')
+    if not version:
+        raise ValueError(
+            f"query {name!r} names no VERSION. A query version "
+            "is part of the clearinghouse parameter set and of every prompt "
+            'hash; pass "<name>@<version>".'
+        )
+    return name, version
+
+
+def _scratch_dir(run_dir: Path, scratch_dir: Optional[Union[str, Path]]) -> Path:
+    """Resolve, create and CHECK the local directory the bulk files go in.
+
+    The ROOT is the caller's ``scratch_dir``, else ``$KBU_SCRATCH_DIR``, else
+    ``/scratch/<user>`` where ``/scratch`` exists (h100's convention), else the
+    system temporary directory. ``function-to-go/<run-id>/`` is appended to
+    whichever it is, so two runs never share a path and a caller naming a
+    scratch root does not have to know the layout under it.
+
+    REFUSES a path inside ``run_dir``. The run directory is a Dropbox-synced
+    surface and these files are 100+ MB of machine-local intermediates that
+    nothing off-machine reads; a default that quietly landed them there is
+    exactly the mistake worth failing on rather than discovering from a sync
+    backlog.
+    """
+    import getpass
+    import tempfile
+
+    if scratch_dir is not None:
+        root = Path(scratch_dir).expanduser()
+    elif os.environ.get("KBU_SCRATCH_DIR"):
+        root = Path(str(os.environ["KBU_SCRATCH_DIR"])).expanduser()
+    elif Path("/scratch").is_dir():
+        root = Path("/scratch") / getpass.getuser()
+    else:
+        root = Path(tempfile.gettempdir())
+    root = root / "function-to-go" / (run_dir.name or "run")
+    resolved_run_dir = run_dir.expanduser().resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    if resolved_root == resolved_run_dir or resolved_run_dir in resolved_root.parents:
+        raise ValueError(
+            f"council_plan: the scratch path {resolved_root} is inside the run "
+            f"directory {resolved_run_dir}. The run directory is a synced "
+            "surface and carries PLAN.json only; the ranked file and the items "
+            "file are machine-local intermediates and must not cross it."
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _plan_path(plan: Dict[str, Any], key: str, run_dir: Path) -> Path:
+    """One of the plan's named side files, absolute or relative to ``run_dir``.
+
+    ``council_plan`` writes these keys as ABSOLUTE paths under the scratch
+    root, which is the spelling
+    :func:`~kbutillib.domains.ai.council.quote.load_plan` supports for the
+    items file. A relative one is resolved against the run directory, the same
+    rule that function applies, so a plan hand-edited to use relative paths
+    reads the same here as it does there.
+    """
+    raw = plan.get(key)
+    if not raw:
+        raise ValueError(
+            f"the plan declares no {key}; stage 1 writes it, and without it "
+            "this stage cannot tell which functions the run was given"
+        )
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = run_dir / path
+    return path
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Read a :func:`_write_jsonl` file back, skipping blank lines."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} is missing. Stage 1 wrote it under the scratch root, and "
+            "`/scratch` on this host is shared, ephemeral and not backed up -- "
+            "re-run `kbu ontomap council-plan` to regenerate the partition "
+            "records rather than exporting a partition with a hole in it."
+        )
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except ValueError as exc:
+                raise ValueError(f"{path}:{number}: not valid JSON: {exc}") from exc
+    return rows
+
+
+def _check_plan_counts(plan: Dict[str, Any], *, abstain: int, fanout: int) -> None:
+    """Refuse an export whose input set differs from the plan's own record.
+
+    ``PLAN.json`` records the partition sizes it wrote, so a disagreement
+    means the records and the plan are from different runs. Publishing that
+    would land result rows for a partition no plan recorded, and "one row per
+    input" would be a claim about an input set nobody can reconstruct.
+    """
+    recorded = dict(plan.get("counts") or {})
+    disagreements = [
+        f"{key}: PLAN.json says {recorded[key]}, the file holds {observed}"
+        for key, observed in (("abstain", abstain), ("fanout", fanout))
+        if key in recorded and int(recorded[key]) != observed
+    ]
+    if disagreements:
+        raise ValueError(
+            "council_export: the plan's partition records disagree with "
+            f"{plan.get('run_id') or 'the plan'}'s own counts -- "
+            + "; ".join(disagreements)
+            + ". Re-run stage 1 rather than exporting against records from a "
+            "different plan."
+        )
+
+
+def _run_job_ids(run_dir: Path) -> Dict[str, List[str]]:
+    """The council job ids of a run, from ``RUN.json`` when there is one.
+
+    STAGE 4 OWNS ``RUN.json``'s contract; this reads only the job ids out of
+    it, and a caller passing ``job_ids=`` bypasses it entirely. Both spellings
+    the PRD uses are accepted -- a top-level ``job_id``/``job_ids`` and a
+    per-chunk ``job_id`` in a ``chunks`` list -- because the run appends that
+    file per chunk and a run that halted mid-way still has the chunks it did.
+
+    Returns ``{"job_ids": [...], "retry_job_ids": [...]}``, in file order with
+    repeats collapsed. An absent or unreadable ``RUN.json`` yields two empty
+    lists, and the caller refuses rather than exporting nothing silently.
+    """
+    path = run_dir / RUN_FILENAME
+    if not path.exists():
+        return {"job_ids": [], "retry_job_ids": []}
+    try:
+        run = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{path}: not valid JSON: {exc}") from exc
+    if not isinstance(run, dict):
+        raise ValueError(
+            f"{path}: expected a JSON object, got {type(run).__name__}"
+        )
+
+    def _ids(value: Any) -> List[str]:
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    job_ids = _ids(run.get("job_id")) + _ids(run.get("job_ids"))
+    retries = _ids(run.get("retry_job_id")) + _ids(run.get("retry_job_ids"))
+    for chunk in run.get("chunks") or ():
+        if not isinstance(chunk, dict):
+            continue
+        target = retries if chunk.get("retry") else job_ids
+        target.extend(_ids(chunk.get("job_id")))
+    return {"job_ids": _unique(job_ids), "retry_job_ids": _unique(retries)}
+
+
+def _unique(values: Sequence[str]) -> List[str]:
+    """*values* with repeats collapsed, first occurrence's order kept."""
+    seen: set = set()
+    out: List[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _refuse_inside_run_dir(out_path: Path, run_dir: Path) -> None:
+    """Refuse an export written into the Dropbox-synced run directory.
+
+    The run directory carries ``PLAN.json``, ``QUOTE.json``, ``APPROVED.json``
+    and ``RUN.json`` -- small, operator-readable JSON -- plus the published
+    ``shard/``. The verdict parquet is the shard's INPUT, not a published
+    artifact, and every byte on the sync surface needs an integrity gate; the
+    same refusal :func:`_scratch_dir` makes for the ranked and items files.
+    """
+    resolved_out = out_path.expanduser().resolve(strict=False)
+    resolved_run_dir = run_dir.expanduser().resolve(strict=False)
+    if resolved_run_dir == resolved_out or resolved_run_dir in resolved_out.parents:
+        raise ValueError(
+            f"council_export: {resolved_out} is inside the run directory "
+            f"{resolved_run_dir}. The run directory is a synced surface "
+            "carrying the small JSON stages and the published shard; the "
+            "verdict parquet is the shard's input and belongs on local "
+            "scratch. Pass out_path= under a scratch root, or omit it."
+        )
+
+
+def _menu_of(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A ranked candidate list as the council's closed menu.
+
+    The SAME projection
+    :meth:`OntologyMappingUtils.function_to_go_council` builds when it calls
+    the council directly, so a planned item and a directly-submitted item
+    render to the same prompt -- which is what lets stage 2 count reuse
+    against answers the store already holds instead of quoting a re-run.
+    """
+    return [
+        {
+            "id": c["go_id"],
+            "label": c["name"],
+            "description": c.get("def") or "",
+            "rank": c["rank"],
+            "score": c["score"],
+        }
+        for c in candidates
+    ]
+
+
+def _gateway_of(config: Any, seat: Any) -> str:
+    """Which PAYER a seat's spend lands on: its account, else its alias.
+
+    Account first because the limits and the bill are account-wide: MAG's 20
+    parallel and 120 requests per minute are enforced across every endpoint on
+    the account, so two aliases on one account are one gateway.
+    """
+    try:
+        cfg = dict(config.endpoint(seat.endpoint))
+    except Exception:  # noqa: BLE001 - an unknown endpoint is still plannable
+        cfg = {}
+    return str(cfg.get("account") or seat.endpoint)
+
+
+def _plan_concurrency(chunk_size: int, config: Any) -> Dict[str, Any]:
+    """The concurrency block written INTO ``PLAN.json``.
+
+    Every number the run stage obeys lives in the plan rather than in a code
+    constant here, and the KBUtilLib-issue-84 rationale travels with it. A
+    workaround baked in as a constant becomes permanent silently; this one
+    must change the day the issue is fixed, and when it does the reason it
+    existed is recorded in the plans it shaped.
+
+    ``declared_queues`` is the live configuration's own queue table, recorded
+    so an operator can see whether the config this run will execute under
+    matches the shape the plan assumes.
+    """
+    declared = dict(getattr(config, "queues", {}) or {})
+    return {
+        "chunk_size": chunk_size,
+        "chunks_in_flight": PLAN_CHUNKS_IN_FLIGHT,
+        "issue": "KBUtilLib issue 84",
+        "rationale": (
+            "WORKAROUND for KBUtilLib issue 84, not a design. The council "
+            "store's claim_calls is synchronous on the worker event loop and "
+            "its cost is linear in the pending set: 217 ms at 19k pending "
+            "rows against 10.4 ms at 2k. That inflated service times 6-9x on "
+            "BOTH gateways at once -- with queue wait at 0.00 -- and "
+            "collapsed throughput 10.8x. ~2,000-item chunks with ONE chunk "
+            "in flight keep the pending set small, because the daemon drains "
+            "every claimable job. When issue 84 is fixed, this block changes."
+        ),
+        "gateways": {
+            "mag": {
+                "queues_sum_to": 6,
+                "max_parallel_requests": 20,
+                "requests_per_minute": 120,
+                "scope": "account-wide",
+                "note": (
+                    "BOTH limits are account-wide and both bind. A config "
+                    "asking 24 parallel errored 427 of 500 pilot items over "
+                    "1,925 transport attempts; queues summing to 6 is the "
+                    "configuration measured to work."
+                ),
+            },
+            "argo": {
+                "chair": 24,
+                "critic": 8,
+                "meta": 8,
+                "note": (
+                    "ARGO saturates at ~24 concurrent and showed zero rate "
+                    "limiting at 40 concurrent across three models."
+                ),
+            },
+        },
+        "declared_queues": [
+            {
+                "queue": qname,
+                "seats": list(getattr(queue, "seats", ()) or ()),
+                "concurrency": int(getattr(queue, "concurrency", 0) or 0),
+                "workers": int(getattr(queue, "workers", 1) or 1),
+            }
+            for qname, queue in sorted(declared.items())
+        ],
+    }
+
+
+def _write_jsonl(path: Path, rows: Any) -> int:
+    """Write *rows* as JSON lines, atomically, returning the row count.
+
+    Streamed a row at a time and swapped into place through ``.partial``, the
+    same discipline :meth:`OntologyMappingUtils.write_ranked` uses: a plan's
+    items file is ~130 MB, so neither a reader nor this process wants the
+    whole thing in memory or half of it on disk under the final name.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".partial")
+    count = 0
+    with tmp.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=str) + "\n")
+            count += 1
+    tmp.replace(path)
+    return count
+
+
+def _now_iso() -> str:
+    """The current UTC time as an ISO-8601 string with a ``Z`` suffix."""
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _verdict_of(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:

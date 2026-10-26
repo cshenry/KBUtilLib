@@ -16,7 +16,7 @@ Two members are REQUIRED and the registry refuses anything missing either:
   for, and a cache keyed on the REQUESTED parameters would hand one answer to
   two materially different questions.
 
-Three more are OPTIONAL and are therefore not part of the runtime-checkable
+Four more are OPTIONAL and are therefore not part of the runtime-checkable
 protocol -- a fake with no CLI to interrogate is still a valid API type:
 
 * ``async preflight() -> dict`` -- "would this endpoint even work, and how
@@ -25,6 +25,26 @@ protocol -- a fake with no CLI to interrogate is still a valid API type:
 * ``async models() -> list[dict]`` -- free enumeration.  ``[]`` means "cannot
   enumerate", which is not an error.
 * ``async aclose() -> None`` -- release any client or process resources.
+* ``supports_web_search: bool`` -- a CLASS ATTRIBUTE, not a method:
+  "can this API type run a call with live web search?"  **Default False**,
+  read through ``getattr(api, "supports_web_search", False)`` by
+  :func:`kbutillib.domains.ai.llm.supports_web_search`, so a third-party API
+  type written before this attribute existed still registers, still passes
+  ``isinstance(api, ApiType)``, and simply reports ``False``.
+
+  It is deliberately NOT in :data:`REQUIRED_MEMBERS` and deliberately NOT a
+  member of :class:`ApiType` below.  Adding it to either would make every
+  pre-existing third-party type fail -- registration refuses anything
+  missing a required member, and ``runtime_checkable`` checks that a data
+  member EXISTS -- and "I cannot search the web" is a safe default to assume
+  about a plug-in, not a defect to refuse it for.
+
+  The opt-in on the other side is ``LLMRequest.params["web_search"] = True``
+  (:data:`~.types.WEB_SEARCH_PARAM`).  An API type that reports ``False``
+  must refuse such a request with ``ok=False`` and
+  ``kind="invalid_output"`` WITHOUT calling the provider, rather than
+  silently answering from training data: a caller that asked for the live
+  web and was quietly served a guess has no way to tell.
 
 ``runtime_checkable`` only checks that members EXIST -- it does not check
 signatures -- so an ``isinstance`` pass is a sanity check, not a contract

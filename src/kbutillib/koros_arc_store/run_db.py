@@ -65,7 +65,12 @@ _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
 # Artifact URI vocabulary (S19).
 _ABS_PATH_RE = re.compile(r"^/")
-_OBJ_URI_RE = re.compile(r"^obj://([A-Za-z0-9._-]+)$")
+# ``obj://<object_id>`` names a KBDL object; an optional ``#<fragment>`` names a
+# member inside it (an archive entry). The object id never contains ``#``, so the
+# FIRST ``#`` splits them and the fragment is opaque: any non-empty run without
+# control characters. This is the ONE spelling of a KBDL object reference across
+# the arc store and the clearinghouse (Chris, 2026-10-25). Use ``fullmatch``.
+_OBJ_URI_RE = re.compile(r"obj://([A-Za-z0-9._-]+)(?:#([^\x00-\x1f\x7f]+))?")
 
 # Payload size smell threshold (S29): logged, never rejected.
 _PAYLOAD_WARN_BYTES = 64 * 1024
@@ -264,6 +269,15 @@ class RunDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_runs_analysis_created
                 ON runs (analysis_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS job_submissions (
+                job_id       TEXT PRIMARY KEY,
+                job_type     TEXT,
+                project      TEXT,
+                arc_slug     TEXT,
+                submitted_at TEXT,
+                host         TEXT
+            );
             """
         )
         # `runs.description` and `scope_description` landed 2026-10-04, after
@@ -336,7 +350,7 @@ class RunDatabase:
         """Validate one artifact URI and normalise file URIs (S8/S19).
 
         Accepts an absolute POSIX path, ``file://`` or ``file:///`` (normalised
-        to ``file://`` + absolute path), or ``obj://<object_id>``. Anything else
+        to ``file://`` + absolute path), or ``obj://<object_id>[#<fragment>]``. Anything else
         raises ``RecordValidationError(bad_artifact_uri)``.
         """
         if not isinstance(uri, str) or not uri:
@@ -357,7 +371,7 @@ class RunDatabase:
                     f"artifact {name!r} file URI is not an absolute path: {uri!r}",
                 )
             return "file://" + path
-        if _OBJ_URI_RE.match(uri):
+        if _OBJ_URI_RE.fullmatch(uri):
             return uri
         if _ABS_PATH_RE.match(uri):
             return uri
@@ -787,6 +801,72 @@ class RunDatabase:
             return []
         finally:
             conn.close()
+
+    def record_submission(
+        self,
+        job_id: str,
+        job_type: Optional[str],
+        project: Optional[str],
+        arc_slug: Optional[str],
+        submitted_at: Optional[str],
+        host: Optional[str],
+    ) -> None:
+        """Upsert which arc/project a KBDL job was submitted from (keyed on job_id).
+
+        Follows the write discipline of :meth:`record_analysis`: gated on
+        :attr:`enabled`, and FAIL-SOFT -- any failure logs a line starting with
+        :data:`SOFT_FAIL_PREFIX`, increments :attr:`failed_write_count` and
+        returns. Never raises.
+        """
+        if not self.enabled:
+            return
+        conn = None
+        try:
+            conn = self._connect()
+            self._ensure_initialized_for_write(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO job_submissions
+                    (job_id, job_type, project, arc_slug, submitted_at, host)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    job_type=excluded.job_type,
+                    project=excluded.project,
+                    arc_slug=excluded.arc_slug,
+                    submitted_at=excluded.submitted_at,
+                    host=excluded.host
+                """,
+                (job_id, job_type, project, arc_slug, submitted_at, host),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - deliberate fail-soft catch-all
+            self.failed_write_count += 1
+            logger.warning(
+                "%s job_id=%s db_path=%s error=%r",
+                SOFT_FAIL_PREFIX,
+                job_id,
+                self.db_path,
+                exc,
+            )
+            return
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def list_submissions(self) -> Dict[str, Any]:
+        """Return ``{job_id: (project, arc_slug)}``. RAISES if the DB is unopenable."""
+        conn = self._open_for_read()
+        try:
+            rows = conn.execute(
+                "SELECT job_id, project, arc_slug FROM job_submissions"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r["job_id"]: (r["project"], r["arc_slug"]) for r in rows}
 
     def delete_record(self, record_id: str) -> bool:
         """Hard-delete a run row and its detail blob in one transaction (S24).

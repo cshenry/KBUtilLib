@@ -183,11 +183,11 @@ from . import clearinghouse_schema as schema
 #:     prepended, or ``None`` when ``col`` is null. NULL-PRESERVING is the
 #:     whole reason it is a derivation and not string concatenation in an
 #:     adapter: ``genome_content.fasta_reference`` is a POINTER, and
-#:     ``"kbdl:obj:" + None`` would write the literal pointer
-#:     ``"kbdl:obj:None"`` -- a reference to an object that does not exist,
+#:     ``"obj://" + None`` would write the literal pointer
+#:     ``"obj://None"`` -- a reference to an object that does not exist,
 #:     indistinguishable in the lake from a real one. A missing pointer must
 #:     stay missing. The prefix text is the FIRST argument and may contain
-#:     colons (``@prefix(kbdl:obj:,fasta_object_id)``); it may not contain a
+#:     colons and slashes (``@prefix(obj://,fasta_object_id)``); it may not contain a
 #:     comma, which is the argument separator.
 #:   - ``@concat(text, col, text, col, ...)`` -- ``@prefix`` generalised to a
 #:     pointer built from MORE THAN ONE column. The arguments STRICTLY
@@ -197,9 +197,9 @@ from . import clearinghouse_schema as schema
 #:     OUT, and it is null-preserving across EVERY named column, for exactly
 #:     the reason ``@prefix`` is: ``genome_content.fasta_reference`` for a
 #:     KBDL archive member is
-#:     ``@concat(kbdl:archive:,archive_object_id,:,entry_name)``, and a row
+#:     ``@concat(obj://,archive_object_id,#,entry_name)``, and a row
 #:     missing either half would otherwise write
-#:     ``"kbdl:archive:None:x"`` -- a pointer to nothing, indistinguishable
+#:     ``"obj://None#x"`` -- a pointer to nothing, indistinguishable
 #:     in the lake from a real one. Literals may contain colons; they may not
 #:     contain a comma, which is the argument separator.
 #:   - ``@lower(col)``     -- ASCII-lowercased value of ``col``. Earns its

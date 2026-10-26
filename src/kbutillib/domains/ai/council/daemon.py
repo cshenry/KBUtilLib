@@ -455,6 +455,13 @@ class CouncilDaemon:
         #: daemon always uses.
         self._scope_batch_size: Optional[int] = None
         self._scope_max_output_tokens_per_item: Optional[int] = None
+        #: This worker's SHARE of its account's requests-per-minute, set by
+        #: :meth:`_run_as_queue_worker` from
+        #: :meth:`_queue_requests_per_minute`.  ``None`` lets
+        #: ``CouncilWorker`` derive the rate from the account's endpoints,
+        #: which is right for an unpartitioned daemon -- it is the only
+        #: consumer it can account for.
+        self._scope_requests_per_minute: Optional[float] = None
         #: Set by the signal handler.  A plain threading event rather than an
         #: ``asyncio.Event`` because the handler is installed before the loop
         #: exists (see :meth:`run_foreground`).
@@ -997,6 +1004,68 @@ class CouncilDaemon:
             logger.debug("council daemon: configuration unreadable: %s", exc)
             return {}
 
+    def _queue_requests_per_minute(
+        self, queue: str, queues: Mapping[str, Any]
+    ) -> Optional[float]:
+        """ONE CHILD's share of its account's requests-per-minute, or ``None``.
+
+        A gateway's per-minute limit is ACCOUNT-WIDE (MAG: 120 req/min
+        alongside 20 parallel, both account-wide, measured 2026-10-21), and
+        this account's queue children are SEPARATE PROCESSES -- so an
+        in-process token bucket per child, each handed the full account rate,
+        would pace the account at ``children x rate``.  That is worse than no
+        pacer at all, because it looks enforced.
+
+        So the rate is apportioned, weighted by each child's ``concurrency``
+        over the account's total ``concurrency x workers``.  Weighted rather
+        than split evenly because a child that may hold three calls in flight
+        can use more of the rate than one that may hold one, and an even
+        split would leave the small child's share idle while the large one
+        was throttled.
+
+        ``None`` when the account declares no ``max_requests_per_minute`` --
+        ``None`` there means "no separate per-minute limit known", not
+        "unlimited", and apportioning an unmeasured number would pace a
+        gateway nobody has measured.
+
+        THE LIMIT THIS DOES NOT FIX, recorded rather than designed around:
+        apportioning accounts for the children THIS CONFIGURATION declares,
+        and for nothing else.  Another session, another machine or another
+        person on the same subscription is invisible to every bucket, which
+        is why a SUSTAINED rate-limit response stays a HALT condition in
+        ``engine/worker.py`` rather than only a retry.
+        """
+        qcfg = queues.get(queue)
+        if qcfg is None:  # pragma: no cover - the caller has already checked
+            return None
+        try:
+            config = self.council.config()
+        except Exception as exc:  # noqa: BLE001 - treated as "cannot say"
+            logger.debug("council daemon: configuration unreadable: %s", exc)
+            return None
+        account = config.queue_account(queue)
+        if not account:
+            return None
+        rates = [
+            float(endpoint.max_requests_per_minute)
+            for endpoint in (config.endpoints or {}).values()
+            if endpoint.account == account and endpoint.max_requests_per_minute
+        ]
+        if not rates:
+            return None
+        account_rate = min(rates)
+        mine = max(1, int(getattr(qcfg, "concurrency", 1) or 1))
+        total = 0
+        for name, other in queues.items():
+            if config.queue_account(name) != account:
+                continue
+            total += max(1, int(getattr(other, "concurrency", 1) or 1)) * max(
+                1, int(getattr(other, "workers", 1) or 1)
+            )
+        if total <= 0:  # pragma: no cover - mine is already >= 1
+            return account_rate
+        return account_rate * mine / total
+
     def _stop_marker_path(self, queue: str) -> Path:
         """The file whose PRESENCE means "this queue was deliberately
         stopped; do not auto-restart it" (see :meth:`_supervise_tick`).
@@ -1156,6 +1225,9 @@ class CouncilDaemon:
             int(qcfg.max_output_tokens_per_item)
             if qcfg.max_output_tokens_per_item is not None
             else None
+        )
+        self._scope_requests_per_minute = self._queue_requests_per_minute(
+            self.queue, queues
         )
         with self.lock.acquire("daemon", partition=(self.queue, index)) as record:
             os.chdir(self.directory)
@@ -1691,6 +1763,11 @@ class CouncilDaemon:
             # both sides, so it is forwarded as-is.
             batch_size=self._scope_batch_size if self._scope_batch_size is not None else 1,
             max_output_tokens_per_item=self._scope_max_output_tokens_per_item,
+            # ``None`` for an unpartitioned daemon, which lets the worker
+            # derive the account's own rate: that process is the only
+            # consumer it can account for.  A queue CHILD gets its
+            # apportioned share (see :meth:`_queue_requests_per_minute`).
+            requests_per_minute=self._scope_requests_per_minute,
         )
         self._worker = worker
         worker.register()

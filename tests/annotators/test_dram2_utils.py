@@ -580,6 +580,9 @@ class TestAnnotateWithMockedNextflow:
         assert isinstance(result, AnnotationResult)
         assert result.tool == "dram2"
         assert result.tool_version == "v2.0.0-beta17"
+        # The pipeline's own revision tag -- a tool version.
+        assert result.version_kind == "tool-version"
+        assert result.version_asserted_by is None
 
     def test_records_keyed_by_caller_ids(self, tmp_path: Path):
         utils = _make_available_utils(tmp_path)
@@ -1697,3 +1700,52 @@ def test_resolver_returns_none_when_nothing_identifies_the_tool(tmp_path):
     utils._pipeline = str(tmp_path / "absent" / "main.nf")
 
     assert utils._resolve_tool_version("nothing identifiable here") is None
+
+
+def test_the_nextflow_fallback_is_typed_as_not_a_tool_version(tmp_path: Path):
+    """The engine-banner fallback reaches AnnotationResult as a LABELLED
+    runner string, and version_kind must say it identifies no tool version.
+
+    This is the other half of the 2026-10-15 fix: labelling the string
+    ``nextflow/...`` stopped a human misreading it; typing it None stops a
+    PROGRAM misreading it.
+    """
+    utils = _make_available_utils(tmp_path)
+    with patch.object(
+        utils,
+        "_run_nextflow",
+        MagicMock(return_value=("", "nextflow/24.10.5", "nextflow run ...")),
+    ):
+        result = utils.annotate({"g1": "MKTAYIAKQ" * 10})
+
+    assert result.tool_version == "nextflow/24.10.5"
+    assert result.version_kind is None
+    assert result.version_asserted_by is None
+
+
+def test_a_bare_manifest_version_is_typed_as_a_tool_version(tmp_path: Path):
+    """The manifest form (no leading ``v``) is the poplar case."""
+    utils = _make_available_utils(tmp_path)
+    with patch.object(
+        utils,
+        "_run_nextflow",
+        MagicMock(return_value=("", "2.0.0-beta17", "nextflow run ...")),
+    ):
+        result = utils.annotate({"g1": "MKTAYIAKQ" * 10})
+
+    assert result.tool_version == "2.0.0-beta17"
+    assert result.version_kind == "tool-version"
+
+
+def test_an_unidentifiable_version_is_typed_none(tmp_path: Path):
+    """_resolve_tool_version returning None must not become a kind."""
+    utils = _make_available_utils(tmp_path)
+    with patch.object(
+        utils,
+        "_run_nextflow",
+        MagicMock(return_value=("", None, "nextflow run ...")),
+    ):
+        result = utils.annotate({"g1": "MKTAYIAKQ" * 10})
+
+    assert result.tool_version is None
+    assert result.version_kind is None

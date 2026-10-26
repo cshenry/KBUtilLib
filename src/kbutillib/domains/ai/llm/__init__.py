@@ -125,6 +125,7 @@ __all__ = [
     "preflight",
     "preflight_api",
     "register_api_type",
+    "supports_web_search",
 ]
 
 #: Entry-point group another distribution declares an API type factory in.
@@ -417,6 +418,39 @@ async def models_api(api: Any) -> List[Dict[str, Any]]:
         return []
     listing = await lister()
     return [dict(entry) for entry in (listing or []) if isinstance(entry, Mapping)]
+
+
+def supports_web_search(
+    api_type: str, endpoint: Optional[Mapping[str, Any]] = None
+) -> bool:
+    """Can *api_type* at *endpoint* run a call with live web search?
+
+    Synchronous and free: the answer is a class attribute, not a probe, so
+    nothing is asked of a provider and nothing is spent.  ``claude_cli`` and
+    ``codex_cli`` are true (both installed CLIs document a web-search
+    switch); ``argo`` and ``openai`` are false -- the gateways this
+    repository reaches through them expose no search tool, so a caller that
+    needs the live web must put what it found in the prompt instead ("context
+    mode").
+
+    Read through ``getattr(api, "supports_web_search", False)`` ON PURPOSE.
+    The attribute is OPTIONAL (see :mod:`.protocol`): a third-party API type
+    declared in the :data:`ENTRY_POINT_GROUP` before this existed carries no
+    such attribute, and it must keep registering and simply report ``False``
+    rather than raise ``AttributeError`` at the one place a caller asks
+    whether it may ask for the web.
+
+    Ask BEFORE building the request: a request carrying
+    ``params={"web_search": True}`` for an API type that reports ``False`` is
+    refused with ``ok=False`` and ``kind="invalid_output"`` and spends
+    nothing, so this is how a caller avoids a failure it could have
+    predicted.
+
+    Raises:
+        KeyError: *api_type* is not registered -- the same configuration
+            mistake, reported the same way, as every other verb here.
+    """
+    return bool(getattr(get_api(api_type, endpoint), "supports_web_search", False))
 
 
 async def kill_cli_children() -> int:

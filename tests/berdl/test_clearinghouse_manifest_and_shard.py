@@ -833,6 +833,136 @@ def test_non_transyt_source_accepts_a_default_parameter_set():
     assert plan.parameter_set_hash == DEFAULT_PARAMETER_SET_HASH
 
 
+# --------------------------------------------------------------------------
+# The shared AI-COUNCIL result-boundary validator, at MANIFEST PLANNING
+# --------------------------------------------------------------------------
+#
+# The second declared tool, for the same reason TRANSYT is the first: there is
+# no such thing as a default council run. A council verdict is ONE bench's
+# answer to ONE query version against ONE retrieval mapping, so `{}` would
+# collapse every run into a single parameter_set_hash slot and make "un-run at
+# THIS version" -- the query the function_to_go pipeline's stage 1 is built on
+# -- a query that always returns nothing.
+
+_COUNCIL_SET = (
+    '{ query = "go_mf@1", bench_fingerprint = "%s", mapping_hash = "%s" }'
+    % ("a" * 64, "b" * 64)
+)
+
+
+@pytest.mark.parametrize("tool", ["council", "Council", "COUNCIL"])
+def test_council_source_refuses_default_parameter_set_at_plan_time(tool):
+    """{} is refused, case-insensitively on the tool component of `source`."""
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(
+            _result_toml(source_value=f"@const({tool}/go_mf@1)", parameter_set="{}")
+        )
+    message = str(exc.value)
+    assert "bench_fingerprint" in message
+    assert "not a default run" in message
+
+
+def test_council_accepts_the_run_identity_at_plan_time():
+    (plan,) = _plan(
+        _result_toml(source_value="@const(council/go_mf@1)", parameter_set=_COUNCIL_SET)
+    )
+    assert set(plan.parameter_set) == {"query", "bench_fingerprint", "mapping_hash"}
+    assert plan.parameter_set_hash == parameter_set_hash(plan.parameter_set)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # roster_fingerprint is PROVENANCE: it covers endpoint_kind, the route
+        # spelling, the token ceiling, the temperature and the extras, so a
+        # seat re-routed to another gateway would move it -- re-partitioning
+        # all 47,341 clearinghouse functions for a pure cost optimisation.
+        '{ query = "go_mf@1", roster_fingerprint = "%s", mapping_hash = "%s" }'
+        % ("a" * 64, "b" * 64),
+        '{ query = "go_mf@1", bench_fingerprint = "%s", mapping_hash = "%s", '
+        'route_fingerprint = "%s" }' % ("a" * 64, "b" * 64, "c" * 64),
+    ],
+)
+def test_council_refuses_provenance_used_as_a_partition_key(value):
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(_result_toml(source_value="@const(council/go_mf@1)", parameter_set=value))
+    assert "PROVENANCE" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # The query version is required: it is part of this partition AND of
+        # every prompt hash, so a run quoted against one spec could otherwise
+        # be published against another.
+        '{ query = "go_mf", bench_fingerprint = "%s", mapping_hash = "%s" }'
+        % ("a" * 64, "b" * 64),
+        '{ query = 1, bench_fingerprint = "%s", mapping_hash = "%s" }'
+        % ("a" * 64, "b" * 64),
+        # A digest must be 64 LOWERCASE hex: a truncated one and an
+        # unsubstituted template marker both fail here.
+        '{ query = "go_mf@1", bench_fingerprint = "abc", mapping_hash = "%s" }'
+        % ("b" * 64),
+        '{ query = "go_mf@1", bench_fingerprint = "%s", mapping_hash = "%s" }'
+        % ("A" * 64, "b" * 64),
+        '{ query = "go_mf@1", bench_fingerprint = "${KBU_BENCH}", '
+        'mapping_hash = "%s" }' % ("b" * 64),
+        '{ query = "go_mf@1", bench_fingerprint = "%s", mapping_hash = "" }'
+        % ("a" * 64),
+    ],
+)
+def test_council_rejects_a_malformed_run_identity_at_plan_time(value):
+    with pytest.raises(cm.ManifestError):
+        _plan(_result_toml(source_value="@const(council/go_mf@1)", parameter_set=value))
+
+
+def test_council_refuses_a_source_and_query_that_disagree():
+    """`source` is "council/<query>"; the two are one fact in two spellings.
+
+    The shipped `function-to-go-council` preset renders both from PLAN.json's
+    single `query` field, and this is the check that it rendered both.
+    """
+    with pytest.raises(cm.ManifestError) as exc:
+        _plan(
+            _result_toml(
+                source_value="@const(council/go_mf@2)", parameter_set=_COUNCIL_SET
+            )
+        )
+    message = str(exc.value)
+    assert "go_mf@2" in message and "go_mf@1" in message
+
+
+def test_council_with_a_derived_source_is_checked_per_row_by_the_sharder(tmp_path):
+    """A derived `source` is unknown at plan time, so the sharder checks it.
+
+    The same two-layer split TRANSYT has: the manifest PLANS, and the shared
+    validator refuses the row once the tool is in hand.
+    """
+    src_path = tmp_path / "ann.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "dna_sequence": ["ACGTACGTAC"],
+                "algorithm": ["Council/go_mf@1"],
+                "function_id": ["f1"],
+            }
+        ),
+        str(src_path),
+    )
+    toml_text = _result_toml(
+        path=str(src_path), source_value="@lower(algorithm)", parameter_set="{}"
+    )
+    manifest = cm.load_manifest(toml_text)
+    # Plan time cannot know the tool -> it plans.
+    (plan,) = cm.shard_plan(manifest)
+    assert plan.parameter_set == {}
+    # The sharder resolves `source` per row and refuses it there.
+    with pytest.raises(ParameterSetError) as exc:
+        cs.shard_manifest(manifest, tmp_path / "bronze")
+    assert "bench_fingerprint" in str(exc.value)
+    assert "council/go_mf@1" in str(exc.value)
+
+
 def test_transyt_with_a_derived_source_is_checked_per_row_by_the_sharder(tmp_path):
     """When `source` is a derivation the tool is unknown at plan time, so the
     manifest PLANS and the sharder applies the same shared validator per row.

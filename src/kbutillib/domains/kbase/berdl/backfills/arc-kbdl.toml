@@ -92,7 +92,7 @@ needs_env = []
 #
 # `fasta_reference` IS A POINTER, and @prefix is null-preserving: a genome
 # with no recovered fasta_object_id is skipped by the adapter
-# (`fasta-pointer-missing`) rather than emitted with "kbdl:obj:None", which
+# (`fasta-pointer-missing`) rather than emitted with "obj://None", which
 # would be indistinguishable in the lake from a real reference.
 #
 # `assembly_accession` and `is_closed` are UNMAPPED. The arc store carries
@@ -118,7 +118,7 @@ observed_at_column = "created_at"
   contig_set = "contig_sequences"
 
   [source.content]
-  fasta_reference = "@prefix(kbdl:obj:,fasta_object_id)"
+  fasta_reference = "@prefix(obj://,fasta_object_id)"
   taxon_id        = "@column(ncbi_taxid)"
   n_contigs       = "n_contigs"
   total_length    = "total_length"

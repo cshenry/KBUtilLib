@@ -1,0 +1,318 @@
+# `function-to-go-council` -- THE PUBLISH STEP OF THE STANDING COUNCIL RUN.
+#
+# WHAT IT MAPS. One source, one target table: the verdict parquet stage 5 of
+# the `function_to_go` pipeline writes
+# (`OntologyMappingUtils.council_export`, whose columns are declared once in
+# `ontology_mapping.verdicts.EXPORT_COLUMNS`) onto `function_result`. One
+# parquet row per input `query_id`, one clearinghouse result row out. It is
+# the last of five stages -- detect un-run -> quote -> approve -> run ->
+# publish -- and it is the ONLY one that writes to the lake.
+#
+# THE SOURCE IS THE PARQUET AND NOT THE COUNCIL STORE. The council store is
+# keyed by `item_id` and knows nothing about clearinghouse identity; the
+# export is the artifact that carries `query_id` through. Pointing a manifest
+# at the store would mean re-deriving the join here, in TOML, which is
+# precisely the kind of logic the manifest grammar refuses to express.
+#
+# `entity_type = "function"`, not `protein`: a council verdict is a statement
+# about a FUNCTION DESCRIPTION ("Glucokinase (EC 2.7.1.2)"), and the GO
+# molecular-function terms it selected. Which proteins carry that function is
+# a different join, in `protein_result`, and nothing here touches it.
+#
+# ---------------------------------------------------------------------------
+# 1. THE JOIN KEY: `precomputed = "query_id"`, AND WHY NOT `raw_column`
+# ---------------------------------------------------------------------------
+#
+# `query_id` IS the clearinghouse `entity_hash`, carried through from the
+# clearinghouse universe read in stage 1, into the ranked file, into the
+# plan's fanout and abstain records, and onto the export row. `precomputed`
+# is therefore the mode that says what is true: the digest already exists and
+# is not being derived here.
+#
+# A PRECOMPUTED DIGEST IS NOT TRUSTED RAW. The sharder passes it through
+# `clearinghouse_schema.encode_entity_hash`, which RE-CANONICALISES it and
+# validates the FORM -- 64 lowercase hex characters -- so a truncated,
+# uppercased or empty key fails as a row rather than landing as a plausible
+# wrong hash. What it cannot check is WHICH RULE produced the digest, and that
+# is the right division of labour here: the rule is "whatever the
+# clearinghouse itself said this function's hash is", which is the only rule
+# that can possibly be right for a join back into the clearinghouse.
+#
+# `raw_column = "function_text"` IS REFUSED BY THIS FILE, deliberately, even
+# though `function_text` ships on every export row. Measured 2026-10-21: the
+# council's own `items.entity_hash` matched 0 of 19,268 clearinghouse hashes
+# while the definition TEXT matched 19,268 of 19,268 -- so a text join LOOKS
+# like the one that works. It is still the wrong key. A text key makes the
+# published row's identity depend on every whitespace and unicode
+# normalisation in the chain between the clearinghouse read and this file:
+# one `strip()`, one NFC pass, one CSV round trip anywhere in five stages, and
+# rows do not collide loudly, they SILENTLY FAIL TO JOIN and read as un-run
+# forever. `query_id` cannot drift, because nothing in the pipeline recomputes
+# it -- the fix for the entity_hash mismatch was to stop DISCARDING the key,
+# not to join on the text. `function_text` travels in the payload, as the
+# published evidence of what was asked, and is never the key.
+#
+# ---------------------------------------------------------------------------
+# 2. THE PARAMETER SET: WHAT IT CARRIES, AND HOW IT IS PARAMETERISED
+# ---------------------------------------------------------------------------
+#
+# `function_result` is keyed on (entity, result_type, source,
+# PARAMETER_SET_HASH), and stage 1 defines "un-run" as the absence of a
+# current-state row at THIS run's hash. The parameter set is therefore the run
+# identity, and it is:
+#
+#     {query, bench_fingerprint, mapping_hash}
+#
+# IT MUST NOT BE `{}`. Every other preset in this directory declares `{}`
+# honestly -- those tools recorded no parameters, so nothing was overridden.
+# Here `{}` would be a lie with a price: it hashes to
+# `identity.DEFAULT_PARAMETER_SET_HASH`, every run would land in that one
+# slot, and all 47,341 functions in the clearinghouse would read as answered
+# by whichever bench got there first. `current_state()` would then make
+# "un-run at THIS version" a query that always returns nothing. It is refused
+# rather than merely discouraged: `council` is a declared tool in
+# `clearinghouse_parameters` (beside TRANSYT, for the same reason -- there is
+# no such thing as a default council run), so `parameter_set = {}` on a
+# `council/...` source fails `kbu clearinghouse plan` by name.
+#
+# `bench_fingerprint` AND NOT `roster_fingerprint`. The bench partitions the
+# corpus; the transport does not (Chris, 2026-10-22: the same models should
+# sit in the same seats across every run of a task, and HOW a model is run --
+# codex, MAG, ARGO, a direct GPU -- is the thing we iterate on to allocate
+# token cost). `bench_fingerprint` is a function of `{role, canonical_model}`
+# per seat and nothing else. `Roster.fingerprint()` additionally covers
+# `endpoint_kind`, the route spelling `model`, `max_output_tokens`,
+# `temperature` and `extra`, so moving one seat from the codex CLI to MAG
+# moves it -- which would re-partition all 47,341 functions and re-charge
+# ~199M tokens for a pure cost optimisation. `temperature`,
+# `max_output_tokens` and `extra` are excluded from the bench for the same
+# reason: they are substantially transport-coupled, and including them would
+# let a routing change re-partition the corpus through the back door.
+#
+# roster_fingerprint and the per-seat route_fingerprint are PUBLISHED, in the
+# result PAYLOAD below, so a row can still answer "was this configured
+# identically" and "where did this come from". They are provenance, not
+# identity, and `clearinghouse_parameters.COUNCIL_REFUSED_KEYS` refuses them
+# as parameter-set keys so the distinction cannot be lost by accident.
+#
+# HOW IT IS PARAMETERISED: A RENDERED COPY, NOT AN ENVIRONMENT PLACEHOLDER.
+# The three values vary per run, and the choice here was between a documented
+# placeholder the publish step substitutes and a `parameter_set_column` on the
+# parquet. THIS FILE USES THE PLACEHOLDER, rendered into a run-local copy of
+# the manifest. Both halves of that decision are forced by the tree:
+#
+#   * A `${VAR}` WOULD NOT WORK, and would fail SILENTLY. `load_manifest`
+#     expands placeholders over the LOCATOR half only -- see its docstring:
+#     the mapping half must be byte-identical everywhere or the same manifest
+#     would write different partition values on different hosts. A `${VAR}`
+#     in `parameter_set` is not expanded, is a perfectly legal parameter-set
+#     string, and would hash the template. So the marker must be substituted
+#     by whoever writes the run's manifest, not by the environment.
+#
+#   * `parameter_set_column` WOULD BE THE WRONG SHAPE. It exists for a source
+#     whose set genuinely varies per record (the `arc` adapter: TRANSYT rows
+#     carry a taxonomy id and every other tool's carry `{}`). Here the set is
+#     ONE CONSTANT for the whole file -- one run, one bench, one query
+#     version, one mapping -- so the static form is what is true, and it is
+#     hashed ONCE at plan time instead of 19,276 times at shard time. It also
+#     keeps the partition key in the manifest, where it is reviewed before a
+#     load, rather than in data written by the stage being published.
+#
+# THE MARKERS ARE DESIGNED TO BE CAUGHT. `query = "go_mf@0"` (no version 0
+# exists; versions start at 1) and 64 zeros for both digests. They are legal,
+# so `kbu clearinghouse plan` passes on the file AS SHIPPED -- which is what
+# makes the preset testable -- and they are inert, because the un-rendered
+# parameter set hashes to exactly
+#
+#     7bccf01baa4f69e139545bf712247b8f49047c6569bad1e107b3e3417f960d49
+#
+# A `function_result` row at that hash means the manifest was loaded
+# un-rendered. `PLAN.json` records the run's real `parameter_set_hash`, so the
+# publish step compares the two and refuses on a mismatch.
+#
+# WHAT THE PUBLISH STEP SUBSTITUTES -- four markers, all from `PLAN.json`, all
+# from its single `query` field or the two digests beside it:
+#
+#     source            @const(council/go_mf@0)  <- "council/" + plan["query"]
+#     parameter_set.query          "go_mf@0"     <- plan["query"]
+#     parameter_set.bench_fingerprint  0*64      <- plan["bench_fingerprint"]
+#     parameter_set.mapping_hash       0*64      <- plan["mapping_hash"]
+#
+# `source` and `parameter_set.query` are two spellings of one fact, and
+# `validate_council_parameter_set` checks that they agree -- so a render that
+# substituted one and missed the other fails at plan time rather than
+# publishing under a partition whose halves disagree.
+#
+# ---------------------------------------------------------------------------
+# 3. THE SHIPPED EXAMPLE PARQUET
+# ---------------------------------------------------------------------------
+#
+# `function-to-go-council-example.parquet` ships BESIDE this manifest as
+# package data, and the locator defaults to it, for the same reason
+# `file-example.toml` ships its fixture: so that
+#
+#     kbu clearinghouse plan <this preset>
+#
+# and `kbu clearinghouse backfill list` work untouched on any pod, with no
+# credentials, no network and no fixture to fetch. Exporting
+# KBU_F2GO_VERDICTS points the preset at a real run's parquet without editing
+# package data, which an operator cannot edit anyway -- it is inside the
+# installed wheel.
+#
+# FIVE ROWS, ONE PER PUBLISHED CLASS: unanimous with a term, meta-decided
+# after a split (and marked `retried`), `no_candidate_matched`, `contentless`
+# and `abstained:no_candidates`. The last three carry `go_ids = []` and are
+# published rather than withheld, which is the behaviour most easily broken.
+#
+# THE ROWS ARE SYNTHETIC AND MUST NEVER REACH PRODUCTION. Every digest on
+# them is `sha256("function-to-go-council-example:<field>")` -- the
+# `query_id`s are hashes of a fixture label, not of any function the
+# clearinghouse knows, so they would join to nothing. Written with the
+# export's own `verdicts.write_verdict_parquet` over
+# `verdicts.EXPORT_COLUMNS`, so the fixture cannot drift from the real
+# artifact's schema. Their `council.store_id` is the inert
+# `example/council-0` and NOT the real poplar store id, so a fixture row that
+# somehow reached the lake is recognisable as one; the four council-decided
+# rows carry a full triple and `status = "ok"`, and the `abstained:` row
+# carries `council = null` with a null status, which is what makes the
+# nullable case visible in a smoke run of the preset as shipped. They also carry `query_version = "0"`, which agrees with
+# the un-rendered `source` below: a smoke run of this preset as shipped lands
+# at the inert parameter-set hash named above, which is exactly the row a
+# promotion gate should refuse. Run it against a scratch dataset.
+
+[backfill]
+# INFORMATIONAL ONLY (see clearinghouse_manifest.BackfillInfo). `backfill
+# list` prints these so an operator can see what a preset reaches for before
+# running it; nothing in the shard or ingest path reads them.
+# Not expanded: `[backfill]` is parsed, not a locator, so a ${VAR} here would
+# stay literal. Named rather than spelled out for that reason.
+pulls_from = [
+  "file://<$KBU_F2GO_VERDICTS> -- the verdict parquet from `kbu ontomap council-export`",
+  "file://<kbutillib package data>/domains/kbase/berdl/backfills/function-to-go-council-example.parquet",
+]
+needs_env = [
+  # Optional. Unset is correct for a plan or a smoke run -- the locator below
+  # declares the shipped example parquet as its default -- and REQUIRED for a
+  # real publish, because the run's verdict parquet is a per-run artifact on
+  # LOCAL SCRATCH (council_export refuses to write it into the Dropbox-synced
+  # run directory: the 19k-row file is the shard's input, not a sync
+  # artifact), so no path is correct for a second run.
+  "KBU_F2GO_VERDICTS",
+]
+
+# ---- Function: the council's GO molecular-function verdict --------------
+#
+# ONE UNIT. The `file` adapter exposes no `units()` decomposition, so this is
+# a single unit: the parquet is read start to finish or not at all. `--slice`
+# is refused against it by adapter name -- a slice is a range of a mongo sort
+# key and there is no sort key here.
+#
+# `kinds = ["result"]` ONLY, and this is the one preset in this directory that
+# writes no entity or content rows. It must not: the functions were READ from
+# `function_entity`/`function_content` in stage 1 (47,341 rows of each are
+# already loaded), so `query_id` names a function the clearinghouse already
+# knows. Re-declaring the identity from the export's `function_text` would
+# hash the text under a different rule and mint a SECOND entity for a function
+# that already has one.
+[[source]]
+name        = "function-to-go-council"
+adapter     = "file"
+path        = "${KBU_F2GO_VERDICTS:-${MANIFEST_DIR}/function-to-go-council-example.parquet}"
+format      = "parquet"
+entity_type = "function"
+kinds       = ["result"]
+# The export stamps each row with when the COUNCIL decided it, and stamps an
+# abstained row with the plan's `generated_at` (when retrieval declined),
+# precisely because `resolve_observed_at` SKIPS a row whose observed_at is
+# null -- which would drop every abstention at shard time. Reading the column
+# rather than stamping the shard run's start time is what makes `observed_at`
+# the decision time rather than the publication time, and `observed_at` is one
+# of the two columns the current-state window function orders by.
+observed_at_column = "decided_at"
+
+  [source.hash]
+  # THE JOIN KEY. The clearinghouse's own entity_hash, carried through from
+  # the universe read; re-canonicalised by encode_entity_hash and never
+  # trusted raw. NOT raw_column on function_text -- see the header, section 1.
+  precomputed = "query_id"
+
+  [source.result]
+  result_type         = "@const(go_molecular_function)"
+  result_type_version = "@const(1.0)"
+  # RENDERED PER RUN from plan["query"] -- see the header, section 2. A
+  # @const (rather than @concat over the parquet's own query_name/
+  # query_version columns) because only a plan-time constant lets
+  # `clearinghouse_parameters` resolve the tool BEFORE any row is read, which
+  # is what makes `parameter_set = {}` a plan-time refusal here instead of a
+  # per-row one 19,276 times over.
+  source              = "@const(council/go_mf@0)"
+  # THE VERDICT, plus the provenance that is not a key. go_confidences is
+  # positionally aligned with go_ids; votes is the vote table; the three
+  # decline classes (abstained:<reason>, no_candidate_matched, contentless)
+  # all arrive with go_ids = [] and are published rather than withheld,
+  # because an ABSENT row is indistinguishable from "not yet run" and stage 1
+  # would re-select them forever. roster_fingerprint and route_fingerprints
+  # ride here BECAUSE they are refused as parameter-set keys: provenance
+  # belongs on the row, identity belongs in the partition.
+  #
+  # THE COUNCIL REFERENCE. `council` is the WINNING council item --
+  # {store_id, job_id, item_id} -- or NULL. It is the pointer from the
+  # high-level assertion this row carries into the FULL deliberation archived
+  # in `kbaseincubator.council`: every proposer ballot with its free-text
+  # "why", the critic audit, the meta adjudication, the candidate menu each
+  # seat was shown. All three parts are needed: `items` is keyed
+  # (job_id, item_id) so `job_id` alone names a job of 19,276 items, and
+  # `job_id` is unique only within one store.
+  #
+  # `council` IS NULL FOR A RETRIEVAL ABSTENTION, and that is the point of it
+  # rather than an edge case: retrieval declined before anything was
+  # submitted, so no council item exists, and a non-null triple there would
+  # fabricate provenance. The abstention's own decline fields
+  # (decline_reason = "abstained:<reason>", go_ids = []) are unchanged.
+  #
+  # `genomes` IS NOT IN THIS PAYLOAD AND NEVER WILL BE (KBUtilLib#98,
+  # decided 2026-10-26). `verdicts.EXPORT_COLUMNS` carries the column and
+  # `verdicts.export_rows` takes an optional `genomes=` map, so the question
+  # is live every time someone reads either; the answer is permanent. Three
+  # reasons, the third decisive:
+  #
+  #   1. This preset has ALWAYS omitted it and neither export path --
+  #      `OntologyMappingUtils.council_export` nor
+  #      `berdl.council_publish.lakehouse_export_rows` -- has ever published
+  #      it. There is nothing to preserve.
+  #   2. THE SET GROWS AND THE SLOT DOES NOT. Genomes are added over time;
+  #      the clearinghouse slot (entity_hash, entity_type, result_type,
+  #      source, parameter_set_hash) freezes on FIRST WRITE. A published
+  #      genome list would go stale the first time a new genome carried the
+  #      function, and would keep reading as authoritative while stale.
+  #   3. THE ONLY IN-PIPELINE SOURCE IS A TEXT JOIN. Nothing but
+  #      `priority_adp1_pmi.tsv` associates a function with genomes here, and
+  #      reaching it means joining on the definition TEXT -- the key this
+  #      file refuses by name in section 1 above, for reasons that do not
+  #      weaken just because the column being filled is provenance.
+  #
+  # Which genomes carry a function is a READ-TIME join through
+  # `protein_result`, which is also where `entity_type = "function"` says it
+  # belongs. The column stays in EXPORT_COLUMNS so the run-directory parquet
+  # stays byte-compatible: it is published EMPTY, not dropped.
+  #
+  # `status` and `retried` are published EXPLICITLY. `status` is the council
+  # ITEM's status (null on an abstention, which never had one); `retried`
+  # says the published verdict came from the run's retry pass -- 105 of the
+  # 113 items that failed on a truncated ARGO response came back on a plain
+  # retry, and a reader comparing two rows needs to know which answer is
+  # which.
+  #
+  # ONE THING THIS CANNOT FIX. The clearinghouse slot key is (entity_hash,
+  # entity_type, result_type, source, parameter_set_hash) and deliberately
+  # EXCLUDES result_type_version, so a payload shape is FROZEN once written:
+  # the 19,268 rows already loaded under this result_type can never gain the
+  # council block, because a corrected payload in the same slot is silently
+  # dropped as already-present. They stay joinable only by the documented
+  # convention that exactly ONE store produced them (the poplar store,
+  # `store.sqlite.POPLAR_COUNCIL_STORE_ID`). A reader finding no council
+  # block on an old row is seeing that, not a bug.
+  payload             = "@json(function_text, go_ids, go_confidences, final_confidence, decided_by, no_functional_content, decline_reason, n_valid_proposers, votes, roster_fingerprint, route_fingerprints, status, retried, council)"
+  # RENDERED PER RUN. NOT {} -- see the header, section 2; {} is refused for a
+  # council source and would collapse every run into one slot.
+  parameter_set       = { query = "go_mf@0", bench_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000", mapping_hash = "0000000000000000000000000000000000000000000000000000000000000000" }

@@ -33,6 +33,17 @@ kbu new-capability              # interactive scaffold for a new @capability
 kbu doctor                      # check all backend availability (exits 0 if all ok)
 ```
 
+### KBDL arc indexing
+
+```console
+kbu kbdl-index --dry-run [--job-type BuildGenome] [--token-file ~/.kbase/token]
+kbu kbdl-index                  # real run: writes rows to the run DB
+```
+
+Indexes swept KBDL job results into the arc store (the same index the sweep loop's
+`--index` phase runs). `--dry-run` writes nothing and reports replace-vs-duplicate
+against existing rows.
+
 ### KIND agent bundle commands
 
 ```console

@@ -82,6 +82,10 @@ from ...llm import get_api as llm_get_api
 from ...llm import preflight_api as llm_preflight_api
 from ...llm.types import LLMRequest
 from ..config import DEFAULT_MAX_CONCURRENCY
+# Re-exported (see ``__all__``): the definition moved to the query-spec
+# module so the quote stage can reproduce a prompt hash without
+# importing this module, which reaches the backends.
+from ..queries.spec import renderer_id_version
 from ..store.errors import StaleClaim
 from ..types import (
     CLI_KINDS,
@@ -136,6 +140,150 @@ RETRYABLE_KINDS = ("transport", "timeout")
 #: the call was created under.  ``store.queries.BLOCKER_BY_ERROR_KIND`` maps
 #: it to the ``configuration_mismatch`` blocker.
 CONFIGURATION_MISMATCH = "configuration_mismatch"
+
+# ---------------------------------------------------------------------------
+# The account-wide request pacer
+# ---------------------------------------------------------------------------
+#
+# A CONCURRENCY CAP IS NOT A RATE LIMIT, and MAG's binding limit is a rate:
+# 120 requests per minute, ACCOUNT-WIDE, alongside a 20-parallel cap that is
+# also account-wide (measured 2026-10-21; a config asking 24 parallel errored
+# 427 of 500 pilot items over 1,925 transport attempts).  The configuration
+# measured to work -- "MAG queues summing to 6" -- is concurrency standing in
+# for rate control: it lands near 100 req/min only because the measured
+# service time is 3-4 s, and it overshoots the moment the gateway gets
+# faster, which is the single most likely change to it.  And because the
+# council RETRIES a 429, the overshoot spends the same per-minute budget and
+# spirals.
+#
+# So :class:`_RateBucket` paces dispatch at the configured
+# ``max_requests_per_minute`` and :class:`_AccountLimit` keeps the semaphore
+# for the parallel cap.  The bucket lives on the ACCOUNT, beside that
+# semaphore, because the account is the scope the gateway enforces at.
+
+#: Burst allowance of an account's pacer, in requests.
+#:
+#: ONE, i.e. NO burst.  The limit being paced against is WINDOWED, which is
+#: why a burst probe overestimated sustained throughput by ~3x (measured
+#: 2026-10-21): tokens handed out at once are spent inside one window and the
+#: window then refuses everything.  A capacity of 1 dispatches AT the
+#: configured rate and never above it, which is what "discovering a ceiling
+#: safely means a slow ramp" requires.
+DEFAULT_RATE_BURST = 1.0
+
+#: How long a rate-limit response stays "recent" for the SUSTAINED test.
+RATE_LIMIT_WINDOW_S = 60.0
+
+#: Rate-limit responses inside :data:`RATE_LIMIT_WINDOW_S`, on one account,
+#: that make the limit SUSTAINED rather than incidental -- at which point the
+#: endpoint is HALTED instead of retried into.
+#:
+#: A halt and not only a retry, because the pacer CANNOT SEE OTHER CONSUMERS
+#: on the same account: another session, another machine or another person on
+#: the same subscription spends the same per-minute budget, so a correctly
+#: paced worker can still be refused.  Retrying into that is the spiral the
+#: first pilot measured -- 1,925 transport attempts for 500 items, 427 of
+#: them errored.
+RATE_LIMIT_HALT_AFTER = 5
+
+
+class _RateBucket:
+    """A token bucket pacing one ACCOUNT's dispatch rate.
+
+    Refills continuously at ``requests_per_minute / 60`` tokens per second up
+    to :attr:`capacity` (:data:`DEFAULT_RATE_BURST`, i.e. one), and every
+    dispatch takes one token before it is sent.  Every seat sharing the
+    account shares the bucket, which is the whole point: per-model semaphores
+    cannot express a limit the provider enforces across models.
+
+    The lock is held ACROSS the sleep deliberately.  That serialises waiters
+    FIFO and makes the dispatch rate exactly the configured one; releasing it
+    first would let N waiters each compute "I only need to wait 0.1 s" from
+    the same stale token count and then all fire together, which is the burst
+    this class exists to prevent.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        requests_per_minute: float,
+        *,
+        capacity: float = DEFAULT_RATE_BURST,
+        clock: Optional[Callable[[], float]] = None,
+        sleep: Optional[Callable[[float], Any]] = None,
+    ) -> None:
+        if float(requests_per_minute) <= 0:
+            raise ValueError(
+                f"{key}: max_requests_per_minute={requests_per_minute!r}; a "
+                "non-positive rate would pace every dispatch to never. Leave "
+                "it unset to mean 'no separate per-minute limit known'."
+            )
+        self.key = key
+        self.requests_per_minute = float(requests_per_minute)
+        self.rate_per_s = self.requests_per_minute / 60.0
+        self.capacity = max(1.0, float(capacity))
+        #: Dispatches this bucket has handed a token to, and the total time
+        #: callers spent waiting for one.  Read by :meth:`CouncilWorker.
+        #: pacer_report`, which is how an operator sees that the pacer -- and
+        #: not the gateway -- is what is limiting a run.
+        self.dispatched = 0
+        self.wait_seconds = 0.0
+        self.waits = 0
+        self._tokens = self.capacity
+        self._updated: Optional[float] = None
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or asyncio.sleep
+        self._lock: Optional[asyncio.Lock] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _lock_for_loop(self) -> asyncio.Lock:
+        """The lock for the RUNNING loop, built on first use.
+
+        Same reason :meth:`_AccountLimit.semaphore` does this: one worker
+        object may be used by two successive ``work()`` calls on two
+        different loops, and an ``asyncio`` primitive bound to a closed loop
+        raises when awaited.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._loop is not loop:
+            self._lock = asyncio.Lock()
+            self._loop = loop
+        return self._lock
+
+    async def acquire(self) -> float:
+        """Take one token, waiting for it if there is none.  Returns the wait."""
+        waited = 0.0
+        async with self._lock_for_loop():
+            while True:
+                now = self._clock()
+                if self._updated is None:
+                    self._updated = now
+                self._tokens = min(
+                    self.capacity,
+                    self._tokens + max(0.0, now - self._updated) * self.rate_per_s,
+                )
+                self._updated = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    self.dispatched += 1
+                    if waited:
+                        self.waits += 1
+                        self.wait_seconds += waited
+                    return waited
+                need = (1.0 - self._tokens) / self.rate_per_s
+                waited += need
+                await self._sleep(need)
+
+    def report(self) -> Dict[str, Any]:
+        """What this bucket has done, for diagnostics and ``RUN.json``."""
+        return {
+            "account": self.key,
+            "requests_per_minute": self.requests_per_minute,
+            "burst": self.capacity,
+            "dispatched": self.dispatched,
+            "waits": self.waits,
+            "wait_seconds": round(self.wait_seconds, 3),
+        }
 
 # ---------------------------------------------------------------------------
 # Batched invocation (t8)
@@ -220,22 +368,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def renderer_id_version(query: Any) -> str:
-    """Identity of HOW a query type renders prompts and reads answers.
-
-    Part of the prompt hash, so that two installations only reuse each other's
-    answers when they would have asked and read them the same way.  The query
-    type's own ``(name, version)`` is in the hash as well, but it is not
-    enough on its own: a spec names its renderer and adapter as
-    ``"<name>@<version>"``, and an installation shipping a different version
-    of either asks or scores a different question under the same spec name.
-    """
-    renderer = getattr(query, "renderer", None) or "template"
-    adapter = getattr(query, "adapter", None) or "generic"
-    id_field = getattr(query, "id_field", None) or "id"
-    return f"{renderer}|{adapter}|{id_field}"
-
-
 def _as_endpoint_table(backends: Optional[Any]) -> Dict[str, Any]:
     """Normalise a ``backends`` argument into ``{alias: instance or None}``.
 
@@ -286,6 +418,18 @@ class _AccountLimit:
         self.key = key
         self.capacity = max(1, int(capacity))
         self.assigned = 0
+        #: The account's REQUEST PACER, or ``None`` when no endpoint on it
+        #: declares ``max_requests_per_minute``.  ``None`` means "no separate
+        #: per-minute limit known", NOT "unlimited" -- see
+        #: :class:`..config.EndpointConfig`.  Set by
+        #: :meth:`CouncilWorker._build_limits`, which is also where the two
+        #: aliases of one subscription end up sharing this object and so
+        #: sharing one bucket.
+        self.pacer: Optional[_RateBucket] = None
+        #: Monotonic timestamps of the rate-limit responses seen on this
+        #: account, trimmed to :data:`RATE_LIMIT_WINDOW_S` -- the SUSTAINED
+        #: test (see :meth:`CouncilWorker._note_rate_limit`).
+        self.rate_limited_at: List[float] = []
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -372,6 +516,17 @@ class CouncilWorker:
             and nothing about batching is engaged.  Above 1, a worker may
             send up to that many homogeneous claimed rows in one invocation,
             subject to the derived ceiling in :meth:`_batch_n`.
+        requests_per_minute: this worker's share of its account's REQUEST
+            RATE, in requests per minute.  Accepted as a plain parameter for
+            exactly the reason ``concurrency`` is -- the caller already knows
+            which queue this worker is, and an account's rate has to be
+            apportioned across the account's queue CHILDREN, which are
+            separate processes and cannot share an in-process bucket (see
+            ``daemon._run_as_queue_worker``).  ``None`` (the default) derives
+            the rate from the account's own endpoints
+            (``max_requests_per_minute``, the smallest declared), which is
+            correct for every un-partitioned worker -- the one process is the
+            only consumer it can account for.
         max_output_tokens_per_item: the configured per-item output estimate
             used to derive the batch ceiling (``QueueConfig``'s field of the
             same name).  ``None`` (the default) falls back to this worker's
@@ -406,6 +561,7 @@ class CouncilWorker:
         concurrency: Optional[int] = None,
         batch_size: int = 1,
         max_output_tokens_per_item: Optional[int] = None,
+        requests_per_minute: Optional[float] = None,
     ) -> None:
         if not user:
             raise ValueError("a council worker must know which user it works for")
@@ -420,6 +576,11 @@ class CouncilWorker:
         self.roles: Optional[set] = set(roles) if roles is not None else None
         self._queue_concurrency: Optional[int] = (
             int(concurrency) if concurrency is not None else None
+        )
+        #: This worker's share of its account's request rate, or ``None`` to
+        #: derive it from the account's endpoints.  See the class docstring.
+        self._queue_requests_per_minute: Optional[float] = (
+            float(requests_per_minute) if requests_per_minute is not None else None
         )
         #: Queue-level batching knobs; see the class docstring.  ``1`` means
         #: "not opted in" and must leave every code path this worker takes
@@ -523,7 +684,16 @@ class CouncilWorker:
         the account's full ``max_concurrency`` is what OTHER queues on the
         same account are allowed to use too, and this child must not claim
         more than its own share.
+
+        THE SAME GROUPING BUILDS THE REQUEST PACER (see :class:`_RateBucket`).
+        An account's rate is the SMALLEST ``max_requests_per_minute`` any of
+        its endpoints declares -- the tightest declared limit is the real one,
+        exactly as for concurrency -- and an account none of whose endpoints
+        declares one gets NO bucket, because ``None`` there means "no
+        separate per-minute limit known" and inventing a number would pace a
+        gateway nobody has measured.
         """
+        rates: Dict[str, float] = {}
         for endpoint in sorted(self.backends):
             cfg = self.endpoint_config(endpoint)
             account = str(cfg.get("account") or "") or f"endpoint:{endpoint}"
@@ -541,9 +711,22 @@ class CouncilWorker:
             else:
                 limit.capacity = min(limit.capacity, max(1, capacity))
             self._limit_by_endpoint[endpoint] = limit
+            rpm = cfg.get("max_requests_per_minute")
+            if rpm:
+                rates[account] = (
+                    float(rpm) if account not in rates else min(rates[account], float(rpm))
+                )
         if self._queue_concurrency is not None:
             for limit in self._limits.values():
                 limit.capacity = max(1, self._queue_concurrency)
+        for account, limit in self._limits.items():
+            rate = (
+                self._queue_requests_per_minute
+                if self._queue_requests_per_minute is not None
+                else rates.get(account)
+            )
+            if rate and float(rate) > 0:
+                limit.pacer = _RateBucket(account, float(rate))
 
     def endpoint_mapping(self, endpoint: str) -> Dict[str, Any]:
         """The endpoint mapping the wrapper is given for *endpoint*.
@@ -1750,6 +1933,18 @@ class CouncilWorker:
             self._enforce_budget(endpoint, usage)
 
         if batch_error is not None:
+            if getattr(batch_error, "rate_limited", False):
+                # The same SUSTAINED test the single-call path makes (see
+                # :meth:`_note_rate_limit`).  The halt is set directly rather
+                # than through :meth:`_halt_endpoint`, which releases ONE
+                # call: here every member is released by
+                # :meth:`_record_failed_invocation` below, and what the halt
+                # has to stop is the NEXT claim.
+                sustained = self._note_rate_limit(endpoint)
+                if sustained is not None:
+                    self.store.set_halt(
+                        endpoint, sustained.kind, sustained.message
+                    )
             self._record_failed_invocation(
                 members,
                 invocation_id,
@@ -2394,6 +2589,15 @@ class CouncilWorker:
         )
         if error.kind in HALTING_KINDS:
             return self._halt_endpoint(call, token, error)
+        if getattr(error, "rate_limited", False):
+            # A RATE LIMIT IS NOT ONLY A RETRY.  A 429 arrives as a
+            # ``transport`` error, which is retryable, and one of them should
+            # be retried; a sustained run of them must halt instead (see
+            # :meth:`_note_rate_limit`).  Checked before the retryable branch
+            # for that reason.
+            sustained = self._note_rate_limit(endpoint)
+            if sustained is not None:
+                return self._halt_endpoint(call, token, sustained)
         if error.kind == "model_unavailable":
             return self._park(call, token, error, wait_s=self.model_wait_s)
         if error.kind in RETRYABLE_KINDS:
@@ -2561,13 +2765,93 @@ class CouncilWorker:
 
     @asynccontextmanager
     async def _slot(self, endpoint: str) -> AsyncIterator[None]:
-        """Hold the endpoint's (possibly account-shared) concurrency slot."""
+        """Pace, then hold the endpoint's account-shared concurrency slot.
+
+        THE ONE CHOKEPOINT EVERY DISPATCH PASSES THROUGH, which is why the
+        account's request pacer lives here: :meth:`_invoke` and
+        :meth:`_invoke_batch` each hold this exactly once per BACKEND
+        INVOCATION, so one token is taken per request whether that request
+        carries one item or twenty.  A pacer inside the api type could not do
+        that -- the api types are per-ENDPOINT objects cached by the wrapper,
+        so two aliases of one subscription would be two buckets, which is
+        precisely the wrong granularity for a limit the provider enforces
+        account-wide; and the wrapper is shared with non-council callers that
+        have no account model at all.
+
+        The token is taken BEFORE the semaphore, so a paced dispatch does not
+        sit on a parallel slot it cannot use.  Either order records the wait
+        as QUEUE WAIT rather than service time (``queued_at`` is stamped by
+        the caller before entering here and ``started`` only after), which is
+        the property that let the issue-84 claim-cost regression be
+        identified at all: inflated service time with queue wait at 0.00.
+        """
         limit = self._limit_by_endpoint.get(endpoint)
         if limit is None:  # pragma: no cover - endpoints come from backends
             yield
             return
+        if limit.pacer is not None:
+            await limit.pacer.acquire()
         async with limit.semaphore():
             yield
+
+    def pacer_report(self) -> List[Dict[str, Any]]:
+        """What each account's request pacer has done, newest state.
+
+        Empty when no endpoint this worker serves declares a
+        ``max_requests_per_minute``.  Exists so an operator reading a long
+        run can tell "the pacer is holding dispatch back" apart from "the
+        gateway is slow", which are the same symptom from outside.
+        """
+        return [
+            limit.pacer.report()
+            for _account, limit in sorted(self._limits.items())
+            if limit.pacer is not None
+        ]
+
+    def _note_rate_limit(self, endpoint: str) -> Optional[CouncilError]:
+        """Record a rate-limit response; return a HALT once it is SUSTAINED.
+
+        A single 429 is a normal, expected consequence of pacing against a
+        windowed limit with other consumers on the account, and it is
+        retried.  :data:`RATE_LIMIT_HALT_AFTER` of them inside
+        :data:`RATE_LIMIT_WINDOW_S` is not: it says the account's real
+        available rate is below what this worker is configured for, and
+        retrying into that spends the same per-minute budget the refusals are
+        already competing for.  The first pilot reached 1,925 transport
+        attempts for 500 items and errored 427 of them doing exactly that.
+
+        Counted PER ACCOUNT, because that is the scope the gateway refuses
+        at; halting is per endpoint, because that is the scope the store's
+        halt has.
+        """
+        limit = self._limit_by_endpoint.get(endpoint)
+        if limit is None:  # pragma: no cover - endpoints come from backends
+            return None
+        now = time.monotonic()
+        limit.rate_limited_at = [
+            at for at in limit.rate_limited_at if now - at <= RATE_LIMIT_WINDOW_S
+        ]
+        limit.rate_limited_at.append(now)
+        if len(limit.rate_limited_at) < RATE_LIMIT_HALT_AFTER:
+            return None
+        paced = (
+            f"{limit.pacer.requests_per_minute:g} req/min"
+            if limit.pacer is not None
+            else "no configured per-minute limit"
+        )
+        return CouncilError(
+            kind="quota_exhausted",
+            message=(
+                f"account {limit.key!r} returned {len(limit.rate_limited_at)} "
+                f"rate-limit responses within {RATE_LIMIT_WINDOW_S:g}s while "
+                f"paced at {paced}. A SUSTAINED rate limit is a halt, not a "
+                "retry: the pacer cannot see other consumers on this account, "
+                "so retrying spends the same per-minute budget the refusals "
+                "are competing for. Lower max_requests_per_minute (or the "
+                "queue's share of it) and `kbu council endpoints reset-halt`."
+            ),
+            halts_endpoint=True,
+        )
 
     # -- outcomes ---------------------------------------------------------
 

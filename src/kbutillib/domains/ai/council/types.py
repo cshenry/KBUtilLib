@@ -98,6 +98,7 @@ __all__ = [
     "data_hash",
     "prompt_hash",
     "route_fingerprint",
+    "bench_fingerprint",
     "default_reuse_namespace",
     "seat_generation_params",
     "ENDPOINT_KINDS",
@@ -343,6 +344,62 @@ def route_fingerprint(
     return canonical_sha256(payload)
 
 
+def bench_fingerprint(roster: "Roster") -> str:
+    """Identity of the BENCH: which models are seated in which roles.
+
+    THE PARTITION KEY.  This is the hash that goes into a clearinghouse
+    ``parameter_set`` -- ``{query, bench_fingerprint, mapping_hash}`` -- so it
+    answers exactly one question: *is this the same experiment?*  It is a
+    function of ``{role, canonical_model}`` per seat and of nothing else.
+
+    Three fingerprints exist in this module and they are not
+    interchangeable.  Each is defined by what it is FOR:
+
+    * :func:`bench_fingerprint` -- PARTITIONS the corpus.  Changing it says
+      "every stored result is now a different experiment and must be
+      recomputed", which for the ``function_to_go`` corpus means 47,341
+      functions and ~199M tokens.  So only a change of MODEL may move it.
+    * :meth:`Roster.fingerprint` -- PROVENANCE of the whole seating.  It
+      additionally covers ``endpoint_kind``, the route spelling ``model``,
+      ``max_output_tokens``, ``temperature`` and ``extra``, so moving one
+      seat from the codex CLI to MAG moves it.  That is the right answer for
+      "was this run configured identically" and the WRONG one for a
+      partition key, which is why it must not be used as one.
+    * :func:`route_fingerprint` -- PROVENANCE of one seat's route: which
+      endpoint alias, which URL or executable, which account.  Its own
+      docstring puts it as "where did this come from", not "is this the same
+      question".
+
+    Both of those are still recorded on every job and call row.  They are
+    simply not keys.
+
+    WHY THE TRANSPORT IS EXCLUDED (Chris, 2026-10-22): the same models should
+    be used for the same seats across every run of a task, and HOW a model is
+    run -- codex, MAG, ARGO, a direct GPU -- is the thing we iterate on to
+    allocate token cost.  A cost optimisation that re-partitioned the corpus
+    and re-charged the whole run would make that iteration unaffordable.
+
+    ``temperature``, ``max_output_tokens`` and ``extra`` are excluded for the
+    same reason and deliberately: they are substantially transport-coupled
+    (a CLI seat and an HTTP seat on one model do not carry the same ceiling),
+    so including them would let a routing change re-partition the corpus
+    through the back door.
+
+    And note what is NOT changed to match: :func:`prompt_hash` KEEPS
+    ``endpoint_kind``, because it is the REUSE key and asks "is this
+    literally the same question already paid for".  Measured: the same
+    ~1,400-token question cost ~63,000 input tokens over ``claude -p``
+    against 1,403 over the API, because the CLI path wraps an agent harness
+    around it.  The two keys ask different questions and correctly disagree.
+    """
+    return canonical_sha256(
+        [
+            {"role": role, "canonical_model": seat.canonical_model}
+            for role, seat in roster.seats()
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Typed failures
 # ---------------------------------------------------------------------------
@@ -511,6 +568,12 @@ class Roster(BaseModel):
         token ceiling, temperature and extra params -- everything that can
         change an answer -- but not the endpoint alias, so the same council
         configured by two users fingerprints identically.
+
+        PROVENANCE, NOT A PARTITION KEY.  Because it covers the endpoint kind
+        and the route spelling, moving a seat from a CLI to a gateway moves
+        this hash; a clearinghouse partitioned on it would recompute its whole
+        corpus for a pure routing change.  :func:`bench_fingerprint` is the
+        partition key, and its docstring sets out the difference.
         """
         return canonical_sha256(
             [

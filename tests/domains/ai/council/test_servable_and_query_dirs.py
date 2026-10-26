@@ -18,6 +18,7 @@ a GPU.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -912,3 +913,97 @@ class TestQueryDirectories:
         assert human.exit_code == 0, human.output
         assert "source_file" in human.output
         assert str(path) in human.output
+
+
+class TestEveryAdvertisedSpellingIsServed:
+    """A gateway may advertise several ids per model and accept a different one
+    than it displays, so readiness must consider all of them.
+
+    Measured on ARGO, 2026-10-20: ``/models`` returns
+    ``{"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"}`` and
+    ``/chat/completions`` accepts ONLY ``internal_id`` -- the display spelling
+    returns HTTP 400 for Claude and HTTP 500 for Gemini.  Reading only ``id``
+    made the readiness test the exact inverse of the call: the sole spelling
+    that works was reported ``unavailable``, so every ARGO council seat was
+    refused at submit while the call itself would have succeeded.
+
+    ``asyncio.run`` rather than an ``asyncio`` marker: this suite does not
+    install pytest-asyncio, and a marker it does not know is silently skipped
+    rather than failed, which would make these tests look green while never
+    executing.
+    """
+
+    @staticmethod
+    def _api(listing: List[Dict[str, Any]]) -> Any:
+        class _Gateway(_Base):
+            async def models(self) -> List[Dict[str, Any]]:
+                self.probes.append("models")
+                return listing
+
+        return _Gateway()
+
+    def _probe(self, listing: List[Dict[str, Any]]) -> Dict[str, Any]:
+        from kbutillib.domains.ai.council.servable import probe_endpoint
+
+        return asyncio.run(probe_endpoint("argo", KIND, self._api(listing)))
+
+    @staticmethod
+    def _seat(model: str, canonical: str) -> Any:
+        class _Seat:
+            seat_name = "critic"
+            endpoint = "argo"
+            endpoint_kind = KIND
+            verified = True
+
+        _Seat.model = model
+        _Seat.canonical_model = canonical
+        return _Seat()
+
+    def test_internal_id_is_a_served_name(self) -> None:
+        probe = self._probe(
+            [{"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"}]
+        )
+        # BOTH spellings, because the gateway names the model by both and a
+        # seat may legitimately be configured with either.
+        assert probe["models"] == {"Gemini 3.5 Flash", "gemini35flash"}
+
+    def test_a_seat_naming_the_internal_id_is_ready(self) -> None:
+        from kbutillib.domains.ai.council.servable import seat_state
+
+        probe = self._probe(
+            [
+                {"id": "Claude Sonnet 5", "internal_id": "claudesonnet5"},
+                {"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"},
+            ]
+        )
+        report = seat_state(
+            "critic", self._seat("claudesonnet5", "anthropic/claude-sonnet-5"), probe
+        )
+        assert report["state"] == "ready", report["detail"]
+
+    def test_the_display_spelling_also_stays_ready(self) -> None:
+        """Widening must not break the seats that named the display id."""
+        from kbutillib.domains.ai.council.servable import seat_state
+
+        probe = self._probe(
+            [{"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"}]
+        )
+        report = seat_state(
+            "proposer",
+            self._seat("Gemini 3.5 Flash", "google/gemini-3.5-flash"),
+            probe,
+        )
+        assert report["state"] == "ready", report["detail"]
+
+    def test_a_model_the_gateway_never_names_is_still_unavailable(self) -> None:
+        """The widening must not turn the check into a rubber stamp."""
+        from kbutillib.domains.ai.council.servable import seat_state
+
+        probe = self._probe(
+            [{"id": "Gemini 3.5 Flash", "internal_id": "gemini35flash"}]
+        )
+        report = seat_state(
+            "critic", self._seat("gpt-5.6-sol", "openai/gpt-5.6-sol"), probe
+        )
+        assert report["state"] == "unavailable"
+        assert "gpt-5.6-sol" in report["detail"]

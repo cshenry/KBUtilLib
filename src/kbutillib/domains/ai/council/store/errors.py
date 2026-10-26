@@ -24,6 +24,9 @@ __all__ = [
     "StaleClaim",
     "NotOwner",
     "JobCancelled",
+    "SeedError",
+    "SeedMultiOrigin",
+    "SeedDestinationNotEmpty",
 ]
 
 
@@ -84,4 +87,37 @@ class JobCancelled(StoreError):
     Calls already claimed when the cancellation landed are still allowed to
     complete -- their replies are stored and stay reusable -- but no new call
     or verdict may be attached.
+    """
+
+
+class SeedError(StoreError):
+    """A reuse-cache seed could not be performed.
+
+    Raised by :meth:`..sqlite.SqliteStore.seed_from_rows`.  A seed rebuilds
+    the REUSE CACHE a wiped store lost, so every refusal here is a refusal to
+    produce a store whose ``find_reusable`` answers would be wrong -- which
+    costs either money (a cache miss re-pays for an answer) or correctness (a
+    superseded answer served as current).
+    """
+
+
+class SeedMultiOrigin(SeedError):
+    """More than one (store_id, snapshot_id) was offered to one seed.
+
+    REFUSED until a deterministic identity remapping contract exists.
+    ``calls.call_id`` is an UNQUALIFIED primary key carrying foreign keys to
+    ``items``/``jobs`` (see ``schema.calls``) while the lakehouse guarantees
+    only STORE-SCOPED identity, so merging two origins by dropping
+    ``store_id`` can collide two different calls onto one id -- silently, and
+    in a table whose rows are then served as reusable answers.
+    """
+
+
+class SeedDestinationNotEmpty(SeedError):
+    """The destination store already holds work that is not this seed.
+
+    A seed is a rebuild of an EMPTY store's reuse cache, not a merge into a
+    populated one: an imported row keeps its source ``job_id``/``call_id``,
+    so importing on top of a store that has its own jobs is the collision
+    case :class:`SeedMultiOrigin` describes, arriving from the other side.
     """

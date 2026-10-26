@@ -67,8 +67,19 @@ __all__ = [
     "data_hash",
     "prompt_hash",
     "route_fingerprint",
+    "bench_fingerprint",
     "default_reuse_namespace",
     "seat_generation_params",
+    # quote
+    "SeatTokenFit",
+    "TokenModel",
+    "fit_token_model",
+    "item_prompt_chars",
+    # approval (stage 3's artifact and the gate stage 4 calls)
+    "Approval",
+    "ApprovalRefused",
+    "approve",
+    "validate_approval",
     # protocols
     "Backend",
     "QueryRenderer",
@@ -142,8 +153,19 @@ _MODULE_MAP: dict[str, str] = {
     "data_hash": "types",
     "prompt_hash": "types",
     "route_fingerprint": "types",
+    "bench_fingerprint": "types",
     "default_reuse_namespace": "types",
     "seat_generation_params": "types",
+    # -- quote (the token model a cost quote is priced from) -------------
+    "SeatTokenFit": "quote",
+    "TokenModel": "quote",
+    "fit_token_model": "quote",
+    "item_prompt_chars": "quote",
+    # -- approval (the ceiling and the six checks before a run spends) ---
+    "Approval": "approval",
+    "ApprovalRefused": "approval",
+    "approve": "approval",
+    "validate_approval": "approval",
     # -- protocols ------------------------------------------------------
     "Backend": "protocols",
     "QueryRenderer": "protocols",

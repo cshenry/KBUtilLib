@@ -236,7 +236,16 @@ kbu council calls search --query go_mf --entity "glutamine synthetase"
 kbu council endpoints status | reset-halt <endpoint> | reset-budget <endpoint>
 kbu council db init | migrate | check
 kbu council models list                       # --endpoint <name> for a live listing
+kbu council token-model                       # the fitted token model a quote is priced from
 ```
+
+`token-model` **spends nothing** either: it fits, from this store's own `attempts`/`calls`
+history, the input tokens per prompt character and the mean/p95 output tokens of each
+`(seat, role)` — with the sample size each was fitted over, and a `basis` of `measured` or
+`projected`. A seat this store has never run is reported `projected` against a NAMED
+fallback (and as a warning), never as a silent zero. See
+`domains/ai/council/quote.py` for why this is a fit over recorded token counts rather than a
+tokenizer: the bench spans three vendors, so no single tokenizer is correct across it.
 
 Every verb supports `--json`, which emits exactly one envelope object
 (`schema_version`, `verb`, `generated_at`, `data`, `warnings`) on stdout and nothing else;

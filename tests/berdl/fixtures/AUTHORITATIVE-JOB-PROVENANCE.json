@@ -1,0 +1,214 @@
+{
+  "purpose": "Which of the 21 jobs in the council store constitute THE published ADP1+PMI result. Answers Albert design-considerations 3.5. Authored by miles, the agent that ran them.",
+  "written": "2026-10-23",
+  "store_snapshot": "_store-backups/council-snapshot-20261023.sqlite.xz",
+  "LOAD_THESE": [
+    "2c94eb1b7abd41dca337a1eb9d78d652",
+    "a4d2ac39fa60445da3ff2f682b062ed3",
+    "7b8a58a4810c4373ba1e84460e02fac1",
+    "ff29236aa120486e823c74a0e0812bf4",
+    "8952d8af0fd24d4090191d3abff16568",
+    "c39b3d2045194e969b223adfb751073e",
+    "9bbf0144c87e47028595c4863af5401a",
+    "d4dc1d10363e46379f9f528a4c3002c0",
+    "34cf8a8c68e7415485818f08061be241",
+    "8c870d97ddf349f9904470fb99f9e4c6",
+    "4bba63453f284182aa1505af6bc7dcfa",
+    "52149f84f3404b9da747fd525433fa38"
+  ],
+  "roster": "option b: proposer_1 ARGO gemini35flash, proposer_2 MAG gpt-5.6-sol, proposer_3 MAG gpt-5.6-luna, critic ARGO claudesonnet5, meta ARGO claudeopus5",
+  "query": "go_mf@4",
+  "total_verdicts": 19268,
+  "unique_functions": 19276,
+  "jobs": [
+    {
+      "job_id": "4747873b241a4e18836aa5c449ff33fa",
+      "label": "function_to_go trial 10",
+      "status": "done",
+      "n_items": 9,
+      "query": "go_mf@1",
+      "verdicts": 0,
+      "disposition": "DO NOT LOAD -- early trial at an older query version."
+    },
+    {
+      "job_id": "2afb564f29bd4902be031e382abb8ef6",
+      "label": "function_to_go trial 10",
+      "status": "done",
+      "n_items": 9,
+      "query": "go_mf@1",
+      "verdicts": 0,
+      "disposition": "DO NOT LOAD -- early trial at an older query version."
+    },
+    {
+      "job_id": "6cd2f21501524327acc8bac6f8404140",
+      "label": "function_to_go trial 10 (go_mf@2)",
+      "status": "done",
+      "n_items": 9,
+      "query": "go_mf@2",
+      "verdicts": 0,
+      "disposition": "DO NOT LOAD -- early trial at an older query version."
+    },
+    {
+      "job_id": "58f8a85f7718477f80e7ad393b3e93c2",
+      "label": "function_to_go trial 10 (go_mf@3)",
+      "status": "done",
+      "n_items": 9,
+      "query": "go_mf@3",
+      "verdicts": 9,
+      "disposition": "DO NOT LOAD -- early trial at an older query version."
+    },
+    {
+      "job_id": "96a612a03a2149c5935478d519f9f522",
+      "label": "ADP1+PMI 2026-10-19",
+      "status": "cancelled",
+      "n_items": 19276,
+      "query": "go_mf@3",
+      "verdicts": 1,
+      "disposition": "DO NOT LOAD -- cancelled. Looks authoritative by label and size; ran the superseded roster."
+    },
+    {
+      "job_id": "c50083c8e22c413787209e605dbf22cf",
+      "label": "gomf pilot 500 (ARGO+MAG roster)",
+      "status": "paused",
+      "n_items": 500,
+      "query": "go_mf@3",
+      "verdicts": 73,
+      "disposition": "DO NOT LOAD -- 500-item pilot, and the pilots used THREE DIFFERENT ROSTERS. Loading mixes rosters silently."
+    },
+    {
+      "job_id": "5c28d7546f0340be80c7949a7e2b869a",
+      "label": "gomf pilot2 500 (all-ARGO roster)",
+      "status": "paused",
+      "n_items": 500,
+      "query": "go_mf@3",
+      "verdicts": 250,
+      "disposition": "DO NOT LOAD -- 500-item pilot, and the pilots used THREE DIFFERENT ROSTERS. Loading mixes rosters silently."
+    },
+    {
+      "job_id": "9bf7d845201d49c98621aa71795e2c27",
+      "label": "gomf pilot3 500 (option b: gemini+critic+meta ARGO, 2 gpt chairs MAG@6)",
+      "status": "done",
+      "n_items": 500,
+      "query": "go_mf@3",
+      "verdicts": 475,
+      "disposition": "DO NOT LOAD -- 500-item pilot, and the pilots used THREE DIFFERENT ROSTERS. Loading mixes rosters silently."
+    },
+    {
+      "job_id": "477d6c53cf3b4547b2a4b750aabe5adf",
+      "label": "ADP1+PMI 19,276 -- option b roster, go_mf@4",
+      "status": "cancelled",
+      "n_items": 19276,
+      "query": "go_mf@4",
+      "verdicts": 49,
+      "disposition": "DO NOT LOAD -- cancelled monolithic attempt, killed for the claim-cost defect. Its 49 verdicts are real but superseded by the chunk that re-ran those items."
+    },
+    {
+      "job_id": "2c94eb1b7abd41dca337a1eb9d78d652",
+      "label": "ADP1+PMI chunk01 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1980,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "a4d2ac39fa60445da3ff2f682b062ed3",
+      "label": "ADP1+PMI chunk02 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1982,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "7b8a58a4810c4373ba1e84460e02fac1",
+      "label": "ADP1+PMI chunk03 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1990,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "ff29236aa120486e823c74a0e0812bf4",
+      "label": "ADP1+PMI chunk04 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1988,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "8952d8af0fd24d4090191d3abff16568",
+      "label": "ADP1+PMI chunk05 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1989,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "c39b3d2045194e969b223adfb751073e",
+      "label": "ADP1+PMI chunk06 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1988,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "9bbf0144c87e47028595c4863af5401a",
+      "label": "ADP1+PMI chunk07 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1993,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "d4dc1d10363e46379f9f528a4c3002c0",
+      "label": "ADP1+PMI chunk08 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1994,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "34cf8a8c68e7415485818f08061be241",
+      "label": "ADP1+PMI chunk09 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 2000,
+      "query": "go_mf@4",
+      "verdicts": 1990,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "8c870d97ddf349f9904470fb99f9e4c6",
+      "label": "ADP1+PMI chunk10 (option b, go_mf@4)",
+      "status": "done",
+      "n_items": 1276,
+      "query": "go_mf@4",
+      "verdicts": 1269,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "4bba63453f284182aa1505af6bc7dcfa",
+      "label": "ADP1+PMI error retry (113 items, option b, go_mf@4)",
+      "status": "done",
+      "n_items": 113,
+      "query": "go_mf@4",
+      "verdicts": 97,
+      "disposition": "LOAD -- part of the published dataset"
+    },
+    {
+      "job_id": "52149f84f3404b9da747fd525433fa38",
+      "label": "ADP1+PMI error retry round 2 (16 items)",
+      "status": "done",
+      "n_items": 16,
+      "query": "go_mf@4",
+      "verdicts": 8,
+      "disposition": "LOAD -- part of the published dataset"
+    }
+  ]
+}

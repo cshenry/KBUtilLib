@@ -84,6 +84,7 @@ from .annotator_utils import (
     AnnotatorUtils,
     Term,
     _guard_protein,
+    classify_version,
     docker_image_identity,
 )
 
@@ -703,6 +704,7 @@ class TransytUtils(AnnotatorUtils):
                 command=cmd,
                 parameters=parameters,
                 records=records,
+                version_kind=classify_version(tool_version, from_image=True),
             )
         finally:
             # Best-effort reclaim of root-owned files via a throwaway chown,

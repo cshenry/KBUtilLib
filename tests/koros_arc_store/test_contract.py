@@ -232,6 +232,17 @@ class TestValidationParity:
         store.record_analysis("p", "a", rec)
         assert store.list_analyses("p", "a")[0].artifacts["f"] == "obj://12345.1.1"
 
+    def test_obj_uri_fragment_accepted(self, store):
+        rec = make_record(run_uid="objf", artifacts={"f": "obj://12345.1.1#g1.fna"})
+        store.record_analysis("p", "a", rec)
+        assert store.list_analyses("p", "a")[0].artifacts["f"] == "obj://12345.1.1#g1.fna"
+
+    def test_obj_uri_empty_fragment_rejected(self, store):
+        rec = make_record(run_uid="objx", artifacts={"f": "obj://12345.1.1#"})
+        with pytest.raises(RecordValidationError) as exc:
+            store.record_analysis("p", "a", rec)
+        assert exc.value.code == "bad_artifact_uri"
+
     def test_file_uri_triple_slash_normalised(self, store):
         rec = make_record(run_uid="file3", artifacts={"f": "file:///data/x.json"})
         store.record_analysis("p", "a", rec)

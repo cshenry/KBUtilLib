@@ -2,8 +2,10 @@
 
 This module holds everything the ingest half of the backfill needs that is
 NOT a transport call: the pure key-matching rule that makes a load idempotent,
-the batch-integrity checks that run before a file is used, the load-execution
-inventory and its durable ledger, and the per-namespace OS lock. The transport
+the PRE-COMMIT JOIN ASSERTIONS that make a wrong join key a loud failure, the
+ARRIVAL decision that tells sync lag from a lost file, the batch-integrity
+checks that run before a file is used, the load-execution inventory and its
+durable ledger, the LOAD RECEIPT, and the per-namespace OS lock. The transport
 side -- reading the live key ranges and handing survivors to
 ``BerdlCapability.load()`` -- stays in
 :meth:`~kbutillib.domains.kbase.berdl.clearinghouse_capability.ClearinghouseCapability.ingest_shards`,
@@ -26,6 +28,17 @@ bronze-mode ``load()`` pointed at a local path cannot work cluster-side: it is
 the driver that must read each batch and hand the rows over as a DataFrame.
 That is what :func:`read_batch_table` plus DataFrame-mode ``load()`` do, and
 it is why there is no object-storage staging and no S3 path anywhere here.
+
+WHY THE JOIN ASSERTIONS AND THE ARRIVAL DECISION ARE HERE AND NOT IN THE
+CAPABILITY. Both are rules about data, and both were added because fill-only's
+correct behaviour -- "a batch with no surviving rows is committed without a
+write at all" -- is indistinguishable from two different failures: a wrong
+join key (the batch joins nothing) and a batch that has not finished syncing
+(the bytes are not the published bytes). Each had a reported exit status of 0.
+Putting the rules in functions over in-memory tables and inventory entries
+means the counts and the deadline arithmetic can be PROVEN by test, and the
+capability is then written to call a rule that is already proven. See the two
+section headers below.
 
 FILL-ONLY IS NOT ATOMIC. The survivors of a batch are computed against the
 target's keys as they stood at the moment of the read. A writer OUTSIDE this
@@ -106,6 +119,25 @@ LEDGER_COMMITTED = "committed"
 #: verification; it is not silently retried.
 LEDGER_FAILED = "failed"
 
+#: NON-TERMINAL: the batch's bytes did not match the sha256 ``run.json``
+#: published and the TRANSFER DEADLINE had not passed, so the file is treated
+#: as STILL ARRIVING rather than as corrupt. The line persists the first
+#: observation -- when it was made, and what was observed -- so a retry
+#: resumes the deadline from the first sighting instead of restarting
+#: verification from nothing, and so the evidence in a later failed-delivery
+#: report is the whole history rather than one sample.
+#:
+#: WHY A STATE AND NOT AN IMMEDIATE FAILURE. The producer writes the shard run
+#: on one machine and a sync client carries it to the pod; the client does not
+#: guarantee the producer's write ORDER, so ``run.json`` can arrive before the
+#: bytes it describes (observed: the client reported a hand-off directory up
+#: to date while one of its three files was absent on the consumer). A first
+#: digest mismatch therefore cannot be told apart from a lost file -- only
+#: ELAPSED TIME can. Alarming on the first mismatch alarms on every normal
+#: sync lag; treating it as transient forever lets a genuinely lost file wait
+#: silently.
+LEDGER_SYNCING = "syncing"
+
 #: What a ULID looks like (Crockford base32, no I/L/O/U) -- the shape every
 #: ``ingest_batch_id`` has, and the ONLY thing allowed into the reconcile
 #: count's SQL text, since Spark has no bind channel.
@@ -155,6 +187,35 @@ class ClearinghouseLockUnavailableError(RuntimeError):
 
 class ClearinghouseNamespaceLockedError(RuntimeError):
     """Another live process holds this namespace's ingest lock."""
+
+
+class ClearinghouseJoinAssertionError(RuntimeError):
+    """A batch failed the pre-commit join assertions and was not committed.
+
+    Raised by :func:`raise_for_join_report` over the report
+    :func:`join_assertions` builds. The message names every failed assertion
+    AND ITS COUNT, because the counts are the whole diagnostic: "0 of 19,268
+    source keys resolve" and "19,268 of 19,268 resolve" are the same code path
+    with the same exit status today, and the first one is a wrong join key.
+    """
+
+
+class ClearinghouseTransferIncompleteError(RuntimeError):
+    """A batch's bytes are not yet the bytes ``run.json`` published.
+
+    STILL SYNCING, not corrupt: raised only while the transfer deadline has
+    not passed. The correct response is to re-run the load, which resumes
+    from the ledger.
+    """
+
+
+class ClearinghouseFailedDeliveryError(RuntimeError):
+    """A batch's bytes never became the bytes ``run.json`` published.
+
+    Raised once the transfer deadline has passed, with the evidence a human
+    needs to act: which batch, expected versus observed size, expected versus
+    observed digest.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -303,6 +364,306 @@ def fill_only_survivors(
 
 
 # --------------------------------------------------------------------------
+# The PRE-COMMIT join assertions -- EVALUATED ON THE INPUTS
+# --------------------------------------------------------------------------
+#
+# WHY THIS EXISTS AND WHY IT IS NOT A RELATIONSHIP TEST ON THE JOIN'S RESULT.
+# Fill-only commits a batch with no surviving rows WITHOUT a write at all
+# (:meth:`ClearinghouseCapability._ingest_one_batch`), which is exactly right
+# for a re-run of a landed run and exactly wrong for a wrong join key -- and
+# the two are indistinguishable from the outside: both report an action, a
+# zero and an exit status of 0. Measured 2026-10-21 on the `function_to_go`
+# council run: the council's own ``items.entity_hash`` matched 0 of 19,268
+# clearinghouse hashes. That load would have been reported as a clean
+# idempotent no-op.
+#
+# THE TRAP, and it is why this defect class survives having tests: A
+# RELATIONSHIP TEST EVALUATED OVER AN EMPTY JOIN PASSES VACUOUSLY. "every
+# joined row has a non-null key", "no joined key is ambiguous" and "the joined
+# rows all resolve" are all TRUE of zero rows. So every assertion below is
+# evaluated on the SOURCE SIDE -- the batch's own rows, and the target's key
+# space read independently -- and never on what the join returned.
+#
+# ALL FOUR REPORT A COUNT. The numbers are the diagnostic: "0 of 19,268
+# resolve" and "19,268 of 19,268 resolve" are the same code path with the same
+# exit status today, and only the count tells them apart.
+
+
+#: The coverage floor the load path asserts when the caller declares none: a
+#: result batch's join keys must ALL name an entity the clearinghouse already
+#: holds.
+#:
+#: WHY 1.0 AND NOT A TOLERANCE. A ``<type>_result`` row whose ``entity_hash``
+#: names no row in ``<type>_entity`` is an ORPHAN in exactly the sense
+#: ``clearinghouse_capability.parameter_set_orphans`` already treats as a hard
+#: failure: the hash is opaque, so nothing can say what the result is ABOUT.
+#: A result load is never the thing that mints identity -- the entity and
+#: content rows are -- so there is no legitimate reason for a result key not
+#: to resolve, and a floor below 1.0 would only be a place for a real
+#: mismatch to hide. ``--coverage-floor`` lowers it for a deliberately partial
+#: load, and the report says what the measured coverage was either way.
+DEFAULT_COVERAGE_FLOOR = 1.0
+
+#: How many of the unresolved keys the coverage refusal NAMES.
+#:
+#: The refusal used to carry only a count, so an operator looking at "8 of
+#: 20,036 do not resolve" could not see WHICH eight without lowering the floor
+#: -- which means bypassing the gate in order to inspect what it caught. A
+#: bounded sample names them in the message and the report without turning a
+#: 20,036-key batch's refusal into a 20,036-element log line.
+UNRESOLVED_SAMPLE_LIMIT = 20
+
+
+def resolvable_source_table(table: str) -> str | None:
+    """The table a batch's join keys must RESOLVE against, or ``None``.
+
+    ``<type>_result`` resolves against ``<type>_entity``: a result row is a
+    statement ABOUT an entity the clearinghouse already knows, so its
+    ``entity_hash`` must be one the entity table holds.
+
+    ``None`` for ``<type>_entity``, ``<type>_content`` and the parameter-set
+    registry, and that is not a gap: those batches are what MINTS the identity
+    they carry, so there is nothing for them to resolve against and a
+    coverage assertion over them would be a statement about the future. The
+    other three assertions still apply to them.
+    """
+    if table == PARAMETER_SET_TABLE:
+        return None
+    if table.endswith("_result"):
+        return f"{table[: -len('_result')]}_entity"
+    return None
+
+
+def _unresolved_clause(sample: Sequence[Any], total: int) -> str:
+    """The "which ones" clause appended to the coverage refusal.
+
+    Args:
+        sample: The sorted, bounded sample of unresolved keys.
+        total: How many were unresolved in all, which is what makes the
+            sample's incompleteness visible rather than implied.
+
+    Returns:
+        ``"Unresolved (first N of M): k1, k2, ..."``, or ``"Unresolved: k1,
+        k2"`` when the sample IS all of them. Empty string for an empty
+        sample, so a caller cannot append a dangling label.
+    """
+    if not sample:
+        return ""
+    listed = ", ".join(str(key) for key in sample)
+    if len(sample) < total:
+        return f"Unresolved (first {len(sample)} of {total}): {listed}."
+    return f"Unresolved: {listed}."
+
+
+def join_assertions(
+    batch: "pa.Table",
+    *,
+    table: str,
+    batch_id: str,
+    resolvable: Sequence[str] | set[str] | None = None,
+    coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
+) -> dict[str, Any]:
+    """The four pre-commit assertions over ONE batch, with a count for each.
+
+    Evaluated entirely on the INPUTS: ``batch`` is the source rows as the
+    inventory published them, and ``resolvable`` is the target's key space
+    read independently of any join (see
+    :meth:`ClearinghouseCapability._resolvable_join_keys`). Nothing here looks
+    at a join result, which is the whole point -- see the section header.
+
+    The four:
+
+    1. **NON-EMPTY SOURCE.** A batch with zero rows is a PRODUCER failure, not
+       a clean load. A shard run over an empty export publishes an inventory,
+       passes every integrity check, appends nothing and exits zero today.
+    2. **NON-NULL KEYS.** A null join key cannot match anything -- SQL
+       ``NULL`` never equals ``NULL``, which :func:`fill_only_survivors`
+       documents and mirrors -- so it survives the anti-join and lands as a
+       row nothing can ever find again.
+    3. **AT MOST ONE SOURCE ROW PER TARGET SLOT.** Two rows of one batch
+       claiming the same slot tuple (:func:`key_columns_for_table`) is
+       ambiguous: both are appended, and which one the current-state
+       derivation picks is decided by an ``observed_at`` tie-break rather than
+       by anything the producer said. The sharder deduplicates within a batch,
+       so a violation is a producer bug and is reported as one.
+    4. **COVERAGE AT OR ABOVE THE FLOOR.** The share of distinct non-null
+       source keys that the target can resolve. ``resolvable=None`` means the
+       question does not apply to this table family
+       (:func:`resolvable_source_table`) and the check is recorded as skipped
+       rather than silently passed.
+
+    ZERO RESOLUTION IS FATAL WHATEVER THE FLOOR. A non-empty batch none of
+    whose keys resolve is the 0-of-19,268 case, and ``--coverage-floor 0``
+    must not be a way to wave it through -- a floor expresses tolerance for a
+    PARTIAL mismatch, and total non-resolution is not partial.
+
+    Args:
+        batch: The batch's rows, as :func:`read_batch_table` read them.
+        table: The target table, which decides the join key
+            (:func:`range_column_for_table`) and the slot key
+            (:func:`key_columns_for_table`).
+        batch_id: Named in every failure message.
+        resolvable: The target's resolvable key values, or ``None`` when the
+            table family has nothing to resolve against.
+        coverage_floor: The declared floor, in ``[0, 1]``.
+
+    Returns:
+        The report: ``table``, ``batch_id``, ``join_key``, ``source_rows``,
+        ``source_keys`` (distinct, non-null), ``null_keys``,
+        ``ambiguous_slots``, ``resolvable_keys``, ``resolved_keys``,
+        ``unresolved_keys``, ``unresolved_sample``,
+        ``unresolved_sample_truncated``, ``coverage``, ``coverage_floor``,
+        ``coverage_checked``, ``ok`` and ``failures``.
+
+        ``unresolved_keys`` is the COUNT; ``unresolved_sample`` is the first
+        :data:`UNRESOLVED_SAMPLE_LIMIT` of the unresolved keys themselves,
+        sorted, with ``unresolved_sample_truncated`` saying whether there were
+        more. Both are ``None`` when coverage was not checked. A refusal that
+        only counts the keys it refused over leaves the operator no way to see
+        WHICH ones without lowering the floor -- i.e. without bypassing the
+        gate to inspect what it caught (found by the
+        council-record-lakehouse-v1 t11 acceptance rehearsal).
+
+    Raises:
+        ValueError: ``batch`` has no join-key column, or ``coverage_floor`` is
+            outside ``[0, 1]``. Neither can be interpreted as a passing
+            assertion.
+    """
+    floor = float(coverage_floor)
+    if not 0.0 <= floor <= 1.0:
+        raise ValueError(
+            f"join_assertions: coverage_floor={coverage_floor!r} is outside "
+            "[0, 1]. A floor is a share of the source keys; a value outside "
+            "that range cannot be compared to one."
+        )
+    join_key = range_column_for_table(table)
+    if join_key not in batch.column_names:
+        raise ValueError(
+            f"join_assertions: batch {batch_id!r} for {table!r} has no join "
+            f"key column {join_key!r} (columns: {batch.column_names}). "
+            "Refusing -- a missing key column cannot be read as 'every key is "
+            "fine'."
+        )
+
+    slot_columns = key_columns_for_table(table)
+    key_values = batch.column(join_key).to_pylist()
+    null_keys = sum(1 for value in key_values if value is None)
+    distinct_keys = {value for value in key_values if value is not None}
+
+    slot_values = [batch.column(column).to_pylist() for column in slot_columns]
+    slot_counts: dict[tuple[Any, ...], int] = {}
+    for tuple_values in zip(*slot_values):
+        slot_counts[tuple_values] = slot_counts.get(tuple_values, 0) + 1
+    ambiguous_slots = sum(1 for count in slot_counts.values() if count > 1)
+
+    coverage_checked = resolvable is not None
+    resolvable_keys = None if resolvable is None else len(set(resolvable))
+    resolved_keys: int | None = None
+    unresolved_keys: int | None = None
+    unresolved_sample: list[Any] | None = None
+    unresolved_sample_truncated: bool | None = None
+    coverage: float | None = None
+    if coverage_checked:
+        held = set(resolvable or ())
+        resolved_keys = len(distinct_keys & held)
+        unresolved_keys = len(distinct_keys) - resolved_keys
+        # NAMED, not just counted. ``key=str`` because a join key is whatever
+        # the source column holds -- hex digests here, but a mixed-type set
+        # has no total order of its own and sorted() would raise on it.
+        unresolved = sorted(distinct_keys - held, key=str)
+        unresolved_sample = unresolved[:UNRESOLVED_SAMPLE_LIMIT]
+        unresolved_sample_truncated = len(unresolved) > UNRESOLVED_SAMPLE_LIMIT
+        coverage = (
+            1.0 if not distinct_keys else resolved_keys / len(distinct_keys)
+        )
+
+    failures: list[str] = []
+    if batch.num_rows == 0:
+        failures.append(
+            f"{table} batch {batch_id}: the expected input is EMPTY (0 source "
+            "rows). A shard run with zero source rows is a PRODUCER failure, "
+            "not a clean load -- an empty export shards, passes every "
+            "integrity check, appends nothing and exits zero, which is "
+            "indistinguishable from a re-run of a landed run."
+        )
+    if null_keys:
+        failures.append(
+            f"{table} batch {batch_id}: {null_keys} of {batch.num_rows} "
+            f"source row(s) have a NULL {join_key}. SQL NULL never equals "
+            "NULL, so such a row matches nothing, survives the fill-only "
+            "anti-join and lands as a row nothing can find again."
+        )
+    if ambiguous_slots:
+        failures.append(
+            f"{table} batch {batch_id}: {ambiguous_slots} target slot(s) "
+            f"({', '.join(slot_columns)}) are claimed by more than one source "
+            "row, so a source key maps to more than one row for one slot. "
+            "Which of them the current-state derivation picks is then decided "
+            "by an observed_at tie-break rather than by the producer. The "
+            "sharder deduplicates within a batch, so this is a producer bug."
+        )
+    if coverage_checked and distinct_keys and resolved_keys == 0:
+        failures.append(
+            f"{table} batch {batch_id}: ZERO of {len(distinct_keys)} distinct "
+            f"{join_key} value(s) resolve against "
+            f"{resolvable_source_table(table)} (which holds "
+            f"{resolvable_keys} key(s) in this batch's hash range). A "
+            "non-empty source that resolves nothing is a WRONG JOIN KEY, not "
+            "an idempotent no-op, and no coverage floor waives it."
+        )
+    elif coverage_checked and coverage is not None and coverage < floor:
+        failures.append(
+            f"{table} batch {batch_id}: {resolved_keys} of "
+            f"{len(distinct_keys)} distinct {join_key} value(s) resolve "
+            f"against {resolvable_source_table(table)} -- coverage "
+            f"{coverage:.6f}, below the declared floor {floor:.6f}. "
+            f"{unresolved_keys} key(s) name no entity the clearinghouse "
+            "holds, and a result row whose entity nothing can find is an "
+            "orphan. "
+            + _unresolved_clause(unresolved_sample or [], unresolved_keys or 0)
+        )
+
+    return {
+        "table": table,
+        "batch_id": batch_id,
+        "join_key": join_key,
+        "slot_key": list(slot_columns),
+        "source_rows": batch.num_rows,
+        "source_keys": len(distinct_keys),
+        "null_keys": null_keys,
+        "ambiguous_slots": ambiguous_slots,
+        "resolvable_keys": resolvable_keys,
+        "resolved_keys": resolved_keys,
+        "unresolved_keys": unresolved_keys,
+        "unresolved_sample": unresolved_sample,
+        "unresolved_sample_truncated": unresolved_sample_truncated,
+        "coverage": coverage,
+        "coverage_floor": floor,
+        "coverage_checked": coverage_checked,
+        "ok": not failures,
+        "failures": failures,
+    }
+
+
+def raise_for_join_report(report: Mapping[str, Any]) -> None:
+    """Raise :class:`ClearinghouseJoinAssertionError` when a report failed.
+
+    Separate from :func:`join_assertions` because the load path LEDGERS the
+    failure and carries on to the next batch rather than unwinding the whole
+    execution -- one refused batch does not invalidate the batches that
+    already committed, and a ledgered failure blocks
+    :meth:`ClearinghouseCapability.verify_run` so it cannot be lost. Callers
+    that want the exception (and the pure tests) use this.
+    """
+    failures = list(report.get("failures") or ())
+    if failures:
+        raise ClearinghouseJoinAssertionError(
+            "ingest: the pre-commit join assertions refused this batch "
+            "BEFORE anything was committed:\n  - " + "\n  - ".join(failures)
+        )
+
+
+# --------------------------------------------------------------------------
 # Batch integrity -- EVERY check runs before the file is used
 # --------------------------------------------------------------------------
 
@@ -380,6 +741,7 @@ def verify_batch_file(
     shard_root: Path,
     expected_batch_id: str,
     expected_sha256: str,
+    observed_sha256: str | None = None,
 ) -> "pa.Table":
     """Run EVERY integrity check on one batch, then return its rows.
 
@@ -408,6 +770,11 @@ def verify_batch_file(
             execution's own id happens after this check passes (see
             :func:`retag_batch_ids`).
         expected_sha256: The digest from the inventory entry.
+        observed_sha256: The file's digest, when the caller has ALREADY
+            streamed it -- :func:`transfer_state` does, immediately before
+            this, to decide whether the bytes have arrived. Passed through so
+            a full-size batch is hashed ONCE per load rather than twice; the
+            check itself is unchanged, and omitting it simply hashes here.
 
     Returns:
         The batch's rows.
@@ -434,7 +801,7 @@ def verify_batch_file(
             "sha256, so the file on disk cannot be shown to be the file the "
             "run published. Refusing."
         )
-    actual = file_sha256(path)
+    actual = file_sha256(path) if observed_sha256 is None else observed_sha256
     if actual != expected_sha256:
         raise ClearinghouseBatchIntegrityError(
             f"batch integrity: batch {expected_batch_id!r} file {relative!r} "
@@ -637,6 +1004,10 @@ def derive_execution_inventory(
                     "table": source.get("table"),
                     "file": source.get("file"),
                     "rows": source.get("rows"),
+                    # Carried for the ARRIVAL check's expected-versus-observed
+                    # size evidence. None for an inventory written before the
+                    # sharder recorded it.
+                    "bytes": source.get("bytes"),
                     "key_column": source.get("key_column"),
                     "hash_min": source.get("hash_min"),
                     "hash_max": source.get("hash_max"),
@@ -1011,6 +1382,442 @@ def _now_iso() -> str:
     from datetime import datetime, timezone  # noqa: PLC0415 - import-cheap
 
     return datetime.now(timezone.utc).isoformat()
+
+
+# --------------------------------------------------------------------------
+# Arrival -- "run.json exists" IS NOT PROOF THAT THE BATCHES ARRIVED
+# --------------------------------------------------------------------------
+#
+# The producer shards on one machine and a sync client carries the run
+# directory to the pod. TWO THINGS ARE NOT TRUE OF THAT HAND-OFF, and the
+# marker-file reflex depends on both:
+#
+#   * The client does not guarantee the PRODUCER'S WRITE ORDER, so ``run.json``
+#     -- the file that describes the batches -- can arrive before the bytes it
+#     describes. The marker is therefore not a completeness signal.
+#   * The client's own "up to date" is not a completeness signal either:
+#     observed on the previous hand-off, the client reported the directory up
+#     to date while one of its three files was absent on the consumer.
+#
+# The five-check ingest gate (:func:`verify_batch_file`) already verifies each
+# batch's sha256, so the detection is in place. WHAT WAS MISSING IS WHAT
+# HAPPENS WHEN IT FAILS, and neither extreme is safe:
+#
+#   * Treating the first mismatch as CORRUPTION alarms on every normal sync
+#     lag, so the alarm gets ignored and then the real one does too.
+#   * Treating it as TRANSIENT forever means a genuinely lost file waits
+#     silently and the load never completes and never says why.
+#
+# A FIRST OBSERVATION CANNOT TELL THEM APART. Only elapsed time can. So the
+# first mismatch is ``syncing`` -- retry, with the first sighting PERSISTED
+# (:data:`LEDGER_SYNCING`) so the retry resumes the clock instead of
+# restarting verification from nothing -- and past the TRANSFER DEADLINE the
+# same mismatch is a FAILED DELIVERY, raised with evidence.
+
+
+#: How long after ``run.json``'s mtime a missing or mismatched batch is still
+#: "arriving". Six hours: the 2026-10-20 hand-off's shard directory is ~19k
+#: rows of result parquet and a cross-machine sync of that size completes in
+#: minutes, so six hours is an order of magnitude of slack and still bounded
+#: well inside the day an operator would wait before asking.
+DEFAULT_TRANSFER_DEADLINE_SECONDS = 6 * 60 * 60
+
+#: The batch file is not there at all.
+TRANSFER_ABSENT = "absent"
+
+#: The batch file is there and its bytes are not the published bytes.
+TRANSFER_DIGEST_MISMATCH = "digest_mismatch"
+
+
+def run_manifest_mtime(shard_dir: Path | str) -> float | None:
+    """``run.json``'s mtime as a POSIX timestamp, or ``None`` when absent.
+
+    The transfer deadline is measured from THE MARKER'S OWN mtime and not from
+    now, nor from when the load happened to start: the marker is written by
+    the producer at the end of the shard run, so it dates the hand-off. A
+    deadline measured from the load's start would reset every time an operator
+    re-ran the command, which is precisely the silent wait this guards
+    against.
+    """
+    from .clearinghouse_shard import RUN_MANIFEST_FILE  # noqa: PLC0415
+
+    path = Path(shard_dir) / RUN_MANIFEST_FILE
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def transfer_state(
+    entry: Mapping[str, Any],
+    *,
+    shard_root: Path,
+    manifest_mtime: float | None,
+    now: float | None = None,
+    deadline_seconds: int = DEFAULT_TRANSFER_DEADLINE_SECONDS,
+    first_observed_at: str | None = None,
+) -> dict[str, Any]:
+    """Classify one batch's arrival: arrived, ``syncing`` or failed delivery.
+
+    ``state == "arrived"`` means the file is present and its bytes ARE the
+    bytes the inventory published -- the normal five-check gate takes over.
+    Use :func:`has_arrived` to ask that question; the digest it streamed
+    rides back in ``observed_sha256`` so the gate reuses it.
+
+    Otherwise the return carries the EVIDENCE a human needs, named in the
+    report and in the eventual exception: which batch, expected versus
+    observed size, expected versus observed digest.
+
+    Args:
+        entry: The batch's inventory entry (``file``, ``sha256``, ``bytes``).
+        shard_root: The directory ``run.json`` describes.
+        manifest_mtime: ``run.json``'s mtime (:func:`run_manifest_mtime`).
+            ``None`` -- the marker is gone -- makes any mismatch a failed
+            delivery immediately: without the marker's date there is no clock
+            to be patient against, and a shard directory whose own inventory
+            vanished mid-load is not a transfer in progress.
+        now: Override the clock, for tests.
+        deadline_seconds: The declared deadline.
+        first_observed_at: The ``first_observed_at`` a previous ``syncing``
+            line persisted. Carried through so the evidence is the whole
+            history; the deadline itself is measured from ``manifest_mtime``.
+
+    Returns:
+        ``{"state": "arrived", "observed_sha256": ...}`` when the bytes are
+        the published bytes -- the digest travels back so the five-check gate
+        does not stream a full-size batch a second time -- or a dict with
+        ``state`` (``"syncing"`` or ``"failed_delivery"``), ``reason``,
+        ``batch_id``, ``file``,
+        ``expected_sha256``, ``observed_sha256``, ``expected_bytes``,
+        ``observed_bytes``, ``deadline_seconds``, ``elapsed_s``,
+        ``manifest_mtime``, ``deadline_at`` and ``first_observed_at``.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415 - import-cheap
+
+    relative = str(entry.get("file") or "")
+    batch_id = str(entry.get("batch_id"))
+    expected_sha = str(entry.get("source_sha256") or entry.get("sha256") or "")
+    expected_bytes = entry.get("bytes")
+    expected_bytes = (
+        int(expected_bytes) if isinstance(expected_bytes, int) else None
+    )
+
+    observed_bytes: int | None = None
+    observed_sha: str | None = None
+    reason: str | None = None
+    if not relative:
+        reason = TRANSFER_ABSENT
+    else:
+        try:
+            path = resolve_batch_path(shard_root, relative)
+        except ClearinghouseBatchIntegrityError:
+            # A path that escapes the root is NOT an arrival problem and must
+            # not be waited out -- the normal gate refuses it outright, and no
+            # amount of waiting could turn it into a batch this run published.
+            # Reported as arrived WITH NO DIGEST, so the gate re-reads (and
+            # refuses) rather than being handed a digest for a file outside
+            # the root.
+            return {"state": "arrived", "observed_sha256": None}
+        if not path.is_file():
+            reason = TRANSFER_ABSENT
+        else:
+            observed_bytes = path.stat().st_size
+            observed_sha = file_sha256(path)
+            if not expected_sha or observed_sha == expected_sha:
+                # Either it matches, or the inventory published no digest at
+                # all -- which is a different refusal, made by the normal
+                # gate, and not something a wait could fix. The digest is
+                # handed back so the gate does not stream the file a SECOND
+                # time: a full-size batch is sized for a Spark append, not for
+                # being hashed twice per load.
+                return {"state": "arrived", "observed_sha256": observed_sha}
+            reason = TRANSFER_DIGEST_MISMATCH
+
+    clock = datetime.now(timezone.utc).timestamp() if now is None else float(now)
+    elapsed = None if manifest_mtime is None else max(0.0, clock - manifest_mtime)
+    expired = elapsed is None or elapsed > float(deadline_seconds)
+    observed_iso = datetime.fromtimestamp(clock, timezone.utc).isoformat()
+    return {
+        "state": "failed_delivery" if expired else "syncing",
+        "reason": reason,
+        "batch_id": batch_id,
+        "table": entry.get("table"),
+        "file": relative,
+        "expected_sha256": expected_sha or None,
+        "observed_sha256": observed_sha,
+        "expected_bytes": expected_bytes,
+        "observed_bytes": observed_bytes,
+        "deadline_seconds": int(deadline_seconds),
+        "manifest_mtime": (
+            None
+            if manifest_mtime is None
+            else datetime.fromtimestamp(manifest_mtime, timezone.utc).isoformat()
+        ),
+        "deadline_at": (
+            None
+            if manifest_mtime is None
+            else datetime.fromtimestamp(
+                manifest_mtime + float(deadline_seconds), timezone.utc
+            ).isoformat()
+        ),
+        "elapsed_s": elapsed,
+        "first_observed_at": first_observed_at or observed_iso,
+        "last_observed_at": observed_iso,
+    }
+
+
+def has_arrived(state: Mapping[str, Any]) -> bool:
+    """Whether a :func:`transfer_state` verdict says the bytes are here."""
+    return state.get("state") == "arrived"
+
+
+def describe_transfer(state: Mapping[str, Any]) -> str:
+    """The one-line evidence sentence for a ``syncing``/failed-delivery state.
+
+    Names the batch, expected versus observed size and expected versus
+    observed digest -- the three things a human needs to decide whether to
+    wait, re-sync or re-shard -- and says which of the two verdicts it is and
+    why.
+    """
+    reason = state.get("reason")
+    where = f"{state.get('table')} batch {state.get('batch_id')} ({state.get('file')})"
+    if reason == TRANSFER_ABSENT:
+        observed = "the file is ABSENT"
+    else:
+        observed = (
+            f"observed sha256 {state.get('observed_sha256')}, "
+            f"{state.get('observed_bytes')} byte(s)"
+        )
+    expected = (
+        f"expected sha256 {state.get('expected_sha256')}, "
+        f"{state.get('expected_bytes')} byte(s)"
+    )
+    if state.get("state") == "syncing":
+        return (
+            f"{where}: {observed}; {expected}. Treating this as STILL "
+            f"SYNCING -- run.json's mtime is {state.get('manifest_mtime')} and "
+            f"the transfer deadline is {state.get('deadline_at')} "
+            f"({state.get('deadline_seconds')}s). First observed "
+            f"{state.get('first_observed_at')}. Re-run the load; the ledger "
+            "resumes from here and the batches that already committed are "
+            "skipped."
+        )
+    return (
+        f"FAILED DELIVERY. {where}: {observed}; {expected}. The transfer "
+        f"deadline ({state.get('deadline_seconds')}s from run.json's mtime "
+        f"{state.get('manifest_mtime')}, i.e. {state.get('deadline_at')}) has "
+        f"passed -- first observed {state.get('first_observed_at')}, still "
+        f"wrong at {state.get('last_observed_at')}. This is a lost file, not "
+        "sync lag: re-sync the shard directory from the producer, or re-shard."
+    )
+
+
+def raise_for_transfer(state: Mapping[str, Any]) -> None:
+    """Raise the right error for a transfer state, with the evidence in it."""
+    if has_arrived(state):
+        return
+    message = describe_transfer(state)
+    if state.get("state") == "syncing":
+        raise ClearinghouseTransferIncompleteError(message)
+    raise ClearinghouseFailedDeliveryError(message)
+
+
+# --------------------------------------------------------------------------
+# THE RECEIPT -- verify's envelope, reconciled against ITEMS SUBMITTED
+# --------------------------------------------------------------------------
+#
+# "Loaded 19,268" is not a complete reconciliation when the plan submitted
+# 19,276: THE EIGHT RESIDUAL ITEMS ARE THE INTERESTING NUMBER, and a row count
+# cannot name them because it never knew about them. An item can also carry
+# several GO terms, so a ``function_result`` ROW count is not an ITEM count
+# either, and the receipt reports the two separately rather than letting one
+# stand in for the other.
+#
+# IT MUST BE RE-EXPORTABLE, NOT A ONE-SHOT. The Iceberg commit and the
+# ``LOADED.json`` write are two unrelated writes with no transaction between
+# them, so a crash in the gap loses the ACKNOWLEDGEMENT while the data sits
+# safely landed -- and a producer that read "no receipt" as "not loaded" would
+# ask for a reload of rows that are already there. Every field below is
+# derived from the ingest ledger, the execution's inventory, the target's
+# snapshot history and the producer's own publish record, so re-running
+# ``verify`` reproduces the SAME receipt. There is deliberately no timestamp
+# and no run-specific nonce in the body: the envelope that carries it has a
+# ``generated_at``, and a receipt that changed every time it was exported
+# could not be compared to the one that was lost.
+
+
+#: The receipt's filename in the producer's run directory. ``verify`` runs
+#: in-pod; the run directory is the synced surface the producer reads back.
+RECEIPT_FILENAME = "LOADED.json"
+
+#: Bumped only on a BREAKING change to the receipt body.
+RECEIPT_VERSION = 1
+
+#: The producer's stage-5 record, beside the shard directory it published.
+#: Written by ``kbu ontomap council-publish``; the receipt reads the item
+#: accounting out of it because ITEMS ARE NOT IN THE SHARD RUN -- an item with
+#: no verdict produced no row, so it is invisible to anything downstream of
+#: the export, and those are exactly the items the reconciliation is about.
+PUBLISH_RECORD_FILENAME = "PUBLISH.json"
+
+
+def read_publish_record(shard_dir: Path | str) -> dict[str, Any]:
+    """The producer's ``PUBLISH.json`` from beside ``shard_dir``, or ``{}``.
+
+    Beside and not inside: the shard directory is the sharder's output and its
+    inventory is ``run.json``, which this must not add a second manifest to.
+    ``{}`` -- a shard run published by something other than ``council-publish``
+    -- is a degraded but honest answer, and the receipt says so in its notes
+    rather than inventing an item count.
+    """
+    path = Path(shard_dir).resolve().parent / PUBLISH_RECORD_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def build_receipt(
+    verify_result: Mapping[str, Any],
+    *,
+    publish_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the load receipt from a :meth:`verify_run` result.
+
+    Pure, and derived ONLY from inputs that do not change between exports --
+    see the section header for why that is the requirement rather than a
+    nicety.
+
+    Args:
+        verify_result: What :meth:`ClearinghouseCapability.verify_run`
+            returned.
+        publish_record: The producer's ``PUBLISH.json``
+            (:func:`read_publish_record`). Absent, the ITEM half of the
+            reconciliation is reported as ``None`` with a note, never as the
+            row count -- an item count a receipt guessed would be worse than
+            one it declined to state.
+
+    Returns:
+        The receipt: ``receipt_version``, ``execution_id``, ``source_run_id``,
+        ``namespace``, ``items_submitted``, ``items_with_verdict``,
+        ``items_unresolved``, ``result_rows_written``, ``declines_by_reason``,
+        ``snapshot_ids``, ``parameter_set_hashes``, ``reconciled``, ``notes``,
+        ``ok`` and ``discrepancies``.
+    """
+    publish = dict(publish_record or {})
+    counts = dict(publish.get("counts") or {})
+
+    def _count(key: str) -> int | None:
+        value = counts.get(key)
+        return int(value) if isinstance(value, int) else None
+
+    items_submitted = _count("items_submitted")
+    items_with_verdict = _count("items_with_verdict")
+    items_unresolved = _count("items_unresolved")
+
+    batches = list(verify_result.get("batches") or ())
+    result_rows = 0
+    snapshot_ids: dict[str, list[str]] = {}
+    for report in verify_result.get("tables") or ():
+        name = str(report.get("name"))
+        snapshot_ids[name] = [str(value) for value in report.get("snapshot_ids") or ()]
+    for report in batches:
+        table = str(report.get("name"))
+        rows = report.get("ledger_rows")
+        if (
+            table.endswith("_result")
+            and table != PARAMETER_SET_TABLE
+            and isinstance(rows, int)
+        ):
+            result_rows += rows
+
+    notes: list[str] = []
+    if not publish:
+        notes.append(
+            "no "
+            + PUBLISH_RECORD_FILENAME
+            + " beside the shard directory, so the ITEM half of the "
+            "reconciliation is unknown. The row counts below are complete; "
+            "items submitted, items with a verdict and items unresolved are "
+            "null rather than stood in for by a row count -- one item can "
+            "carry several result rows, so the two are not the same number."
+        )
+    if (
+        items_submitted is not None
+        and items_with_verdict is not None
+        and items_unresolved is not None
+        and items_submitted != items_with_verdict + items_unresolved
+    ):
+        notes.append(
+            f"the publish record does not add up: {items_submitted} item(s) "
+            f"submitted but {items_with_verdict} with a verdict plus "
+            f"{items_unresolved} unresolved. The producer's own accounting is "
+            "wrong, so neither number can be reconciled against the rows."
+        )
+    if items_with_verdict is not None and result_rows < items_with_verdict:
+        notes.append(
+            f"{result_rows} result row(s) landed for {items_with_verdict} "
+            "item(s) with a verdict. One item can carry several result rows, "
+            "so more rows than items is normal -- FEWER is not, and means "
+            "items that had an answer did not land."
+        )
+    if items_unresolved:
+        notes.append(
+            f"{items_unresolved} item(s) are UNRESOLVED: they were submitted "
+            "and have no verdict, so no row was published for them and the "
+            "next plan will re-select them. They are not a load failure; they "
+            "are the residual the next run has to pick up."
+        )
+
+    reconciled = (
+        items_submitted is not None
+        and items_with_verdict is not None
+        and items_unresolved is not None
+        and items_submitted == items_with_verdict + items_unresolved
+        and result_rows >= items_with_verdict
+    )
+    return {
+        "receipt_version": RECEIPT_VERSION,
+        "execution_id": verify_result.get("execution_id")
+        or verify_result.get("run_id"),
+        "source_run_id": verify_result.get("source_run_id"),
+        "namespace": verify_result.get("namespace"),
+        "unit": verify_result.get("unit"),
+        "items_submitted": items_submitted,
+        "items_with_verdict": items_with_verdict,
+        "items_unresolved": items_unresolved,
+        "result_rows_written": result_rows,
+        "declines_by_reason": dict(publish.get("declines_by_reason") or {}),
+        "snapshot_ids": snapshot_ids,
+        "parameter_set_hashes": [
+            str(value) for value in verify_result.get("parameter_set_hashes") or ()
+        ],
+        "reconciled": reconciled,
+        "notes": notes,
+        "ok": bool(verify_result.get("ok")),
+        "discrepancies": [str(line) for line in verify_result.get("discrepancies") or ()],
+    }
+
+
+def write_receipt(path: Path | str, receipt: Mapping[str, Any]) -> Path:
+    """Write a receipt atomically, and return where it went.
+
+    Atomic for the reason every file on the synced run surface is: the
+    producer reads this back to decide whether a reload is needed, and a
+    half-written receipt is worse than none -- it would be parsed.
+    """
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(receipt), indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    return path
 
 
 # --------------------------------------------------------------------------

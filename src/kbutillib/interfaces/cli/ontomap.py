@@ -1,0 +1,1848 @@
+"""``kbu ontomap`` -- the function-to-GO pipeline's operator surface.
+
+This is the operator's entry point to a STANDING, QUOTED, APPROVED run of the
+``function_to_go`` task: assigning GO molecular-function terms to protein
+function descriptions. Five stages, in order, each one a verb:
+
+1. **PLAN** -- detect the un-run functions. "Un-run" means no current-state
+   ``function_result`` row at this run's clearinghouse ``parameter_set_hash``,
+   where the parameter set is ``{query: "<name>@<version>",
+   bench_fingerprint, mapping_hash}``. ``council-plan``.
+
+   ``bench_fingerprint`` and NOT ``roster_fingerprint``: the bench partitions
+   the corpus, the transport does not. ``Roster.fingerprint()`` covers the
+   endpoint kind, the route spelling, the token ceiling, the temperature and
+   the extras, so moving one seat from the codex CLI to MAG moves it --
+   which would re-partition all 47,341 clearinghouse functions and re-charge
+   ~199M tokens for a pure cost optimisation. See
+   :func:`~kbutillib.domains.ai.council.types.bench_fingerprint`.
+2. **QUOTE** -- price the plan before anything is spent: items, tokens per
+   seat, wall clock, concurrency the gateways will actually tolerate.
+   ``council-quote``.
+3. **APPROVE** -- a human says yes to a specific quote. Nothing in stage 4
+   runs without an approval record naming the quote it approves.
+   ``council-approve``.
+4. **RUN** -- execute the approved plan (``council-run``), including the
+   first-class retry pass over items whose only defect was a silently
+   truncated response, and report progress with ``council-status``.
+5. **PUBLISH** -- export the verdicts (``council-export``) and hand them to
+   the clearinghouse manifest/shard/load/verify chain (``council-publish``).
+   The join key into the clearinghouse is ``query_id`` -- the clearinghouse
+   ``entity_hash``, carried through from the ranked file. NEVER the council's
+   own ``items.entity_hash``, and never the definition text.
+
+**THIS MODULE OWNS NO PIPELINE LOGIC.** Every verb is a thin facade over
+:class:`~kbutillib.domains.genome.ontology_mapping.ontology_mapping_utils.OntologyMappingUtils`,
+the council store and the clearinghouse chain -- all of which already exist. A
+verb that reimplemented any of them would be a second place that could
+disagree with the library, so there is none.
+
+THE OUTPUT CONTRACT. Under ``--json`` every verb emits EXACTLY ONE object, the
+same envelope ``kbu council`` and ``kbu clearinghouse`` publish::
+
+    {"schema_version": 1, "verb": "version", "generated_at": "...",
+     "data": {...}, "warnings": [...]}
+
+Three structural rules, carried over verbatim:
+
+1. HUMAN OUTPUT IS A RENDERING OF THE SAME DICT. Each verb builds one
+   envelope (via a ``_build_*`` helper) and then either serialises it
+   (``--json``) or hands that very object to :func:`_render`. There is no
+   second code path that computes anything.
+2. ``schema_version`` is bumped only on a BREAKING change to ``data``.
+   Additive fields do not bump it; a consumer pinning major ``1`` must
+   tolerate unknown keys.
+3. ``warnings`` is never empty for a degraded answer.
+
+STDOUT DISCIPLINE. Under ``--json``, stdout carries the envelope and nothing
+else; warnings are mirrored to stderr for the human.
+
+WHAT IS IMPLEMENTED HERE. The group and ALL EIGHT VERBS: ``version``,
+``council-plan``, ``council-quote``, ``council-approve``, ``council-run``,
+``council-status``, ``council-export`` and ``council-publish``. The
+registered-but-not-implemented stub convention (``_PLANNED_VERBS``) is kept
+with an EMPTY list rather than deleted: a stub that exited 0 would be worse
+than no stub at all -- a rehearsal of the whole pipeline would pass straight
+over a missing stage and report success -- so the next verb to be designed
+ahead of its implementation has somewhere to go.
+
+``council-status`` IS THE ONLY VERB THAT READS ACROSS RUNS, which is why it
+takes a runs ROOT rather than a run directory. A corpus under a versioned
+transform is always partly stale, so it reports coverage TWICE: by lifecycle
+state (work that has been PAID FOR but has not LANDED is invisible in both a
+"what is un-run" count and a "what is loaded" count, and that is exactly what
+a crashed run leaves behind) and by ``parameter_set_hash`` (partial-version
+coverage is TOLERATED, not normalised away -- re-running 47,341 functions on
+every bump is unaffordable -- so it must be REPORTED). It also surfaces a
+SECOND CONCURRENT RUN, because two run directories in stage 4 interleave their
+chunks through the one daemon and defeat the chunking entirely. The logic lives
+in :mod:`kbutillib.domains.genome.ontology_mapping.council_status`.
+
+``council-publish`` IS THE PRODUCER HALF OF STAGE 5 AND NOTHING MORE. It
+renders the shipped ``function-to-go-council`` preset for this run, gates it
+through ``kbu clearinghouse plan``'s own validator, and writes a shard run
+under ``<run-dir>/shard`` -- all of which runs ANYWHERE, because sharding
+needs CPU and disk and neither a pod nor credentials. The consumer half
+(``kbu clearinghouse load`` and ``verify``, both in-pod) runs on kbhub after
+Dropbox syncs the directory, and nothing in this module reaches for it. The
+logic lives in
+:mod:`kbutillib.domains.genome.ontology_mapping.council_publish`.
+
+``council-run`` IS THE ONLY VERB THAT SPENDS A TOKEN, and it refuses to spend
+the first one until the approval gate passes (naming the check that failed)
+and until ``$ARGO_USER`` and the AMSC token both resolve -- neither is
+exported in any shell on this host and neither fails loudly mid-run. It
+drains ONE CHUNK AT A TIME behind ``.done`` markers (KBUtilLib issue 84; the
+daemon drains every claimable job, so submitting them all up front would
+rebuild the pending set the chunking exists to avoid), runs the retry pass as
+a declared stage, and RUNS IN THE FOREGROUND: on this host, detaching means
+``systemd-run --user --scope --collect``, which its help says, because
+``setsid``/``nohup``/``disown`` do not escape the launching unit's cgroup.
+The run logic itself lives in
+:mod:`kbutillib.domains.genome.ontology_mapping.council_run`.
+
+``council-approve`` WRITES AN AUDIT TRAIL AND A BINDING CEILING, NOT AN
+AUTHENTICATION BOUNDARY. ``APPROVED.json`` is unsigned, there is no key
+material on these machines that could sign it, and an agent can write it. What
+it buys is an explicit per-gateway token ceiling, a checkable binding to this
+plan and this quote, and a refusal when the job has changed under it. The
+checks themselves live in
+:func:`~kbutillib.domains.ai.council.approval.validate_approval`, which is the
+function stage 4 calls -- this verb owns no gate logic of its own.
+
+``council-quote`` OWNS NO PRICING LOGIC EITHER. It delegates to
+``kbu council quote``'s own :func:`~.council.build_quote`, which is the same
+function that command calls -- two code paths that both priced a plan would
+be two numbers that could disagree, and the one an operator approved would be
+whichever CLI they happened to type.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence
+
+import click
+
+#: The output-contract schema version. Bumped ONLY on a breaking change to a
+#: verb's ``data`` shape; additive fields do not bump it (see module docstring
+#: rule 2).
+SCHEMA_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Envelope + emit
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    """The current UTC time as an ISO-8601 string with a ``Z`` suffix."""
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _envelope(
+    verb: str,
+    *,
+    data: Dict[str, Any],
+    warnings: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Build the one published envelope object every verb emits."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "verb": verb,
+        "generated_at": _now_iso(),
+        "data": data,
+        "warnings": list(warnings or []),
+    }
+
+
+def _emit(envelope: Dict[str, Any], *, as_json: bool) -> None:
+    """Emit one built envelope, honouring the stdout discipline."""
+    warnings = envelope.get("warnings", [])
+    if as_json:
+        for warning in warnings:
+            click.echo(f"warning: {warning}", err=True)
+        click.echo(json.dumps(envelope, default=_jsonable))
+        return
+    _render(envelope)
+    for warning in warnings:
+        click.echo(f"warning: {warning}", err=True)
+
+
+def _jsonable(value: Any) -> str:
+    """Last-resort encoder for a value ``json`` cannot serialise itself."""
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
+def _rows(rows: Sequence[Dict[str, Any]], columns: Sequence[str]) -> None:
+    """Print *rows* as a column-aligned table of *columns*."""
+    if not rows:
+        click.echo("(none)")
+        return
+    table = [[_cell(row.get(col)) for col in columns] for row in rows]
+    widths = [
+        max(len(col), *(len(line[i]) for line in table)) for i, col in enumerate(columns)
+    ]
+    click.echo("  ".join(col.ljust(widths[i]) for i, col in enumerate(columns)).rstrip())
+    for line in table:
+        click.echo("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(line)).rstrip())
+
+
+def _cell(value: Any) -> str:
+    """Format one cell value for the human table."""
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+
+def _render(envelope: Dict[str, Any]) -> None:
+    """Render a built envelope on stdout.
+
+    Takes the SAME dict the ``--json`` path serialises -- there is no second
+    computation path, which is what lets a test patch this function and assert
+    it received exactly what the serialiser would have emitted.
+    """
+    verb = str(envelope.get("verb") or "")
+    data = envelope.get("data") or {}
+
+    if verb == "council-quote":
+        # Rendered by `kbu council`'s own renderer, under the verb name that
+        # renderer keys on. This group adds no second rendering of a quote:
+        # the two commands must print the same thing from the same dict.
+        from .council import _render as _render_council
+
+        _render_council({"verb": "quote", "data": data})
+        return
+
+    if verb == "council-plan":
+        counts = data.get("counts") or {}
+        click.echo(f"plan:            {data.get('plan_file')}")
+        click.echo(f"query:           {data.get('query')}   profile: {data.get('profile')}")
+        click.echo(f"parameter_set:   {str(data.get('parameter_set_hash'))[:12]}  "
+                   f"(bench {str(data.get('bench_fingerprint'))[:12]}, "
+                   f"mapping {str(data.get('mapping_hash'))[:12]})")
+        click.echo(f"plan_hash:       {str(data.get('plan_hash'))[:12]}")
+        click.echo(
+            "counts:          "
+            + ", ".join(f"{key}={counts.get(key)}" for key in
+                        ("universe", "done", "unrun", "submit", "abstain", "fanout"))
+        )
+        concurrency = data.get("concurrency") or {}
+        click.echo(
+            f"chunks:          {len(data.get('chunks') or [])} of "
+            f"{concurrency.get('chunk_size')}, "
+            f"{concurrency.get('chunks_in_flight')} in flight "
+            f"({concurrency.get('issue')})"
+        )
+        _rows(
+            data.get("transport_allocation") or [],
+            ("role", "seat_name", "gateway", "endpoint_kind", "canonical_model"),
+        )
+        return
+
+    if verb == "council-approve":
+        click.echo(f"approval:        {data.get('approval_file') or '(not written)'}")
+        click.echo(f"approver:        {data.get('approver')}")
+        click.echo(
+            f"approved_at:     {data.get('approved_at')}   "
+            f"expires_at: {data.get('expires_at')}"
+        )
+        click.echo(f"plan_hash:       {str(data.get('plan_hash'))[:12]}")
+        click.echo(f"quote_hash:      {str(data.get('quote_hash'))[:12]}")
+        basis = data.get("ceiling_basis") or {}
+        _rows(
+            [
+                {
+                    "gateway": gateway,
+                    "ceiling_tokens": f"{int(tokens):,}",
+                    "quote_upper": f"{int((basis.get('gateway_upper_tokens') or {}).get(gateway, 0)):,}",
+                }
+                for gateway, tokens in sorted(
+                    (data.get("ceiling_tokens") or {}).items()
+                )
+            ],
+            ("gateway", "ceiling_tokens", "quote_upper"),
+        )
+        click.echo(
+            f"ceiling basis:   the quote's UPPER band x {basis.get('headroom')} "
+            "headroom (never the point estimate), with "
+            f"{int(basis.get('unattributed_upper_tokens') or 0):,} unattributed "
+            "repair-pass tokens spread pro rata"
+        )
+        if data.get("note"):
+            click.echo(f"note:            {data.get('note')}")
+        click.echo(
+            "THIS IS AN AUDIT TRAIL AND A CEILING, NOT AN AUTHENTICATION "
+            "BOUNDARY: the file is unsigned and an agent can write it."
+        )
+        return
+
+    if verb == "council-run":
+        summary = data.get("summary") or {}
+        retry = data.get("retry") or {}
+        halt = data.get("halt")
+        click.echo(f"run:             {data.get('run_file')}")
+        click.echo(f"query:           {data.get('query')}   run_id: {data.get('run_id')}")
+        click.echo(
+            f"approval:        {str(data.get('approved_quote_hash'))[:12]}  "
+            f"plan {str(data.get('plan_hash'))[:12]}"
+        )
+        click.echo(
+            f"complete:        {bool(data.get('complete'))}   "
+            f"chunks {summary.get('chunks_settled')}/{summary.get('chunks')} "
+            f"settled, {summary.get('retry_rounds')} retry round(s)"
+        )
+        click.echo(
+            "items:           "
+            f"{summary.get('items')} submitted, ok={summary.get('ok')}, "
+            f"error={summary.get('error')}, "
+            f"{float(summary.get('duration_s') or 0) / 3600:.2f} h"
+        )
+        _rows(
+            [
+                {
+                    "gateway": gateway,
+                    "ceiling_tokens": f"{int(ceiling):,}",
+                    "spent_tokens": f"{int((data.get('spend_by_gateway') or {}).get(gateway, 0)):,}",
+                    "endpoints": (data.get("endpoints_by_gateway") or {}).get(gateway, []),
+                }
+                for gateway, ceiling in sorted(
+                    (data.get("ceiling_tokens") or {}).items()
+                )
+            ],
+            ("gateway", "ceiling_tokens", "spent_tokens", "endpoints"),
+        )
+        _rows(
+            [
+                {
+                    "chunk": ("retry " if row.get("retry") else "") + str(row.get("index")),
+                    "job_id": row.get("job_id"),
+                    "items": row.get("items"),
+                    "ok": row.get("ok"),
+                    "error": row.get("error"),
+                    "duration_s": row.get("duration_s"),
+                    "outcome": row.get("outcome"),
+                    "pending_at_claim": (row.get("claim_probe") or {}).get("pending_calls"),
+                }
+                for row in data.get("chunks") or []
+                if isinstance(row, dict)
+            ],
+            ("chunk", "job_id", "items", "ok", "error", "duration_s", "outcome",
+             "pending_at_claim"),
+        )
+        click.echo(
+            f"retry pass:      ran={bool(retry.get('ran'))}, "
+            f"rounds={len(retry.get('rounds') or [])}/{retry.get('round_cap')}"
+            + (f" -- {retry.get('reason')}" if retry.get("reason") else "")
+        )
+        if halt:
+            click.echo(f"HALTED:          {halt.get('reason')}: {halt.get('detail')}")
+        return
+
+    if verb == "council-status":
+        lifecycle = data.get("lifecycle") or {}
+        partition = data.get("by_parameter_set") or {}
+        corpus = data.get("corpus") or {}
+        click.echo(f"query:           {data.get('query')}   source: {data.get('source')}")
+        click.echo(
+            f"parameter_set:   {str(data.get('parameter_set_hash') or '(unresolved)')[:12]}"
+        )
+        click.echo(
+            f"corpus:          {_cell(corpus.get('functions'))} function(s) "
+            f"(function_entity {_cell(corpus.get('entity_rows'))}, "
+            f"function_content {_cell(corpus.get('content_rows'))})"
+        )
+        click.echo("")
+        click.echo("BY LIFECYCLE")
+        _rows(lifecycle.get("states") or [], ("state", "functions", "runs", "share"))
+        click.echo(
+            f"paid for, NOT landed: {_cell(lifecycle.get('paid_for_not_landed'))} "
+            "function(s) -- running plus exported-not-loaded. Tokens spent, "
+            "nothing in the clearinghouse."
+        )
+        if lifecycle.get("un_run_is_a_floor"):
+            click.echo(
+                f"un-run is a FLOOR: the run directories overclaim by "
+                f"{_cell(lifecycle.get('overclaimed'))} function(s)."
+            )
+        click.echo("")
+        click.echo("BY parameter_set_hash")
+        _rows(
+            [
+                {
+                    "parameter_set_hash": str(row.get("parameter_set_hash"))[:16],
+                    "current": "yes" if row.get("current") else "-",
+                    "functions": row.get("functions"),
+                    "share": row.get("share"),
+                }
+                for row in partition.get("parameter_sets") or []
+            ],
+            ("parameter_set_hash", "current", "functions", "share"),
+        )
+        click.echo(
+            "covered only by an OLDER parameter set: "
+            f"{_cell(partition.get('covered_only_by_an_older_parameter_set'))}"
+            f"   never covered: {_cell(partition.get('uncovered'))}"
+        )
+        click.echo("")
+        click.echo("RUNS")
+        # The hash is truncated to the same 12 characters the two blocks above
+        # use: a 64-character column pushes every other field off a terminal,
+        # and the full value is in the `--json` envelope for anything that
+        # needs to compare it.
+        _rows(
+            [
+                {**row, "parameter_set_hash": str(row.get("parameter_set_hash"))[:12]}
+                for row in data.get("runs") or []
+                if isinstance(row, dict)
+            ],
+            ("run_id", "state", "functions", "complete", "published",
+             "rows_at_parameter_set", "parameter_set_hash"),
+        )
+        if data.get("concurrent_runs"):
+            click.echo(
+                "TWO RUNS IN STAGE 4: "
+                + ", ".join(
+                    str(row.get("run_dir")) for row in data["concurrent_runs"]
+                )
+                + " -- they interleave their chunks through the one daemon."
+            )
+        return
+
+    if verb == "council-export":
+        counts = data.get("counts") or {}
+        click.echo(f"export:          {data.get('out_path')}")
+        click.echo(f"query:           {data.get('query')}")
+        click.echo(f"parameter_set:   {str(data.get('parameter_set_hash'))[:12]}  "
+                   f"(mapping {str(data.get('mapping_hash'))[:12]}, "
+                   f"roster {str(data.get('roster_fingerprint'))[:12]})")
+        click.echo(f"jobs:            {', '.join(data.get('job_ids') or []) or '-'}")
+        click.echo(
+            "counts:          "
+            + ", ".join(
+                f"{key}={counts.get(key)}"
+                for key in ("inputs", "rows", "withheld", "abstained", "decided")
+            )
+        )
+        click.echo(
+            "declines:        "
+            + ", ".join(
+                f"{key}={counts.get(key, 0)}"
+                for key in ("abstained", "no_candidate_matched", "contentless")
+            )
+        )
+        click.echo(
+            f"with go_ids:     {counts.get('with_go_ids')}   "
+            f"retried: {counts.get('retried')}   "
+            f"bytes: {data.get('bytes')}"
+        )
+        return
+
+    if verb == "version":
+        provenance = data.get("provenance") or {}
+        click.echo(f"mapping_version: {data.get('mapping_version')}")
+        click.echo(f"mapping_hash:    {data.get('mapping_hash')}")
+        click.echo(f"go_release:      {provenance.get('go_release')}")
+        click.echo(f"placeholder_rules: {provenance.get('placeholder_rules')}")
+        _rows(
+            provenance.get("models") or [],
+            ("artifact", "ontomap_method_version", "sha256"),
+        )
+        params = provenance.get("params") or {}
+        if params:
+            click.echo(
+                "params: "
+                + ", ".join(f"{key}={params[key]}" for key in sorted(params))
+            )
+        return
+
+    click.echo(json.dumps(data, indent=2, sort_keys=True, default=_jsonable))
+
+
+# ---------------------------------------------------------------------------
+# The facade
+# ---------------------------------------------------------------------------
+
+
+def _ontomap() -> Any:
+    """Construct the :class:`OntologyMappingUtils` this invocation works through.
+
+    One factory, so a test can patch exactly one name. The import is lazy and
+    inside the function: the retrieval backend pulls numpy/sklearn/joblib, and
+    ``kbu --help`` must not pay for them (nor fail on a host that has not got
+    them). A host missing them becomes a clean CLI error, below, rather than an
+    ImportError traceback.
+    """
+    from ...domains.genome.ontology_mapping.ontology_mapping_utils import (
+        OntologyMappingUtils,
+    )
+
+    return OntologyMappingUtils()
+
+
+def _fail(exc: BaseException) -> "click.ClickException":
+    """An ontomap failure as a clean CLI error rather than a traceback."""
+    return click.ClickException(f"{type(exc).__name__}: {exc}")
+
+
+def _json_option(function: Any) -> Any:
+    """``--json``, spelled once."""
+    return click.option(
+        "--json", "as_json", is_flag=True, default=False, help="Emit the JSON envelope."
+    )(function)
+
+
+# ---------------------------------------------------------------------------
+# ``kbu ontomap`` group
+# ---------------------------------------------------------------------------
+
+
+@click.group(name="ontomap")
+def ontomap_cmd() -> None:
+    """Run the standing function-to-GO council pipeline, in five stages.
+
+    \b
+    1. `council-plan`     detect the un-run functions (no current-state
+                          function_result row at this run's parameter_set_hash)
+    2. `council-quote`    price that plan -- items, tokens, wall clock,
+                          per-gateway concurrency -- before anything is spent
+    3. `council-approve`  a human approves one specific quote; stage 4 refuses
+                          to run without an approval naming it
+    4. `council-run`      execute the approved plan -- one chunk at a time,
+                          behind a per-gateway token ceiling, with the retry
+                          pass. It runs in the FOREGROUND: see its help for
+                          the `systemd-run --user --scope --collect` this
+                          host requires to outlive the session.
+       `council-status`   coverage by LIFECYCLE state and by
+                          parameter_set_hash, across every run directory --
+                          including a second run in stage 4, which defeats
+                          the chunking
+    5. `council-publish`  `council-export` the verdicts, then hand them to the
+                          clearinghouse manifest/shard/load/verify chain
+
+    `version` is free and spends nothing: it reports the retrieval backend's
+    identity (mapping_version, mapping_hash, provenance), which is part of
+    every stage's parameter set. Under `--json` every verb emits the one
+    envelope `kbu council` and `kbu clearinghouse` publish.
+    """
+
+
+# ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
+
+
+def _build_version(util: Any) -> Dict[str, Any]:
+    """Build the ``version`` envelope: the retrieval backend's identity."""
+    try:
+        report = dict(util.mapping_version())
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    return _envelope(
+        "version",
+        data={
+            "mapping_version": report.get("mapping_version"),
+            "mapping_hash": report.get("mapping_hash"),
+            "provenance": report.get("provenance") or {},
+        },
+        warnings=[],
+    )
+
+
+@ontomap_cmd.command(name="version")
+@_json_option
+def version_cmd(as_json: bool) -> None:
+    """Report the retrieval backend's identity: version, hash, provenance.
+
+    Spends nothing and reaches no network. ``mapping_hash`` is folded into
+    every pipeline stage's clearinghouse ``parameter_set_hash``, so a backend
+    swap makes previously-run functions un-run again -- which is exactly why
+    this verb exists separately from the stages that consume it.
+    """
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    _emit(_build_version(util), as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# council-quote -- stage 2, delegated to `kbu council quote`
+# ---------------------------------------------------------------------------
+
+
+@ontomap_cmd.command(name="council-quote")
+@click.option(
+    "--plan",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run directory holding PLAN.json, or the plan file itself.",
+)
+@click.option("--profile", default=None, help="Bench to quote. Default: the plan's own.")
+@click.option("--seat", multiple=True, metavar="SEAT_NAME=ALIAS", help="Override one seat (repeatable).")
+@click.option(
+    "--meta-fire-rate",
+    default=None,
+    type=float,
+    help="Fraction of items reaching meta. Default: 0.241, measured over n=19,268.",
+)
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(),
+    help="Where to write QUOTE.json. Default: the run directory the plan came from.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Compute and print the quote without writing QUOTE.json.",
+)
+@click.option("--config", "config_path", default=None, type=click.Path(exists=True, dir_okay=False), help="Council configuration YAML.")
+@click.option("--store", "store_url", default=None, help="Override the council store URL.")
+@_json_option
+def council_quote_cmd(
+    plan: str,
+    profile: Optional[str],
+    seat: Sequence[str],
+    meta_fire_rate: Optional[float],
+    out: Optional[str],
+    no_write: bool,
+    config_path: Optional[str],
+    store_url: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 2: price a plan -- per-seat tokens, reuse, wall clock, dollars.
+
+    SPENDS NOTHING. Delegates to `kbu council quote`, which is the only
+    implementation; this verb exists so the five pipeline stages read as one
+    sequence under `kbu ontomap`.
+
+    Writes `QUOTE.json` into the run directory, carrying the `plan_hash` the
+    approval in stage 3 binds to.
+    """
+    from .council import _council, build_quote
+
+    context = click.Context(click.Command("quote"))
+    context.obj = {"config_path": config_path, "store_url": store_url}
+    try:
+        util = _council(context)
+        util.require_schema()
+    except Exception as exc:  # noqa: BLE001 - an unusable store is a CLI error
+        raise _fail(exc) from exc
+    try:
+        envelope = build_quote(
+            util,
+            plan=plan,
+            profile=profile,
+            seat=seat,
+            meta_fire_rate=meta_fire_rate,
+            out=out,
+            write=not no_write,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a bad plan is a CLI error
+        raise _fail(exc) from exc
+    # Re-labelled to this group's verb so the envelope says which command was
+    # run, but it is the SAME dict `kbu council quote` emits.
+    envelope["verb"] = "council-quote"
+    _emit(envelope, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# council-plan -- stage 1
+# ---------------------------------------------------------------------------
+
+
+def _build_council_plan(util: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-plan`` envelope from the facade's own plan dict.
+
+    OWNS NO PLANNING LOGIC. Every number in the envelope comes from
+    :meth:`OntologyMappingUtils.council_plan`, which is the only
+    implementation; this builder selects what an operator reads and warns
+    where the answer is degraded.
+    """
+    try:
+        plan = dict(util.council_plan(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable plan is a CLI error
+        raise _fail(exc) from exc
+
+    counts = dict(plan.get("counts") or {})
+    warnings = []
+    if not counts.get("submit"):
+        warnings.append(
+            "the plan holds NO submit items: every function in the "
+            f"clearinghouse universe ({counts.get('universe', 0)}) either "
+            f"already has a current-state result at this parameter_set_hash "
+            f"({counts.get('done', 0)}) or was declined by retrieval "
+            f"({counts.get('abstain', 0)}). Stage 2 will refuse to quote it."
+        )
+    if counts.get("abstain"):
+        warnings.append(
+            f"{counts['abstain']} un-run function(s) were declined by "
+            "retrieval and are NOT in the submit set; they are recorded in "
+            f"{plan.get('abstain_file')} and stage 5 publishes them as "
+            "decline_reason=abstained:* rather than dropping them."
+        )
+    return _envelope("council-plan", data=plan, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-plan")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Run directory PLAN.json is written into (created if absent).",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>". Default: the shipped go_mf@1.',
+)
+@click.option(
+    "--bundle",
+    default=None,
+    type=click.Path(exists=True),
+    help="EXPLICIT path to an un-run input bundle (its directory or its "
+    "BUNDLE.json) written in-pod by `council-unrun-bundle`. With it, this "
+    "command reads no clearinghouse and needs no BERDL credential. There is "
+    "no default and no latest-bundle search: using whatever is newest is how "
+    "a run silently plans the wrong parameter set.",
+)
+@click.option("--profile", default=None, help="Bench to plan against. Default: the configured one.")
+@click.option(
+    "--chunk-size",
+    default=None,
+    type=int,
+    help="Submit items per chunk. Default: 2000 (KBUtilLib issue 84 workaround).",
+)
+@click.option(
+    "--scratch-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Local ROOT for the ranked/items files; function-to-go/<run-id>/ is "
+    "appended. Default: $KBU_SCRATCH_DIR, else /scratch/<user>.",
+)
+@_json_option
+def council_plan_cmd(
+    run_dir: str,
+    query: Optional[str],
+    bundle: Optional[str],
+    profile: Optional[str],
+    chunk_size: Optional[int],
+    scratch_dir: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 1: detect the un-run functions and write the run plan.
+
+    SPENDS NO LLM TOKENS. It runs the retrieval stage locally and writes
+    `PLAN.json`; the first token is spent in stage 4, behind a quote and an
+    approval.
+
+    WITH `--bundle` it reads the un-run set from an immutable file produced
+    IN-POD by `council-unrun-bundle` and CONSTRUCTS NO BERDL CLIENT -- which
+    is what the scheduled, unattended stage must use, because the off-pod
+    read failed on 2026-10-23 when poplar's ~/.kbase/token expired at 27 days
+    old and an unattended stage that cannot read silently produces no plan.
+    The bundle's sha256 inventory is verified and its parameter set is
+    checked against this run's BEFORE any retrieval: consuming a bundle built
+    for a different bench or query version would skip work that needs doing.
+
+    WITHOUT `--bundle` it does the two clearinghouse reads itself, which is
+    the original single-command path -- fine locally with a live credential
+    and a human watching, and not for the scheduled stage.
+
+    "Un-run" means no current-state `function_result` row at this run's
+    clearinghouse `parameter_set_hash`, over the parameter set
+    `{query, bench_fingerprint, mapping_hash}`. `bench_fingerprint` is
+    model-only, so re-routing a seat to a different gateway re-selects
+    NOTHING, while a bench, query-version or mapping_hash change re-selects
+    the whole corpus.
+
+    `PLAN.json` is the only file written into the run directory. The ranked
+    file, the items file and the abstain/fanout records are machine-local
+    intermediates and go under the scratch directory.
+    """
+    from ...domains.genome.ontology_mapping.ontology_mapping_utils import (
+        DEFAULT_COUNCIL_QUERY,
+        PLAN_CHUNK_SIZE,
+    )
+
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _build_council_plan(
+            util,
+            run_dir=run_dir,
+            query=query or DEFAULT_COUNCIL_QUERY,
+            bundle=bundle,
+            chunk_size=PLAN_CHUNK_SIZE if chunk_size is None else chunk_size,
+            profile=profile,
+            scratch_dir=scratch_dir,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-unrun-bundle -- stage 1a, IN-POD
+# ---------------------------------------------------------------------------
+
+
+def _parse_parameter_set(raw: str) -> Dict[str, Any]:
+    """``--parameter-set`` as a dict: inline JSON, or ``@path`` to a JSON file.
+
+    A file is supported because the parameter set is produced on h100 (it
+    needs the council roster and the retrieval mapping version) and consumed
+    in the pod, so it travels as a small file rather than as a shell
+    argument that a quoting mistake could silently truncate.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise click.ClickException(
+            "--parameter-set is empty. The un-run read is defined BY the "
+            "parameter set -- 'un-run' means no current-state result at this "
+            "parameter_set_hash -- so there is no default and an empty set is "
+            "refused for a council source anyway."
+        )
+    if text.startswith("@"):
+        path = Path(text[1:]).expanduser()
+        if not path.is_file():
+            raise click.ClickException(
+                f"--parameter-set @{path} does not exist."
+            )
+        text = path.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise click.ClickException(
+            f"--parameter-set is not valid JSON: {exc}. Expected an object "
+            'like {"query": "go_mf@4", "bench_fingerprint": "...", '
+            '"mapping_hash": "..."} or @path/to/parameter-set.json'
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise click.ClickException(
+            f"--parameter-set must be a JSON object, got a "
+            f"{type(parsed).__name__}."
+        )
+    return parsed
+
+
+@ontomap_cmd.command(name="council-unrun-bundle")
+@click.option(
+    "--bundle-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Directory the bundle is written into (created if absent).",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>". Default: the shipped go_mf@1.',
+)
+@click.option(
+    "--parameter-set",
+    "parameter_set",
+    required=True,
+    help="The run's parameter set as JSON, or @path to a JSON file. "
+    'Normally {"query": "<name>@<version>", "bench_fingerprint": "...", '
+    '"mapping_hash": "..."}. REQUIRED and never derived here: deriving it '
+    "needs the council roster and the retrieval mapping version, which are "
+    "exactly the requirements this in-pod step keeps out of the pod.",
+)
+@_json_option
+def council_unrun_bundle_cmd(
+    bundle_dir: str,
+    query: Optional[str],
+    parameter_set: str,
+    as_json: bool,
+) -> None:
+    """Stage 1a, IN-POD: read the clearinghouse and emit an un-run bundle.
+
+    SPENDS NO LLM TOKENS and performs NO RETRIEVAL. This is the only part of
+    stage 1 that touches the lake, and it is deliberately the smallest piece
+    that must work inside the pod.
+
+    WHY IT IS SEPARATE. The off-pod read worked from h100 on 2026-10-22 and
+    failed on 2026-10-23 with an auth error: poplar's ~/.kbase/token had
+    expired at 27 days old. Stage 1 is schedulable and UNATTENDED, so an
+    expiry means the plan silently is not produced and nobody learns until
+    somebody looks. After this split h100 holds no BERDL credential at all:
+    the read happens where the credential lives and an immutable file
+    crosses.
+
+    WHAT IT WRITES: `BUNDLE.json` (the version, the query and source, the
+    canonical parameter set and its hash, the extraction time, the row
+    counts, and a sha256 inventory over its own files) plus `unrun.jsonl`
+    (query_id and the EXACT definition text per un-run function). It does not
+    rank, partition, chunk or prepare a quote -- `council-plan --bundle`
+    does all of that off-pod.
+    """
+    from ...domains.genome.ontology_mapping.ontology_mapping_utils import (
+        DEFAULT_COUNCIL_QUERY,
+    )
+
+    resolved = _parse_parameter_set(parameter_set)
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    try:
+        record = dict(
+            util.council_unrun_bundle(
+                bundle_dir,
+                query=query or DEFAULT_COUNCIL_QUERY,
+                parameter_set=resolved,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable bundle is a CLI error
+        raise _fail(exc) from exc
+
+    warnings = list(record.pop("warnings", []) or [])
+    _emit(
+        _envelope("council-unrun-bundle", data=record, warnings=warnings),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-approve -- stage 3
+# ---------------------------------------------------------------------------
+
+
+def _parse_ceilings(values: Sequence[str]) -> Dict[str, int]:
+    """``--ceiling-tokens argo=250000000`` -> ``{"argo": 250000000}``.
+
+    Underscores and commas are accepted in the number, because an operator
+    typing a nine-digit token ceiling by hand will group it.
+    """
+    out: Dict[str, int] = {}
+    for raw in values or ():
+        gateway, sep, number = str(raw).partition("=")
+        gateway, number = gateway.strip(), number.strip().replace(",", "").replace("_", "")
+        if not sep or not gateway or not number:
+            raise click.ClickException(
+                f"--ceiling-tokens {raw!r} is not GATEWAY=N; the gateway is the "
+                "payer name the quote reports (an account, else an endpoint "
+                "alias), e.g. --ceiling-tokens argo=250000000"
+            )
+        try:
+            out[gateway] = int(number)
+        except ValueError as exc:
+            raise click.ClickException(
+                f"--ceiling-tokens {raw!r}: {number!r} is not a whole number of "
+                "tokens"
+            ) from exc
+    return out
+
+
+def _build_council_approve(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-approve`` envelope from the approval it writes.
+
+    OWNS NO GATE LOGIC. The artifact, the ceiling derivation and the six
+    checks stage 4 makes all live in
+    :mod:`kbutillib.domains.ai.council.approval`; this builder calls
+    :func:`~kbutillib.domains.ai.council.approval.approve` and selects what an
+    operator reads.
+    """
+    from ...domains.ai.council.approval import approve
+
+    try:
+        approval = approve(**kwargs)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable quote is a CLI error
+        raise _fail(exc) from exc
+    data = {
+        **approval.to_dict(),
+        "run_dir": str(kwargs.get("run_dir")),
+        "approval_file": approval.source or None,
+    }
+    warnings = list(approval.warnings)
+    if not approval.source:
+        warnings.append(
+            "--no-write was given, so NOTHING was approved: this is the "
+            "ceiling the quote implies, and stage 4 will refuse the run until "
+            "APPROVED.json exists."
+        )
+    return _envelope("council-approve", data=data, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-approve")
+@click.argument(
+    "run_dir",
+    type=click.Path(exists=True, file_okay=False),
+)
+@click.option(
+    "--ceiling-tokens",
+    "ceiling",
+    multiple=True,
+    metavar="GATEWAY=N",
+    help="Override one gateway's token ceiling (repeatable). Default: that "
+    "gateway's quoted UPPER band times the headroom factor.",
+)
+@click.option(
+    "--headroom",
+    default=None,
+    type=float,
+    help="Multiple applied to the quote's upper band. Default: 1.25.",
+)
+@click.option(
+    "--expires-in",
+    "expires_in",
+    default=None,
+    type=float,
+    metavar="DAYS",
+    help="Days until the approval expires. Default: 7. An approval with no expiry would be a standing authorisation to spend.",
+)
+@click.option("--note", default="", help="Why this run, recorded in the artifact.")
+@click.option(
+    "--approver",
+    default=None,
+    help="Who is approving. Default: $KBU_APPROVER, else the login name. A "
+    "LABEL for the audit trail -- it is not authenticated.",
+)
+@click.option(
+    "--no-write",
+    "no_write",
+    is_flag=True,
+    default=False,
+    help="Show the ceiling the quote implies without writing APPROVED.json.",
+)
+@_json_option
+def council_approve_cmd(
+    run_dir: str,
+    ceiling: Sequence[str],
+    headroom: Optional[float],
+    expires_in: Optional[float],
+    note: str,
+    approver: Optional[str],
+    no_write: bool,
+    as_json: bool,
+) -> None:
+    """Stage 3: approve one specific quote, with a token ceiling on it.
+
+    SPENDS NOTHING. Reads `QUOTE.json` out of RUN_DIR, hashes it, and writes
+    `APPROVED.json` beside it carrying `approved_at`, `expires_at`,
+    `approver`, `plan_hash`, `quote_hash`, the per-gateway `ceiling_tokens`
+    and your note.
+
+    \b
+    THIS ARTIFACT IS AN AUDIT TRAIL AND A BINDING CEILING.
+    IT IS NOT AN AUTHENTICATION BOUNDARY. It is unsigned and cannot be:
+    there is no key material on these machines, and an agent can write the
+    file as easily as you can. `--approver` is a label, not an identity.
+
+    What it does buy: stage 4 has an explicit number to halt at, the binding
+    to this plan and this quote is checkable, and a stale approval against a
+    changed job is refused by name.
+
+    THE CEILING DEFAULTS TO THE QUOTE'S UPPER BAND TIMES 1.25, NOT TO ITS
+    POINT ESTIMATE. A ceiling at the mean halts about half of all runs
+    partway, and a run halted at 60% has spent 60% of the tokens for none of
+    the result. The headroom also covers the retry pass, which is charged
+    after this approval is written (~0.3% of run cost, measured).
+
+    A MODEL swap after approval is refused by stage 4; RE-ROUTING the same
+    models to another gateway is permitted and only makes the quoted PRICE
+    stale (it is reported as a warning). The approval binds to the bench, not
+    to the transport.
+    """
+    from ...domains.ai.council.approval import (
+        DEFAULT_EXPIRES_IN_DAYS,
+        DEFAULT_HEADROOM,
+    )
+
+    _emit(
+        _build_council_approve(
+            run_dir=run_dir,
+            approver=approver,
+            ceiling_tokens=_parse_ceilings(ceiling) or None,
+            headroom=DEFAULT_HEADROOM if headroom is None else headroom,
+            expires_in_days=(
+                DEFAULT_EXPIRES_IN_DAYS if expires_in is None else expires_in
+            ),
+            note=note,
+            write=not no_write,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-export -- stage 5
+# ---------------------------------------------------------------------------
+
+
+def _build_council_export(util: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-export`` envelope from the facade's export record.
+
+    OWNS NO EXPORT LOGIC. Every number comes from
+    :meth:`OntologyMappingUtils.council_export`, including its own warnings,
+    which are carried through rather than restated: a withheld item is a
+    DEGRADED answer and the envelope contract says ``warnings`` is never empty
+    for one.
+    """
+    try:
+        export = dict(util.council_export(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unusable run dir is a CLI error
+        raise _fail(exc) from exc
+
+    counts = dict(export.get("counts") or {})
+    warnings = list(export.get("warnings") or [])
+    if not counts.get("rows"):
+        warnings.append(
+            "the export holds NO rows: the plan named "
+            f"{counts.get('inputs', 0)} input function(s) and none of them "
+            "produced a publishable row. A shard run over zero rows is a "
+            "producer failure, not a clean load."
+        )
+    return _envelope("council-export", data=export, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-export")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json (and RUN.json, for the job ids).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Where the parquet goes. Default: <scratch>/verdicts.parquet. A path "
+    "inside the run directory is refused.",
+)
+@click.option(
+    "--job-id",
+    "job_id",
+    multiple=True,
+    help="Council job to read verdicts from (repeatable, in order). Default: "
+    "whatever RUN.json names.",
+)
+@click.option(
+    "--retry-job-id",
+    "retry_job_id",
+    multiple=True,
+    help="Council job belonging to the retry pass (repeatable). Its verdicts "
+    "supersede the chunk jobs' and its rows are marked retried.",
+)
+@click.option(
+    "--scratch-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Local ROOT for the default --out; function-to-go/<run-id>/ is "
+    "appended. Default: $KBU_SCRATCH_DIR, else /scratch/<user>.",
+)
+@_json_option
+def council_export_cmd(
+    run_dir: str,
+    out_path: Optional[str],
+    job_id: Sequence[str],
+    retry_job_id: Sequence[str],
+    scratch_dir: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 5: export the run's verdicts as PARQUET, one row per input.
+
+    SPENDS NOTHING. Reads `PLAN.json`, the plan's abstain/fanout records and
+    the council store; writes one parquet file on LOCAL SCRATCH. The published
+    artifact is the shard run (`council-publish`); this file is its input, so
+    writing it into the synced run directory is refused.
+
+    ONE ROW PER INPUT `query_id`, including all three decline classes --
+    `abstained:<reason>`, `no_candidate_matched` and `contentless` -- each with
+    `go_ids = []`. Recording them is what stops stage 1 re-selecting them
+    forever: un-run means "no current-state result row", so an ABSENT row is
+    indistinguishable from "not yet run".
+
+    An item with NO VERDICT (every call failed) is withheld and reported as a
+    warning: it is genuinely un-run and the next plan must re-select it.
+
+    `query_id` comes from the ranked data the plan carried through, never from
+    a text join and never from the council's own `items.entity_hash`.
+    """
+    try:
+        util = _ontomap()
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing backend dep is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _build_council_export(
+            util,
+            run_dir=run_dir,
+            out_path=out_path,
+            job_ids=list(job_id) or None,
+            retry_job_ids=list(retry_job_id) or None,
+            scratch_dir=scratch_dir,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-run -- stage 4
+# ---------------------------------------------------------------------------
+
+
+def _build_council_run(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-run`` envelope from the run record it writes.
+
+    OWNS NO RUN LOGIC. The gate, the ceiling, the chunk loop, the pacer and
+    the retry pass all live in
+    :func:`~kbutillib.domains.genome.ontology_mapping.council_run.council_run`;
+    this builder calls it, adds the derived headline numbers
+    (:func:`~kbutillib.domains.genome.ontology_mapping.council_run.run_summary`,
+    so the summary cannot drift from the chunk rows it summarises) and carries
+    the run's own warnings through rather than restating them.
+
+    Deliberately does NOT go through :func:`_ontomap`: stage 4 ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_run import council_run, run_summary
+
+    try:
+        record = dict(council_run(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+
+    warnings = list(record.get("warnings") or [])
+    data = {**record, "summary": run_summary(record)}
+    if not record.get("complete") and not warnings:
+        warnings.append(
+            "the run did not complete and said nothing about why; treat this "
+            "as a defect in the run record rather than as a finished run."
+        )
+    return _envelope("council-run", data=data, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-run")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json, QUOTE.json and APPROVED.json.",
+)
+@click.option(
+    "--no-resume",
+    "no_resume",
+    is_flag=True,
+    default=False,
+    help="Demand a FRESH, unconsumed approval and ignore the .done markers. "
+    "Default: resume, which is what honours them.",
+)
+@click.option(
+    "--profile",
+    default=None,
+    help="Re-route the bench. Default: the plan's own. A MODEL change is "
+    "refused by the approval gate; re-routing the same models is permitted.",
+)
+@click.option(
+    "--chunk-timeout",
+    "chunk_timeout",
+    default=None,
+    type=float,
+    metavar="SECONDS",
+    help="Per-chunk wall-clock budget, so one wedged chunk cannot hold the "
+    "run. Default: 21600 (6 h).",
+)
+@click.option(
+    "--poll-interval",
+    "poll_interval",
+    default=None,
+    type=float,
+    metavar="SECONDS",
+    help="How often the ceiling, the halts and the stop file are read. "
+    "Default: 5.",
+)
+@click.option(
+    "--retry-rounds",
+    "retry_rounds",
+    default=None,
+    type=int,
+    help="Cap on retry rounds over invalid_output items. Default: 2. 0 "
+    "declares the pass unnecessary, which is recorded as such.",
+)
+@click.option(
+    "--amsc-token",
+    "amsc_token",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Where the AMSC token is read from when the endpoint's api_key_env "
+    "is unset. Default: ~/.config/amsc/token.",
+)
+@click.option(
+    "--allow-unverified",
+    is_flag=True,
+    default=False,
+    help="Admit seats whose model nobody has confirmed serves what it claims.",
+)
+@click.option(
+    "--allow-unavailable",
+    is_flag=True,
+    default=False,
+    help="Queue a chunk even though an endpoint is unavailable here. Its "
+    "calls WAIT.",
+)
+@_json_option
+def council_run_cmd(
+    run_dir: str,
+    no_resume: bool,
+    profile: Optional[str],
+    chunk_timeout: Optional[float],
+    poll_interval: Optional[float],
+    retry_rounds: Optional[int],
+    amsc_token: Optional[str],
+    allow_unverified: bool,
+    allow_unavailable: bool,
+    as_json: bool,
+) -> None:
+    """Stage 4: execute an APPROVED plan, one chunk at a time, then retry.
+
+    SPENDS LLM TOKENS -- the only stage of this pipeline that does -- and
+    refuses to spend the first one until the approval gate passes and every
+    credential resolves.
+
+    \b
+    IT REFUSES TO START, NAMING THE CHECK, WHEN:
+      * any of the approval gate's six checks fails (approval_present,
+        quote_hash, plan_hash, bench_fingerprint, expires_at, consumed);
+      * `$ARGO_USER` is unset (`argo_user`) -- ARGO authenticates by ANL
+        username and it is exported in NO shell on this host;
+      * the AMSC token is neither in `$<api_key_env>` nor in
+        ~/.config/amsc/token (`amsc_token`).
+    Neither credential fails loudly once a run has started: the seats report
+    unavailable and the calls park, or the gateway answers 401 for nine
+    hours. This is what retires the `kbu-env.sh` wrapper -- the command
+    resolves what it needs and says where from.
+
+    ONE CHUNK AT A TIME, in plan order, with `.job`/`.done` markers: a
+    resumed run after a killed chunk re-executes only that chunk, against the
+    job it already submitted. One at a time is LOAD-BEARING, not caution --
+    the daemon drains every claimable job, so submitting them all up front
+    would rebuild the pending set the chunking exists to avoid (KBUtilLib
+    issue 84: claim cost 217 ms at 19k pending rows against 10.4 ms at 2k, a
+    10.8x throughput collapse).
+
+    THE RETRY PASS IS A DECLARED STAGE and the run is NOT reported complete
+    before it has run or been declared unnecessary. `invalid_output` is not
+    in the worker's RETRYABLE_KINDS and ARGO truncates silently, so a cut-off
+    reply is abandoned on its first attempt: 113 items failed that way in the
+    completed run and 105 came back on a plain retry, for 0.30% of run cost.
+
+    It HALTS on the approved per-gateway ceiling, on a gateway halt
+    (including a sustained rate limit) and on an operator stop -- a `STOP`
+    file in the run directory. Each halt is recorded with its reason on every
+    endpoint of the run; clear it with `kbu council endpoints reset-halt`
+    (and `reset-budget` for a ceiling halt) and resume.
+
+    \b
+    LAUNCHING A RUN THAT OUTLIVES ITS SESSION -- READ THIS.
+    THIS COMMAND RUNS IN THE FOREGROUND and detaching it is yours to do. On
+    this host a run that must survive the session has to be started under its
+    own scope:
+    \b
+        systemd-run --user --scope --collect \\
+            kbu ontomap council-run --run-dir <dir>
+    \b
+    `setsid`, `nohup` and `disown` DO NOT WORK here: none of them escapes the
+    launching unit's cgroup, and systemd kills everything in that cgroup when
+    the unit goes away -- without a trace in the run's own log. A 9-hour run
+    lost that way looks identical to a crash.
+    """
+    from ...domains.genome.ontology_mapping.council_run import (
+        AMSC_TOKEN_PATH,
+        DEFAULT_CHUNK_TIMEOUT_S,
+        DEFAULT_POLL_INTERVAL_S,
+        RETRY_ROUND_CAP,
+    )
+
+    _emit(
+        _build_council_run(
+            run_dir=run_dir,
+            resume=not no_resume,
+            profile=profile,
+            allow_unverified=allow_unverified,
+            allow_unavailable=allow_unavailable,
+            chunk_timeout_s=(
+                DEFAULT_CHUNK_TIMEOUT_S if chunk_timeout is None else chunk_timeout
+            ),
+            poll_interval_s=(
+                DEFAULT_POLL_INTERVAL_S if poll_interval is None else poll_interval
+            ),
+            retry_rounds=RETRY_ROUND_CAP if retry_rounds is None else retry_rounds,
+            amsc_token_path=amsc_token or AMSC_TOKEN_PATH,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-publish -- stage 5, the producer half
+# ---------------------------------------------------------------------------
+
+
+def _build_council_publish(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-publish`` envelope from the record it writes.
+
+    OWNS NO PUBLISH LOGIC. The render, the plan gate, the partition check, the
+    shard run and the inventory check-back all live in
+    :func:`~kbutillib.domains.genome.ontology_mapping.council_publish.council_publish`;
+    this builder calls it and carries its warnings through rather than
+    restating them -- a withheld item is a DEGRADED answer and the envelope
+    contract says ``warnings`` is never empty for one.
+
+    Deliberately does NOT go through :func:`_ontomap`: stage 5 ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_publish import council_publish
+
+    try:
+        record = dict(council_publish(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    return _envelope(
+        "council-publish", data=record, warnings=list(record.get("warnings") or [])
+    )
+
+
+@ontomap_cmd.command(name="council-publish")
+@click.option(
+    "--run-dir",
+    required=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="Run directory holding PLAN.json.",
+)
+@click.option(
+    "--verdicts",
+    "verdicts",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="The verdict parquet to publish. Default: verdicts.parquet in the "
+    "scratch directory PLAN.json names -- `council-export` refuses to write "
+    "it into the synced run directory, so it is never beside PLAN.json.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Where the shard run goes. Default: <run-dir>/shard, which is the "
+    "path Dropbox syncs to the consumer.",
+)
+@click.option(
+    "--target-bytes",
+    "target_bytes",
+    type=int,
+    default=None,
+    help="Target uncompressed bytes per shard (default ~512 MiB).",
+)
+@_json_option
+def council_publish_cmd(
+    run_dir: str,
+    verdicts: Optional[str],
+    out_dir: Optional[str],
+    target_bytes: Optional[int],
+    as_json: bool,
+) -> None:
+    """Stage 5: render the manifest, gate it, and shard the run's verdicts.
+
+    SPENDS NOTHING AND RUNS ANYWHERE. Sharding needs CPU and disk, "no pod and
+    no credentials" -- its own docstring says so -- so this runs here, beside
+    the run directory, and makes no transport call. The two IN-POD verbs are
+    the consumer's: Dropbox syncs `<run-dir>/shard/` to kbhub, where
+    `kbu clearinghouse load` (fill-only, idempotent, ledger-resumable) and
+    `kbu clearinghouse verify` run.
+
+    FOUR STEPS, each a reuse of something that already exists. The shipped
+    `function-to-go-council` preset is RENDERED into `<run-dir>/MANIFEST.toml`
+    with this run's query reference, bench fingerprint and mapping hash
+    substituted for the inert markers it ships; `kbu clearinghouse plan`'s own
+    validator then gates it, and the rendered `parameter_set_hash` is compared
+    against the one PLAN.json recorded -- a mismatch, or the documented inert
+    hash, refuses before a single row is written. Then `clearinghouse shard`
+    writes `<run-dir>/shard`, whose `run.json` carries a sha256, a row count,
+    a byte count and a hash range PER BATCH. That is the completeness contract
+    the consumer verifies against, and it already exists: there is no second
+    manifest format.
+
+    `PUBLISH.json` records the ITEM accounting the load receipt reconciles
+    against -- items submitted, items with a verdict, items unresolved, and
+    the declines by reason. Items are not rows in either direction: an item
+    whose every call failed produced no row at all and is invisible to the
+    shard run, and one item can carry several GO terms.
+
+    THE JOIN KEY is `query_id` -- the clearinghouse `entity_hash`, carried
+    through from the ranked file. NEVER the council's own
+    `items.entity_hash`, and never the definition text.
+    """
+    _emit(
+        _build_council_publish(
+            run_dir=run_dir,
+            verdicts=verdicts,
+            out_dir=out_dir,
+            target_bytes=target_bytes,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# council-status -- stage 4's report, and the only verb that reads ACROSS runs
+# ---------------------------------------------------------------------------
+
+
+def _build_council_status(**kwargs: Any) -> Dict[str, Any]:
+    """Build the ``council-status`` envelope from the status record.
+
+    OWNS NO STATUS LOGIC. The lifecycle classification, the two coverage
+    arithmetics and the concurrent-run check all live in
+    :mod:`kbutillib.domains.genome.ontology_mapping.council_status`; this
+    builder calls it and carries its warnings through rather than restating
+    them -- an unresolved parameter set, a failed read and a second run in
+    stage 4 are all DEGRADED answers, and the envelope contract says
+    ``warnings`` is never empty for one.
+
+    Deliberately does NOT go through :func:`_ontomap`: status ranks nothing,
+    so it must not pay for -- or fail on -- the retrieval backend's
+    numpy/scikit-learn/joblib stack.
+    """
+    from ...domains.genome.ontology_mapping.council_status import council_status
+
+    try:
+        record = dict(council_status(**kwargs))
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    warnings = list(record.get("warnings") or [])
+    if not record.get("runs"):
+        warnings.append(
+            "no run directories were found, so every lifecycle state between "
+            "un-run and loaded reads zero. That is a statement about the "
+            "directories this verb was pointed at, NOT about the "
+            "clearinghouse: a run directory that has not synced yet holds "
+            "work that is already in flight."
+        )
+    return _envelope("council-status", data=record, warnings=warnings)
+
+
+@ontomap_cmd.command(name="council-status")
+@click.option(
+    "--runs-root",
+    "runs_root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="The directory HOLDING the per-run directories. Every run under it "
+    "is classified.",
+)
+@click.option(
+    "--run-dir",
+    "run_dir",
+    multiple=True,
+    type=click.Path(file_okay=False, exists=True),
+    help="One run directory (repeatable), instead of or as well as a root.",
+)
+@click.option(
+    "--query",
+    default=None,
+    help='Council query as "<name>@<version>", which fixes the clearinghouse '
+    "source. Default: the newest discovered plan's, else go_mf@1.",
+)
+@click.option(
+    "--parameter-set-hash",
+    "parameter_set_hash",
+    default=None,
+    help="The CURRENT parameter set. Default: the one the newest discovered "
+    "plan records.",
+)
+@_json_option
+def council_status_cmd(
+    runs_root: Optional[str],
+    run_dir: Sequence[str],
+    query: Optional[str],
+    parameter_set_hash: Optional[str],
+    as_json: bool,
+) -> None:
+    """Stage 4: coverage by LIFECYCLE state and by `parameter_set_hash`.
+
+    SPENDS NOTHING, WRITES NOTHING, AND RUNS ANYWHERE. Two clearinghouse
+    reads -- a `COUNT(*)` for the corpus and one current-state read for this
+    source -- plus six `stat` calls per run directory. The reads work from
+    h100 off-pod over the BERDL delta API, so this is not gated on the locus;
+    only `load` and `verify` are in-pod.
+
+    \b
+    A CORPUS UNDER A VERSIONED TRANSFORM IS ALWAYS PARTLY STALE, so one
+    coverage number is the wrong answer and this reports two:
+
+    \b
+      BY LIFECYCLE -- un-run, planned-not-quoted, quoted-not-approved,
+      approved-not-run, running, exported-not-loaded, loaded. The MIDDLE-LATE
+      states are the ones that go missing: work that has been PAID FOR and
+      has not LANDED is invisible in both a "what is un-run" count (the plan
+      took it out of the un-run set) and a "what is loaded" count (nothing
+      landed), and that is exactly what a crashed 199M-token run leaves
+      behind. `paid_for_not_landed` is that number.
+
+    \b
+      BY parameter_set_hash -- how much of the corpus is current, and how
+      much is covered ONLY by an older parameter set. Partial-version
+      coverage is TOLERATED, NOT NORMALISED AWAY: re-running all 47,341
+      functions on every bench, query-version or mapping_hash bump is
+      unaffordable. So it is REPORTED, because "is this dataset consistent?"
+      is unanswerable otherwise.
+
+    IT SURFACES A SECOND CONCURRENT RUN. Two run directories both in stage 4
+    interleave their chunks through the one daemon and defeat the chunking
+    entirely (KBUtilLib issue 84: claim cost 217 ms at 19k pending rows
+    against 10.4 ms at 2k, a 10.8x throughput collapse). Neither run can see
+    the other; this verb can. The remedy is a `STOP` file in one of them.
+
+    THE STATE IS READ OFF THE FILES. Each stage writes exactly one artifact
+    into the synced run directory -- PLAN.json, QUOTE.json, APPROVED.json,
+    RUN.json, PUBLISH.json, and the consumer's LOADED.json -- so the
+    lifecycle is a function of which of those exist. `loaded` comes from the
+    CLEARINGHOUSE and not from the receipts, which is what catches the
+    crash-after-commit case: the Iceberg commit and the LOADED.json write
+    have no transaction between them, so a published run with no receipt
+    whose rows are already in the table needs its receipt RE-EXPORTED
+    (`verify --receipt`), not a reload.
+    """
+    if not runs_root and not run_dir:
+        raise click.UsageError(
+            "pass --runs-root (the directory holding the per-run "
+            "directories) and/or --run-dir. Status is a report ACROSS runs -- "
+            "a second concurrent run is one of the things it exists to "
+            "surface -- so it cannot be scoped to nothing."
+        )
+    _emit(
+        _build_council_status(
+            runs_root=runs_root,
+            run_dirs=list(run_dir) or None,
+            query=query,
+            parameter_set_hash=parameter_set_hash,
+        ),
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The remaining pipeline verbs -- registered, NOT yet implemented
+# ---------------------------------------------------------------------------
+
+#: The pipeline verbs this module registers but does not implement, with the
+#: stage each belongs to. A verb is registered here so the operator surface and
+#: its help listing are settled before its stage lands, and each one exits
+#: NON-ZERO: a stub that exited 0 would let a rehearsal of the whole pipeline
+#: pass over a missing stage and report success.
+#:
+#: **IT IS NOW EMPTY, AND THAT IS THE END STATE, NOT A GAP.** All five stages
+#: and all eight verbs have landed, ``council-status`` last; every name that
+#: was ever on this list has LEFT it, which is the expected shape of progress
+#: through the five stages. The machinery below is kept rather than deleted so
+#: that the next verb designed ahead of its implementation has somewhere to go
+#: -- the convention is what stops a rehearsal reporting success over a stage
+#: that does not exist, and it is cheaper to keep than to re-derive.
+_PLANNED_VERBS: tuple[tuple[str, str], ...] = ()
+
+
+def _register_stub(name: str, summary: str) -> None:
+    """Register one not-yet-implemented verb that exits non-zero when run."""
+
+    @ontomap_cmd.command(
+        name=name,
+        short_help=summary,
+        help=f"{summary}\n\nNOT IMPLEMENTED YET -- registered so the operator "
+        "surface is settled; running it is an error, never a silent success.",
+    )
+    @_json_option
+    def _stub(as_json: bool, _verb: str = name) -> None:
+        raise click.ClickException(
+            f"kbu ontomap {_verb}: not implemented yet. The verb is registered "
+            "but its stage has not landed; nothing was planned, quoted, run or "
+            "published."
+        )
+
+
+for _verb_name, _verb_summary in _PLANNED_VERBS:
+    _register_stub(_verb_name, _verb_summary)
+
+
+# ---------------------------------------------------------------------------
+# council-publish-lakehouse -- stage 5's producer half, from DURABLE data
+# ---------------------------------------------------------------------------
+#
+# Same output, different source. `council-publish` above reads the verdict
+# parquet a finished run's export wrote beside its PLAN.json; this verb
+# rebuilds that parquet out of the archived deliberation in
+# `kbaseincubator.council` plus the campaign's publication bundle, so the
+# publish is reproducible and re-runnable after the run directory, the scratch
+# export and the SQLite store are all gone. It then hands off to EXACTLY the
+# verb above: same render, same plan gate, same shard, same shipped preset,
+# same in-pod loader. There is no second loader and no second manifest format.
+
+
+@ontomap_cmd.command(name="council-publish-lakehouse")
+@click.option(
+    "--bundle",
+    required=True,
+    type=click.Path(dir_okay=False, exists=True),
+    help="The campaign's publication bundle (BUNDLE.json). Its digest is "
+    "verified on read.",
+)
+@click.option(
+    "--lakehouse",
+    default=None,
+    help="Where the council namespace lives: a local SQLite staging file, or "
+    "'berdl' for the live namespace (in-pod only). Default: berdl.",
+)
+@click.option(
+    "--publish-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Where PLAN.json, MANIFEST.toml, PUBLISH.json and shard/ go. Written "
+    "from the bundle, so no original run directory is needed.",
+)
+@click.option(
+    "--snapshot-id",
+    default=None,
+    help="Override the snapshot the bundle names. Still ONE snapshot, and "
+    "still refused unless the archive's load ledger marks it complete.",
+)
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the archiver's delivery state directories, for the "
+    "completeness check.",
+)
+@click.option(
+    "--coverage-floor",
+    "coverage_floor",
+    type=float,
+    default=None,
+    help="The pre-join guard's resolution floor. Default: the existing "
+    "clearinghouse DEFAULT_COVERAGE_FLOOR of 1.0. Lower it only for a "
+    "deliberately partial publish -- the measured production campaign has 8 "
+    "of 20,036 submitted query_ids (19,276 fanout + 760 abstentions) "
+    "unresolved, and those eight are the interesting number.",
+)
+@click.option(
+    "--roster-fingerprint",
+    default=None,
+    help="Override the run identity's roster_fingerprint. Only needed when "
+    "the gated jobs disagree or the archive recorded none.",
+)
+@click.option(
+    "--target-bytes",
+    "target_bytes",
+    type=int,
+    default=None,
+    help="Target uncompressed bytes per shard (default ~512 MiB).",
+)
+@_json_option
+def council_publish_lakehouse_cmd(
+    bundle: str,
+    lakehouse: Optional[str],
+    publish_dir: str,
+    snapshot_id: Optional[str],
+    state_root: Optional[str],
+    coverage_floor: Optional[float],
+    roster_fingerprint: Optional[str],
+    target_bytes: Optional[int],
+    as_json: bool,
+) -> None:
+    """Stage 5 from the LAKEHOUSE: a pinned snapshot plus a bundle in, shards out.
+
+    THREE GATES, ALL REQUIRED, and a job must pass every one: `query_name` is
+    `go_mf`; the job is LISTED in the campaign's publication bundle; and its
+    disposition is `published`. A job with NO disposition row is NOT
+    publishable -- absence never reads as published -- and a job named here
+    that is undispositioned or unlisted fails NON-ZERO with its id. The two
+    cancelled 19,276-item jobs in the production store look authoritative by
+    label, by size and by status; one of them carries 49 genuine but
+    superseded verdicts.
+
+    PINNED TO ONE COMPLETED SNAPSHOT, never "whatever is current": that makes
+    a re-publish non-reproducible. An incompletely-archived snapshot is
+    refused naming the tables that did not reconcile.
+
+    WINNERS RESOLVE BY THE BUNDLE'S DECLARED ORDER -- not by parent_job_id,
+    not by insertion order, not by latest timestamp.
+
+    THE GUARD RUNS BEFORE THE JOIN. A relationship test evaluated over an
+    empty join passes vacuously, so the four assertions (non-empty input,
+    non-null keys, at most one row per target slot, coverage at or above the
+    floor) are evaluated on the SOURCE side and each reports a count. A
+    non-empty input that resolves nothing exits non-zero whatever the floor.
+
+    THE LOAD IS NOT PERFORMED HERE and is not claimed. Everything this verb
+    does runs off-pod. `kbu clearinghouse load` and `kbu clearinghouse verify`
+    are the consumer machine's verbs and the receipt names them; it reports
+    the load as AWAITING OPERATOR ACCEPTANCE.
+    """
+    from ...domains.genome.ontology_mapping.council_bundle import read_bundle
+    from ...domains.kbase.berdl.council_publish import publish_from_lakehouse
+    from ...domains.kbase.berdl.council_sink import open_sink
+
+    kwargs: Dict[str, Any] = {}
+    if coverage_floor is not None:
+        kwargs["coverage_floor"] = coverage_floor
+    try:
+        record = dict(
+            publish_from_lakehouse(
+                open_sink(lakehouse),
+                read_bundle(bundle),
+                publish_dir=publish_dir,
+                snapshot_id=snapshot_id,
+                state_root=state_root,
+                roster_fingerprint=roster_fingerprint,
+                target_bytes=target_bytes,
+                **kwargs,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    _emit(
+        _envelope(
+            "council-publish-lakehouse",
+            data=record,
+            warnings=list((record.get("publish") or {}).get("warnings") or []),
+        ),
+        as_json=as_json,
+    )

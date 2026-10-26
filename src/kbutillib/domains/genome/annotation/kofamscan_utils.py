@@ -102,6 +102,7 @@ from .annotator_utils import (
     AnnotatorUtils,
     Term,
     _guard_protein,
+    classify_version,
     describe_or_accession,
     docker_image_identity,
 )
@@ -608,19 +609,29 @@ class KofamscanUtils(AnnotatorUtils):
         # bare tag (the previous behaviour) named nothing -- `latest` is a
         # different set of bytes after every rebuild. Native mode has no
         # digest to pin to, so it still records the executable path.
+        tool_version = (
+            docker_image_identity(self._docker_image)
+            if self._docker_image
+            else self._kofamscan_exe
+        ) or None
+        # Docker mode: the identity is a digest when `docker image inspect`
+        # answered, and a bare tag when it did not -- classify_version tells
+        # those apart. Native mode records an executable PATH, which does not
+        # identify a version at all, so the kind is None by construction.
+        version_kind = (
+            classify_version(tool_version, from_image=True)
+            if self._docker_image
+            else None
+        )
         return AnnotationResult(
             tool=_TOOL,
-            tool_version=(
-                docker_image_identity(self._docker_image)
-                if self._docker_image
-                else self._kofamscan_exe
-            )
-            or None,
+            tool_version=tool_version,
             db_version=self.profile_set,
             run_id=run_id,
             command=command,
             parameters=parameters,
             records=records,
+            version_kind=version_kind,
         )
 
     # ------------------------------------------------------------------

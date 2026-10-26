@@ -1044,3 +1044,123 @@ class TestNoInjection:
         assert result.error is not None
         assert result.error.kind == "model_unavailable"
         assert f"127.0.0.1:{port}" in result.error.message
+
+
+# ---------------------------------------------------------------------------
+# Web search: both HTTP backends refuse, and spend nothing doing it
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchIsRefusedWithoutARequest:
+    """Neither HTTP backend has live web search, and both say so honestly.
+
+    The point of a refusal rather than a silent downgrade: a caller that
+    asked for the live web and was quietly handed the model's training data
+    has no way to tell it happened.  Every test here asserts that the
+    recorder saw NO request, which is what makes "spends nothing" a measured
+    fact and not a claim about where the guard was placed.
+    """
+
+    @pytest.mark.parametrize("kind", ["argo", "openai"])
+    def test_the_attribute_is_false_on_both(self, kind: str) -> None:
+        backend = argo() if kind == "argo" else openai()
+        assert backend.supports_web_search is False
+        run(backend.aclose())
+
+    @pytest.mark.parametrize("kind", ["argo", "openai"])
+    def test_a_web_search_request_is_refused_and_nothing_is_sent(
+        self, kind: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Exported so the refusal cannot be mistaken for the missing-username
+        # auth failure: ARGO's credential is PRESENT and the call is still
+        # refused, which is also what proves the guard runs before _bearer.
+        monkeypatch.setenv(ARGO_USER_ENV, "someuser")
+        recorder = Recorder(chat_response(json.dumps(ANSWER)))
+        backend = argo(recorder) if kind == "argo" else openai(recorder)
+
+        result = complete(
+            backend,
+            request(seat(kind=kind, extra={"web_search": True})),
+        )
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.kind == "invalid_output"
+        assert result.error.message == f"{kind} has no web search; use context mode"
+        assert recorder.requests == [], "a refusal must not reach the transport"
+
+    def test_argo_refuses_even_with_no_username_exported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The web-search refusal is reported, not the auth failure.
+
+        Ordering matters for the caller: ``auth`` halts the whole endpoint and
+        is what a user chases a credential over, while this is a per-request
+        mistake the caller can fix by switching to context mode.
+        """
+        monkeypatch.delenv(ARGO_USER_ENV, raising=False)
+        recorder = Recorder(chat_response(json.dumps(ANSWER)))
+
+        result = complete(
+            argo(recorder), request(seat(extra={"web_search": True}))
+        )
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.kind == "invalid_output"
+        assert recorder.requests == []
+
+    @pytest.mark.parametrize("kind", ["argo", "openai"])
+    def test_a_falsy_opt_in_is_answered_normally(
+        self, kind: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``web_search=False`` is the same as absent: the call goes through."""
+        monkeypatch.setenv(ARGO_USER_ENV, "someuser")
+        recorder = Recorder(chat_response(json.dumps(ANSWER)))
+        backend = argo(recorder) if kind == "argo" else openai(recorder)
+
+        result = complete(
+            backend,
+            request(seat(kind=kind, extra={"web_search": False})),
+        )
+
+        assert result.ok is True, result.error
+        assert len(recorder.requests) == 1
+
+    @pytest.mark.parametrize("value", [False, None, 0])
+    def test_web_search_is_never_posted_as_a_model_parameter(
+        self, value: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """It is an instruction to the API TYPE, not a knob on the model.
+
+        A strict OpenAI-compatible server answers 400 for an unknown body
+        field, so forwarding the key a caller always writes would break every
+        call on exactly the servers that validate hardest.  Only falsy values
+        are exercised because a truthy one never reaches the body at all.
+        """
+        monkeypatch.setenv(ARGO_USER_ENV, "someuser")
+        recorder = Recorder(chat_response(json.dumps(ANSWER)))
+
+        result = complete(
+            argo(recorder),
+            request(seat(extra={"web_search": value, "top_p": 0.9})),
+        )
+
+        assert result.ok is True, result.error
+        body = recorder.body
+        assert "web_search" not in body
+        # The sibling param is still forwarded, so this is not "params were
+        # dropped wholesale".
+        assert body["top_p"] == 0.9
+
+    def test_web_search_is_absent_from_effective_params_too(self) -> None:
+        """The caller content-addresses its calls on this; a refused knob is not one."""
+        backend = argo()
+        try:
+            params = backend.effective_params(
+                seat(extra={"web_search": False, "top_p": 0.9})
+            )
+        finally:
+            run(backend.aclose())
+        assert "web_search" not in params
+        assert params["top_p"] == 0.9

@@ -604,6 +604,45 @@ class TestAnnotateMocked:
         assert result.records == []
         assert result.tool == "transyt"
 
+    def test_a_full_digest_identity_is_typed_as_an_artifact_digest(self):
+        """TranSyT has no --version flag, so its provenance is the image's
+        content hash. When `docker image inspect` answers, the identity is a
+        full sha256 and version_kind says so."""
+        digest = "f" * 64
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        with patch.object(tu, "is_available", return_value=True):
+            with patch.object(tu, "_run_docker", side_effect=self._fake_run_docker):
+                with patch(_IDENTITY, return_value=f"mock@sha256:{digest}"):
+                    result = tu.annotate(proteins={"prot1": "MKTAY"}, tax_id="562")
+
+        assert result.tool_version == f"mock@sha256:{digest}"
+        assert result.version_kind == "artifact-digest"
+        assert result.version_asserted_by is None
+
+    def test_a_bare_tag_identity_is_typed_as_identifying_nothing(self):
+        """docker_image_identity degrades to the bare tag when
+        `docker image inspect` cannot be run. `mock:latest` names a different
+        set of bytes after every rebuild, so it is not an identity."""
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        with patch.object(tu, "is_available", return_value=True):
+            with patch.object(tu, "_run_docker", side_effect=self._fake_run_docker):
+                with patch(_IDENTITY, return_value="mock:latest"):
+                    result = tu.annotate(proteins={"prot1": "MKTAY"}, tax_id="562")
+
+        assert result.tool_version == "mock:latest"
+        assert result.version_kind is None
+
+    def test_a_truncated_digest_identity_is_typed_none(self):
+        """The module's own `_annotate` fixture uses an abbreviated digest;
+        8 hex characters resolve nothing, so the kind must be None."""
+        tu = _make_utils()
+        tu._docker_image = "mock:latest"
+        result = self._annotate(tu, proteins={"prot1": "MKTAY"}, tax_id="562")
+        assert result.tool_version == "mock:latest@sha256:abc"
+        assert result.version_kind is None
+
     def test_metabolites_parameter_stored(self):
         tu = _make_utils()
         tu._docker_image = "mock:latest"

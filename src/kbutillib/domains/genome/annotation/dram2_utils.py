@@ -115,6 +115,7 @@ from .annotator_utils import (
     AnnotatorUtils,
     Term,
     _guard_protein,
+    classify_version,
 )
 
 # ---------------------------------------------------------------------------
@@ -733,6 +734,7 @@ class DRAM2Utils(AnnotatorUtils):
             command=command,
             parameters=parameters,
             records=records,
+            version_kind=classify_version(tool_version, from_image=False),
         )
 
     # ------------------------------------------------------------------

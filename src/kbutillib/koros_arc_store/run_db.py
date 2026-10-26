@@ -670,7 +670,7 @@ class RunDatabase:
         try:
             conn = self._connect()
         except Exception:  # noqa: BLE001 -- soft-fail, consistent with the writes
-            self._failed_writes += 1
+            self.failed_write_count += 1
             return False
         try:
             self._ensure_initialized_for_write(conn)
@@ -696,8 +696,8 @@ class RunDatabase:
             conn.commit()
             return True
         except Exception as exc:  # noqa: BLE001
-            self._failed_writes += 1
-            log.warning("describe_record failed for %s: %r", record_id, exc)
+            self.failed_write_count += 1
+            logger.warning("describe_record failed for %s: %r", record_id, exc)
             return False
         finally:
             conn.close()
@@ -727,7 +727,7 @@ class RunDatabase:
         try:
             conn = self._connect()
         except Exception:  # noqa: BLE001
-            self._failed_writes += 1
+            self.failed_write_count += 1
             return False
         try:
             self._ensure_initialized_for_write(conn)
@@ -747,8 +747,8 @@ class RunDatabase:
             conn.commit()
             return True
         except Exception as exc:  # noqa: BLE001
-            self._failed_writes += 1
-            log.warning("set_scope_description failed for %s/%s: %r", project, arc, exc)
+            self.failed_write_count += 1
+            logger.warning("set_scope_description failed for %s/%s: %r", project, arc, exc)
             return False
         finally:
             conn.close()

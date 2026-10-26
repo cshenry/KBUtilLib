@@ -72,6 +72,7 @@ __all__ = [
     "in_pod_leg",
     "render_report",
     "run_rehearsal",
+    "find_plan_files",
 ]
 
 
@@ -480,6 +481,32 @@ GENERATED_AT_SOURCE = (
 )
 
 
+def find_plan_files(base: Path) -> list[Path]:
+    """Every ``PLAN.json`` under *base*, TOLERATING A TREE THAT MOVES.
+
+    ``Path.rglob`` raises when a directory it has already decided to descend
+    into disappears before it gets there, and the whole walk dies with it.
+    That is not hypothetical on this host: ``/scratch/chenry`` is a search
+    root, it holds ``TMPDIR``, and poplar is a SHARED machine -- so a pip
+    build tracker or a pytest tmp directory belonging to someone else's
+    process is being created and deleted under the walk the entire time it
+    runs. Measured 2026-10-26: a t11 run died in step 0 on
+    ``FileNotFoundError: /scratch/chenry/tmp/pip-build-tracker-owajbjkv``,
+    which took steps 5, 6 and 7 down with it as NOT ASSERTED -- an
+    environmental race reported as a failure of the rail.
+
+    ``os.walk`` with ``onerror`` is the fix rather than a retry loop: the
+    right response to one unreadable or vanished subtree is to skip THAT
+    subtree and keep walking, and a retry would re-race. Sorted, so the
+    "first match was used" report is deterministic.
+    """
+    found: list[Path] = []
+    for directory, _subdirs, files in os.walk(base, onerror=lambda _exc: None):
+        if "PLAN.json" in files:
+            found.append(Path(directory) / "PLAN.json")
+    return sorted(found)
+
+
 class Rehearsal:
     """Drives the nine steps against one snapshot and one scratch namespace.
 
@@ -594,7 +621,7 @@ class Rehearsal:
             searched.append(str(base))
             if not base.is_dir():
                 continue
-            for plan_file in sorted(base.rglob("PLAN.json")):
+            for plan_file in find_plan_files(base):
                 try:
                     plan = json.loads(plan_file.read_text(encoding="utf-8"))
                 except Exception:  # noqa: BLE001 - a bad plan is not a plan
@@ -606,6 +633,14 @@ class Rehearsal:
                         "path": str(plan_file),
                         "query": plan.get("query"),
                         "counts": plan.get("counts"),
+                        # A RUN DIRECTORY OWNS ITS RECORD FILES; a publisher's
+                        # output directory names SOMEONE ELSE'S. See the
+                        # self_contained sort below.
+                        "self_contained": all(
+                            Path(str(plan.get(key) or "")).parent
+                            == plan_file.parent
+                            for key in ("abstain_file", "fanout_file")
+                        ),
                     }
                 )
         step.note(f"roots searched: {searched}")
@@ -627,14 +662,38 @@ class Rehearsal:
                 f"({len(candidates)} PLAN.json files found)."
             )
             return
+        # A DIRECTORY THAT OWNS ITS RECORD FILES WINS. `write_publish_plan`
+        # re-writes the bundle's plan into every publish directory, so a
+        # PREVIOUS run of this rehearsal leaves PLAN.json files that match
+        # this campaign on every count -- same query, same 19,276, and the
+        # record files still resolve because the plan names them by absolute
+        # path. Sorted first, they would SHADOW the real run directory and the
+        # rehearsal would take its own output as its input. The real run
+        # directory is the one whose plan names records that are its own
+        # siblings; a publish directory names another directory's. Stable, so
+        # the order within each group is still the deterministic sort.
+        matches.sort(key=lambda entry: not entry.get("self_contained"))
         if len(matches) > 1:
             step.find(
                 f"{len(matches)} run directories name this campaign: "
-                f"{[m['path'] for m in matches]}. The first was used. Two "
-                "plans for one campaign could declare different parameter "
-                "sets, and the parameter_set_hash is the partition key."
+                f"{[m['path'] for m in matches]}. The one that OWNS its "
+                "record files was used "
+                f"({matches[0]['path']}, self_contained="
+                f"{bool(matches[0].get('self_contained'))}); the others are "
+                "previous publish outputs, which carry a re-written copy of "
+                "the same plan. Two plans for one campaign could declare "
+                "different parameter sets, and the parameter_set_hash is the "
+                "partition key."
             )
         self.run_dir = Path(matches[0]["path"]).parent
+        step.check(
+            "the chosen run directory OWNS the record files its plan names "
+            "-- it is the directory the RUN wrote, not one a publisher "
+            "re-wrote the plan into",
+            True,
+            bool(matches[0].get("self_contained")),
+            evidence=f"run_dir={self.run_dir}",
+        )
         plan = json.loads((self.run_dir / "PLAN.json").read_text(encoding="utf-8"))
         step.check(
             "a run directory for the campaign exists and its PLAN.json names "

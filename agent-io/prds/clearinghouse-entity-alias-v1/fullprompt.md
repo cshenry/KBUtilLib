@@ -129,27 +129,30 @@ operator ran the new table's creation step. See Gotchas.
 
 ### Links to full research output
 
-- [External prior-art scan](research/external-prior-art-scan.md) -- **NOT PRESENT AT
-  COMMIT TIME. Read this before relying on the link.** The scan was dispatched three
-  times and the first two produced nothing:
-  `task-c06a5d7a` (codex) died in 35s on an expired credential, and `task-c9a6e008`
-  (claude) spent its entire 1200s budget researching -- 85+ tool calls, reaching
-  exactly the right material, including Ensembl's `info_type` patch timeline and the
-  UniProt `delac_sp`/`delac_tr` deletion lists -- and was killed having written
-  nothing. **That second failure was a defect in the dispatch prompt, not in the
-  research**: it never told the worker to write early, so a perfect uncommitted
-  report was worth nothing. `task-8a36f389` was re-dispatched with an explicit
-  write-first-and-commit-often instruction and a 2400s budget. If this link is dead
-  when you read it, that third attempt also failed and the external scan is simply
-  missing.
-  **What it was asked, and therefore what is still unverified:** Ensembl
-  `xref`/`object_xref` and specifically what `info_type`/`info_text` are FOR (bears
-  directly on Q2); UniProt idmapping; NCBI `gene2accession`; OBO
-  `alt_id`/`replaced_by` obsolescence modelling (bears on Q2a); identifiers.org and
-  Bioregistry on closed-vs-open vocabularies (bears on Q11.2); whether one external
-  id routinely maps to several internal entities (bears on Q7); partitioning war
-  stories for a crosswalk table keyed on its source vocabulary (bears on Q5); and
-  whether `curies`/`bioregistry`/`pyobo` are real candidates or overkill.
+- [External prior-art scan](research/external-prior-art-scan.md) -- **LANDED, on the
+  fifth dispatch.** Surveys Ensembl `xref`/`object_xref`, UniProt idmapping and its
+  ID Mapping service, NCBI `gene2accession` and `assembly_summary`, GO/OBO
+  obsolescence relations, GA4GH refget, BioMart and InterMine, identifiers.org,
+  Bioregistry, SSSOM and a commercial MDM crosswalk, plus the `curies`,
+  `bioregistry`, `prefixmaps` and `pyobo` packages. **It found one genuine defect**
+  -- `ncbi_taxon` is a membership relation and not an invertible alias (Q10, and the
+  `INVERTIBLE_ALIAS_SOURCES` tuple exists because of it) -- **independently
+  corroborated Q2a** without having been shown it, **reshaped Q2** (the missing
+  thing is method and actor, not a confidence float), **lowered Q6's confidence**
+  as the one property with no validating precedent, **closed Q11.2**, and
+  **declined to invent a war story** where it had no evidence, saying so in as many
+  words about Ensembl's `info_type` and about partitioning benchmarks. Its own
+  `WHAT I DID NOT SEARCH` section is unusually candid and worth reading.
+
+  Getting it took five attempts, and the failures are recorded because the lesson
+  outlived them: `task-c06a5d7a` (codex) died in 35s on the expired credential;
+  `task-c9a6e008` (claude) spent its whole 1200s budget researching -- 85+ tool
+  calls, reaching exactly the right sources -- and was killed having committed
+  nothing, which was **a defect in my dispatch prompt rather than in the research**,
+  because it never told the worker to write early; `task-8a36f389` failed to launch
+  on a Maestro-side error; and `task-e34c7004` succeeded on the codex rail once
+  Chris restored the credential, committing **five times incrementally** under an
+  explicit write-first instruction.
 
 ### Quality report
 
@@ -205,18 +208,28 @@ genome-identity-v1's Q12.2). KBase workspace API semantics for `kbase_ws_ref`
 unvalidated). And `kbdl_service`'s own SQLite clearinghouse, which lake-5 D5.18
 declines to retire and which this table does not touch.
 
-**THE EXTERNAL HALF OF THE RESEARCH STEP DID NOT LAND, and that is the single
-biggest gap in this document.** Everything above is the internal corpus, read
-directly. No literature, no prior art in other systems, and no reusable-tool survey
-informed this draft. Four entries are weaker than they would otherwise be and each
-says so in its own `Confidence` line: Q2 (the missing confidence column -- Ensembl's
-`info_type` is the direct precedent and went unread), Q2a (the observation model --
-OBO's `alt_id`/`replaced_by` is the direct precedent and went unread), Q5 (the
-partition key -- no war stories), and Q11.2 (closed-vs-open vocabulary -- the
-identifiers.org/Bioregistry experience is exactly the evidence missing). **A reader
-should treat those four as internally-reasoned rather than externally-corroborated.**
+**THE EXTERNAL HALF OF THE RESEARCH STEP DID LAND, on the fifth attempt, and it
+changed four entries.** Q10 went from NONE to MEDIUM blast radius on a real defect
+(`ncbi_taxon` is not invertible); Q2a rose to high confidence on independent
+corroboration; Q2 was reshaped (method/actor, not confidence) and its
+"cheap to add later" claim read down as unverified; Q6 fell from high to medium as
+the only design property with no validating precedent; and Q11.2 closed. Q5 is
+unchanged and still MEDIUM, because the scan looked for crosswalk partitioning
+guidance and found none.
 
-**Confidence the design should carry: HIGH on everything except Q2, Q2a and Q5.** The
+**What the scan itself did NOT do, from its own disclosure:** it read no internal
+source tree by design; it accepted the GTDB 7,225/596,859 figure as requester
+context without verifying it, and noted that a missing record can reflect release
+or selection differences rather than retraction; it did not inspect KBase/BV-BRC
+md5 canonicalization or workspace-ref version semantics, which is **exactly why
+`arc_record` and `kbase_ws_ref` are listed as invertible only PROVISIONALLY**; it
+performed no live multiplicity census and no Iceberg benchmark; and it installed no
+packages, so its tool assessments are documented-capability judgements rather than
+measured ones. It rates itself high on the schema and lifecycle distinctions and
+medium on the workload and tool-fit recommendations, which matches how they are
+used here.
+
+**Confidence the design should carry: HIGH on everything except Q2, Q5 and Q6.** The
 table shape, the vocabulary, the fill-only rule and the read surface are
 transcriptions of a design that was itself built against live reads, and the three
 derivations this PRD adds are each forced by a specific line of existing code
@@ -292,6 +305,25 @@ hash and is shared by every genome in the archive. Corrected, with the explicit 
 that an `archive_object_id` is never labelled `kbdl_fasta_object`.
 A `## Acceptance Criteria` section (37 items) was appended, and Q11.1 was closed by a
 sibling session's measurement.
+
+**Round 0, external prior-art scan folded -- 2026-10-26.** The scan landed on its
+fifth dispatch ([report](research/external-prior-art-scan.md), Maestro
+`task-e34c7004`) and changed five entries. **It found one genuine defect:**
+`ncbi_taxon` names a TAXON rather than an assembly, so it is a one-to-many
+membership relation in a table whose `resolve()` promises at most one -- Q10 goes
+from NONE to MEDIUM blast radius, a declared `INVERTIBLE_ALIAS_SOURCES` tuple now
+exists, and `resolve()` REFUSES a non-invertible source instead of raising a
+spurious ambiguity (`arc_analysis` is excluded on the same grounds, by its own
+description). A second, smaller defect: `resolve()` now counts
+`(entity_type, entity_hash)` PAIRS, because counting bare hashes hid cross-type
+ambiguity in a verb that neither takes nor returns an entity type. Q2a rose to HIGH
+confidence on independent corroboration -- the scan had not seen it and arrived at
+the same assert/retract event-log conclusion unprompted. Q2 was reshaped: the thing
+the prior art actually carries is METHOD and ACTOR, not a confidence float, and its
+"cheap to add later" claim is read down as unverified. Q6 fell from high to MEDIUM
+as the only design property with no validating precedent. Q11.2 closed -- there is
+no published threshold, and the premise that registries evolved from in-code tuples
+is itself unsupported.
 
 ## Problem Statement
 
@@ -434,7 +466,7 @@ currently answer at all.
 | `kbdl_fasta_object` | `fasta_object_id` (= KBDL `content_hash`, rule B) | `^[0-9a-f]{64}$` | the bytes. **This is also where hash rule B is recorded**, which is how the A/B relationship becomes queryable instead of folklore. |
 | `ncbi_assembly` | e.g. `GCF_000091665.1` | none (opaque) | |
 | `gtdb_accession` | GTDB's accession | none (opaque) | distinct from NCBI's; GTDB r220 has a hard NCBI coverage ceiling -- 7,225 of 596,859 genomes are gone from NCBI -- so these genuinely diverge |
-| `ncbi_taxon` | the taxon id, decimal string | `^[1-9][0-9]*$` | deliberately redundant with `genome_content.taxon_id`: one query shape for every identifier |
+| `ncbi_taxon` | the taxon id, decimal string | `^[1-9][0-9]*$` | **NOT INVERTIBLE** -- a membership relation, see below. Deliberately redundant with `genome_content.taxon_id`: one query shape for every identifier |
 | `kbase_assembly_md5` | the 32-hex md5 | `^[0-9a-f]{32}$` | foreign interop, fenced out of `entity_hash` by genome-identity-v1 D4 and homeless until now |
 | `bvbrc_genome_md5` | the 32-hex md5 | `^[0-9a-f]{32}$` | same |
 | `arc_record` | the arc store `record_id` | none (opaque) | |
@@ -449,6 +481,49 @@ prefix invites a writer to treat it as independent.
 where that is declared.** An undeclared validator is a decision, not an omission:
 the four opaque sources are opaque because their grammars are owned by other
 systems and this library has no business asserting them.
+
+### Not every alias source is INVERTIBLE, and the vocabulary has to say which
+
+**This is a defect the external prior-art scan caught, and it is the most valuable
+thing that scan returned.** `resolve(alias_source, alias_id)` promises at most one
+entity. That promise is false for `ncbi_taxon`: **a taxonomy id names a TAXON, not
+an assembly.** NCBI's own `assembly_summary` documentation separates the versioned
+assembly identifier (column 1) from the organism and species taxonomy ids
+(columns 6 and 7) precisely because they are different kinds of thing. So
+`resolve('ncbi_taxon', '2157')` is a MEMBERSHIP query that legitimately matches
+every archaeal genome in the corpus, and under the three-step reduction it would
+raise `AliasAmbiguousError` for the entirely normal case of having more than one
+genome per taxon. That is not an ambiguity to report; it is a question the verb
+should never have accepted.
+
+Three more sources were flagged as needing their own version-and-scope contracts
+before scalar inversion can be asserted at all -- `arc_record`, `arc_analysis` and
+`kbase_ws_ref`. Of those, `arc_analysis` is **explicitly the grouping key across
+re-runs**, so it is one-to-many by construction and by its own description.
+
+So the module declares a second, smaller tuple:
+
+```
+INVERTIBLE_ALIAS_SOURCES = (
+    "kbdl_object", "kbdl_fasta_object", "ncbi_assembly", "gtdb_accession",
+    "kbase_assembly_md5", "bvbrc_genome_md5", "arc_record", "kbase_ws_ref",
+)
+# NOT invertible: ncbi_taxon (a taxon names many assemblies),
+#                 arc_analysis (the grouping key across re-runs)
+```
+
+`resolve()` **REFUSES a non-invertible source** with a distinct error naming
+`aliases()` as the verb that answers the question. A refusal is right and an
+ambiguity error is wrong, because `AliasAmbiguousError` means "this data is
+contested and somebody must fix it" while a taxon matching many genomes means
+"you asked a set question with a scalar verb" -- conflating them would send an
+operator hunting a data defect that does not exist.
+
+`arc_record` and `kbase_ws_ref` are listed as invertible **provisionally**: the scan
+could not inspect their version semantics and neither could this PRD. If a workspace
+ref turns out to be version-unpinned, or an arc record to cover several entities, the
+fix is to move that one string from one tuple to the other -- which is exactly why
+invertibility is DATA in a tuple rather than logic in the verb.
 
 ## User Stories
 
@@ -719,8 +794,15 @@ they disagree:
 1. **Reduce independently per `(entity_type, entity_hash, alias_source, alias_id)`**
    to that four-tuple's latest observation, using the tie order above.
 2. **Discard the four-tuples whose winner is `withdrawn`.**
-3. **Count distinct `entity_hash` across what survives:** zero -> `None`, exactly
-   one -> that hash, more than one -> raise.
+3. **Count distinct `(entity_type, entity_hash)` PAIRS across what survives:**
+   zero -> `None`, exactly one -> that hash, more than one -> raise.
+
+**Count the PAIR, not the hash alone** -- another finding from the external scan.
+`resolve()` returns a bare `entity_hash` and takes no `entity_type`, so counting
+hashes alone would hide a CROSS-TYPE collision: one `(alias_source, alias_id)`
+resolving to the same hex string under two different entity types would read as
+unambiguous and return a hash the caller cannot interpret. Counting pairs makes that
+case raise, which is correct -- it genuinely is contested.
 
 **Historical withdrawn mappings therefore do NOT cause ambiguity.** The case that
 forced this to be written down: `hA present(t1)`, `hB present(t2)`,
@@ -993,6 +1075,18 @@ assertions and is where the additive-`schema_version` check belongs.
      raise (a count-every-historical-hash reading, which makes the correction
      permanently unresolvable). This is the test that pins the three-step reduction
      order in the read surface.
+14b2. **`resolve()` REFUSES a non-invertible source, and the refusal is not an
+      ambiguity error.** `resolve('ncbi_taxon', ...)` and
+      `resolve('arc_analysis', ...)` must raise a distinct non-invertible error
+      naming `aliases()` as the right verb -- NOT `AliasAmbiguousError`, and NOT a
+      `None`. Assert this even when only ONE genome carries that taxon, because the
+      refusal is about the source's CONTRACT and not about how many rows happen to
+      match today; a test that seeds one row and passes would hide the defect.
+14b3. **`resolve()` counts `(entity_type, entity_hash)` PAIRS, not hashes.** Seed
+      the same hex string under two different `entity_type` values for one
+      `(alias_source, alias_id)` and assert `AliasAmbiguousError`. Counting hashes
+      alone would read as unambiguous and return a hash the caller cannot interpret,
+      since `resolve()` takes and returns no entity type.
 14c. **The tie order is deterministic.** Given a `present` and a `withdrawn` for one
      four-tuple with IDENTICAL `observed_at`, the reduction is stable across repeated
      calls and `withdrawn` wins. Without a tie rule, SQL row order decides whether an
@@ -1102,12 +1196,33 @@ field to `register_aliases`'s row contract and `validate_alias`'s signature in t
 a filter and a returned key in t3, and an `[[source.alias]]` key in t6. Doing it
 NOW costs about an hour; doing it after the first bulk load costs a backfill or a
 permanently ambiguous column.
-**Confidence:** LOW -- and this is the entry the design session itself recorded as
-the one it was least sure of. **It is the top thing to look at**, and the cheapest
-moment to reverse it is before any row exists. The external prior-art scan was
-asked specifically what Ensembl's `info_type`/`info_text` are FOR and what becomes
-impossible without them; read
-[that scan](research/external-prior-art-scan.md) before accepting this.
+**Confidence:** LOW, and the external scan has now RESHAPED rather than resolved
+this entry. Three things it established, all of which change the argument:
+
+- **"Confidence" was the wrong name for what is missing.** The surveyed precedents
+  do not carry a floating confidence; they carry METHOD and ACTOR. Ensembl's
+  `info_type` distinguishes a DIRECT link from a PROJECTION or a
+  COORDINATE_OVERLAP, `identity_xref` carries alignment score and percent identity,
+  and `analysis_id` traces which analysis asserted the row; SSSOM separates
+  predicate, justification, author and reviewer, with confidence merely OPTIONAL.
+  **A confidence number alone would not recover method or actor**, so the column
+  this entry declines is not the column the prior art actually has.
+- **The concretely lost operations, which the first draft could only gesture at:**
+  selecting DIRECT rather than inferred links; filtering by alignment score;
+  tracing which analysis or which human asserted a mapping; and selecting
+  assertions by justification or reviewer. None of those is answerable from the
+  seven columns, and no "retained elsewhere" store exists for them in this design.
+- **The "cheap to add later" claim is UNVERIFIED and should be read down.** The
+  scan found **no quantified retrospective migration cost** in any surveyed system,
+  and no evidence that Ensembl ever regretted its schema -- it says so explicitly
+  rather than inventing a war story. The one verified later addition is SSSOM's
+  set-level confidence field. So "adding a nullable column later is cheap" remains
+  a plausible inference about Iceberg, not a precedent.
+
+**The decision still stands** -- a strict alias is a fact, and these ten sources are
+strict aliases rather than inferred mappings -- but if Chris reverses it, the thing
+to add is a METHOD/ACTOR column pair, not a confidence float.
+[The scan](research/external-prior-art-scan.md) is the evidence.
 
 ### Q2a. How is a WITHDRAWN or superseded alias expressed, given append-only? -- DECIDED: an `observation` field, so a row is an observation rather than a standing fact
 
@@ -1157,12 +1272,24 @@ exactly section 6's six columns. **The cost of being wrong in this direction is
 low**, which is worth knowing: because `null` reads naturally as `present`, adding
 the field LATER is one of the few schema changes here that does not strand existing
 rows -- so this is reversible in both directions, unlike Q1 or Q5.
-**Confidence:** medium. The ARGUMENT is strong and I did not originate it; what I am
-less sure of is whether a two-value vocabulary is enough, or whether a third state
-(`superseded`, distinct from `withdrawn`) earns its place once the obsolete-ID
-service is built. I deliberately did NOT add a third value: two writers inventing
-states no reader can order is the failure mode, and `ALIAS_OBSERVATIONS` is a code
-change away from growing if it needs to.
+**INDEPENDENTLY CORROBORATED, and by a reader that had not seen this entry.** The
+external prior-art scan was dispatched against the SIX-column design, before Q2a
+existed, and asked how surveyed systems express "this alias was once asserted and is
+no longer true". It concluded unprompted that a positive-only table "answers 'ever
+observed,' not 'currently valid'", that `observed_at` "dates the observation; it does
+not encode withdrawal", that `SELECT DISTINCT` "cannot repair a wrong edge", and
+that the escape route is **"an append-only event log with assert/retract
+operations"** -- precisely what Q2a adopted. Prior art agrees: NCBI uses status and
+history, GO distinguishes obsoletion from replacement, MDM products carry deletion
+dates. It also supplies the warning that matters most for a retrofit: **"a future
+nullable evidence column can describe new rows, but old evidence needs source replay
+and may be unrecoverable"** -- the argument for doing this now rather than later, in
+sharper form than I had it.
+**Confidence:** raised from medium to HIGH on the shape. What remains uncertain is
+only the vocabulary SIZE -- whether a third state (`superseded`, distinct from
+`withdrawn`) earns its place once the obsolete-ID service exists. I deliberately did
+NOT add one: two writers inventing states no reader can order is the failure mode,
+and `ALIAS_OBSERVATIONS` is a code change away from growing.
 
 ### Q3. How do alias rows get written, given that `register()` cannot name the table? -- DECIDED: a dedicated public `register_aliases()` verb
 
@@ -1217,12 +1344,21 @@ created means dropping and recreating it. Today that is free -- the table does n
 exist. The alternative worth considering is `entity_type`, which has exactly five
 values and therefore a bounded partition count; `alias_source` has ten today and
 grows by code change.
-**Confidence:** MEDIUM, and the reason is honest: it follows `source` and
-`query_name` BY ANALOGY, and **nobody has measured how the ten values will
-distribute, because there are no rows.** The external scan was asked for war
-stories on partitioning a crosswalk table by its source vocabulary. If
-`kbdl_fasta_object` ends up holding 95% of rows, this is a skewed partition that
-buys little.
+**One more reversal cost, from the external scan, which makes this worse than "a
+full rewrite" suggests:** Iceberg supports partition-spec EVOLUTION as a
+metadata-only change, but **older data remains under the OLD spec and is not
+reclustered**. A later repartition therefore does not fix the files already written;
+it splits the table into two layouts and leaves the badly-clustered history in place
+until somebody rewrites it deliberately.
+**Confidence:** MEDIUM. The external scan was asked specifically for war stories on
+partitioning a crosswalk by its source vocabulary and found **no benchmark and no
+crosswalk-specific guidance at all** -- only general engine documentation on
+partition boundaries and small-file costs, plus Delta's warning about small
+partitions. So this remains an analogy to `source` and `query_name` with **nobody
+having measured how the ten values will distribute, because there are no rows.** If
+`kbdl_fasta_object` ends up holding 95% of them, this is a skewed partition that buys
+little. Treat it as a workload assumption to be measured after the first real load,
+not a settled fact.
 
 ### Q6. Is an alias row with no matching entity row an ERROR? -- DECIDED: no -- it is legal, and the integrity check is a non-failing report
 
@@ -1240,8 +1376,15 @@ is the point: an opaque result is unrecoverable, an early alias is merely early.
 report-to-failure change in t4, plus deleting tests 15 and 17. It would also
 require every writer to order its appends entity-first, which `register_aliases`
 currently does not demand.
-**Confidence:** high -- the asymmetry with the result-hash case is well argued in
-the source design, and the reversal is cheap.
+**Confidence:** LOWERED from high to MEDIUM by the external scan, which is the one
+place it contradicted a design property rather than supporting it. Of the seven
+properties put to it, legal orphans was **the only one with no validating
+precedent**: relational cross-reference links and mapping-service failures "are not
+evidence for orphan hash rows", and an entity still existing does not mean every
+identifier link to it remains valid -- so the inverse health report answers a
+different question from the one a reader might assume. The asymmetry with the
+result-hash case is still well argued and the reversal is still cheap, so the
+decision stands; what does not stand is any claim that others do it this way.
 
 ### Q7. Can one `(alias_source, alias_id)` pair identify more than one entity? -- DECIDED: treat it as a defect -- `resolve()` RAISES rather than choosing
 
@@ -1295,14 +1438,30 @@ in t1 and test 8.
 **Confidence:** high -- but note this is a genuinely arguable call, and the test
 exists precisely because the obvious implementation gets it the other way round.
 
-### Q10. Is `ncbi_taxon` redundant with `genome_content.taxon_id`? -- DECIDED: yes, and store it anyway
+### Q10. Is `ncbi_taxon` redundant with `genome_content.taxon_id`? -- DECIDED: yes, store it anyway, and declare it NOT INVERTIBLE
 
-**Blast radius:** NONE
-**Why:** One query shape for every identifier is worth more than the saved rows.
-An operator asking "what do we know this genome by" should not have to know that
-nine answers come from one table and the tenth from another.
-**If you disagree:** drop one vocabulary entry and its row; nothing else moves.
-**Confidence:** high.
+**Blast radius:** MEDIUM -- raised from NONE after the external scan
+**Why:** One query shape for every identifier is worth more than the saved rows: an
+operator asking "what do we know this genome by" should not have to know that nine
+answers come from one table and the tenth from another. **But "redundant and
+harmless" was WRONG, and that was a real defect.** A taxonomy id names a TAXON, not
+an assembly -- NCBI's `assembly_summary` documentation separates the versioned
+assembly identifier from the organism and species taxonomy ids for exactly that
+reason -- so `ncbi_taxon` is a ONE-TO-MANY membership relation sitting in a table
+whose reverse lookup promises at most one. Left unaddressed,
+`resolve('ncbi_taxon', ...)` would raise `AliasAmbiguousError` for the ordinary case
+of two genomes sharing a taxon, sending an operator to hunt a data defect that does
+not exist. Hence `INVERTIBLE_ALIAS_SOURCES` and a REFUSAL rather than an ambiguity
+error; see the Solution's invertibility section. `arc_analysis` is excluded for the
+same reason and by its own description -- it is the grouping key across re-runs.
+**If you disagree:** dropping `ncbi_taxon` removes one vocabulary entry, its
+validator, its row and its exclusion from `INVERTIBLE_ALIAS_SOURCES`; the
+invertibility machinery itself must STAY, because `arc_analysis` needs it
+independently.
+**Confidence:** high on the invertibility split; medium on `arc_record` and
+`kbase_ws_ref` being invertible at all -- neither the scan nor this PRD could inspect
+their version semantics, and moving a string between the two tuples is the whole
+remedy if either turns out to be scoped differently.
 
 ### Q11. What I could not decide and did not guess
 
@@ -1342,13 +1501,24 @@ mistakes them for having been settled.
    parallel question for the GAA store is genome-identity-v1's Q12.2 and is still
    open there.
 
-2. **How the ten-value vocabulary should grow, if it outgrows a code change.**
-   `identifiers.org` and Bioregistry exist because closed in-code prefix lists did
-   not scale, and this PRD does not know at what scale that becomes true here. The
-   external scan was asked for the threshold and for whether there is a migration
-   path that does not rewrite rows. Until that comes back, the closed tuple is the
-   call and the growth path is "a code change and a review" -- which is the right
-   answer for ten values and may be the wrong one for a hundred.
+2. **CLOSED by the external scan, in the only way it honestly could be: there IS
+   no published threshold.** It looked for a corpus-size or organizational point at
+   which an in-code tuple should become a registry and found none -- and it also
+   found **no evidence that identifiers.org or Bioregistry ever evolved FROM such a
+   tuple**, saying plainly that "their existence alone does not establish that
+   history". So the premise of my original question was itself unsupported. What it
+   did establish is positive and actionable: those registries curate namespaces and
+   review prefix changes OUTSIDE their consumers, so **a ten-value tuple is
+   defensible, and the thing to preserve is the verbatim source spelling** -- which
+   lets a registry govern the same keys later without rewriting a single row. That
+   independently supports Q9 (store `alias_id` verbatim) and the bare-`alias_id`
+   choice in Out of Scope. **And no surveyed tool replaces this table**: `curies`,
+   `bioregistry`, `prefixmaps` and `pyobo` handle lexical namespaces and ontology
+   ingestion, not biological identity or Iceberg persistence. `curies` is named as
+   the best optional helper IF CURIE/URI conversion is ever needed, at the
+   ingestion or export boundary only, with the explicit caveat that **normalization
+   must not overwrite a verbatim `alias_id`**. The growth path stays "a code change
+   and a review", now as a researched position rather than a default.
 
 **No live measurement was taken by this session**, and three facts the design rests
 on are therefore inherited records from 2026-10-25 17:07 and 17:36 CDT rather than
@@ -1743,7 +1913,9 @@ Albert's and his to state. **Until it has run, this PRD is `continue`, not
 15. `aliases(current_only=True)` reduces to the latest observation per four-tuple and then excludes withdrawn winners, returning an empty result for a finally-withdrawn four-tuple.
 16. `aliases()` applies no filter for `None` and matches nothing for `[]`, with the emitted SQL containing `1 = 0` and never `IN ()`, and composes its filters by `AND`.
 17. The alias SQL builder emits placeholders and canonicalized params and performs no string interpolation of its own; inlining occurs only inside the existing `_run` / `_inline_hex_params` seam.
-18. `resolve()` reduces per four-tuple, discards withdrawn winners, then counts distinct `entity_hash` across survivors: zero returns `None`, one returns that hash, more than one raises `AliasAmbiguousError`.
+18. `resolve()` reduces per four-tuple, discards withdrawn winners, then counts distinct `(entity_type, entity_hash)` PAIRS across survivors: zero returns `None`, one returns that hash, more than one raises `AliasAmbiguousError`.
+18a. `INVERTIBLE_ALIAS_SOURCES` is declared and excludes exactly `ncbi_taxon` and `arc_analysis`; `resolve()` refuses a non-invertible source with a distinct error naming `aliases()`, and that refusal is neither `AliasAmbiguousError` nor `None`, and fires even when only one row currently matches.
+18b. Seeding one hex string under two different `entity_type` values for one `(alias_source, alias_id)` raises `AliasAmbiguousError`, proving pairs rather than hashes are counted.
 19. `resolve()` returns `hB` for the sequence `hA present`, `hB present`, `hA withdrawn` on one `(alias_source, alias_id)` pair.
 20. `AliasAmbiguousError` is not a subclass of `ValueError`, and its message names the pair and every `entity_hash` found.
 21. `resolve()` raises `ValueError` for an unknown `alias_source` and returns `None` for a valid-but-unknown alias, and the two are distinguishable.

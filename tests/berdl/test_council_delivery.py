@@ -1197,3 +1197,45 @@ class TestTheCli:
         assert envelope["data"]["counts"] == {"failed": 1}
         assert envelope["warnings"]
         assert "manifest" in envelope["warnings"][0]
+
+
+class TestTheLakehouseIsTheAuthority:
+    """A cached ``ok`` is re-reconciled against the tables on every tick.
+
+    "Correctness must come from reconciling disk against the lakehouse, NEVER
+    from having seen an event" applies to the receipt too: one that matches
+    its manifest while the rows are gone is exactly the state that would
+    otherwise be invisible.
+    """
+
+    def test_a_cached_receipt_whose_rows_are_gone_is_reported_not_trusted(
+        self, drop_root: Path, sink, state_root: Path, tmp_path: Path
+    ) -> None:
+        delivery = _drop_a_delivery(drop_root, tmp_path)
+        first = _scanner(drop_root, sink, state_root, tmp_path).tick(now=NOW)["reports"][0]
+        assert first["state"] == "complete"
+
+        # A DIFFERENT namespace, holding nothing -- the same state directory,
+        # the same receipt, the same manifest identity.
+        empty = SqliteCouncilSink(tmp_path / "other-lake" / "council.sqlite")
+        empty.bootstrap()
+        try:
+            scanner = cdel.CouncilDeliveryScanner(
+                drop_dir=drop_root,
+                scratch_dir=tmp_path / "scratch",
+                sink=empty,
+                state_root=state_root,
+                poll_seconds=1,
+            )
+            report = scanner.tick(now=NOW + timedelta(minutes=5))["reports"][0]
+            assert report["state"] == "failed"
+            assert report["stage"] == cdel.STAGE_ARCHIVE
+            assert report["archive"]["action"] == "receipt-disagrees-with-lakehouse"
+            assert "CACHE, never an authority" in report["archive"]["detail"]
+            # And nothing was re-appended into the empty namespace: the
+            # ledger says every batch committed and there is no rollback.
+            assert empty.count_rows("calls") == 0
+        finally:
+            empty.close()
+        # The original namespace is untouched.
+        assert _archived_calls(sink, delivery) == delivery["row_counts"]["calls"]

@@ -1205,7 +1205,37 @@ class CouncilDeliveryScanner:
         # excuse a failed publish, and a failed publish does not re-archive.
         archive_state = str((settled.get(STAGE_ARCHIVE) or {}).get("state") or "")
         if archive_state == OUTCOME_OK:
-            report[STAGE_ARCHIVE] = {**settled[STAGE_ARCHIVE], "action": "cached"}
+            # THE RECEIPT IS A CACHE AND THE LAKEHOUSE IS THE AUTHORITY, so a
+            # cached `ok` is re-reconciled against the tables every tick
+            # rather than trusted on its identity match alone. Correctness
+            # here comes from reconciling disk against the lakehouse; a
+            # receipt that matched its manifest while the rows were gone is
+            # exactly the state that would otherwise be invisible.
+            #
+            # A disagreement is reported and NOT papered over by re-appending:
+            # the ledger says every batch committed, so a retry would skip
+            # them all and there is no rollback. "The ledger says committed
+            # and the table is empty" is a decision about this delivery, the
+            # same posture `AmbiguousBatchError` takes.
+            status = reconcile_delivery(self.sink, ArchiveLedger(state_dir))
+            if status["complete"]:
+                report[STAGE_ARCHIVE] = {**settled[STAGE_ARCHIVE], "action": "cached"}
+            else:
+                report[STAGE_ARCHIVE] = {
+                    **settled[STAGE_ARCHIVE],
+                    "state": OUTCOME_FAILED,
+                    "action": "receipt-disagrees-with-lakehouse",
+                    "detail": (
+                        "the persisted archive receipt says this delivery "
+                        "reconciled, and the namespace now says it has not: "
+                        f"{status['incomplete']!r} did not reconcile "
+                        f"({ {table: status['tables'][table] for table in status['incomplete'] if table in status['tables']} }). "
+                        "A receipt is a CACHE, never an authority. This is "
+                        "NOT retried by re-appending: the load ledger says "
+                        "every batch committed, so a retry would skip them "
+                        "all, and there is no rollback."
+                    ),
+                }
         else:
             report[STAGE_ARCHIVE] = self._archive(
                 manifest, drop, identity=identity, outcomes=outcomes

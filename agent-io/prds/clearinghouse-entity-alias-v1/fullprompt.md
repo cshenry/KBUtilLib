@@ -260,6 +260,39 @@ implicit, each flagged as a derivation in Open Questions: the dedicated write ve
 terminal entry, including the `fitness.assembly_hash` rule-A/rule-B question that
 remains a live unknown. Folds in H3's documentation fix as task t7.
 
+**Round 0, confront round 1 folded -- 2026-10-26.** A cross-family (codex) adversary
+attacked the draft and returned EIGHT binding stall points
+([stall report](research/confront-round-1-stall-report.md), Maestro
+`task-a2c90f9f`). **All eight were kept; none was dropped**, because every one was a
+contradiction or an unverified claim in my own text rather than a disagreement about
+the design. What changed:
+(1) Out of Scope excluded retraction wholesale while Q2a added it -- a flat
+contradiction; the exclusion is now "mutable retraction COLUMNS, not retraction",
+and Q1's stale no-retraction clause is gone.
+(2) "Latest by `observed_at`" had no tie rule and no clock policy; the capability now
+mints `observed_at`/`ingest_batch_id` per call, REFUSES caller-supplied values, and
+every reduction orders by `observed_at DESC, ingest_batch_id DESC, observation DESC`.
+(3) `aliases()` claimed to return event history while specifying a five-tuple
+reduction, which cannot both hold; it now returns the latest occurrence of each
+STATE, and says what it cannot show.
+(4) `current_only=True` would have returned a withdrawn row from something called the
+live set; it now excludes withdrawn winners.
+(5) `resolve()`'s collision semantics admitted three incompatible readings; the
+three-step reduction is now explicit, and a corrected collision resolves rather than
+raising forever (test 14b).
+(6) **"Parameter-bound, never inlined" was unimplementable** -- `_run` has three
+binding regimes and only in-pod Trino binds; Spark and off-pod inline via
+`_inline_hex_params`. Withdrawn in favour of "the alias builder never interpolates".
+(7) The CLI said "exits non-zero only on the collision `ValueError`", wrong twice:
+the collision is `AliasAmbiguousError`, and "only" made a typo'd source look like a
+successful not-found.
+(8) **Gotcha 12's join guidance was materially WRONG.** Stripping `obj://` from
+`obj://<archive_id>#<entry>` yields the ARCHIVE id, which is not the member's FASTA
+hash and is shared by every genome in the archive. Corrected, with the explicit rule
+that an `archive_object_id` is never labelled `kbdl_fasta_object`.
+A `## Acceptance Criteria` section (37 items) was appended, and Q11.1 was closed by a
+sibling session's measurement.
+
 ## Problem Statement
 
 A genome in this system is known by at least eight different names, and the
@@ -555,8 +588,27 @@ register_aliases(rows, *, tenant=TENANT, dataset=NAMESPACE) -> dict
 ```
 
 `rows` is a sequence of mappings each carrying `entity_type`, `entity_hash`,
-`alias_source`, `alias_id`. `observed_at` and `ingest_batch_id` are filled by the
-writer exactly as the other write paths fill them.
+`alias_source`, `alias_id`.
+
+**THE CLOCK POLICY IS EXPLICIT, because "filled as the other write paths fill them"
+turned out to name no policy at all.** `register()` hands prepared mappings straight
+to `load()` and the registry projection retains caller-provided values, so the
+existing capability writers have no clock of their own; only the sharder does. So,
+for both alias verbs: **the capability generates a non-null UTC `observed_at` and a
+fresh ULID `ingest_batch_id` per call, and a caller-supplied value for either is
+REFUSED, not overridden.** Refusing rather than silently replacing matters because a
+caller passing `observed_at` is expressing an intent -- source event time -- that
+this design does not implement, and quietly discarding it would make the resulting
+ordering wrong in a way nobody could see.
+
+**Every latest-observation reduction in this PRD orders by
+`observed_at DESC, ingest_batch_id DESC, observation DESC`**, which makes
+`withdrawn` win an exact provenance tie. Equal timestamps are reachable at timestamp
+precision under concurrency, and without a tie rule SQL row order decides whether an
+alias is live -- arbitrarily, and differently on each read. This defines
+**deterministic tie behaviour, not global causal ordering across writers**; two
+writers disagreeing about the world is a producer problem the orphan report
+surfaces, not something a sort key can fix.
 
 It is modelled on `_write_parameter_set_registry()` -- a direct
 `capability.load()` with `tables=[{"name": ENTITY_ALIAS_TABLE, "mode": "append"}]`
@@ -614,9 +666,19 @@ Four filters composed by `AND`. **The semantics are `results()`'s, stated
 exactly**: `None` applies no filter; `[]` is a request to match nothing. For the
 list-valued filters use the existing `_in_literal()` helper, which already yields
 `1 = 0` for an empty list rather than an invalid `IN ()`. `entity_hash` goes
-through `_encode_hashes` and is **parameter-bound**, never inlined, exactly as
-every other hash lookup in the class. `alias_sources` is the partition column, so
-it prunes.
+through `_encode_hashes`. **Build hash predicates with PLACEHOLDERS and
+canonicalized params and execute them through the existing `_run` binding regimes;
+do not interpolate a hash in the alias SQL builder itself.** The first draft said
+"parameter-bound, never inlined", which is unimplementable: `_run` has THREE regimes
+and only one binds server-side. In-pod Trino binds truly; **in-pod Spark cannot bind
+at all** (`BerdlCapability.query` refuses `params` there) and off-pod has no bind
+channel, so both route through `_inline_hex_params`, which inlines the
+already-validated 64-hex value. Demanding "never inlined" would mean either refusing
+Spark and off-pod hash filters -- capabilities every neighbouring reader has -- or
+inventing a remote bind protocol, which is not this change. The invariant that is
+both achievable and the one that matters: **the alias builder never does its own
+string interpolation**, so validation and inlining stay in the single audited place.
+`alias_sources` is the partition column, so it prunes.
 
 Returns one dict per distinct five-tuple plus `observed_at` and `ingest_batch_id`.
 **`SELECT DISTINCT` on the five-tuple**, with `MAX(observed_at)` and a
@@ -624,19 +686,49 @@ corresponding `ingest_batch_id`, because the table is fill-only and a duplicate
 row is expected and harmless -- a reader that returned duplicates would be
 surfacing an implementation detail as data.
 
-`aliases()` returns the OBSERVATION HISTORY, not just current state: both the
-`present` and the `withdrawn` rows come back, each with its `observation` value.
-That is deliberate -- it is the verb an operator uses to ask "what happened to this
-accession", and collapsing it to current state would throw the answer away. A
-`current_only=True` keyword applies the latest-observation reduction for callers
-that want just the live set.
+**`aliases()` returns the most recent occurrence of EACH OBSERVATION STATE per
+four-tuple -- not full event history, and not just current state.** Repeated
+same-state events are intentionally collapsed by the five-tuple `DISTINCT`: after
+`present(t1) -> withdrawn(t2) -> present(t3)` it returns TWO rows, the withdrawn at
+t2 and the present at t3, and it cannot show the original t1 registration or
+distinguish a genuine re-assertion from a retry.
+
+That limit is stated rather than papered over, because the first draft advertised
+"observation history" while specifying a five-tuple reduction, and those are
+incompatible -- the reduction necessarily merges the first and third events. **No
+public complete-event-history accessor is promised here.** An operator asking "what
+happened to this accession" gets the state transitions, which is the useful answer;
+an auditor needing every row reads the table directly. Test 10a therefore asserts
+the three rows were PERSISTED, via the write path, not that `aliases()` returns
+three.
+
+**`current_only=True` first reduces each four-tuple to its single latest observation
+and then EXCLUDES withdrawn winners**, so it returns the live set and never hands
+back a row marked `withdrawn`. Returning a withdrawn dict and returning nothing are
+different public behaviours, and a caller trusting the phrase "live set" would
+otherwise act on an explicitly retracted identifier.
 
 ```
 resolve(alias_source, alias_id, *, engine=None) -> str | None
 ```
 
-The reverse lookup. It resolves against the **LATEST observation** for the pair: if
-that observation is `withdrawn`, there is no current mapping and it returns `None`.
+The reverse lookup, and its reduction order is specified exactly, because three
+different readings of "the latest observation for the pair" are each defensible and
+they disagree:
+
+1. **Reduce independently per `(entity_type, entity_hash, alias_source, alias_id)`**
+   to that four-tuple's latest observation, using the tie order above.
+2. **Discard the four-tuples whose winner is `withdrawn`.**
+3. **Count distinct `entity_hash` across what survives:** zero -> `None`, exactly
+   one -> that hash, more than one -> raise.
+
+**Historical withdrawn mappings therefore do NOT cause ambiguity.** The case that
+forced this to be written down: `hA present(t1)`, `hB present(t2)`,
+`hA withdrawn(t3)` for one `(alias_source, alias_id)`. A pair-global "latest wins"
+returns `None` and loses a perfectly valid mapping; counting every historical hash
+raises forever and makes a CORRECTED collision permanently unresolvable; the rule
+above returns `hB`, which is the only answer that treats the withdrawal as the
+correction it is.
 
 Validates `alias_source` against `ALIAS_SOURCES` and raises `ValueError` on an
 unknown one -- a typo must not return `None`, because `None` means "no such alias"
@@ -699,9 +791,20 @@ the existing output contract, with the command layer holding no logic of its own
 - `kbu clearinghouse aliases [--type T] [--hash H] [--alias-source S ...] [--alias-id I ...] [--json]`
 - `kbu clearinghouse resolve --alias-source S --alias-id I [--json]`
 
-`resolve` prints the hash, or reports "no entity" and **exits 0** -- "this alias is
-not known" is a successful answer to the question asked, not a failure. It exits
-non-zero only on the collision `ValueError`.
+**`AliasAmbiguousError` is a DISTINCT exception and NOT a `ValueError` subclass**,
+so the two cannot be caught together by accident. The exit contract:
+
+- a valid lookup with **no current mapping** emits a SUCCESSFUL envelope and
+  **exits 0** -- "this alias is not known" answers the question asked;
+- **`AliasAmbiguousError`** emits ONE failure envelope and **exits 1**;
+- an **invalid `--alias-source`** likewise emits one failure envelope and
+  **exits 1** -- it is bad user input, and the first draft's "exits non-zero only on
+  the collision" would have made a typo'd source indistinguishable by exit status
+  from a successful not-found;
+- transport and query errors also exit non-zero.
+
+No exception may escape as a traceback: that would bypass the one-envelope output
+contract every other verb in this module honours.
 
 **`SCHEMA_VERSION` stays at 1.** Both additions are new verbs and a new key inside
 `health`'s `data`; nothing a consumer already parses changes shape, which is
@@ -755,11 +858,14 @@ whole run, and the refusal is so a programmatic writer cannot bypass the skip.
   declares neither today. Record also that **KBDL's `genome_id` is literally
   `fasta_object_id[:16]`**, which is why the vocabulary has no `kbdl_genome_id`
   source.
-- **The `obj://` prefix rule**, because Gotcha 12 has no other home: state that
-  `alias_id` is stored BARE while `genome_content.fasta_reference` carries
-  `obj://<id>[#<member>]` as of `ed40f28`, that a direct join between them returns
-  zero rows, and that the archive-member form needs its `#<entry>` fragment split
-  off as well as the scheme stripped.
+- **The `obj://` pointer rule, in its CORRECTED form** (Gotcha 12 has no other
+  home): for a standalone `obj://<fasta_object_id>`, removing the scheme recovers
+  `kbdl_fasta_object.alias_id`; for `obj://<archive_object_id>#<entry_name>`,
+  parsing recovers an archive-and-member LOCATOR and **not** the member's FASTA
+  hash, so such a member must be joined through `entity_hash` or an explicit
+  member-mapping that does not yet exist. State plainly that an
+  `archive_object_id` must **never** be labelled `kbdl_fasta_object`, because it is
+  shared by every genome in the archive.
 - `agent-io/docs/kbu-clearinghouse-cli.md` gains the two verbs.
 
 ### Where the deep module is
@@ -853,23 +959,48 @@ assertions and is where the additive-`schema_version` check belongs.
     nothing, and the four filters compose by `AND`. Assert against the emitted SQL
     for the `[]` case (it must contain `1 = 0` and must NOT contain `IN ()`), and
     against returned rows for composition.
+11a. **The alias SQL builder never interpolates a hash itself.** Assert the builder
+     emits a PLACEHOLDER and passes canonicalized params, on every engine. Do NOT
+     assert "the hash is absent from the final SQL text" -- that is false by design
+     off-pod and on in-pod Spark, where `_run` inlines via `_inline_hex_params`
+     because neither can bind. The property under test is where interpolation
+     happens, not whether it happens.
 12. **`aliases()` returns one row per distinct five-tuple** when the stub returns a
     duplicated row, so fill-only's duplicates do not leak to a reader.
 13. **`resolve()` returns `None` for an unknown alias but RAISES `ValueError` for an
     unknown `alias_source`.** The two must be distinguishable; conflating them is
     the bug this test exists for.
-13a. **`aliases()` returns HISTORY by default and current state on request.**
-     With a `present` and a later `withdrawn` row for one four-tuple, the default
-     call returns BOTH, and `current_only=True` returns only the reduced latest.
-     A default that silently reduced would throw away the operator's answer to
-     "what happened to this accession".
+13a. **`aliases()` returns per-state latest by default; `current_only=True`
+     EXCLUDES withdrawn winners.** With a `present` and a later `withdrawn` row for
+     one four-tuple, the default call returns BOTH, and `current_only=True` returns
+     an EMPTY result -- not the withdrawn row. Returning a withdrawn dict from
+     something documented as the live set is the specific defect this test prevents.
+13b. **Repeated same-state events are collapsed, and that is asserted rather than
+     discovered.** After `present -> withdrawn -> present`, the default
+     `aliases()` returns TWO rows (the t2 withdrawn and the t3 present), not three.
+     This pins the contract that `aliases()` is not an event-history accessor.
 14. **`resolve()` RAISES on two distinct hashes for one pair**, and the message
     names both. See Q7.
-14a. **The contested raise is a DISTINCT exception type.** Assert
-     `AliasAmbiguousError` specifically, and assert it is NOT what an unknown
-     `alias_source` raises and NOT what a not-found returns. Conflating "unknown"
-     with "contested" is the defect; a test on the type is what keeps them apart
-     through a later refactor.
+14a. **The contested raise is a DISTINCT exception type and NOT a `ValueError`
+     subclass.** Assert `AliasAmbiguousError` specifically, assert it is NOT what an
+     unknown `alias_source` raises, and assert `issubclass(AliasAmbiguousError,
+     ValueError)` is FALSE -- otherwise a single `except ValueError` catches both and
+     the distinction the type exists for is lost silently.
+14b. **A CORRECTED collision resolves rather than raising forever.** The sequence
+     `hA present(t1)`, `hB present(t2)`, `hA withdrawn(t3)` for one
+     `(alias_source, alias_id)` must return `hB`. Assert it does NOT return `None`
+     (a pair-global latest-wins reading, which loses a valid mapping) and does NOT
+     raise (a count-every-historical-hash reading, which makes the correction
+     permanently unresolvable). This is the test that pins the three-step reduction
+     order in the read surface.
+14c. **The tie order is deterministic.** Given a `present` and a `withdrawn` for one
+     four-tuple with IDENTICAL `observed_at`, the reduction is stable across repeated
+     calls and `withdrawn` wins. Without a tie rule, SQL row order decides whether an
+     alias is live, differently on each read.
+14d. **Caller-supplied provenance is REFUSED.** A row carrying `observed_at` or
+     `ingest_batch_id` is rejected by both write verbs, rather than silently
+     overridden, and each verb generates a non-null UTC timestamp and a fresh ULID
+     batch id per call.
 15. **`alias_orphans()` reports a non-zero orphan count and the `health` verb still
     exits ZERO.** This is the single most important test in the PRD. Assert the exit
     code, and assert that the returned report has no `failures` key -- the second
@@ -943,10 +1074,11 @@ genome companion namespace (decision (2), session `368c658e`) asked whether its 
 source of truth. **Genericity over `entity_type` is firm and will not be narrowed
 to genome-only**, so a projection is the right END STATE. It is deliberately not
 the right thing to build yet, for three reasons that are properties of THIS design:
-the join key is undeclared (`fitness.assembly_hash` follows neither hash rule -- see
-Q11.1), `entity_alias` has no retraction (Gotcha 6), and an alias whose entity does
-not exist is legal (Q6), so a projection hands a consumer orphan rows that are
-correct by design. The recommendation sent to that session was therefore: build
+an alias whose entity does not exist is legal (Q6), so a projection hands a consumer
+orphan rows that are correct by design; and the companion namespace must be loadable
+before `entity_alias` exists at all. (The first reason given here originally was an
+undeclared join key; **that reason is now CLOSED** -- see Q11.1 -- and retraction is
+no longer absent either, per Q2a. One of the three original objections survives.) The recommendation sent to that session was therefore: build
 `genome_alias` separately now, but spell the columns identically
 (`alias_source`, `alias_id`, `observed_at`, `ingest_batch_id`) so convergence is
 later a VIEW rather than a rewrite.
@@ -1177,16 +1309,38 @@ nine answers come from one table and the tenth from another.
 Two items. Neither blocks the build; both are recorded so that nobody later
 mistakes them for having been settled.
 
-1. **Whether any `kbaseincubator.fitness` row already carries an `assembly_hash`
-   computed under rule B rather than rule A.** The design session read the
-   *columns*, not the *values*. If even one row is rule B, H3 is a LIVE DATA PROBLEM
-   and not merely a documentation gap, and decision (2) -- the genome companion
-   namespace, which builds on exactly that column -- inherits it. This PRD's t7
-   documents the distinction, which is the right action either way, but
-   documentation does not fix wrong values. **Settled by one `COUNT(*)` against
-   `fitness.genome` joined to a known rule-A hash, or more cheaply by whoever wrote
-   those rows saying which function they called.** The parallel question for the GAA
-   store is genome-identity-v1's own Q12.2 and is open there too.
+1. **SETTLED SINCE THE FIRST DRAFT, and favourably:
+   `kbaseincubator.fitness.assembly_hash` IS rule A.** Measured by session
+   `368c658e` on 2026-10-26, n=3, by recomputing BOTH rules from the real bytes --
+   fetch the assembly object, pull the FASTA from the blobstore behind
+   `fasta_handle_ref`, run `standardizers.entity_hash('genome',
+   parse_fasta_contigs(raw))` and `sha256(raw)`, and compare each to the stored
+   value. Refs `262939/41/3` (1 contig), `262939/27/2` (16 contigs) and
+   `262939/85/3` (7 contigs) all MATCH rule A; none matches rule B. **Two of the
+   three are multi-contig**, so rule A's sort step is load-bearing in those cases
+   and the stored hash still matches -- which a single-contig test could NOT have
+   shown, because with one contig sorting is a no-op and the two rules differ only
+   by header inclusion. So H3 is a DOCUMENTATION gap, not a live data problem, and
+   `fitness.assembly_hash` already IS this table's `entity_hash`.
+
+   **AND A METHOD CORRECTION THAT MATTERS MORE THAN THE ANSWER.** This entry
+   originally said it was "settled by one `COUNT(*)`". **That was wrong**, and the
+   same session proved it by running exactly that test: intersecting the 47
+   `fitness.assembly_hash` values against KBDL's 4,865 `content_hash` values (rule B
+   by construction) returned 0, and against `fasta_object_id` also 0. **Both zeros
+   are UNINFORMATIVE**, because the corpora are DISJOINT -- 48 fitnessDB genomes in
+   KBase workspace 262939 versus 4,865 KBDL-built genomes -- so an empty
+   intersection was the expected result under BOTH hypotheses. Reported as
+   "settled, not rule B" it would have read as authoritative and been unsupported.
+   **A hash-rule question is settled by recomputing from the bytes, never by an
+   intersection between corpora that may not overlap**, and the corpus-overlap
+   precondition is the thing to check before believing any such intersection.
+
+   **Scope of the claim, stated honestly:** n=3 of 47 is strong evidence and a
+   refutation of "some rows are rule B", but it is not a proof over all 47. The
+   remaining 44 cost roughly 5 MB of blobstore traffic each by that recipe. The
+   parallel question for the GAA store is genome-identity-v1's Q12.2 and is still
+   open there.
 
 2. **How the ten-value vocabulary should grow, if it outgrows a code change.**
    `identifiers.org` and Bioregistry exist because closed in-code prefix lists did
@@ -1320,20 +1474,33 @@ the version this PRD was written against (`b63eb6a2`), and it moved twice in two
 minutes on 2026-10-25. **Anything cut from this PRD must re-read `main` in the same
 minute it is cut.** This is a coordination hazard, not a design one.
 
-**12. Joining `entity_alias.alias_id` to `genome_content.fasta_reference` requires
-adding the `obj://` prefix, and neither column says so.** As of `ed40f28`,
-`fasta_reference` holds `obj://<id>` for a bare object and
-`obj://<archive_id>#<entry>` for an archive member, while `alias_id` under
-`alias_source = 'kbdl_fasta_object'` holds the bare `<id>`. Both are correct for
-their own column (see Out of Scope), but a consumer joining them directly gets ZERO
-ROWS -- not an error, not a type mismatch, just an empty result that looks like
-"we have no aliases for these genomes". The archive-member case is worse than a
-prefix mismatch: `fasta_reference` may carry a `#<entry>` fragment that has no
-counterpart in `alias_id` at all, so even after stripping `obj://` the join needs
-the fragment split off. **A silently-empty join is the single most likely way a
-downstream reader gets this wrong**, and it is exactly the failure mode the H1
-unification was done to prevent, reappearing one level down at the CURIE/URI
-boundary. t7's documentation must state the prefix rule explicitly.
+**12. `fasta_reference` and `alias_id` are NOT two spellings of one value, and for
+archive members they are not even the same KIND of thing -- so no prefix trick
+joins them.** This gotcha was materially WRONG in the first draft, which said
+stripping `obj://` and splitting the `#<entry>` fragment would bridge the join. It
+will not, and the corrected version is the one that matters:
+
+- **Standalone object.** `fasta_reference` is `obj://<fasta_object_id>` and
+  `alias_id` under `alias_source = 'kbdl_fasta_object'` is the bare
+  `<fasta_object_id>`. Here removing the scheme DOES recover the alias value; the
+  only hazard is the prefix, and a direct join silently returns zero rows.
+- **Archive member -- the part that was wrong.** `fasta_reference` is
+  `obj://<archive_object_id>#<entry_name>`, which the preset's own comment calls
+  "A POINTER INTO THE ARCHIVE, not to a standalone object: a genome in a
+  GenomeArchive is one MEMBER of it". The adapter emits `archive_object_id` and
+  `entry_name` separately and **emits no `fasta_object_id` for that record at all**.
+  So stripping the scheme yields the ARCHIVE id, which is NOT the member's rule-B
+  FASTA content hash and is **shared by every genome in that archive**. Treating it
+  as a per-genome identifier produces empty joins or, worse, many-entity collisions.
+
+**Therefore: never label an `archive_object_id` as `kbdl_fasta_object`.** Join an
+archive member through `entity_hash`, or through an explicit
+archive-and-member-to-member-hash mapping that does not exist yet. Building that
+mapping is a separately scoped follow-on and is NOT in this PRD.
+
+A silently-empty join remains the most likely way a downstream reader gets this
+wrong, and it is the H1 failure mode reappearing one level down at the CURIE/URI
+boundary -- which is why t7 must state the rule, in the corrected form.
 
 ## Sources Consulted
 
@@ -1489,9 +1656,16 @@ does not backfill `entity_alias` from them.
 20,036 `function_result` rows.** D3.7: nothing is retrofitted. Those stay as they
 are.
 
-**A tombstone / retraction mechanism.** See Gotcha 6. No `retracted_at`, no
-`replaced_by`. If it is needed it is a schema change, and nobody has decided to
-need it.
+**Mutable retraction columns -- but NOT retraction itself.** This exclusion was
+rewritten in confront round 1, because the first draft excluded retraction
+wholesale and then Q2a added it, which is a flat contradiction a build agent cannot
+resolve. The correct statement: **observation-based withdrawal and reinstatement are
+IN SCOPE** (Q2a, Implementation Decisions 1-4). What is OUT of scope is a mutable
+`retracted_at` timestamp and a successor-link `replaced_by` column -- the first
+because stamping it requires UPDATING a row, which append-only forbids, and the
+second because a named replacement is already just another alias row. **Q2a and
+Implementation Decisions 1-4 supersede every earlier statement in this document
+that `entity_alias` has no retraction.**
 
 **Ahmed's Protein Clearinghouse.** Explicitly out per Chris, 2026-10-07, and
 lake-5 D5.1.
@@ -1549,3 +1723,43 @@ spec (not merely that the table exists -- see Gotcha 3); then
 orphan total of 0. It requires in-pod credentials on kbhub, so its route is
 Albert's and his to state. **Until it has run, this PRD is `continue`, not
 `finished`.**
+
+## Acceptance Criteria
+
+1. `clearinghouse_schema` declares `ENTITY_ALIAS_TABLE`, `_ENTITY_ALIAS_COLUMNS` with exactly seven columns in DDL order, `entity_alias_columns()`, `entity_alias_column_names()`, `ALIAS_SOURCES` with exactly ten values and no `kbdl_genome_id`, `ALIAS_OBSERVATIONS == ("present", "withdrawn")`, `ALIAS_SOURCE_PATTERNS` with exactly four entries, and `validate_alias()`.
+2. `table_configs()` returns seventeen configs, with the `entity_alias` config last and carrying `partition_by == "alias_source"`.
+3. `entity_alias` is absent from `ENTITY_TYPES`, absent from all three `all_<kind>` union views, and `table_name()` raises `ValueError` for it in either argument position.
+4. `validate_alias()` defaults `observation` to `"present"`, refuses an unknown `alias_source` and an unknown `observation` naming the legal values in each case, refuses an `alias_id` that is empty, whitespace-only or `None`, and returns a whitespace-padded `alias_id` byte-identical.
+5. Observation-based withdrawal and reinstatement are implemented; no `retracted_at` and no `replaced_by` column exists anywhere in the schema.
+6. No statement anywhere in the committed PRD or the code comments asserts that `entity_alias` has no retraction mechanism.
+7. `register_aliases()` is fill-only on the five-tuple, always writes `observation = "present"`, and makes ZERO `load()` calls on an identical retry, reporting every row as `already_present`.
+8. `observe_alias()` always appends and never applies fill-only, so a `present -> withdrawn -> present` sequence persists all three rows.
+9. Both write verbs generate a non-null UTC `observed_at` and a fresh ULID `ingest_batch_id` per call, and REFUSE a caller-supplied value for either rather than overriding it.
+10. Every latest-observation reduction orders by `observed_at DESC, ingest_batch_id DESC, observation DESC`, making `withdrawn` win an exact provenance tie, and the result is stable across repeated calls.
+11. Both write verbs validate every row before any append and refuse the whole call with `load()` uncalled on any invalid row, naming the offending row index.
+12. Both write verbs refuse off-pod, run the write-target assertion, apply the postflight null-`row_count` check, and refuse with a message naming OP-C5 when the `entity_alias` table is absent.
+13. Neither write verb calls `_assert_lake5_schema`, and `_assert_lake5_schema` still passes against a namespace holding the sixteen pre-existing tables without `entity_alias`.
+14. `aliases()` returns the most recent occurrence of each observation state per four-tuple: after `present -> withdrawn -> present` it returns two rows, not three.
+15. `aliases(current_only=True)` reduces to the latest observation per four-tuple and then excludes withdrawn winners, returning an empty result for a finally-withdrawn four-tuple.
+16. `aliases()` applies no filter for `None` and matches nothing for `[]`, with the emitted SQL containing `1 = 0` and never `IN ()`, and composes its filters by `AND`.
+17. The alias SQL builder emits placeholders and canonicalized params and performs no string interpolation of its own; inlining occurs only inside the existing `_run` / `_inline_hex_params` seam.
+18. `resolve()` reduces per four-tuple, discards withdrawn winners, then counts distinct `entity_hash` across survivors: zero returns `None`, one returns that hash, more than one raises `AliasAmbiguousError`.
+19. `resolve()` returns `hB` for the sequence `hA present`, `hB present`, `hA withdrawn` on one `(alias_source, alias_id)` pair.
+20. `AliasAmbiguousError` is not a subclass of `ValueError`, and its message names the pair and every `entity_hash` found.
+21. `resolve()` raises `ValueError` for an unknown `alias_source` and returns `None` for a valid-but-unknown alias, and the two are distinguishable.
+22. `alias_orphans()` returns a report carrying `orphans_by_source`, `orphan_total` and the reduced population size, and carrying NO `failures` key.
+23. `alias_orphans()` counts only four-tuples whose latest observation is `present`: a withdrawn orphan yields `orphan_total == 0`, and the same alias re-observed as present is counted.
+24. `kbu clearinghouse health` exits ZERO with a non-zero alias orphan count present, and still exits NON-ZERO when a parameter-set integrity finding is present.
+25. The alias orphan report appears in the health envelope as `data.alias_integrity` and never in `warnings`.
+26. `kbu clearinghouse aliases` and `kbu clearinghouse resolve` each emit exactly one envelope under the existing output contract in both human and `--json` modes, with no exception escaping as a traceback.
+27. `kbu clearinghouse resolve` exits 0 for a valid lookup with no current mapping, and exits 1 for `AliasAmbiguousError` and for an invalid `--alias-source`.
+28. An unpassed `--alias-source` is not collapsed to `[]`, and repeated values reach the capability as a list.
+29. `SCHEMA_VERSION` is still 1, and every pre-existing `health` envelope key is still present with `alias_integrity` added.
+30. `clearinghouse_manifest.KINDS` includes `"alias"`, and a preset declaring a list-shaped `[[source.alias]]` block plans successfully and yields an `entity_alias` `TablePlan`.
+31. The manifest refuses, at PLAN time, an unknown `alias_source`, an unparseable `alias_id` derivation, a mapping of any sharder-filled column including `observation`, and `"alias"` declared in `kinds` with no block.
+32. Planned alias rows carry `observation = "present"` unconditionally, and a preset cannot declare `observation`.
+33. A null-producing `@concat` in an alias block drops the row and emits no `alias_id` containing the literal string `"None"`.
+34. The operator runbook contains an `OP-C5` section after `OP-C4`, following `OP-C1`'s dry-run / real-run / acceptance structure, whose acceptance step reads the live columns AND the live partition spec and states why existence alone is insufficient.
+35. The operator runbook states that rule A is the clearinghouse identity and rule B is a KBDL-local artifact id, that `kbaseincubator.fitness`'s `assembly_hash` columns declare neither rule in their own documentation, and that KBDL's `genome_id` is literally `fasta_object_id[:16]`.
+36. The operator runbook states the corrected `obj://` pointer rule: that removing the scheme recovers `alias_id` only for a standalone `obj://<fasta_object_id>`, that `obj://<archive_object_id>#<entry_name>` yields an archive-and-member locator and NOT the member's FASTA hash, and that an `archive_object_id` must never be labelled `kbdl_fasta_object`.
+37. No test criterion anywhere in the delivered work requires a fully green test suite; every test-related criterion is regression-framed.

@@ -588,11 +588,18 @@ and `parameter_set_hash` is added.
 
 ```
 function(function_id, description, <tail>)
-function_annotation(gene_id, function_id, tool, tool_version, parameter_set_hash, score, <tail>)
+function_annotation(build_id, gene_id, function_id, tool, tool_version, parameter_set_hash, score, <tail>)
 ontology_term(ontology_id, namespace, term, label, definition, lineage, <tail>)
-ontology_annotation(gene_id, ontology_id, tool, tool_version, parameter_set_hash, score, <tail>)
-transyt_annotation(gene_id, reaction_equation, tc_number, substrate, tool_version, parameter_set_hash, <tail>)
+ontology_annotation(build_id, gene_id, ontology_id, tool, tool_version, parameter_set_hash, score, <tail>)
+transyt_annotation(build_id, gene_id, reaction_equation, tc_number, substrate, tool_version, parameter_set_hash, <tail>)
 ```
+
+**`build_id` leads every gene-referencing table, and that is a consequence of Q4 rather than a
+separate decision.** Once `gene` is keyed on `(build_id, gene_id)`, a `gene_id` alone does not
+identify a row, so a functional annotation carrying only `gene_id` cannot say *which* structural
+call it annotates. The research scan states the rule directly: "if your functional-annotation table
+joins to a gene table, it must join to the gene table **of the same structural run**." The foreign
+key is therefore `(build_id, gene_id)` throughout, never `gene_id`.
 
 `tool` is drawn from the measured live vocabulary plus KBDL's wired set:
 `BAKTA`, `PROKKA`, `DRAM2`, `RAST`, `KOFAMSCAN`, `TRANSYT`. Adding a seventh is a load, not a
@@ -608,8 +615,27 @@ other information.
 
 ### Tables: `condition`, `essentiality`, `experimental_fitness`, `propagated_fitness`
 
-Carried from `fitness` unchanged in shape, plus the provenance tail. They are the part of the
-scheme that works: `experimental_fitness` already carries a `provenance` column and a `source_ref`,
+Carried from `fitness` unchanged in shape, plus `build_id` and the provenance tail:
+
+```
+condition(condition_id, name, description, condition_group, media, modelseed_compound_id,
+          temperature, ph, aerobic, <tail>)
+essentiality(essentiality_id, build_id, gene_id, is_essential, call_source, source_ref, <tail>)
+experimental_fitness(experimental_fitness_id, build_id, gene_id, condition_id, fitness, t_score,
+                     provenance, source_ref, <tail>)
+propagated_fitness(propagated_fitness_id, build_id, gene_id, condition_id, max_fitness,
+                   min_fitness, average_fitness, n_fitness_hits, <tail>)
+```
+
+`condition` is the one table here with no `build_id`: a growth condition is a property of an
+experiment, not of a gene call. The other three key on a gene and therefore inherit
+`(build_id, gene_id)` for the reason given above. **This is the most expensive single consequence of
+Q4**: `propagated_fitness` is already 14,076,257 rows live and grows as genomes x conditions, so one
+extra `STRING` column there is the largest storage cost the decision imposes. It is still the right
+call — a fitness value attributed to the wrong structural call is worse than a wider row — but it is
+the number to quote if Q4 is ever revisited.
+
+They are otherwise the part of the scheme that works: `experimental_fitness` already carries a `provenance` column and a `source_ref`,
 `essentiality` already carries `call_source`, and the live data shows a single honest value
 (`user_upload:essential_genes.csv`). Nothing in the fourteen-item agenda touches them.
 

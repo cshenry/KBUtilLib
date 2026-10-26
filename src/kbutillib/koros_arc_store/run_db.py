@@ -65,7 +65,12 @@ _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
 # Artifact URI vocabulary (S19).
 _ABS_PATH_RE = re.compile(r"^/")
-_OBJ_URI_RE = re.compile(r"^obj://([A-Za-z0-9._-]+)$")
+# ``obj://<object_id>`` names a KBDL object; an optional ``#<fragment>`` names a
+# member inside it (an archive entry). The object id never contains ``#``, so the
+# FIRST ``#`` splits them and the fragment is opaque: any non-empty run without
+# control characters. This is the ONE spelling of a KBDL object reference across
+# the arc store and the clearinghouse (Chris, 2026-10-25). Use ``fullmatch``.
+_OBJ_URI_RE = re.compile(r"obj://([A-Za-z0-9._-]+)(?:#([^\x00-\x1f\x7f]+))?")
 
 # Payload size smell threshold (S29): logged, never rejected.
 _PAYLOAD_WARN_BYTES = 64 * 1024
@@ -280,7 +285,7 @@ class RunDatabase:
         """Validate one artifact URI and normalise file URIs (S8/S19).
 
         Accepts an absolute POSIX path, ``file://`` or ``file:///`` (normalised
-        to ``file://`` + absolute path), or ``obj://<object_id>``. Anything else
+        to ``file://`` + absolute path), or ``obj://<object_id>[#<fragment>]``. Anything else
         raises ``RecordValidationError(bad_artifact_uri)``.
         """
         if not isinstance(uri, str) or not uri:
@@ -301,7 +306,7 @@ class RunDatabase:
                     f"artifact {name!r} file URI is not an absolute path: {uri!r}",
                 )
             return "file://" + path
-        if _OBJ_URI_RE.match(uri):
+        if _OBJ_URI_RE.fullmatch(uri):
             return uri
         if _ABS_PATH_RE.match(uri):
             return uri

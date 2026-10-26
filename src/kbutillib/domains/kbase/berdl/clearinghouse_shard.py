@@ -4611,7 +4611,7 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
         text, column = args
         value = row.get(column)
         # NULL IN, NULL OUT. A prefixed null would become the literal
-        # pointer "kbdl:obj:None" -- a reference to an object that does not
+        # pointer "obj://None" -- a reference to an object that does not
         # exist, and indistinguishable in the lake from a real one. A missing
         # pointer stays missing.
         return None if value is None else f"{text}{value}"
@@ -4625,7 +4625,7 @@ def _derive(derivation: cm.Derivation, row: Mapping[str, Any]) -> Any:
             value = row.get(args[index + 1])
             # NULL IN, NULL OUT, across EVERY named column, for the same
             # reason @prefix is null-preserving: a pointer assembled from a
-            # missing half ("kbdl:archive:None:x") is a reference to nothing
+            # missing half ("obj://None#x") is a reference to nothing
             # and is indistinguishable in the lake from a real one.
             if value is None:
                 return None

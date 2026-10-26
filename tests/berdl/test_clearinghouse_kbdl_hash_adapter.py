@@ -191,7 +191,7 @@ def _source(name: str = "kbdl-archives", **locator) -> cm.Source:
         locator=dict(locator),
         hash_spec={"precomputed": "entity_hash"},
         content={
-            "fasta_reference": "@concat(kbdl:archive:,archive_object_id,:,entry_name)",
+            "fasta_reference": "@concat(obj://,archive_object_id,#,entry_name)",
             "n_contigs": "n_contigs",
             "total_length": "total_length",
         },
@@ -301,10 +301,10 @@ def test_submit_hash_genomes_refuses_a_non_string_id_before_any_request():
 
 def test_concat_builds_the_archive_member_pointer():
     derivation = cm.parse_derivation(
-        "@concat(kbdl:archive:,archive_object_id,:,entry_name)", where="t"
+        "@concat(obj://,archive_object_id,#,entry_name)", where="t"
     )
     row = {"archive_object_id": ARCHIVE_A, "entry_name": "g1.fna"}
-    assert cs._derive(derivation, row) == f"kbdl:archive:{ARCHIVE_A}:g1.fna"
+    assert cs._derive(derivation, row) == f"obj://{ARCHIVE_A}#g1.fna"
 
 
 @pytest.mark.parametrize(
@@ -319,7 +319,7 @@ def test_concat_is_null_preserving_across_every_named_column(row):
     """A pointer assembled from a missing half is a reference to nothing, and
     in the lake it is indistinguishable from a real one."""
     derivation = cm.parse_derivation(
-        "@concat(kbdl:archive:,archive_object_id,:,entry_name)", where="t"
+        "@concat(obj://,archive_object_id,#,entry_name)", where="t"
     )
     assert cs._derive(derivation, row) is None
 
@@ -1163,7 +1163,7 @@ def test_the_preset_writes_the_precomputed_entity_hash_on_both_tables(preset_sha
 def test_the_preset_writes_the_exact_archive_member_pointer(preset_shard):
     content = {r["entity_hash"]: r for r in _rows(preset_shard, "genome_content")}
     first = content[_digest(f"{ARCHIVE_A}:g1.fna")]
-    assert first["fasta_reference"] == f"kbdl:archive:{ARCHIVE_A}:g1.fna"
+    assert first["fasta_reference"] == f"obj://{ARCHIVE_A}#g1.fna"
     assert first["n_contigs"] == 2
     assert first["total_length"] == 26
     # UNMAPPED, and null is the honest value: a hash job reads FASTA and
@@ -1188,7 +1188,7 @@ def test_the_shipped_preset_declares_what_the_task_requires():
     assert source.locator["max_in_flight"] == 1
     assert source.hash_spec == {"precomputed": "entity_hash"}
     assert source.content["fasta_reference"] == (
-        "@concat(kbdl:archive:,archive_object_id,:,entry_name)"
+        "@concat(obj://,archive_object_id,#,entry_name)"
     )
     assert set(source.kinds) == {"entity", "content"}
     assert manifest.backfill.pulls_from == ("KBDL on poplar",)

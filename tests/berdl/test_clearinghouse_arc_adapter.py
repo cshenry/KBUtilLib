@@ -567,14 +567,14 @@ def test_parameter_set_column_rejects_a_float_and_a_non_mapping():
 
 
 def test_prefix_derivation_prepends_and_preserves_null():
-    derivation = cm.parse_derivation("@prefix(kbdl:obj:,fasta_object_id)", where="t")
-    assert derivation.args == ("kbdl:obj:", "fasta_object_id")
+    derivation = cm.parse_derivation("@prefix(obj://,fasta_object_id)", where="t")
+    assert derivation.args == ("obj://", "fasta_object_id")
     assert cs._derive(derivation, {"fasta_object_id": FASTA_ID}) == (
-        f"kbdl:obj:{FASTA_ID}"
+        f"obj://{FASTA_ID}"
     )
     assert cs._derive(derivation, {"fasta_object_id": None}) is None
     with pytest.raises(cm.ManifestError, match="exactly two arguments"):
-        cm.parse_derivation("@prefix(kbdl:obj:)", where="t")
+        cm.parse_derivation("@prefix(obj://)", where="t")
 
 
 # ==========================================================================
@@ -1286,7 +1286,7 @@ def test_the_preset_writes_the_genome_pointer_taxon_and_contig_counts(
     content = {r["entity_hash"]: r for r in _rows(preset_shard, "genome_content")}
     assert len(content) == 2
     first = content[standardizers.entity_hash("genome", CONTIGS)]
-    assert first["fasta_reference"] == f"kbdl:obj:{FASTA_ID}"
+    assert first["fasta_reference"] == f"obj://{FASTA_ID}"
     assert first["taxon_id"] == "562"
     assert first["n_contigs"] == 2
     assert first["total_length"] == sum(len(c) for c in CONTIGS)

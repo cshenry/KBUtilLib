@@ -473,6 +473,27 @@ class TestValidation:
         assert row.artifacts["abs"] == "/data/out.json"
         assert row.artifacts["obj"] == "obj://12345.6.7"
 
+    def test_obj_uri_fragment_accepted(self, db):
+        # obj://<id>#<member> is the one spelling of a KBDL archive member,
+        # shared with the clearinghouse's fasta_reference (2026-10-25).
+        rec = make_record()
+        rec.artifacts = {"member": "obj://ab12.cd-3#genomes/GCF_1.2 x#y.fna"}
+        db.record_analysis("p", "a", rec)
+        row = db.list_analyses("p", "a")[0]
+        assert row.artifacts["member"] == "obj://ab12.cd-3#genomes/GCF_1.2 x#y.fna"
+
+    @pytest.mark.parametrize(
+        "uri",
+        ["obj://", "obj://abc#", "obj://#entry", "obj://a:b#e", "obj://abc\n",
+         "obj://abc#e\n", "obj://abc#e\tf", "kbdl:obj:abc", "kbdl:archive:abc:e"],
+    )
+    def test_malformed_obj_uri_rejected(self, db, uri):
+        rec = make_record()
+        rec.artifacts = {"out": uri}
+        with pytest.raises(RecordValidationError) as exc:
+            db.record_analysis("p", "a", rec)
+        assert exc.value.code == "bad_artifact_uri"
+
     def test_subject_stored_verbatim(self, db):
         rec = make_record(subject="Genome_MixedCase-01")
         db.record_analysis("p", "a", rec)

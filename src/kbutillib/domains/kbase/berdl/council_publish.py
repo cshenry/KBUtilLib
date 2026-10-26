@@ -402,6 +402,7 @@ def select_verdicts(
     # order, so a later job overwrites an earlier one's entry for the same
     # item_id -- which is how a retried item names its retry job.
     settled: dict[str, dict[str, Any]] = {}
+    texts: dict[str, str] = {}
     per_job: dict[str, int] = {}
     for job_id in ordered:
         rows = sink.select_rows(
@@ -418,18 +419,23 @@ def select_verdicts(
                     "verdict": _json_value(row.get("verdict")) or {},
                     "decided_at": row.get("decided_at"),
                     "job_id": _text(row.get("job_id")) or job_id,
-                    # Carried for the published ``function_text`` cell. The
-                    # council store's items hold the entity text in
-                    # ``evidence``; the bundle's fanout carries only the
-                    # (query_id, item_id) pair.
-                    "evidence": _json_value(row.get("evidence")),
                 }
                 for row in rows
             ],
             job_id=job_id,
             into=settled,
         )
-    texts = _item_texts(sink, store_id=store_id, snapshot_id=pinned, job_ids=ordered)
+        # The published ``function_text`` cell, read from the SAME rows rather
+        # than in a second pass: the council store's items hold the entity
+        # text in ``evidence`` and the bundle's fanout carries only the
+        # (query_id, item_id) pair, so the text has to come from here -- and
+        # a second read of 19,276 items per job to get it would double the
+        # whole selection's cost. Later jobs overwrite earlier ones, exactly
+        # as their verdicts do.
+        for row in rows:
+            evidence = _json_value(row.get("evidence"))
+            if isinstance(evidence, Mapping) and evidence.get("text") is not None:
+                texts[_text(row["item_id"])] = str(evidence["text"])
 
     plan = dict(bundle.get("plan") or {})
     identity = {
@@ -451,32 +457,6 @@ def select_verdicts(
         "jobs": jobs,
         "items_read_per_job": per_job,
     }
-
-
-def _item_texts(
-    sink: Any, *, store_id: str, snapshot_id: str, job_ids: Sequence[str]
-) -> dict[str, str]:
-    """``{item_id: entity text}`` from the archived ``items.evidence``.
-
-    The published ``function_text`` cell is the evidence of what was asked,
-    and the bundle's fanout carries only ``(query_id, item_id)``. Read in
-    declared job order so a later job's text supersedes an earlier one's for
-    the same item, exactly as its verdict does.
-    """
-    out: dict[str, str] = {}
-    for job_id in job_ids:
-        for row in sink.select_rows(
-            "items",
-            where={"store_id": store_id, "snapshot_id": snapshot_id, "job_id": job_id},
-            columns=("item_id", "evidence"),
-            order_by=("item_id",),
-        ):
-            evidence = _json_value(row.get("evidence"))
-            if isinstance(evidence, Mapping):
-                text = evidence.get("text")
-                if text is not None:
-                    out[_text(row["item_id"])] = str(text)
-    return out
 
 
 # --------------------------------------------------------------------------

@@ -499,10 +499,52 @@ class TestAnnotateMocked:
 
         assert isinstance(result, AnnotationResult)
         assert result.tool == "kofamscan"
+        # Native mode: tool_version is the executable PATH, which identifies
+        # no version at all.
+        assert result.tool_version == "/opt/kofam_scan/exec_annotation"
+        assert result.version_kind is None
+        assert result.version_asserted_by is None
         rec = next(r for r in result.records if r.gene_id == "gene1")
         ko_ids = {t.id for t in rec.terms if t.namespace == "KO"}
         # Both significant hits present; the below-threshold hit excluded.
         assert ko_ids == {"K00001", "K00002"}
+
+    def test_docker_mode_full_digest_is_typed_as_an_artifact_digest(self):
+        """`exec_annotation` has no --version flag, so the honest identity is
+        the image's content hash; version_kind names it as a digest rather
+        than as a tool release."""
+        digest = "b" * 64
+        ku = _make_utils()
+        ku._docker_image = "kbutillib/kofamscan:latest"
+        with patch.object(ku, "is_available", return_value=True), patch.object(
+            ku, "_run_kofamscan", side_effect=self._fake_run_kofamscan
+        ), patch(
+            "kbutillib.domains.genome.annotation.kofamscan_utils."
+            "docker_image_identity",
+            return_value=f"kbutillib/kofamscan@sha256:{digest}",
+        ):
+            result = ku.annotate(proteins={"gene1": "MKTAY"})
+
+        assert result.tool_version == f"kbutillib/kofamscan@sha256:{digest}"
+        assert result.version_kind == "artifact-digest"
+        assert result.version_asserted_by is None
+
+    def test_docker_mode_bare_tag_fallback_is_typed_none(self):
+        """When `docker image inspect` cannot be run, the identity degrades to
+        the bare tag -- which names nothing, and must not be typed as one."""
+        ku = _make_utils()
+        ku._docker_image = "kbutillib/kofamscan:latest"
+        with patch.object(ku, "is_available", return_value=True), patch.object(
+            ku, "_run_kofamscan", side_effect=self._fake_run_kofamscan
+        ), patch(
+            "kbutillib.domains.genome.annotation.kofamscan_utils."
+            "docker_image_identity",
+            return_value="kbutillib/kofamscan:latest",
+        ):
+            result = ku.annotate(proteins={"gene1": "MKTAY"})
+
+        assert result.tool_version == "kbutillib/kofamscan:latest"
+        assert result.version_kind is None
 
     def test_absent_ko_function_map_yields_ko_ids_only(self):
         ku = _make_utils()

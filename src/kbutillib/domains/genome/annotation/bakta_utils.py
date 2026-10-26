@@ -137,6 +137,7 @@ from .annotator_utils import (
     ToolUnavailableError,
     _guard_dna,
     _guard_protein,
+    classify_version,
     describe_or_accession,
 )
 from .ontology_dictionary import OntologyDictionary
@@ -897,6 +898,7 @@ class BaktaUtils(AnnotatorUtils):
             command=command,
             parameters=parameters,
             records=records,
+            version_kind=classify_version(tool_version, from_image=False),
         )
 
     # ------------------------------------------------------------------

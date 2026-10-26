@@ -138,6 +138,34 @@ _DEFAULT_TIMEOUT_S = 30 * 60
 # Override per-deployment with the `rast.kmer_dataset` config key.
 _DEFAULT_KMER_DATASET = "2018-0531"
 
+# Who asserted _DEFAULT_KMER_DATASET, recorded as DATA rather than only as the
+# comment above, so a consumer of AnnotationResult can see that the version is
+# an assertion and not an observation. Until this existed, a reader of
+# `tool_version="2018-0531"` had no way to tell it from a value the service
+# reported. Copy it into a result; never hand out the module-level dict itself.
+_DEFAULT_KMER_DATASET_ASSERTED_BY: dict[str, Any] = {
+    "who": "chris",
+    "date": "2026-10-15",
+    "basis": (
+        "kmer dataset id named by the PI; the RAST service exposes no version"
+    ),
+}
+
+# The asserted-by record for a deployment that supplied `rast.kmer_dataset`
+# itself: still an assertion (nothing observed it), but asserted by the
+# config, not by the PI, and with no date to attach.
+_CONFIG_KMER_DATASET_ASSERTED_BY: dict[str, Any] = {
+    "who": "config",
+    "date": None,
+    "basis": "rast.kmer_dataset override",
+}
+
+# Sentinel for "the config key was not supplied at all". The override must be
+# detected from SUPPLIED-NESS, not by comparing the value to the default: a
+# deployment that explicitly pins `rast.kmer_dataset: "2018-0531"` has asserted
+# that value itself, and a value-comparison would silently credit the PI for it.
+_UNSET = object()
+
 
 class RastServiceError(Exception):
     """Raised when the RAST JSON-RPC call fails or returns a malformed result.
@@ -230,8 +258,18 @@ class RastUtils(AnnotatorUtils):
         self._timeout: int = int(
             self.get_config_value("rast.timeout", default=_DEFAULT_TIMEOUT_S)
         )
+        configured_kmer_dataset = self.get_config_value(
+            "rast.kmer_dataset", default=_UNSET
+        )
+        #: True when `rast.kmer_dataset` was supplied by config (whatever its
+        #: value), False when this run fell back to _DEFAULT_KMER_DATASET.
+        self._kmer_dataset_from_config: bool = (
+            configured_kmer_dataset is not _UNSET
+        )
         self._kmer_dataset: str = str(
-            self.get_config_value("rast.kmer_dataset", default=_DEFAULT_KMER_DATASET)
+            _DEFAULT_KMER_DATASET
+            if configured_kmer_dataset is _UNSET
+            else configured_kmer_dataset
         )
 
     # ------------------------------------------------------------------
@@ -363,6 +401,12 @@ class RastUtils(AnnotatorUtils):
             ),
             parameters=parameters,
             records=records,
+            version_kind="tool-version",
+            version_asserted_by=dict(
+                _CONFIG_KMER_DATASET_ASSERTED_BY
+                if self._kmer_dataset_from_config
+                else _DEFAULT_KMER_DATASET_ASSERTED_BY
+            ),
         )
 
     # ------------------------------------------------------------------

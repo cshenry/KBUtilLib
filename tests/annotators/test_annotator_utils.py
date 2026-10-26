@@ -2,6 +2,7 @@
 
 Tests cover:
 - Term, AnnotationRecord, AnnotationResult dataclasses
+- classify_version() version-kind classification table
 - ToolUnavailableError construction and message format
 - _guard_dna / _guard_protein alphabet checks
 - AnnotatorUtils._require_available() raises ToolUnavailableError
@@ -22,6 +23,7 @@ from kbutillib.domains.genome.annotation.annotator_utils import (
     ToolUnavailableError,
     _guard_dna,
     _guard_protein,
+    classify_version,
     describe_or_accession,
 )
 from kbutillib.domains.genome.annotation.ontology_dictionary import OntologyDictionary
@@ -175,6 +177,38 @@ class TestAnnotationResultDataclass:
         # Each instance should get its own default list
         r1.records.append(AnnotationRecord(gene_id="g1"))
         assert r2.records == []
+
+    def test_version_typing_fields_default_to_none(self):
+        """The two provenance-typing fields are optional: an annotator that
+        has not been wired for them still constructs, and reads as "this
+        version string is unclassified"."""
+        r = self._make()
+        assert r.version_kind is None
+        assert r.version_asserted_by is None
+
+    def test_positional_construction_still_works(self):
+        """The new fields were appended, so the pre-existing positional
+        argument order is unchanged."""
+        r = AnnotationResult(
+            "prokka",
+            "1.14.6",
+            None,
+            "abc123",
+            "prokka --outdir /tmp input.fasta",
+            {"gcode": 11},
+            [],
+        )
+        assert r.tool == "prokka"
+        assert r.version_kind is None
+        assert r.version_asserted_by is None
+
+    def test_version_typing_fields_round_trip(self):
+        r = self._make(
+            version_kind="tool-version",
+            version_asserted_by={"who": "chris", "date": None, "basis": "b"},
+        )
+        assert r.version_kind == "tool-version"
+        assert r.version_asserted_by["who"] == "chris"
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +591,94 @@ def test_identity_returns_bare_tag_when_every_field_is_blank():
 
 def test_identity_of_empty_image_is_empty():
     assert docker_image_identity("") == ""
+
+
+# ---------------------------------------------------------------------------
+# classify_version()
+# ---------------------------------------------------------------------------
+
+_SHA64 = "a" * 64
+_SHA64_MIXED = "ABCDEF0123456789" * 4  # 64 hex, mixed case
+
+
+class TestClassifyVersion:
+    """The version-kind classification table.
+
+    SCOPE, asserted here as well as in the docstring: these cases are the
+    formats the WIRED annotators emit (a tool release, a
+    ``docker_image_identity`` string, a nextflow runner label, an
+    executable path).  ``classify_version`` does not judge arbitrary
+    strings -- see ``test_an_arbitrary_string_is_called_a_tool_version``,
+    which pins that deliberately-permissive behaviour rather than
+    pretending it validates.
+    """
+
+    @pytest.mark.parametrize(
+        "value,from_image,expected",
+        [
+            # --- None / empty, either mode
+            (None, False, None),
+            (None, True, None),
+            ("", False, None),
+            ("", True, None),
+            ("   ", False, None),
+            ("   ", True, None),
+            # --- from_image=True: only a FULL 64-hex sha256 digest counts
+            (f"kbutillib/transyt@sha256:{_SHA64}", True, "artifact-digest"),
+            (f"oschwengers/bakta@sha256:{_SHA64_MIXED}", True, "artifact-digest"),
+            # 63 hex -- one short, names nothing resolvable
+            (f"img@sha256:{'a' * 63}", True, None),
+            # 65 hex -- one too many
+            (f"img@sha256:{'a' * 65}", True, None),
+            # 64 hex plus trailing junk: this is why the match must be a
+            # FULL match and not a prefix match
+            (f"img@sha256:{_SHA64}-dirty", True, None),
+            (f"img@sha256:{_SHA64} ", True, None),
+            # non-hex characters in the right length
+            (f"img@sha256:{'z' * 64}", True, None),
+            # a bare tag -- what docker_image_identity returns when
+            # `docker image inspect` could not be run at all
+            ("kbutillib/kofamscan:latest", True, None),
+            (":latest", True, None),
+            # a short/truncated digest, e.g. the 8-char form docker prints
+            ("oschwengers/bakta@sha256:033df943", True, None),
+            # a plain release string is NOT a digest
+            ("1.14.6", True, None),
+            # --- from_image=False
+            ("1.14.6", False, "tool-version"),
+            ("1.11.4", False, "tool-version"),
+            ("2.0.0-beta17", False, "tool-version"),
+            ("v2.0.0-beta17", False, "tool-version"),
+            ("2018-0531", False, "tool-version"),
+            # the RUNNER's version, not the tool's
+            ("nextflow/24.10.5", False, None),
+            ("nextflow/", False, None),
+            # an executable path is not a version
+            ("/opt/kofam_scan/exec_annotation", False, None),
+            ("/usr/local/bin/prokka", False, None),
+        ],
+    )
+    def test_table(self, value, from_image, expected):
+        assert classify_version(value, from_image=from_image) == expected
+
+    def test_bare_latest_tag_in_tool_mode_is_not_special_cased(self):
+        """``:latest`` only reaches the classifier with ``from_image=True``
+        (it comes out of ``docker_image_identity``), where it is None.  In
+        tool mode nothing claims to recognise it; documented, not fixed."""
+        assert classify_version(":latest", from_image=True) is None
+        assert classify_version(":latest", from_image=False) == "tool-version"
+
+    def test_an_arbitrary_string_is_called_a_tool_version(self):
+        """Deliberate: the classifier covers the formats the wired
+        annotators emit and does not validate arbitrary strings."""
+        assert classify_version("not a version at all", from_image=False) == (
+            "tool-version"
+        )
+
+    def test_never_raises_on_a_non_string(self):
+        assert classify_version(3.14, from_image=False) is None  # type: ignore[arg-type]
+        assert classify_version(["1.0"], from_image=True) is None  # type: ignore[arg-type]
+
+    def test_from_image_is_keyword_only(self):
+        with pytest.raises(TypeError):
+            classify_version("1.0", False)  # type: ignore[misc]

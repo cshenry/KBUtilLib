@@ -496,6 +496,10 @@ class TestProkkaUtilsAnnotateEnd2End:
         assert isinstance(result, AnnotationResult)
         assert result.tool == "prokka"
         assert result.tool_version == "1.14.6"
+        # PROKKA reports its own release, so the version string identifies
+        # the tool and nothing asserted it on PROKKA's behalf.
+        assert result.version_kind == "tool-version"
+        assert result.version_asserted_by is None
 
     def test_annotate_records_keyed_by_caller_ids(self):
         utils = _make_utils()

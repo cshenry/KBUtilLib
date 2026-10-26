@@ -560,6 +560,10 @@ class TestAnnotateMocked:
         assert isinstance(result, AnnotationResult)
         assert result.tool == "bakta"
         assert result.tool_version == "1.11.4"
+        # A bakta release out of the payload's version.bakta: a real tool
+        # version, observed (nobody asserted it).
+        assert result.version_kind == "tool-version"
+        assert result.version_asserted_by is None
         assert result.db_version == "6.0"
         assert result.parameters["db_major"] == 6
         gene_ids = {r.gene_id for r in result.records}

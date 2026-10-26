@@ -22,6 +22,9 @@ from kbutillib.domains.external.rast_utils import (  # noqa: E402
     RastServiceError,
     RastUtils,
     RastUtilsImpl,
+    _CONFIG_KMER_DATASET_ASSERTED_BY,
+    _DEFAULT_KMER_DATASET,
+    _DEFAULT_KMER_DATASET_ASSERTED_BY,
     _chunked,
     _split_role_terms,
 )
@@ -185,6 +188,19 @@ class TestAnnotateResultParsing:
         assert result.tool_version == "2018-0531"
         assert result.db_version == "2018-0531"
         assert result.parameters["kmer_dataset"] == "2018-0531"
+        # The kmer dataset id IS what determines a RAST annotation, so it is
+        # typed as a tool version -- but it was named by the PI, not observed,
+        # and version_asserted_by is what says so. Before this field existed a
+        # reader took "2018-0531" for a value the service reported.
+        assert result.version_kind == "tool-version"
+        assert result.version_asserted_by == {
+            "who": "chris",
+            "date": "2026-10-15",
+            "basis": (
+                "kmer dataset id named by the PI; the RAST service exposes no "
+                "version"
+            ),
+        }
         gene_ids = {rec.gene_id for rec in result.records}
         # g2 (empty function) and g3 (no function key) are zero-hit and absent.
         assert gene_ids == {"g1"}
@@ -204,6 +220,74 @@ class TestAnnotateResultParsing:
             result = ru.annotate({"g1": "MKTAY"})
         assert result.tool_version == "2099-0101"
         assert result.parameters["kmer_dataset"] == "2099-0101"
+
+    def test_config_override_is_asserted_by_config_not_by_the_pi(self):
+        """A deployment that supplied `rast.kmer_dataset` asserted that value
+        itself; crediting the PI for it would be a provenance lie."""
+        ru = _make_utils(config={"rast": {"kmer_dataset": "2099-0101"}})
+        assert ru._kmer_dataset == "2099-0101"
+        with patch(
+            "modelseedpy.core.rpcclient.RPCClient.call",
+            return_value=_rpc_result([{"id": "g1", "function": "Some enzyme"}]),
+        ):
+            result = ru.annotate({"g1": "MKTAY"})
+
+        assert result.tool_version == "2099-0101"
+        assert result.version_kind == "tool-version"
+        assert result.version_asserted_by == {
+            "who": "config",
+            "date": None,
+            "basis": "rast.kmer_dataset override",
+        }
+
+    def test_default_and_override_assert_differently(self):
+        """The two asserted_by dicts must not be interchangeable -- that is
+        the whole point of recording who asserted the value."""
+        default_ru = _make_utils()
+        override_ru = _make_utils(config={"rast": {"kmer_dataset": "2099-0101"}})
+        rpc = patch(
+            "modelseedpy.core.rpcclient.RPCClient.call",
+            return_value=_rpc_result([{"id": "g1", "function": "Some enzyme"}]),
+        )
+        with rpc:
+            default_result = default_ru.annotate({"g1": "MKTAY"})
+        with rpc:
+            override_result = override_ru.annotate({"g1": "MKTAY"})
+
+        assert (
+            default_result.version_asserted_by
+            != override_result.version_asserted_by
+        )
+        assert default_result.version_asserted_by["who"] == "chris"
+        assert override_result.version_asserted_by["who"] == "config"
+
+    def test_an_explicit_config_pin_of_the_default_value_is_still_the_configs(self):
+        """Supplied-ness, not value comparison: a deployment that pins the
+        default value explicitly has asserted it itself."""
+        ru = _make_utils(config={"rast": {"kmer_dataset": _DEFAULT_KMER_DATASET}})
+        with patch(
+            "modelseedpy.core.rpcclient.RPCClient.call",
+            return_value=_rpc_result([{"id": "g1", "function": "Some enzyme"}]),
+        ):
+            result = ru.annotate({"g1": "MKTAY"})
+
+        assert result.tool_version == _DEFAULT_KMER_DATASET
+        assert result.version_asserted_by["who"] == "config"
+
+    def test_asserted_by_is_a_copy_not_the_module_constant(self):
+        """A caller mutating the dict on a result must not poison every
+        later run."""
+        ru = _make_utils()
+        with patch(
+            "modelseedpy.core.rpcclient.RPCClient.call",
+            return_value=_rpc_result([{"id": "g1", "function": "Some enzyme"}]),
+        ):
+            result = ru.annotate({"g1": "MKTAY"})
+
+        assert result.version_asserted_by is not _DEFAULT_KMER_DATASET_ASSERTED_BY
+        assert result.version_asserted_by is not _CONFIG_KMER_DATASET_ASSERTED_BY
+        result.version_asserted_by["who"] = "someone else"
+        assert _DEFAULT_KMER_DATASET_ASSERTED_BY["who"] == "chris"
 
     def test_multi_role_function_splits_into_separate_rast_terms(self):
         ru = _make_utils()

@@ -19,12 +19,12 @@ pytest.importorskip("modelseedpy", reason="modelseedpy required for RastUtils te
 from modelseedpy.core.rpcclient import ServerError  # noqa: E402
 
 from kbutillib.domains.external.rast_utils import (  # noqa: E402
-    RastServiceError,
-    RastUtils,
-    RastUtilsImpl,
     _CONFIG_KMER_DATASET_ASSERTED_BY,
     _DEFAULT_KMER_DATASET,
     _DEFAULT_KMER_DATASET_ASSERTED_BY,
+    RastServiceError,
+    RastUtils,
+    RastUtilsImpl,
     _chunked,
     _split_role_terms,
 )

@@ -583,10 +583,15 @@ def guard_join(
             ),
         }
     )
+    # Hoisted out of the comprehension: the production campaign submits
+    # 19,276 keys, and rebuilding these two sets per element would be
+    # quadratic for no reason.
+    submitted_set = set(submitted)
+    malformed_set = set(malformed)
     resolvable = {
         encode_entity_hash(query_id)
         for query_id in resolvable_query_ids(bundle, verdicts)
-        if query_id in set(submitted) and query_id not in set(malformed)
+        if query_id in submitted_set and query_id not in malformed_set
     }
     report = join_assertions(
         batch,

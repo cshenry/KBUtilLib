@@ -1858,6 +1858,126 @@ def seed_store_cmd(
     _emit(_envelope("seed-store", data=data), as_json=as_json)
 
 
+# ---------------------------------------------------------------------------
+# delivery-scan -- the restartable consumer loop
+# ---------------------------------------------------------------------------
+#
+# THE LOOP SCANS, IT DOES NOT WATCH. kbhub has no user systemd, so this is
+# booked to a Jupyter startup routine and is restarted at arbitrary points: it
+# cannot assume it observed any file arrival. Every tick enumerates the
+# deliveries present, resolves each against the archiver's load ledger and the
+# persisted stage outcomes, and completes whatever is incomplete.
+#
+# A VERB IN A REPOSITORY IS NOT AN INSTALLED SERVICE. What an operator must do
+# to register this with kbhub's Jupyter startup facility is NOT in this tree --
+# see council_delivery.OPERATOR_INSTALL, which names it as a gap rather than
+# inventing a command that would read exactly like a working one until the pod
+# restarted and nothing came back.
+
+
+@council_cmd.command(name="delivery-scan")
+@click.option(
+    "--drop-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="The directory Dropbox syncs COUNCIL-DELIVERY directories into.",
+)
+@click.option(
+    "--scratch-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Where a compressed snapshot is decompressed. Explicit: which "
+    "filesystem absorbs ~900 MB is an operator's decision.",
+)
+@_lakehouse_option
+@click.option(
+    "--state-root",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Root of the delivery state directories -- the SAME root the "
+    "archiver uses. Default: $KBU_COUNCIL_ARCHIVE_DIR, else "
+    "~/.kbu/council/archive/runs.",
+)
+@click.option(
+    "--poll-seconds",
+    type=float,
+    default=None,
+    help="Seconds between ticks. Default 300: the real latency is a tick "
+    "interval plus a Dropbox sync, not seconds.",
+)
+@click.option(
+    "--ticks",
+    "max_ticks",
+    type=int,
+    default=1,
+    help="How many ticks to run. 1 (the default) is one reconciliation pass "
+    "by hand; 0 means run forever, which is what a registered routine does.",
+)
+@_json_option
+@click.pass_context
+def delivery_scan_cmd(
+    ctx: click.Context,
+    drop_dir: str,
+    scratch_dir: str,
+    lakehouse: Optional[str],
+    state_root: Optional[str],
+    poll_seconds: Optional[float],
+    max_ticks: int,
+    as_json: bool,
+) -> None:
+    """Reconcile the drop directory against the lakehouse, once or forever.
+
+    \b
+    A MANIFEST'S PRESENCE IS NOT PROOF OF ARRIVAL: a delivery is complete
+    only when every file its inventory lists is present and sha256-matches. A
+    first mismatch is a RETRY (normal sync lag) with progress persisted; past
+    the deadline it is a FAILED delivery, raised with per-file expected vs
+    observed size and digest. A legacy mtime-derived deadline is FROZEN on
+    first observation, because consumer-side mtime can reset on sync and a
+    deadline recomputed every tick never expires.
+
+    ARCHIVAL AND PUBLICATION ARE PERSISTED SEPARATELY and each incomplete
+    stage is retried even when the other has a receipt. A receipt on disk is a
+    CACHE whose identity must match the manifest digest -- never an authority.
+
+    SAFE TO RUN CONCURRENTLY WITH ITSELF: each delivery is claimed with an
+    O_EXCL lock in its state directory and the loser skips it for one tick.
+    """
+    from ...domains.kbase.berdl.council_delivery import (
+        DEFAULT_POLL_SECONDS,
+        CouncilDeliveryScanner,
+    )
+
+    try:
+        scanner = CouncilDeliveryScanner(
+            drop_dir=drop_dir,
+            scratch_dir=scratch_dir,
+            sink=_sink(lakehouse),
+            state_root=state_root,
+            poll_seconds=DEFAULT_POLL_SECONDS if poll_seconds is None else poll_seconds,
+        )
+        ticks = scanner.run(max_ticks=None if max_ticks == 0 else max_ticks)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal is a CLI error
+        raise _fail(exc) from exc
+    last = ticks[-1] if ticks else {}
+    data = {
+        "drop_dir": str(drop_dir),
+        "ticks": len(ticks),
+        "deliveries": last.get("deliveries", 0),
+        "counts": last.get("counts", {}),
+        "reports": last.get("reports", []),
+    }
+    warnings = [
+        f"delivery {report.get('delivery_id')!r}: {report.get('stage')} -- "
+        f"{report.get('detail')}"
+        for report in data["reports"]
+        if report.get("state") == "failed"
+    ]
+    _emit(_envelope("delivery-scan", data=data, warnings=warnings), as_json=as_json)
+
+
 @council_cmd.group(name="disposition")
 def disposition_cmd() -> None:
     """Declare and resolve what each job's output is FOR.

@@ -232,6 +232,12 @@ _TERMINAL_STATES = frozenset({"completed", "failed"})
 #: connection reset and a worker restart without masking an outage.
 _POLL_MAX_CONNECTION_ERRORS = 5
 
+#: The most ``job_ids`` ``POST /jobs/status`` accepts in one body. The service
+#: answers 400 for more than this (and for a malformed id), so
+#: :meth:`KBDLServiceUtils.status_many` chunks rather than letting a bulk load
+#: of 3,669 archives walk into a 400.
+_STATUS_MANY_MAX_IDS = 1000
+
 
 # ── Typed errors ──────────────────────────────────────────────────────────
 
@@ -827,6 +833,58 @@ class KBDLServiceUtils(SharedEnvUtils):
         """Clear a finished job's result and workdir (tombstone retained)."""
         self._request("DELETE", f"/jobs/{job_id}")
 
+    def status_many(self, job_ids: Sequence[str]) -> Dict[str, Any]:
+        """Return the status of many jobs in as few requests as possible.
+
+        One ``GET /jobs/{id}`` per job does not survive a bulk load: the
+        2026-10-11 incident submitted 3,669 archives from 96 concurrent
+        uploaders, and confirming them one at a time is 3,669 round trips
+        against a service whose SQLite ledger is already contended. This
+        batches them through ``POST /jobs/status``.
+
+        De-duplicates ``job_ids`` (preserving first-seen order) and chunks
+        the result into requests of at most ``_STATUS_MANY_MAX_IDS`` ids,
+        because the service answers 400 above that. The per-chunk responses
+        are merged, so the caller sees one answer regardless of how many
+        requests it took.
+
+        Args:
+            job_ids: The job ids to look up. May contain duplicates. An
+                empty sequence makes NO request and returns empty results
+                (the service rejects a zero-id body).
+
+        Returns:
+            ``{"jobs": {job_id: status, ...}, "unknown": [job_id, ...]}``.
+            ``unknown`` holds ids the service would not resolve -- note
+            that **another user's job and a nonexistent job are
+            indistinguishable here**, exactly as ``GET /jobs/{id}`` renders
+            both as 404. Each status dict carries ``job_type``, ``state``,
+            ``submitted_at``, ``started_at``, ``finished_at``, ``failure``
+            (``{"code", "message"}`` or None) and ``auto_retry_count``.
+
+        Raises:
+            KBDLBadRequestError: If the service rejects a chunk, e.g. for a
+                malformed job id. The ids themselves are not validated
+                here; the service owns that rule.
+        """
+        seen: set[str] = set()
+        unique: List[str] = []
+        for job_id in job_ids:
+            if job_id not in seen:
+                seen.add(job_id)
+                unique.append(job_id)
+
+        jobs: Dict[str, Any] = {}
+        unknown: List[str] = []
+        for start in range(0, len(unique), _STATUS_MANY_MAX_IDS):
+            chunk = unique[start : start + _STATUS_MANY_MAX_IDS]
+            body = self._request(
+                "POST", "/jobs/status", json={"job_ids": chunk}
+            ).json()
+            jobs.update(body.get("jobs") or {})
+            unknown.extend(body.get("unknown") or [])
+        return {"jobs": jobs, "unknown": unknown}
+
     def poll_until_terminal(
         self,
         job_id: str,
@@ -892,6 +950,127 @@ class KBDLServiceUtils(SharedEnvUtils):
                 )
             sleep_fn(interval)
 
+    def poll_jobs_until_terminal(
+        self,
+        job_ids: Sequence[str],
+        interval: float = 5.0,
+        timeout: Optional[float] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        time_fn: Callable[[], float] = time.monotonic,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Poll :meth:`status_many` until EVERY id in ``job_ids`` is terminal.
+
+        THE CONFIRMATION STEP FOR A BULK LOAD. A ``POST /objects`` 202 means
+        the upload was ACCEPTED FOR REGISTRATION, not that it was stored --
+        the object exists only once its ``KBDLUploadObject`` job reaches
+        ``"completed"``. Both silent losses this method exists to catch were
+        a 202 that a client recorded as success:
+
+        * 2026-10-11, 3,669 archives from 96 concurrent uploaders: the job
+          failed ``internal_error`` / ``"database is locked"``. The object
+          was never registered and the client reported success.
+        * 2026-10-15, 2,374 groups: job ``56e5d409…`` failed ``worker_lost``
+          because its lease was claimed and never renewed. Lease expiry is
+          never retried, so nothing re-ran it.
+
+        Each round polls ONLY the ids not yet terminal, so a load of a few
+        thousand jobs collapses to one request per round as they finish
+        rather than re-asking about every id every time.
+
+        It does NOT raise merely because a job FAILED: the failed status is
+        returned like any other and the caller decides (matching
+        :meth:`poll_until_terminal`, and unlike :meth:`submit_and_wait`).
+        That is deliberate -- a bulk load wants the whole picture, not an
+        exception on the first of 3,669 failures.
+
+        Connection errors are tolerated exactly as :meth:`poll_until_terminal`
+        tolerates them: the same ``_POLL_MAX_CONNECTION_ERRORS`` bound on
+        CONSECUTIVE failures, reset by any successful poll. A lost connection
+        is not a lost job.
+
+        Args:
+            job_ids: The jobs to wait on. Duplicates are collapsed. An empty
+                sequence returns ``{}`` without making a request.
+            interval: Seconds between rounds (passed to ``sleep_fn``).
+                Defaults to 5.0 rather than :meth:`poll_until_terminal`'s 2.0
+                because a round here covers up to 1,000 jobs.
+            timeout: Optional overall wall-clock budget in seconds.
+            sleep_fn: Injectable sleep function (default ``time.sleep``).
+            time_fn: Injectable monotonic clock (default ``time.monotonic``).
+
+        Returns:
+            ``{job_id: final status dict}`` for every id, including the ones
+            that reached ``"failed"``.
+
+        Raises:
+            KBDLNotFoundError: If the service reports ANY id as unknown. The
+                message lists those ids. An unknown id cannot resolve by
+                waiting, and for a bulk load it most likely means the client
+                is confirming ids it never successfully submitted -- which is
+                the failure mode, not a detail to poll through.
+            TimeoutError: If ``timeout`` elapses first. The message names how
+                many ids were still pending.
+        """
+        seen: set[str] = set()
+        pending: List[str] = []
+        for job_id in job_ids:
+            if job_id not in seen:
+                seen.add(job_id)
+                pending.append(job_id)
+        total = len(pending)
+
+        final: Dict[str, Dict[str, Any]] = {}
+        start = time_fn()
+        consecutive_connection_errors = 0
+        while pending:
+            try:
+                batch = self.status_many(pending)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                # Same reasoning as poll_until_terminal: the jobs run on the
+                # service, and an interrupted POST says nothing about them.
+                consecutive_connection_errors += 1
+                if consecutive_connection_errors > _POLL_MAX_CONNECTION_ERRORS:
+                    raise
+                self.log_warning(
+                    f"transient connection error polling {len(pending)} job(s) "
+                    f"({consecutive_connection_errors} of "
+                    f"{_POLL_MAX_CONNECTION_ERRORS} tolerated): {exc}"
+                )
+            else:
+                consecutive_connection_errors = 0
+                unknown = batch.get("unknown") or []
+                if unknown:
+                    raise KBDLNotFoundError(
+                        f"KBDL reports {len(unknown)} job id(s) as unknown "
+                        f"(nonexistent, or belonging to another caller -- the "
+                        f"service does not distinguish the two): "
+                        f"{', '.join(unknown)}"
+                    )
+                jobs = batch.get("jobs") or {}
+                still_pending: List[str] = []
+                for job_id in pending:
+                    status = jobs.get(job_id)
+                    # An id in neither `jobs` nor `unknown` should not happen
+                    # under the server contract; it stays pending rather than
+                    # being invented as terminal, and surfaces as a timeout.
+                    if status is not None and status.get("state") in _TERMINAL_STATES:
+                        final[job_id] = status
+                    else:
+                        still_pending.append(job_id)
+                pending = still_pending
+                if not pending:
+                    return final
+            if timeout is not None and (time_fn() - start) >= timeout:
+                raise TimeoutError(
+                    f"{len(pending)} of {total} job(s) did not reach a terminal "
+                    f"state within {timeout}s"
+                )
+            sleep_fn(interval)
+        return final
+
     def submit_and_wait(
         self,
         job_type: str,
@@ -950,6 +1129,33 @@ class KBDLServiceUtils(SharedEnvUtils):
         is no separate JSON-only submission path for it, since its params
         alone carry no bytes.
 
+        A 202 MEANS ACCEPTED FOR REGISTRATION, NOT STORED. The object does
+        not exist until its ``KBDLUploadObject`` job reaches ``"completed"``;
+        a 202 only says the service took the bytes and queued the work.
+        Treating the 202 as success is how two bulk loads lost uploads
+        silently: on 2026-10-11 (3,669 archives, 96 concurrent uploaders) the
+        jobs failed ``internal_error`` / ``"database is locked"``, and on
+        2026-10-15 (2,374 groups) one failed ``worker_lost`` after its lease
+        expired unrenewed. In both cases the client recorded success and
+        nothing was registered.
+
+        **Confirmation is therefore the caller's job, and for a bulk load it
+        is not optional**: pass the returned job ids to
+        :meth:`poll_jobs_until_terminal` (or :meth:`poll_until_terminal` for
+        a single upload) and check each final state. A ``"failed"`` status is
+        returned rather than raised, so the caller can retry or report it --
+        ``KBDLUploadObject`` is idempotent (``transform="none"`` is
+        content-addressed and ``ObjectStore.put`` dedups on ``object_id``;
+        the transforms are byte-deterministic), so a retry is safe.
+
+        With ``transform="none"`` the 202 body also carries
+        ``expected_object_id``: the sha256 hex digest of the uploaded bytes,
+        i.e. the ``object_id`` the content WILL have once the job completes.
+        It lets a caller record the mapping before the job finishes and
+        verify afterwards that it got the object it uploaded. It is absent
+        for ``transform != "none"``, where the stored bytes are not the
+        uploaded bytes and so the id cannot be known up front.
+
         Object types fall into two groups, and this method only ever
         creates the first kind:
 
@@ -992,13 +1198,15 @@ class KBDLServiceUtils(SharedEnvUtils):
                 behavior, so existing callers are unaffected.
 
         Returns:
-            With ``transform="none"``: ``{"job_id": ...}`` for newly-hashed
-            content (HTTP 202), or ``{"object_id": ...}`` if the content
-            already hashes to an object the caller can already see (HTTP
-            201) -- the upload is discarded server-side in that case and no
-            new job is queued. With ``transform != "none"``: always
-            ``{"job_id": ...}`` (HTTP 202); the 201/dedup path never
-            applies.
+            With ``transform="none"``: ``{"job_id": ..., "expected_object_id":
+            ...}`` for newly-hashed content (HTTP 202), or
+            ``{"object_id": ...}`` if the content already hashes to an object
+            the caller can already see (HTTP 201) -- the upload is discarded
+            server-side in that case and no new job is queued. With
+            ``transform != "none"``: always ``{"job_id": ...}`` (HTTP 202),
+            with NO ``expected_object_id``; the 201/dedup path never applies.
+            Only the 201 form means the object exists now; see the
+            accepted-not-stored paragraph above.
         """
         opened: Optional[Any] = None
         if hasattr(file, "read"):

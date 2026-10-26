@@ -59,6 +59,7 @@ def kbdl_index_cmd(dry_run: bool, job_types: Tuple[str, ...], token_file: Option
     from ...kbdl_index.run import (
         created_at_sources, normalize_job_types, overlap_vs_existing,
         population_ids, run_index)
+    from ...kbdl_index.indexer import StoreDisabledError
     from ...koros_arc_store import KorosArcStore
 
     try:
@@ -71,10 +72,13 @@ def kbdl_index_cmd(dry_run: bool, job_types: Tuple[str, ...], token_file: Option
     kbdl = KBDLServiceUtils(token=token) if token else KBDLServiceUtils()
     store = KorosArcStore(runs_root)
 
-    res = run_index(store, kbdl, ledger_path, results_root, str(store.runs_root),
-                    dry_run=dry_run, job_types=types, fetch_finished=fetch_finished,
-                    finished_limit=finished_limit, skip_existing=skip_existing,
-                    log=click.echo)
+    try:
+        res = run_index(store, kbdl, ledger_path, results_root, str(store.runs_root),
+                        dry_run=dry_run, job_types=types, fetch_finished=fetch_finished,
+                        finished_limit=finished_limit, skip_existing=skip_existing,
+                        log=click.echo)
+    except StoreDisabledError as exc:
+        raise click.ClickException(str(exc))
     out = {"report": res.report.__dict__, "summary": res.report.summary()}
     if dry_run:
         out["dated_from"] = created_at_sources(res.captured)

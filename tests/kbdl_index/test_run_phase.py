@@ -5,6 +5,7 @@ Everything uses tmp dirs and a stubbed KBDL client; no live calls.
 import argparse
 import gzip
 import json
+import os
 
 import pytest
 from click.testing import CliRunner
@@ -191,3 +192,73 @@ def test_overlap_after_real_index_is_all_replace(env):
                     dry_run=True)
     ov = overlap_vs_existing(env['store'], res.captured)
     assert ov['replace'] == 2 and ov['duplicate'] == 0
+
+
+# ---- disabled run DB guard ---------------------------------------------------
+
+GATE = 'arc-store run DB is disabled (set KBDL_RUN_DB_ENABLED=1, or KB_POD)'
+
+
+@pytest.fixture
+def disabled_env(env, monkeypatch):
+    for var in ('KBDL_RUN_DB_ENABLED', 'KB_POD', 'KBDL_POD'):
+        monkeypatch.delenv(var, raising=False)
+    env['store'] = KorosArcStore(runs_root=env['runs'], db_path=env['db'])
+    assert env['store'].db.enabled is False
+    return env
+
+
+def _db_count(path):
+    import sqlite3
+    if not path.exists():
+        return 0                                           # never created: zero rows
+    conn = sqlite3.connect(str(path))
+    try:
+        return conn.execute('select count(*) from runs').fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_real_index_against_disabled_store_raises_and_writes_nothing(disabled_env):
+    from kbutillib.kbdl_index.indexer import StoreDisabledError
+    env = disabled_env
+    with pytest.raises(StoreDisabledError, match='refusing a real index'):
+        run_index(env['store'], FakeKBDL(), env['ledger'], env['root'], env['runs'])
+    assert _db_count(env['db']) == 0
+    assert rows(env['store']) == []
+
+
+def test_dry_run_against_disabled_store_still_works(disabled_env):
+    env = disabled_env
+    res = run_index(env['store'], FakeKBDL(), env['ledger'], env['root'], env['runs'],
+                    dry_run=True)
+    assert res.report.would_write > 0 and res.report.records_written == 0
+
+
+def test_cli_real_index_against_disabled_store_exits_nonzero(disabled_env):
+    env = disabled_env
+    result = CliRunner().invoke(main, ['kbdl-index', '--runs-root', env['runs'],
+                                       '--results-root', env['root'],
+                                       '--ledger', env['ledger']])
+    assert result.exit_code != 0
+    assert GATE in result.output
+    assert 'Traceback' not in result.output
+    assert _db_count(env['db']) == 0
+
+
+def test_enabled_real_index_count_matches_row_delta(env):
+    before = _db_count(env['db'])
+    res = run_index(env['store'], FakeKBDL(), env['ledger'], env['root'], env['runs'])
+    assert res.report.records_written == 2
+    assert _db_count(env['db']) - before == res.report.records_written
+
+
+def test_loop_pass_with_disabled_db_logs_index_failure_and_continues(
+        disabled_env, capsys, monkeypatch):
+    monkeypatch.setenv('KOROS_HOME', os.path.dirname(disabled_env['runs']))
+    args = argparse.Namespace(types=list(sweep.DEFAULT_TYPES), dry_run=False, max=0,
+                              no_mirror=True, loop=0, index=True)
+    sweep.run_pass(args)                                   # must not raise
+    out = capsys.readouterr().out
+    assert 'INDEX FAILED StoreDisabledError' in out and GATE in out
+    assert _db_count(disabled_env['db']) == 0

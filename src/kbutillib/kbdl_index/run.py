@@ -163,6 +163,9 @@ def run_index(store, kbdl, ledger_path, results_root, runs_root, *, dry_run=Fals
     (needed for the replace-vs-duplicate overlap check), and the report is
     relabelled would_write. With ``skip_existing`` (default) jobs that already have
     a row from another producer are not written."""
+    if not dry_run:
+        from .indexer import require_store_enabled
+        require_store_enabled(store)                       # before any network call
     meta = job_meta_from_list_jobs(kbdl.list_jobs())
     filled = 0
     if fetch_finished:

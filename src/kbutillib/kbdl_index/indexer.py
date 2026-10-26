@@ -152,6 +152,24 @@ def _load_result(path):
         return json.load(fh)
 
 
+class StoreDisabledError(RuntimeError):
+    """A real (non-dry) index was requested against a disabled run DB."""
+
+
+DISABLED_MESSAGE = ("arc-store run DB is disabled (set KBDL_RUN_DB_ENABLED=1, or KB_POD); "
+                    "refusing a real index that would silently write nothing")
+
+
+def require_store_enabled(store) -> None:
+    """Raise StoreDisabledError if ``store`` has a run DB that is disabled.
+
+    Stores without a ``.db`` (CaptureStore, in-memory fakes) always accept writes.
+    """
+    db = getattr(store, 'db', None)
+    if db is not None and getattr(db, 'enabled', True) is False:
+        raise StoreDisabledError(DISABLED_MESSAGE)
+
+
 def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
                      dry_run: bool = False,
                      job_meta: Optional[Mapping[str, dict]] = None,
@@ -170,6 +188,8 @@ def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
     the store) and must leave out this indexer's own rows so re-attribution still
     upserts by record_id.
     """
+    if not dry_run:
+        require_store_enabled(store)
     report = IndexReport(dry_run=dry_run)
     job_meta = job_meta or {}
     ledger = _read_ledger(ledger_path)
@@ -293,6 +313,9 @@ def index_swept_jobs(store, resolver, attributor, ledger_path, results_root,
         before = store.failed_write_count
         store.record_analysis(attribution.project if attribution else None,
                               attribution.arc_slug if attribution else None, record)
+        db = getattr(store, 'db', None)
+        if db is not None and getattr(db, 'enabled', True) is False:
+            continue                                       # no-op write: never counted
         if store.failed_write_count > before:
             report.write_failed += 1
         else:

@@ -457,12 +457,32 @@ RETRY_JOB_IDS: tuple[str, ...] = (
 #: stamp today's date -- which, because the preset maps ``decided_at`` onto
 #: ``observed_at`` and that slot freezes on first write, would make the
 #: publish date the permanent observation time of all 760 abstentions.
-PLAN_ASSEMBLED_ON = "2026-10-19"
+#:
+#: THREE DATES, ALL DIFFERENT, AND EASY TO CONFLATE. Measured, not assumed:
+#:
+#:   * ``2026-10-19`` is the CAMPAIGN'S NAME only (``CAMPAIGN_ID``). Nothing
+#:     in the record happened on it.
+#:   * ``2026-10-20T18:25:44Z`` is when the first BASE job was submitted, and
+#:     the ten ran to ``2026-10-21T03:27:52Z`` with the two retries on
+#:     ``2026-10-22``. This is where ``generated_at`` comes from.
+#:   * ``2026-10-23`` is when the PLAN was assembled -- the value below.
+#:     ``xport.Iv9Tft/PLAN.json`` has mtime ``2026-10-23 04:26`` and its two
+#:     record files ``2026-10-23 01:18``, and step 0's own finding has said
+#:     "hand-assembled on 2026-10-23" since it was written.
+#:
+#: ``assembled_on`` is WHEN THE PLAN WAS ASSEMBLED, so it is the third of
+#: those. Using the campaign's name here would record a provenance claim that
+#: the file mtimes contradict, in the one field whose entire purpose is to be
+#: honest about where the plan came from.
+PLAN_ASSEMBLED_ON = "2026-10-23"
 PLAN_RECONSTRUCTION_REASON = (
-    "the 2026-10-19 go_mf@4 ADP1+PMI campaign predates stage 1: it was driven "
-    "by `kbu submit --query go_mf@4 --input chunkNN.jsonl` from run_chunks.sh, "
-    "so no stage-1 PLAN.json was ever written and regenerating one would "
-    "describe today's universe rather than the run that happened"
+    "the go_mf@4 ADP1+PMI campaign (named 2026-10-19; its ten base jobs "
+    "actually ran 2026-10-20T18:25:44Z..2026-10-21T03:27:52Z with two retries "
+    "on 2026-10-22) predates stage 1: it was driven by `kbu submit --query "
+    "go_mf@4 --input chunkNN.jsonl` from run_chunks.sh, so no stage-1 "
+    "PLAN.json was ever written. This plan was hand-assembled on 2026-10-23 "
+    "to drive the export; regenerating one now would describe today's "
+    "universe rather than the run that happened"
 )
 
 #: How the campaign's ``generated_at`` is DERIVED, stated in the bundle so a
@@ -1582,6 +1602,22 @@ class Rehearsal:
                 str(bundle["plan_hash"]),
                 "generated_at" in (bundle.get("plan") or {}),
             ),
+        )
+        step.find(
+            "THREE DIFFERENT DATES ATTACH TO THIS CAMPAIGN AND THEY ARE "
+            "ROUTINELY CONFLATED. Measured here: the campaign is NAMED "
+            f"2026-10-19 ({CAMPAIGN_ID}) and nothing in the record happened "
+            "on that day; its ten base jobs were submitted "
+            f"{generated_at} .. 2026-10-21T03:27:52Z with the two retries on "
+            "2026-10-22; and the PLAN was hand-assembled on "
+            f"{PLAN_ASSEMBLED_ON} (PLAN.json mtime 2026-10-23 04:26, its two "
+            "record files 2026-10-23 01:18). plan_origin keeps the last two "
+            "apart on purpose -- assembled_on is when somebody wrote the "
+            "plan, generated_at is when retrieval declined the 760, and only "
+            "the second may stamp a published row. The task that commissioned "
+            "this work gave assembled_on as 2026-10-19, which is the "
+            "campaign's NAME; the file mtimes and step 0's own long-standing "
+            "finding both say 2026-10-23, and that is what is recorded."
         )
         step.check(
             "EVERY abstention carries its function text IN THE BUNDLE -- the "

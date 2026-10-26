@@ -8,7 +8,7 @@
   "authored_on": "2026-10-26",
   "authored_machine": "h100",
   "written_against_commit": "ed40f28848ba0fc9235662ab87b3a4d4741bd145",
-  "draft_commit": null,
+  "draft_commit": "b15a710f81be147fec9ef6371d55295824dd0ec8",
   "review_rounds": 0,
   "confront_rounds": 0,
   "review_protocol": "Written SINGLE-PASS in Draft Mode: researched, written complete and buildable in one pass, committed, and stopped without asking anything. Chris edits the committed fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review clearinghouse-entity-alias-v1` then diffs his edits against draft_commit, classifies every hunk, propagates decision changes through the body, user stories, testing decisions and the taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. CAVEAT, h100-specific and load-bearing: Review Mode step 2 diffs draft_commit against the WORKING TREE. This bundle is committed on `main`, and every KBUtilLib checkout on h100 and primary-laptop is parked on `wip`, so NO working tree holds it and that diff is impossible until `main` is merged into `wip`. Review must therefore run on primary-laptop AFTER that merge. Do not edit the readable Dropbox copy -- Review Mode would see no changes.",

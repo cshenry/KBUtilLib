@@ -1,5 +1,64 @@
 # Genome companion namespace (`kbaseincubator.genome_companion`)
 
+> ## ⚠️ STATUS: NOT BUILDABLE AS IT STANDS. Confront round 1 is adjudicated but NOT folded.
+>
+> The Open Questions contract says a PRD carrying an undecided question is a defect. By that
+> standard **this document is currently defective and should not be dispatched**, and the
+> cross-family adversary's own headline agrees: *"do not start production loading from this PRD.
+> The build-scoping fix is incomplete, assembly identity cannot represent the stated multiplicity,
+> and the snapshot/update contract is undecided. These are data-loss and attribution failures, not
+> editorial defects."*
+>
+> **Confront round 1** (`task-16879cc1`, codex/GPT-5, 36,137 bytes,
+> [report](research/confront-round-1-stall-report.md)) returned **18 stall points**. I triaged them
+> but did **not** fold the structural ones, because three of them contradict decisions marked
+> IRREVERSIBLE and re-keying every table deserves a session with full context rather than the tail
+> of the one that drafted it.
+>
+> **THREE BLOCKING CONTRADICTIONS — these are mine, not the adversary's misreading:**
+>
+> 1. **Stall 2 — the snapshot contract is self-inconsistent.** The PRD says every table is
+>    append-only, *and* that `genome_id` is a primary key, *and* that idempotence is keyed on
+>    `(store_id, snapshot_id, table_name)`. When a second snapshot arrives those cannot all hold:
+>    appending duplicates the key, skipping loses enrichment, replacing breaks append-only. I cited
+>    `council-record-lakehouse-v1`'s snapshot-versioned keys plus a current projection as the
+>    precedent and then **did not carry it into my own keys.** Fixing it re-keys every table.
+> 2. **Stall 3 — `assembly` cannot hold what Q2 claims.** The PRD says the primary key is
+>    `assembly_entity_hash` *and* that "one entity hash may front several content hashes". One row
+>    has one `assembly_content_hash` and one FASTA pointer, so that is a straight contradiction.
+>    `contig` is scoped only by entity hash while contig ids belong to a particular FASTA form.
+> 3. **Stall 13 — the sharder reuse as written would lose data.** `clearinghouse_shard._key_spec`
+>    does *entity* dedup, so swapping `entity_hash` for `genome_id` would discard all but one gene
+>    per genome; `_range_boundaries` assumes a 64-hex key space, which a G-number is not. "Sorting
+>    by genome is not deduplicating by genome" is correct and I did not see it.
+>
+> **ALSO GENUINE, non-blocking but owed:** stall 4 (the mutant/WT acceptance fixture cannot be
+> produced by a KBDL-only loader — KBDL dedupes exactly that pair on `content_hash`, so my own
+> testing decision asks for something the pipeline cannot make), stall 5 (`build_id` has no byte
+> canonicalization, and enrichment changes features without changing the tuple), stall 8
+> (`is_current` has no winner rule and no atomic mechanism), stalls 10/11/12 (coordinate convention,
+> qualifier JSON encoding, per-tool source mapping), stall 14 (512 MB is a local uncompressed buffer
+> estimate, not a promise about compressed Iceberg files — `_row_bytes` counts string lengths),
+> stall 15 (an append-only `reconciled=FALSE` row permanently poisons its batch), stall 16 (the
+> read protections are admonitions, not a read projection), stall 17 (a blanket non-empty guard
+> rejects legitimately empty optional tables), stall 18 (no retirement dates or table list).
+>
+> **ALREADY FIXED in this commit** — the two that needed no design decision: stall 7's duplicate
+> `load_ledger` columns and missing `qualifier_counts_json`, and stall 9's conflation of the FASTA
+> pointer with the genome-JSON object id. Stall 6 was fixed before the report landed (commit
+> `0a2b0a7`).
+>
+> **NOT the adversary's fault, but worth knowing when reading the report:** the worker ran in a
+> worktree off `main`, which carries neither this PRD nor the sibling PRDs it references (those are
+> on `wip` and on this branch), and **I did not embed the taskplan** — it says so explicitly. So
+> stall 1's "absent from this checkout" complaints are partly an artifact of my dispatch. Its
+> *valid core* survives that: the PRD cites a delivery contract living in another document instead
+> of pinning it here.
+>
+> **What survived the attack unchallenged**, in its words: the seven-value `feature_type` validator,
+> the CDS/protein-hash iff constraint, the fixed `alias_source` vocabulary, the low-cardinality
+> partition-column choices, and legal overlapping intervals.
+
 ## Research Report
 
 ### Important findings
@@ -212,6 +271,17 @@ sequencing, for the reader-inventory gap named above.
 ---
 
 ## Revision Log
+
+**Round 1 confront — 2026-10-25 (NOT folded).** `task-16879cc1` returned 18 stall points.
+Two pure errors fixed (duplicate `load_ledger` columns; FASTA-pointer/genome-JSON conflation).
+Three blocking contradictions triaged and deliberately left for a round-2 session because they
+contradict IRREVERSIBLE decisions: the snapshot/append-only/primary-key inconsistency, `assembly`'s
+key versus its stated multiplicity, and the sharder's entity-dedup data-loss risk. See the status
+banner. **The PRD is not buildable until these are folded.**
+
+**Round 0b — 2026-10-25 (research fold).** External scan folded. New Q4 (annotation-run scoping)
+after the scan found a real collision: `gene_id` alone is not a key. `build_id` threaded through
+every gene-referencing table. Eighteen tables, not seventeen.
 
 **Round 0 — 2026-10-25 (draft).** First draft, written single-pass. All sixteen judgement calls
 decided and reflected in the body. Three items from the fourteen-shortcoming agenda changed shape
@@ -644,9 +714,10 @@ They are otherwise the part of the scheme that works: `experimental_fitness` alr
 ```
 genome_disposition(genome_id, disposition, reason, declared_by, declared_at, <tail>)
    disposition IN ('published','pilot','trial','superseded','excluded')
-load_ledger(load_batch_id, store_id, snapshot_id, snapshot_seq, table_name,
-            rows_expected BIGINT, rows_written BIGINT, reconciled BOOLEAN,
-            started_at, finished_at, <tail>)
+load_ledger(table_name STRING, rows_expected BIGINT, rows_written BIGINT,
+            reconciled BOOLEAN, started_at TIMESTAMP, finished_at TIMESTAMP,
+            qualifier_counts_json STRING, <tail>)
+   logical key: (load_batch_id, table_name) -- both from the provenance tail
 ```
 
 **Nothing downstream may treat "exists in `genome_companion.*`" as "is a result."**
@@ -654,6 +725,13 @@ This is `council-record-lakehouse-v1`'s lesson, and KBDL has its own instance of
 distinction already: `object_supersedes` holds 28,051 rows all reasoned `atb-recompression-v1`,
 which is exactly "present in the archive, superseded as a result". A genome with no disposition row
 is **not** publishable; absence is not an implicit `published`.
+
+**Corrected after confront round 1 (stall 7):** the original listing repeated `load_batch_id`,
+`store_id`, `snapshot_id` and `snapshot_seq` as business columns *and* inherited them in the
+mandatory provenance tail, which is invalid DDL -- duplicate column names. They now come from the
+tail only, and the logical key is `(load_batch_id, table_name)`. `qualifier_counts_json` was also
+added: the feature loader is told to record a count per distinct `gene_qualifier` key, and the
+original schema gave it nowhere to go.
 
 `load_ledger` makes a delivery complete only when **every** table reconciles. A partially-written
 batch is not publishable, and `reconciled = FALSE` on any row of a `load_batch_id` makes the whole
@@ -764,9 +842,13 @@ in the first phase that touched the real package.
   the test that catches that, and without it the suite is self-confirming.
 - **Idempotence.** Load the same snapshot twice; assert row counts are identical and
   `load_ledger` records one reconciled batch, not two.
-- **Supersession resolution.** A fixture where the snapshot's `genome_object_id` appears as
-  `old_object_id` in `object_supersedes`; assert the loaded row carries the *new* id in
-  `fasta_reference` and the *observed* id in `fasta_reference_observed`. Note that this case has
+- **Supersession resolution -- TWO INDEPENDENT CHAINS, and the first draft conflated them
+  (confront stall 9).** `fasta_reference` is the FASTA object pointer; `genome_object_id` is the
+  genome JSON pointer. They are different object types with separate supersession chains, and
+  resolving one into the other's column points at the wrong kind of object. So: resolve the FASTA
+  chain into `assembly.fasta_reference` / `fasta_reference_observed`, and resolve the genome JSON
+  chain into `genome_alias` rows under `alias_source='kbdl_object_id'` (observed and resolved both
+  recorded). Two fixtures and two assertions, never one. Note that this case has
   **zero live instances** today (measured: 0 of 4,865), so the fixture is the only coverage and
   must be built deliberately.
 - **Overlapping features are legal.** Load a genome with a CDS overlapping an RNA gene; assert both
@@ -1039,9 +1121,15 @@ from `organism:locus` to `{genome_id}_{N}` that nobody has written, for a table 
 **Confidence:** high on `evidence` — the reconciliation is exact across all six tools.
 **Medium on `annotation`**: I proved it does not join, not that nobody wants what it holds.
 
-### Q11. How does the lake consume genome-object supersession? -- DECIDED: resolve transitively at load time, and store BOTH — the resolved current id in `fasta_reference`, the id as observed in the snapshot in `fasta_reference_observed`.
+### Q11. How does the lake consume supersession? -- DECIDED: resolve the FASTA chain and the genome-JSON chain SEPARATELY and transitively at load time, storing observed and resolved for each -- FASTA into `assembly.fasta_reference`/`fasta_reference_observed`, genome JSON into `genome_alias` under `kbdl_object_id`.
 **Blast radius:** MEDIUM
-**Why:** Storing only the observed id pins the lake to objects that may have been recompressed away;
+**Why:** **Corrected after confront round 1 (stall 9).** The first draft said "resolve
+`genome_object_id` and store the new id in `fasta_reference`", which conflates two different object
+types: `fasta_reference` points at a FASTA object, `genome_object_id` at a genome JSON object, and
+they supersede independently. Resolving one into the other's column is simply wrong, and the
+measured data would not have caught it (0 live supersessions touch either). Two chains, two
+destinations.
+Storing only the observed id pins the lake to objects that may have been recompressed away;
 storing only the resolved id destroys the ability to reproduce what the snapshot actually said,
 which is the one thing a provenance-carrying row exists for. Both costs one column.
 **If you disagree:** resolve-at-read moves the `object_supersedes` table into the query path, which

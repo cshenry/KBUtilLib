@@ -4,7 +4,7 @@ import os
 import shutil
 from configparser import ConfigParser
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base_utils import BaseUtils
 from .dependency_manager import DEFAULT_DEPENDENCIES_FILE, DependencyManager
@@ -87,10 +87,19 @@ class SharedEnvUtils(BaseUtils):
         #
         # Bridge both directions: KB_AUTH_TOKEN and KBASE_AUTH_TOKEN are treated as
         # synonyms, with KB_AUTH_TOKEN taking precedence when both are set.
+        #
+        # Where each namespace's token came from is recorded in _token_sources so
+        # that a rejected token can be traced to its source and failed over from
+        # (KBUtilLib#94: a stale pod env token silently outranked a valid file).
+        self._token_sources = {key: "file" for key in self._token_hash}
+        if "kbase" in self._token_hash and self._kbase_token_file is not None:
+            self._token_sources["kbase"] = f"file:{self._kbase_token_file}"
+        self._rejected_tokens = {}
         _kb_env_token = os.environ.get("KB_AUTH_TOKEN") or os.environ.get("KBASE_AUTH_TOKEN")
         if _kb_env_token:
             self._token_hash["kbase"] = _kb_env_token
             _src = "KB_AUTH_TOKEN" if os.environ.get("KB_AUTH_TOKEN") else "KBASE_AUTH_TOKEN"
+            self._token_sources["kbase"] = f"env:{_src}"
             self.log_debug(f"{_src} found in environment; using as kbase token (not persisted)")
 
         # Initialize dependency manager (auto_init=False so callers control when to resolve)
@@ -105,6 +114,8 @@ class SharedEnvUtils(BaseUtils):
                 # If token is a dictionary, set each key-value pair (don't save to file)
                 for key, value in token.items():
                     self.set_token(value, key, save_file=False)
+
+        self._log_kbase_token_source()
 
     def _find_config_file(self, explicit_path: Optional[Union[str, Path]] = None) -> Optional[Path]:
         """Find the configuration file using priority order.
@@ -389,6 +400,7 @@ class SharedEnvUtils(BaseUtils):
     def set_token(self, token, namespace="kbase", save_file=True):
         """Set a token and save it to the token file."""
         self._token_hash[namespace] = token
+        self._token_sources[namespace] = "explicit"
         if save_file:
             self.save_token_file()
 
@@ -396,6 +408,84 @@ class SharedEnvUtils(BaseUtils):
     def get_token(self, namespace="kbase") -> Any:
         """Retrieve a stored secret."""
         return self._token_hash.get(namespace, None)
+
+    def get_token_source(self, namespace="kbase") -> Optional[str]:
+        """Where the token :meth:`get_token` returns came from.
+
+        One of ``"explicit"`` (``token=`` or :meth:`set_token`),
+        ``"env:<VAR>"``, ``"file:<path>"`` or ``"file"`` (``~/.tokens``), or
+        None when no token is set. Never the token itself.
+        """
+        if namespace not in self._token_hash:
+            return None
+        return self._token_sources.get(namespace)
+
+    def _kbase_token_candidates(self) -> List[Tuple[str, str]]:
+        """Every kbase token this process can see, in precedence order.
+
+        Read fresh on each call: environment variables are frozen at process
+        start, but ``~/.kbase/token`` may have been refreshed since, which is
+        exactly the token a long-lived process needs after its env one expires.
+        """
+        candidates = []
+        for var in ("KB_AUTH_TOKEN", "KBASE_AUTH_TOKEN"):
+            value = os.environ.get(var)
+            if value:
+                candidates.append((f"env:{var}", value))
+        if self._kbase_token_file is not None:
+            path = Path(self._kbase_token_file)
+            try:
+                value = path.read_text().strip() if path.exists() else ""
+            except OSError as e:
+                self.log_warning(f"Could not read kbase token file {path}: {e}")
+                value = ""
+            if value:
+                candidates.append((f"file:{path}", value))
+        return candidates
+
+    def _log_kbase_token_source(self) -> None:
+        source = self.get_token_source("kbase")
+        if source is None:
+            return
+        current = self._token_hash["kbase"]
+        others = [
+            src for src, value in self._kbase_token_candidates()
+            if src != source and value != current
+        ]
+        if others:
+            self.log_info(
+                f"kbase token: using {source}; a DIFFERENT token is also present "
+                f"in {', '.join(others)}"
+            )
+        else:
+            self.log_debug(f"kbase token: using {source}")
+
+    def fail_over_token(self, namespace="kbase") -> bool:
+        """Switch to the next distinct token after the current one was rejected.
+
+        For a caller that just received an authentication failure (HTTP 401).
+        Marks the current token rejected, then adopts the first candidate from
+        :meth:`_kbase_token_candidates` not yet rejected, logging the switch by
+        SOURCE. Returns True if it switched, False if there is nothing left to
+        try. A token supplied explicitly is never failed over from: the caller
+        chose it, and silently substituting another identity would be wrong.
+        Only the ``"kbase"`` namespace has alternate sources.
+        """
+        source = self.get_token_source(namespace)
+        if namespace != "kbase" or source in (None, "explicit"):
+            return False
+        rejected = self._rejected_tokens.setdefault(namespace, set())
+        rejected.add(self._token_hash[namespace])
+        for candidate_source, value in self._kbase_token_candidates():
+            if value not in rejected:
+                self._token_hash[namespace] = value
+                self._token_sources[namespace] = candidate_source
+                self.log_warning(
+                    f"kbase token from {source} was rejected; failing over to "
+                    f"{candidate_source}"
+                )
+                return True
+        return False
 
     def load_environment_variables(self) -> None:
         """Load relevant environment variables into the shared environment."""

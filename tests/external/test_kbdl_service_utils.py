@@ -890,6 +890,85 @@ def test_401_and_403_are_distinguishable_typed_errors():
     assert issubclass(KBDLNotAuthorizedError, kbdl_client_module.KBDLServiceError)
 
 
+# ---------------------------------------------------------------------------
+# 401 token fail-over (KBUtilLib#94): a stale env token must not mask a valid
+# ~/.kbase/token. Fake tokens only; env is monkeypatched, the file is tmp.
+# ---------------------------------------------------------------------------
+
+STALE_ENV_TOKEN = "fake-stale-env"
+VALID_FILE_TOKEN = "fake-valid-file"
+
+
+def _unauthorized():
+    return FakeResponse(
+        401, {"detail": {"error": "invalid_token", "message": "bad token"}}
+    )
+
+
+def make_env_and_file_client(session, tmp_path, monkeypatch):
+    monkeypatch.delenv("KB_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("KBASE_AUTH_TOKEN", STALE_ENV_TOKEN)
+    token_file = tmp_path / "token"
+    token_file.write_text(VALID_FILE_TOKEN)
+    return KBDLServiceUtils(
+        session=session,
+        base_url=TEST_BASE_URL,
+        config_file=False,
+        token_file=tmp_path / "absent-tokens",
+        kbase_token_file=token_file,
+    )
+
+
+def test_401_fails_over_from_stale_env_token_to_file_token(tmp_path, monkeypatch):
+    session = FakeSession([_unauthorized(), FakeResponse(200, [])])
+    client = make_env_and_file_client(session, tmp_path, monkeypatch)
+
+    assert client.list_jobs() == []
+    sent = [c["headers"]["Authorization"] for c in session.calls]
+    assert sent == [f"Bearer {STALE_ENV_TOKEN}", f"Bearer {VALID_FILE_TOKEN}"]
+    # The switch sticks: the next request goes straight out with the file token.
+    session._responses.append(FakeResponse(200, []))
+    client.list_jobs()
+    assert session.calls[-1]["headers"]["Authorization"] == f"Bearer {VALID_FILE_TOKEN}"
+
+
+def test_401_with_every_token_rejected_names_the_source(tmp_path, monkeypatch):
+    session = FakeSession([_unauthorized(), _unauthorized()])
+    client = make_env_and_file_client(session, tmp_path, monkeypatch)
+
+    with pytest.raises(KBDLAuthenticationError, match=r"kbase token source: file:"):
+        client.list_jobs()
+    assert len(session.calls) == 2
+
+
+def test_401_with_explicit_token_does_not_fail_over():
+    session = FakeSession([_unauthorized()])
+    client = make_client(session)
+
+    with pytest.raises(KBDLAuthenticationError, match=r"kbase token source: explicit"):
+        client.list_jobs()
+    assert len(session.calls) == 1
+
+
+def test_401_fail_over_resends_upload_bytes_from_the_start(tmp_path, monkeypatch):
+    class ReadingSession(FakeSession):
+        """Consumes the multipart file object, as a real transport would."""
+
+        def request(self, method, url, **kwargs):
+            response = super().request(method, url, **kwargs)
+            self.calls[-1]["body"] = kwargs["files"]["file"][1].read()
+            return response
+
+    session = ReadingSession([_unauthorized(), FakeResponse(202, {"job_id": "up-1"})])
+    client = make_env_and_file_client(session, tmp_path, monkeypatch)
+
+    result = client.upload_object(
+        b"file bytes", object_type="GenomeArchive", name="a", visibility="private"
+    )
+    assert result == {"job_id": "up-1"}
+    assert [c["body"] for c in session.calls] == [b"file bytes", b"file bytes"]
+
+
 def test_404_surfaces_typed_error():
     session = FakeSession([FakeResponse(404, {"detail": "job not found"})])
     client = make_client(session)

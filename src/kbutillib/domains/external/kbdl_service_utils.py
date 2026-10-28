@@ -481,14 +481,42 @@ class KBDLServiceUtils(SharedEnvUtils):
         return {}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        """Send one request, failing over to another kbase token on a 401.
+
+        A 401 means the auth layer rejected the request before anything was
+        done, so resending -- even a ``POST`` -- cannot create a second job.
+        That is why this retry is safe where :meth:`_build_retrying_session`
+        deliberately does not retry ``POST``. It exists for KBUtilLib#94: a
+        long-lived process holds a pod env token that has gone stale while
+        ``~/.kbase/token`` is valid.
+        """
         url = f"{self.base_url}{path}"
-        headers = {**self._auth_headers(), **(kwargs.pop("headers", None) or {})}
-        self.log_debug(f"{method} {url}")
-        response = self.session.request(
-            method, url, timeout=self.timeout, headers=headers, **kwargs
-        )
-        self._raise_for_status(response)
-        return response
+        extra_headers = kwargs.pop("headers", None) or {}
+        # Multipart uploads carry file objects the first attempt consumes.
+        rewind = [
+            (part[1], part[1].tell())
+            for part in (kwargs.get("files") or {}).values()
+            if isinstance(part, tuple) and len(part) > 1
+            and hasattr(part[1], "seek") and hasattr(part[1], "tell")
+        ]
+        while True:
+            headers = {**self._auth_headers(), **extra_headers}
+            self.log_debug(f"{method} {url}")
+            response = self.session.request(
+                method, url, timeout=self.timeout, headers=headers, **kwargs
+            )
+            try:
+                self._raise_for_status(response)
+            except KBDLAuthenticationError as exc:
+                rejected_source = self.get_token_source("kbase")
+                if self.fail_over_token("kbase"):
+                    for fileobj, position in rewind:
+                        fileobj.seek(position)
+                    continue
+                raise KBDLAuthenticationError(
+                    f"{exc} (kbase token source: {rejected_source or 'none'})"
+                ) from None
+            return response
 
     @staticmethod
     def _error_detail(response: requests.Response) -> Any:

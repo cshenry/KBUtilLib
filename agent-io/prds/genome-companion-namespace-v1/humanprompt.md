@@ -1,88 +1,98 @@
 # The genome companion namespace — what this is, in one page
 
-**Decision (2), designed, attacked, and folded.** A new lakehouse namespace,
-`kbaseincubator.genome_companion`, built on the `kbaseincubator.fitness` scheme you named — with its
-fourteen defects decided, 21 tables, three read projections, one in-pod loader, and `KBDLStoreLoad`'s
-submission path retired.
+**Redesigned at your direction.** The namespace is now an **annotation and occurrence companion** to
+the clearinghouse, and it duplicates nothing. Two changes to the clearinghouse, twelve science tables
+in the companion, three read projections, and the KBDL load function adapted to feed all of it.
 
-**It has been through a cross-family adversary and come out the other side.** The confront returned
-18 stall points and opened with *"do not start production loading from this PRD."* All 18 are folded.
-Three of them reshaped the design rather than polishing it, and those three are the most important
-thing on this page.
+## The thing I found when I went looking, and it changes the pitch
 
-## The three things the adversary broke, and what they are now
+**The mechanism you described already exists.** `clearinghouse_schema._CONTENT_TYPE_HEAD` is a
+per-entity-type mapping whose entire purpose is "customize those tables as needed for each entity
+type". On `main` it already holds `fasta_reference, taxon_id, assembly_accession, n_contigs,
+total_length, is_closed` for genome; `sequence, seq_length` for protein; `sequence, seq_length,
+protein_entity_hash` for gene. So this is **under-populated, not absent** — and my previous two drafts
+were re-declaring every one of those columns in their own `assembly`, `genome`, `function` and
+`ontology_term` tables. That duplication was only visible once I asked the question against the source
+instead of against my own document.
 
-**1. The snapshot contract was impossible. → Q1, and it re-keyed every table.**
-The first draft said every table was append-only, *and* that `genome_id` was a primary key, *and*
-that idempotence was keyed on the snapshot. On a second delivery those cannot all hold: appending
-duplicates the key, skipping loses enrichment, replacing breaks append-only. Worse — I had *cited*
-`council-record-lakehouse-v1`'s snapshot-versioned keys as the precedent and then not adopted the
-mechanism. Now: every science row is an immutable snapshot version keyed
-`(store_id, snapshot_id, logical_key)`, and a current read picks **one** fully-reconciled snapshot
-**before any join**.
+## Why this is urgent rather than merely correct
 
-**2. `assembly` could not hold what I claimed. → Q3.**
-I wrote that the key was `assembly_entity_hash` *and* that one entity hash "may front several content
-hashes". One row holds one content hash. Now `assembly` is **one row per FASTA representation**, and
-`contig` is scoped to the representation — because contig ids belong to a FASTA form, and a header
-change preserves the order-independent hash while changing them.
+**Measured 2026-10-27: `genome_entity`, `genome_content`, `gene_entity`, `gene_content`,
+`protein_entity`, `protein_content` and every `*_result` for those types are all ZERO ROWS.** Only
+`function` has data (47,341). The clearinghouse is append-only, fill-only, no production delete — so
+a column we add now is free, and a column we add after the first genome load is a corpus-wide
+backfill. **This is one operator command away from being permanent.** `function_content` and
+`ontology_term_content` are deliberately untouched, because they are the only place a change costs
+anything.
 
-**3. The sharder would have silently deleted your data. → Q6.**
-I said "reuse `clearinghouse_shard.py` unchanged with `genome_id` as the sort key". Its key spec does
-*entity* dedup, so that would have **discarded all but one gene per genome**. "Sorting by genome is
-not deduplicating by genome." Now there is an explicit per-table key and routing map, and dedup is on
-full snapshot-scoped keys only.
+## The one load-bearing idea
 
-## And one thing I measured during the fold that nothing had noticed
+**A clearinghouse gene entity is a *sequence*, not a located feature.** It is keyed on the content
+hash, so the same sequence in a thousand genomes is **one row by design** — which means location is
+something the clearinghouse structurally *cannot* hold. The companion exists for exactly that gap:
+the occurrence. Which sequence, in which genome, on which contig, at which coordinates, called by
+which tool.
 
-**`genome_id` is not a hash.** The draft said it was a truncated content hash — so did the briefing I
-was handed. It is `unk` + a **contiguous decimal ordinal**: `unk1` … `unk4865`. That matters because
-equal-width *lexicographic* ranges over it are badly skewed (`unk1` captures 1, 10–19, 100–199,
-1000–1999 — measured 1111 ids versus 111 for `unk5`), and string sorting puts `unk10` before `unk2`.
-Parsing the ordinal and routing on the **integer** is both correct and *better* than hashing: a dense
-ordered counter gives near-even shards and near-perfect pruning. Two decisions had the wrong stated
-reason; both conclusions survived.
+And the same logic settles annotation, which is the biggest change: **a BAKTA call on a protein
+sequence is a fact about the sequence**, so it goes in `protein_result` — one row per tool, however
+many genomes carry that protein. `fitness.function_annotation` holds **1,118,422 rows for 48
+genomes**; the per-feature shape multiplies one fact by how often a protein recurs, which at 2M
+genomes is roughly the difference between 10⁸ and 10¹⁰ rows. The companion **joins** to annotations
+and never copies them — and `published_gene_annotation` reconstitutes the fitness-DB shape by join, so
+you get the convenient view without the storage.
 
-## What else is worth knowing before you read it
+## What the companion actually holds
 
-**`fitness` is not unpartitioned by oversight — the writer is the defect.** No partition clause on any
-of it, and the layout is already broken at 48 genomes: `genome` holds 48 rows in **48 files**,
-`function_annotation` 1.1M rows in **2,880 files**. Our write path cannot request an Iceberg transform
-or a file-size property at all, so the lever is the writer — and `512 MB` is now treated as an
-*uncompressed budget*, with the layout **measured** through the real ingest path rather than asserted.
+Only four kinds of thing, and if a future table fits none of them it probably belongs in the
+clearinghouse:
 
-**Two of your fourteen items dissolved on measurement.** `evidence` *is* linked and is worthless:
-2,504,043 rows reconciling exactly to the sum of its parents, zero non-null scores, not even a unique
-key. `fitness.annotation` is not merely wide — **all 272,076 rows are orphans.** Both dropped.
+- **occurrence** — `contig`, `genome_feature` (the core table), `feature_qualifier`
+- **genome-scoped provenance** — `genome_build`, `genome_build_provenance`, `genome_caller_run`
+- **per-occurrence judgement** — `feature_consensus`, `feature_curation`
+- **experiment** — `condition`, `essentiality`, `experimental_fitness`, `propagated_fitness`
 
-**Your assembly-scoped decision met a real counterexample and survived.** `SyringaeB728a` and
-`SyringaeB728a_mexBdelta` — a knockout mutant and its wild-type parent — share a byte-identical
-assembly. The hash stays assembly-scoped; it just cannot be the genome's key.
+Plus `load_request`, `load_ledger`, and two append-only declaration logs. **No mutable column
+anywhere.**
 
-**The assembly-hash ambiguity is a documentation gap, not a data problem.** I fetched three
-assemblies from your workspace 262939 and recomputed both rules over the real FASTA: rule A matched
-all three, rule B none, and two were multi-contig so the sort step was load-bearing. `fitness`
-already stores the clearinghouse's canonical hash.
+## Your two other instructions, taken
 
-## What to read, and where to push back
+**Selective loading.** A load is now a **request** that names genomes, not a snapshot of a store.
+`load_request.selector_json` records what was asked for, so a request stays reproducible after the
+corpus moves. A genome is simply absent until requested.
 
-**25 judgement calls: 7 IRREVERSIBLE, 14 MEDIUM, 3 LOW, 1 terminal.** Read Q1–Q7 first — those are
-the irreversible ones. **Q6 is the single highest-risk entry**: it is IRREVERSIBLE and the only one of
-the seven at medium confidence, because its file-size target is a budget rather than a measurement
-until the rehearsal runs.
+**Multiple instances.** The namespace is a **parameter**, defaulting to `genome_companion`. Nothing
+hardcodes it. No ACL, quota or cross-instance query is designed — you said not to worry about that
+yet. What makes it work is that the clearinghouse stays **single and shared**: companion rows
+reference content hashes, which are globally valid, so two instances describing one genome agree about
+what it is without coordinating.
 
-To change anything, edit its `DECIDED:` line and run `--review`.
+## Two things to push back on
 
-## Two questions that are yours, and one gap I own
+**Q3 — I split your example differently from how you phrased it.** You named checkm scores as content
+metadata. I put the *intrinsic* metrics in `genome_content` (`gc_content`, `contig_n50`,
+`max_contig_length`, `min_contig_length`, `n_ambiguous_bases`, `assembly_level`) and the *assessed*
+ones in `genome_result` as a declared `genome_quality@1` type — because CheckM2 1.0 and 1.1
+legitimately disagree, and `completeness` is meaningless without `completeness_model_used`. The cost
+is real: the payload is a JSON string, so "completeness > 95" is an extraction rather than a column
+scan. That is why `published_genome` flattens it back into columns, and why the acceptance task
+**measures** the query cost and reports it. **It is free to reverse before the first load and
+expensive after** — the alternative is five columns on `genome_content` and deleting the result type.
 
-**How many genomes are to be enriched** (blocked continuation 180). No table shape depends on it, but
-it decides whether the first load is 4,865 rows or 2,000,000 — i.e. whether the sharding is exercised
-on day one.
+**Q9 — this design is strictly weaker in one place, and I took the regression deliberately.** The
+companion keys genomes on `genome_entity_hash`, which *is* the assembly hash — so two biologically
+distinct genomes with identical assemblies collapse to **one** entity. Your `SyringaeB728a` /
+`SyringaeB728a_mexBdelta` pair is exactly that case. I took it because a surrogate genome key
+re-introduces a genome table, which re-introduces the duplication this whole revision removes — and
+because KBDL's registry dedupes that shape anyway, so the previous draft's support for it was
+theoretical too. The escape hatch is specified in Q9 (a small `genome_instance` table), and **I would
+support building it the first time a real mutant/parent pair needs to load.**
 
-**Whether anything reads `fitness` or `inner_loop`.** I measured contents, not consumers, so Q20 now
-promises *no change at all* to either rather than a compatibility window I could not size.
+## Status, honestly
 
-**My own flaw in how I ran the confront:** the worker's worktree is off `main`, which carries neither
-this PRD nor the sibling PRDs it cites, and I did not embed the taskplan — the report says so itself.
-Some of its "absent from this checkout" complaints were my dispatch, not its misreading. The valid
-core is folded regardless. If a round 2 goes out, the taskplan goes with it.
+**19 judgement calls plus a terminal: 6 IRREVERSIBLE, 13 MEDIUM.** Taskplan re-derived and validated
+at 11 tasks across 8 phases. Read Q1–Q9 first; those are the irreversible ones plus the two above.
+
+**This revision has NOT been re-attacked.** Confront round 1's eighteen stalls were folded into the
+*previous* design, and several are now obsolete rather than fixed — the Revision Log says which. One
+confront round of the three-round budget remains, and running it against this scheme is the obvious
+next step before anyone builds.

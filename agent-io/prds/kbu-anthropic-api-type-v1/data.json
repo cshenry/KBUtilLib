@@ -1,7 +1,9 @@
 {
   "prd_name": "kbu-anthropic-api-type-v1",
   "title": "The `anthropic` api type and an exactly-priced council wallet",
-  "repos": ["KBUtilLib"],
+  "repos": [
+    "KBUtilLib"
+  ],
   "authored_by": "miles",
   "authored_on": "2026-10-29",
   "authored_machine": "h100",
@@ -23,7 +25,7 @@
       "cause": "Submitted with --role operator, following the header of agent-io/confront/consumer-sim-prd.md. The codex operator role carries a standing instruction to refuse until it finds a committed verdict-passing approval manifest, so it exited 0 in 35 seconds having correctly refused. The ai-design runbook's own step-4d command says --role researcher. Filed as AIAssistant issue #30; retried successfully with --role researcher plus a write-early preamble."
     }
   },
-  "draft_commit": null,
+  "draft_commit": "d178f28f008aba08c1a742848177a2800302088e",
   "review_protocol": "Written single-pass in /ai-design Draft Mode on h100. Every judgement call is already decided and applied in the body and the taskplan; the Open Questions section is a manifest of choices, not a queue of holes. Chris edits the committed fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-anthropic-api-type-v1` then diffs the working tree against `draft_commit`, classifies every hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. NOTE ON DELIVERY: this bundle was authored on h100, where the Dropbox working tree is parked on `wip` and may not be written, so the commit is on `main` off-tree and the files exist on no machine's disk until `main` is merged into `wip` on primary-laptop. A readable, sha256-verified copy is under ~/Dropbox/AIPlatform/artifacts/ -- do NOT edit that copy, because Review Mode diffs the git working tree and would see no changes.",
   "is_new_prd_rather_than_amendment": {
     "decision": "new PRD",

@@ -1,0 +1,263 @@
+{
+  "prd_name": "kbu-anthropic-api-type-v1",
+  "title": "The `anthropic` api type and an exactly-priced council wallet",
+  "repos": ["KBUtilLib"],
+  "authored_by": "miles",
+  "authored_on": "2026-10-29",
+  "authored_machine": "h100",
+  "base_commit": "cb6cf1b03e91f262e862aaa49e90c461190735f4",
+  "review_rounds": 0,
+  "confront_rounds": 1,
+  "confront": {
+    "round": 1,
+    "task_id": "task-4deb5df1",
+    "backend": "codex",
+    "machine": "h100",
+    "artifact": "research/confront-round-1-stall-report.md",
+    "binding_stalls_returned": 7,
+    "accepted": 6,
+    "accepted_in_substance_resolved_differently": 1,
+    "outcome": "SIX OF SEVEN CHANGED THE DESIGN BEFORE THE FIRST COMMIT. The two largest were defects in the draft rather than gaps: (a) the temperature rule was UNIMPLEMENTABLE because CouncilConfig._seat pops temperature out of model params onto the seat -- the adversary executed _seat and measured seat.temperature=0.3 / seat.extra={} -- re-decided as Q4 with a _seat change; (b) the draft's own `priced: \"partial\"` fix would have published a partial subtotal as a COMPLETE dollar figure, because Quote.to_dict and the quote CLI both select priced gateways by TRUTHINESS -- re-decided as Q11 with a strict boolean plus a partially_priced flag so unaware readers understate. Also folded: an account-validation hole (Q3), an unsatisfiable namespace criterion (AC7 withdrawn), a three-way contradiction on size-tiered pricing (new Q11b), balance-delta rows triple-attributing one wallet (new Q11c), an impossible live criterion (new Q5b, AC4 reclassified as an injected-response test), and a framing error about which rate limit binds (Q8). NOT adopted: a required operator-asserted `options.quota_scope` field -- the objection behind it is real but the field cannot be validated against anything, so `account` is instead required to EQUAL the bucket name and multi-organisation use is named a non-goal.",
+    "first_attempt_failed": {
+      "task_id": "task-2209d5ce",
+      "cause": "Submitted with --role operator, following the header of agent-io/confront/consumer-sim-prd.md. The codex operator role carries a standing instruction to refuse until it finds a committed verdict-passing approval manifest, so it exited 0 in 35 seconds having correctly refused. The ai-design runbook's own step-4d command says --role researcher. Filed as AIAssistant issue #30; retried successfully with --role researcher plus a write-early preamble."
+    }
+  },
+  "draft_commit": null,
+  "review_protocol": "Written single-pass in /ai-design Draft Mode on h100. Every judgement call is already decided and applied in the body and the taskplan; the Open Questions section is a manifest of choices, not a queue of holes. Chris edits the committed fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-anthropic-api-type-v1` then diffs the working tree against `draft_commit`, classifies every hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. NOTE ON DELIVERY: this bundle was authored on h100, where the Dropbox working tree is parked on `wip` and may not be written, so the commit is on `main` off-tree and the files exist on no machine's disk until `main` is merged into `wip` on primary-laptop. A readable, sha256-verified copy is under ~/Dropbox/AIPlatform/artifacts/ -- do NOT edit that copy, because Review Mode diffs the git working tree and would see no changes.",
+  "is_new_prd_rather_than_amendment": {
+    "decision": "new PRD",
+    "sibling": "kbu-ai-council-v1",
+    "reason": "kbu-ai-council-v1 is at status `ready` in the registry, not `done`. Amending a `ready` PRD edits a document an interactive conductor may claim and reopens a bundle whose work has already landed. This PRD uses the backend-agnostic provider layer that one built, through the registry door and the ApiType protocol, exactly as designed."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "claim": "SeatSpec.endpoint_kind's closed Literal is the ONLY hard blocker; the store needs no migration.",
+      "evidence": "council/types.py:489 is Literal['argo','openai','claude_cli','codex_cli','fake','replay']; ENDPOINT_KINDS at council/types.py:112 is the same list. council/store/schema.py:225 is _ENUM = sa.String(32) (line 125) with no CHECK. council/config.py:1333 _require_registered_kind asks llm.api_types() rather than a local list. A repo-wide git grep for codex_cli returned no other closed enumeration.",
+      "confidence": "high"
+    },
+    {
+      "id": "F2",
+      "claim": "The pricing bucket and the rate-limit group are the SAME config key: `account`.",
+      "evidence": "quote.py::_gateway_of (line 1556) returns cfg.get('account') or seat.endpoint. engine/worker.py::_build_limits (line 673) groups by cfg.get('account') or f'endpoint:{endpoint}'.",
+      "confidence": "high"
+    },
+    {
+      "id": "F3",
+      "claim": "CORRECTS THE COMMISSIONING BRIEF. Anthropic enforces rate limits per MODEL-CLASS BUCKET, not account-wide, so N aliases are NOT N pools against one limit. The brief's predicted pricing-versus-pacing conflict does not arise.",
+      "evidence": "platform.claude.com/docs/en/api/rate-limits, read 2026-10-29: 'Each row in the following tables has its own RPM, ITPM, and OTPM limits.' Footnotes: Opus 4.8/4.7/4.6/4.5 share one bucket; Sonnet 4.6/4.5 share one; Opus 5, Sonnet 5, Haiku 4.5 each have their own.",
+      "confidence": "high",
+      "consequence": "One alias per rate-limit bucket is correct for pacing AND splits the pricing bucket at the granularity pricing needs. Decided as Q3."
+    },
+    {
+      "id": "F4",
+      "claim": "Sending `temperature` returns HTTP 400 on every current Claude model, and SeatSpec.temperature defaults to 0, so a naive port fails EVERY call.",
+      "evidence": "Sampling parameters are removed on Sonnet 5, Opus 5, Opus 4.8, Opus 4.7 (bundled claude-api skill, API-drift table). SeatSpec.temperature default is 0, not None (council/types.py). HttpBackend._params (llm/apis/http_common.py:590) sends temperature whenever it is not None. Independent corroboration in-repo: llm/apis/http.py ARGO_NO_TEMPERATURE_MODELS = {'claudeopus47','claudeopus48','claudesonnet5'}.",
+      "confidence": "high",
+      "consequence": "Omit all sampling parameters unless a seat sets one explicitly. Decided as Q4. NOT named in the commissioning brief."
+    },
+    {
+      "id": "F5",
+      "claim": "The wallet-exhausted signal arrives as an HTTP 400 which currently neither halts the endpoint nor retries, so the run drains item by item with a misleading reason.",
+      "evidence": "An operator-set spend limit returns HTTP 400 invalid_request_error with a message beginning 'You have reached your specified API usage limits'; the organisation monthly cap returns 429 with error.details.error_code = enforced_spend_limit_reached and NO retry-after (rate-limits doc, read 2026-10-29). HttpBackend._status_error (llm/apis/http_common.py:645) maps any non-429 4xx to InvalidOutput: not retryable, does not halt.",
+      "confidence": "high",
+      "consequence": "Both spend-limit shapes map to QuotaExhausted (halts endpoint). NOT named in the commissioning brief, and it is the likely path: fencing a $200 credit with a $200 console limit is the obvious operator action."
+    },
+    {
+      "id": "F6",
+      "claim": "`input_tokens` is not the input total; the usage mapping must be written as a sum.",
+      "evidence": "Anthropic docs: total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens; input_tokens counts only tokens after the last cache breakpoint.",
+      "confidence": "high",
+      "consequence": "prompt_tokens = input_tokens + cache_creation + cache_read. Also: cache reads bill at a fraction of base input, so the token sum and the dollar figure diverge once caching is on -- hence the v1 refusal of cache_control."
+    },
+    {
+      "id": "F7",
+      "claim": "Truncation is likely, not hypothetical, and the signal has a different name.",
+      "evidence": "Anthropic uses stop_reason 'max_tokens'; HttpBackend._complete (line 480) tests finish_reason == 'length'. Thinking is on by default and adaptive on Opus 5 and Sonnet 5, thinking tokens count as output, and SeatSpec.max_output_tokens defaults to 4000.",
+      "confidence": "high",
+      "consequence": "Map stop_reason max_tokens onto the existing truncation failure; document the ceiling. Without the mapping a truncated answer is diagnosed as 'reply contained no JSON object'."
+    },
+    {
+      "id": "F8",
+      "claim": "The rate-limit bucket to list-price correspondence is 1:1 today but is a coincidence, and Claude Haiku 5.5 cannot be priced by the current schema at all.",
+      "evidence": "Every current bucket holds one price (Opus 4.x all $5/$25; Sonnet 4.x all $3/$15; Opus 5, Sonnet 5, Haiku 4.5 alone). Claude Haiku 5.5 input price is TIERED BY PROMPT SIZE: $0.10/MTok up to 100,000 tokens, $0.50/MTok above (pricing doc, read 2026-10-29). RateConfig (council/config.py:744) carries a single input_per_mtok.",
+      "confidence": "high",
+      "consequence": "Price per canonical model inside each gateway so the quote is exact by construction (Q11). Haiku 5.5 is out of scope."
+    },
+    {
+      "id": "F9",
+      "claim": "The provider's own limits are machine-readable -- a first for this project.",
+      "evidence": "anthropic-ratelimit-requests-limit / -remaining / -reset plus input-tokens and output-tokens families on every response (rate-limits doc). Caveats read and recorded: reported values are the most restrictive limit currently in effect (a workspace limit can shadow the model's) and remaining counts are rounded to the nearest thousand. Contrast: every ARGO and MAG usage/billing/pricing/quota path 404s, per the _price_gateways docstring.",
+      "confidence": "high",
+      "consequence": "Record the headers so a wrong max_requests_per_minute is detectable; do NOT self-tune (Q7)."
+    },
+    {
+      "id": "F10",
+      "claim": "The canonical collision with ARGO means this wallet adds FEWER chairs than it appears to.",
+      "evidence": "DEFAULT_CANONICAL maps ARGO claudesonnet5 -> anthropic/claude-sonnet-5 and claudeopus5 -> anthropic/claude-opus-5; Roster._check_independence refuses two proposers on one canonical model. ARGO's table does NOT cover Haiku 4.5 or Sonnet 4.6.",
+      "confidence": "high",
+      "consequence": "The seats this wallet newly makes available are Haiku 4.5 and Sonnet 4.6, plus moving an existing Claude seat off ARGO -- not three extra Claude chairs. Input the roster decision needs; the roster itself is out of scope."
+    },
+    {
+      "id": "F11",
+      "claim": "resolve_credentials would report an anthropic endpoint as needing no credential.",
+      "evidence": "domains/genome/ontology_mapping/council_run.py::resolve_credentials (line 272) branches argo (354), openai (377), then falls through to 'interactive_subscription_login' if kind in ('claude_cli','codex_cli') else 'none' (456).",
+      "confidence": "high"
+    },
+    {
+      "id": "F12",
+      "claim": "An anthropic endpoint would be refused at config load for a reason about answer caching.",
+      "evidence": "BASE_URL_KINDS = ('argo','openai') (council/config.py:119). EndpointConfig._check (line 637) sends any other non-CLI kind down the branch demanding reuse_namespace, because default_reuse_namespace (types.py:210) would otherwise return one string for every such endpoint.",
+      "confidence": "high",
+      "consequence": "Default base_url to https://api.anthropic.com in an anthropic branch placed before the generic one."
+    },
+    {
+      "id": "F13",
+      "claim": "VERIFIED_OUTPUT_CAPS is empty, so every seat runs as singles; an anthropic seat is the first that could legitimately earn an entry, and deliberately does not get one.",
+      "evidence": "worker.py:322 VERIFIED_OUTPUT_CAPS = {} and its comment requiring an independently measured mechanism; _effective_output_cap (line 1602); _batch_n forces singles with no entry. max_tokens on /v1/messages is a required hard ceiling, unlike either CLI's argv.",
+      "confidence": "high",
+      "consequence": "No entry in v1 (Q9). Cost to record in quote assumptions: no batch amortisation of the per-item GO menu."
+    },
+    {
+      "id": "F14",
+      "claim": "The $200 wallet is NOT a single enforced ceiling.",
+      "evidence": "max_total_tokens is per endpoint (_enforce_budget, worker.py:3084, reads self.endpoint_config(endpoint)). Q3 puts each rate-limit bucket on its own endpoint, so three seats mean three budgets and nothing sums them. A halt is also per endpoint, so one alias halting does not stop the run.",
+      "confidence": "high",
+      "consequence": "The largest gap this PRD leaves open, named in gotcha 3 and in Out of Scope item 3. Closing it is new mechanism, not configuration."
+    },
+    {
+      "id": "F16",
+      "claim": "FROM THE EXTERNAL SCAN, BUILD-AFFECTING. The official SDK retries a 429 WITHOUT inspecting the spend code, and defaults to 2 retries -- breaking this repository's stated one-attempt-per-call invariant and tripling the spend-cap spiral.",
+      "evidence": "anthropic-sdk-python src/anthropic/_base_client.py:906 BaseClient._should_retry checks x-should-retry then HTTP status including 429, without examining error.details.error_code (read at a pinned commit by task-a7ad9d14). llm/__init__.py module docstring: 'Exactly one attempt per call. Retries, backoff, budgets, halts, concurrency limits and single-flight collapsing belong to the caller (for the council, to CouncilWorker) because only the caller knows what a second attempt would cost.' Analogous prior art: LiteLLM #32785, where three configured retries produced four upstream calls against a quota-exhausted account.",
+      "confidence": "high",
+      "consequence": "Construct the SDK client with max_retries=0. Decided as Q2b. The error mapping in F5 is necessary but NOT sufficient without it. NOT known before the scan ran."
+    },
+    {
+      "id": "F17",
+      "claim": "FROM THE EXTERNAL SCAN, BUILD-AFFECTING. The SDK requires Python >= 3.10 and this repository's CI tests 3.9 while installing the `all` extra, so an unmarked dependency breaks the 3.9 build.",
+      "evidence": "anthropic-sdk-python pyproject.toml:11 requires Python >=3.10 (scan). Verified LOCALLY rather than taken on trust: KBUtilLib pyproject.toml line 6 is requires-python = '>=3.9', and .github/workflows/ci.yml runs a matrix of 3.9, 3.10, 3.11 installing with `pip install -e \".[dev]\"`; the pyproject comments record that CI installs `all`. Precedent already in the file: mcp = ['mcp >=1.27,<2 ; python_version >= \"3.10\"'].",
+      "confidence": "high",
+      "consequence": "The extra must carry a `python_version >= '3.10'` marker in BOTH optional-dependencies and `all`, and the lazy-import error must name the Python requirement as well as the extra, because on 3.9 the extra resolves to nothing."
+    },
+    {
+      "id": "F18",
+      "claim": "FROM THE EXTERNAL SCAN. The usage-name trap is a SHIPPED defect in two serious projects and is still live in two libraries.",
+      "evidence": "Three libraries sum the three input categories: LiteLLM AnthropicConfig.calculate_usage (transformation.py:2747), LangChain _create_usage_metadata (chat_models.py:3316), Vercel convertAnthropicUsage (convert-anthropic-usage.ts:44). Two do NOT: aisuite _get_completion_usage (anthropic_provider.py:281) and LlamaIndex get_tokens_from_response (token_counting.py:39) -- and the scan EXTRACTED AND EXECUTED both on input=18 / cache_creation=2284 / cache_read=0, each returning prompt_tokens=18 against a true total of 2302. Shipped defects: Vercel AI SDK #9921 (18 instead of 2302, closed via #10975) and LiteLLM #28354 (field-name mismatch, fallback returned zero).",
+      "confidence": "high",
+      "consequence": "Q2's sum is what three independent implementations converged on; the two that did not are measurably wrong. Turns the central trap from predicted to documented."
+    },
+    {
+      "id": "F19",
+      "claim": "FROM THE EXTERNAL SCAN. Double normalisation zeroes all usage and cost, so the normalised dict must never be re-read as native usage.",
+      "evidence": "Hermes #123157: adapters emitted prompt_tokens/completion_tokens, then a downstream pricing function selected a NATIVE Anthropic usage parser by provider identity, looked for input_tokens/output_tokens, found neither, and reported all usage and cost as zero. Deterministic reproduction cited at 7b761da2de.",
+      "confidence": "medium-high",
+      "consequence": "Recorded as gotcha 15. Nothing in KBUtilLib does this today; the natural future change -- a cost path branching on endpoint_kind to 'handle Anthropic properly' -- would reintroduce it."
+    },
+    {
+      "id": "F20",
+      "claim": "FROM THE EXTERNAL SCAN. Anthropic documents its own OpenAI-compatibility surface as evaluation-only, with silently ignored inputs.",
+      "evidence": "platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk: prompt caching unsupported, tool `strict` ignored, `response_format` ignored, thinking output unavailable, system/developer messages hoisted into one top-level system field, and unsupported inputs may be silently ignored.",
+      "confidence": "high",
+      "consequence": "First-party confirmation of the no-shim instruction, and a stronger argument than shape mismatch: a shim would work badly and SILENTLY."
+    },
+    {
+      "id": "F21",
+      "claim": "FROM THE EXTERNAL SCAN. No client is known to discover Anthropic sibling-model bucket membership from response headers, so a config-driven bucket table is the state of the art rather than a shortcut.",
+      "evidence": "The scan searched LiteLLM routing/counters, Promptfoo rate-limit docs, the Anthropic SDK retry code and GitHub for Anthropic header-based limiters. It found cross-process coordination prior art (LiteLLM Router recommends Redis-backed per-deployment/model/minute counters, lowest_tpm_rpm_v2.py) and header-driven adaptive CONCURRENCY (Promptfoo, AIMD) but no automatic bucket discovery. Caveats it adds: a response is a snapshot, snapshots can arrive out of order, a later-arriving older-larger `remaining` would raise the allowance when it should fall, and lowering concurrency does NOT ensure several large prompts fit ITPM.",
+      "confidence": "medium-high",
+      "consequence": "Supports Q7 (record headers, do not self-tune) and Q10 (config-overridable bucket table). One refinement taken: scope the bucket to the credential's organisation/workspace, not the API key, since several keys can share a quota."
+    },
+    {
+      "id": "F15",
+      "claim": "The anthropic SDK is not installed and not declared, and brings a second HTTP stack.",
+      "evidence": "Measured on h100 2026-10-29: `import anthropic` in /home/chenry/venvs/kbdl raises ModuleNotFoundError; the name appears nowhere in pyproject.toml. anthropic 1.x is built on the httpx2 package; the project depends on httpx 0.28 (httpx 0.28.1 installed in that venv). Separate distributions, so they coexist.",
+      "confidence": "high",
+      "consequence": "New optional extra pinned >=1,<2, lazily imported, failing with a message naming kbutillib[anthropic]. The endpoint's `proxy` key must be wired to the SDK's client explicitly; it is not inherited."
+    }
+  ],
+  "open_contingencies": [
+    {
+      "id": "C1",
+      "item": "The model ID strings for the 5.5 generation (Claude Opus 5.5, Sonnet 5.5, Haiku 5.5) could not be obtained from any source this session could read. The live pricing and rate-limit pages name the models; the bundled claude-api skill's model table (cached 2026-06-24) supplies no IDs for them.",
+      "assumed_instead": "Shipped canonical and bucket defaults cover only documented IDs: claude-haiku-4-5, claude-sonnet-5, claude-sonnet-4-6, claude-opus-5, claude-opus-4-8. Q10 makes adding a model a configuration act. The implementing task is told NOT to invent an ID by pattern and to use the free GET /v1/models instead.",
+      "blocks_build": false
+    },
+    {
+      "id": "C2",
+      "item": "Whether Claude Haiku 5.5 should be refused outright by the rates loader or merely warned about. Its size-tiered input price cannot be expressed by RateConfig's single input_per_mtok.",
+      "assumed_instead": "Out of scope. Which of refuse-or-warn is right depends on whether anyone wants to seat it, which is a roster decision this PRD scopes out.",
+      "blocks_build": false
+    },
+    {
+      "id": "C3",
+      "item": "Whether ARGO's claudeopus5 also rejects temperature. ARGO_NO_TEMPERATURE_MODELS contains claudeopus47, claudeopus48 and claudesonnet5 but not claudeopus5, while the direct API rejects sampling parameters on Opus 5. Either ARGO normalises the parameter away or this is a latent gap in the ARGO table.",
+      "assumed_instead": "Not determined and the ARGO table NOT changed. Changing another route's table on inference, inside a PRD about a different api type, is how an unrelated route breaks. Recorded for a separate investigation; explicitly out of scope.",
+      "blocks_build": false
+    },
+    {
+      "id": "C4",
+      "item": "The exact anthropic SDK method signatures and response attribute names are documentation-derived, not verified against an installed package, because the package is not installed.",
+      "assumed_instead": "Phase 1 of the taskplan is a real-dependency smoke task whose entire job is to pin them by inspection before phase 2 builds on them, and which writes a FIXTURE BASIS section later phases must derive fixtures from.",
+      "blocks_build": false
+    },
+    {
+      "id": "C5",
+      "item": "No live Anthropic API call was made during design: no ANTHROPIC_API_KEY is present in this session's environment and a design session does not spend money. Every claim about response shape rests on documentation rather than on an observed response.",
+      "assumed_instead": "This is precisely why the usage assertion is acceptance criteria AC1-AC4 against a real call rather than a test in the plan: a stub built from the same documentation as the code would confirm the documentation, not the API.",
+      "blocks_build": false
+    },
+    {
+      "id": "C6",
+      "item": "RESOLVED. The external prior-art scan (Maestro task-a7ad9d14, codex on h100) returned before the bundle was committed. Verified by git -- the artifact blob exists on the task branch and is absent from main, so its presence proves this run wrote it -- rather than by trusting the reported status.",
+      "assumed_instead": "Folded in as findings F16-F21 and research-report findings 14-19, plus new decision Q2b, gotchas 15-18 and acceptance criteria 16-18. Two of its findings were build-affecting and were not known before it ran. Its own stated limits are adopted: no live-provider call, no third-party suite installed, OpenRouter's server adapter not reachable, and the stale/out-of-order header failure mode an inference rather than a measured incident.",
+      "blocks_build": false
+    },
+    {
+      "id": "C8",
+      "item": "DELIVERY STATE IS LIVE-ACCEPTANCE-PENDING. Acceptance criteria 1, 2, 3 and 6 require a real credential, the models to call, an isolated council store and an explicit spending cap -- none of which an autonomous build has. AC4 was found to be impossible live at all (there is no supported way to make the provider omit its usage object) and is reclassified as an engine integration test with an injected response.",
+      "assumed_instead": "Implementation and offline verification complete without credentials; the build RECORDS the pending criteria and MUST NOT claim acceptance. Decided as Q5b. Provisioning the four inputs before dispatch would let a build close them, and this decision does not prevent that -- it refuses to ASSUME it.",
+      "blocks_build": false
+    },
+    {
+      "id": "C9",
+      "item": "The corpus correction arrived from sibling session a6182005 while this bundle was being written, after the Out of Scope section was first drafted. Its numbers (29,179 items, $313 vs $200, $156.52 with batch, ~$992 feasible rosters with batch and none without) were measured by that session, not independently by this one.",
+      "assumed_instead": "Taken as reported and folded in, because it is a measurement from the session that owns the run and it names its source file with a sha256. This session did NOT re-measure the corpus. Whether the batch lane becomes a second PRD or a later phase is explicitly left to a6182005 and Chris; this PRD only records the recommendation and withdraws the superseded $127 figure.",
+      "blocks_build": false
+    },
+    {
+      "id": "C7",
+      "item": "No prior art exists for handling `enforced_spend_limit_reached` specifically. The scan searched for it in public clients and found none, and confirmed the official SDK's retry function does not inspect it.",
+      "assumed_instead": "The taxonomy is ours to get right rather than to copy. It is covered by acceptance criterion 14 and by dedicated tests asserting halts_endpoint=True for both spend-limit shapes -- named in the testing section as the highest-value tests in the suite because they are the ones whose absence costs money.",
+      "blocks_build": false
+    }
+  ],
+  "out_of_scope": [
+    "CORRECTED 2026-10-29, and the correction is material: the Batch API lane is out of scope HERE but is a SEPARATE PRD THAT THIS ONE IS A PREREQUISITE FOR, and the planned run is NOT FUNDABLE WITHOUT IT. The draft said 'worth ~$127 and not worth the build yet'; that was sized against 21,333 items. Session a6182005 measured the real corpus at 29,179 needing a vote (from ~/Dropbox/Jobs/function-to-go/pmi_functions_for_council.tsv, sha256 b2857214...). At 29,179 the Anthropic leg of any three-chair roster is $313 against $200 of credit; batch at 50% brings it to $156.52 (22% margin). Feasible rosters exist at ~$992 total WITH batch and NONE without. It stays out of scope because it is a different execution shape (submit/poll/retrieve, out-of-order results keyed by custom_id, its own rate limits and queue-depth ceiling), and the dependency runs one way: a batch lane needs this PRD's api type, usage normalisation and per-model pricing -- it must price at 50% of the PER-MODEL rates, which is only expressible once Q11 lands. RECOMMENDED: a second PRD `kbu-anthropic-batch-lane-v1` naming this one as prerequisite. That is a recommendation, not this session's decision; roster and run scoping belong to a6182005 and to Chris.",
+    "A token-aware pacer. max_requests_per_minute and max_concurrency cannot express ITPM/OTPM, which is what actually binds this provider for a council's large prompts (Q8, gotcha 20). Needs a measurement of real prompt/output distributions first. What ships is the sustained-429 halt -- detection, not prevention -- and the docs say so.",
+    "Multi-organisation / multi-workspace quota scoping. Several API keys can share one quota and two organisations hold independent pools for one model, so `account` = bucket name is only correct within one organisation. There is one Anthropic wallet and one organisation here. An operator-asserted quota_scope field was considered and rejected (Q3) because it cannot be validated against anything.",
+    "Prompt caching. Out, but for a better reason than it was dropped: cache reads do not count toward ITPM, so caching is a throughput lever as well as a cost one. The backend actively REFUSES cache_control in v1 so the token and dollar figures cannot disagree.",
+    "A cross-endpoint wallet ceiling (see F14). The largest gap left open.",
+    "A self-tuning pacer driven by the rate-limit headers (Q7). Headers are recorded; nothing is fed back.",
+    "Batching for anthropic seats via a VERIFIED_OUTPUT_CAPS entry (Q9).",
+    "Server-side tools (web search, web fetch, code execution). supports_web_search stays False.",
+    "Structured outputs / server-enforced JSON (Q6).",
+    "Streaming -- council answers are small JSON objects well inside the non-streaming timeout.",
+    "Size-tiered pricing, and therefore Claude Haiku 5.5 as a priced seat.",
+    "Any change to the ARGO tables, including the claudeopus5 observation in C3.",
+    "The corpus, roster and scoping decisions for the planned council run. This PRD is the code half only; it does not choose effort, which models to seat, or the run size.",
+    "Any council store migration -- none is needed (F1). Stated so a task does not invent one.",
+    "Managed Agents, the Admin API, Workload Identity Federation, fast mode, task budgets and the Files API."
+  ],
+  "cost_note": "This credit is a SECOND WALLET AT THE SAME PRICE, not a discount. ARGO was measured billing Claude at vendor list within 1.5% on the 2026-10-20 bill. What it buys is independence from the ARGO cap and access to two models ARGO does not serve (Haiku 4.5, Sonnet 4.6). No task may justify itself on a saving that does not exist, and a quote comparing the two routes should come out roughly equal.",
+  "research": {
+    "local_corpus_read_at_commit": "cb6cf1b",
+    "external_scan_task": "task-a7ad9d14",
+    "external_scan_backend": "codex",
+    "external_scan_machine": "h100",
+    "external_sources_fetched_2026_10_29": [
+      "https://platform.claude.com/docs/en/api/rate-limits",
+      "https://platform.claude.com/docs/en/about-claude/pricing"
+    ]
+  }
+}

@@ -500,3 +500,220 @@ def test_gpr_string_support_marker_is_reexported_by_the_flat_shim():
         )
 
     assert shim_marker == GPR_STRING_SUPPORT == 1
+
+
+# ---------------------------------------------------------------------------
+# Exchange reactions must exist BEFORE ATP correction runs
+# (KBDLJobRunningPrototype issue #28, cause 1)
+#
+# ``MSBuilder.build()`` calls ``add_exchanges_to_model`` from inside itself,
+# before ``build_metabolic_model`` has injected ``reactions_to_add``.  On the
+# RAST-role path that is harmless, because ``build_metabolic_reactions`` runs
+# earlier inside ``build()``.  On a ROLELESS build -- the path GAA's
+# ``build_isolated_model`` and the KBDL reconstruction job use -- ``build()``
+# contributes no metabolic reactions at all, so the model reached ATP
+# correction with reactions but ZERO exchanges.  With no exchanges there is no
+# nutrient uptake: ATP was 0 on every one of the 54 ATP media, all 54 were
+# recorded ``{"score": 1000, "failed": true}``, ``selected_media`` came out
+# empty, nothing raised, and the model shipped with energy-generating cycles.
+#
+# These tests pin the ORDER, which is the whole of the fix, using a call
+# recorder rather than a real builder/corrector.
+# ---------------------------------------------------------------------------
+
+
+class _OrderRecorder:
+    """Shared call log for the fakes below."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+
+class _OrderedModel:
+    def __init__(self, recorder):
+        self._recorder = recorder
+        self.reactions = []
+        self.genes = []
+        self.objective = None
+
+    def remove_reactions(self, ids):  # pragma: no cover - not exercised here
+        pass
+
+
+class _OrderedMdlUtl:
+    def __init__(self, recorder):
+        self.model = _OrderedModel(recorder)
+        self._recorder = recorder
+        self._attributes: dict = {}
+        self.wsid = None
+        self.recon_builder = None
+        self.atp_tests = None
+
+    def get_attributes(self):
+        return self._attributes
+
+    def nonexchange_reaction_count(self):
+        return 0
+
+    def is_core(self, rxn):  # pragma: no cover - not exercised here
+        return True
+
+
+class _OrderedBuilder:
+    """Stands in for ``MSBuilder``: both the class and its instances."""
+
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    # class-level use: ``self.MSBuilder(genome, template)``
+    def __call__(self, genome, template):
+        self._recorder.calls.append("build_instance")
+        return self
+
+    # instance-level use: ``builder.build(base_model, "0", False, False)``
+    def build(self, *args, **kwargs):
+        self._recorder.calls.append("builder.build")
+        return _OrderedModel(self._recorder)
+
+    # class-level static use: ``self.MSBuilder.add_exchanges_to_model(model)``
+    def add_exchanges_to_model(self, model, extra_cell="e0"):
+        self._recorder.calls.append("add_exchanges_to_model")
+        return []
+
+
+class _OrderedATPCorrection:
+    def __init__(self, recorder):
+        self._recorder = recorder
+        self.cumulative_core_gapfilling = []
+        self.sentinel_tests = [{"media": None, "objective": "rxn00062_c0"}]
+
+    def __call__(self, *args, **kwargs):
+        self._recorder.calls.append("MSATPCorrection.__init__")
+        return self
+
+    def run_atp_correction(self):
+        self._recorder.calls.append("run_atp_correction")
+        return self.sentinel_tests
+
+
+class _OrderedSelf:
+    """Fake MSReconstructionUtils carrying only what the build path touches."""
+
+    def __init__(self, recorder, atp):
+        self.MSBuilder = _OrderedBuilder(recorder)
+        self.MSATPCorrection = atp
+        self.MSModelUtil = self
+        self.modelseedpy_data_dir = "/nonexistent"
+        self.templates = {"core": "core_ref", "gn": "gn_ref"}
+        self._recorder = recorder
+        self._mdlutl = _OrderedMdlUtl(recorder)
+
+    # ``self.MSModelUtil.get(mdl)``
+    def get(self, mdl):
+        return self._mdlutl
+
+    def get_template(self, ref, _none):
+        return object()
+
+    def _add_reactions_from_gene_mapping(self, mdlutl, builder, hash_,
+                                         template, **kwargs):
+        self._recorder.calls.append("_add_reactions_from_gene_mapping")
+        return []
+
+
+class _OrderedGenome:
+    id = "g1"
+    scientific_name = "Toy organism"
+    features: list = []
+
+
+def _build_with_recorder(*, atp_safe=True, reactions_to_add=None):
+    recorder = _OrderRecorder()
+    atp = _OrderedATPCorrection(recorder)
+    fake_self = _OrderedSelf(recorder, atp)
+    import cobra  # noqa: F401 - build_metabolic_model imports cobra lazily
+
+    out, mdlutl = MSReconstructionUtils.build_metabolic_model(
+        fake_self,
+        genome=_OrderedGenome(),
+        genome_classifier=None,
+        gs_template="gn",
+        gs_template_obj=object(),
+        core_template=object(),
+        atp_safe=atp_safe,
+        reactions_to_add=reactions_to_add
+        if reactions_to_add is not None
+        else {"rxn00001": ["g1"]},
+    )
+    return recorder.calls, out, mdlutl, atp
+
+
+def test_exchanges_are_added_before_atp_correction_runs():
+    """The ordering that issue #28 cause 1 is entirely about."""
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder()
+
+    assert "add_exchanges_to_model" in calls
+    assert "run_atp_correction" in calls
+    assert calls.index("add_exchanges_to_model") < calls.index(
+        "run_atp_correction"
+    ), f"exchanges must precede ATP correction; order was {calls}"
+
+
+def test_exchanges_are_added_after_the_injected_reactions():
+    """Order matters on BOTH sides.
+
+    The injected reactions are what introduce the extracellular metabolites,
+    so adding exchanges before them would build none of the exchanges that
+    matter -- which is exactly what ``MSBuilder.build()``'s own internal call
+    already does.
+    """
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder()
+
+    assert calls.index("_add_reactions_from_gene_mapping") < calls.index(
+        "add_exchanges_to_model"
+    ), f"injection must precede exchange creation; order was {calls}"
+
+
+def test_exchanges_are_added_even_when_atp_correction_is_skipped():
+    """``atp_safe=False`` must still produce a model that can take up
+    nutrients, or the gap-fill that follows has nothing to work with."""
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder(atp_safe=False)
+
+    assert "add_exchanges_to_model" in calls
+    assert "run_atp_correction" not in calls
+
+
+def test_exchanges_are_added_when_there_are_no_reactions_to_add():
+    """The call is unconditional, not gated on ``reactions_to_add``."""
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder(reactions_to_add={})
+
+    assert "_add_reactions_from_gene_mapping" not in calls
+    assert "add_exchanges_to_model" in calls
+    assert calls.index("add_exchanges_to_model") < calls.index(
+        "run_atp_correction"
+    )
+
+
+def test_atp_tests_are_published_on_the_model_util():
+    """The tests ``run_atp_correction`` returns were computed and dropped.
+
+    GAA's ``gapfill_reaction_set`` needs them to make genome-scale gap-fill
+    ATP-safe (issue #28 cause 3), and recomputing them costs a full ATP run.
+    """
+    pytest.importorskip("cobra")
+    _calls, _out, mdlutl, atp = _build_with_recorder()
+
+    assert mdlutl.atp_tests == atp.sentinel_tests
+
+
+def test_no_atp_tests_are_published_when_correction_is_skipped():
+    """``atp_safe=False`` leaves the attribute untouched, so a downstream
+    consumer can tell "not computed" from "computed and empty"."""
+    pytest.importorskip("cobra")
+    _calls, _out, mdlutl, _atp = _build_with_recorder(atp_safe=False)
+
+    assert mdlutl.atp_tests is None

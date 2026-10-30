@@ -403,6 +403,28 @@ class MSReconstructionUtils(KBModelUtils):
                 template_reactions_only=template_reactions_only,
             )
 
+        # Add exchange reactions for every extracellular metabolite, BEFORE ATP
+        # correction. Load-bearing for ordering, not a convenience:
+        # ``MSBuilder.build()`` already calls ``add_exchanges_to_model`` once,
+        # but it does so from inside itself, before this method has had a chance
+        # to inject ``reactions_to_add``. On the RAST-role path that is harmless
+        # (``build_metabolic_reactions`` runs earlier inside ``build()``, so the
+        # extracellular species are present). On a ROLELESS build -- the path
+        # KBDL/GAA ``build_isolated_model`` uses -- ``build()`` contributes no
+        # metabolic reactions at all, every real reaction arrives above from
+        # ``_add_reactions_from_gene_mapping``, and that method registers the
+        # ``e0`` compartment but creates no exchanges. Without this call the
+        # model reaches ATP correction with reactions but ZERO exchanges, so it
+        # cannot take up any nutrient: ATP is 0 on all 54 ATP media, every
+        # medium is recorded ``{"score": 1000, "failed": true}``, and
+        # ``selected_media`` ends up empty. Nothing raises, and the model ships
+        # with energy-generating cycles intact
+        # (KBDLJobRunningPrototype#28, cause 1).
+        #
+        # ``add_exchanges_to_model`` is idempotent -- it skips any ``EX_`` id
+        # already present -- so this is a strict no-op for the RAST-role path.
+        self.MSBuilder.add_exchanges_to_model(mdlutl.model)
+
         # Run ATP correction
         if atp_safe:
             atpcorrection = self.MSATPCorrection(
@@ -417,6 +439,15 @@ class MSReconstructionUtils(KBModelUtils):
             )
             tests = atpcorrection.run_atp_correction()
             current_output["Core GF"] = len(atpcorrection.cumulative_core_gapfilling)
+            # Publish the ATP tests on the model util so downstream gap-fill can
+            # be ATP-safe without recomputing them. ``MSModelUtil.atp_tests`` is
+            # the attribute ``get_atp_tests`` caches into, so a caller may reach
+            # these either way. Previously ``tests`` was computed here and
+            # dropped on the floor, which left every genome-scale gap-fill in
+            # GAA's ``gapfill_reaction_set`` free to re-add the very cycles ATP
+            # correction had just filtered out (KBDLJobRunningPrototype#28,
+            # cause 3).
+            mdlutl.atp_tests = tests
 
         # Set model attributes
         mdlutl.get_attributes()["class"] = current_output["Class"]

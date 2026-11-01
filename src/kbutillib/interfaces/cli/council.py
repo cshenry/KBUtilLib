@@ -334,7 +334,15 @@ def _render(envelope: Dict[str, Any]) -> None:
             ("gateway", "total_tokens_point", "priced", "dollars_point", "dollars_upper"),
         )
         for gateway in data.get("gateways") or []:
-            if not gateway.get("priced"):
+            if not gateway.get("priced") and gateway.get("partially_priced"):
+                # Name WHICH rate is missing, not just "unpriced".
+                click.echo(
+                    f"{gateway.get('gateway')}: PARTIALLY priced -- no rate for "
+                    f"{', '.join(str(m) for m in gateway.get('unpriced_models') or [])}; "
+                    f"known subtotal {gateway.get('dollars_known_subtotal')} "
+                    f"{gateway.get('currency') or ''} is NOT a total".rstrip()
+                )
+            elif not gateway.get("priced"):
                 click.echo(f"{gateway.get('gateway')}: unpriced")
             elif gateway.get("is_floor"):
                 click.echo(

@@ -527,6 +527,9 @@ class _OrderRecorder:
 
     def __init__(self):
         self.calls: list[str] = []
+        # Every ``allow_all_non_grp_reactions`` value the builder was asked for,
+        # in call order (issue #29 -- the flag must stay False).
+        self.non_grp_flags: list[bool] = []
 
 
 class _OrderedModel:
@@ -538,6 +541,10 @@ class _OrderedModel:
 
     def remove_reactions(self, ids):  # pragma: no cover - not exercised here
         pass
+
+    def add_reactions(self, reactions):
+        self._recorder.calls.append("model.add_reactions")
+        self.reactions.extend(reactions)
 
 
 class _OrderedMdlUtl:
@@ -574,6 +581,14 @@ class _OrderedBuilder:
     def build(self, *args, **kwargs):
         self._recorder.calls.append("builder.build")
         return _OrderedModel(self._recorder)
+
+    # instance-level use: ``builder.build_non_metabolite_reactions(model, ...)``
+    def build_non_metabolite_reactions(
+        self, cobra_model, allow_all_non_grp_reactions=False
+    ):
+        self._recorder.calls.append("build_non_metabolite_reactions")
+        self._recorder.non_grp_flags.append(allow_all_non_grp_reactions)
+        return []
 
     # class-level static use: ``self.MSBuilder.add_exchanges_to_model(model)``
     def add_exchanges_to_model(self, model, extra_cell="e0"):
@@ -717,3 +732,530 @@ def test_no_atp_tests_are_published_when_correction_is_skipped():
     _calls, _out, mdlutl, _atp = _build_with_recorder(atp_safe=False)
 
     assert mdlutl.atp_tests is None
+
+
+# ---------------------------------------------------------------------------
+# Spontaneous/universal template reactions must be revisited AFTER gene mapping
+# (KBDLJobRunningPrototype issue #29)
+#
+# ``MSBuilder.build_non_metabolite_reactions`` admits a spontaneous/universal
+# template reaction only when at least one of its metabolites is already a key
+# of ``builder.template_species_to_model_species`` (unless
+# ``allow_all_non_grp_reactions=True``).  ``build()`` calls it once, from inside
+# itself.  On the ROLELESS gene-mapping path ``build()`` adds no metabolic
+# reactions at all, so that map is still empty when the predicate runs and
+# almost nothing qualifies: models were getting 3-12 of the 42
+# spontaneous/universal reactions in GramNeg V6.  The casualties include
+# membrane diffusion of O2 (``rxn05468``), CO2 (``rxn05467``) and water
+# (``rxn05319``), so the models could not respire -- they "grew" by running
+# cytochrome oxidase ``rxn14415`` backwards to make O2 out of water.  The real
+# reactions arrive afterwards from ``_add_reactions_from_gene_mapping``, and
+# before this fix nothing revisited the spontaneous set after that.
+#
+# The ordering tests below reuse the ``_Ordered*`` recorder.  The behavioural
+# tests use ``_SpontaneousBuilder``, which reimplements the modelseedpy 0.4.2
+# predicate faithfully over real cobra objects, so they assert on the FINISHED
+# MODEL rather than on a call log.
+# ---------------------------------------------------------------------------
+
+
+def test_non_metabolite_reactions_are_rebuilt_after_gene_mapping():
+    """The ``AFTER`` half of the fix's position.
+
+    Gene mapping is what populates ``template_species_to_model_species``, so a
+    call that precedes it sees an empty map and admits nothing.
+    """
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder()
+
+    assert "build_non_metabolite_reactions" in calls
+    assert calls.index("_add_reactions_from_gene_mapping") < calls.index(
+        "build_non_metabolite_reactions"
+    ), f"gene mapping must precede the rebuild; order was {calls}"
+
+
+def test_non_metabolite_reactions_are_rebuilt_before_exchanges():
+    """The ``BEFORE`` half of the fix's position.
+
+    An extracellular species introduced by a newly added diffusion reaction has
+    to reach the single existing ``add_exchanges_to_model`` call, or it becomes
+    a flux dead-end.
+    """
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder()
+
+    assert calls.index("build_non_metabolite_reactions") < calls.index(
+        "add_exchanges_to_model"
+    ), f"rebuild must precede exchange creation; order was {calls}"
+
+
+def test_non_metabolite_reactions_are_rebuilt_before_atp_correction():
+    """Respiration has to exist before ATP correction judges the media."""
+    pytest.importorskip("cobra")
+    calls, _out, _mdlutl, _atp = _build_with_recorder()
+
+    assert calls.index("build_non_metabolite_reactions") < calls.index(
+        "run_atp_correction"
+    ), f"rebuild must precede ATP correction; order was {calls}"
+
+
+def _build_capturing_recorder(*, atp_safe=True, reactions_to_add=None):
+    """As ``_build_with_recorder``, but hands back the recorder itself.
+
+    Needed because the ``allow_all_non_grp_reactions`` assertion is about an
+    ARGUMENT, not about call order, and the older helper only exposes the log.
+    """
+    recorder = _OrderRecorder()
+    fake_self = _OrderedSelf(recorder, _OrderedATPCorrection(recorder))
+    import cobra  # noqa: F401 - build_metabolic_model imports cobra lazily
+
+    MSReconstructionUtils.build_metabolic_model(
+        fake_self,
+        genome=_OrderedGenome(),
+        genome_classifier=None,
+        gs_template="gn",
+        gs_template_obj=object(),
+        core_template=object(),
+        atp_safe=atp_safe,
+        reactions_to_add=reactions_to_add
+        if reactions_to_add is not None
+        else {"rxn00001": ["g1"]},
+    )
+    return recorder
+
+
+def test_rebuild_never_forces_all_non_grp_reactions():
+    """``allow_all_non_grp_reactions`` stays False, deliberately.
+
+    Forcing all 42 spontaneous/universal reactions in would guarantee the count
+    but would add reactions whose metabolites are absent, creating dead-end
+    species and destroying the coverage number as a diagnostic signal.  The
+    conservative predicate is the point of the fix, not a limitation of it.
+    """
+    pytest.importorskip("cobra")
+    recorder = _build_capturing_recorder()
+
+    assert recorder.non_grp_flags, "the builder was never asked to rebuild"
+    assert all(flag is False for flag in recorder.non_grp_flags), (
+        "allow_all_non_grp_reactions must stay False; "
+        f"saw {recorder.non_grp_flags}"
+    )
+
+
+# --- behavioural half: assert on the FINISHED MODEL ------------------------
+#
+# The fakes below reimplement the modelseedpy 0.4.2 inclusion predicate rather
+# than recording calls, so these tests fail if the second call is present but
+# ineffective -- which it would be if its return value were dropped.
+# ``build_non_metabolite_reactions`` RETURNS reactions and does not add them;
+# ``build()`` pairs it with its own ``cobra_model.add_reactions`` and the fix
+# has to do the same.
+
+
+#: Membrane diffusion reactions from GramNeg V6, as
+#: ``template reaction id -> {template species id: coefficient}``.  These three
+#: are the ones issue #29 measured: their absence is why models could not
+#: respire.
+_DIFFUSION_TEMPLATE_REACTIONS = {
+    "rxn05468_c": {"cpd00007_c": -1.0, "cpd00007_e": 1.0},  # O2
+    "rxn05467_c": {"cpd00011_c": -1.0, "cpd00011_e": 1.0},  # CO2
+    "rxn05319_c": {"cpd00001_c": -1.0, "cpd00001_e": 1.0},  # H2O
+}
+
+
+def _mint_model_metabolite(template_species_id):
+    """``cpd00007_c`` -> a cobra metabolite ``cpd00007_c0`` in compartment ``c0``.
+
+    Mirrors ``MSTemplateSpecies.to_metabolite(index)``: the template species id
+    carries a bare compartment letter and the model metabolite id carries the
+    compartment plus the builder index.
+    """
+    import cobra
+
+    base, _, compartment = template_species_id.rpartition("_")
+    model_compartment = compartment + "0"
+    return cobra.Metabolite(
+        id=f"{base}_{model_compartment}",
+        name=base,
+        compartment=model_compartment,
+    )
+
+
+class _SpontaneousBuilder:
+    """Predicate-faithful stand-in for ``MSBuilder`` on the roleless path.
+
+    Reproduces three behaviours of modelseedpy 0.4.2 that the fix depends on:
+
+    * ``build()`` on a roleless genome adds NO metabolic reactions, so the
+      ``template_species_to_model_species`` map is still empty when ``build()``
+      makes its own internal ``build_non_metabolite_reactions`` call -- and the
+      predicate therefore admits nothing.
+    * ``build_non_metabolite_reactions`` admits a reaction only when at least
+      one of its template metabolites is already a key of that map (or
+      ``allow_all_non_grp_reactions`` is set), and it RETURNS the reactions
+      instead of adding them.
+    * ``add_exchanges_to_model`` mints ``EX_<metabolite id>`` for every
+      metabolite in the ``e0`` compartment, skipping ids already present.
+    """
+
+    def __init__(self, template_reactions=None):
+        self._template_reactions = (
+            _DIFFUSION_TEMPLATE_REACTIONS
+            if template_reactions is None
+            else template_reactions
+        )
+        self.template_species_to_model_species = {}
+        self.base_model = None
+        self.index = "0"
+        self.compartments = {}
+        #: number of reactions each ``build_non_metabolite_reactions`` call
+        #: admitted, in call order -- lets a test see the first call return
+        #: nothing and a later one return the diffusion reactions.
+        self.admitted_per_call = []
+
+    # ``self.MSBuilder(genome, template)``
+    def __call__(self, genome, template):
+        return self
+
+    # ``builder.build(base_model, "0", False, False)``
+    def build(self, model_or_id, index="0", *args, **kwargs):
+        self.index = index
+        self.base_model = model_or_id
+        # The roleless path contributes no metabolic reactions at all; the only
+        # thing build() does that matters here is its own (futile) rebuild.
+        model_or_id.add_reactions(self.build_non_metabolite_reactions(model_or_id))
+        self.add_exchanges_to_model(model_or_id)
+        return model_or_id
+
+    def build_non_metabolite_reactions(
+        self, cobra_model, allow_all_non_grp_reactions=False
+    ):
+        import cobra
+
+        reactions = []
+        for template_rxn_id, stoichiometry in self._template_reactions.items():
+            species_ids = set(stoichiometry)
+            if not (
+                species_ids & set(self.template_species_to_model_species)
+                or allow_all_non_grp_reactions
+            ):
+                continue
+            model_stoichiometry = {}
+            for species_id, coefficient in stoichiometry.items():
+                if species_id not in self.template_species_to_model_species:
+                    metabolite = _mint_model_metabolite(species_id)
+                    self.template_species_to_model_species[species_id] = metabolite
+                    self.base_model.add_metabolites([metabolite])
+                model_stoichiometry[
+                    self.template_species_to_model_species[species_id]
+                ] = coefficient
+            model_rxn_id = template_rxn_id + "0"
+            if model_rxn_id not in cobra_model.reactions:
+                reaction = cobra.Reaction(
+                    model_rxn_id, name=model_rxn_id, lower_bound=-1000, upper_bound=1000
+                )
+                reaction.add_metabolites(model_stoichiometry)
+                reactions.append(reaction)
+        self.admitted_per_call.append(len(reactions))
+        return reactions
+
+    # ``self.MSBuilder.add_exchanges_to_model(mdlutl.model)`` -- a staticmethod
+    # on the real class, so the model arrives as the first positional argument.
+    def add_exchanges_to_model(self, model, extra_cell="e0"):
+        import cobra
+
+        exchanges = []
+        for metabolite in model.metabolites:
+            if metabolite.compartment != extra_cell:
+                continue
+            exchange_id = "EX_" + metabolite.id
+            if exchange_id in model.reactions:
+                continue
+            exchange = cobra.Reaction(
+                exchange_id,
+                name="Exchange for " + metabolite.name,
+                lower_bound=-1000,
+                upper_bound=1000,
+            )
+            exchange.add_metabolites({metabolite: -1})
+            exchanges.append(exchange)
+        model.add_reactions(exchanges)
+        return exchanges
+
+
+class _SpontaneousMdlUtl:
+    def __init__(self, model):
+        self.model = model
+        self._attributes: dict = {}
+        self.wsid = None
+        self.recon_builder = None
+        self.atp_tests = None
+
+    def get_attributes(self):
+        return self._attributes
+
+    def nonexchange_reaction_count(self):
+        return len(self.model.reactions)
+
+    def is_core(self, rxn):  # pragma: no cover - not exercised here
+        return True
+
+
+class _SpontaneousSelf:
+    """Fake ``MSReconstructionUtils`` whose gene mapping seeds chosen species.
+
+    ``mapped_species`` is the set of TEMPLATE species ids the gene-mapped
+    reactions bring into the model -- i.e. exactly what the real
+    ``_add_reactions_from_gene_mapping`` writes into
+    ``builder.template_species_to_model_species`` as it goes.
+    """
+
+    def __init__(self, builder, mapped_species):
+        self.MSBuilder = builder
+        self.MSATPCorrection = None
+        self.MSModelUtil = self
+        self.modelseedpy_data_dir = "/nonexistent"
+        self.templates = {"core": "core_ref", "gn": "gn_ref"}
+        self._mapped_species = mapped_species
+        self._mdlutl = None
+
+    def get(self, mdl):
+        self._mdlutl = _SpontaneousMdlUtl(mdl)
+        return self._mdlutl
+
+    def get_template(self, ref, _none):
+        return object()
+
+    def _add_reactions_from_gene_mapping(self, mdlutl, builder, hash_, template,
+                                        **kwargs):
+        """Faithful to the real method's map-writing half.
+
+        The real method mints a model metabolite for every template metabolite
+        it has not seen, registers it in
+        ``builder.template_species_to_model_species`` and adds it to
+        ``builder.base_model`` -- which is what makes the predicate in the
+        second ``build_non_metabolite_reactions`` call able to admit anything.
+        """
+        import cobra
+
+        model_stoichiometry = {}
+        for species_id in self._mapped_species:
+            if species_id not in builder.template_species_to_model_species:
+                metabolite = _mint_model_metabolite(species_id)
+                builder.template_species_to_model_species[species_id] = metabolite
+                builder.base_model.add_metabolites([metabolite])
+            model_stoichiometry[
+                builder.template_species_to_model_species[species_id]
+            ] = -1.0
+        if not model_stoichiometry:
+            return []
+        reaction = cobra.Reaction(
+            "rxn00001_c0", name="gene-mapped reaction",
+            lower_bound=-1000, upper_bound=1000,
+        )
+        reaction.add_metabolites(model_stoichiometry)
+        reaction.gene_reaction_rule = "g1"
+        mdlutl.model.add_reactions([reaction])
+        return [reaction]
+
+
+def _build_with_spontaneous(mapped_species):
+    """Run a roleless gene-mapped build and return ``(model, builder)``."""
+    import cobra
+
+    builder = _SpontaneousBuilder()
+    fake_self = _SpontaneousSelf(builder, mapped_species)
+    base_model = cobra.Model(id_or_model="g1", name="Toy organism")
+
+    _out, mdlutl = MSReconstructionUtils.build_metabolic_model(
+        fake_self,
+        genome=_OrderedGenome(),
+        genome_classifier=None,
+        gs_template="gn",
+        gs_template_obj=object(),
+        core_template=object(),
+        base_model=base_model,
+        atp_safe=False,
+        reactions_to_add={"rxn00001": ["g1"]},
+    )
+    return mdlutl.model, builder
+
+
+def test_the_first_rebuild_inside_build_admits_nothing_on_a_roleless_genome():
+    """Why a second call is needed at all.
+
+    This is the defect, stated as a property: on the roleless path the model is
+    still empty when ``build()`` runs its own rebuild, so the predicate has an
+    empty ``template_species_to_model_species`` to intersect against and admits
+    zero of the spontaneous/universal reactions.
+    """
+    pytest.importorskip("cobra")
+    _model, builder = _build_with_spontaneous({"cpd00007_c", "cpd00011_c"})
+
+    assert builder.admitted_per_call[0] == 0, (
+        "build()'s own rebuild should admit nothing on a roleless genome; "
+        f"per-call admissions were {builder.admitted_per_call}"
+    )
+
+
+def test_o2_and_co2_diffusion_are_present_after_a_gene_mapped_build():
+    """(a) The reactions issue #29 is named for.
+
+    Gene mapping brings the cytosolic O2 (``cpd00007_c``) and CO2
+    (``cpd00011_c``) species into the model, so the rebuild's predicate can now
+    admit ``rxn05468`` (O2 membrane diffusion) and ``rxn05467`` (CO2 membrane
+    diffusion).  Without the second call these are absent and the model cannot
+    respire -- it "grows" by running cytochrome oxidase ``rxn14415`` backwards
+    to make O2 out of water.
+    """
+    pytest.importorskip("cobra")
+    model, _builder = _build_with_spontaneous({"cpd00007_c", "cpd00011_c"})
+
+    reaction_ids = {rxn.id for rxn in model.reactions}
+    assert "rxn05468_c0" in reaction_ids, (
+        "O2 membrane diffusion missing; the model cannot respire. "
+        f"reactions were {sorted(reaction_ids)}"
+    )
+    assert "rxn05467_c0" in reaction_ids, (
+        "CO2 membrane diffusion missing. "
+        f"reactions were {sorted(reaction_ids)}"
+    )
+
+
+def test_an_unmapped_species_still_rides_in_on_a_mapped_reaction():
+    """The predicate needs only ONE metabolite in common, not all of them.
+
+    Water was never gene-mapped here, yet ``rxn05319`` stays out because none of
+    its species are in the map -- which is the conservative behaviour
+    ``allow_all_non_grp_reactions=False`` buys, and what keeps the coverage
+    number meaningful as a diagnostic.
+    """
+    pytest.importorskip("cobra")
+    model, _builder = _build_with_spontaneous({"cpd00007_c"})
+
+    reaction_ids = {rxn.id for rxn in model.reactions}
+    assert "rxn05468_c0" in reaction_ids  # O2 was mapped
+    assert "rxn05319_c0" not in reaction_ids  # water was not, and is not forced
+
+
+def test_diffusion_introduced_extracellular_species_gets_an_exchange():
+    """(b) The ordering property, asserted on the model rather than a line number.
+
+    ``rxn05468`` introduces extracellular O2 (``cpd00007_e0``), a species that
+    did not exist until the rebuild ran.  Because the rebuild is positioned
+    BEFORE the single ``add_exchanges_to_model`` call, that species gets its
+    exchange; if the rebuild were placed after it, O2 would be a flux dead-end
+    and the respiration this fix restores would still not work.
+    """
+    pytest.importorskip("cobra")
+    model, _builder = _build_with_spontaneous({"cpd00007_c", "cpd00011_c"})
+
+    metabolite_ids = {m.id for m in model.metabolites}
+    assert "cpd00007_e0" in metabolite_ids, "the diffusion reaction was not added"
+
+    reaction_ids = {rxn.id for rxn in model.reactions}
+    assert "EX_cpd00007_e0" in reaction_ids, (
+        "extracellular O2 introduced by the rebuild has no exchange, so it is a "
+        f"flux dead-end. reactions were {sorted(reaction_ids)}"
+    )
+    assert "EX_cpd00011_e0" in reaction_ids, (
+        "extracellular CO2 introduced by the rebuild has no exchange. "
+        f"reactions were {sorted(reaction_ids)}"
+    )
+
+
+def test_every_extracellular_species_has_an_exchange():
+    """Stated as a whole-model invariant, so it cannot pass by coincidence."""
+    pytest.importorskip("cobra")
+    model, _builder = _build_with_spontaneous({"cpd00007_c", "cpd00011_c"})
+
+    reaction_ids = {rxn.id for rxn in model.reactions}
+    extracellular = [m.id for m in model.metabolites if m.compartment == "e0"]
+    assert extracellular, "no extracellular species were introduced at all"
+    missing = [m for m in extracellular if "EX_" + m not in reaction_ids]
+    assert not missing, f"extracellular species with no exchange: {missing}"
+
+
+def test_a_mapping_with_no_relevant_species_is_a_no_op():
+    """(c) The predicate admits nothing and nothing raises.
+
+    A genome whose gene mapping brings in none of the diffusion species must be
+    left exactly as it was: the conservative predicate is what prevents the
+    second call from inventing dead-end metabolites, so "admits nothing" is a
+    correct outcome, not a failure.
+    """
+    pytest.importorskip("cobra")
+    model, builder = _build_with_spontaneous({"cpd99999_c"})
+
+    reaction_ids = {rxn.id for rxn in model.reactions}
+    assert not reaction_ids & {"rxn05468_c0", "rxn05467_c0", "rxn05319_c0"}, (
+        f"nothing should have been admitted; reactions were {sorted(reaction_ids)}"
+    )
+    # The rebuild ran and simply found nothing to do.
+    assert builder.admitted_per_call == [0, 0]
+    # No dead-end extracellular species were invented.
+    assert not [m.id for m in model.metabolites if m.compartment == "e0"]
+
+
+def test_an_empty_gene_mapping_does_not_raise():
+    """``reactions_to_add={}`` skips gene mapping entirely; the rebuild still
+    runs, still admits nothing, and must not raise."""
+    pytest.importorskip("cobra")
+    import cobra
+
+    builder = _SpontaneousBuilder()
+    fake_self = _SpontaneousSelf(builder, set())
+    _out, mdlutl = MSReconstructionUtils.build_metabolic_model(
+        fake_self,
+        genome=_OrderedGenome(),
+        genome_classifier=None,
+        gs_template="gn",
+        gs_template_obj=object(),
+        core_template=object(),
+        base_model=cobra.Model(id_or_model="g1", name="Toy organism"),
+        atp_safe=False,
+        reactions_to_add={},
+    )
+
+    assert len(mdlutl.model.reactions) == 0
+    assert builder.admitted_per_call == [0, 0]
+
+
+def test_the_rebuild_does_not_duplicate_what_build_already_added():
+    """Idempotence across the two calls.
+
+    ``build_non_metabolite_reactions`` skips any reaction id already in the
+    model it is handed, so when the first call DOES admit something (a genome
+    whose species map is pre-populated, i.e. the RAST-role path) the second call
+    must not re-add it -- cobra raises on duplicate reaction ids, so a
+    regression here would surface as an exception rather than a bad model.
+    """
+    pytest.importorskip("cobra")
+    import cobra
+
+    builder = _SpontaneousBuilder()
+    # Pre-seed the map, as build_metabolic_reactions would on the RAST path.
+    base_model = cobra.Model(id_or_model="g1", name="Toy organism")
+    builder.base_model = base_model
+    metabolite = _mint_model_metabolite("cpd00007_c")
+    builder.template_species_to_model_species["cpd00007_c"] = metabolite
+    base_model.add_metabolites([metabolite])
+
+    fake_self = _SpontaneousSelf(builder, {"cpd00007_c"})
+    _out, mdlutl = MSReconstructionUtils.build_metabolic_model(
+        fake_self,
+        genome=_OrderedGenome(),
+        genome_classifier=None,
+        gs_template="gn",
+        gs_template_obj=object(),
+        core_template=object(),
+        base_model=base_model,
+        atp_safe=False,
+        reactions_to_add={"rxn00001": ["g1"]},
+    )
+
+    ids = [rxn.id for rxn in mdlutl.model.reactions]
+    assert ids.count("rxn05468_c0") == 1, f"duplicate diffusion reaction in {ids}"
+    # The first call admitted it; the second found it already present.
+    assert builder.admitted_per_call[0] == 1
+    assert builder.admitted_per_call[-1] == 0

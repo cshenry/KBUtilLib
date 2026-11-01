@@ -403,6 +403,50 @@ class MSReconstructionUtils(KBModelUtils):
                 template_reactions_only=template_reactions_only,
             )
 
+        # Re-run the spontaneous/universal template reactions now that the model
+        # actually has metabolites. BOTH HALVES OF THIS POSITION ARE LOAD-BEARING.
+        #
+        # ``MSBuilder.build_non_metabolite_reactions`` admits a spontaneous or
+        # universal template reaction only when at least one of its metabolites
+        # is already a key of ``builder.template_species_to_model_species``
+        # (unless ``allow_all_non_grp_reactions=True``). ``build()`` above calls
+        # it once, but on the ROLELESS gene-mapping path ``build()`` adds no
+        # metabolic reactions at all, so that map is still empty and almost
+        # nothing qualifies: models were getting 3-12 of the 42
+        # spontaneous/universal reactions in GramNeg V6. The ones lost include
+        # membrane diffusion of O2 (``rxn05468``), CO2 (``rxn05467``) and water
+        # (``rxn05319``), so the models could not respire -- they "grew" through
+        # workarounds such as running cytochrome oxidase ``rxn14415`` backwards
+        # to make O2 out of water. Measured effect of restoring just those three
+        # diffusion reactions: max ATP per glucose went 1.0 -> 31.5 (Phaeo),
+        # 0.5 -> 31.5 (Smeli), 10.1 -> 26.5 (Keio, vs 23.5 for iML1515)
+        # (KBDLJobRunningPrototype#29).
+        #
+        # AFTER ``_add_reactions_from_gene_mapping``, because that is what
+        # populates ``template_species_to_model_species`` (it writes every
+        # metabolite it introduces into the map), so the inclusion predicate can
+        # now admit reactions the first call could not.
+        #
+        # BEFORE ``add_exchanges_to_model``, so an extracellular species brought
+        # in by a newly added diffusion reaction gets its exchange from the
+        # single existing ``add_exchanges_to_model`` call below instead of
+        # becoming a flux dead-end.
+        #
+        # ``allow_all_non_grp_reactions`` stays False DELIBERATELY. Forcing all
+        # 42 in would guarantee the count but would add reactions whose
+        # metabolites are absent, creating dead-end species and destroying the
+        # coverage number as a diagnostic signal.
+        #
+        # Note this method RETURNS the reactions rather than adding them -- the
+        # caller is responsible for ``add_reactions``, exactly as ``build()``
+        # does internally. It already skips any reaction id present in the model
+        # passed to it, so this cannot duplicate what the first call added.
+        non_metabolic_reactions = builder.build_non_metabolite_reactions(
+            mdlutl.model, allow_all_non_grp_reactions=False
+        )
+        if non_metabolic_reactions:
+            mdlutl.model.add_reactions(non_metabolic_reactions)
+
         # Add exchange reactions for every extracellular metabolite, BEFORE ATP
         # correction. Load-bearing for ordering, not a convenience:
         # ``MSBuilder.build()`` already calls ``add_exchanges_to_model`` once,

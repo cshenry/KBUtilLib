@@ -47,6 +47,8 @@ from .types import (
 )
 
 __all__ = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_RATE_LIMIT_BUCKETS",
     "BASE_URL_KINDS",
     "DEFAULT_CANONICAL",
     "DEFAULT_CANONICAL_BY_KIND",
@@ -98,6 +100,54 @@ DEFAULT_CANONICAL_BY_KIND: Dict[str, Dict[str, str]] = {
         "sonnet": "anthropic/claude-sonnet-5",
         "opus": "anthropic/claude-opus-5",
     },
+    # Anthropic's own Messages API.  ONLY model ids that were confirmed during
+    # design; a newer one is added through configuration (``canonical:`` on
+    # the model plus a ``rate_limit_buckets`` entry), and its id is obtained
+    # from ``GET /v1/models`` (free) -- never invented by pattern.
+    #
+    # THE COLLISION WITH ARGO IS DELIBERATE -- DO NOT "FIX" IT.  ARGO's
+    # ``claudesonnet5``/``claudeopus5`` already map (DEFAULT_CANONICAL) to the
+    # same ``anthropic/claude-sonnet-5``/``anthropic/claude-opus-5`` as the
+    # direct ids below, so ``Roster._check_independence`` refuses seating both
+    # routes as proposers.  That refusal is what stops two wallets presenting
+    # one model as two independent votes.  Never add a per-wallet suffix to
+    # make both seatable.
+    "anthropic": {
+        "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+        "claude-sonnet-5": "anthropic/claude-sonnet-5",
+        "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+        "claude-opus-5": "anthropic/claude-opus-5",
+        "claude-opus-4-8": "anthropic/claude-opus-4.8",
+    },
+}
+
+#: Where an ``anthropic`` endpoint points when it declares no ``base_url``.
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+#: Anthropic RATE-LIMIT BUCKET per canonical model identity.
+#:
+#: Anthropic enforces RPM / input-TPM / output-TPM PER MODEL-CLASS BUCKET, not
+#: per organisation: Opus 5, Sonnet 5 and Haiku 4.5 each hold a separate
+#: allowance, while Opus 4.8/4.7/4.6/4.5 SHARE one bucket and Sonnet 4.6/4.5
+#: share another.  An ``anthropic`` endpoint's ``account`` MUST equal the
+#: bucket its models resolve to (enforced in
+#: :meth:`CouncilConfig._validate_anthropic_buckets`), because ``account`` is
+#: read by BOTH ``quote._gateway_of`` (the pricing bucket) and
+#: ``engine.worker._build_limits`` (the shared semaphore + rate pacer).
+#:
+#: Overridable WITHOUT a code change: a config's top-level
+#: ``rate_limit_buckets: {<canonical>: <bucket>}`` is merged over this table,
+#: which is how a newly released Claude model is seated.
+ANTHROPIC_RATE_LIMIT_BUCKETS: Dict[str, str] = {
+    "anthropic/claude-opus-5": "anthropic-opus-5",
+    "anthropic/claude-sonnet-5": "anthropic-sonnet-5",
+    "anthropic/claude-haiku-4.5": "anthropic-haiku-4.5",
+    "anthropic/claude-opus-4.8": "anthropic-opus-4",
+    "anthropic/claude-opus-4.7": "anthropic-opus-4",
+    "anthropic/claude-opus-4.6": "anthropic-opus-4",
+    "anthropic/claude-opus-4.5": "anthropic-opus-4",
+    "anthropic/claude-sonnet-4.6": "anthropic-sonnet-4",
+    "anthropic/claude-sonnet-4.5": "anthropic-sonnet-4",
 }
 
 #: How many calls may be in flight per endpoint when the config is silent.
@@ -108,6 +158,11 @@ DEFAULT_MAX_CONCURRENCY: Dict[str, int] = {
     "openai": 16,
     "claude_cli": 1,
     "codex_cli": 1,
+    # Deliberately below ``openai``'s 16: on Anthropic the binding constraint
+    # is the per-minute REQUEST RATE (set ``max_requests_per_minute``), not
+    # the parallel cap.  A low cap with a correct pacer is safe; the reverse
+    # is how the 2026-10-21 MAG pilot errored 427 of 500 items.
+    "anthropic": 4,
 }
 
 DEFAULT_STORE_URL = "sqlite:///~/.kbutillib/council/council.sqlite"
@@ -132,6 +187,7 @@ _ENDPOINT_KEYS = frozenset(
         "proxy",
         "billing",
         "account",
+        "billing_wallet",
         "max_concurrency",
         "max_requests_per_minute",
         "max_total_tokens",
@@ -170,6 +226,8 @@ _TOP_KEYS = frozenset(
         "user",
         "query_dirs",
         "cli_temp_root",
+        # Overrides/extends ANTHROPIC_RATE_LIMIT_BUCKETS ({canonical: bucket}).
+        "rate_limit_buckets",
     }
 )
 
@@ -609,6 +667,13 @@ class EndpointConfig(BaseModel):
     proxy: Optional[str] = None
     billing: Literal["subscription", "api"] = "subscription"
     account: Optional[str] = None
+    #: The PAYER: which wallet (console balance) this endpoint's spend comes
+    #: out of.  Non-secret.  Defaults to ``account`` so every existing
+    #: endpoint is unchanged; REQUIRED for ``anthropic``, where ``account``
+    #: names the rate-limit bucket and several buckets sit on one wallet, so
+    #: ``account`` can no longer stand in for the payer.  Read by the quote's
+    #: balance-delta block.
+    billing_wallet: Optional[str] = None
     max_concurrency: Optional[int] = None
     #: Requests per minute this endpoint's ACCOUNT will accept, when that is
     #: a separate ceiling from ``max_concurrency``.  MAG enforces both and
@@ -658,6 +723,41 @@ class EndpointConfig(BaseModel):
                 )
             if not self.executable:
                 self.executable = _CLI_DEFAULT_EXECUTABLE[self.kind]
+        elif self.kind == "anthropic":
+            # BEFORE the generic no-URL plug-in branch below: ``anthropic`` is
+            # not in BASE_URL_KINDS, so without this branch an endpoint with no
+            # base_url would be refused for lacking reuse_namespace -- a reason
+            # about answer caching an operator could never guess from the
+            # message.  Filling the default also gives
+            # ``types.default_reuse_namespace`` a real identity to derive from,
+            # which is what that branch was protecting.
+            if not self.base_url:
+                self.base_url = ANTHROPIC_BASE_URL
+            if "billing" not in self.model_fields_set:
+                self.billing = "api"
+            elif self.billing == "subscription":
+                raise ConfigError(
+                    f"endpoint {self.name!r} is anthropic with billing: subscription. "
+                    "An anthropic endpoint is an API-billed wallet (an API key and a "
+                    "credit balance); the subscription path is the claude_cli / "
+                    "codex_cli kinds. Set billing: api."
+                )
+            if not self.account:
+                raise ConfigError(
+                    f"endpoint {self.name!r} is anthropic and declares no account. "
+                    "For anthropic, `account` names the RATE-LIMIT BUCKET its models "
+                    "share (see ANTHROPIC_RATE_LIMIT_BUCKETS), because the same key "
+                    "groups the engine's semaphore and rate pacer and buckets the "
+                    "dollar quote."
+                )
+            if not self.billing_wallet:
+                raise ConfigError(
+                    f"endpoint {self.name!r} is anthropic and declares no "
+                    "billing_wallet. Several rate-limit buckets (accounts) sit on one "
+                    "API wallet, so `account` cannot name the payer; set "
+                    "billing_wallet to a non-secret label for the wallet (the same "
+                    "value on every endpoint paid from it)."
+                )
         elif self.kind in BASE_URL_KINDS:
             if not self.base_url:
                 raise ConfigError(
@@ -680,6 +780,8 @@ class EndpointConfig(BaseModel):
 
         if self.max_concurrency is None:
             self.max_concurrency = DEFAULT_MAX_CONCURRENCY.get(self.kind, 4)
+        if self.billing_wallet is None:
+            self.billing_wallet = self.account
         return self
 
 
@@ -861,6 +963,10 @@ class CouncilConfig(BaseModel):
     #: written into one: they are expected to be in Dropbox, where a sidecar
     #: file would sync to the whole fleet.
     query_dirs: List[str] = []
+    #: Overrides/extensions of :data:`ANTHROPIC_RATE_LIMIT_BUCKETS`,
+    #: ``{canonical model: bucket}``.  A new Claude model needs this config
+    #: entry, not a code change.
+    rate_limit_buckets: Dict[str, str] = {}
     source: str = ""
 
     # -- accessors ----------------------------------------------------------
@@ -979,7 +1085,14 @@ class CouncilConfig(BaseModel):
             )
 
         params = dict(model.params)
-        temperature = params.pop("temperature", 0)
+        # ``anthropic``: an OMITTED temperature becomes None ("send none") while
+        # an explicit value -- INCLUDING an explicit 0 -- is kept verbatim.  The
+        # current Claude models reject any sampling parameter with HTTP 400,
+        # and once popped here nothing downstream could tell "explicitly 0"
+        # from "never set".  Every other kind keeps today's 0 default.
+        temperature = params.pop(
+            "temperature", None if endpoint.kind == "anthropic" else 0
+        )
         max_output_tokens = params.pop("max_output_tokens", None)
         legacy_max = params.pop("max_tokens", None)
         if max_output_tokens is None:
@@ -1001,6 +1114,105 @@ class CouncilConfig(BaseModel):
             extra=extra,
             verified=model.verified,
         )
+
+    # -- anthropic rate-limit buckets -----------------------------------------
+
+    def rate_limit_bucket_table(self) -> Dict[str, str]:
+        """:data:`ANTHROPIC_RATE_LIMIT_BUCKETS` with this config's overrides."""
+        table = dict(ANTHROPIC_RATE_LIMIT_BUCKETS)
+        table.update({str(k): str(v) for k, v in (self.rate_limit_buckets or {}).items()})
+        return table
+
+    @model_validator(mode="after")
+    def _validate_anthropic_buckets(self) -> "CouncilConfig":
+        """Refuse an ``anthropic`` grouping that would mis-share an allowance.
+
+        WHY THIS IS A REFUSAL AND NOT A CONVENTION: ``account`` is read by
+        BOTH ``quote._gateway_of`` (the pricing bucket) and
+        ``engine.worker._build_limits`` (the shared-semaphore and
+        shared-rate-bucket group).  A wrong grouping either collapses several
+        genuinely separate provider allowances into one -- throttling the run
+        to the slowest model's rate -- or splits one shared allowance into
+        independent pools, which is the MAG failure (427 of 500 items errored,
+        2026-10-21).  Neither announces itself.
+
+        Rules, all at load:
+
+        * every model on an ``anthropic`` endpoint has a canonical identity
+          with an entry in the bucket table -- an unknown model silently
+          becoming its own bucket is the same over-subscription hole;
+        * one endpoint's models are all in ONE bucket;
+        * endpoints sharing an ``account`` are all in ONE bucket;
+        * ``account`` EQUALS the resolved bucket name.  Refusing only the
+          cross-bucket case would leave two aliases for the SAME bucket
+          free to carry two different account strings -- two independent
+          pacers against one allowance.  ``account == bucket`` closes that
+          with no new key: two aliases on one bucket necessarily share it.
+        """
+        table = self.rate_limit_bucket_table()
+        endpoint_bucket: Dict[str, str] = {}
+        for name, endpoint in self.endpoints.items():
+            if endpoint.kind != "anthropic":
+                continue
+            buckets: Dict[str, List[str]] = {}
+            for alias, model in self.models.items():
+                if model.endpoint != name:
+                    continue
+                canonical = model.canonical or default_canonical(
+                    alias, model.served_name, endpoint.kind
+                )
+                if not canonical:
+                    raise ConfigError(
+                        f"model {alias!r} on anthropic endpoint {name!r} has no "
+                        "canonical identity, so its rate-limit bucket cannot be "
+                        "resolved; declare canonical: anthropic/<model> for it."
+                    )
+                bucket = table.get(canonical)
+                if bucket is None:
+                    raise ConfigError(
+                        f"model {alias!r} on anthropic endpoint {name!r} has canonical "
+                        f"identity {canonical!r}, which has no entry in the rate-limit "
+                        "bucket table (ANTHROPIC_RATE_LIMIT_BUCKETS). Add one under the "
+                        f"top-level `rate_limit_buckets:` key, e.g. "
+                        f"rate_limit_buckets: {{{canonical!r}: <bucket>}} -- an unknown "
+                        "model must not silently become its own bucket."
+                    )
+                buckets.setdefault(bucket, []).append(alias)
+            if len(buckets) > 1:
+                detail = "; ".join(f"{b}: {sorted(a)}" for b, a in sorted(buckets.items()))
+                raise ConfigError(
+                    f"anthropic endpoint {name!r} carries models from more than one "
+                    f"rate-limit bucket ({detail}). Declare one endpoint per bucket, "
+                    "each with account set to its bucket name."
+                )
+            if buckets:
+                endpoint_bucket[name] = next(iter(buckets))
+
+        by_account: Dict[str, Dict[str, List[str]]] = {}
+        for name, bucket in endpoint_bucket.items():
+            account = str(self.endpoints[name].account)
+            by_account.setdefault(account, {}).setdefault(bucket, []).append(name)
+        for account, buckets in sorted(by_account.items()):
+            if len(buckets) > 1:
+                detail = "; ".join(
+                    f"bucket {b!r} (endpoints {sorted(e)})" for b, e in sorted(buckets.items())
+                )
+                raise ConfigError(
+                    f"anthropic endpoints share account {account!r} across different "
+                    f"rate-limit buckets: {detail}. Anthropic enforces limits per "
+                    "bucket, and one account would throttle them all to the slowest "
+                    "model's rate; give each bucket its own account."
+                )
+        for name, bucket in sorted(endpoint_bucket.items()):
+            account = self.endpoints[name].account
+            if account != bucket:
+                raise ConfigError(
+                    f"anthropic endpoint {name!r} has account {account!r}, but its "
+                    f"models resolve to rate-limit bucket {bucket!r}; set account: "
+                    f"{bucket}. The account must EQUAL the bucket name so two aliases "
+                    "on one bucket share one pacer instead of two."
+                )
+        return self
 
     # -- queue partitioning ---------------------------------------------------
 
@@ -1352,6 +1564,26 @@ def _require_registered_kind(name: str, kind: str) -> None:
     )
 
 
+def _read_rate_limit_buckets(raw: Any) -> Dict[str, str]:
+    """Validate the top-level ``rate_limit_buckets`` mapping."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            "rate_limit_buckets must be a mapping of canonical model identity to "
+            f"bucket name, got {type(raw).__name__}"
+        )
+    out: Dict[str, str] = {}
+    for canonical, bucket in raw.items():
+        if not str(canonical).strip() or not str(bucket or "").strip():
+            raise ConfigError(
+                f"rate_limit_buckets entry {canonical!r}: {bucket!r} must name both a "
+                "canonical model and a non-empty bucket"
+            )
+        out[str(canonical)] = str(bucket)
+    return out
+
+
 def load_council_config(
     path_or_dict: Optional[Union[str, Path, Mapping[str, Any]]] = None,
     *,
@@ -1592,6 +1824,7 @@ def load_council_config(
             (str(raw["store_id"]).strip() or None) if raw.get("store_id") else None
         ),
         cli_temp_root=cli_temp_root,
+        rate_limit_buckets=_read_rate_limit_buckets(raw.get("rate_limit_buckets")),
         user=(str(raw["user"]).strip() or None) if raw.get("user") else None,
         query_dirs=_resolve_query_dirs(raw.get("query_dirs"), source),
         source=source,

@@ -109,14 +109,22 @@ __all__ = [
 # Endpoint kinds a seat may be served from.  A self-hosted model is just an
 # ``openai`` endpoint the user declared (review round 2 took model management
 # out of the product); ``fake`` and ``replay`` exist for the test backends.
+# ``anthropic`` is Anthropic's native Messages API (llm api type
+# ``anthropic``).
 ENDPOINT_KINDS = (
     "argo",
     "openai",
+    "anthropic",
     "claude_cli",
     "codex_cli",
     "fake",
     "replay",
 )
+# OPENAI-SHAPED kinds (POST /chat/completions), not merely "reached by URL".
+# ``anthropic`` is URL-reached but DELIBERATELY EXCLUDED: its request and
+# response shapes are the Messages API's, not OpenAI's, and listing it here
+# would tell every reader of this tuple otherwise.  (No reader inside this
+# repository at the time of writing -- it is exported for callers.)
 HTTP_KINDS = ("argo", "openai")
 CLI_KINDS = ("claude_cli", "codex_cli")
 
@@ -487,7 +495,7 @@ class SeatSpec(BaseModel):
     seat_name: str
     endpoint: str
     endpoint_kind: Literal[
-        "argo", "openai", "claude_cli", "codex_cli", "fake", "replay"
+        "argo", "openai", "anthropic", "claude_cli", "codex_cli", "fake", "replay"
     ]
     model: str
     canonical_model: str

@@ -219,14 +219,16 @@ class TestBuiltins:
         assert isinstance(api, ApiType)
         run(llm.aclose_all())
 
-    def test_the_builtin_set_is_exactly_the_four_real_kinds(self) -> None:
+    def test_the_builtin_set_is_exactly_the_five_real_kinds(self) -> None:
         """``fake`` and ``replay`` are NOT registered, and that is the point.
 
         A packaged configuration naming ``kind: fake`` must fail at load
         rather than quietly answer from a script instead of from a model.  A
         test that wants them registers them itself.
         """
-        assert llm.BUILTIN_API_TYPES == ("argo", "claude_cli", "codex_cli", "openai")
+        assert llm.BUILTIN_API_TYPES == (
+            "anthropic", "argo", "claude_cli", "codex_cli", "openai"
+        )
         names = llm.api_types()
         assert set(llm.BUILTIN_API_TYPES) <= set(names)
         assert "fake" not in names
@@ -259,7 +261,7 @@ class TestBuiltins:
             import sys
             from kbutillib.domains.ai import llm
             assert sorted(llm.api_types()) == [
-                "argo", "claude_cli", "codex_cli", "openai"
+                "anthropic", "argo", "claude_cli", "codex_cli", "openai"
             ], sorted(llm.api_types())
             leaked = [name for name in sys.modules if ".llm.apis." in name]
             assert not leaked, leaked

@@ -17,10 +17,10 @@ Example -- the whole public surface in five lines::
     #   ... or, from synchronous code:
     result = llm.complete(request, api_type="argo", endpoint={})
 
-Four API types are built in -- ``argo``, ``openai``, ``claude_cli`` and
-``codex_cli`` -- and a fifth kind can be added from ANOTHER distribution
-without editing this package, by declaring a factory in the
-``kbutillib.llm_api_types`` entry-point group::
+Five API types are built in -- ``anthropic``, ``argo``, ``openai``,
+``claude_cli`` and ``codex_cli`` -- and further kinds can be added from
+ANOTHER distribution without editing this package, by declaring a factory in
+the ``kbutillib.llm_api_types`` entry-point group::
 
     [project.entry-points."kbutillib.llm_api_types"]
     my_gateway = "my_pkg.llm:make_api"
@@ -133,7 +133,7 @@ ENTRY_POINT_GROUP = "kbutillib.llm_api_types"
 
 #: The API types this package ships.  ``fake``/``replay`` are not here on
 #: purpose -- see the module docstring.
-BUILTIN_API_TYPES = ("argo", "claude_cli", "codex_cli", "openai")
+BUILTIN_API_TYPES = ("anthropic", "argo", "claude_cli", "codex_cli", "openai")
 
 #: ``{name: factory}``.  A factory takes one endpoint mapping and returns an
 #: :class:`~.protocol.ApiType`.
@@ -653,10 +653,18 @@ def _jsonable(value: Any) -> Any:
 # Registered through lazy factories, so ``import kbutillib.domains.ai.llm``
 # pulls in neither ``httpx`` nor the subprocess machinery.  Registered through
 # the private door rather than ``register_api_type`` for the same reason: the
-# public door probes a factory's product, and probing these four would import
+# public door probes a factory's product, and probing these five would import
 # httpx at import time, which is exactly what the lazy loader exists to avoid.
 # Their shape is pinned by their own suites and by
 # ``test_llm_wrapper.py::TestBuiltins``.
+
+
+def _make_anthropic(endpoint: Mapping[str, Any]) -> Any:
+    # The SDK is an optional extra; AnthropicBackend imports it lazily and
+    # raises an ImportError naming `kbutillib[anthropic]` and Python >= 3.10.
+    from .apis.anthropic import AnthropicBackend
+
+    return AnthropicBackend(endpoint)
 
 
 def _make_argo(endpoint: Mapping[str, Any]) -> Any:
@@ -693,6 +701,7 @@ def _register_builtin(name: str, factory: Callable[[Mapping[str, Any]], Any]) ->
         _REGISTRY[name] = factory
 
 
+_register_builtin("anthropic", _make_anthropic)
 _register_builtin("argo", _make_argo)
 _register_builtin("openai", _make_openai)
 _register_builtin("claude_cli", _make_claude_cli)

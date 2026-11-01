@@ -10,6 +10,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pytest
 
+# quote.py imports SQLAlchemy at module scope: the `council` extra, which CI's
+# `.[dev]` install does not include.
+pytest.importorskip("sqlalchemy", reason="quote.py needs the 'council' extra")
+
 from kbutillib.domains.ai.council.config import ANTHROPIC_RATE_LIMIT_BUCKETS, load_council_config
 from kbutillib.domains.ai.council.quote import (
     Quote,

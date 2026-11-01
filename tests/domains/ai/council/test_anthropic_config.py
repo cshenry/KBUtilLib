@@ -7,6 +7,7 @@ Assertions are on published results: loaded configs, resolved seats,
 
 from __future__ import annotations
 
+import importlib.util
 from typing import Any, Dict, Optional
 
 import pytest
@@ -26,6 +27,13 @@ from kbutillib.domains.ai.council.types import (
     RosterError,
     SeatSpec,
     default_reuse_namespace,
+)
+
+#: The council store (and quote.py) need SQLAlchemy -- the `council` extra,
+#: which CI's `.[dev]` install does not include.
+NEEDS_SQLALCHEMY = pytest.mark.skipif(
+    importlib.util.find_spec("sqlalchemy") is None,
+    reason="the council store needs the 'council' extra (pip install -e '.[council]')",
 )
 
 BUCKET_HAIKU = ANTHROPIC_RATE_LIMIT_BUCKETS["anthropic/claude-haiku-4.5"]
@@ -228,6 +236,7 @@ class TestSeatTemperature:
         assert seat.temperature is not None
 
 
+@NEEDS_SQLALCHEMY
 class TestBuildLimitsReuse:
     """Asserts the EXISTING ``CouncilWorker._build_limits`` groups anthropic
     endpoints as the account rule intends (it is not modified)."""

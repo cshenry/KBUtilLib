@@ -8,7 +8,7 @@
   "authored_on": "2026-10-29",
   "authored_machine": "h100",
   "base_commit": "cb6cf1b03e91f262e862aaa49e90c461190735f4",
-  "review_rounds": 0,
+  "review_rounds": 1,
   "confront_rounds": 1,
   "confront": {
     "round": 1,
@@ -24,6 +24,42 @@
       "task_id": "task-2209d5ce",
       "cause": "Submitted with --role operator, following the header of agent-io/confront/consumer-sim-prd.md. The codex operator role carries a standing instruction to refuse until it finds a committed verdict-passing approval manifest, so it exited 0 in 35 seconds having correctly refused. The ai-design runbook's own step-4d command says --role researcher. Filed as AIAssistant issue #30; retried successfully with --role researcher plus a write-early preamble."
     }
+  },
+  "review_round_1": {
+    "round": 1,
+    "date": "2026-10-31",
+    "by": "miles",
+    "machine": "h100",
+    "session": "ecf79c92-8cbf-5eba-b67d-3414884a1f21",
+    "baseline": "d178f28f008aba08c1a742848177a2800302088e",
+    "measurement": "Review Mode step 2 was taken against the ON-DISK wip working tree -- the real comparison the procedure specifies, not a substitute. The bundle first reached a working tree when Chris merged main into wip on 2026-10-31 at 08:50:33 CDT (merge commit dabbe59); before that it was committed on main only and existed on no machine's disk, which is why this round could not be run earlier. Result: fullprompt.md, humanprompt.md, taskplan.json and both research/ files sha256-identical to the baseline; data.json differed ONLY by the two editorial hunks commit 2ebf612 had already made (writing draft_commit, and a json.dump reflow of the \"repos\" list). No (CSH ...) annotations anywhere in the bundle; no collision artifacts; no untracked additions in the PRD dir.",
+    "hunks": {
+      "editorial": 2,
+      "decision_changed": 0,
+      "question_answered": 0,
+      "requirement_added": 0,
+      "rationale_edited": 0
+    },
+    "chris_edits": "none -- he approved the PRD as written on 2026-10-29 and asked for ready",
+    "defects_fixed": [
+      {
+        "where": "taskplan.json, task anthropic-sdk-smoke, success_criteria",
+        "defect": "The criterion demanded the anthropic extra be pinned `>=1,<2`, while the task's own prompt makes the major version the task's call ('WHICH major is YOURS TO DETERMINE') and names `>=1,<2` explicitly as superseded earlier-draft text, since external research reported the SDK's current main at 2.3.0. A reviewer judging against the criterion would have FAILED a correct implementation.",
+        "cause": "confront round 1 rewrote the prompt and the criterion kept its pre-confront text",
+        "fix": "criterion now requires a single-major pin chosen by inspection and justified in the work record"
+      },
+      {
+        "where": "taskplan.json, task anthropic-config-and-literal, success_criteria",
+        "defect": "The criterion demanded the resolved reuse namespace be 'distinct from other endpoints'', while the task's own prompt says in terms DO NOT assert that -- a confront adversary executed default_reuse_namespace for a haiku and an opus anthropic alias and got `https://api.anthropic.com#` for BOTH, and that sharing is deliberate. The prompt records the uniqueness criterion as WITHDRAWN. Same failure mode: correct work would have been failed.",
+        "cause": "same -- the withdrawn criterion survived in success_criteria",
+        "fix": "criterion now matches the prompt and records why uniqueness must not be asserted"
+      }
+    ],
+    "propagation": "None owed from Chris's edits, because there were none. The two defects above are criteria-versus-prompt contradictions, not design changes: both prompts already carry the post-confront decision, so aligning the criteria changes no decision, no user story, no testing decision and no task prompt.",
+    "gotchas_rederived": "Not required, and deliberately not touched. The propagation rule binds on a decision-changed, question-answered or requirement-added hunk; this round had none. Re-deriving a 180-line Gotchas section with no edit driving it would be churn on a document nobody has changed.",
+    "compression": "None. Review Mode's tighten-as-you-go rule is bound by diff hygiene -- tighten the text you are already touching. This round touched two criteria strings and the Revision Log, so there was no two-rounds-of-editing redundancy to fold.",
+    "confront": "Not run. Review Mode step 5b runs confront when a round moves an IRREVERSIBLE or MEDIUM blast-radius decision; this round moved no decision at all. confront_rounds stays 1 of the shared budget of 3.",
+    "note_on_visibility": "Committed on main from h100 off-tree (the Dropbox working tree here is parked on wip and may not be written). The wip working tree -- which is what primary-laptop reads and what the registered prd_dir resolves to -- was merged from main BEFORE this commit, so the file on Chris's disk still reads review_rounds 0 until main is merged into wip again."
   },
   "draft_commit": "d178f28f008aba08c1a742848177a2800302088e",
   "review_protocol": "Written single-pass in /ai-design Draft Mode on h100. Every judgement call is already decided and applied in the body and the taskplan; the Open Questions section is a manifest of choices, not a queue of holes. Chris edits the committed fullprompt.md in place, annotating with (CSH - ...) or (CSH : ...) markers; `/ai-design --review kbu-anthropic-api-type-v1` then diffs the working tree against `draft_commit`, classifies every hunk, propagates decision changes through the body, user stories, testing decisions and taskplan, re-derives the Gotchas section, and recommits with a fresh baseline. NOTE ON DELIVERY: this bundle was authored on h100, where the Dropbox working tree is parked on `wip` and may not be written, so the commit is on `main` off-tree and the files exist on no machine's disk until `main` is merged into `wip` on primary-laptop. A readable, sha256-verified copy is under ~/Dropbox/AIPlatform/artifacts/ -- do NOT edit that copy, because Review Mode diffs the git working tree and would see no changes.",

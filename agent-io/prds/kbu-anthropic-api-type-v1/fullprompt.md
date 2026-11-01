@@ -417,6 +417,20 @@ thing that closes the gap. Batch stays out of scope, but as a **separate PRD
 that this one is a prerequisite for**, and the claim that this PRD alone makes
 the planned run affordable has been withdrawn.
 
+**Round 1 — 2026-10-31 — review round: no edits from Chris, two internal
+contradictions fixed.** The working-tree diff from `d178f28` was empty apart from
+the `draft_commit` writeback `2ebf612` had already made, so the design carries no
+change of Chris's — he approved the PRD as written on 2026-10-29. The round's
+substantive work came from reading the taskplan instead. Two tasks'
+`success_criteria` still carried **pre-confront** text that the confront fold had
+superseded in their prompts, so each criterion contradicted the task it judges and
+would have failed correct work: phase 1's demanded the SDK extra be pinned
+`>=1,<2` while its prompt makes the major version the task's own call and names
+`>=1,<2` as superseded, and phase 3's demanded a reuse namespace *distinct from
+other endpoints'* while its prompt states that the sharing is deliberate and that
+criterion withdrawn. Both criteria now match their prompts. No decision moved, so
+the Gotchas section is unchanged.
+
 ## Problem Statement
 
 An operator has $200 of Anthropic API credit and wants to seat two or three

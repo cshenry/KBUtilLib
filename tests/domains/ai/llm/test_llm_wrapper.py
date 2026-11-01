@@ -25,6 +25,7 @@ a GPU: every api type used is registered by the test itself.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import subprocess
 import sys
@@ -1465,8 +1466,28 @@ class SearchingApi(ScriptedApi):
     supports_web_search = True
 
 
+#: ``anthropic`` is a built-in whose SDK is an OPTIONAL extra (Python >= 3.10
+#: only): without it, constructing one raises an ImportError naming the extra,
+#: which is the contract -- so a test that constructs every built-in asserts
+#: THAT instead of the attribute when the SDK is absent.
+_HAS_ANTHROPIC_SDK = importlib.util.find_spec("anthropic") is not None
+
+
+def _constructible_builtins() -> List[str]:
+    """Every built-in, minus ``anthropic`` when its SDK is absent -- after
+    asserting that it then refuses with the documented message."""
+    names = list(llm.BUILTIN_API_TYPES)
+    if not _HAS_ANTHROPIC_SDK:
+        with pytest.raises(ImportError, match=r"kbutillib\[anthropic\]"):
+            llm.get_api("anthropic", _builtin_endpoint("anthropic"))
+        names.remove("anthropic")
+    return names
+
+
 def _builtin_endpoint(name: str) -> Dict[str, Any]:
     """An endpoint mapping for built-in *name* that constructs without a network."""
+    if name == "anthropic":
+        return {"name": name, "kind": name}
     if name in ("argo", "openai"):
         return {"name": name, "kind": name, "base_url": "http://127.0.0.1:9/v1"}
     return {"name": name, "kind": name, "executable": "no-such-cli"}
@@ -1485,6 +1506,13 @@ class TestWebSearchCapability:
         [
             ("argo", False),
             ("openai", False),
+            pytest.param(
+                "anthropic",
+                False,
+                marks=pytest.mark.skipif(
+                    not _HAS_ANTHROPIC_SDK, reason="anthropic SDK not installed"
+                ),
+            ),
             ("claude_cli", True),
             ("codex_cli", True),
         ],
@@ -1499,14 +1527,14 @@ class TestWebSearchCapability:
         """Stated as a set, so a new built-in cannot quietly join the true side."""
         searching = {
             name
-            for name in llm.BUILTIN_API_TYPES
+            for name in _constructible_builtins()
             if llm.supports_web_search(name, _builtin_endpoint(name))
         }
         run(llm.aclose_all())
         assert searching == {"claude_cli", "codex_cli"}
 
     def test_every_builtin_exposes_the_attribute_on_its_instance(self) -> None:
-        for name in llm.BUILTIN_API_TYPES:
+        for name in _constructible_builtins():
             api = llm.get_api(name, _builtin_endpoint(name))
             assert isinstance(api.supports_web_search, bool), name
         run(llm.aclose_all())

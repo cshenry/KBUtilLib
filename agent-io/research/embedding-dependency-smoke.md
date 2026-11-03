@@ -285,3 +285,67 @@ Two consequences for the backend, both of which would be found the hard way othe
 The `lm_head.*` keys report `UNEXPECTED` on the ESM-C load too, which is the intended discard of the
 masked-LM head. Unlike ESM2, **nothing is reported `MISSING`** — so the ESM-C encoder load is fully
 deterministic, no randomly-initialized parameters at all.
+
+---
+
+## Step 6 — does `local_files_only=True` raise cleanly when the snapshot is absent?
+
+Method: a fresh empty temp directory under `/scratch/chenry/tmp` was used as both `HF_HOME` and
+`cache_dir`, then each class was asked to load with `local_files_only=True`. The directory was verified
+empty before the attempts.
+
+**Answer: NO — not uniformly. Three different behaviours across four call sites.**
+
+| call | raises? | exception type | message |
+|---|---|---|---|
+| `EsmModel.from_pretrained(..., local_files_only=True)` | yes, **cleanly** | `builtins.OSError` | `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files. Check your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.` |
+| `EsmcModel.from_pretrained(..., local_files_only=True)` | yes, **cleanly** | `builtins.OSError` | *identical message to the above* |
+| `EsmTokenizer.from_pretrained(..., local_files_only=True)` | yes, but **not cleanly** | `builtins.TypeError` | `expected str, bytes or os.PathLike object, not NoneType` |
+| `EsmcTokenizer.from_pretrained(..., local_files_only=True)` | **NO EXCEPTION — it succeeded** | — | — |
+
+### The two model classes behave well
+
+Both raise a plain `OSError` (`isinstance(e, OSError)` is `True`; the MRO is
+`OSError <- Exception <- BaseException <- object`) with an actionable message that names offline mode.
+A preflight can catch `OSError` and report "snapshot not cached" accurately. Note the message says
+"couldn't connect", which is misleading — there was working network here and `local_files_only=True`
+suppressed the fetch by design — but the exception type and behaviour are correct.
+
+### FINDING: `EsmTokenizer` leaks a `TypeError`, not an `OSError`
+
+`EsmTokenizer` fails with `TypeError: expected str, bytes or os.PathLike object, not NoneType` — an
+internal failure where a resolved-path of `None` is passed onward, rather than a deliberate "not
+cached" error. **A preflight written as `except OSError:` will not catch this** and the task will die
+with an opaque `TypeError` instead of a clear diagnostic. Catch `(OSError, TypeError)`, or probe the
+cache directly.
+
+### FINDING: `EsmcTokenizer` silently succeeds with NO files present at all
+
+This is the most consequential result of step 6. `EsmcTokenizer.from_pretrained("biohub/ESMC-300M",
+local_files_only=True, cache_dir=<empty>)` returned a **fully working tokenizer**:
+
+- `vocab_size` = 33; `name_or_path` = `biohub/ESMC-300M`
+- `tk("MKVLAAGIVL")["input_ids"]` → `[0, 20, 15, 7, 4, 5, 5, 6, 12, 7, 4, 2]` — the correct ids
+- **no `hub` directory was even created** in the empty cache; nothing was read from or written to disk
+
+The cause is that the vocabulary is **hardcoded in the module source**,
+`transformers/models/esmc/tokenization_esmc.py` (verified: the file contains a literal residue/special
+token vocab list). The repo id is therefore decorative. Proof: the same call with a deliberately
+nonexistent repo id, `biohub/THIS-REPO-DOES-NOT-EXIST-xyz`, **also succeeded**, returning a working
+tokenizer with `vocab_size` 33 and `name_or_path` set to the bogus name.
+
+**Consequence for the backend preflight: successfully loading the tokenizer is NOT evidence that the
+checkpoint is present, and for ESM-C it is not evidence that the repo even exists.** A
+"can we run offline?" check must load the **model** (or inspect the snapshot/weight files on disk).
+Using tokenizer construction as the cheap proxy — the obvious optimization — gives a false green for
+ESM-C and would fail only later, at weight-load time, inside a worker.
+
+This is recorded as measured third-party behaviour. Per the no-injection criterion nothing was patched,
+pinned or worked around.
+
+### Incidental: ESM-C tokenizer vocab 33 vs config vocab 64
+
+`EsmcTokenizer.vocab_size` is **33** while `EsmcConfig.vocab_size` is **64** (ESM2 is self-consistent at
+33/33). The embedding matrix is wider than the tokenizer's vocabulary. Harmless for embedding
+extraction, but a validation assert of `tokenizer.vocab_size == config.vocab_size` would fail on ESM-C
+while passing on ESM2 — do not write that check.

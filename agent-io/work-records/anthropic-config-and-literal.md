@@ -13,8 +13,11 @@ The council can now SEAT an `anthropic` endpoint.
   why. Grep of `src/`, `tests/` and `scripts/` found **no reader** of
   `HTTP_KINDS` other than its own export.
 - `council/config.py`:
-  - `DEFAULT_MAX_CONCURRENCY["anthropic"] = 4` (commented: the per-minute rate
-    binds first).
+  - `DEFAULT_MAX_CONCURRENCY["anthropic"] = 4`. The comment follows PRD Q8:
+    the token axes bind, neither lever expresses them, and the sustained-429
+    halt covers the gap. An earlier version of this comment said "the
+    per-minute rate binds first", which repeated the taskplan's pre-confront
+    framing; it was corrected after checking against the PRD.
   - `EndpointConfig._check` gains an `anthropic` branch BEFORE the generic
     no-URL plug-in branch: defaults `base_url` to `https://api.anthropic.com`;
     defaults `billing` to `api` when unset and refuses an explicit

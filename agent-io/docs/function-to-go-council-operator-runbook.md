@@ -600,8 +600,28 @@ items. Config load therefore refuses:
 `billing_wallet` is required and names the payer. Give it the same value on
 every alias paid from the same credit.
 
-On this provider the per-minute **rate** binds before the parallel cap, so
-set `max_requests_per_minute`. `max_concurrency` defaults to 4.
+**Neither limit you can configure expresses what binds this provider.**
+Anthropic enforces three limits per bucket: requests per minute (RPM), input
+tokens per minute (ITPM) and output tokens per minute (OTPM). For a council's
+large prompts, the **token** limits bind.
+
+- `max_requests_per_minute` paces requests. Set it from the console's limits
+  page, or measure it as described below.
+- `max_concurrency` bounds parallelism. It defaults to 4.
+
+Neither can express a tokens-per-minute ceiling, so correct values for both
+still don't guarantee you stay inside the token limits. What covers the gap is
+the endpoint halt after a sustained run of 429s: 5 within 60 seconds
+(`RATE_LIMIT_HALT_AFTER`). That is detection after the fact, not prevention.
+A token-aware pacer is out of scope, and needs measured prompt and output
+sizes first.
+
+Limits belong to the organisation/workspace, not the API key: several keys can
+share one quota. `account` = bucket name is correct only within one
+organisation, and multi-organisation use is a non-goal.
+
+`anthropic` seats run as singles. There is no `VERIFIED_OUTPUT_CAPS` entry, so
+no batching, and each item's prompt is sent in full.
 
 ### The budget does NOT protect the wallet as a whole
 
@@ -621,6 +641,14 @@ with a console spend limit as well, and read the three money signals below.
   answer `temperature`, `top_p` and `top_k` with HTTP 400. On a model that
   accepts them, set one explicitly in `params`. The provider default is 1.0,
   not 0.
+- **Which extras pass through.** `thinking`, `effort` and
+  `output_config.format` aren't requested by default, but a model's `params`
+  may set them, and they are sent as given. Only `cache_control` is refused,
+  at any depth, because cache-billed tokens would make the dollar figure
+  disagree with the token figure. If you set `output_config.format`, those
+  results still say `schema_enforced: false`, which is then inaccurate.
+  `model`, `messages` and `max_tokens` can't be overridden, and `stream` and
+  `tools` are refused.
 - ARGO already serves Sonnet 5 and Opus 5 under the **same canonical
   identity**, so `Roster._check_independence` refuses to seat both routes for
   one model. That refusal is deliberate: it stops one model counting as two

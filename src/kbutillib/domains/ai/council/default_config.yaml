@@ -83,10 +83,17 @@ endpoints:
   # bucket name; billing_wallet names the payer (one value for every alias
   # paid from the same credit).
   #
-  # The per-minute RATE binds before the parallel cap on this provider, so
-  # max_requests_per_minute is the number to set (from your console's limits
-  # page, or measured -- see the operator runbook) and max_concurrency
-  # defaults low (4).
+  # NEITHER max_requests_per_minute NOR max_concurrency can express what binds
+  # this provider. Anthropic limits requests/min AND input tokens/min AND
+  # output tokens/min per bucket, and for a council's large prompts the TOKEN
+  # limits bind first. max_requests_per_minute paces requests (set it from your
+  # console's limits page, or measure it -- see the operator runbook) and
+  # max_concurrency defaults low (4), but a correct value for both still does
+  # not keep you inside the token limits. What catches that is the halt after
+  # a sustained run of 429s: detection, not prevention. Setting
+  # max_requests_per_minute does not mean "now I am within my limits".
+  # Limits are per organisation/workspace, not per API key: several keys can
+  # share one quota.
   #
   # max_total_tokens is PER ENDPOINT. Several aliases mean several budgets and
   # NOTHING SUMS THEM: a single fixed wallet is not expressible as one enforced

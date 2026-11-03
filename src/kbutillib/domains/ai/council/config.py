@@ -158,10 +158,17 @@ DEFAULT_MAX_CONCURRENCY: Dict[str, int] = {
     "openai": 16,
     "claude_cli": 1,
     "codex_cli": 1,
-    # Deliberately below ``openai``'s 16: on Anthropic the binding constraint
-    # is the per-minute REQUEST RATE (set ``max_requests_per_minute``), not
-    # the parallel cap.  A low cap with a correct pacer is safe; the reverse
-    # is how the 2026-10-21 MAG pilot errored 427 of 500 items.
+    # Deliberately below ``openai``'s 16: an unpaced endpoint at high
+    # concurrency is how the 2026-10-21 MAG pilot errored 427 of 500 items,
+    # and a low cap with a pacer is safe while the reverse is not.
+    #
+    # NEITHER lever expresses what actually binds this provider (PRD Q8).
+    # Anthropic enforces RPM, input-tokens/min and output-tokens/min per
+    # rate-limit bucket, and for a council's large prompts the TOKEN axes
+    # bind. ``max_requests_per_minute`` paces requests and this cap bounds
+    # parallelism; neither guarantees token-rate compliance. What covers the
+    # gap is the sustained-429 halt -- detection after the fact, not
+    # prevention. Do not document "the request rate binds first".
     "anthropic": 4,
 }
 

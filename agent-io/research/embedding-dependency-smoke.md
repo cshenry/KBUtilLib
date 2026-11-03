@@ -349,3 +349,315 @@ pinned or worked around.
 33/33). The embedding matrix is wider than the tokenizer's vocabulary. Harmless for embedding
 extraction, but a validation assert of `tokenizer.vocab_size == config.vocab_size` would fail on ESM-C
 while passing on ESM2 — do not write that check.
+
+---
+
+## Step 7 — biotrainer 2.1.1 embedding API (reading task, no code)
+
+Read from the actual published artifacts, not from memory. `biotrainer-2.1.1-py3-none-any.whl` and
+`biotrainer_core-2.1.1-py3-none-any.whl` were downloaded from PyPI and unzipped under
+`/scratch/chenry/esm-smoke/read/` purely to read. **Neither was installed**, and no dependency of this
+repo changed. The `EmbeddingAPI` surface lives in `biotrainer`, but the hashing and HDF5 primitives live
+in the separate **`biotrainer-core==2.1.1`** distribution — a detail worth knowing before anyone goes
+looking for `get_hash` in the wrong wheel.
+
+Confirmed from PyPI metadata: biotrainer 2.1.1 `requires_python = <3.14,>=3.12` — exactly as the task
+stated. Agreement.
+
+### FINDING: biotrainer pins `transformers<5.20.0`, so it cannot coexist with the build we measured
+
+`Requires-Dist: transformers<5.20.0,>=5.17.0`. We measured on **5.22.1**. Adopting biotrainer as a
+dependency would force transformers *down* below 5.20, i.e. below the version this smoke test
+validated. This is an additional, independent reason not to adopt it — one not listed in the task's
+reasons — and it reinforces the decision already made.
+
+### The API surface
+
+`biotrainer/embedding/embedding_api.py` exposes exactly two methods on `EmbeddingAPI`:
+
+- `compute_embeddings(input_data, output_dir, protocol, force_output_dir=False, force_recomputing=False, store_by_hash=True, embedding_stats_tracker=None) -> str` — writes an HDF5 file, returns its path.
+- `generate_embeddings(input_data, reduce: bool) -> Generator[SequenceData, None, None]` — yields in-memory records as they are computed, nothing written.
+
+**Note the asymmetry in how reduction is selected.** `generate_embeddings` takes an explicit
+`reduce: bool`. `compute_embeddings` has **no** `reduce` parameter — it derives reduction from the
+`protocol` argument via `use_reduced_embeddings = protocol in Protocol.using_per_sequence_embeddings()`
+(`embedding_service.py:89`). Both paths converge on the same generator,
+`_embeddings_generator(seq_records, use_reduced_embeddings)`.
+
+### Pooling / reduction
+
+Reduction is a **plain unweighted arithmetic mean over the residue axis**, one line
+(`embedder_interfaces.py:111-118`):
+
+```python
+@staticmethod
+def reduce_per_protein(embedding: torch.Tensor) -> torch.Tensor:
+    return embedding.mean(axis=0)
+```
+
+Applied in `_embeddings_generator` (`embedding_service.py:283-285`) only when the reduce flag is set;
+otherwise the full per-residue matrix is passed through. Properties worth noting:
+
+- **`reduce` is a boolean, not a strategy.** There is no `max`, `sum`, `cls`, or attention-weighted
+  option anywhere in the embedding package, and no hook to supply one. A design that needs CLS-token
+  pooling or masked-mean must add that concept itself; copying biotrainer gives mean-only.
+- **The mean is taken *after* special tokens are stripped**, so it is a true residue mean — provided
+  the stripping is right. There is no `attention_mask` weighting at the reduce step, because padding
+  has already been removed per-sequence before this point.
+
+### Two different special-token stripping strategies — and a latent ESM-C bug
+
+biotrainer strips special tokens in two different ways, which is directly relevant to the measurements
+above:
+
+1. **Generic path** (`huggingface_transformer_embedder.py:85-100`, `_get_keep_mask`): calls
+   `tokenizer.get_special_tokens_mask(input_id, already_has_special_tokens=True)`, drops every
+   flagged index *except* the mask token (deliberately kept for MLM use), plus a per-model
+   `_custom_indices_to_remove`, and indexes with a boolean keep-mask. This is the robust approach — it
+   would correctly drop ESM-C's `|` chainbreak token, since I measured `|` as id 31 in
+   `all_special_ids`.
+2. **ESM2 fast path** (`ESM2.py:46-79`): skips the scan entirely and slices positionally —
+   `embedding = embeddings[seq_num, 1:num_real_tokens - 1]` where
+   `num_real_tokens = attention_mask[seq_num].sum()`. The docstring states the assumed layout
+   `[BOS, AA1..AAn, EOS, PAD...]`. This exactly matches what I measured for both models (leading
+   `<cls>`, trailing `<eos>`), and the comment explains the motive: avoid "costly scanning for special
+   tokens each time".
+
+**`class ESMC(ESM2)` inherits that fast path and does not override it** (`ESM2.py:87`). For a
+single-chain sequence that is correct. But because ESM-C's tokenizer carries the extra `|` chainbreak
+special token that ESM2 does not have, a multi-chain input would leave `|` positions **inside** the
+residue slice and therefore inside the mean. This is prior art to copy *carefully*: take the
+positional-slice optimization only if single-chain input is guaranteed, otherwise use the keep-mask.
+
+### FINDING: the task's claim about biotrainer's ESM routing is WRONG for 2.1.1
+
+The task prompt says biotrainer "routes any model name containing 'esm' to `EsmModel` which is the wrong
+architecture for ESMC". **That is not what 2.1.1 does.** Measured from the source:
+
+- There is a **dedicated `ESMC` class** (`biotrainer/embedding/huggingface/ESM2.py:87`), registered in
+  `OPTIMIZED_EMBEDDERS` alongside `ESM2` (`huggingface/__init__.py:7-13`).
+- Routing is by **exact dictionary membership**, not substring matching:
+  `if embedder_name in _esm2_family_dict.keys()` and `if embedder_name in _esmc_family_dict.keys()`.
+  A name merely *containing* "esm" matches neither and falls through to the generic embedder.
+- `ESMC.detect` does **not** use `EsmModel`.
+
+So the rationale "routes any model name containing 'esm' to EsmModel" should be struck from the PRD's
+list of reasons. **The decision not to adopt biotrainer is unaffected** — the python-version pin, the
+`transformers<5.20.0` pin, eager loading, and the missing GenSLM adapter all stand on their own. Only
+this one stated reason is factually wrong, and it is recorded here so the taskplan can be corrected.
+
+What `ESMC.detect` actually does is its own cautionary tale: it loads via **`AutoTokenizer` /
+`AutoModel`** (`ESM2.py:93-95`) — the very thing our task forbids — and then *guards after the fact* by
+checking the resolved class names:
+
+```python
+if "ESMC" in model_name.upper() and "ESMC" in tokenizer_name.upper():
+    return cls(...)
+else:
+    raise ImportError(f"Trying to load ESMC model {embedder_name}, but resolved as {model_name}! ...")
+```
+
+That guard is a good pattern in itself (fail loudly when `Auto*` resolves to the wrong architecture),
+but using the explicit `EsmcModel` class as our task requires makes it unnecessary.
+
+### Independent corroboration of our measured widths
+
+biotrainer hardcodes per-model widths, and they **agree with what I measured**:
+
+| model | biotrainer's table | **measured here** | agree? |
+|---|---|---|---|
+| `facebook/esm2_t6_8M_UR50D` | 320 | **320** | yes |
+| `biohub/ESMC-300M` | 960 | **960** | yes |
+
+Two independent sources now give 960 for ESMC-300M, which strengthens the finding that the task's
+expectation table simply omitted it. For reference, biotrainer's other entries (not verified by me):
+ESM2 35M→480, 150M→640, 650M→1280, 3B→2560, 15B→5120; ESMC-600M→1152, ESMC-6B→2560.
+
+### The task's "loads the model at construction" claim is CORRECT
+
+Confirmed. `ESM2.detect` / `ESMC.detect` call `from_pretrained(...).to(device)` inline
+(`ESM2.py:31-35`, `93-95`) and hand an already-materialized model into
+`HuggingfaceTransformerEmbedder.__init__`, which immediately calls `self._set_model_precision()`
+(`huggingface_transformer_embedder.py:20-28`). There is no deferral: constructing the embedder downloads
+and loads weights. Agreement with the task.
+
+### Sequence hashing for provenance
+
+`biotrainer_core/functions/hashing.py:10-13`:
+
+```python
+def calculate_sequence_hash(sequence: str) -> str:
+    suffix = len(sequence)
+    sequence = f"{sequence}_{suffix}"
+    return hashlib.sha256(sequence.encode()).hexdigest()
+```
+
+- **SHA-256 of the sequence with its own length appended** as `"{seq}_{len}"`. Verified concretely:
+  `calculate_sequence_hash("MKVLAAGIVL")` = `d71c29bafc8de8c396e37ad9a29d30f93d5cfb9499f3093cb980a53f524c05fe`
+  (plain `sha256("MKVLAAGIVL")` is `a45eb063...`, i.e. the length suffix genuinely changes the digest).
+  The length suffix is cheap belt-and-braces against collisions and makes the key self-describing.
+- Full 64-hex digest, not truncated. `SequenceData.get_hash()` is a thin wrapper
+  (`sequence_data.py:152`). `get_id_for_id2emb()` falls back to `seq_id` only when the sequence is
+  empty.
+- **The hash covers the SEQUENCE ONLY.** It does not include the embedder name, the model revision, the
+  `reduce` flag, or the precision. biotrainer compensates entirely through *file naming* (below), so
+  embeddings from different models never share a file.
+
+**This is the single most important pattern NOT to copy verbatim for KBDL.** If per-model embeddings are
+ever pooled into one store — which a KBDL object store naturally invites — a sequence-only key silently
+collides across ESM2 / ESM-C / ProtT5, and across reduced vs per-residue. Our key must incorporate at
+minimum the model id, the resolved revision SHA (which step 4 proves must be fetched deliberately,
+since `config._commit_hash` is `None`), and the reduction mode.
+
+A second, genuinely good hashing pattern worth copying — `get_embedding_hash()`
+(`sequence_data.py:160-185`) hashes the embedding's raw bytes **after normalizing to float64**:
+
+> "We normalize to float64 before hashing to avoid false cache misses caused purely by dtype
+> differences (e.g. float32 vs float64) when the underlying values are identical."
+
+That is exactly the right instinct for a cache key over float tensors, and worth lifting directly.
+
+### HDF5 output layout
+
+Writer: `biotrainer_core/h5_files/h5_handling.py:38-42`.
+
+```python
+def store_embedding_to_handle(h5_file_handle, seq_hash, seq_id, embedding_data):
+    h5_file_handle.create_dataset(seq_hash, data=embedding_data, compression="gzip", chunks=True)
+    h5_file_handle[seq_hash].attrs["original_id"] = seq_id
+```
+
+| aspect | layout |
+|---|---|
+| structure | **flat** — one dataset per sequence at the file root, no groups, no nesting |
+| dataset key | the **sequence hash** when `store_by_hash=True` (default), else the raw `seq_id` |
+| human-readable id | carried as the dataset attribute **`attrs["original_id"]`** — the only place `seq_id` survives |
+| compression | `compression="gzip"` with `chunks=True` (auto-chunking), on every dataset |
+| dataset shape | `(n_residues, width)` unreduced; `(width,)` reduced — the *same* key either way |
+| dtype | whatever numpy array arrives; float16 only if half precision was used |
+
+Path and file name (`embedding_service.py:289-323`):
+
+```
+<output_dir>/embeddings/<embedder_name_last_path_segment>/[reduced_]embeddings_file_<embedder>[_half].h5
+```
+
+`embedder_name.split("/")[-1]` strips the HF org, so `biohub/ESMC-300M` becomes `ESMC-300M`. **The
+reduction mode, the embedder, and the precision are encoded in the filename and directory — never in the
+dataset key.** That is what makes the sequence-only hash safe *for biotrainer* and unsafe for a single
+shared store.
+
+Reader: `read_id2emb` (`h5_handling.py:12-28`) returns `{key: embedding[:]}`, loading everything when
+`ids_to_load is None`, and **raises `ValueError` on a requested-but-missing key** rather than skipping.
+`EmbeddingService.load_embeddings` then converts to `torch.tensor(...).float()` — note this **upcasts
+float16 back to float32 on read**, so half precision is a storage saving only.
+
+Operational patterns in `compute_embeddings` worth copying:
+
+- **Resumability by key-set difference** (`:105-122`): opens an existing file, reads `existing_keys`,
+  and embeds only records whose hash (or id) is absent; returns early if nothing is missing. This is
+  the right shape for a long-running KBDL job that gets killed.
+- **`force_recomputing=True` unlinks the file** (`:99-100`) rather than overwriting keys — because
+  `create_dataset` on an existing key would raise.
+- **Sequences sorted by length descending** before embedding (`:132-135`) so the largest batch is
+  attempted first and OOM surfaces immediately rather than hours in.
+- **`/` is rejected in sequence ids** when `store_by_hash=False` (`:127-130`), since HDF5 treats it as a
+  group path separator. Hash keys are immune, which is a real argument for hash keys.
+- **I/O is offloaded to a separate `spawn` process** fed by an `mp.Queue(maxsize=30)`
+  (`:24-33`, `:152-190`), so gzip compression does not block the GPU; a `None` sentinel shuts it down,
+  and it is pushed in a `finally`/`except` so the writer cannot hang on an exception.
+
+### OOM handling (biotrainer, inherited from bio-embeddings)
+
+`EmbedderWithFallback._embed_batch` (`embedder_interfaces.py:137-200`) is a **three-stage cascade** on
+`RuntimeError`: full batch on GPU → each sequence individually on GPU → that sequence on CPU. It is
+skipped entirely when the device is already CPU. Half precision disables the CPU fallback with an
+explicit `NotImplementedError` pointing at huggingface/transformers#11546.
+
+`estimate_batch_size` (`embedder_interfaces.py:57-74`) sizes batches from device memory rather than a
+fixed constant: `batch_size = device_memory_gb * 1024 residues_per_gb * 0.8 safety_factor`, clamped to
+`8192 * 6` with the comment that this is a good trade-off "even on an H100". Batching is by **total
+residue count**, not sequence count (`embed_many`, `:76-109`), which is the correct unit for a
+variable-length workload, and an over-long single sequence is passed through alone with a warning.
+
+### bio-embeddings 0.2.2 — OOM/storage prior art only
+
+Unmaintained since 2021 and, confirmed from PyPI, `requires_python = ">=3.7.1,<3.10"` — it **cannot be
+installed on any python this fleet runs**. Skimmed purely as prior art, as instructed. biotrainer's
+`embedder_interfaces.py` header explicitly credits it as the file's origin, so the lineage is direct.
+
+- **Same reduction**: `reduce_per_protein` is `embedding.mean(0)` (`embed/esm_embedder.py:82-84`), but
+  declared `@abc.abstractmethod` so every embedder must opt in — several override it (CPCProt is
+  already per-protein and no-ops; UniRep, Bepler, PLUS-RNN, GloVe, fastText each differ). biotrainer
+  made it a concrete default instead. The abstract version is arguably the safer design: it forces each
+  new model to state its pooling rather than silently inheriting mean.
+- **Keys are plain `md5(sequence)`** (`utilities/helpers.py:59`) — no length suffix — with
+  `attrs["original_id"]` carrying the real id, the same convention biotrainer still uses. Notably it
+  ships a **dedicated MD5-clash exception** (`utilities/exceptions.py:27`) that halts execution, plus a
+  check that the mapping has as many unique `original_id`s as hashes. biotrainer's length-suffixed
+  SHA-256 is the evolved answer to exactly that worry.
+- **Storage is split across three files**, not one: per-residue, `reduced_`, and `transformed_`
+  (`embed/pipeline.py:229-248`), each written in the same loop with its own `create_dataset`. The
+  `discard_per_amino_acid_embeddings` flag exists specifically so the large per-residue file can be
+  skipped when only per-protein vectors are wanted — and the config validation refuses the combination
+  that would produce nothing (`:116-119`).
+- **Half precision is applied at storage time**, `embedding.astype(numpy.float16)` (`:234-235`),
+  separately from `half_precision_model` (which is restricted to the ProtT5 models). Splitting
+  "compute in fp16" from "store in fp16" is a useful distinction biotrainer partly loses.
+- **Disk-space preflight — the most directly reusable idea here.**
+  `_print_expected_file_sizes` (`embed/pipeline.py:40-76`) predicts output size *before* embedding:
+
+  ```
+  per_amino_acid_size_in_bytes = 4 * embedding_dimension * number_of_layers
+  per_protein_size_in_bytes    = 4 * embedding_dimension
+  embeddings_file_size         = per_amino_acid_size_in_bytes * total_residues
+  reduced_embeddings_file_size = per_protein_size_in_bytes * n_proteins
+  ```
+
+  then compares the total against `shutil.disk_usage(prefix)` and logs a loud warning advising the user
+  to "stop execution NOW" if it will not fit. For KBDL this is worth copying almost verbatim — with the
+  measured widths (320 for ESM2-8M, 960 for ESMC-300M) it is immediately computable, and note the
+  formula multiplies by layer count, which matters if more than the last hidden state is ever stored.
+  Unreduced ESMC-300M is `4 * 960 = 3840` bytes per residue before gzip.
+- **`max_amino_acids`** is a user-supplied batch cap threaded into `embed_many`
+  (`embed/pipeline.py:227`) rather than biotrainer's automatic memory-derived estimate.
+
+---
+
+## Summary of disagreements with the task's expectation table
+
+Reported, not reconciled. Per the task's instruction, the measurement stands and the table is called
+wrong where it is wrong.
+
+| # | item | status |
+|---|---|---|
+| 1 | ESM2 width 320, 6 layers, leading `<cls>`, trailing `<eos>` | **table AGREES with measurement** |
+| 2 | ESM-C leading `<cls>`, trailing `<eos>` | **table AGREES with measurement** |
+| 3 | ESM-C `max_tokens 2048` | **TABLE WRONG on the key.** Value 2048 is right; the key is `max_position_embeddings`. `config.max_tokens` does not exist. |
+| 4 | ESM-C hidden width and layer count | **TABLE INCOMPLETE** — omitted entirely. Measured 960 and 30 (corroborated by biotrainer's own table for the width). |
+| 5 | biotrainer "routes any model name containing 'esm' to EsmModel" | **CLAIM WRONG for 2.1.1.** A dedicated `ESMC` class exists; routing is exact dict membership. Other reasons to reject biotrainer stand. |
+| 6 | biotrainer "loads the model at construction" | **CLAIM CORRECT** — verified in `ESM2.detect`. |
+| 7 | biotrainer requires python `>=3.12,<3.14` | **CLAIM CORRECT** — verified from PyPI metadata. |
+| 8 | bio-embeddings unmaintained | **CLAIM CORRECT** — last release 0.2.2, `requires_python >=3.7.1,<3.10`. |
+| 9 | `transformers>=5.16` for ESM-C; current release 5.22.1 | **CLAIM CORRECT** — resolved to exactly 5.22.1. |
+
+### Additional constants and hazards the table did not cover
+
+1. `EsmModel` randomly initializes `pooler.dense`; **`pooler_output` is non-deterministic and must never
+   be used**. `EsmcModel` returns no `pooler_output` at all.
+2. `config._commit_hash` is `None` on both models — fetch the revision SHA from `HfApi` or the cache path.
+3. `len(hidden_states)` is layers **+ 1** (7 and 31); entry 0 is the embedding output.
+4. `tokenizer.model_max_length` is the `1e30` sentinel on both — derive truncation from
+   `max_position_embeddings` (1026 / 2048, both inclusive of the 2 special tokens).
+5. `local_files_only=True` is **not** uniformly clean: models raise `OSError`, `EsmTokenizer` raises
+   `TypeError`, `EsmcTokenizer` raises nothing at all and succeeds even for a nonexistent repo.
+6. ESM-C's tokenizer has an extra `|` chainbreak special token (id 31) that ESM2 lacks.
+7. ESM-C: `tokenizer.vocab_size` 33 vs `config.vocab_size` 64 — do not assert these are equal.
+8. `tokenizer.bos_token` is `None` on ESM2 but `<cls>` on ESM-C.
+9. The explicit class is spelled **`Esmc`**Model, not `EsmC`/`ESMC`.
+10. biotrainer pins `transformers<5.20.0`, below the 5.22.1 validated here.
+
+## Steps not reached
+
+None. Steps 1–7 were all completed and are recorded above. GenSLM was deliberately not attempted, per
+the task instruction; no claim about where its weights live is made here.

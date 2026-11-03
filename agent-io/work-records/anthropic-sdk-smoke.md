@@ -25,6 +25,20 @@ assertion is a PRD acceptance criterion and belongs to an operator run
 
 ## pin chosen: `anthropic >=2.3,<3 ; python_version >= '3.10'`
 
+> **2026-11-03: `2.4.0` now resolves under this pin, and was spot-checked.**
+> The record below describes 2.3.0, the version it was written against. It is
+> not the only version the pin admits. Against an installed 2.4.0 I checked
+> that these still hold: `AsyncAnthropic` and `max_retries` (default 2);
+> `_should_retry` still retries 429 without reading the error body; the auth
+> header is still `Authorization: Bearer`; `messages.create` still takes
+> `model`/`max_tokens`/`system`/`messages` and still has no named
+> `temperature`; the four `Usage` token fields and the `Message`
+> content/model/stop_reason/stop_details/usage fields are unchanged; and the
+> exception classes and `DefaultAsyncHttpxClient` are all present. The
+> backend, config, engine-budget, quote, credential and rehearsal-script tests
+> pass against 2.4.0 (246 passed, Python 3.11). Re-run this check whenever a
+> newer 2.x resolves.
+
 Inspection of what is resolvable (`pip index versions anthropic`, 2026-11-01):
 current release **2.3.0**; the 2.x line is 2.0.0–2.3.0, the 1.x line ends at
 1.17.0.

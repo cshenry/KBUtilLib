@@ -17,9 +17,16 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...core.shared_env_utils import SharedEnvUtils
+
+# GTDB-Tk reference packages (gtdbtk_rNNN_data.tar.gz) ship a prebuilt skani sketch database of every GTDB
+# species representative under <package>/skani/database. These constants mirror GTDB-Tk's ANI screen
+# (gtdbtk/config/common.py, gtdbtk/ani_screen.py) so classify_genomes_gtdb() reproduces its species calls.
+GTDB_REFERENCE_EXTENSION = "_genomic.fna.gz"  # reference sketch names are <accession>_genomic.fna.gz
+GTDB_AF_THRESHOLD = 0.5  # alignment fraction = max(AF_ref, AF_query)
+GTDB_DEFAULT_RADIUS = 95.0  # species ANI radius when a rep is missing from gtdb_radii.tsv
 
 
 class SKANIUtils(SharedEnvUtils):
@@ -30,11 +37,13 @@ class SKANIUtils(SharedEnvUtils):
     - Create and manage sketch databases from genome directories
     - Query genomes against cached sketch databases
     - Compute pairwise genome distances
+    - Register a GTDB-Tk reference package's skani database and assign GTDB species by ANI
     """
 
     def __init__(
         self,
         cache_file: Optional[str] = None,
+        skani_executable: Optional[str] = None,
         **kwargs: Any
     ) -> None:
         """Initialize SKANI utilities.
@@ -42,15 +51,17 @@ class SKANIUtils(SharedEnvUtils):
         Args:
             cache_file: Path to JSON file for tracking sketch databases.
                        Defaults to config value or ~/.kbutillib/skani_databases.json
+            skani_executable: Path to the skani binary. Overrides the 'skani.executable' config value.
             **kwargs: Additional keyword arguments passed to SharedEnvUtils
         """
         super().__init__(**kwargs)
 
-        # Get skani executable path from config
-        self.skani_executable = self.get_config_value(
+        # Get skani executable path from the argument, else config
+        self.skani_executable = skani_executable or self.get_config_value(
             "skani.executable",
             default="skani"
         )
+        self._gtdb_reference_cache: Dict[str, Tuple[Dict[str, str], Dict[str, float]]] = {}
 
         # Set up cache file path
         if cache_file is None:
@@ -1015,6 +1026,259 @@ class SKANIUtils(SharedEnvUtils):
                 os.unlink(output_file)
             except:
                 pass
+
+
+    # ── GTDB reference packages ──────────────────────────────────────────
+
+    @staticmethod
+    def canonical_gtdb_id(gid: str) -> str:
+        """Canonical form of a GTDB/NCBI genome accession, as GTDB-Tk uses for lookups.
+
+        GCF_005435135.1, RS_GCF_005435135.1, GB_GCA_005435135.1 and a reference sketch name such as
+        database/GCF_005435135.1_genomic.fna.gz all map to G005435135.
+        """
+        gid = os.path.basename(gid)
+        if gid.endswith(GTDB_REFERENCE_EXTENSION):
+            gid = gid[: -len(GTDB_REFERENCE_EXTENSION)]
+        if gid.startswith("U"):
+            return gid
+        gid = gid.replace("RS_", "").replace("GB_", "").replace("GCA_", "G").replace("GCF_", "G")
+        return gid.split(".", 1)[0]
+
+    @staticmethod
+    def _genome_id(fasta_path: Union[str, Path]) -> str:
+        """Genome ID from a FASTA path: the file name without .gz and the FASTA extension."""
+        name = Path(fasta_path).name
+        if name.endswith(".gz"):
+            name = name[:-3]
+        for ext in (".fna", ".fasta", ".fa", ".fas", ".fsa", ".ffn"):
+            if name.endswith(ext):
+                return name[: -len(ext)]
+        return name
+
+    def register_gtdb_database(
+        self,
+        gtdbtk_data_path: Union[str, Path],
+        database_name: Optional[str] = None,
+        overwrite: bool = False
+    ) -> Dict[str, Any]:
+        """Register the skani sketch database shipped in a GTDB-Tk reference package.
+
+        GTDB-Tk packages (e.g. gtdbtk_r232_data.tar.gz, unpacked as release232/) contain skani sketches of
+        every GTDB species representative (skani/database), plus the taxonomy and species ANI radii that
+        classify_genomes_gtdb() needs. Nothing is copied; the cache entry points at the package.
+
+        Args:
+            gtdbtk_data_path: The unpacked package directory (the one holding skani/, taxonomy/, radii/)
+            database_name: Name to register under. Defaults to "gtdb_<release>", e.g. "gtdb_r232"
+            overwrite: Replace an existing cache entry of the same name
+
+        Returns:
+            Dict with database_name, database_path, gtdb_release, genome_count and registered
+            (False when an entry already existed and overwrite was not set)
+
+        Example:
+            >>> util = SKANIUtils(skani_executable="/path/to/skani")
+            >>> util.register_gtdb_database("~/Documents/gtdbtk_data/release232")
+            >>> util.classify_genomes_gtdb(["bin1.fna", "bin2.fna"], "gtdb_r232", threads=16)
+        """
+        root = Path(gtdbtk_data_path).expanduser().resolve()
+        db_path = root / "skani" / "database"
+        taxonomy_file = root / "taxonomy" / "gtdb_taxonomy.tsv"
+        radii_file = root / "radii" / "gtdb_radii.tsv"
+        required = [db_path / "sketches.db", db_path / "index.db", db_path / "markers.bin", taxonomy_file, radii_file]
+        missing = [str(p) for p in required if not p.exists()]
+        if missing:
+            raise ValueError(f"Not a GTDB-Tk reference package with a skani database; missing: {missing}")
+
+        release = ""
+        metadata_txt = root / "metadata" / "metadata.txt"
+        if metadata_txt.exists():
+            for line in metadata_txt.read_text().splitlines():
+                if line.startswith("VERSION_DATA="):
+                    release = line.split("=", 1)[1].strip()
+        sketch_meta: Dict[str, str] = {}
+        if (db_path / "metadata.tsv").exists():
+            for line in (db_path / "metadata.tsv").read_text().splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    sketch_meta[key.strip()] = value.strip()
+
+        name = database_name or f"gtdb_{release or root.name}"
+        with self._write_lock():
+            cache = self._load_cache()
+            if name in cache and not overwrite:
+                self.log_info(f"Database '{name}' is already registered; pass overwrite=True to replace it")
+                existing = cache[name]
+                return {"database_name": name, "database_path": existing.get("path", ""),
+                        "gtdb_release": (existing.get("metadata") or {}).get("gtdb_release", ""),
+                        "genome_count": existing.get("genome_count", 0), "registered": False}
+
+            genome_count = int(sketch_meta.get("num_genomes_sketches", "0") or 0)
+            now = datetime.now().isoformat()
+            cache[name] = {
+                "path": str(db_path),
+                "description": f"GTDB {release} species representatives (skani sketches from GTDB-Tk package {root})",
+                "created": now,
+                "updated": now,
+                "genome_count": genome_count,
+                "metadata": {
+                    "type": "gtdb",
+                    "gtdb_release": release,
+                    "package_path": str(root),
+                    "taxonomy_file": str(taxonomy_file),
+                    "radii_file": str(radii_file),
+                    "skani_sketch_version": sketch_meta.get("skani_version", ""),
+                    "sketch_date_created": sketch_meta.get("date_created", ""),
+                },
+            }
+            self._save_cache(cache)
+        self._gtdb_reference_cache.pop(name, None)
+        self.log_info(f"Registered GTDB {release} skani database '{name}' ({genome_count} genomes) at {db_path}")
+        return {"database_name": name, "database_path": str(db_path), "gtdb_release": release,
+                "genome_count": genome_count, "registered": True}
+
+    def _load_gtdb_reference(self, database_name: str) -> Tuple[Dict[str, str], Dict[str, float]]:
+        """(canonical id -> GTDB lineage, canonical id -> species ANI radius) for a registered GTDB database."""
+        info = self._get_database_info(database_name)
+        meta = (info or {}).get("metadata") or {}
+        if meta.get("type") != "gtdb":
+            raise ValueError(f"'{database_name}' is not a registered GTDB database; use register_gtdb_database()")
+        if database_name not in self._gtdb_reference_cache:
+            taxonomy: Dict[str, str] = {}
+            with open(meta["taxonomy_file"]) as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) >= 2:
+                        taxonomy[self.canonical_gtdb_id(parts[0])] = parts[1]
+            radii: Dict[str, float] = {}
+            with open(meta["radii_file"]) as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) >= 3:
+                        try:
+                            radii[self.canonical_gtdb_id(parts[1])] = float(parts[2])
+                        except ValueError:
+                            continue                     # header or malformed line
+            self._gtdb_reference_cache[database_name] = (taxonomy, radii)
+        return self._gtdb_reference_cache[database_name]
+
+    def classify_genomes_gtdb(
+        self,
+        query_fasta: Union[str, Path, List[Union[str, Path]]],
+        database_name: str = "gtdb_r232",
+        threads: int = 1,
+        af_threshold: float = GTDB_AF_THRESHOLD,
+        max_hits: int = 5,
+        timeout: Optional[int] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Assign GTDB species to genomes by ANI against a GTDB-Tk package's skani database.
+
+        Reproduces GTDB-Tk's ANI screen (classify_wf's first step): skani search against every GTDB
+        species representative; AF = max(AF_ref, AF_query); among hits with AF >= af_threshold, take the
+        highest ANI; the genome gets that representative's species if ANI >= the species' radius from
+        gtdb_radii.tsv. Genomes without such a hit need GTDB-Tk's tree placement for a classification;
+        this method reports them but does not place them.
+
+        Args:
+            query_fasta: FASTA path or list of paths (.fna/.fa/.fasta, optionally .gz)
+            database_name: A database registered with register_gtdb_database()
+            threads: skani threads
+            af_threshold: Minimum alignment fraction (GTDB-Tk: 0.5)
+            max_hits: Number of closest hits to return per genome (sorted by ANI, then AF)
+            timeout: Seconds before skani is abandoned (None = no limit; loading ~200,000 sketches is slow)
+
+        Returns:
+            {genome_id: {"status": "species assigned" | "below radius" | "low AF" | "no hit",
+                         "classification": GTDB lineage or None (set only when a species is assigned),
+                         "reference": closest qualifying (or closest) reference accession, "ani": percent,
+                         "af": fraction, "radius": species ANI radius, "reference_taxonomy": lineage,
+                         "hits": [{"reference", "ani", "af", "radius", "taxonomy"}, ...]}}
+            genome_id is the file name without its FASTA extension. Every query appears, hit or not.
+        """
+        paths = [query_fasta] if isinstance(query_fasta, (str, Path)) else list(query_fasta)
+        self.initialize_call(
+            "classify_genomes_gtdb",
+            {"query_fasta": [str(p) for p in paths], "database_name": database_name, "threads": threads,
+             "af_threshold": af_threshold, "max_hits": max_hits, "timeout": timeout},
+            print_params=True
+        )
+        if not self.skani_available:
+            raise RuntimeError("SKANI is not available. Please install SKANI first.")
+        taxonomy, radii = self._load_gtdb_reference(database_name)
+        db_path = Path(self._get_database_info(database_name)["path"])
+        if not db_path.exists():
+            raise ValueError(f"skani database not found at {db_path}; was the GTDB-Tk package moved?")
+
+        queries: Dict[str, str] = {}
+        for p in paths:
+            p = Path(p).expanduser().resolve()
+            if not p.exists():
+                raise ValueError(f"Query file not found: {p}")
+            queries[str(p)] = self._genome_id(p)
+        dupes = sorted(g for g in set(queries.values()) if list(queries.values()).count(g) > 1)
+        if dupes:
+            raise ValueError(f"Query files map to the same genome ID: {dupes[:5]}")
+
+        with tempfile.TemporaryDirectory(prefix="kbu_skani_gtdb_") as tmp:
+            query_list = Path(tmp) / "queries.txt"
+            query_list.write_text("\n".join(queries) + "\n")
+            output_file = Path(tmp) / "skani_search.tsv"
+            cmd = [self.skani_executable, "search", "-d", str(db_path), "--ql", str(query_list),
+                   "--short-header", "-t", str(threads), "-o", str(output_file)]
+            self.log_info(f"Searching {len(queries)} genome(s) against '{database_name}' with {threads} thread(s)")
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"skani search timed out after {timeout} s")
+            if result.returncode != 0:
+                raise RuntimeError(f"skani search failed: {result.stderr[-2000:]}")
+            hits: Dict[str, List[Dict[str, Any]]] = {}
+            with open(output_file) as fh:
+                fh.readline()                                    # header
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 5:
+                        continue
+                    ref = os.path.basename(parts[0])
+                    if ref.endswith(GTDB_REFERENCE_EXTENSION):
+                        ref = ref[: -len(GTDB_REFERENCE_EXTENSION)]
+                    gid = self.canonical_gtdb_id(ref)
+                    qid = queries.get(parts[1]) or queries.get(str(Path(parts[1]).resolve())) or self._genome_id(parts[1])
+                    hits.setdefault(qid, []).append({
+                        "reference": ref,
+                        "ani": float(parts[2]),
+                        "af": round(max(float(parts[3]), float(parts[4])) / 100.0, 6),
+                        "radius": radii.get(gid, GTDB_DEFAULT_RADIUS),
+                        "taxonomy": taxonomy.get(gid, ""),
+                    })
+
+        results: Dict[str, Dict[str, Any]] = {}
+        for qid in queries.values():
+            hs = sorted(hits.get(qid, []), key=lambda h: (-h["ani"], -h["af"]))
+            af_pass = [h for h in hs if h["af"] >= af_threshold]
+            top = af_pass[0] if af_pass else (hs[0] if hs else None)
+            if not hs:
+                status = "no hit"
+            elif not af_pass:
+                status = "low AF"
+            elif top["ani"] >= top["radius"]:
+                status = "species assigned"
+            else:
+                status = "below radius"
+            results[qid] = {
+                "status": status,
+                "classification": top["taxonomy"] if status == "species assigned" else None,
+                "reference": top["reference"] if top else None,
+                "ani": top["ani"] if top else None,
+                "af": top["af"] if top else None,
+                "radius": top["radius"] if top else None,
+                "reference_taxonomy": top["taxonomy"] if top else None,
+                "hits": hs[:max_hits],
+            }
+        assigned = sum(1 for r in results.values() if r["status"] == "species assigned")
+        self.log_info(f"GTDB species assigned by ANI for {assigned}/{len(results)} genome(s)")
+        return results
 
 
 # ── Composition-based implementation ─────────────────────────────────────

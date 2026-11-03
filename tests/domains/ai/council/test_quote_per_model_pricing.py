@@ -144,6 +144,27 @@ class TestPerModel:
         assert gw(gateways, OPUS4)["input_tokens"] == round(sum(l.input_tokens_point for l in opus_lines()))
 
 
+class TestTwoBuckets:
+    def test_AC5_two_buckets_two_rates_two_rows_two_figures(self) -> None:
+        """PRD AC5: two Claude models in two rate-limit buckets, a rate for
+        each, give two gateway rows with two different dollar figures, and
+        each row's by_model figures sum to its total."""
+        cfg = config({HAIKU: rate(1, 5), SONNET5: rate(3, 15)})
+        lines = [
+            line("p1", HAIKU, "anthropic/claude-haiku-4.5", 1_000_003, 50_001, endpoint="a-haiku"),
+            line("p2", SONNET5, "anthropic/claude-sonnet-5", 1_000_003, 50_001, endpoint="a-sonnet5"),
+        ]
+        gateways, _ = _price_gateways(cfg, lines)
+        rows = {g["gateway"]: g for g in gateways}
+        assert set(rows) == {HAIKU, SONNET5}
+        assert rows[HAIKU]["priced"] is True and rows[SONNET5]["priced"] is True
+        assert rows[HAIKU]["dollars_point"] != rows[SONNET5]["dollars_point"]
+        for row in rows.values():
+            assert row["dollars_point"] == round(sum(m["dollars_point"] for m in row["by_model"]), 2)
+        headline = quote_from(gateways, lines, cfg).to_dict()["headline"]
+        assert headline["dollars_complete"] is True
+
+
 class TestPartial:
     RATES = {f"{OPUS4}/{M48}": rate(15, 75), f"{OPUS4}/{M47}": rate(5, 25)}
 

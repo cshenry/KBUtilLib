@@ -172,6 +172,12 @@ def usage_from_anthropic(usage: Any) -> Optional[Dict[str, Optional[int]]]:
     ``None`` is returned ONLY when the provider reported no usage object at
     all -- that is how the engine tells "free" from "unmeasurable", and the
     two must stay distinguishable.
+
+    AFTER THIS FUNCTION THERE IS NO ANTHROPIC-SHAPED USAGE ANYWHERE.  Never
+    re-read the dict this returns as native Anthropic usage -- e.g. a cost
+    path that branches on ``endpoint_kind == "anthropic"`` to look for
+    ``input_tokens``.  It finds neither name and reports zero: Hermes #123157
+    is exactly that double-normalisation bug (PRD gotcha 15).
     """
     if usage is None:
         return None
@@ -523,17 +529,18 @@ class AnthropicBackend:
         Mirrors ``HttpBackend._model_params``/``_extra_body``: the request's
         ``params`` (minus ``extra_body`` and :data:`WEB_SEARCH_PARAM`, which
         are not generation parameters) and its nested ``extra_body`` are
-        merged over the endpoint's ``extra_body``.  Then the sampling rule:
-        ``temperature`` comes from ``req.temperature`` and EVERY sampling
-        parameter is dropped when it is ``None``.
+        merged over the endpoint's ``extra_body``.  Then the sampling rule
+        (PRD Q4): ``temperature`` is sent IFF ``req.temperature is not
+        None``, and likewise any ``top_p``/``top_k`` arriving in ``params``.
 
-        ``req.temperature`` counts only when it was SET on the request
-        (``model_fields_set``): ``LLMRequest``'s field default is ``0``, and
-        forwarding a field default is exactly the bug that fails every call
-        on every current Claude model.  A council seat always sets it
-        explicitly (``as_llm_request`` copies ``SeatSpec.temperature``, which
-        the config layer leaves ``None`` for an ``anthropic`` seat that did
-        not configure one), so an explicit ``0`` is still sent.
+        The council's "omitted vs explicitly 0" distinction is carried by the
+        config layer, not here: ``CouncilConfig._seat`` leaves
+        ``SeatSpec.temperature`` as ``None`` for an ``anthropic`` model whose
+        params omit it, and ``as_llm_request`` copies that field.  A DIRECT
+        ``LLMRequest`` caller who leaves ``temperature`` at its field default
+        of ``0`` does get ``0`` sent -- the pre-existing behaviour of every
+        backend, deliberately not changed by this api type (Q4); such a
+        caller opts out by passing ``temperature=None``.
         """
         params = dict(req.params or {})
         merged: Dict[str, Any] = dict(self.endpoint_extra_body)
@@ -541,7 +548,7 @@ class AnthropicBackend:
         merged.update(
             {k: v for k, v in params.items() if k not in ("extra_body", WEB_SEARCH_PARAM)}
         )
-        if "temperature" in req.model_fields_set:
+        if req.temperature is not None:
             merged["temperature"] = req.temperature
         for key in SAMPLING_PARAMS:
             if key in merged and merged[key] is None:
@@ -566,12 +573,14 @@ class AnthropicBackend:
                 f"provider extras {forbidden} are not allowed in this lane: they "
                 "change the response shape this backend parses"
             )
-        output_config = extras.get("output_config")
-        if isinstance(output_config, Mapping) and "format" in output_config:
-            return (
-                "structured outputs (output_config.format) are not requested by "
-                "this backend; the engine validates the answer itself"
-            )
+        # NOT refused, deliberately (PRD, request construction): `thinking`,
+        # `effort` and `output_config.format` are not REQUESTED by default,
+        # but an operator may set them knowingly as extras.  Only
+        # cache_control is refused, because only it makes the dollar figure
+        # disagree with the token figure.  An operator who sets
+        # output_config.format makes `schema_enforced=False` on these results
+        # inaccurate -- a documented consequence, not a reason to ban it.
+        #
         # Recursive on purpose: a nested cache_control is exactly the one a
         # top-level key test would let through.
         if _contains_key(extras, "cache_control"):
@@ -588,7 +597,8 @@ class AnthropicBackend:
         ``temperature``/``top_p``/``top_k`` are NOT named parameters of the
         installed SDK's ``create`` (phase-1 record), so every extra travels in
         ``extra_body``, which the SDK merges into the JSON body verbatim.
-        No ``thinking`` and no ``output_config.format`` are sent.
+        No ``thinking`` and no ``output_config.format`` are sent by default;
+        either reaches the body only if an operator put it in the extras.
         """
         kwargs: Dict[str, Any] = {
             "model": req.model,

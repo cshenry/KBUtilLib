@@ -443,11 +443,16 @@ class TestRequest:
         call(recorder, req(temperature=None))
         assert "temperature" not in recorder.bodies()[0]
 
-    def test_temperature_default_field_value_is_not_sent(self) -> None:
-        """LLMRequest's field default is 0; forwarding a field default is F4."""
+    def test_direct_caller_field_default_zero_is_sent(self) -> None:
+        """PRD Q4: the rule is "send iff ``req.temperature is not None``".  A
+        DIRECT ``LLMRequest`` caller who leaves the field default (0) gets 0
+        sent -- every backend's pre-existing behaviour, deliberately not
+        changed here.  The council's omitted case reaches the backend as
+        ``None`` through ``_seat`` (see test_anthropic_config's end-to-end
+        sampling test)."""
         recorder = Recorder(message())
         call(recorder, LLMRequest(model="claude-sonnet-5", user="q"))
-        assert "temperature" not in recorder.bodies()[0]
+        assert recorder.bodies()[0]["temperature"] == 0
 
     def test_explicit_zero_is_sent(self) -> None:
         recorder = Recorder(message())
@@ -476,6 +481,19 @@ class TestRequest:
         assert body["service_tier"] == "auto"
         assert body["stop_sequences"] == ["END"]
         assert "web_search" not in body and "extra_body" not in body
+
+    def test_operator_set_thinking_and_output_config_pass_through(self) -> None:
+        """Not requested by default, but NOT refused (PRD): only cache_control
+        is refused.  An operator may set these knowingly."""
+        recorder = Recorder(message())
+        extras = {"thinking": {"type": "enabled", "budget_tokens": 1024},
+                  "output_config": {"format": {"type": "json_schema", "schema": {}}}}
+        result = call(recorder, req(params=extras))
+        assert result.ok is True
+        body = recorder.bodies()[0]
+        assert body["thinking"] == extras["thinking"]
+        assert body["output_config"] == extras["output_config"]
+        assert result.schema_enforced is False  # documented as inaccurate in this case
 
     @pytest.mark.parametrize("key", ["model", "messages", "max_tokens", "stream", "tools"])
     def test_reserved_and_forbidden_extras_refused_unsent(self, key: str) -> None:
@@ -537,8 +555,9 @@ class TestEffectiveParams:
     def test_no_temperature_by_default(self) -> None:
         b = backend()
         try:
-            assert "temperature" not in b.effective_params(req())
-            assert "temperature" not in b.effective_params(LLMRequest(model="m"))
+            assert "temperature" not in b.effective_params(req())  # temperature=None
+            # a direct caller's field default (0) is sent, so it is reported
+            assert b.effective_params(LLMRequest(model="m"))["temperature"] == 0
             assert b.effective_params(req(temperature=0))["temperature"] == 0
             assert b.effective_params(req(temperature=0.7))["temperature"] == 0.7
         finally:

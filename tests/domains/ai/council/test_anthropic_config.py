@@ -270,3 +270,61 @@ class TestBuildLimitsReuse:
         assert shared.capacity == 2  # min declared max_concurrency
         assert shared.pacer is not None
         assert shared.pacer.requests_per_minute == 90.0  # min declared rpm
+
+
+@pytest.mark.skipif(importlib.util.find_spec("anthropic") is None,
+                    reason="anthropic SDK not installed (kbutillib[anthropic], Python >= 3.10)")
+class TestSamplingEndToEnd:
+    """PRD AC12: no seat sends a sampling parameter unless its config sets one,
+    verified through ``effective_params`` AND the request body the backend
+    builds, from a real config through ``_seat`` and a council
+    ``CompletionRequest`` -- three cases asserted separately."""
+
+    def _sent(self, params: Dict[str, Any]) -> Any:
+        import asyncio
+        import json
+
+        import httpx2
+
+        from kbutillib.domains.ai.council.types import CompletionRequest
+        from kbutillib.domains.ai.llm.apis.anthropic import AnthropicBackend
+
+        raw = cfg({"a-haiku": anth(BUCKET_HAIKU)},
+                  {"m": {"endpoint": "a-haiku", "served_name": "claude-haiku-4-5", "params": params}})
+        config = load_council_config(raw)
+        seat = config._seat("proposer_1", "m")
+        bodies = []
+
+        def handler(request: Any) -> Any:
+            bodies.append(json.loads(request.content))
+            return httpx2.Response(200, json={
+                "id": "m", "type": "message", "role": "assistant", "model": "claude-haiku-4-5",
+                "content": [{"type": "text", "text": '{"ok": 1}'}], "stop_reason": "end_turn",
+                "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+        backend = AnthropicBackend(dict(config.endpoint("a-haiku"), api_key="sk-test"),
+                                   transport=httpx2.MockTransport(handler))
+        request = CompletionRequest(seat=seat, role="proposer", system="s", user="u")
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(backend.complete(request))
+            loop.run_until_complete(backend.aclose())
+        finally:
+            loop.close()
+        assert result.ok is True, result.error
+        return bodies[0], backend.effective_params(seat)
+
+    def test_omitted_sends_nothing(self) -> None:
+        body, effective = self._sent({})
+        assert "temperature" not in body
+        assert "temperature" not in effective
+
+    def test_explicit_zero_sends_zero(self) -> None:
+        body, effective = self._sent({"temperature": 0})
+        assert body["temperature"] == 0
+        assert effective["temperature"] == 0
+
+    def test_explicit_nonzero_sends_it(self) -> None:
+        body, effective = self._sent({"temperature": 0.4})
+        assert body["temperature"] == 0.4
+        assert effective["temperature"] == 0.4

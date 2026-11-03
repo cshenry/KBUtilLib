@@ -169,3 +169,119 @@ It is non-deterministic across processes, so the same sequence embedded twice wo
 vectors and any cache keyed on sequence hash would be silently wrong. Pool from `last_hidden_state`
 over `[1:-1]`. `output.keys()` is `['last_hidden_state', 'pooler_output']`, so the bad field is the
 second thing an author sees — this is an easy mistake to make.
+
+---
+
+## Model 2 — `biohub/ESMC-300M`
+
+Loaded through **native Transformers with an explicit model class**, never `AutoModel`, as instructed.
+
+### FINDING: the class is `EsmcModel` / `EsmcTokenizer` — note the casing
+
+The explicit classes exported by transformers 5.22.1 are `EsmcModel`, `EsmcTokenizer`, `EsmcConfig`,
+`EsmcForMaskedLM`, `EsmcForSequenceClassification`, `EsmcForTokenClassification`, `EsmcPreTrainedModel`
+— spelled **`Esmc`**, not `ESMC` and not `EsmC`. `EsmcModel.__module__` is
+`transformers.models.esmc.modeling_esmc`. A backend author who guesses `from transformers import
+EsmCModel` gets an `ImportError`. The ESM-C support lives in its own `transformers/models/esmc`
+package, separate from `esm` (ESM2) and `esmfold2`.
+
+This also confirms, concretely, the task's reason for banning `AutoModel` for this repo: the shipped
+`config.json` declares `architectures: ['EsmcForMaskedLM']` and carries an `auto_map` key, so automatic
+resolution would hand back a masked-LM head (and consult remote code mappings) instead of the bare
+encoder we want.
+
+### Resolved revision
+
+| field | value |
+|---|---|
+| **resolved revision SHA** | **`e4bac860f0c502cd80f3aeac3d0ce6524c6627cb`** |
+| source | `HfApi().model_info(repo).sha`, identical to the on-disk snapshot dir |
+| snapshot path | `/scratch/chenry/esm-smoke/hf/hub/models--biohub--ESMC-300M/snapshots/e4bac860f0c502cd80f3aeac3d0ce6524c6627cb` |
+| checkpoint lastModified | 2026-09-16 18:34:59+00:00 |
+
+`config._commit_hash` is **`None`** here too — same provenance gotcha as ESM2, so it is a property of
+transformers 5.22.1 rather than of one checkpoint.
+
+### Measured values vs. the expectation table
+
+| value | expected by task table | **measured** | verdict |
+|---|---|---|---|
+| leading special token | `<cls>` | **`<cls>`, id 0, at position 0** | **AGREES** |
+| trailing special token | `<eos>` | **`<eos>`, id 2, at final position** | **AGREES** |
+| max_tokens 2048 | `max_tokens` = 2048 | **2048, but the key is `max_position_embeddings`; `config.max_tokens` is ABSENT** | **value AGREES, key name in table is WRONG** |
+| trailing hidden dim | *table gives none* | **960** | newly measured |
+| layers | *table gives none* | **30** (`hidden_states` length 31) | newly measured |
+
+**Disagreement, stated explicitly: the table's `max_tokens` key does not exist on this config.**
+`getattr(config, "max_tokens")` returns absent. The 2048 figure itself is correct, but it is carried by
+`max_position_embeddings`. Any backend reading `config.max_tokens` raises `AttributeError` or silently
+takes a default. The table should say `max_position_embeddings = 2048`.
+
+The table also omitted the hidden width and layer count for this model entirely. They are **960** and
+**30**. Backend tasks written against a guessed ESM-C width (e.g. 1152, the ESM-C-600M figure) would be
+wrong; storage sizing must use 960 for this checkpoint.
+
+`last_hidden_state.shape = (1, 12, 960)`, dtype `torch.float32`, device `cpu`.
+
+### Tokenization — measured, with positions decoded
+
+10 residues in, **12 tokens out, delta = +2**. Identical id layout to ESM2 for this sequence:
+
+```
+input_ids : [0, 20, 15, 7, 4, 5, 5, 6, 12, 7, 4, 2]
+tokens    : ['<cls>', 'M', 'K', 'V', 'L', 'A', 'A', 'G', 'I', 'V', 'L', '<eos>']
+decode()  : '<cls> M K V L A A G I V L <eos>'
+special_tokens_mask : [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+```
+
+| pos | id | token | special |
+|---|---|---|---|
+| 0 | 0 | `<cls>` | **yes (LEADING)** |
+| 1–10 | 20,15,7,4,5,5,6,12,7,4 | M K V L A A G I V L | no |
+| 11 | 2 | `<eos>` | **yes (TRAILING)** |
+
+**There IS a leading special token.** Same `emb[1:-1]` stripping rule as ESM2.
+
+Special-token inventory: `all_special_tokens = ['<cls>', '<eos>', '<unk>', '<pad>', '<mask>', '|']`,
+`all_special_ids = [0, 2, 3, 1, 32, 31]`. Note the extra **`|` chainbreak token (id 31)** that ESM2 does
+not have; a multi-chain input would gain a further non-residue position that `emb[1:-1]` alone does not
+remove. `attention_mask` is returned; `token_type_ids` is not.
+
+`tokenizer.model_max_length` is the same `1e30` sentinel as ESM2 — unusable, derive truncation from
+`max_position_embeddings` (2048, inclusive of the two special tokens → 2046 residues).
+
+### Config constants as shipped
+
+| key | value |
+|---|---|
+| `hidden_size` | **960** |
+| `num_hidden_layers` | **30** |
+| `num_attention_heads` | 15 |
+| `max_position_embeddings` | **2048** |
+| `intermediate_size` | 2560 |
+| `vocab_size` | 64 |
+| `model_type` | `esmc` |
+| `max_tokens` | **ABSENT** |
+
+### `hidden_states` length — 31 for 30 layers
+
+Same embedding-plus-layers convention as ESM2: entry 0 is the embedding output, 1..30 are the layers.
+
+### FINDING: `EsmcModel` returns NO `pooler_output` — ESM2 and ESM-C are asymmetric here
+
+| | `EsmModel` (ESM2) | `EsmcModel` (ESM-C) |
+|---|---|---|
+| `output.keys()` | `['last_hidden_state', 'pooler_output']` | `['last_hidden_state', 'hidden_states']` |
+| pooler in checkpoint | absent → **randomly initialized** | **no pooler at all** |
+| `tokenizer.bos_token` | **`None`** | **`<cls>`** |
+
+Two consequences for the backend, both of which would be found the hard way otherwise:
+
+1. **A shared code path that reads `output.pooler_output` works on ESM2 (returning garbage) and raises
+   on ESM-C.** The only portable sequence embedding is pooling `last_hidden_state[:, 1:-1, :]`.
+2. **`bos_token` is `None` on ESM2 but `<cls>` on ESM-C.** Special-token handling must not be written
+   against `bos_token_id`; use the measured positional rule or `cls_token_id`.
+
+The `lm_head.*` keys report `UNEXPECTED` on the ESM-C load too, which is the intended discard of the
+masked-LM head. Unlike ESM2, **nothing is reported `MISSING`** — so the ESM-C encoder load is fully
+deterministic, no randomly-initialized parameters at all.

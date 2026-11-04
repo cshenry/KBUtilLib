@@ -1,8 +1,9 @@
 # clearinghouse-entity-alias-v1
 
-The identifier-carriage facility for the BERDL clearinghouse: one generic
-`entity_alias` table, its closed `alias_source` vocabulary, its write boundary,
-its read surface including a reverse lookup, and its health report.
+The identifier-carriage facility for the BERDL clearinghouse: five per-entity-type
+`<type>_alias` tables and an `all_alias` view, their closed `alias_source`
+vocabulary, the write boundary, the read surface including a reverse lookup, and a
+health report.
 
 ## Research Report
 
@@ -16,9 +17,18 @@ is not entity-typed, with a docstring explaining that `table_name()` composes
 cannot go through it. It is deliberately absent from `ENTITY_TYPES` and from all
 three `all_<kind>` union views. A live read of the lake on 2026-10-25 17:36 CDT
 returned 19 objects in `kbaseincubator.clearinghouse` -- the fifteen per-type
-tables, the three union views, and `parameter_set`. **`entity_alias` is the same
-shape one step further on**, which is why this is a small change rather than a new
-pattern.
+tables, the three union views, and `parameter_set`.
+
+**ROUND 1 CORRECTION, and it inverts what this finding was used for.** The first
+draft read `parameter_set` as the precedent for the alias table and concluded it
+should likewise be one non-entity-typed table. That was wrong: `parameter_set` is
+keyed by `parameter_set_hash`, not by an entity, and holds one row per distinct
+parameter set ever used -- which is exactly WHY it is the single non-entity-typed
+table. An alias table is entity-KEYED, so the applicable precedent is the
+`<type>_entity` family and the correct shape is **five per-type tables plus a
+fourth union view**. `parameter_set` remains the only exception, and this finding
+now stands for the opposite conclusion: the alias tables are ORDINARY
+entity-keyed tables and need no special machinery at all.
 
 **2. The write verb cannot be `register()`, and that is a structural fact rather
 than a preference.** `ClearinghouseCapability.register(entity_type, rows, *, kind)`
@@ -110,22 +120,23 @@ exist, indistinguishable in the lake from a real one." An alias table makes that
 failure mode multi-valued, which is why `alias_id` must REFUSE an empty value
 rather than skip the row.
 
-**10. `bootstrap()` is the sanctioned way to add the seventeenth table to a
+**10. `bootstrap()` is the sanctioned way to add the five alias tables to a
 namespace that already holds sixteen, and it is already safe for this.** It is an
 idempotent create-or-verify: it creates tables that do not exist and verifies the
 partition spec of those that do, raising `BootstrapPartitionSpecMismatchError`
 rather than attempting an unsupported live partition-spec change, and
 `BootstrapIndeterminateStateError` rather than treating an ambiguous existence
 probe as "absent". It explicitly **cannot add a column to an existing table** --
-which does not matter here, because `entity_alias` is a wholly new table.
+which does not matter here, because all five `<type>_alias` tables are wholly new.
 
 **11. `_assert_lake5_schema` does not need changing, by luck rather than by
 design.** It iterates `table_configs()` and skips any name that is neither
-`PARAMETER_SET_TABLE` nor `*_result`. A seventeenth config named `entity_alias`
-falls through that filter untouched. This is worth stating because the preflight
-*looks* like something that should learn about every new table, and teaching it
-about `entity_alias` would make every existing namespace fail ingest until an
-operator ran the new table's creation step. See Gotchas.
+`PARAMETER_SET_TABLE` nor `*_result`. The five new `<type>_alias` configs all fall
+through that filter untouched -- note that `*_alias` does not match `*_result`, so
+adding a fourth kind does not disturb it. This is worth stating because the
+preflight *looks* like something that should learn about every new table, and
+teaching it about the alias tables would make every existing namespace fail
+*result* ingest until an operator ran OP-C5. See Gotchas.
 
 ### Links to full research output
 
@@ -325,6 +336,36 @@ as the only design property with no validating precedent. Q11.2 closed -- there 
 no published threshold, and the premise that registries evolved from in-code tuples
 is itself unsupported.
 
+**REVIEW ROUND 1 -- 2026-11-03. Chris reversed Q1.** One annotation, one decision,
+and it is the IRREVERSIBLE one: **break the alias table up by entity type**, for the
+same reason the other entity types were broken up, because there are far more
+proteins than genomes and a shared table would make genome-alias reads pay protein
+scale.
+
+**Adopted, and the reasoning in the PRD is now his rather than mine.** My
+`parameter_set` analogy was wrong -- that table is keyed by a hash and holds one row
+per distinct parameter set, so it is not entity-keyed, which is exactly why it is
+the lone exception. An alias table IS entity-keyed, so `<type>_entity` was always
+the right precedent. I also checked the one thing that could have rescued a shared
+table and it does not: four of the ten sources (`arc_record`, `arc_analysis`,
+`kbase_ws_ref`, `ncbi_taxon`) are entity-type-agnostic, so those partitions would
+mix genome and protein rows regardless of partitioning on `alias_source`.
+
+**What propagated:** `alias` becomes the fourth KIND, so `_KINDS` and `_VIEW_KINDS`
+each gain a member, `table_configs()` goes from seventeen configs to **twenty-one**,
+and a fourth `all_alias` union view appears. All three verbs take an `entity_type`
+(optional on the two read verbs, which fall back to `all_alias`). **Three things got
+SIMPLER:** the bespoke `ENTITY_ALIAS_TABLE` constant and `entity_alias_columns()`
+accessors are deleted because `table_name`/`table_columns` now serve them; the
+manifest block validates through the standard `column_names(etype, "alias")` with no
+special case; and `alias_orphans()` becomes a straight five-pair join. **Q3's
+original justification COLLAPSED** -- `register()` can now name the table -- so that
+entry is rewritten to stand on the two narrower grounds that survive, with the
+collapse recorded. Q1a is new: per-entity-type source legality, which only became an
+answerable question once the tables were split. Tests 1, 2 and 22's user story
+INVERT, because the alias tables are now first-class rather than deliberately
+excluded from the per-type surface.
+
 ## Problem Statement
 
 A genome in this system is known by at least eight different names, and the
@@ -369,15 +410,19 @@ over the whole corpus.
 
 ## Solution
 
-One new table, `kbaseincubator.clearinghouse.entity_alias`, plus the accessors,
-validators, write boundary, read surface, CLI verbs and health report that make it
-usable. It is the seventeenth clearinghouse table and the second one that is not
-entity-typed.
+**FIVE new tables, one per entity type** -- `genome_alias`, `protein_alias`,
+`gene_alias`, `function_alias`, `ontology_term_alias` -- plus a fourth `all_alias`
+union view, and the accessors, validators, write boundary, read surface, CLI verbs
+and health report that make them usable. **`alias` becomes the FOURTH KIND**
+alongside `entity`, `content` and `result`, so the clearinghouse goes from sixteen
+tables to **twenty-one**: the fifteen per-type tables, the parameter-set registry,
+and five per-type alias tables.
 
 ```
-entity_alias
-  entity_type     STRING      -- one of ENTITY_TYPES
+<entity_type>_alias     -- genome_alias, protein_alias, gene_alias,
+                           function_alias, ontology_term_alias
   entity_hash     STRING      -- 64 lowercase hex, canonical identity (rule A)
+  entity_type     STRING      -- single-valued per table; kept for the all_alias view
   alias_source    STRING      -- the vocabulary the identifier belongs to; PARTITION KEY
   alias_id        STRING      -- the identifier itself, verbatim
   observation     STRING      -- one of ALIAS_OBSERVATIONS: 'present' | 'withdrawn'
@@ -385,13 +430,45 @@ entity_alias
   ingest_batch_id STRING
 ```
 
-Seven properties define it, and each is there for a stated reason:
+Seven properties define them, and each is there for a stated reason:
 
-**It is generic over entity type, not genome-only.** Proteins, genes, functions and
-ontology terms have the same problem -- `ontology_term` has alternate ids,
-`function` has tool-local names. A genome-only table is a smaller change today and
-four more tables later. Genericity is expressed as a COLUMN (`entity_type`), not in
-the table's name, exactly as `parameter_set` is one table and not five.
+**They are PER ENTITY TYPE, exactly as every other entity-keyed table in this
+schema is.** Round 1 reversed this: the first draft specified ONE generic
+`entity_alias` carrying `entity_type` as a column, reasoning from the
+`parameter_set` precedent. **That was the wrong precedent, and the correction is
+Chris's.** `parameter_set` is keyed by `parameter_set_hash` and holds one row per
+distinct parameter set ever used -- it is not keyed by an entity at all, which is
+exactly why it is the one non-entity-typed table. An alias table IS entity-keyed,
+so its true analogue is `<type>_entity`, and that is per-type.
+
+The volume argument is load-bearing, and the schema module already makes it:
+"Because each entity type now has its own physical tables, `entity_type` is no
+longer a useful partition key (it is single-valued within each table)". It names
+`gene_entity`, `protein_entity`, `gene_content` and `protein_content` as **"the four
+high-volume tables"**, against genome, function and ontology_term "whose row counts
+are low enough (~1M-10M) that a partition key buys nothing". There are far more
+proteins than genomes, so one shared alias table would drag genome-alias reads down
+to protein scale -- and would reintroduce, as a multi-valued column, the very
+`entity_type` discriminator that per-type tables exist to eliminate.
+
+**And `alias_source` partitioning does NOT rescue a shared table.** That is the
+check that settles this rather than leaving it a matter of taste. Four of the ten
+sources are entity-type-AGNOSTIC: `arc_record`, `arc_analysis` and `kbase_ws_ref`
+are job-and-object provenance that any entity type can carry, and `ncbi_taxon`
+applies to genes and proteins as readily as to genomes. Those four partitions would
+therefore MIX genome and protein rows, so a genome query filtering
+`alias_source = 'arc_record'` would scan overwhelmingly protein rows. Partitioning
+cleanly separates only the six genome-specific sources, and those were never the
+problem.
+
+**A consequence worth stating because it simplifies three things rather than
+complicating them:** once `alias` is a kind, `table_name(entity_type, "alias")`
+names these tables through the one sanctioned constructor,
+`table_columns(entity_type, "alias")` serves their columns through the one
+sanctioned accessor, and the manifest's `[source.alias]` block validates against
+that same accessor. The first draft needed a bespoke `ENTITY_ALIAS_TABLE` constant
+and bespoke `entity_alias_columns()` accessors precisely BECAUSE the table was not
+entity-typed; all of that bespoke machinery now disappears.
 
 **Its `alias_source` vocabulary is closed at the start.** Ten values, declared as a
 module-level tuple, validated at the write boundary; adding one is a code change
@@ -576,7 +653,7 @@ invertibility is DATA in a tuple rather than logic in the verb.
 17. As a **consumer of the JSON envelope**, I want the new CLI verbs to be additive
     under an unchanged `schema_version`, so that nothing I already parse changes.
 18. As an **operator deploying this**, I want a numbered runbook step that creates
-    the seventeenth table in a namespace that already holds sixteen, so that the
+    five new alias tables in a namespace that already holds sixteen, so that the
     deploy is a documented procedure rather than an improvisation.
 19. As an **operator**, I want `bootstrap()` to remain safe to re-run after this
     change, so that adding the table cannot disturb the sixteen that exist.
@@ -588,10 +665,11 @@ invertibility is DATA in a tuple rather than logic in the verb.
     demonstrably NOT wired into the `health` verb's non-zero exit, so that the one
     likely copy-paste error in this PRD is caught by a test rather than in
     production.
-22. As a **future maintainer**, I want `entity_alias` to be absent from
-    `ENTITY_TYPES`, un-nameable by `table_name()`, and absent from all three
-    `all_<kind>` union views, so that it cannot leak into the per-entity query
-    surface.
+22. As a **future maintainer**, I want the alias tables to be ORDINARY
+    entity-keyed tables -- named by `table_name(entity_type, "alias")`, served by
+    `table_columns(entity_type, "alias")`, and unioned by `all_alias` exactly as
+    `<type>_entity` is by `all_entity` -- so that no bespoke alias-only machinery
+    exists for a future maintainer to keep in step.
 23. As a **manifest author**, I want to declare alias rows in a backfill preset
     alongside `entity` and `content`, so that a source that knows identifiers can
     emit them without bespoke Python.
@@ -606,64 +684,139 @@ binding content is the interfaces and the rules.
 
 ### 1. The schema module (`clearinghouse_schema`)
 
-Add, following the `PARAMETER_SET_TABLE` precedent in the same module line for
-line:
+**`alias` becomes the fourth KIND.** That is the whole shape of this change, and
+every other item below follows from it:
 
-- **`ENTITY_ALIAS_TABLE = "entity_alias"`** -- a module constant, NOT built by
-  `table_name()`, for the documented reason that `table_name()` composes
-  `f"{entity_type}_{kind}"` and validates both halves against `ENTITY_TYPES` and
-  `_KINDS`, and the alias table is neither an entity type nor a kind.
-- **`_ENTITY_ALIAS_COLUMNS`** -- the seven `(name, sql_type)` pairs in DDL order,
-  declared once so the DDL, the accessors and the tests read one definition.
-- **`ALIAS_OBSERVATIONS = ("present", "withdrawn")`** -- a closed two-value
-  vocabulary, and the DEFAULT for every bulk write is `"present"`. Keep it a tuple
-  with a validator for the same reason `ALIAS_SOURCES` is one: an open observation
-  vocabulary would let a writer invent a third state that no reader knows how to
-  order.
-- **`entity_alias_columns()`** and **`entity_alias_column_names()`** -- separate
-  accessors mirroring `parameter_set_columns()` / `parameter_set_column_names()`,
-  for the same reason those are separate from `table_columns()`: routing the alias
-  table through `table_columns()` would mean inventing a pseudo entity type, which
-  would then leak into `ENTITY_TYPES`, the union views, and every caller that
-  iterates the five types.
+- **`_KINDS` becomes `("entity", "content", "result", "alias")`**, so
+  `table_name(entity_type, "alias")` yields `genome_alias`, `protein_alias`,
+  `gene_alias`, `function_alias` and `ontology_term_alias` through the ONE
+  sanctioned table-name constructor. No bespoke constant.
+- **`_VIEW_KINDS` becomes `("all_entity", "all_content", "all_result",
+  "all_alias")`**, and `union_view_sql("all_alias", ...)` unions the five alias
+  tables. They CAN be unioned, unlike the content tables, because the alias schema
+  is GENERIC across types -- identical seven columns everywhere, like
+  `_ENTITY_COLUMNS` and `_RESULT_COLUMNS` and unlike `_CONTENT_TYPE_HEAD`.
+- **`_ALIAS_COLUMNS`** -- the seven `(name, sql_type)` pairs in DDL order, declared
+  once, so the DDL, `table_columns()` and the tests read one definition:
+  `entity_hash`, `entity_type`, `alias_source`, `alias_id`, `observation`,
+  `observed_at`, `ingest_batch_id`. **`entity_hash` leads and `entity_type`
+  follows, matching `_ENTITY_COLUMNS` exactly** rather than inventing an order.
+- **`entity_type` STAYS as a column even though it is single-valued per table**,
+  for precisely the reason `_ENTITY_COLUMNS` keeps it on `genome_entity`: the
+  `all_alias` view needs a discriminator once the five are unioned. Dropping it
+  would make the view's rows unattributable.
+- **`table_columns(entity_type, "alias")` returns `_ALIAS_COLUMNS`** -- the generic
+  branch, alongside `entity` and `result`. **No `entity_alias_columns()` accessor
+  and no `ENTITY_ALIAS_TABLE` constant exist any more**; both were artefacts of the
+  table not being entity-typed, and the first draft needed them only for that
+  reason.
+- **`_ALIAS_PARTITION_BY`** -- `alias_source` on ALL FIVE alias tables. This
+  deliberately differs from `_ENTITY_PARTITION_BY`, which partitions only the two
+  high-volume types: every alias table is genuinely MULTI-source (that is what the
+  table is for), and `alias_source` is the filter essentially every read carries,
+  so the pruning is worth having even on the smaller types. `entity_type` is NOT a
+  partition key -- it is single-valued per table, which is the module's own stated
+  reason for not partitioning on it anywhere.
 - **`ALIAS_SOURCES`** -- a module-level tuple of the ten values, in the order the
   Solution table lists them.
-- **`ALIAS_SOURCE_PATTERNS`** -- a mapping from `alias_source` to a compiled
-  shape regex, containing ONLY the four sources that have one. A source absent
-  from this mapping is opaque by declaration. **The mapping must not be
-  defaulted to a permissive pattern**, because "opaque" and "validated by a
-  pattern that happens to match everything" are different claims and only the
-  first is honest.
+- **`ALIAS_OBSERVATIONS = ("present", "withdrawn")`** -- a closed two-value
+  vocabulary; the DEFAULT for every bulk write is `"present"`. Keep it a tuple with
+  a validator for the same reason `ALIAS_SOURCES` is one: an open observation
+  vocabulary lets a writer invent a third state that no reader knows how to order.
+- **`ALIAS_SOURCE_PATTERNS`** -- a mapping from `alias_source` to a compiled shape
+  regex, containing ONLY the four sources that have one. A source absent from this
+  mapping is opaque by declaration. **It must not be defaulted to a permissive
+  pattern**, because "opaque" and "validated by a pattern that matches everything"
+  are different claims and only the first is honest.
+- **`INVERTIBLE_ALIAS_SOURCES`** -- unchanged by this round; see the Solution's
+  invertibility section and Q10.
+- **`ALIAS_SOURCES_BY_ENTITY_TYPE`** -- NEW, and a direct consequence of splitting
+  by type. See the next subsection.
 - **`validate_alias(entity_type, entity_hash, alias_source, alias_id,
-  observation="present") -> tuple`** -- the one validator, returning the
-  canonicalized five-tuple or raising. Rules: `entity_type` in `ENTITY_TYPES`;
-  `entity_hash` through the existing `encode_entity_hash` 64-hex contract;
-  `alias_source` in `ALIAS_SOURCES`; `observation` in `ALIAS_OBSERVATIONS`;
-  `alias_id` non-empty after `.strip()` and, where the source has one, matching
-  its pattern. **`alias_id` is stored verbatim, not stripped** -- the strip is the
-  emptiness TEST, not a transformation, because silently trimming an identifier
-  changes it.
+  observation="present") -> tuple`** -- the one validator. Rules: `entity_type` in
+  `ENTITY_TYPES`; `entity_hash` through the existing `encode_entity_hash` 64-hex
+  contract; `alias_source` in `ALIAS_SOURCES` **and legal for that `entity_type`**;
+  `observation` in `ALIAS_OBSERVATIONS`; `alias_id` non-empty after `.strip()` and,
+  where the source has one, matching its pattern. **`alias_id` is stored verbatim,
+  not stripped** -- the strip is the emptiness TEST, not a transformation, because
+  silently trimming an identifier changes it.
 
-`table_configs()` then emits **seventeen** configs: the existing sixteen in their
-existing documented order, then the `entity_alias` config LAST, carrying
-`"partition_by": "alias_source"`. Its docstring and the module docstring must be
-updated from "sixteen" to "seventeen" and `PARAMETER_SET_TABLE`'s own docstring
-from "the sixteenth clearinghouse table, and the only one that is not
-entity-typed" to "the sixteenth ... and one of two that are not entity-typed".
+`table_configs()` emits **twenty-one** configs, in a deterministic documented order:
+the five `<type>_entity`, the five `<type>_content`, the five `<type>_result`, the
+parameter-set registry, then the five `<type>_alias` each carrying
+`"partition_by": "alias_source"`. The module docstring, `table_configs()`'s
+docstring and `PARAMETER_SET_TABLE`'s docstring all move from "sixteen" to
+"twenty-one"; `PARAMETER_SET_TABLE` remains **the only** non-entity-typed table,
+and its docstring's claim to that effect becomes true again rather than needing the
+"one of two" hedge the first draft introduced.
 
-**`ENTITY_TYPES`, `_KINDS` and `union_view_sql` are NOT touched.** The alias table
-appears in no `all_<kind>` view.
+#### Which sources are legal for which entity type
+
+Splitting by entity type makes a question answerable that a single generic table
+could only ignore: **`ncbi_assembly` is meaningless on a protein.** A closed
+vocabulary that cannot say so is only half closed, so the module declares:
+
+```
+_TYPE_AGNOSTIC_ALIAS_SOURCES = ("arc_record", "arc_analysis", "kbase_ws_ref", "ncbi_taxon")
+_GENOME_ONLY_ALIAS_SOURCES  = ("kbdl_object", "kbdl_fasta_object", "ncbi_assembly",
+                               "gtdb_accession", "kbase_assembly_md5", "bvbrc_genome_md5")
+
+ALIAS_SOURCES_BY_ENTITY_TYPE = {
+    "genome":        _TYPE_AGNOSTIC_ALIAS_SOURCES + _GENOME_ONLY_ALIAS_SOURCES,
+    "protein":       _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "gene":          _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "function":      _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "ontology_term": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+}
+```
+
+**The four type-agnostic sources are agnostic for a reason, not for convenience:**
+`arc_record`, `arc_analysis` and `kbase_ws_ref` identify a job record, an analysis
+grouping and a workspace object respectively, none of which is specific to what
+kind of entity is being described; and a gene or a protein has an NCBI taxon as
+genuinely as a genome does.
+
+**The other four types get NO type-specific sources yet, and that is deliberate
+rather than an omission.** The Problem Statement motivates them -- `ontology_term`
+has alternate ids, `function` has tool-local names -- but **this PRD has not
+researched what those vocabularies are**, and inventing `uniprot_accession` or
+`ec_number` here would be exactly the unresearched guess the closed-vocabulary rule
+exists to prevent. The five tables are created now because schema shape at zero rows
+is free; the vocabularies grow by code change and review, one researched source at a
+time. **So `protein_alias` is writable only for provenance sources on day one**,
+which is honest about what is actually known.
 
 ### 2. The write boundary (`ClearinghouseCapability.register_aliases`)
 
-A new public verb, because `register()` structurally cannot carry it:
+A separate public verb -- **and in round 1 the REASON for that changed, which is
+worth stating rather than quietly keeping the conclusion.** The first draft argued
+`register()` *structurally cannot* carry aliases, because it routes through
+`table_name(entity_type, kind)` which refuses anything outside
+`ENTITY_TYPES x _KINDS`. Now that `alias` IS a kind, that argument is simply gone:
+`register(entity_type, rows, kind="alias")` would resolve the table perfectly well.
+
+The verb stays separate on two narrower grounds that survive:
+
+1. **`register()` is plain-append; aliases are FILL-ONLY.** Nothing in
+   `register()`'s path consults existing rows, and folding a fill-only pre-read into
+   it would change the behaviour of the entity, content and result writes that
+   currently share it.
+2. **`register()` already branches on kind for the parameter set** -- a `result`
+   call requires a `parameter_set` input, validates it, hashes it and writes the
+   registry first. Adding a third mode with different idempotence semantics makes
+   one verb carry three contracts, and the one it would carry worst is the one with
+   the subtlest invariant.
 
 ```
-register_aliases(rows, *, tenant=TENANT, dataset=NAMESPACE) -> dict
+register_aliases(entity_type, rows, *, tenant=TENANT, dataset=NAMESPACE) -> dict
 ```
 
-`rows` is a sequence of mappings each carrying `entity_type`, `entity_hash`,
-`alias_source`, `alias_id`.
+**It now takes `entity_type` and routes through `table_name(entity_type, "alias")`**
+-- one call writes one table, exactly as `register()` does. `rows` is a sequence of
+mappings each carrying `entity_hash`, `alias_source`, `alias_id`, and optionally
+`entity_type`; a row whose `entity_type` disagrees with the argument is REFUSED
+rather than silently coerced, because a row claiming a different type than the table
+it is being written to is a caller bug and not a formatting nicety.
 
 **THE CLOCK POLICY IS EXPLICIT, because "filled as the other write paths fill them"
 turned out to name no policy at all.** `register()` hands prepared mappings straight
@@ -686,8 +839,9 @@ writers disagreeing about the world is a producer problem the orphan report
 surfaces, not something a sort key can fix.
 
 It is modelled on `_write_parameter_set_registry()` -- a direct
-`capability.load()` with `tables=[{"name": ENTITY_ALIAS_TABLE, "mode": "append"}]`
-and rows projected through `entity_alias_column_names()` -- and it inherits
+`capability.load()` with
+`tables=[{"name": table_name(entity_type, "alias"), "mode": "append"}]` and rows
+projected through `column_names(entity_type, "alias")` -- and it inherits
 `register()`'s four non-negotiable guards:
 
 - **IN-POD ONLY.** Refuses off-pod before any transport call.
@@ -700,8 +854,10 @@ and rows projected through `entity_alias_column_names()` -- and it inherits
   index and the reason.
 
 **Fill-only, and this is what makes a retry free.** Before appending, read the
-distinct five-tuples already present for the `(entity_type, alias_source)` slices
-the batch touches, and append only the rows not already there. Return a report
+distinct five-tuples already present for the `alias_source` slices the batch
+touches **within this one table** -- `entity_type` no longer needs to be part of
+the slice selection, because the table already is that selection -- and append only
+the rows not already there. Return a report
 shaped like the registry's: `written`, `already_present`, `load_result` (`None`
 when every row was already present, in which case **no `load()` is made at all**
 -- that is precisely what makes an ordinary retry add no row).
@@ -725,8 +881,8 @@ carries any observation value.
 
 **It does NOT call `_assert_lake5_schema`.** That guard is about the result slot
 key and is deliberately left alone (see Gotchas). It SHOULD assert, cheaply, that
-the `entity_alias` table exists in the write namespace, and refuse with a message
-naming the runbook step if it does not -- the same posture `_assert_lake5_schema`
+`table_name(entity_type, "alias")` exists in the write namespace, and refuse with a
+message naming the runbook step if it does not -- the same posture `_assert_lake5_schema`
 takes for an un-rebuilt result table, for the same reason: an append into a table
 that is not there either fails obscurely or creates one with the wrong spec.
 
@@ -737,8 +893,14 @@ aliases(entity_type=None, entity_hash=None, *, alias_sources=None,
         alias_ids=None, engine=None) -> list[dict]
 ```
 
-Four filters composed by `AND`. **The semantics are `results()`'s, stated
-exactly**: `None` applies no filter; `[]` is a request to match nothing. For the
+Four filters composed by `AND`. **`entity_type` now also SELECTS THE TABLE**, and
+that is the one behavioural change this round makes to the read surface: with an
+`entity_type` given, the verb reads that one `<type>_alias` table; with `None`, it
+reads the `all_alias` union view, which exists precisely so a cross-type question
+stays answerable in one query. The view is the only reason `entity_type` survives
+as a column, and this is what it is for.
+
+**The semantics are `results()`'s, stated exactly**: `None` applies no filter; `[]` is a request to match nothing. For the
 list-valued filters use the existing `_in_literal()` helper, which already yields
 `1 = 0` for an empty list rather than an invalid `IN ()`. `entity_hash` goes
 through `_encode_hashes`. **Build hash predicates with PLACEHOLDERS and
@@ -753,7 +915,9 @@ Spark and off-pod hash filters -- capabilities every neighbouring reader has -- 
 inventing a remote bind protocol, which is not this change. The invariant that is
 both achievable and the one that matters: **the alias builder never does its own
 string interpolation**, so validation and inlining stay in the single audited place.
-`alias_sources` is the partition column, so it prunes.
+`alias_sources` is the partition column, so it prunes -- and per-type tables mean a
+genome read now prunes on BOTH axes, the table and the partition, which is the whole
+point of the round-1 split.
 
 Returns one dict per distinct five-tuple plus `observed_at` and `ingest_batch_id`.
 **`SELECT DISTINCT` on the five-tuple**, with `MAX(observed_at)` and a
@@ -784,12 +948,19 @@ different public behaviours, and a caller trusting the phrase "live set" would
 otherwise act on an explicitly retracted identifier.
 
 ```
-resolve(alias_source, alias_id, *, engine=None) -> str | None
+resolve(alias_source, alias_id, *, entity_type=None, engine=None) -> str | None
 ```
 
-The reverse lookup, and its reduction order is specified exactly, because three
-different readings of "the latest observation for the pair" are each defensible and
-they disagree:
+**`entity_type` is new this round and is OPTIONAL.** With it, `resolve()` reads one
+table and the answer cannot be cross-type-ambiguous by construction. Without it, it
+reads `all_alias` and the pair-counting below is what keeps a cross-type collision
+visible. Defaulting to `None` keeps the verb usable by the caller it was designed
+for -- `kbdl-add-non-coding-to-existing-genome-v1`'s Q3 resolver, which holds a KBDL
+object id and does NOT know the entity type, since not knowing what the thing is is
+the entire reason it is asking.
+
+Its reduction order is specified exactly, because three different readings of "the
+latest observation for the pair" are each defensible and they disagree:
 
 1. **Reduce independently per `(entity_type, entity_hash, alias_source, alias_id)`**
    to that four-tuple's latest observation, using the tie order above.
@@ -797,9 +968,11 @@ they disagree:
 3. **Count distinct `(entity_type, entity_hash)` PAIRS across what survives:**
    zero -> `None`, exactly one -> that hash, more than one -> raise.
 
-**Count the PAIR, not the hash alone** -- another finding from the external scan.
-`resolve()` returns a bare `entity_hash` and takes no `entity_type`, so counting
-hashes alone would hide a CROSS-TYPE collision: one `(alias_source, alias_id)`
+**Count the PAIR, not the hash alone** -- a finding from the external scan, and it
+matters MORE after the round-1 split, not less: the rows now live in five separate
+tables, so a cross-type collision is a collision ACROSS TABLES and is invisible to
+any single-table read. `resolve()` returns a bare `entity_hash`, so counting hashes
+alone would hide it: one `(alias_source, alias_id)`
 resolving to the same hex string under two different entity types would read as
 unambiguous and return a hash the caller cannot interpret. Counting pairs makes that
 case raise, which is correct -- it genuinely is contested.
@@ -930,8 +1103,8 @@ whole run, and the refusal is so a programmatic writer cannot bypass the skip.
 
 - A new numbered runbook section, **OP-C5**, following the OP-C1 pattern exactly
   (dry run showing `action: create` for one table, then the real run, then an
-  acceptance read): create `entity_alias` in a namespace that already holds
-  sixteen, via `bootstrap()`, which is idempotent and will report the sixteen as
+  acceptance read): create the five `<type>_alias` tables and the `all_alias` view
+  in a namespace that already holds sixteen, via `bootstrap()`, which is idempotent and will report the sixteen as
   already present.
 - **H3's documentation fix**, which has no other home and is one paragraph: state
   in `agent-io/docs/clearinghouse-schema-operator-runbook.md` that **rule A is the
@@ -993,12 +1166,19 @@ assertions and is where the additive-`schema_version` check belongs.
 
 **The tests that actually earn their place**, as opposed to restating the schema:
 
-1. **`table_configs()` returns seventeen, with `entity_alias` last and partitioned
-   on `alias_source`.** The count is the regression guard: a developer adding a
-   table and forgetting the config is the failure.
-2. **`entity_alias` is in no `all_<kind>` view and `table_name()` refuses it in
-   either argument position.** Mirrors the registry test. This is what keeps it out
-   of the per-entity query surface.
+1. **`table_configs()` returns twenty-one, with the five `<type>_alias` configs
+   LAST, each partitioned on `alias_source`.** The count is the regression guard: a
+   developer adding a kind and forgetting its configs is the failure.
+2. **The alias tables ARE first-class, and this test INVERTS from round 0.**
+   `table_name(etype, "alias")` returns `<etype>_alias` for all five types;
+   `table_columns(etype, "alias")` returns the generic seven columns;
+   `union_view_sql("all_alias", ...)` names exactly the five alias tables and
+   nothing else; and `PARAMETER_SET_TABLE` is STILL refused by `table_name()` in
+   either argument position, because it remains the only non-entity-typed table.
+2a. **Every alias table carries `entity_type`, and `all_alias` selects it.** The
+    column is single-valued per table and exists only so the union view's rows stay
+    attributable -- a regression that dropped it would make `all_alias` useless
+    while every single-table read kept working, so the test has to be on the view.
 3. **The vocabulary is closed, by behaviour.** A write and a manifest plan naming
    `kbdl_genome` (a plausible misspelling of `kbdl_object`) must both be refused,
    and the message must name the legal values. Asserting the tuple's contents is
@@ -1107,7 +1287,8 @@ assertions and is where the additive-`schema_version` check belongs.
 17. **An alias orphan is not reported as a `warning`.** Keeps the envelope's
     `warnings` meaning "degraded answer".
 18. **`_assert_lake5_schema` is unchanged by the new config.** Build the preflight
-    against a namespace holding the sixteen old tables and NOT `entity_alias`, and
+    against a namespace holding the sixteen old tables and NONE of the five
+    `<type>_alias` tables, and
     assert it still passes. This is the regression guard on Gotcha 2 -- it fails
     loudly if someone "helpfully" teaches the preflight about every table.
 19. **Manifest plan-time refusals**: an unknown `alias_source`, an unparseable
@@ -1143,41 +1324,90 @@ moves.
 Entries are ordered by BLAST RADIUS DESCENDING, which means by the cost of
 REVERSING the decision after the work ships, not by the size of the change now.
 
-### Q1. Is `entity_alias` ONE generic table carrying `entity_type`, or one alias table per entity type? -- DECIDED: one generic table
+### Q1. ONE generic alias table carrying `entity_type`, or one per entity type? -- DECIDED (REVERSED IN ROUND 1): five per-type tables, with `alias` as a fourth KIND
 
 **Blast radius:** IRREVERSIBLE
-**Why:** Protein, gene, function and ontology_term have the same problem --
-`ontology_term` has alternate ids, `function` has tool-local names -- so a
-genome-only table is a smaller change today and four more tables later. Genericity
-as a COLUMN rather than in the name follows `parameter_set`, which is one table and
-not five, and whose docstring already argues the case: making a non-entity-typed
-table pretend to be an entity type puts it in the per-type views and in every
-caller that iterates the five types.
-**If you disagree:** a per-type scheme means five tables named by `table_name()`, a
-sixth `_KINDS` member `"alias"`, inclusion in a fourth `all_alias` union view, and
-`entity_type` dropped from the column list. In this PRD it changes t1 entirely, the
-seventeen-config count in t1's tests, `register_aliases`'s signature in t2 (it
-would take `entity_type` and route through `table_name`), both read verbs in t3,
-and the manifest's block shape in t6. Once rows exist, converting a generic table
-to five means a full rewrite and two read paths during the transition.
-**Confidence:** high -- this is the source design's call at high confidence, and
-the `parameter_set` precedent makes it cheap.
-**A sibling design depends on this answer, so it is stated here explicitly:** the
-genome companion namespace (decision (2), session `368c658e`) asked whether its own
-`genome_alias` table should be a PROJECTION of `entity_alias` rather than a second
-source of truth. **Genericity over `entity_type` is firm and will not be narrowed
-to genome-only**, so a projection is the right END STATE. It is deliberately not
-the right thing to build yet, for three reasons that are properties of THIS design:
-an alias whose entity does not exist is legal (Q6), so a projection hands a consumer
-orphan rows that are correct by design; and the companion namespace must be loadable
-before `entity_alias` exists at all. (The first reason given here originally was an
-undeclared join key; **that reason is now CLOSED** -- see Q11.1 -- and retraction is
-no longer absent either, per Q2a. One of the three original objections survives.) The recommendation sent to that session was therefore: build
-`genome_alias` separately now, but spell the columns identically
-(`alias_source`, `alias_id`, `observed_at`, `ingest_batch_id`) so convergence is
-later a VIEW rather than a rewrite.
+**REVERSED BY CHRIS IN REVIEW ROUND 1**, and the reversal is correct. The first
+draft chose ONE generic `entity_alias` carrying `entity_type` as a column, reasoning
+from `parameter_set`. **That was the wrong precedent.** `parameter_set` is keyed by
+`parameter_set_hash` and holds one row per distinct parameter set ever used; it is
+not entity-keyed, which is exactly why it is the single non-entity-typed table. An
+alias table IS entity-keyed, so its analogue is `<type>_entity` -- and that is
+per-type.
 
-### Q2. Should `entity_alias` carry a `confidence` or `asserted_by` column? -- DECIDED: no such column
+**Why:** two reasons, and the second is the one that makes it more than a
+consistency preference.
+(1) **Volume.** The schema module names `gene_entity`, `protein_entity`,
+`gene_content` and `protein_content` as "the four high-volume tables" against
+genome, function and ontology_term "whose row counts are low enough (~1M-10M) that a
+partition key buys nothing". There are far more proteins than genomes, so one shared
+alias table drags genome-alias reads to protein scale. The module also states the
+structural half: "Because each entity type now has its own physical tables,
+`entity_type` is no longer a useful partition key (it is single-valued within each
+table)" -- a generic table reintroduces as a multi-valued column the very
+discriminator per-type tables removed.
+(2) **`alias_source` partitioning does NOT rescue a shared table**, which is the
+check that settles it. Four of the ten sources are entity-type-AGNOSTIC --
+`arc_record`, `arc_analysis`, `kbase_ws_ref` and `ncbi_taxon` -- so those partitions
+would MIX genome and protein rows and a genome query on
+`alias_source = 'arc_record'` would scan overwhelmingly protein rows. Partitioning
+separates only the six genome-specific sources, which were never the problem.
+
+**What it moved, and it moved less than the first draft predicted:** `_KINDS` gains
+`"alias"`, `_VIEW_KINDS` gains `"all_alias"`, `table_configs()` goes from seventeen
+configs to **twenty-one**, and `register_aliases`/`aliases`/`resolve` take an
+`entity_type`. But three things got SIMPLER, because the tables are now ordinary:
+the bespoke `ENTITY_ALIAS_TABLE` constant and `entity_alias_columns()` accessors are
+DELETED (`table_name` and `table_columns` serve them); the manifest's `[source.alias]`
+block validates against the standard `column_names(etype, "alias")` with no special
+case; and `alias_orphans()` becomes a straight five-pair join instead of switching
+its join target on a column value. `entity_type` is KEPT as a column -- exactly as
+`_ENTITY_COLUMNS` keeps it on `genome_entity` -- because `all_alias` needs a
+discriminator.
+
+**If you disagree** (i.e. to go back to one generic table): revert `_KINDS` and
+`_VIEW_KINDS`, reinstate `ENTITY_ALIAS_TABLE` plus the two bespoke accessors, drop
+`ALIAS_SOURCES_BY_ENTITY_TYPE` and Q1a, return `table_configs()` to seventeen, drop
+the `entity_type` argument from the three verbs, and restore the manifest special
+case. **But note it is no longer free:** the reason the first draft called this
+IRREVERSIBLE holds in both directions, and every genome table is still 0 rows only
+until the first load.
+**Confidence:** high. The volume premise is the schema module's own, and the
+partition-does-not-rescue-it check was performed rather than assumed.
+
+**A sibling design depended on the old answer, and the dependency is now moot.**
+Session `368c658e` asked whether its own `genome_alias` should be a PROJECTION of a
+generic `entity_alias`. It has since told me (2026-10-27) that Chris rescoped its
+PRD to duplicate nothing the clearinghouse holds, so `genome_alias` was DELETED and
+its loader writes to the clearinghouse alias tables directly. Under this round's
+reversal the convergence is cleaner still: the clearinghouse table it writes is
+`genome_alias`, per-type, which is the shape that session originally proposed.
+
+### Q1a. Which `alias_source` values are legal for which entity type? -- DECIDED: declared per type, with four type-agnostic sources and genome-only for the rest
+
+**Blast radius:** LOW
+**Why:** Splitting by entity type makes answerable a question a generic table could
+only ignore -- `ncbi_assembly` is meaningless on a protein -- and a closed
+vocabulary that cannot say so is only half closed. `arc_record`, `arc_analysis`,
+`kbase_ws_ref` and `ncbi_taxon` are declared type-AGNOSTIC because they identify a
+job record, an analysis grouping, a workspace object and a taxon respectively, none
+of which is specific to the kind of entity being described. The other six are
+genome-only.
+**The other four types therefore start with NO type-specific sources, deliberately.**
+The Problem Statement motivates them -- `ontology_term` has alternate ids, `function`
+has tool-local names -- but this PRD has NOT researched those vocabularies, and
+inventing `uniprot_accession` or `ec_number` here would be precisely the unresearched
+guess a closed vocabulary exists to prevent. The five tables are created now because
+schema shape at zero rows is free; the vocabularies grow one researched source at a
+time.
+**If you disagree:** dropping the per-type map makes `validate_alias` accept any
+source for any type and deletes one test; the cost is that a writer can put an
+assembly accession on a protein and nothing refuses it.
+**Confidence:** high on the mechanism, medium on the partition of the ten -- the
+four type-agnostic ones are a judgement from what the identifiers denote, not from a
+measurement, and a reviewer who knows the arc store better may move one.
+
+### Q2. Should the alias tables carry a `confidence` or `asserted_by` column? -- DECIDED: no such column
 
 **Blast radius:** MEDIUM
 **Why:** Both live precedents (`v2_genome_aliases`, `gene_alias`) have neither, and
@@ -1291,25 +1521,32 @@ only the vocabulary SIZE -- whether a third state (`superseded`, distinct from
 NOT add one: two writers inventing states no reader can order is the failure mode,
 and `ALIAS_OBSERVATIONS` is a code change away from growing.
 
-### Q3. How do alias rows get written, given that `register()` cannot name the table? -- DECIDED: a dedicated public `register_aliases()` verb
+### Q3. Should alias writes go through `register()` or their own verb? -- DECIDED: their own verb, but the REASON changed in round 1
 
 **Blast radius:** MEDIUM
-**Why:** `register()` selects its table via `table_name(entity_type, kind)`, which
-raises `ValueError` on anything outside `ENTITY_TYPES` x `_KINDS`. This is the same
-constraint that made `parameter_set` rows go through
-`_write_parameter_set_registry()` instead, and that method -- a direct
-`capability.load()` with an explicit table name and rows projected through the
-table's own column-name accessor -- is the shape to copy. Widening `register()` to
-accept a table name would turn its "the table is never caller-supplied" guarantee
-into "sometimes it is", which is a safety property worth more than the saved verb.
-**If you disagree:** the alternative is a `kind="alias"` sentinel threaded through
-`table_name()`, which means `_KINDS` grows, `table_columns()` must special-case it,
-and `table_name("genome", "alias")` starts returning `genome_alias` -- a table that
-does not exist. That lands in t1 and t2 and changes the test in t1 that asserts
-`table_name()` refuses the alias table in either argument position.
-**Confidence:** high -- it is forced by a specific `ValueError` in existing code,
-and it is a DERIVATION this PRD added, not a call the source design made. Flagged
-as such.
+**THE ORIGINAL REASON IS GONE, and saying so matters more than keeping the
+conclusion.** The first draft argued `register()` *structurally cannot* carry
+aliases: it routes through `table_name(entity_type, kind)`, which refuses anything
+outside `ENTITY_TYPES x _KINDS`. Round 1 made `alias` a KIND, so
+`register(entity_type, rows, kind="alias")` would now resolve the table perfectly
+well and that argument no longer exists.
+**Why the verb stays separate anyway:** two narrower grounds that do survive.
+(1) `register()` is PLAIN-APPEND and aliases are FILL-ONLY; nothing in `register()`'s
+path consults existing rows, and folding a fill-only pre-read into it would change
+the behaviour of the entity, content and result writes that share it.
+(2) `register()` already branches on kind for the parameter set -- a `result` call
+requires, validates, hashes and pre-writes a `parameter_set`. A third mode with
+different idempotence semantics makes one verb carry three contracts, and the one it
+would carry worst is the one with the subtlest invariant.
+**If you disagree:** fold it in as `register(entity_type, rows, kind="alias")` with a
+fill-only branch. That is now a genuinely available option -- it was not before --
+and it would delete `register_aliases` while leaving `observe_alias` separate
+regardless, since that one must NOT be fill-only. Weigh it as a real alternative
+rather than a strawman.
+**Confidence:** high on the conclusion, and this entry is now a DERIVATION whose
+stated justification has been corrected once. That history is kept deliberately: a
+conclusion that survives after its original argument collapses deserves more
+scrutiny, not less.
 
 ### Q4. How do backfill presets declare aliases? -- DECIDED: a fourth manifest kind with a list-shaped `[[source.alias]]` block
 
@@ -1326,16 +1563,29 @@ every future alias writer re-implements validation and the vocabulary is enforce
 in N places instead of one. Dropping this removes t6 entirely and leaves the
 writers named in D3.7 unable to write without code changes in a repo this PRD does
 not touch.
-**Confidence:** medium -- the fourth-kind decision is forced, but the exact TOML
-spelling is mine and no preset exists to validate it against. A reviewer who knows
-the preset authors' habits should check the shape. This is the second DERIVATION
-this PRD added beyond the source design.
+**ROUND 1 SIMPLIFIED THIS.** The fourth kind is no longer something this block has
+to invent against the grain of the schema module -- `_KINDS` now contains `"alias"`
+for Q1's reasons, so the manifest's own `KINDS` simply mirrors it, and `_plan_alias`
+validates against the STANDARD `schema.column_names(entity_type, "alias")` that
+`_plan_content` and `_plan_result` already use. The first draft needed a bespoke
+accessor here purely because the table was not entity-typed; that special case is
+deleted.
+**Confidence:** medium. The fourth-kind decision is forced and now also consistent
+with the schema module rather than additive to it, but **the exact TOML spelling is
+still mine and no preset exists to validate it against** -- a reviewer who knows the
+preset authors' habits should check the shape. This remains a DERIVATION beyond the
+source design.
 
 ### Q5. What is the partition key? -- DECIDED: `alias_source`
 
 **Blast radius:** MEDIUM
 **Why:** It is the analogue of `source` on the five `<type>_result` tables and
-`query_name` on `council.calls` -- the slice that keeps one vocabulary's files off
+`query_name` on `council.calls`. **Round 1 made it per-table rather than global**,
+and it is now applied to ALL FIVE alias tables -- deliberately unlike
+`_ENTITY_PARTITION_BY`, which partitions only the two high-volume types, because
+every alias table is genuinely multi-source (that is what the table is for) and
+`alias_source` is the filter essentially every read carries. Note the reinforcing
+effect: a genome read now prunes on both the table and the partition -- the slice that keeps one vocabulary's files off
 another's -- and `alias_sources` is the filter most reads will carry, so it prunes.
 **If you disagree:** repartitioning a live Iceberg table is a full rewrite, and
 `bootstrap()` will refuse the change rather than attempt it
@@ -1546,14 +1796,15 @@ than the report contents alone.
 **2. `_assert_lake5_schema` passes the new table by accident, and "fixing" that
 breaks every existing namespace.** The preflight iterates `table_configs()` and
 `continue`s on any name that is neither `PARAMETER_SET_TABLE` nor `*_result`, so a
-seventeenth config named `entity_alias` is skipped with no change. It LOOKS like a
+five new `<type>_alias` configs are all skipped with no change -- `*_alias` does not
+match `*_result`. It LOOKS like a
 guard that should learn about every new table. Teaching it would make every
 namespace that has not yet run OP-C5 fail *result* ingest -- work that has nothing
 to do with aliases. Test 18 is the guard against this specific helpfulness.
 
 **3. The table can exist and be unwritable, and the error will not say so.**
 `bootstrap()` creates tables that do not exist but **cannot add a column to one
-that does**. If anyone hand-creates `entity_alias` with five columns, or with no
+that does**. If anyone hand-creates a `<type>_alias` with six columns, or with no
 partitioning, `bootstrap()` will either verify it as present (column drift is not
 checked) or refuse on the partition spec. The first case is the dangerous one: an
 append of seven-column rows into a six-column table either fails obscurely or drops
@@ -1589,7 +1840,8 @@ as though they were live, and it will do so silently and plausibly -- a withdraw
 NCBI accession is a perfectly well-formed accession. `resolve()` and
 `aliases(current_only=True)` apply the reduction; raw SQL against the table does
 not, and neither does `aliases()` by default, which returns history ON PURPOSE.
-Anything downstream that joins `entity_alias` directly must do its own reduction.
+Anything downstream that joins a `<type>_alias` table, or `all_alias`, directly
+must do its own reduction.
 This is the standard cost of an append-only observation log and it is the right
 trade, but it is a NEW failure mode that the six-column version did not have.
 
@@ -1614,7 +1866,7 @@ KBDL's own `object_supersedes` (28,051 rows), not from here.
 **8. Storing rule B in `kbdl_fasta_object` makes the A/B relationship queryable,
 and also makes it look like two identities for one thing.** That is the intended
 benefit -- the relationship stops being folklore -- but a reader who joins
-`entity_alias` to itself on `alias_id` across sources will find a 64-hex rule-B
+`genome_alias` to itself on `alias_id` across sources will find a 64-hex rule-B
 value sitting in `alias_id` and a 64-hex rule-A value in `entity_hash` on the same
 row, both sha256, both lowercase hex, with nothing in the data saying they are
 computed by different rules over different bytes. That is precisely the join that
@@ -1820,7 +2072,7 @@ documents the A/B distinction. If a `COUNT(*)` shows real rule-B values in
 **Retiring `v2_genome_aliases` or `gene_alias`.** The two existing alias tables stay
 exactly as they are. `inner_loop` is the retiring side on its own schedule, and
 `fitness.gene_alias` serves a live consumer. This PRD does not migrate either, and
-does not backfill `entity_alias` from them.
+does not backfill the alias tables from them.
 
 **Retrofitting the existing 47,341 `function_entity` / `function_content` rows and
 20,036 `function_result` rows.** D3.7: nothing is retrofitted. Those stay as they
@@ -1835,7 +2087,7 @@ IN SCOPE** (Q2a, Implementation Decisions 1-4). What is OUT of scope is a mutabl
 because stamping it requires UPDATING a row, which append-only forbids, and the
 second because a named replacement is already just another alias row. **Q2a and
 Implementation Decisions 1-4 supersede every earlier statement in this document
-that `entity_alias` has no retraction.**
+that the alias tables have no retraction.**
 
 **Ahmed's Protein Clearinghouse.** Explicitly out per Chris, 2026-10-07, and
 lake-5 D5.1.
@@ -1886,7 +2138,8 @@ it is OP-C5, an in-pod operator step, and no build task can stand in for it.
 ### The acceptance step, named so it is not forgotten
 
 **OP-C5, in-pod, after the tasks merge.** `bootstrap()` dry run showing
-`action: create` for `entity_alias` ONLY and the sixteen others as already present;
+`action: create` for the FIVE `<type>_alias` tables ONLY and the sixteen others as
+already present;
 then the real run; then an acceptance read of the live columns AND the partition
 spec (not merely that the table exists -- see Gotcha 3); then
 `kbu clearinghouse health` exiting ZERO with `alias_integrity` present and an
@@ -1896,22 +2149,26 @@ Albert's and his to state. **Until it has run, this PRD is `continue`, not
 
 ## Acceptance Criteria
 
-1. `clearinghouse_schema` declares `ENTITY_ALIAS_TABLE`, `_ENTITY_ALIAS_COLUMNS` with exactly seven columns in DDL order, `entity_alias_columns()`, `entity_alias_column_names()`, `ALIAS_SOURCES` with exactly ten values and no `kbdl_genome_id`, `ALIAS_OBSERVATIONS == ("present", "withdrawn")`, `ALIAS_SOURCE_PATTERNS` with exactly four entries, and `validate_alias()`.
-2. `table_configs()` returns seventeen configs, with the `entity_alias` config last and carrying `partition_by == "alias_source"`.
-3. `entity_alias` is absent from `ENTITY_TYPES`, absent from all three `all_<kind>` union views, and `table_name()` raises `ValueError` for it in either argument position.
+1. `clearinghouse_schema._KINDS == ("entity", "content", "result", "alias")` and `_VIEW_KINDS == ("all_entity", "all_content", "all_result", "all_alias")`; it declares `_ALIAS_COLUMNS` with exactly seven columns in DDL order (`entity_hash` first, `entity_type` second), `ALIAS_SOURCES` with exactly ten values and no `kbdl_genome_id`, `ALIAS_OBSERVATIONS == ("present", "withdrawn")`, `ALIAS_SOURCE_PATTERNS` with exactly four entries, `INVERTIBLE_ALIAS_SOURCES`, `ALIAS_SOURCES_BY_ENTITY_TYPE`, and `validate_alias()`.
+1a. No `ENTITY_ALIAS_TABLE` constant and no `entity_alias_columns()` / `entity_alias_column_names()` accessors exist anywhere in the delivered code; `table_name(entity_type, "alias")` and `table_columns(entity_type, "alias")` serve those roles.
+2. `table_configs()` returns twenty-one configs, with the five `<type>_alias` configs last, each carrying `partition_by == "alias_source"`.
+3. `table_name(entity_type, "alias")` returns `<entity_type>_alias` for all five entity types; `union_view_sql("all_alias", ...)` names exactly those five tables and no others; `PARAMETER_SET_TABLE` remains absent from every union view and is still refused by `table_name()` in either argument position.
+3a. `validate_alias()` refuses an `alias_source` that is not legal for the given `entity_type` per `ALIAS_SOURCES_BY_ENTITY_TYPE` -- specifically, `ncbi_assembly` on `protein` is refused while `arc_record` on `protein` is accepted.
 4. `validate_alias()` defaults `observation` to `"present"`, refuses an unknown `alias_source` and an unknown `observation` naming the legal values in each case, refuses an `alias_id` that is empty, whitespace-only or `None`, and returns a whitespace-padded `alias_id` byte-identical.
 5. Observation-based withdrawal and reinstatement are implemented; no `retracted_at` and no `replaced_by` column exists anywhere in the schema.
-6. No statement anywhere in the committed PRD or the code comments asserts that `entity_alias` has no retraction mechanism.
+6. No statement anywhere in the committed PRD or the code comments asserts that the alias tables have no retraction mechanism.
 7. `register_aliases()` is fill-only on the five-tuple, always writes `observation = "present"`, and makes ZERO `load()` calls on an identical retry, reporting every row as `already_present`.
 8. `observe_alias()` always appends and never applies fill-only, so a `present -> withdrawn -> present` sequence persists all three rows.
 9. Both write verbs generate a non-null UTC `observed_at` and a fresh ULID `ingest_batch_id` per call, and REFUSE a caller-supplied value for either rather than overriding it.
 10. Every latest-observation reduction orders by `observed_at DESC, ingest_batch_id DESC, observation DESC`, making `withdrawn` win an exact provenance tie, and the result is stable across repeated calls.
 11. Both write verbs validate every row before any append and refuse the whole call with `load()` uncalled on any invalid row, naming the offending row index.
-12. Both write verbs refuse off-pod, run the write-target assertion, apply the postflight null-`row_count` check, and refuse with a message naming OP-C5 when the `entity_alias` table is absent.
-13. Neither write verb calls `_assert_lake5_schema`, and `_assert_lake5_schema` still passes against a namespace holding the sixteen pre-existing tables without `entity_alias`.
+12. Both write verbs refuse off-pod, run the write-target assertion, apply the postflight null-`row_count` check, and refuse with a message naming OP-C5 when `table_name(entity_type, "alias")` is absent.
+12a. Both write verbs take `entity_type` and route through `table_name(entity_type, "alias")`; a row whose own `entity_type` disagrees with the argument is refused rather than coerced.
+13. Neither write verb calls `_assert_lake5_schema`, and `_assert_lake5_schema` still passes against a namespace holding the sixteen pre-existing tables and none of the five `<type>_alias` tables.
 14. `aliases()` returns the most recent occurrence of each observation state per four-tuple: after `present -> withdrawn -> present` it returns two rows, not three.
 15. `aliases(current_only=True)` reduces to the latest observation per four-tuple and then excludes withdrawn winners, returning an empty result for a finally-withdrawn four-tuple.
 16. `aliases()` applies no filter for `None` and matches nothing for `[]`, with the emitted SQL containing `1 = 0` and never `IN ()`, and composes its filters by `AND`.
+16a. `aliases(entity_type=<t>)` reads the single `<t>_alias` table and `aliases(entity_type=None)` reads the `all_alias` view; `resolve()` accepts an optional `entity_type` and reads one table when given it.
 17. The alias SQL builder emits placeholders and canonicalized params and performs no string interpolation of its own; inlining occurs only inside the existing `_run` / `_inline_hex_params` seam.
 18. `resolve()` reduces per four-tuple, discards withdrawn winners, then counts distinct `(entity_type, entity_hash)` PAIRS across survivors: zero returns `None`, one returns that hash, more than one raises `AliasAmbiguousError`.
 18a. `INVERTIBLE_ALIAS_SOURCES` is declared and excludes exactly `ncbi_taxon` and `arc_analysis`; `resolve()` refuses a non-invertible source with a distinct error naming `aliases()`, and that refusal is neither `AliasAmbiguousError` nor `None`, and fires even when only one row currently matches.
@@ -1927,10 +2184,11 @@ Albert's and his to state. **Until it has run, this PRD is `continue`, not
 27. `kbu clearinghouse resolve` exits 0 for a valid lookup with no current mapping, and exits 1 for `AliasAmbiguousError` and for an invalid `--alias-source`.
 28. An unpassed `--alias-source` is not collapsed to `[]`, and repeated values reach the capability as a list.
 29. `SCHEMA_VERSION` is still 1, and every pre-existing `health` envelope key is still present with `alias_integrity` added.
-30. `clearinghouse_manifest.KINDS` includes `"alias"`, and a preset declaring a list-shaped `[[source.alias]]` block plans successfully and yields an `entity_alias` `TablePlan`.
+30. `clearinghouse_manifest.KINDS` includes `"alias"`, and a preset declaring a list-shaped `[[source.alias]]` block plans successfully and yields a `<entity_type>_alias` `TablePlan` validated against `schema.column_names(entity_type, "alias")` with no alias-specific special case.
 31. The manifest refuses, at PLAN time, an unknown `alias_source`, an unparseable `alias_id` derivation, a mapping of any sharder-filled column including `observation`, and `"alias"` declared in `kinds` with no block.
 32. Planned alias rows carry `observation = "present"` unconditionally, and a preset cannot declare `observation`.
 33. A null-producing `@concat` in an alias block drops the row and emits no `alias_id` containing the literal string `"None"`.
+33a. OP-C5 creates five tables and one view, and its dry run reports `action: create` for exactly those five and `already present` for the pre-existing sixteen.
 34. The operator runbook contains an `OP-C5` section after `OP-C4`, following `OP-C1`'s dry-run / real-run / acceptance structure, whose acceptance step reads the live columns AND the live partition spec and states why existence alone is insufficient.
 35. The operator runbook states that rule A is the clearinghouse identity and rule B is a KBDL-local artifact id, that `kbaseincubator.fitness`'s `assembly_hash` columns declare neither rule in their own documentation, and that KBDL's `genome_id` is literally `fasta_object_id[:16]`.
 36. The operator runbook states the corrected `obj://` pointer rule: that removing the scheme recovers `alias_id` only for a standalone `obj://<fasta_object_id>`, that `obj://<archive_object_id>#<entry_name>` yields an archive-and-member locator and NOT the member's FASTA hash, and that an `archive_object_id` must never be labelled `kbdl_fasta_object`.

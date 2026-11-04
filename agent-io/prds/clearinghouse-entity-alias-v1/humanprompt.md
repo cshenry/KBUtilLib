@@ -3,11 +3,14 @@
 A genome is known by eight different names, and the clearinghouse can currently
 record none of them.
 
-This PRD adds ONE table, `kbaseincubator.clearinghouse.entity_alias`, and the
-accessors, validators, write boundary, read surface, CLI verbs and health report
-that make it usable. It is generic over entity type, carries a closed
-`alias_source` vocabulary, and answers the question the whole system cannot
-answer today: **"I have a KBDL object id -- what is this?"**
+This PRD adds **FIVE tables, one per entity type** -- `genome_alias`,
+`protein_alias`, `gene_alias`, `function_alias`, `ontology_term_alias` -- plus an
+`all_alias` view, and the accessors, validators, write boundary, read surface, CLI
+verbs and health report that make them usable. `alias` becomes the fourth KIND
+alongside `entity`, `content` and `result`, taking the clearinghouse from sixteen
+tables to twenty-one. They carry a closed `alias_source` vocabulary and answer the
+question the whole system cannot answer today: **"I have a KBDL object id -- what
+is this?"**
 
 ## Why now, and not later
 
@@ -34,7 +37,31 @@ table has to live in code: the write verb cannot be `register()`, the manifest
 needs a fourth block kind, and the health report must NOT inherit the
 parameter-set registry's fail-the-build posture.
 
-## Two things to look at first
+## Round 1 absorbed your reversal
+
+**You were right and my precedent was wrong.** You asked for the alias table to be
+broken up by entity type; it now is, as five per-type tables with `alias` as a
+fourth kind. I had reasoned from `parameter_set`, but that table is keyed by a hash
+and holds one row per distinct parameter set -- it is not entity-keyed, which is
+exactly why it is the lone non-entity-typed table. An alias table IS entity-keyed,
+so `<type>_entity` was always the right analogue.
+
+I also checked the one thing that might have saved a shared table, and it does not:
+four of the ten alias sources (`arc_record`, `arc_analysis`, `kbase_ws_ref`,
+`ncbi_taxon`) are entity-type-agnostic, so partitioning on `alias_source` would
+still mix genome and protein rows in those four partitions. Your performance
+argument holds even with the partitioning in place.
+
+**The split made three things simpler, not harder:** the bespoke alias-only constant
+and accessors are deleted (`table_name`/`table_columns` serve them now), the
+manifest block validates through the standard accessor with no special case, and the
+orphan report becomes a straight five-pair join. It also **collapsed Q3's original
+argument** -- `register()` can now name the table -- so that entry is rewritten to
+stand on the two narrower reasons that survive, with the collapse recorded rather
+than hidden. One new entry, **Q1a**, decides which alias sources are legal for which
+entity type; that only became an answerable question once the tables were split.
+
+## Two other things to look at
 
 **1. Q2a is the ONE place this PRD goes beyond your settled design.** Section 6
 specifies six columns and says nothing about retraction. This PRD has **seven**: it

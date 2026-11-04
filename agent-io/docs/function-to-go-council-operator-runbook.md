@@ -553,6 +553,182 @@ eventually" is how a divergent path survives a year.)
 
 ---
 
+## Anthropic API seats (`kind: anthropic`)
+
+For an operator holding an Anthropic API key and a fixed API credit. The
+commented example in `src/kbutillib/domains/ai/council/default_config.yaml`
+shows the shape; copy it into the `ai_council` section of
+`~/.kbutillib/config.yaml` and fill in the rates per minute.
+
+### Install and credential
+
+```bash
+pip install 'kbutillib[anthropic]'
+```
+
+The SDK requires **Python >= 3.10**. On 3.9 the extra installs nothing, and
+constructing the endpoint fails with a message naming both the extra and the
+Python floor.
+
+The key travels **only** through the variable an endpoint's `api_key_env`
+names (default `ANTHROPIC_API_KEY`). Don't put it in a config file (a
+credential-shaped `api_key:` value is refused at load), in `extra_body`, or in
+a header. `council-run`
+resolves it before spending and refuses with check `anthropic_api_key` when
+it is unset. Without that refusal, a run with no key fails quietly: the seats
+report unavailable and the calls park.
+
+### One alias per rate-limit bucket
+
+`account` names the **rate-limit bucket**, not the wallet. Anthropic enforces
+requests/min and input/output tokens/min per model-class bucket. Opus 5,
+Sonnet 5 and Haiku 4.5 each hold a separate allowance. Opus 4.8/4.7/4.6/4.5
+share one, and Sonnet 4.6/4.5 share another.
+
+The same `account` key groups the engine's semaphore and rate pacer and also
+buckets the dollar quote. Naming it after the wallet throttles every model to
+the slowest one's rate. Naming it per model splits one shared allowance into
+independent pools, which is how the 2026-10-21 MAG pilot errored 427 of 500
+items. Config load therefore refuses:
+
+- an `account` that is not the bucket name;
+- one endpoint whose models span two buckets;
+- two endpoints that share an account across buckets;
+- a model whose canonical identity has no bucket entry. Add a top-level
+  `rate_limit_buckets: {<canonical>: <bucket>}` for a new model.
+
+`billing_wallet` is required and names the payer. Give it the same value on
+every alias paid from the same credit.
+
+**Neither limit you can configure expresses what binds this provider.**
+Anthropic enforces three limits per bucket: requests per minute (RPM), input
+tokens per minute (ITPM) and output tokens per minute (OTPM). For a council's
+large prompts, the **token** limits bind.
+
+- `max_requests_per_minute` paces requests. Set it from the console's limits
+  page, or measure it as described below.
+- `max_concurrency` bounds parallelism. It defaults to 4.
+
+Neither can express a tokens-per-minute ceiling, so correct values for both
+still don't guarantee you stay inside the token limits. What covers the gap is
+the endpoint halt after a sustained run of 429s: 5 within 60 seconds
+(`RATE_LIMIT_HALT_AFTER`). That is detection after the fact, not prevention.
+A token-aware pacer is out of scope, and needs measured prompt and output
+sizes first.
+
+Limits belong to the organisation/workspace, not the API key: several keys can
+share one quota. `account` = bucket name is correct only within one
+organisation, and multi-organisation use is a non-goal.
+
+`anthropic` seats run as singles. There is no `VERIFIED_OUTPUT_CAPS` entry, so
+no batching, and each item's prompt is sent in full.
+
+### The budget does NOT protect the wallet as a whole
+
+`max_total_tokens` is **per endpoint**. Three bucket aliases have three
+budgets, and nothing adds them up, so a single fixed wallet can't be expressed
+as one enforced ceiling today. A halt is also per endpoint. Fence the credit
+with a console spend limit as well, and read the three money signals below.
+
+### Seats: thinking, sampling, independence
+
+- `max_output_tokens` has to cover **thinking plus the answer**. Thinking is
+  on by default and adaptive on the current models, and its tokens are billed
+  as output. The seat default of 4000 is often too small, and a truncated
+  answer (`stop_reason: max_tokens`) is a failed call, not a vote. `effort`
+  can be passed in a model's `params`.
+- **No sampling parameter is sent by default.** The current Claude models
+  answer `temperature`, `top_p` and `top_k` with HTTP 400. On a model that
+  accepts them, set one explicitly in `params`. The provider default is 1.0,
+  not 0.
+- **Which extras pass through.** `thinking`, `effort` and
+  `output_config.format` aren't requested by default, but a model's `params`
+  may set them, and they are sent as given. Only `cache_control` is refused,
+  at any depth, because cache-billed tokens would make the dollar figure
+  disagree with the token figure. If you set `output_config.format`, those
+  results still say `schema_enforced: false`, which is then inaccurate.
+  `model`, `messages` and `max_tokens` can't be overridden, and `stream` and
+  `tools` are refused.
+- ARGO already serves Sonnet 5 and Opus 5 under the **same canonical
+  identity**, so `Roster._check_independence` refuses to seat both routes for
+  one model. That refusal is deliberate: it stops one model counting as two
+  votes. The models this wallet adds are Haiku 4.5 and Sonnet 4.6.
+- This credit is a **second wallet at the same price, not a discount**. ARGO
+  was measured billing Claude within 1.5% of vendor list price on the
+  2026-10-20 bill. What the credit buys is independence from the ARGO cap.
+
+### Rates for the quote
+
+Rates may be keyed per model as `"<account>/<canonical-model>"`, falling back
+to `"<account>"`. Every rate needs a `provenance`. If some models on an
+account have rates and others don't, the account is reported
+`partially_priced`. It is not a total, and the CLI names the missing models.
+The balance-delta block has one row per `billing_wallet`. Don't divide one
+wallet delta into per-model rates: one equation can't solve for several
+unknowns. Claude Haiku 5.5's input pricing is tiered by prompt size, which a
+single `input_per_mtok` can't express.
+
+### Verify for free before committing money
+
+Offline, no request sent: the backend's own preflight reports `ready` when the
+key resolves and `refused` when it doesn't. It reports the **name** of the
+variable, never the value.
+
+```bash
+python -c "import asyncio; from kbutillib.domains.ai import llm; print(asyncio.run(llm.preflight('anthropic', {'api_key_env': 'ANTHROPIC_API_KEY'})))"
+```
+
+Online but free (`GET /v1/models` spends nothing):
+
+```bash
+kbu council models list --endpoint anthropic-haiku
+kbu council doctor --profile <profile>
+```
+
+`doctor` judges a non-CLI seat by whether the endpoint's model listing names
+the seat's `served_name`. **Unverified:** whether the live listing includes
+the short ids (`claude-haiku-4-5`) or only dated snapshot ids. If `doctor`
+reports an Anthropic seat unavailable while `models list` shows a dated form
+of the same model, that is the cause, not a dead endpoint. `GET /v1/models`
+is also the only legitimate source for a new model id.
+
+### Measure the real rate limits
+
+Make **one** small call, for example with
+`scripts/council/anthropic_acceptance_rehearsal.py`, which prints the header.
+Then read `anthropic-ratelimit-requests-limit`,
+`anthropic-ratelimit-input-tokens-limit` and
+`anthropic-ratelimit-output-tokens-limit` off the response and compare them
+with the endpoint's configured `max_requests_per_minute`.
+
+Two caveats:
+
+- The headers report the **most restrictive limit currently in effect**. A
+  workspace limit can shadow the model's own limit.
+- Remaining counts are rounded to the nearest thousand.
+
+Treat the headers as a sanity check, not a control input; the backend records
+them and never paces on them. They are also process-local, kept on the
+backend instance and logged only at debug level.
+
+### The three money signals
+
+They look alike and behave differently:
+
+| Signal | Meaning | What the council does |
+|---|---|---|
+| HTTP 429 with `retry-after`, no special code | Ordinary rate limit | Retryable, flagged `rate_limited`. A **sustained** run of them halts the endpoint. |
+| HTTP 429 whose error carries `enforced_spend_limit_reached` | **Organisation monthly spend cap** | `quota_exhausted`, halts the endpoint **immediately**. Retrying cannot succeed. |
+| HTTP 400 whose message begins `You have reached your specified API usage limits` | **Operator-set spend limit** (console) | `quota_exhausted`, halts the endpoint **immediately**. The halt message quotes the matched text. |
+
+The third is the most likely way a fixed credit runs out: fencing a credit
+with an equal console limit is the obvious thing to do. If Anthropic changes
+that wording, the symptom is a 400 reported as `invalid_output` where a halt
+used to be. The SDK's own retries are disabled, so each attempt is exactly
+one request.
+
+---
+
 ## If something goes wrong
 
 | Symptom | Where to look |

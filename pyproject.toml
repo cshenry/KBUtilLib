@@ -169,9 +169,16 @@ prott5 = ["torch", "transformers", "sentencepiece"]
 # nothing this module calls needs them, so they are intentionally omitted.
 community = ["beautifulsoup4", "lxml"]
 # Function -> GO mapping (kbu.ontology_mapping.function_to_go). The vendored
-# OntoMap go-text models are scikit-learn pickles; 1.9.0 is the version they
-# load cleanly under (no InconsistentVersionWarning), so it is pinned exactly.
-ontology_mapping = ["numpy >=1.24", "scipy >=1.10", "scikit-learn ==1.9.0", "joblib >=1.3"]
+# OntoMap go-text models are scikit-learn pickles built with 1.9.0. That
+# version was once pinned exactly (`==1.9.0`), but 1.9.0 requires Python >=
+# 3.11 while this project supports >= 3.9, so uv -- which resolves for every
+# supported Python at once -- could not resolve the project at all, and every
+# `uv sync`/`uv run` CI job (mypy, coverage) failed. The pin is deliberately
+# RELAXED (Chris's call, 2026-11-04): any scikit-learn installs, and loading
+# the pickles under a version other than 1.9.0 may emit sklearn's
+# InconsistentVersionWarning. Install scikit-learn==1.9.0 yourself (Python >=
+# 3.11) for the exact build-time environment.
+ontology_mapping = ["numpy >=1.24", "scipy >=1.10", "scikit-learn", "joblib >=1.3"]
 # Reaction-similarity module (kbu.rxnsim). Imported lazily, so the package
 # imports fine without these; install with: pip install KBUtilLib[reaction_similarity]
 reaction_similarity = [

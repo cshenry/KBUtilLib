@@ -443,9 +443,10 @@ class TestParameterSetRegistry:
     def test_table_name_constant_is_parameter_set(self):
         assert PARAMETER_SET_TABLE == "parameter_set"
 
-    def test_registry_config_is_present_and_last(self):
+    def test_registry_config_is_present_and_precedes_the_alias_tables(self):
+        # Order: 15 entity/content/result, the registry, then 5 alias tables.
         configs = table_configs()
-        assert configs[-1]["name"] == PARAMETER_SET_TABLE
+        assert configs[15]["name"] == PARAMETER_SET_TABLE
 
     def test_registry_declares_exactly_the_four_columns_in_order(self):
         config = _configs_by_name()[PARAMETER_SET_TABLE]

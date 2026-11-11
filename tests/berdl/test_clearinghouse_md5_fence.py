@@ -37,6 +37,13 @@ _SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 _BERDL_DIR = _SRC_ROOT / "kbutillib" / "domains" / "kbase" / "berdl"
 
 
+# clearinghouse_schema.py deliberately NAMES these two strings: they are
+# members of the closed ALIAS_SOURCES vocabulary, i.e. labels for an alias
+# row that points AT a foreign md5, never an entity hash. test_alias_md5_names_
+# are_only_alias_source_vocabulary below keeps the exemption that narrow.
+_ALIAS_VOCABULARY_FILES = {"clearinghouse_schema.py"}
+
+
 def _kb_genome_utils_md5() -> str:
     """kb_genome_utils.load_genome_from_local_files: md5 of sorted contig
     sequences joined with the EMPTY string."""
@@ -94,6 +101,8 @@ def test_renamed_md5_symbols_absent_under_berdl():
     assert _BERDL_DIR.is_dir(), f"berdl dir not found at {_BERDL_DIR}"
     offenders: list[str] = []
     for py in _BERDL_DIR.rglob("*.py"):
+        if py.name in _ALIAS_VOCABULARY_FILES:
+            continue
         text = py.read_text(encoding="utf-8")
         for symbol in ("kbase_assembly_md5", "bvbrc_genome_md5"):
             if symbol in text:
@@ -102,3 +111,17 @@ def test_renamed_md5_symbols_absent_under_berdl():
         "renamed foreign-system md5 symbols leaked into the clearinghouse "
         f"tree: {offenders!r}"
     )
+
+
+def test_alias_md5_names_are_only_alias_source_vocabulary():
+    """The exemption above stays narrow: in clearinghouse_schema.py the md5
+    names appear only as ALIAS_SOURCES labels / their patterns, and an md5 is
+    still refused as an entity_hash."""
+    from kbutillib.domains.kbase.berdl import clearinghouse_schema as schema
+
+    for symbol in ("kbase_assembly_md5", "bvbrc_genome_md5"):
+        assert symbol in schema.ALIAS_SOURCES
+        assert symbol in schema.ALIAS_SOURCE_PATTERNS
+    for label in sorted(_MD5_SITES):
+        with pytest.raises(ValueError):
+            schema.validate_alias("genome", _MD5_SITES[label](), "arc_record", "x")

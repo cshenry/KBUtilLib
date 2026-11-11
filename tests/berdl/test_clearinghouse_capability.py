@@ -500,7 +500,7 @@ def test_criterion_g_stats_uses_count_star_not_row_count_field():
     """
     real_counts = {}
     for i, (kind, etype) in enumerate(
-        [(k, e) for k in ("entity", "content", "result") for e in ENTITY_TYPES]
+        [(k, e) for k in ("entity", "content", "result", "alias") for e in ENTITY_TYPES]
     ):
         real_counts[table_name(etype, kind)] = 100 + i  # never 5000
 
@@ -521,7 +521,7 @@ def test_criterion_g_stats_uses_count_star_not_row_count_field():
     assert reported == real_counts
     # The sentinel page-size never leaks into any reported row_count.
     assert _SENTINEL_ROW_COUNT not in reported.values()
-    assert len(report["tables"]) == 15
+    assert len(report["tables"]) == 20
 
 
 def test_stats_include_files_offpod_warns_and_omits_file_fields():
@@ -560,17 +560,19 @@ def test_stats_include_files_inpod_reads_files_metadata():
 # --------------------------------------------------------------------------
 
 
-def test_tables_lists_all_fifteen_with_partition_spec():
+def test_tables_lists_all_twenty_with_partition_spec():
     def responder(call):
         return [{"row_count": 1}]
 
     fake = _FakeCapability(responder=responder)
     cap = ClearinghouseCapability(fake)
     listing = cap.tables()
-    assert len(listing) == 15
+    assert len(listing) == 20
     names = {t["name"] for t in listing}
     assert names == {
-        table_name(e, k) for k in ("entity", "content", "result") for e in ENTITY_TYPES
+        table_name(e, k)
+        for k in ("entity", "content", "result", "alias")
+        for e in ENTITY_TYPES
     }
     # result tables partition by source per the config.
     result_entries = [t for t in listing if t["kind"] == "result"]

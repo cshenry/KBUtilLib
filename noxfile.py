@@ -174,7 +174,10 @@ def coverage(session: nox.Session) -> None:
     args = session.posargs or ["report"]
 
     # The dev extra, not a bare `-e .` -- the suite needs pytest-cov and pandas.
-    session.install("-e", ".[dev]")
+    # Plus `council` (SQLAlchemy): without it every council test module that
+    # imports the store or quote.py fails at COLLECTION and pytest stops
+    # before running anything -- the same fix .github/workflows/ci.yml carries.
+    session.install("-e", ".[dev,council]")
 
     # Only run the suite when we are not merely post-processing existing
     # coverage data (the `-- xml -i` invocation reads the .coverage file the

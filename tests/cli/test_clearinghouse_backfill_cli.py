@@ -1008,8 +1008,9 @@ def test_status_emits_one_envelope_merging_all_three_records(
     assert data["units"][0]["rows_sharded"] > 0
     # ... and the ledger.
     assert data["units"][0]["rows_ingested"] == data["units"][0]["rows_sharded"]
-    # ALL SIXTEEN tables, the parameter-set registry included.
-    assert len(data["tables"]) == 16
+    # ALL TWENTY-ONE tables, the parameter-set registry and the five alias
+    # tables included.
+    assert len(data["tables"]) == 21
     by_name = {row["name"]: row for row in data["tables"]}
     assert set(by_name) == {c["name"] for c in schema.table_configs()}
     assert by_name[schema.PARAMETER_SET_TABLE]["rows_ingested"] >= 1

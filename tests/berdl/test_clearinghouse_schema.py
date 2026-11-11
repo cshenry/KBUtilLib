@@ -20,8 +20,15 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     ALL_PARITY_ROWS,
     PARITY_CASES,
 )
+import kbutillib
+from kbutillib.domains.kbase.berdl import clearinghouse_schema as _schema_module
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    ALIAS_OBSERVATIONS,
+    ALIAS_SOURCE_PATTERNS,
+    ALIAS_SOURCES,
+    ALIAS_SOURCES_BY_ENTITY_TYPE,
     ENTITY_TYPES,
+    INVERTIBLE_ALIAS_SOURCES,
     NAMESPACE,
     PARAMETER_SET_TABLE,
     TENANT,
@@ -34,6 +41,7 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     table_configs,
     table_name,
     union_view_sql,
+    validate_alias,
 )
 
 #: Columns every ``<type>_entity`` table declares (GENERIC across types).
@@ -148,7 +156,7 @@ class TestTableName:
 
 
 class TestTableConfigs:
-    def test_returns_exactly_sixteen_configs_with_the_expected_names(self):
+    def test_returns_exactly_twenty_one_configs_with_the_expected_names(self):
         configs = table_configs()
         names = [table["name"] for table in configs]
         expected = (
@@ -156,13 +164,14 @@ class TestTableConfigs:
             + [f"{t}_content" for t in ENTITY_TYPES]
             + [f"{t}_result" for t in ENTITY_TYPES]
             + [PARAMETER_SET_TABLE]
+            + [f"{t}_alias" for t in ENTITY_TYPES]
         )
         # Documented order: all five entity, then all five content, then all
         # five result, each in ENTITY_TYPES order, then the parameter-set
-        # registry last.
+        # registry, then all five alias tables last.
         assert names == expected
-        assert len(configs) == 16
-        assert len(set(names)) == 16
+        assert len(configs) == 21
+        assert len(set(names)) == 21
 
     def test_every_per_type_name_equals_table_name_resolver(self):
         # Generator and resolver must not drift: each per-entity-type
@@ -171,7 +180,7 @@ class TestTableConfigs:
         # entity-typed, so table_name() cannot and must not name it (see
         # TestParameterSetRegistry).
         expected = set()
-        for kind in ("entity", "content", "result"):
+        for kind in ("entity", "content", "result", "alias"):
             for entity_type in ENTITY_TYPES:
                 expected.add(table_name(entity_type, kind))
         actual = {
@@ -296,6 +305,18 @@ class TestTableConfigs:
         # A genome stores a POINTER to its FASTA, never the sequence inlined.
         assert "sequence" not in genome
 
+    def test_alias_tables_are_last_and_partitioned_on_alias_source(self):
+        configs = table_configs()
+        for config, entity_type in zip(configs[-5:], ENTITY_TYPES):
+            assert config["name"] == f"{entity_type}_alias"
+            assert config["partition_by"] == "alias_source"
+        partitioned = {
+            name
+            for name, cfg in _configs_by_name().items()
+            if cfg.get("partition_by") == "alias_source"
+        }
+        assert partitioned == {f"{t}_alias" for t in ENTITY_TYPES}
+
     def test_standardizer_version_partitioning_on_exactly_four_tables(self):
         configs = _configs_by_name()
         partitioned = {
@@ -407,6 +428,18 @@ class TestParameterSetRegistry:
     query surface.
     """
 
+    def test_registry_is_the_only_non_entity_typed_table(self):
+        for config in table_configs():
+            if config["name"] == PARAMETER_SET_TABLE:
+                continue
+            etype, _, kind = config["name"].partition("_")
+            # type-first names: every other table resolves through table_name().
+            assert any(
+                config["name"] == table_name(t, k)
+                for t in ENTITY_TYPES
+                for k in ("entity", "content", "result", "alias")
+            ), config["name"]
+
     def test_table_name_constant_is_parameter_set(self):
         assert PARAMETER_SET_TABLE == "parameter_set"
 
@@ -448,7 +481,7 @@ class TestParameterSetRegistry:
             table_name("protein", PARAMETER_SET_TABLE)
 
     def test_registry_appears_in_no_union_view(self):
-        for kind in ("all_entity", "all_content", "all_result"):
+        for kind in ("all_entity", "all_content", "all_result", "all_alias"):
             sql = union_view_sql(kind, fqn_prefix=f"{TENANT}.{NAMESPACE}")
             assert PARAMETER_SET_TABLE not in sql, kind
             assert "canonical_json" not in sql, kind
@@ -719,13 +752,13 @@ class TestUnionViewSql:
             assert table_name(entity_type, "result") in sql
 
     def test_each_view_has_five_union_branches(self):
-        for kind in ("all_entity", "all_content", "all_result"):
+        for kind in ("all_entity", "all_content", "all_result", "all_alias"):
             sql = self._sql(kind)
             # Five per-type tables joined by four UNION ALL separators.
             assert sql.count("UNION ALL") == len(ENTITY_TYPES) - 1
 
     def test_view_ddl_is_create_or_replace_view(self):
-        for kind in ("all_entity", "all_content", "all_result"):
+        for kind in ("all_entity", "all_content", "all_result", "all_alias"):
             sql = self._sql(kind)
             assert "CREATE OR REPLACE VIEW" in sql
             # The view name itself is backtick-quoted, per _quote_fqn.
@@ -768,3 +801,232 @@ class TestUnionViewSql:
         # "entity" is a table kind, not a view kind -- must be rejected.
         with pytest.raises(ValueError):
             union_view_sql("entity", fqn_prefix=self._FQN_PREFIX)
+
+
+_FQN = f"{TENANT}.{NAMESPACE}"
+_HASH = "ab" * 32
+
+#: The alias DDL, in order: entity_hash FIRST, entity_type SECOND.
+_ALIAS_COLUMN_ORDER = (
+    "entity_hash",
+    "entity_type",
+    "alias_source",
+    "alias_id",
+    "observation",
+    "observed_at",
+    "ingest_batch_id",
+)
+
+
+class TestImportPath:
+    def test_kbutillib_is_imported_from_the_worktree_under_test(self):
+        # Evidence for the work-record: the run must not silently import the
+        # wip-parked Dropbox tree via the editable install.
+        print("kbutillib.__file__ =", kbutillib.__file__)
+        assert ".maestro/worktrees/schema-entity-alias-table" in kbutillib.__file__
+
+
+class TestAliasKind:
+    def test_kinds_and_view_kinds(self):
+        assert _schema_module._KINDS == ("entity", "content", "result", "alias")
+        assert _schema_module._VIEW_KINDS == (
+            "all_entity",
+            "all_content",
+            "all_result",
+            "all_alias",
+        )
+
+    def test_table_name_resolves_alias_for_all_five_types(self):
+        for t in ENTITY_TYPES:
+            assert table_name(t, "alias") == f"{t}_alias"
+
+    def test_table_columns_is_generic_seven_columns_in_ddl_order(self):
+        for t in ENTITY_TYPES:
+            cols = table_columns(t, "alias")
+            assert tuple(n for n, _ in cols) == _ALIAS_COLUMN_ORDER
+            assert dict(cols)["observed_at"] == "TIMESTAMP"
+            assert column_names(t, "alias") == _ALIAS_COLUMN_ORDER
+            assert cols is _schema_module._ALIAS_COLUMNS
+        names = _ALIAS_COLUMN_ORDER
+        assert names.index("observation") == names.index("alias_id") + 1
+        assert names.index("observation") + 1 == names.index("observed_at")
+
+    def test_alias_config_schema_sql_is_rendered_from_the_columns(self):
+        configs = _configs_by_name()
+        for t in ENTITY_TYPES:
+            assert configs[f"{t}_alias"]["schema_sql"] == _schema_sql_from_columns(
+                table_columns(t, "alias")
+            )
+
+    def test_removed_round0_symbols_do_not_exist(self):
+        for name in (
+            "ENTITY_ALIAS_TABLE",
+            "entity_alias_columns",
+            "entity_alias_column_names",
+        ):
+            assert not hasattr(_schema_module, name), name
+
+    def test_entity_alias_is_not_a_table_name(self):
+        with pytest.raises(ValueError):
+            table_name("entity_alias", "entity")
+        with pytest.raises(ValueError):
+            table_name("genome", "entity_alias")
+
+    def test_all_alias_view_unions_exactly_the_five_alias_tables(self):
+        sql = union_view_sql("all_alias", fqn_prefix=_FQN)
+        assert "`all_alias`" in sql
+        assert sql.count("UNION ALL") == 4
+        for t in ENTITY_TYPES:
+            assert f"`{t}_alias`" in sql
+        for kind in ("entity", "content", "result"):
+            for t in ENTITY_TYPES:
+                assert f"`{t}_{kind}`" not in sql
+        assert PARAMETER_SET_TABLE not in sql
+
+    def test_all_alias_view_selects_entity_type(self):
+        sql = union_view_sql("all_alias", fqn_prefix=_FQN)
+        assert sql.count("`entity_type`") == len(ENTITY_TYPES)
+        for col in _ALIAS_COLUMN_ORDER:
+            assert f"`{col}`" in sql
+
+
+class TestAliasVocabularies:
+    def test_alias_sources_is_the_ten_in_order(self):
+        assert ALIAS_SOURCES == (
+            "kbdl_object",
+            "kbdl_fasta_object",
+            "ncbi_assembly",
+            "gtdb_accession",
+            "ncbi_taxon",
+            "kbase_assembly_md5",
+            "bvbrc_genome_md5",
+            "arc_record",
+            "arc_analysis",
+            "kbase_ws_ref",
+        )
+
+    def test_no_kbdl_genome_id_source(self):
+        # Deliberate absence: genome_id is fasta_object_id[:16], derivable.
+        assert "kbdl_genome_id" not in ALIAS_SOURCES
+
+    def test_observations_closed_vocabulary(self):
+        assert ALIAS_OBSERVATIONS == ("present", "withdrawn")
+
+    def test_patterns_have_exactly_four_entries(self):
+        assert set(ALIAS_SOURCE_PATTERNS) == {
+            "kbdl_fasta_object",
+            "kbase_assembly_md5",
+            "bvbrc_genome_md5",
+            "ncbi_taxon",
+        }
+        assert all(hasattr(p, "match") for p in ALIAS_SOURCE_PATTERNS.values())
+
+    def test_invertible_is_a_strict_subset_excluding_exactly_two(self):
+        assert set(INVERTIBLE_ALIAS_SOURCES) < set(ALIAS_SOURCES)
+        assert set(ALIAS_SOURCES) - set(INVERTIBLE_ALIAS_SOURCES) == {
+            "ncbi_taxon",
+            "arc_analysis",
+        }
+        for member in INVERTIBLE_ALIAS_SOURCES:
+            assert member in ALIAS_SOURCES
+
+    def test_sources_by_entity_type(self):
+        assert set(ALIAS_SOURCES_BY_ENTITY_TYPE) == set(ENTITY_TYPES)
+        assert set(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == set(ALIAS_SOURCES)
+        assert len(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == 10
+        agnostic = {"arc_record", "arc_analysis", "kbase_ws_ref", "ncbi_taxon"}
+        for t in ("protein", "gene", "function", "ontology_term"):
+            assert set(ALIAS_SOURCES_BY_ENTITY_TYPE[t]) == agnostic
+
+
+class TestValidateAlias:
+    def _ok(self, source="ncbi_assembly", alias_id="GCF_000001405.40", **kw):
+        return validate_alias("genome", _HASH, source, alias_id, **kw)
+
+    def test_returns_canonical_five_tuple_and_defaults_to_present(self):
+        assert self._ok() == (
+            "genome", _HASH, "ncbi_assembly", "GCF_000001405.40", "present"
+        )
+
+    def test_explicit_withdrawn_is_accepted(self):
+        assert self._ok(observation="withdrawn")[4] == "withdrawn"
+
+    def test_retracted_is_refused_and_message_names_both_values(self):
+        with pytest.raises(ValueError) as exc:
+            self._ok(observation="retracted")
+        assert "present" in str(exc.value) and "withdrawn" in str(exc.value)
+
+    def test_unknown_entity_type_refused(self):
+        with pytest.raises(ValueError):
+            validate_alias("bogus", _HASH, "arc_record", "x")
+
+    def test_entity_hash_goes_through_the_64_hex_contract(self):
+        with pytest.raises(ValueError):
+            validate_alias("genome", "abc", "arc_record", "x")
+        upper = validate_alias("genome", _HASH.upper(), "arc_record", "x")
+        assert upper[1] == _HASH
+
+    def test_misspelled_source_refused_and_names_legal_values(self):
+        with pytest.raises(ValueError) as exc:
+            self._ok(source="kbdl_genome")
+        for source in ALIAS_SOURCES:
+            assert source in str(exc.value)
+
+    def test_kbdl_genome_id_refused(self):
+        with pytest.raises(ValueError):
+            self._ok(source="kbdl_genome_id")
+
+    def test_ncbi_assembly_refused_on_protein_and_names_legal_set(self):
+        with pytest.raises(ValueError) as exc:
+            validate_alias("protein", _HASH, "ncbi_assembly", "GCF_1")
+        assert "arc_record" in str(exc.value)
+        assert "protein" in str(exc.value)
+
+    def test_arc_record_accepted_on_protein(self):
+        out = validate_alias("protein", _HASH, "arc_record", "rec-1")
+        assert out[0] == "protein" and out[2] == "arc_record"
+
+    @pytest.mark.parametrize("bad", ["a" * 63, "a" * 65, "A" * 64, "g" * 64])
+    def test_fasta_object_near_misses_refused(self, bad):
+        with pytest.raises(ValueError):
+            self._ok(source="kbdl_fasta_object", alias_id=bad)
+
+    def test_fasta_object_valid_accepted(self):
+        assert self._ok(source="kbdl_fasta_object", alias_id="a" * 64)[3] == "a" * 64
+
+    @pytest.mark.parametrize("source", ["kbase_assembly_md5", "bvbrc_genome_md5"])
+    @pytest.mark.parametrize("bad", ["a" * 31, "a" * 33, "A" * 32])
+    def test_md5_near_misses_refused(self, source, bad):
+        with pytest.raises(ValueError):
+            self._ok(source=source, alias_id=bad)
+
+    @pytest.mark.parametrize("source", ["kbase_assembly_md5", "bvbrc_genome_md5"])
+    def test_md5_valid_accepted(self, source):
+        assert self._ok(source=source, alias_id="0f" * 16)[3] == "0f" * 16
+
+    @pytest.mark.parametrize("bad", ["0", "01", "-1", "1.5", "abc"])
+    def test_taxon_near_misses_refused(self, bad):
+        with pytest.raises(ValueError):
+            self._ok(source="ncbi_taxon", alias_id=bad)
+
+    def test_taxon_valid_accepted(self):
+        assert self._ok(source="ncbi_taxon", alias_id="2157")[3] == "2157"
+
+    @pytest.mark.parametrize(
+        "source", ["kbdl_object", "ncbi_assembly", "gtdb_accession", "arc_record",
+                   "arc_analysis", "kbase_ws_ref"],
+    )
+    def test_opaque_sources_accept_a_string_no_pattern_would_match(self, source):
+        weird = "!! not-hex, not-numeric \u00e9 !!"
+        assert source not in ALIAS_SOURCE_PATTERNS
+        assert self._ok(source=source, alias_id=weird)[3] == weird
+
+    @pytest.mark.parametrize("bad", ["", "   ", None])
+    def test_empty_blank_and_none_alias_id_refused(self, bad):
+        with pytest.raises(ValueError):
+            self._ok(alias_id=bad)
+
+    def test_alias_id_round_trips_byte_identical_with_whitespace(self):
+        out = self._ok(alias_id=" GCF_1 ")
+        assert out[3] == " GCF_1 "
+        assert len(out[3]) == 7

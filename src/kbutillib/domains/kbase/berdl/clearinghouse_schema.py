@@ -5,8 +5,12 @@ This defines the Apache Iceberg tables of the ``kbaseincubator`` tenant's
 config dicts shaped for
 :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
 (``tables=table_configs()``), plus a pair of hash-encoding helpers.
-:func:`table_configs` emits the fifteen per-entity-type tables plus the
-parameter-set registry -- sixteen configs in total.
+:func:`table_configs` emits the fifteen entity/content/result tables, the
+parameter-set registry, and the five per-type ``<type>_alias`` tables --
+twenty-one configs in total. ``alias`` is the FOURTH kind: it maps external
+identifiers (assembly accessions, md5s, workspace refs, ...) to an
+``entity_hash``, append-only, one table per entity type so genome-alias reads
+are never dragged to protein scale.
 
 The fifteen per-entity-type tables are ``<entity_type>_<kind>``
 (type-first) for each of the
@@ -33,7 +37,7 @@ since 10M genomes inlined would be ~50TB; and so on).
 The public :func:`table_name` resolver is the ONLY place a per-entity-type
 clearinghouse table name is constructed -- ``f"{entity_type}_{kind}"`` --
 so the config generator and every caller share one definition and cannot
-drift. The sixteenth table is the one exception, and for a reason:
+drift. The parameter-set registry is the one exception, and for a reason:
 :data:`PARAMETER_SET_TABLE` is a module constant rather than a
 ``table_name()`` call because the registry is NOT entity-typed, so there
 is no ``(entity_type, kind)`` pair that could name it.
@@ -155,6 +159,7 @@ at runtime. Never emit one here.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Sequence
 
 #: The BERDL tenant this namespace lives under.
@@ -193,12 +198,12 @@ SOURCE_GENOME_CLEARHOUSE_NAMESPACE = f"{TENANT}.genome_clearhouse"
 #: emitted by :func:`table_configs`.
 ENTITY_TYPES = ("genome", "protein", "gene", "function", "ontology_term")
 
-#: The three physical kinds a clearinghouse table can be.
-_KINDS = ("entity", "content", "result")
+#: The four physical kinds a clearinghouse table can be.
+_KINDS = ("entity", "content", "result", "alias")
 
-#: The three cross-type UNION ALL views :func:`union_view_sql` can emit, one
+#: The four cross-type UNION ALL views :func:`union_view_sql` can emit, one
 #: per kind, each named ``all_<kind>``.
-_VIEW_KINDS = ("all_entity", "all_content", "all_result")
+_VIEW_KINDS = ("all_entity", "all_content", "all_result", "all_alias")
 
 #: Column declarations for every ``<type>_entity`` table, in DDL order.
 #: GENERIC: identical for all five entity types. Declared once; every other
@@ -232,8 +237,8 @@ _RESULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ingest_batch_id", "STRING"),
 )
 
-#: Name of the PARAMETER-SET REGISTRY table -- the sixteenth clearinghouse
-#: table, and the only one that is not entity-typed.
+#: Name of the PARAMETER-SET REGISTRY table -- the sixteenth of the twenty-one
+#: clearinghouse tables, and the only one that is not entity-typed.
 #:
 #: Declared as a module constant rather than built by :func:`table_name`
 #: precisely BECAUSE it is not entity-typed: ``table_name`` composes
@@ -256,6 +261,111 @@ _PARAMETER_SET_COLUMNS: tuple[tuple[str, str], ...] = (
     ("observed_at", "TIMESTAMP"),
     ("ingest_batch_id", "STRING"),
 )
+
+#: Column declarations for every ``<type>_alias`` table, in DDL order.
+#: GENERIC: identical for all five entity types. ``entity_hash`` is first and
+#: ``entity_type`` second, matching :data:`_ENTITY_COLUMNS`. ``entity_type`` is
+#: kept although it is single-valued per table, for the same reason
+#: ``genome_entity`` keeps it: the ``all_alias`` view needs a discriminator
+#: once the five tables are unioned.
+#:
+#: The table is APPEND-ONLY and each row is an OBSERVATION (``observation`` is
+#: one of :data:`ALIAS_OBSERVATIONS`), so a withdrawal is itself an appended
+#: row rather than an UPDATE, and reinstatement (present -> withdrawn ->
+#: present, as NCBI does when it suppresses then un-suppresses an accession)
+#: is expressible, which a terminal ``retracted_at`` column cannot do.
+#: Readers take the LATEST observation per
+#: ``(entity_type, entity_hash, alias_source, alias_id)`` by ``observed_at``.
+_ALIAS_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("entity_hash", "STRING"),
+    ("entity_type", "STRING"),
+    ("alias_source", "STRING"),
+    ("alias_id", "STRING"),
+    ("observation", "STRING"),
+    ("observed_at", "TIMESTAMP"),
+    ("ingest_batch_id", "STRING"),
+)
+
+#: Closed vocabulary for ``observation``; ``"present"`` is the default for every
+#: bulk write. A tuple with a validator (not an open string) so a writer cannot
+#: invent a third state that no reader knows how to order.
+ALIAS_OBSERVATIONS = ("present", "withdrawn")
+
+#: Closed vocabulary of ``alias_source`` values, in documented order.
+#: There is deliberately NO ``"kbdl_genome_id"``: KBDL's genome_id is literally
+#: ``fasta_object_id[:16]`` (build_genome.py, ``_INTERNAL_ID_HASH_CHARS = 16``),
+#: a derivable prefix rather than an independent identifier, and storing a
+#: derivable prefix invites a writer to treat it as independent. Do not add it.
+ALIAS_SOURCES = (
+    "kbdl_object",
+    "kbdl_fasta_object",
+    "ncbi_assembly",
+    "gtdb_accession",
+    "ncbi_taxon",
+    "kbase_assembly_md5",
+    "bvbrc_genome_md5",
+    "arc_record",
+    "arc_analysis",
+    "kbase_ws_ref",
+)
+
+#: Sources whose alias_id resolves to AT MOST ONE entity. NOT invertible:
+#: ``ncbi_taxon`` (a taxon names MANY assemblies, so resolving it is a
+#: membership query) and ``arc_analysis`` (the grouping key across re-runs).
+#: ``arc_record`` and ``kbase_ws_ref`` are listed PROVISIONALLY -- nobody has
+#: inspected their version/scope semantics -- so the remedy if either is
+#: scoped differently is moving one string between the two tuples. Kept as
+#: DATA, not logic inside a resolver.
+INVERTIBLE_ALIAS_SOURCES = (
+    "kbdl_object",
+    "kbdl_fasta_object",
+    "ncbi_assembly",
+    "gtdb_accession",
+    "kbase_assembly_md5",
+    "bvbrc_genome_md5",
+    "arc_record",
+    "kbase_ws_ref",
+)
+
+#: Shape regexes for the four sources whose identifiers have a known shape.
+#: The other six sources are OPAQUE BY DECLARATION and are deliberately ABSENT:
+#: "opaque" and "validated by a pattern matching everything" are different
+#: claims, and only the first is honest.
+ALIAS_SOURCE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "kbdl_fasta_object": re.compile(r"^[0-9a-f]{64}$"),
+    "kbase_assembly_md5": re.compile(r"^[0-9a-f]{32}$"),
+    "bvbrc_genome_md5": re.compile(r"^[0-9a-f]{32}$"),
+    "ncbi_taxon": re.compile(r"^[1-9][0-9]*$"),
+}
+
+#: Sources that are not specific to one entity type.
+_TYPE_AGNOSTIC_ALIAS_SOURCES = (
+    "arc_record",
+    "arc_analysis",
+    "kbase_ws_ref",
+    "ncbi_taxon",
+)
+#: Sources that only make sense for a genome. The four non-genome types get NO
+#: type-specific sources on purpose: nobody has researched what a protein or
+#: ontology-term alias vocabulary should contain, and inventing one here is
+#: exactly the unresearched guess a closed vocabulary exists to prevent.
+_GENOME_ONLY_ALIAS_SOURCES = (
+    "kbdl_object",
+    "kbdl_fasta_object",
+    "ncbi_assembly",
+    "gtdb_accession",
+    "kbase_assembly_md5",
+    "bvbrc_genome_md5",
+)
+
+#: Legal ``alias_source`` values per entity type.
+ALIAS_SOURCES_BY_ENTITY_TYPE: dict[str, tuple[str, ...]] = {
+    "genome": _TYPE_AGNOSTIC_ALIAS_SOURCES + _GENOME_ONLY_ALIAS_SOURCES,
+    "protein": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "gene": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "function": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "ontology_term": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+}
 
 #: The tail every ``<type>_content`` table shares, declared ONCE and composed
 #: onto each type's type-specific head below. ``entity_hash`` leads every
@@ -341,6 +451,11 @@ _CONTENT_PARTITION_BY: dict[str, str] = {
     "gene": "standardizer_version",
     "protein": "standardizer_version",
 }
+#: Every ``<type>_alias`` table partitions on ``alias_source``: each is
+#: genuinely multi-source and alias_source is the filter nearly every read
+#: carries. ``entity_type`` is NOT a partition key -- it is single-valued per
+#: table.
+_ALIAS_PARTITION_BY = "alias_source"
 
 #: Raw byte length of a sha256 digest -- the width of ``entity_hash``.
 _HASH_BYTES = 32
@@ -363,7 +478,7 @@ def table_name(entity_type: str, kind: str) -> str:
     Args:
         entity_type: One of :data:`ENTITY_TYPES` (``"genome"``,
             ``"protein"``, ``"gene"``, ``"function"``, ``"ontology_term"``).
-        kind: One of ``"entity"``, ``"content"``, ``"result"``.
+        kind: One of ``"entity"``, ``"content"``, ``"result"``, ``"alias"``.
 
     Returns:
         The ``<entity_type>_<kind>`` table name.
@@ -398,8 +513,8 @@ def table_columns(entity_type: str, kind: str) -> tuple[tuple[str, str], ...]:
 
     Args:
         entity_type: One of :data:`ENTITY_TYPES`.
-        kind: One of ``"entity"``, ``"content"``, ``"result"``. ``"entity"``
-            and ``"result"`` return the GENERIC schemas (identical across all
+        kind: One of ``"entity"``, ``"content"``, ``"result"``. ``"entity"``,
+            ``"result"`` and ``"alias"`` return the GENERIC schemas (identical across all
             five types); ``"content"`` returns the type-specialized schema.
 
     Returns:
@@ -416,6 +531,8 @@ def table_columns(entity_type: str, kind: str) -> tuple[tuple[str, str], ...]:
         return _ENTITY_COLUMNS
     if kind == "result":
         return _RESULT_COLUMNS
+    if kind == "alias":
+        return _ALIAS_COLUMNS
     return _content_columns(entity_type)
 
 
@@ -456,7 +573,7 @@ def parameter_set_column_names() -> tuple[str, ...]:
 
 
 def table_configs() -> list[dict[str, Any]]:
-    """Return the sixteen clearinghouse table configs for ``BerdlCapability.load``.
+    """Return the twenty-one clearinghouse table configs for ``BerdlCapability.load``.
 
     Each dict is shaped for the ``tables=`` argument of
     :meth:`~kbutillib.domains.kbase.berdl.capability.BerdlCapability.load`
@@ -465,16 +582,18 @@ def table_configs() -> list[dict[str, Any]]:
     generator and resolver cannot drift), a ``schema_sql`` DDL fragment, and
     a ``partition_by`` ONLY on the tables that partition -- ``gene_entity``,
     ``protein_entity``, ``gene_content`` and ``protein_content`` on
-    ``standardizer_version``, and all five ``<type>_result`` on ``source``.
+    ``standardizer_version``, all five ``<type>_result`` on ``source``, and
+    all five ``<type>_alias`` on ``alias_source``.
     The other six per-type configs, and the parameter-set registry, carry no
     ``partition_by`` key at all (its absence means "unpartitioned"; see the
     module docstring's "Partitioning" section).
 
     Returns:
-        A new list of sixteen dicts in a deterministic, documented order:
+        A new list of twenty-one dicts in a deterministic, documented order:
         all five ``<type>_entity`` configs in :data:`ENTITY_TYPES` order,
         then all five ``<type>_content``, then all five ``<type>_result``,
-        then the single :data:`PARAMETER_SET_TABLE` registry config last.
+        then the single :data:`PARAMETER_SET_TABLE` registry config, then
+        all five ``<type>_alias`` configs last.
         Freshly built on every call, so callers may freely mutate the result
         (e.g. to add ``bronze_path`` for bronze-mode ingest) without
         affecting this module's constants.
@@ -508,7 +627,7 @@ def table_configs() -> list[dict[str, Any]]:
             }
         )
 
-    # The sixteenth table: the parameter-set registry. Not entity-typed, so
+    # The parameter-set registry (the sixteenth config). Not entity-typed, so
     # its name is the module constant and not a table_name() call, and
     # UNPARTITIONED -- the key is omitted entirely, exactly as the six
     # unpartitioned per-type configs above omit it. Rendered through the
@@ -519,6 +638,15 @@ def table_configs() -> list[dict[str, Any]]:
             "schema_sql": _schema_sql(_PARAMETER_SET_COLUMNS),
         }
     )
+
+    for entity_type in ENTITY_TYPES:
+        configs.append(
+            {
+                "name": table_name(entity_type, "alias"),
+                "schema_sql": _schema_sql(_ALIAS_COLUMNS),
+                "partition_by": _ALIAS_PARTITION_BY,
+            }
+        )
 
     return configs
 
@@ -541,7 +669,7 @@ def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
     """Return ``CREATE OR REPLACE VIEW`` DDL for one cross-type union view.
 
     After the fifteen-table split, the cross-type query surface is restored
-    by three ``UNION ALL`` views, each named ``all_<kind>`` and each
+    by four ``UNION ALL`` views, each named ``all_<kind>`` and each
     unioning the five per-type tables of that kind:
 
     - ``all_entity`` and ``all_result`` union EVERY column, because their
@@ -555,12 +683,17 @@ def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
       ``entity_type`` discriminator, and reconciles none of the specialized
       columns. Attempting a full union of divergent content schemas is the
       failure mode this view exists to avoid.
+    - ``all_alias`` unions the five ``<type>_alias`` tables. Unlike content
+      they CAN be unioned, because the alias schema is generic across types;
+      the columns are listed explicitly so ``entity_type`` is visibly the
+      discriminator.
 
     This module stays pod-free and emits SQL TEXT only: it performs no I/O,
     imports no ``pyspark``, and creates nothing itself.
 
     Args:
-        kind: One of ``"all_entity"``, ``"all_content"``, ``"all_result"``.
+        kind: One of ``"all_entity"``, ``"all_content"``, ``"all_result"``,
+            ``"all_alias"``.
         fqn_prefix: The fully-qualified prefix the per-type tables live
             under -- typically ``f"{TENANT}.{NAMESPACE}"`` -- taken as a
             parameter rather than hardcoded. Each segment is backtick-quoted
@@ -573,7 +706,7 @@ def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
         text naming all five per-type tables of ``kind``.
 
     Raises:
-        ValueError: If ``kind`` is not one of the three known view kinds.
+        ValueError: If ``kind`` is not one of the four known view kinds.
     """
     if kind not in _VIEW_KINDS:
         raise ValueError(
@@ -598,6 +731,9 @@ def union_view_sql(kind: str, *, fqn_prefix: str) -> str:
                 f"SELECT {select_list}, "
                 f"'{entity_type}' AS `entity_type` FROM {table_fqn}"
             )
+        elif table_kind == "alias":
+            select_list = ", ".join(f"`{col}`" for col, _t in _ALIAS_COLUMNS)
+            branches.append(f"SELECT {select_list} FROM {table_fqn}")
         else:
             # Schema-identical tables: union every column.
             branches.append(f"SELECT * FROM {table_fqn}")
@@ -642,6 +778,63 @@ def encode_entity_hash(value: str | bytes) -> str:
         "encode_entity_hash: expected a str (hex) or bytes (raw), got "
         f"{type(value).__name__}."
     )
+
+
+def validate_alias(
+    entity_type: str,
+    entity_hash: str,
+    alias_source: str,
+    alias_id: str,
+    observation: str = "present",
+) -> tuple[str, str, str, str, str]:
+    """Validate one alias observation; the ONE validator every writer uses.
+
+    Returns the canonical five-tuple
+    ``(entity_type, entity_hash, alias_source, alias_id, observation)`` or
+    raises ``ValueError``. ``alias_id`` is returned VERBATIM: the ``.strip()``
+    is the emptiness TEST, not a transformation, because an identifier is
+    owned by the system that minted it and trimming it changes it. A ``None``
+    alias_id is refused (the ``"kbdl:obj:None"`` hazard: concatenating a null
+    yields a pointer to nothing that looks real in the lake).
+    """
+    if observation not in ALIAS_OBSERVATIONS:
+        raise ValueError(
+            f"validate_alias: unknown observation {observation!r}; "
+            f"expected one of {ALIAS_OBSERVATIONS!r}."
+        )
+    if entity_type not in ENTITY_TYPES:
+        raise ValueError(
+            f"validate_alias: unknown entity_type {entity_type!r}; "
+            f"expected one of {ENTITY_TYPES!r}."
+        )
+    canonical_hash = encode_entity_hash(entity_hash)
+    if alias_source not in ALIAS_SOURCES:
+        raise ValueError(
+            f"validate_alias: unknown alias_source {alias_source!r}; "
+            f"expected one of {ALIAS_SOURCES!r}."
+        )
+    legal = ALIAS_SOURCES_BY_ENTITY_TYPE[entity_type]
+    if alias_source not in legal:
+        raise ValueError(
+            f"validate_alias: alias_source {alias_source!r} is not legal for "
+            f"entity_type {entity_type!r}; legal sources for it: {legal!r}."
+        )
+    if not isinstance(alias_id, str):
+        raise ValueError(
+            f"validate_alias: alias_id must be a string, got {alias_id!r}."
+        )
+    if not alias_id.strip():
+        raise ValueError(
+            f"validate_alias: alias_id for source {alias_source!r} is empty "
+            f"or whitespace-only."
+        )
+    pattern = ALIAS_SOURCE_PATTERNS.get(alias_source)
+    if pattern is not None and not pattern.match(alias_id):
+        raise ValueError(
+            f"validate_alias: alias_id {alias_id!r} does not match the "
+            f"{alias_source!r} shape {pattern.pattern!r}."
+        )
+    return (entity_type, canonical_hash, alias_source, alias_id, observation)
 
 
 def decode_entity_hash(value: str) -> str:

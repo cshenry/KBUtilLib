@@ -20,7 +20,6 @@ from kbutillib.domains.kbase.berdl.clearinghouse_parity_fixture import (
     ALL_PARITY_ROWS,
     PARITY_CASES,
 )
-import kbutillib
 from kbutillib.domains.kbase.berdl import clearinghouse_schema as _schema_module
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     ALIAS_OBSERVATIONS,
@@ -817,14 +816,6 @@ _ALIAS_COLUMN_ORDER = (
     "observed_at",
     "ingest_batch_id",
 )
-
-
-class TestImportPath:
-    def test_kbutillib_is_imported_from_the_worktree_under_test(self):
-        # Evidence for the work-record: the run must not silently import the
-        # wip-parked Dropbox tree via the editable install.
-        print("kbutillib.__file__ =", kbutillib.__file__)
-        assert ".maestro/worktrees/schema-entity-alias-table" in kbutillib.__file__
 
 
 class TestAliasKind:

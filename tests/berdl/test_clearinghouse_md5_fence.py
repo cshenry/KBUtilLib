@@ -25,6 +25,7 @@ tree, where an interop md5 has no business appearing.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,20 @@ def test_alias_md5_names_are_only_alias_source_vocabulary():
     for symbol in ("kbase_assembly_md5", "bvbrc_genome_md5"):
         assert symbol in schema.ALIAS_SOURCES
         assert symbol in schema.ALIAS_SOURCE_PATTERNS
+    # "Only": every line of the exempted file that mentions either name is a
+    # bare vocabulary member (a quoted tuple entry or a pattern-dict key); the
+    # names never occur in code, a comment, or next to an entity_hash.
+    vocab_line = re.compile(
+        r'^\s*"(kbase_assembly_md5|bvbrc_genome_md5)"(,|: re\.compile\(.*\),)\s*$'
+    )
+    schema_file = _BERDL_DIR / "clearinghouse_schema.py"
+    mentions = [
+        line
+        for line in schema_file.read_text(encoding="utf-8").splitlines()
+        if "kbase_assembly_md5" in line or "bvbrc_genome_md5" in line
+    ]
+    assert mentions
+    assert all(vocab_line.match(line) for line in mentions), mentions
     for label in sorted(_MD5_SITES):
         with pytest.raises(ValueError):
             schema.validate_alias("genome", _MD5_SITES[label](), "arc_record", "x")

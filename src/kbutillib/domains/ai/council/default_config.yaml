@@ -64,6 +64,112 @@ endpoints:
   #     headers:
   #       X-AmSC-MAG-Provider: <provider>   # from the MyAmSC portal docs
 
+  # ANTHROPIC'S OWN API (kind: anthropic) -- a fixed API credit spent through
+  # POST /v1/messages. Needs `pip install 'kbutillib[anthropic]'` (Python >=
+  # 3.10) and an API key in the variable api_key_env names; nothing else
+  # carries the key. base_url is omitted: it defaults to
+  # https://api.anthropic.com.
+  #
+  # ONE ALIAS PER RATE-LIMIT BUCKET -- not one per wallet, not one per model.
+  # The `account` key names the RATE-LIMIT BUCKET, not the wallet. Anthropic
+  # enforces requests/min and input/output tokens/min PER MODEL-CLASS BUCKET:
+  # Opus 5, Sonnet 5 and Haiku 4.5 each hold a separate allowance, Opus
+  # 4.8/4.7/4.6/4.5 share one, Sonnet 4.6/4.5 share another. The same
+  # `account` key groups the engine's semaphore and rate pacer AND buckets the
+  # dollar quote, so naming it after the wallet would throttle the run to the
+  # slowest model's rate, and naming it per model would split one shared
+  # allowance into independent pools -- which is how the 2026-10-21 MAG pilot
+  # errored 427 of 500 items. Config load REFUSES an account that is not the
+  # bucket name; billing_wallet names the payer (one value for every alias
+  # paid from the same credit).
+  #
+  # NEITHER max_requests_per_minute NOR max_concurrency can express what binds
+  # this provider. Anthropic limits requests/min AND input tokens/min AND
+  # output tokens/min per bucket, and for a council's large prompts the TOKEN
+  # limits bind first. max_requests_per_minute paces requests (set it from your
+  # console's limits page, or measure it -- see the operator runbook) and
+  # max_concurrency defaults low (4), but a correct value for both still does
+  # not keep you inside the token limits. What catches that is the halt after
+  # a sustained run of 429s: detection, not prevention. Setting
+  # max_requests_per_minute does not mean "now I am within my limits".
+  # Limits are per organisation/workspace, not per API key: several keys can
+  # share one quota.
+  #
+  # max_total_tokens is PER ENDPOINT. Several aliases mean several budgets and
+  # NOTHING SUMS THEM: a single fixed wallet is not expressible as one enforced
+  # ceiling today. Setting a budget on each alias does not protect the wallet
+  # as a whole -- fence it with a console spend limit as well.
+  #
+  # A seat's max_output_tokens must cover THINKING PLUS THE ANSWER. Thinking is
+  # on by default and adaptive on the current Claude models, its tokens are
+  # billed and counted as OUTPUT, and the seat default of 4000 is often not
+  # enough; a truncated answer is a wasted call. `effort` may be passed in a
+  # model's params to trade depth against spend; no value is chosen here.
+  #
+  # NO SAMPLING PARAMETER IS SENT BY DEFAULT: the current Claude models reject
+  # temperature, top_p and top_k with HTTP 400. On a model that accepts them, a
+  # seat may set one explicitly in its params -- the provider's default is
+  # 1.0, not 0.
+  #
+  # This credit is a SECOND WALLET AT THE SAME PRICE, NOT A DISCOUNT: ARGO was
+  # measured billing Claude at vendor list within 1.5% on the 2026-10-20 bill.
+  # What it buys is independence from the ARGO cap and models ARGO does not
+  # serve. ARGO already serves Sonnet 5 and Opus 5 under the SAME canonical
+  # identity, so a roster cannot seat both routes for one model --
+  # Roster._check_independence refuses it, deliberately, because that is what
+  # stops one model being counted as two votes. The models this wallet newly
+  # makes seatable are Haiku 4.5 and Sonnet 4.6.
+  #
+  # Dollar quotes: `rates` may be keyed per model as
+  # "<account>/<canonical-model>", falling back to "<account>", and every rate
+  # must carry a provenance. Claude Haiku 5.5's input pricing is TIERED BY
+  # PROMPT SIZE, which a single input_per_mtok cannot express -- do not declare
+  # a rate for it and expect an exact quote.
+  #
+  # anthropic-haiku:
+  #   kind: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   billing: api
+  #   account: anthropic-haiku-4.5          # = the bucket name, enforced
+  #   billing_wallet: anthropic-credit
+  #   max_concurrency: 4
+  #   max_requests_per_minute: <rpm>        # your console's limit for this bucket
+  # anthropic-sonnet4:
+  #   kind: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   billing: api
+  #   account: anthropic-sonnet-4           # Sonnet 4.6 / 4.5 share this bucket
+  #   billing_wallet: anthropic-credit
+  #   max_concurrency: 4
+  #   max_requests_per_minute: <rpm>
+  # anthropic-opus4:
+  #   kind: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   billing: api
+  #   account: anthropic-opus-4             # Opus 4.8 / 4.7 / 4.6 / 4.5 share this bucket
+  #   billing_wallet: anthropic-credit
+  #   max_concurrency: 4
+  #   max_requests_per_minute: <rpm>
+  #
+  # ...with matching entries under `models:` (canonical identity comes from the
+  # built-in DEFAULT_CANONICAL_BY_KIND["anthropic"] table):
+  #
+  #   haiku45-api:
+  #     endpoint: anthropic-haiku
+  #     served_name: claude-haiku-4-5
+  #     params: {max_output_tokens: 16000}
+  #   sonnet46-api:
+  #     endpoint: anthropic-sonnet4
+  #     served_name: claude-sonnet-4-6
+  #   opus48-api:
+  #     endpoint: anthropic-opus4
+  #     served_name: claude-opus-4-8
+  #
+  # A newly released Claude model is added HERE -- a `models:` entry with an
+  # explicit `canonical:`, plus a top-level `rate_limit_buckets:` entry if its
+  # bucket is not built in -- and needs no code change. Take its id from
+  # GET /v1/models, which is free and returns the live list; never guess one.
+
 models:
   # ARGO aliases. served_name defaults to the alias (ARGO's own model names),
   # and canonical identity comes from the built-in DEFAULT_CANONICAL table.

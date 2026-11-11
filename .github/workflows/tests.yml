@@ -20,7 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { python: "3.9", os: "ubuntu-latest", session: "mypy" }
+          # ubuntu-24.04, not ubuntu-latest: 26.04 has no Python 3.9 build.
+          - { python: "3.9", os: "ubuntu-24.04", session: "mypy" }
 
     env:
       NOXSESSION: ${{ matrix.session }}

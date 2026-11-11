@@ -45,6 +45,11 @@ dev = [
   "pandas >=1.3.0",
   "ipykernel >=6.0",  # provides the python3 kernelspec that tests/harness notebook execution needs
   "duckdb >=0.10",  # dev-only local SQL engine for off-pod clearinghouse-schema testing
+  # The `anthropic` api type's SDK, so CI (which installs `.[dev]`) actually
+  # exercises tests/domains/ai/llm/test_anthropic_backend.py. MARKED: on the
+  # 3.9 leg it resolves to nothing and those tests skip. Keep in step with the
+  # `anthropic` extra below.
+  "anthropic >=2.3,<3 ; python_version >= '3.10'",
 ]
 # Backfill source drivers (kbu clearinghouse backfill). pymongo is the ONLY
 # entry: the mongo source adapter is the one adapter that needs a driver, and
@@ -59,6 +64,26 @@ dev = [
 # which CI installs, and a Mongo driver is neither a transport nor a docs dep.
 backfill = [
   "pymongo >=4.6",
+]
+# Native Anthropic Messages API backend (llm api type `anthropic`,
+# domains/ai/llm/apis/anthropic.py). Imported LAZILY inside the backend's
+# constructor -- never at module scope -- so `import kbutillib` and every other
+# api type work without it; a missing package surfaces as an ImportError
+# naming BOTH `kbutillib[anthropic]` AND the Python >= 3.10 requirement.
+#
+# The environment MARKER is load-bearing: the SDK declares Requires-Python
+# >=3.10 while this project supports 3.9, and on 3.9 this extra therefore
+# resolves to NOTHING (which is also why the import error has to name the
+# Python floor -- "install the extra" alone is advice that cannot work there).
+# Same precedent as `mcp` below.
+#
+# The single-major PIN is load-bearing too: this SDK has moved its HTTP stack
+# (httpx -> httpx2) and changed its async raw-response surface across releases,
+# so an open floor would let two installs behave differently with no signal.
+# 2.x is the major inspected for the backend (2.3.0, current on PyPI at the
+# time of writing); see agent-io/work-records/anthropic-sdk-smoke.md.
+anthropic = [
+  "anthropic >=2.3,<3 ; python_version >= '3.10'",
 ]
 # Transport adapters (kept optional so `import kbutillib` and the core library
 # never require these heavy server deps). Install with e.g. `pip install .[mcp]`.
@@ -144,9 +169,16 @@ prott5 = ["torch", "transformers", "sentencepiece"]
 # nothing this module calls needs them, so they are intentionally omitted.
 community = ["beautifulsoup4", "lxml"]
 # Function -> GO mapping (kbu.ontology_mapping.function_to_go). The vendored
-# OntoMap go-text models are scikit-learn pickles; 1.9.0 is the version they
-# load cleanly under (no InconsistentVersionWarning), so it is pinned exactly.
-ontology_mapping = ["numpy >=1.24", "scipy >=1.10", "scikit-learn ==1.9.0", "joblib >=1.3"]
+# OntoMap go-text models are scikit-learn pickles built with 1.9.0. That
+# version was once pinned exactly (`==1.9.0`), but 1.9.0 requires Python >=
+# 3.11 while this project supports >= 3.9, so uv -- which resolves for every
+# supported Python at once -- could not resolve the project at all, and every
+# `uv sync`/`uv run` CI job (mypy, coverage) failed. The pin is deliberately
+# RELAXED (Chris's call, 2026-11-04): any scikit-learn installs, and loading
+# the pickles under a version other than 1.9.0 may emit sklearn's
+# InconsistentVersionWarning. Install scikit-learn==1.9.0 yourself (Python >=
+# 3.11) for the exact build-time environment.
+ontology_mapping = ["numpy >=1.24", "scipy >=1.10", "scikit-learn", "joblib >=1.3"]
 # Reaction-similarity module (kbu.rxnsim). Imported lazily, so the package
 # imports fine without these; install with: pip install KBUtilLib[reaction_similarity]
 reaction_similarity = [
@@ -163,6 +195,7 @@ reaction_similarity_extra = [
 # Everything needed to run all transports + build docs.
 all = [
   "mcp >=1.27,<2 ; python_version >= '3.10'",
+  "anthropic >=2.3,<3 ; python_version >= '3.10'",
   "fastapi >=0.110",
   "uvicorn[standard] >=0.29",
   "httpx[socks] >=0.28",
@@ -188,7 +221,7 @@ dev = [
   "pandas >=1.3.0",
   "ipykernel >=6.0",
   "duckdb >=0.10",  # dev-only local SQL engine for off-pod clearinghouse-schema testing
-
+  "anthropic >=2.3,<3 ; python_version >= '3.10'",  # see the `dev` extra
 ]
 lint = [
   "ruff >=0.5.5",

@@ -1159,6 +1159,22 @@ class Quote:
                 ),
                 "dollars_complete": not unpriced,
                 "unpriced_gateways": unpriced,
+                # Presentation only: a partially priced gateway is already in
+                # `unpriced_gateways` (its `priced` is a strict False), so the
+                # totals above exclude it. Its known subtotal is published here
+                # so an operator can see it -- and see that it is not a total.
+                "partially_priced_gateways": [
+                    {
+                        "gateway": str(g["gateway"]),
+                        "dollars_known_subtotal": g.get("dollars_known_subtotal"),
+                        "dollars_known_subtotal_upper": g.get(
+                            "dollars_known_subtotal_upper"
+                        ),
+                        "unpriced_models": list(g.get("unpriced_models") or []),
+                    }
+                    for g in self.gateways
+                    if g.get("partially_priced")
+                ],
             },
             "meta_fire_rate": {
                 "rate": self.meta_fire_rate,
@@ -1566,6 +1582,31 @@ def _gateway_of(config: Any, seat: Any) -> str:
     return str(cfg.get("account") or seat.endpoint)
 
 
+def _resolve_rate(
+    rates: Mapping[str, Any], gateway: str, canonical: Optional[str]
+) -> Tuple[Optional[str], Any]:
+    """``(rate key, RateConfig)`` for one model on one gateway, or ``(None, None)``.
+
+    ``"<gateway>/<canonical_model>"`` first, then ``"<gateway>"``.
+    ``CouncilConfig.rates`` is keyed by a free string, so the composite key
+    needs no schema change.
+    """
+    if canonical:
+        key = f"{gateway}/{canonical}"
+        if key in rates:
+            return key, rates[key]
+    if gateway in rates:
+        return gateway, rates[gateway]
+    return None, None
+
+
+def _rate_dict(rate: Any) -> Dict[str, float]:
+    return {
+        "input_per_mtok": float(rate.input_per_mtok),
+        "output_per_mtok": float(rate.output_per_mtok),
+    }
+
+
 def _price_gateways(
     config: Any,
     lines: Sequence[QuoteLine],
@@ -1583,34 +1624,146 @@ def _price_gateways(
     A gateway with no rate is reported ``unpriced``, which is a usable answer
     (the operator knows what is missing) in a way that a confidently wrong
     dollar figure is not.
+
+    PER CANONICAL MODEL.  A gateway is an ``account``, and an account can
+    carry several models at different prices (an Anthropic rate-limit bucket
+    groups Opus 4.8 with Opus 4.7, and ``account`` must name the bucket
+    because it also groups the engine's semaphore and pacer).  One rate per
+    gateway would be exact only by coincidence, and a quote right by
+    coincidence cannot be told apart from one right by construction.  So each
+    gateway's lines are sub-bucketed by ``canonical_model`` and each
+    sub-bucket priced at ``rates["<gateway>/<canonical>"]``, falling back to
+    ``rates["<gateway>"]``; the gateway figure is the UNROUNDED sum, rounded
+    once, so ``by_model`` and the total cannot disagree by rounding.
+
+    THE SAME REFUSAL, EXTENDED TO PART OF A GATEWAY.  A partially priced
+    gateway is ``priced: False`` -- a STRICT boolean -- with
+    ``partially_priced: True``, the ``unpriced_models`` and a
+    ``dollars_known_subtotal``.  A partial sum presented as a total is the
+    same error as substituting a list rate for an unknown one.  Keeping
+    ``priced`` false makes every existing truthiness reader
+    (``Quote.to_dict``, the quote CLI, and any reader nobody has found)
+    treat the gateway as UNPRICED, which understates rather than overstates;
+    a tri-state string would be truthy and would put a partial subtotal in
+    the priced total with ``dollars_complete`` reading true.
+
+    A gateway whose models are priced from more than one rate publishes
+    ``rate: None`` and ``rate_provenance: None`` (one legacy pair cannot
+    represent several, and picking one would misattribute provenance); the
+    contributing rates and their provenance are under ``by_model``.
+
+    Raises:
+        ValueError: the contributing rates are not all one currency --
+            ``RateConfig.currency`` is a free string, and mixed denominations
+            would otherwise be added together silently.
     """
     rates = dict(getattr(config, "rates", {}) or {})
-    buckets: Dict[str, Dict[str, float]] = {}
+    buckets: Dict[str, Dict[Optional[str], Dict[str, float]]] = {}
     for line in lines:
         gateway = line.gateway
         if gateway is None:
             continue
-        bucket = buckets.setdefault(
-            gateway, {"input": 0.0, "output_point": 0.0, "output_upper": 0.0}
+        sub = buckets.setdefault(gateway, {}).setdefault(
+            line.canonical_model,
+            {"input": 0.0, "output_point": 0.0, "output_upper": 0.0},
         )
-        bucket["input"] += line.input_tokens_point
-        bucket["output_point"] += line.output_tokens_point
-        bucket["output_upper"] += line.output_tokens_upper
+        sub["input"] += line.input_tokens_point
+        sub["output_point"] += line.output_tokens_point
+        sub["output_upper"] += line.output_tokens_upper
+
+    # Refuse mixed currencies BEFORE anything is summed, quote-wide: the
+    # headline adds dollars across gateways too.
+    currencies: Dict[str, List[str]] = {}
+    for gateway, models in buckets.items():
+        for canonical in models:
+            key, rate = _resolve_rate(rates, gateway, canonical)
+            if rate is not None:
+                currencies.setdefault(str(rate.currency), []).append(str(key))
+    if len(currencies) > 1:
+        detail = "; ".join(
+            f"{currency}: {sorted(set(keys))}" for currency, keys in sorted(currencies.items())
+        )
+        raise ValueError(
+            "refusing to price a quote whose contributing rates are not all one "
+            f"currency ({detail}); amounts in different currencies cannot be summed"
+        )
 
     out: List[Dict[str, Any]] = []
     warnings: List[str] = []
     for gateway in sorted(buckets):
-        bucket = buckets[gateway]
+        models = buckets[gateway]
+        total_in = sum(m["input"] for m in models.values())
+        total_out_point = sum(m["output_point"] for m in models.values())
+        total_out_upper = sum(m["output_upper"] for m in models.values())
         entry: Dict[str, Any] = {
             "gateway": gateway,
-            "input_tokens": round(bucket["input"]),
-            "output_tokens_point": round(bucket["output_point"]),
-            "output_tokens_upper": round(bucket["output_upper"]),
-            "total_tokens_point": round(bucket["input"] + bucket["output_point"]),
-            "total_tokens_upper": round(bucket["input"] + bucket["output_upper"]),
+            "input_tokens": round(total_in),
+            "output_tokens_point": round(total_out_point),
+            "output_tokens_upper": round(total_out_upper),
+            "total_tokens_point": round(total_in + total_out_point),
+            "total_tokens_upper": round(total_in + total_out_upper),
         }
-        rate = rates.get(gateway)
-        if rate is None:
+
+        by_model: List[Dict[str, Any]] = []
+        priced_point = 0.0
+        priced_upper = 0.0
+        contributing: Dict[str, Any] = {}
+        unpriced_models: List[Optional[str]] = []
+        unpriced_tokens = 0.0
+        for canonical in sorted(models, key=lambda c: str(c or "")):
+            sub = models[canonical]
+            key, rate = _resolve_rate(rates, gateway, canonical)
+            row: Dict[str, Any] = {
+                "canonical_model": canonical,
+                "input_tokens": round(sub["input"]),
+                "output_tokens_point": round(sub["output_point"]),
+                "output_tokens_upper": round(sub["output_upper"]),
+                "total_tokens_point": round(sub["input"] + sub["output_point"]),
+                "total_tokens_upper": round(sub["input"] + sub["output_upper"]),
+            }
+            if rate is None:
+                row.update(
+                    {
+                        "priced": False,
+                        "rate_key": None,
+                        "rate": None,
+                        "currency": None,
+                        "is_floor": None,
+                        "rate_provenance": None,
+                        "dollars_point": None,
+                        "dollars_upper": None,
+                    }
+                )
+                unpriced_models.append(canonical)
+                unpriced_tokens += sub["input"] + sub["output_point"]
+            else:
+                per_in = float(rate.input_per_mtok) / 1e6
+                per_out = float(rate.output_per_mtok) / 1e6
+                # UNROUNDED: rounded once, at the gateway.
+                point = sub["input"] * per_in + sub["output_point"] * per_out
+                upper = sub["input"] * per_in + sub["output_upper"] * per_out
+                priced_point += point
+                priced_upper += upper
+                contributing[str(key)] = rate
+                row.update(
+                    {
+                        "priced": True,
+                        "rate_key": key,
+                        "rate": _rate_dict(rate),
+                        "currency": str(rate.currency),
+                        "is_floor": bool(rate.is_floor),
+                        "rate_provenance": str(rate.provenance),
+                        "dollars_point": point,
+                        "dollars_upper": upper,
+                    }
+                )
+            by_model.append(row)
+
+        currency = next((str(r.currency) for r in contributing.values()), None)
+        any_floor = any(bool(r.is_floor) for r in contributing.values())
+        single = next(iter(contributing.values())) if len(contributing) == 1 else None
+
+        if not contributing:
             entry.update(
                 {
                     "priced": False,
@@ -1631,45 +1784,122 @@ def _price_gateways(
                 f"gateway {gateway!r} is unpriced: "
                 f"{entry['total_tokens_point']:,} tokens carry no dollar figure"
             )
+        elif unpriced_models:
+            names = [str(m) for m in unpriced_models]
+            entry.update(
+                {
+                    # STRICT boolean, deliberately False: see the docstring.
+                    "priced": False,
+                    "partially_priced": True,
+                    "unpriced_models": names,
+                    "dollars_point": None,
+                    "dollars_upper": None,
+                    "dollars_known_subtotal": round(priced_point, 2),
+                    "dollars_known_subtotal_upper": round(priced_upper, 2),
+                    "currency": currency,
+                    "rate": None,
+                    "is_floor": any_floor,
+                    "rate_provenance": None,
+                    "unpriced_reason": (
+                        f"gateway {gateway!r} is only PARTIALLY priced: no rate "
+                        f"for {names} under `ai_council.rates` (tried "
+                        f"'{gateway}/<canonical_model>' then '{gateway}'). "
+                        "dollars_known_subtotal covers only part of the tokens and "
+                        "is NOT a total; a vendor list rate is NOT substituted."
+                    ),
+                }
+            )
+            warnings.append(
+                f"gateway {gateway!r} is partially priced: no rate for {names}; "
+                f"{round(unpriced_tokens):,} tokens carry no dollar figure and the "
+                "known subtotal is not a total"
+            )
         else:
-            per_in = float(rate.input_per_mtok) / 1e6
-            per_out = float(rate.output_per_mtok) / 1e6
             entry.update(
                 {
                     "priced": True,
-                    "dollars_point": round(
-                        bucket["input"] * per_in + bucket["output_point"] * per_out, 2
-                    ),
-                    "dollars_upper": round(
-                        bucket["input"] * per_in + bucket["output_upper"] * per_out, 2
-                    ),
-                    "currency": str(rate.currency),
-                    "rate": {
-                        "input_per_mtok": float(rate.input_per_mtok),
-                        "output_per_mtok": float(rate.output_per_mtok),
-                    },
-                    "is_floor": bool(rate.is_floor),
-                    "rate_provenance": str(rate.provenance),
+                    "dollars_point": round(priced_point, 2),
+                    "dollars_upper": round(priced_upper, 2),
+                    "currency": currency,
+                    "rate": _rate_dict(single) if single is not None else None,
+                    "is_floor": any_floor,
+                    "rate_provenance": str(single.provenance) if single is not None else None,
                 }
             )
+        for key in sorted(contributing):
+            rate = contributing[key]
             if rate.is_floor:
                 warnings.append(
                     f"gateway {gateway!r} is priced from a rate its own "
                     f"provenance marks as a FLOOR ({rate.provenance}); the "
                     "dollar figure is a lower bound, not a cost"
                 )
+                if len(contributing) > 1 or key != gateway:
+                    floored = [
+                        str(row["canonical_model"])
+                        for row in by_model
+                        if row.get("rate_key") == key
+                    ]
+                    warnings.append(
+                        f"gateway {gateway!r}: rate {key!r} is a FLOOR and prices "
+                        f"{floored}"
+                    )
+        entry["by_model"] = by_model
         out.append(entry)
     return out, warnings
 
 
-def _balance_delta_block(gateways: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    """The operator-filled before/after balance record, one row per gateway.
+def _wallets_of(config: Any, lines: Sequence[QuoteLine]) -> Dict[str, str]:
+    """``{gateway: billing wallet}`` from each line's endpoint configuration.
+
+    ``billing_wallet`` defaults to ``account`` (= the gateway) for every kind
+    but ``anthropic``, so this is the identity map wherever nothing changed.
+    A gateway reached through endpoints naming different wallets gets one
+    combined label rather than being counted under each.
+    """
+    found: Dict[str, Set[str]] = {}
+    for line in lines:
+        if line.gateway is None:
+            continue
+        wallet = ""
+        if line.endpoint:
+            try:
+                wallet = str(dict(config.endpoint(line.endpoint)).get("billing_wallet") or "")
+            except Exception:  # noqa: BLE001 - an unknown endpoint is not fatal
+                wallet = ""
+        found.setdefault(line.gateway, set()).add(wallet or line.gateway)
+    return {gateway: " + ".join(sorted(w)) for gateway, w in found.items()}
+
+
+def _balance_delta_block(
+    gateways: Sequence[Mapping[str, Any]],
+    wallets: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """The operator-filled before/after balance record, one row per WALLET.
 
     Every completed run is the only calibration this pipeline can get: the
     gateways publish no usage, billing, pricing or quota endpoint that
     answers (all 404, and MAG's ``/models/<id>`` returns 401 "Only proxy
     admin"), so the effective dollars-per-token is observable ONLY as the
     difference between two balances a human read either side of a run.
+
+    Keyed on ``billing_wallet``, NOT on gateway.  There is one balance per
+    WALLET, and once ``account`` came to mean an Anthropic rate-limit bucket,
+    several gateways (buckets) sit on one wallet.  Keyed on gateway this would
+    emit one row per bucket -- several rows asking for the SAME console
+    balance -- and an operator copying the wallet delta into each would
+    attribute the whole bill several times.  Each row aggregates its member
+    gateways' quoted tokens and names them in ``gateways``; ``gateway`` keeps
+    the row's key (the wallet), which for every non-anthropic endpoint is the
+    gateway itself, exactly as before.
+
+    DO NOT DERIVE PER-MODEL RATES FROM ONE WALLET OBSERVATION.  A single
+    balance delta cannot be decomposed into several models' input and output
+    rates (one equation, many unknowns).  ``implied_*_per_mtok`` is
+    meaningful only for a row with ONE member gateway priced from one rate;
+    for a multi-member row it stays empty, and dividing the delta across
+    buckets to write per-model entries into ``ai_council.rates`` would be
+    writing confident wrong numbers.
 
     The fields are emitted EMPTY and are meant to be filled in -- before the
     run and after it -- so that the next run's dollar figure can be derived
@@ -1678,31 +1908,49 @@ def _balance_delta_block(gateways: Sequence[Mapping[str, Any]]) -> Dict[str, Any
     are present, and what an operator should then write into
     ``ai_council.rates`` with ``provenance`` naming this run.
     """
-    return {
-        "purpose": (
-            "Read each gateway's balance immediately before and after the "
-            "run and record it here. The delta over this quote's token "
-            "totals is the only measurement of effective cost available: "
-            "every gateway usage/billing/pricing/quota path 404s."
-        ),
-        "gateways": [
+    wallets = dict(wallets or {})
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
+    for entry in gateways:
+        wallet = wallets.get(str(entry["gateway"])) or str(entry["gateway"])
+        grouped.setdefault(wallet, []).append(entry)
+
+    rows: List[Dict[str, Any]] = []
+    for wallet in sorted(grouped):
+        members = grouped[wallet]
+        currencies = sorted({str(m.get("currency")) for m in members if m.get("currency")})
+        rows.append(
             {
-                "gateway": entry["gateway"],
+                "gateway": wallet,
+                "billing_wallet": wallet,
+                "gateways": sorted(str(m["gateway"]) for m in members),
                 "balance_before": None,
                 "balance_after": None,
                 "read_at_before": None,
                 "read_at_after": None,
-                "currency": entry.get("currency"),
+                "currency": currencies[0] if len(currencies) == 1 else None,
                 "delta": None,
-                "quoted_total_tokens_point": entry["total_tokens_point"],
-                "quoted_input_tokens": entry["input_tokens"],
-                "quoted_output_tokens_point": entry["output_tokens_point"],
+                "quoted_total_tokens_point": sum(int(m["total_tokens_point"]) for m in members),
+                "quoted_input_tokens": sum(int(m["input_tokens"]) for m in members),
+                "quoted_output_tokens_point": sum(int(m["output_tokens_point"]) for m in members),
                 "actual_total_tokens": None,
                 "implied_input_per_mtok": None,
                 "implied_output_per_mtok": None,
             }
-            for entry in gateways
-        ],
+        )
+        if len(members) > 1:
+            rows[-1]["note"] = (
+                "one balance covers several gateways; do NOT derive per-model or "
+                "per-gateway rates from this single delta"
+            )
+    return {
+        "purpose": (
+            "Read each wallet's balance immediately before and after the "
+            "run and record it here. The delta over this quote's token "
+            "totals is the only measurement of effective cost available: "
+            "every gateway usage/billing/pricing/quota path 404s. One row per "
+            "billing wallet; a single delta cannot be split into per-model rates."
+        ),
+        "gateways": rows,
     }
 
 
@@ -2191,7 +2439,7 @@ def quote_plan(
         },
         wall_clock=wall_clock,
         gateways=tuple(gateways),
-        balance_delta=_balance_delta_block(gateways),
+        balance_delta=_balance_delta_block(gateways, _wallets_of(config, lines)),
         token_model=token_model.to_dict(),
         meta_fire_rate=rate,
         meta_fire_rate_n=int(meta_fire_rate_n),

@@ -13,7 +13,10 @@ on:
 jobs:
   tests:
     name: pytest / Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: ubuntu-latest moved to 26.04, for which
+    # actions/setup-python has no Python 3.9 build, so the 3.9 leg failed at
+    # setup before any test ran (2026-11-01). 24.04 still serves 3.9.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +37,10 @@ jobs:
       - name: Install package and dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # `council` (SQLAlchemy) as well: without it every council test module
+          # that imports the store or quote.py fails at COLLECTION, and pytest
+          # stops before running anything.
+          pip install -e ".[dev,council]"
 
       - name: Run pytest with coverage
         run: |

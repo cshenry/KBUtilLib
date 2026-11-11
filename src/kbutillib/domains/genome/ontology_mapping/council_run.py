@@ -177,7 +177,7 @@ AMSC_TOKEN_PATH = "~/.config/amsc/token"
 #: refusal always NAMES one of these, for the same reason an approval refusal
 #: names its check: "credentials are missing" leaves an operator to guess
 #: which of two unrelated things to export.
-CREDENTIAL_CHECKS: Tuple[str, ...] = ("argo_user", "amsc_token")
+CREDENTIAL_CHECKS: Tuple[str, ...] = ("argo_user", "amsc_token", "anthropic_api_key")
 
 #: The ``endpoint_state.halt_kind`` values THIS STAGE writes, as against the
 #: ones the worker writes for a provider failure.
@@ -296,6 +296,15 @@ def resolve_credentials(
       ``amsc_token``.  An endpoint declaring NO ``api_key_env`` needs nothing
       (a local vLLM port ignores the header's value), and is reported as
       such rather than refused.
+    * ``anthropic`` -- Anthropic's Messages API needs an API key.  An
+      explicit ``api_key`` in the endpoint config is reported with source
+      ``config``; otherwise the variable named by ``api_key_env`` (default
+      ``ANTHROPIC_API_KEY``) must be set and non-empty.  There is no file
+      fallback: unlike the AMSC token there is no conventional place for this
+      key, and inventing a path would be a guess.  Unset is
+      ``anthropic_api_key``, raised like ``argo_user`` -- never reported as
+      ``requires: none``, because a seat that cannot authenticate does not
+      fail loudly either.
     * ``claude_cli`` / ``codex_cli`` -- an interactive subscription login,
       which lives in the CLI's own state and is checked by that api type's
       billing preflight.  Nothing here to resolve.
@@ -368,6 +377,41 @@ def resolve_credentials(
                     "endpoint": endpoint,
                     "kind": kind,
                     "requires": "anl_username",
+                    "name": name,
+                    "source": "environment",
+                }
+            )
+            continue
+
+        if kind == "anthropic":
+            name = str(cfg.get("api_key_env") or "ANTHROPIC_API_KEY").strip()
+            if cfg.get("api_key"):
+                rows.append(
+                    {
+                        "endpoint": endpoint,
+                        "kind": kind,
+                        "requires": "api_key",
+                        "name": "api_key",
+                        "source": "config",
+                    }
+                )
+                continue
+            if not str(environ.get(name) or "").strip():
+                raise RunRefused(
+                    "anthropic_api_key",
+                    f"endpoint {endpoint!r} is an Anthropic API endpoint, which "
+                    f"cannot authenticate without an API key, and ${name} is "
+                    "unset or empty in this process (the endpoint sets no "
+                    "api_key). A council started without it does not fail "
+                    "loudly -- the seats report unavailable and the calls "
+                    f"park. Export it (`export {name}=<your-anthropic-api-key>`) "
+                    "and start the run again.",
+                )
+            rows.append(
+                {
+                    "endpoint": endpoint,
+                    "kind": kind,
+                    "requires": "api_key",
                     "name": name,
                     "source": "environment",
                 }

@@ -1738,8 +1738,7 @@ is (see the editable-install trap in the Backfill chapter's Deploy section).
 
 **C5.1 -- dry run.** `bootstrap()` is an idempotent create-or-verify, so
 passing the whole `table_configs()` list is correct: the sixteen existing
-tables are reported as already present and only the five new ones are
-created.
+tables report `'action': 'append'` and only the five new ones are created.
 
 ```python
 from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
@@ -1754,13 +1753,24 @@ print(report)
 
 Expect `'action': 'create'` for **exactly** `genome_alias`,
 `protein_alias`, `gene_alias`, `function_alias` and `ontology_term_alias`,
-and *already present* for the other sixteen. Anything else is a STOP:
+and `'exists': True, 'action': 'append'` for the other sixteen. Each of the
+five `create` entries also carries a `'namespace_warning'` -- expected on a
+dry run, and the same warning OP-C1 describes. Anything else is a STOP:
 
 - `create` for any of the sixteen means a table you believed existed does
   not, which is a different problem from OP-C5.
-- *Already present* for an alias table means someone created it by hand.
+- `'action': 'append'` for an alias table means someone created it by hand.
   Do not proceed to the real run; go straight to C5.3 and read its columns,
   because `bootstrap()` will verify it as present whatever its columns are.
+- **`'action': 'refuse'` on ANY table, carrying a `'reason'` string.** A dry
+  run PREVIEWS a refusal instead of raising, which is the whole reason to run
+  it first -- do not scan only for an exception. Two conditions produce it: a
+  live partition spec that does not match the config (which raises
+  `BootstrapPartitionSpecMismatchError` on a real run), and an existence probe
+  that could not be determined, reported as `'exists': None` (which raises
+  `BootstrapIndeterminateStateError` on a real run). Read the `'reason'`, and
+  do NOT proceed to C5.2: on a real run **no table in the batch is written,
+  not just the refused one.**
 
 **C5.2 -- the real run.** Only after the dry run reads as exactly five
 creates.

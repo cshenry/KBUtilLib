@@ -870,6 +870,11 @@ for kind in ("all_entity", "all_content", "all_result"):
   `observed_at`, `ingest_batch_id`) plus a literal `entity_type`
   discriminator, and reconciles none of the type-specialized columns.
 
+> **There are now FOUR union views, not three.** The alias change (OP-C5,
+> below) adds `all_alias`, created the same way after the five
+> `<type>_alias` tables exist. This section's loop is unchanged; OP-C5 C5.4
+> creates the fourth.
+
 **These views are metadata-only and safe to drop and recreate.** A view
 carries no data of its own -- it is a stored `SELECT` over the physical
 tables -- so dropping one, or re-running `CREATE OR REPLACE VIEW`, costs
@@ -1663,6 +1668,361 @@ step; do not pre-populate it with expected results.**
 | OP-C3 production |  |  |  |
 | OP-C4 |  |  |  |
 
+
+---
+
+## The alias change -- OP-C5, and two identities that are both called "the assembly hash"
+
+This chapter is separate from the parameter-set chapter above on purpose.
+The parameter-set change added a column and a registry; the alias change
+adds an unrelated facility. It is filed after OP-C4 in document order
+because it is operated after OP-C4, not because it belongs to it.
+
+The alias facility maps an **external identifier** (an NCBI assembly
+accession, a KBase workspace reference, a KBDL object id, an md5, ...) to the
+clearinghouse `entity_hash` it denotes. It adds a **fourth table kind,
+`alias`**: five tables, one per entity type -- `genome_alias`,
+`protein_alias`, `gene_alias`, `function_alias`, `ontology_term_alias` --
+and a fourth cross-type view, `all_alias`. `table_configs()` returns
+**twenty-one** configs after this change (sixteen before it). Every alias
+table has the same seven columns, in DDL order: `entity_hash`,
+`entity_type`, `alias_source`, `alias_id`, `observation`, `observed_at`,
+`ingest_batch_id`. They are **append-only**: each row is an *observation*
+(`present` or `withdrawn`), so a withdrawal is an appended row and a
+reinstatement is expressible. Readers take the **latest** observation per
+`(entity_type, entity_hash, alias_source, alias_id)` by `observed_at`.
+Each table is partitioned on `alias_source`.
+
+**Why five per-type tables, not one `entity_alias`.** An operator seeing
+five near-identical tables will ask. There are far more proteins than
+genomes, so a single shared table would make every genome-alias read pay
+protein scale. Partitioning a shared table on `alias_source` does not fix
+that, because four of the ten sources (`arc_record`, `arc_analysis`,
+`kbase_ws_ref`, `ncbi_taxon`) are entity-type-agnostic and so span every
+type. The same reasoning is why the entity/content/result tables are
+per-type. **`PARAMETER_SET_TABLE` (`parameter_set`) is, once again, the
+ONLY table in the namespace that is not entity-typed.** There is no
+`entity_alias` table; do not create one.
+
+**Build-complete and operationally-complete are separate here too:** the
+code can be merged while OP-C5 is still owed. Nothing writes aliases until
+the tables exist.
+
+### OP-C5 -- create the five alias tables and the `all_alias` view
+
+**When this runs.** After the deploy and OP-C1 (the namespace must already
+exist and the sixteen existing tables must be present). Nothing has written
+to an alias table, so there is no data to protect and no writer lockout is
+needed. As in OP-C1, `cap` is the `ClearinghouseBootstrapCapability(BerdlCapability())`
+from section 2.0, and a bare `BerdlCapability()` raises `AttributeError`.
+
+**C5.0 -- precondition: the importing tree carries the alias change.**
+
+```python
+import kbutillib
+print(kbutillib.__file__)
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    PARAMETER_SET_TABLE, table_configs,
+)
+alias_tables = [c["name"] for c in table_configs() if c["name"].endswith("_alias")]
+assert sorted(alias_tables) == sorted([
+    "genome_alias", "protein_alias", "gene_alias",
+    "function_alias", "ontology_term_alias",
+]), alias_tables
+assert len(table_configs()) == 21, len(table_configs())
+print("precondition OK -- this tree carries the alias change")
+```
+
+Either assertion firing is a **STOP**: the tree is not the one you think it
+is (see the editable-install trap in the Backfill chapter's Deploy section).
+
+**C5.1 -- dry run.** `bootstrap()` is an idempotent create-or-verify, so
+passing the whole `table_configs()` list is correct: the sixteen existing
+tables are reported as already present and only the five new ones are
+created.
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
+    bootstrap, table_configs,
+)
+
+configs = table_configs()                     # all twenty-one
+report = bootstrap(cap, namespace="kbaseincubator.clearinghouse",
+                   tables=configs, dry_run=True)
+print(report)
+```
+
+Expect `'action': 'create'` for **exactly** `genome_alias`,
+`protein_alias`, `gene_alias`, `function_alias` and `ontology_term_alias`,
+and *already present* for the other sixteen. Anything else is a STOP:
+
+- `create` for any of the sixteen means a table you believed existed does
+  not, which is a different problem from OP-C5.
+- *Already present* for an alias table means someone created it by hand.
+  Do not proceed to the real run; go straight to C5.3 and read its columns,
+  because `bootstrap()` will verify it as present whatever its columns are.
+
+**C5.2 -- the real run.** Only after the dry run reads as exactly five
+creates.
+
+```python
+report = bootstrap(cap, namespace="kbaseincubator.clearinghouse",
+                   tables=configs, dry_run=False)
+print(report["load_result"]["tables"])
+```
+
+Each alias table's `'statement'` should carry all seven columns and a
+partition clause on `alias_source`. `bootstrap()` raises two named errors
+rather than guess, and both are STOPs, not retries:
+
+- `BootstrapPartitionSpecMismatchError` -- a live table's partition spec
+  disagrees with the config. `bootstrap()` refuses rather than attempt a
+  live partition-spec change, which is unsupported and unmeasured. No write
+  is attempted for **any** table in that call.
+- `BootstrapIndeterminateStateError` -- an existence probe was ambiguous or
+  errored. It is never read as "absent", because that would fall through to
+  an overwrite. Again nothing is written for any table.
+
+**C5.3 -- acceptance: read the live COLUMNS and the live PARTITION SPEC of
+each of the five.** Existence is not acceptance.
+
+```python
+EXPECTED_ALIAS_COLUMNS = {
+    "entity_hash": "string", "entity_type": "string",
+    "alias_source": "string", "alias_id": "string",
+    "observation": "string", "observed_at": "timestamp",
+    "ingest_batch_id": "string",
+}
+def fqn(name): return ".".join(f"`{p}`" for p in ["kbaseincubator", "clearinghouse", name])
+
+for name in alias_tables:
+    rows = spark.sql(f"DESCRIBE TABLE {fqn(name)}").collect()
+    cols = {r["col_name"]: r["data_type"] for r in rows
+            if r["col_name"] and not r["col_name"].startswith("#")}
+    live = {k: cols.get(k) for k in EXPECTED_ALIAS_COLUMNS}
+    assert live == EXPECTED_ALIAS_COLUMNS, (name, cols)
+    spec = cap.table_partition_spec(name, namespace="kbaseincubator.clearinghouse")
+    assert spec == ["alias_source"], (name, spec)
+    print(name, "columns OK, partition spec", spec)
+```
+
+(Trino rejects backquoted identifiers; if you run the `DESCRIBE` through
+Trino rather than Spark, use double quotes, as in OP-C1's acceptance step.)
+
+**Why this read is not optional.** `bootstrap()` creates a *missing* table
+but **cannot add a column to an existing one**, and it verifies partition
+specs only: column drift is not checked. If anyone hand-created
+`genome_alias` with the wrong columns, `bootstrap()` reports it present and
+clean, and the first append of seven-column rows either fails obscurely or
+silently drops the data of a column the table lacks. The partition-spec
+read is separate because the live spec is what `bootstrap()` compares, but
+an operator reading it directly is the only check that does not trust the
+tool that created the table.
+
+**C5.4 -- create the `all_alias` view AFTER the five tables exist.** Exactly
+as section 2.4 creates its views after their tables, and for the same
+reason: the view references the tables.
+
+```python
+from kbutillib.domains.kbase.berdl.clearinghouse_schema import TENANT, union_view_sql
+
+ddl = union_view_sql("all_alias", fqn_prefix=f"{TENANT}.clearinghouse")
+print(ddl)
+spark.sql(ddl)
+```
+
+**This makes the union views FOUR, not three.** An operator following
+section 2.4 and then OP-C5 ends with `all_entity`, `all_content`,
+`all_result` and `all_alias`. `all_alias` unions all seven columns of the
+five alias tables (unlike `all_content`, the alias schema is generic across
+types, so no column has to be dropped). It is metadata-only and freely
+droppable and recreatable, like the other three. `parameter_set` still
+appears in no union view.
+
+**C5.5 -- closing check: three INDEPENDENT checks, none implying another.**
+
+```
+kbu clearinghouse health
+echo "exit=$?"
+```
+
+1. **`health` exits zero.** This proves the command ran and the
+   *parameter-set* integrity check found nothing: `parameter_set_integrity`
+   findings do set a non-zero exit (`_exit_on_integrity_failure`, in
+   `src/kbutillib/interfaces/cli/clearinghouse.py`).
+2. **`data.alias_integrity` is present** in the envelope. This proves the
+   alias facility is wired into `health` at all.
+3. **`data.alias_integrity.orphan_total` is read by eye.** Its keys are
+   `orphans_by_source`, `orphan_total`, `reduced_rows` and
+   `reduced_rows_by_type`. On a freshly created, empty set of tables it is
+   `0`.
+
+**A zero exit is NOT evidence that the orphan total is zero.** This is
+deliberate. An alias whose entity has no row yet is a *legal* state (the
+alias can arrive before the entity), so `alias_integrity` carries **no
+`failures` key** -- `_exit_on_integrity_failure` reads exactly that key, and
+its absence is what keeps the exit code zero. It is also kept out of
+`warnings`, because a warning marks a degraded answer and an orphan count is
+a complete answer about a legitimate state. So a **non-zero orphan total
+still exits zero and is not a failure.** An operator who reads a zero exit
+as proof of no alias orphans has made a mistake, and it is exactly the
+silent-failure inference this document exists to prevent.
+
+### Run record -- OP-C5
+
+Empty template. **Fill a row in only after you have actually run the
+step; do not pre-populate it with expected results.**
+
+| Step | Date | Operator | Result |
+|---|---|---|---|
+| C5.0 precondition |  |  |  |
+| C5.1 dry run (five creates, sixteen present) |  |  |  |
+| C5.2 real run |  |  |  |
+| C5.3 columns and partition spec, five tables |  |  |  |
+| C5.4 `all_alias` view |  |  |  |
+| C5.5 health: exit / alias_integrity present / orphan_total |  |  |  |
+
+### Two quantities are both called "the assembly hash", and they are NOT equal
+
+A genome has two hashes that people call "the assembly hash". They are
+computed by different rules over different bytes.
+
+**Rule A -- the clearinghouse identity.**
+`standardizers.entity_hash("genome", contigs)`: strip FASTA headers and all
+whitespace from each contig, uppercase, drop contigs that are empty after
+cleaning, **sort ascending**, join with `|`, sha256. It is
+**order-independent** and **header-independent**. This is the canonical
+clearinghouse genome `entity_hash`.
+
+**Rule B -- a KBDL-local artifact id.** KBDL's `genomes.content_hash` is
+`sha256(canonical FASTA bytes)`, and it is enforced equal to
+`fasta_object_id`. It is **header-inclusive** and **order-dependent**.
+(Source: `kbdl_service/job_types/build_genome.py` in the
+`KBDLJobRunningPrototype` repo, line numbers as of that repo's `wip` at
+`c676443`, checked 2026-11-12 -- that repo is not part of this one, so these
+may drift: the hash is computed at line 1404, `content_hash =
+hashlib.sha256(canonical_bytes).hexdigest()`; the equality is enforced in
+`_put_canonical_fasta` at line 1690, the check itself at line 1720.)
+
+Two submissions of the same contigs in a **different order** get the
+**same A and a different B**.
+
+The enforcement in `_put_canonical_fasta` is `if fasta_object_id !=
+content_hash: raise JobExecutionError(FailureCode.INTERNAL_ERROR, ...)`, not
+a bare `assert`. Its docstring gives the reason, worth repeating: a mismatch
+is silent corruption of the dedup key, so it is checked rather than
+assumed, and reported as INTERNAL_ERROR because nothing a caller supplied
+could cause it; a plain `assert` would be stripped under `python -O`, which
+is precisely when nobody is watching.
+
+**A is the clearinghouse identity; B is a KBDL-local artifact id.**
+`kbaseincubator.fitness`'s `genome.assembly_hash` and
+`assembly.assembly_hash` columns declare **neither** rule. A column named
+`assembly_hash` that does not say which rule it follows is a join waiting to
+fail silently, and `fitness` is the scheme the genome companion namespace
+will be built on, which is why this is written down before that design
+starts.
+
+**Q11.1 is settled: `fitness.assembly_hash` IS rule A.** Measured on
+2026-10-26 (n=3) by recomputing both rules from the real bytes of refs
+`262939/41/3` (1 contig), `262939/27/2` (16 contigs) and `262939/85/3` (7
+contigs): all three match rule A and none matches rule B. Two of the three
+are multi-contig, so rule A's sort step is load-bearing in the match. This
+closes a **documentation gap**, not a live data problem; nothing in the
+lake was wrong, only unlabelled. Scope, honestly: n=3 of 47 rows is strong
+evidence, not proof over all 47.
+
+**KBDL's `genome_id` is not an independent identifier.** The chain is:
+`genome_id = content_hash[:16]` (`_INTERNAL_ID_HASH_CHARS = 16` at line 484;
+the assignment `genome_id=content_hash[:_INTERNAL_ID_HASH_CHARS]` at line
+1549), and `content_hash` is enforced equal to `fasta_object_id`, therefore
+`genome_id == fasta_object_id[:16]`. The last step holds **only because**
+`_put_canonical_fasta` enforces the equality; were that check removed the
+identity would break silently, which is why it is an exception and not an
+assert. This is why the alias vocabulary has **no `kbdl_genome_id` source**,
+and why the arc indexer's locus-prefix map (`object_id[:16] -> object_id`)
+resolves against the same sixteen characters.
+
+**Making the A/B relationship queryable.** Storing rule B in the
+`kbdl_fasta_object` alias source is what turns the relationship between A
+and B from folklore into a query. A genome row in `genome_alias` carries its
+rule-A hash in `entity_hash` and its rule-B hash in `alias_id`.
+
+> **Reader's warning.** On that same row a 64-hex rule-B value sits in
+> `alias_id` and a 64-hex rule-A value sits in `entity_hash`. Both are
+> sha256, both lowercase hex, and **nothing in the data says they are
+> computed by different rules over different bytes.** So a **self-join on
+> `alias_id` across sources**, or a join of `alias_id` to `entity_hash`, is
+> exactly the silent-failure join this section exists to prevent: it returns
+> rows or no rows with equal confidence and neither answer means what it
+> appears to mean. Always filter on `alias_source` and join through
+> `entity_hash`.
+
+### The `obj://` prefix rule
+
+As of KBUtilLib `main` commit `ed40f28` (2026-10-25, "one spelling for KBDL
+object references, `obj://<id>[#<member>]`", Chris's option A for the
+URI-spelling question), there is **one** spelling for a KBDL object
+reference: `obj://<id>[#<member>]`. `genome_content.fasta_reference` carries
+that form -- `obj://<id>` for a bare object, `obj://<archive_id>#<entry>` for
+an archive member.
+
+**`alias_id` does not.** Under `alias_source = 'kbdl_fasta_object'` or
+`'kbdl_object'` it holds the **bare `<id>`**, deliberately: `alias_source`
+and `alias_id` are already a (namespace, identifier) pair, so embedding
+`obj://` in the value would state the namespace twice. This is the
+CURIE-versus-URI distinction: the alias table is the CURIE side, and
+`fasta_reference` is the URI side because it is a pointer in a column with no
+vocabulary column beside it.
+
+**A direct join between `alias_id` and `fasta_reference` returns ZERO ROWS**
+-- not an error, just an empty result that reads as "no aliases for these
+genomes".
+
+**Standalone object -- the scheme can be removed, and that is the only
+hazard.** `fasta_reference = obj://<fasta_object_id>` and `alias_id` under
+`kbdl_fasta_object` is the bare `<fasta_object_id>`. Both directions
+(Spark/Trino SQL; `substr` is 1-based and `obj://` is 6 characters):
+
+```sql
+-- alias -> reference: add the scheme to the alias side
+SELECT a.entity_hash, g.fasta_reference
+FROM genome_alias a
+JOIN genome_content g ON g.fasta_reference = concat('obj://', a.alias_id)
+WHERE a.alias_source = 'kbdl_fasta_object';
+
+-- reference -> alias: strip the scheme from the reference side, standalone form only
+SELECT g.fasta_reference, a.entity_hash
+FROM genome_content g
+JOIN genome_alias a ON a.alias_id = substr(g.fasta_reference, 7)
+WHERE a.alias_source = 'kbdl_fasta_object'
+  AND g.fasta_reference LIKE 'obj://%'
+  AND g.fasta_reference NOT LIKE '%#%';
+```
+
+(Both omit, for brevity, the latest-observation reduction every alias read
+needs; a `withdrawn` observation is still a row.)
+
+**Archive member -- there is NO correct one-expression join today.**
+`fasta_reference = obj://<archive_object_id>#<entry_name>`. The preset's own
+comment (`src/kbutillib/domains/kbase/berdl/backfills/kbdl-genome-archives.toml`,
+around line 75) says `fasta_reference` "IS A POINTER INTO THE ARCHIVE, not to
+a standalone object: a genome in a GenomeArchive is one MEMBER of it", so the
+reference needs both the archive's object id and the member's entry name.
+The adapter emits `archive_object_id` and `entry_name` separately and emits
+**no** `fasta_object_id` for that record. Stripping the scheme therefore
+yields the **archive** id, which is **not** the member's rule-B FASTA content
+hash and **is shared by every genome in that archive**. Treating it as a
+per-genome identifier produces empty joins or many-entity collisions. (The
+same comment notes `@concat` is null-preserving across both columns: a row
+missing either half is dropped rather than written as `obj://None#x`, which
+would be a pointer to nothing and indistinguishable in the lake from a real
+one.)
+
+So: **an `archive_object_id` must NEVER be labelled `kbdl_fasta_object`.**
+An archive member is joined **through `entity_hash`**, or through an explicit
+archive-and-member-to-member-hash mapping that **does not exist yet** and is
+separately scoped follow-on work. Do not synthesise one from the string.
 
 ---
 

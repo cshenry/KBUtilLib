@@ -221,7 +221,9 @@ DERIVATIONS: tuple[str, ...] = (
 #: The kinds a source may target, MIRRORING
 #: :data:`clearinghouse_schema._KINDS` rather than re-typing it, so a kind the
 #: schema gains cannot be silently refused here (kept as its own public
-#: constant so callers do not reach into a private schema name).
+#: constant for callers). This deliberately reads the private schema name
+#: across the same-subpackage seam: the drift it prevents is the bug class
+#: this module exists to avoid.
 KINDS: tuple[str, ...] = tuple(schema._KINDS)
 
 #: Matches a ``@name(args)`` derivation head. The argument text is captured

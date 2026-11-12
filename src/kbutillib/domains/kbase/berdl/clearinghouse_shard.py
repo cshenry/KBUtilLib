@@ -4737,6 +4737,18 @@ SKIP_SHARD_VALUE_ERROR = "shard-value-error"
 #: :data:`SKIP_SHARD_VALUE_ERROR` -- see :class:`ShardParameterSetError`.
 SKIP_PARAMETER_SET = "parameter-set-invalid"
 
+#: An alias entry whose ``alias_id`` derived to null for a record. The row is
+#: NOT EMITTED -- a null-preserving derivation (``@prefix``/``@concat``) says
+#: the identifier does not exist for this record, and an alias row for it
+#: would be the ``"kbdl:obj:None"`` pointer-to-nothing, made multi-valued.
+SKIP_ALIAS_ID_NULL = "alias-id-null"
+#: An alias row :func:`clearinghouse_schema.validate_alias` refused (blank, or
+#: not the shape its ``alias_source`` requires). One row lost, run continues.
+SKIP_ALIAS_INVALID = "alias-invalid"
+
+#: Bulk backfill observes an alias PRESENT, always. Never read from a preset.
+_ALIAS_BULK_OBSERVATION = "present"
+
 #: The ``source`` recorded on a registry batch holding PER-ROW parameter sets.
 #: A single label rather than one source name: a unit's per-row sets are
 #: merged across every source that declared ``parameter_set_column`` (two
@@ -4960,6 +4972,62 @@ def _row_parameter_set(
     if collector is not None:
         collector.setdefault(digest, canonical)
     return digest
+
+
+def _build_alias_rows(
+    plan: cm.TablePlan,
+    row: Mapping[str, Any],
+    *,
+    run_observed_at: datetime,
+    skips: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Build the alias rows ONE source record yields: one per planned entry.
+
+    ``observation`` is ``"present"`` unconditionally. An entry whose
+    ``alias_id`` derives to null is dropped (counted under
+    :data:`SKIP_ALIAS_ID_NULL`); a row :func:`schema.validate_alias` refuses is
+    dropped (counted under :data:`SKIP_ALIAS_INVALID`). A record with no
+    hashable value raises :class:`ShardValueError`, like any other kind.
+    """
+    entity_hash = _compute_entity_hash(plan, row)
+    if plan.observed_at_column is None:
+        observed_at = run_observed_at
+    else:
+        observed_at = resolve_observed_at(
+            row.get(plan.observed_at_column),
+            where=(
+                f"source {plan.source_name!r} table {plan.table!r} column "
+                f"{plan.observed_at_column!r}"
+            ),
+        )
+    rows: list[dict[str, Any]] = []
+    for alias_source, derivation in plan.aliases:
+        alias_id = _derive(derivation, row)
+        if alias_id is None:
+            skips[SKIP_ALIAS_ID_NULL] = skips.get(SKIP_ALIAS_ID_NULL, 0) + 1
+            continue
+        try:
+            _, canonical_hash, _, alias_id, observation = schema.validate_alias(
+                plan.entity_type,
+                entity_hash,
+                alias_source,
+                alias_id if isinstance(alias_id, str) else str(alias_id),
+                _ALIAS_BULK_OBSERVATION,
+            )
+        except ValueError:
+            skips[SKIP_ALIAS_INVALID] = skips.get(SKIP_ALIAS_INVALID, 0) + 1
+            continue
+        rows.append(
+            {
+                "entity_hash": canonical_hash,
+                "entity_type": plan.entity_type,
+                "alias_source": alias_source,
+                "alias_id": alias_id,
+                "observation": observation,
+                "observed_at": observed_at,
+            }
+        )
+    return rows
 
 
 def _build_row(
@@ -5374,6 +5442,16 @@ def _key_spec(entity_type: str | None, kind: str) -> _KeySpec:
             observed_at_descending=True,
             tiebreak_columns=("payload",),
         )
+    if kind == "alias":
+        # Append-only observations: a row is identified by the whole
+        # (entity, source, id, observation) tuple, and a re-run of the same
+        # observation is a duplicate.
+        return _KeySpec(
+            key_column="entity_hash",
+            dedup_columns=("entity_hash", "alias_source", "alias_id", "observation"),
+            observed_at_descending=True,
+            tiebreak_columns=("alias_source", "alias_id", "observation"),
+        )
     # entity / content: identity is the hash; the tie-break is the whole
     # mapped row, excluding the two provenance columns that differ per batch
     # (ingest_batch_id) or per record (observed_at) without making the row a
@@ -5739,12 +5817,26 @@ def shard_table(
             for record in adapter.iter_records():
                 emitted += 1
                 try:
-                    out_row = _build_row(
-                        plan,
-                        record,
-                        run_observed_at=context.observed_at,
-                        parameter_sets=outcome.parameter_sets,
-                    )
+                    if plan.kind == "alias":
+                        alias_skips: dict[str, int] = {}
+                        out_rows = _build_alias_rows(
+                            plan,
+                            record,
+                            run_observed_at=context.observed_at,
+                            skips=alias_skips,
+                        )
+                        for reason, count in alias_skips.items():
+                            key = (plan.source_name, reason)
+                            skip_counts[key] = skip_counts.get(key, 0) + count
+                    else:
+                        out_rows = [
+                            _build_row(
+                                plan,
+                                record,
+                                run_observed_at=context.observed_at,
+                                parameter_sets=outcome.parameter_sets,
+                            )
+                        ]
                 except ShardValueError as exc:
                     if isinstance(exc, ShardParameterSetError):
                         reason = SKIP_PARAMETER_SET
@@ -5755,24 +5847,28 @@ def shard_table(
                     key = (plan.source_name, reason)
                     skip_counts[key] = skip_counts.get(key, 0) + 1
                     continue
-                accepted += 1
-                if plan.kind == "result" and out_row.get("parameter_set_hash"):
-                    outcome.parameter_set_hashes.add(out_row["parameter_set_hash"])
-                out_row[_ROW_SOURCE_KEY] = plan.source_name
-                index = _range_index(out_row[spec.key_column], boundaries, n)
-                out_row[_ROW_RANGE_KEY] = index
-                buffer.append(out_row)
-                buffer_bytes += _row_bytes(out_row)
-                if metrics is not None:
-                    metrics.rows_per_range[index] = (
-                        metrics.rows_per_range.get(index, 0) + 1
-                    )
-                    if len(buffer) > metrics.max_sort_buffer_rows:
-                        metrics.max_sort_buffer_rows = len(buffer)
-                    metrics.note_resident(len(buffer))
-                if buffer_bytes >= target_bytes:
-                    _spill_buffer(buffer, spool, sort_key, metrics)
-                    buffer_bytes = 0
+                if out_rows:
+                    accepted += 1
+                for out_row in out_rows:
+                    if plan.kind == "result" and out_row.get("parameter_set_hash"):
+                        outcome.parameter_set_hashes.add(
+                            out_row["parameter_set_hash"]
+                        )
+                    out_row[_ROW_SOURCE_KEY] = plan.source_name
+                    index = _range_index(out_row[spec.key_column], boundaries, n)
+                    out_row[_ROW_RANGE_KEY] = index
+                    buffer.append(out_row)
+                    buffer_bytes += _row_bytes(out_row)
+                    if metrics is not None:
+                        metrics.rows_per_range[index] = (
+                            metrics.rows_per_range.get(index, 0) + 1
+                        )
+                        if len(buffer) > metrics.max_sort_buffer_rows:
+                            metrics.max_sort_buffer_rows = len(buffer)
+                        metrics.note_resident(len(buffer))
+                    if buffer_bytes >= target_bytes:
+                        _spill_buffer(buffer, spool, sort_key, metrics)
+                        buffer_bytes = 0
             # Adapter-reported skips are merged with the sharder's own, so a
             # source's shortfall is one number with one list of reasons.
             for reason, count in adapter.skipped().items():

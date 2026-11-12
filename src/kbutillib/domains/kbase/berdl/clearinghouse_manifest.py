@@ -218,10 +218,11 @@ DERIVATIONS: tuple[str, ...] = (
     "concat",
 )
 
-#: The three kinds a source may target, mirroring
-#: :data:`clearinghouse_schema._KINDS` (kept as its own public constant so
-#: callers do not reach into a private schema name).
-KINDS: tuple[str, ...] = ("entity", "content", "result")
+#: The kinds a source may target, MIRRORING
+#: :data:`clearinghouse_schema._KINDS` rather than re-typing it, so a kind the
+#: schema gains cannot be silently refused here (kept as its own public
+#: constant so callers do not reach into a private schema name).
+KINDS: tuple[str, ...] = tuple(schema._KINDS)
 
 #: Matches a ``@name(args)`` derivation head. The argument text is captured
 #: raw and split by the derivation's own arity rules; only the NAME is matched
@@ -300,6 +301,10 @@ class TablePlan:
     #: ``parameter_set_hash`` is set on a ``result`` plan, which is how the
     #: sharder knows whether to stamp the plan's hash or derive the row's.
     parameter_set_column: str | None = None
+    #: The validated alias entries as ``(alias_source, alias_id derivation)``
+    #: pairs, for the ``alias`` kind only; empty for every other kind. One
+    #: source record yields one alias row per pair.
+    aliases: tuple[tuple[str, Derivation], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,11 @@ class Source:
     hash_spec: Mapping[str, Any]
     content: Mapping[str, Any]
     result: Mapping[str, Any]
+    #: The ``[[source.alias]]`` entries, in declaration order; empty when the
+    #: source declares none. A LIST (not a column map) because a source emits
+    #: one alias row per entry per entity -- a different cardinality from the
+    #: one-row-per-entity content and result blocks.
+    alias: tuple[Mapping[str, Any], ...] = ()
     #: Optional top-level ``observed_at_column``: the name of a SOURCE column
     #: carrying this record's observation time. ``None`` means the sharder
     #: stamps its run start time on every row of this source instead. Either
@@ -393,6 +403,8 @@ _MAPPING_KEYS = frozenset(
         "hash",
         "content",
         "result",
+        # ``[[source.alias]]``: a LIST of alias entries (mapping half).
+        "alias",
         # Not a locator key. ``observed_at_column`` names a SOURCE column the
         # sharder reads per row for ``observed_at``; it is part of the mapping
         # half (adapter-independent), so it must be listed here or it would
@@ -739,6 +751,18 @@ def _read_manifest_text(source: str | Path) -> str:
     return source
 
 
+def _parse_alias_entries(name: str, raw: Any) -> tuple[Mapping[str, Any], ...]:
+    """Shape-check the raw ``alias`` value: absent, or a list of tables."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(e, Mapping) for e in raw):
+        raise ManifestError(
+            f"source {name!r} [source.alias] must be an ARRAY of tables "
+            "([[source.alias]], one per alias_source), not a single table."
+        )
+    return tuple(dict(e) for e in raw)
+
+
 def _parse_source(
     raw: Any, *, index: int, env: Mapping[str, str] | None = None
 ) -> Source:
@@ -803,6 +827,7 @@ def _parse_source(
         hash_spec=dict(raw.get("hash") or {}),
         content=dict(raw.get("content") or {}),
         result=dict(raw.get("result") or {}),
+        alias=_parse_alias_entries(name, raw.get("alias")),
         observed_at_column=(
             observed_at_column.strip() if observed_at_column is not None else None
         ),
@@ -967,7 +992,11 @@ def _plan_source(source: Source) -> list[TablePlan]:
         parameter_set_json: str | None = None
         parameter_set_hash: str | None = None
         parameter_set_column: str | None = None
-        if kind == "content":
+        aliases: tuple[tuple[str, Derivation], ...] = ()
+        if kind == "alias":
+            columns = {}
+            aliases = _plan_alias(source)
+        elif kind == "content":
             columns = _plan_content(source)
         elif kind == "result":
             columns = _plan_result(source)
@@ -992,9 +1021,93 @@ def _plan_source(source: Source) -> list[TablePlan]:
                 parameter_set_hash=parameter_set_hash,
                 observed_at_column=source.observed_at_column,
                 parameter_set_column=parameter_set_column,
+                aliases=aliases,
             )
         )
+    if source.alias and "alias" not in source.kinds:
+        raise ManifestError(
+            f"source {name!r}: a [[source.alias]] block is declared but "
+            "'alias' is not in kinds; add it, or the block would be silently "
+            "ignored."
+        )
     return plans
+
+
+#: The only keys an ``[[source.alias]]`` entry may carry: the alias columns
+#: the manifest MAY map. Everything else in the alias schema is sharder-filled.
+_ALIAS_ENTRY_KEYS: tuple[str, ...] = ("alias_source", "alias_id")
+
+
+def _plan_alias(source: Source) -> tuple[tuple[str, Derivation], ...]:
+    """Validate the ``[[source.alias]]`` entries, at PLAN time.
+
+    Declared names are checked against the STANDARD
+    :func:`clearinghouse_schema.column_names` for ``(entity_type, "alias")``.
+    ``observation`` is reserved DELIBERATELY: a bulk backfill observes an
+    identifier to be PRESENT, always (the sharder writes
+    ``observation="present"``). A withdrawal is a deliberate single
+    observation through ``observe_alias``, never a bulk fact a loader
+    discovers, so a preset that could declare it could mass-withdraw aliases
+    through a mapping typo.
+    """
+    name = source.name
+    etype = source.entity_type
+    if not source.alias:
+        raise ManifestError(
+            f"source {name!r}: kind 'alias' is declared but there is no "
+            "[[source.alias]] block naming its alias_source / alias_id."
+        )
+    legal = schema.column_names(etype, "alias")
+    reserved = {
+        "entity_type",
+        "entity_hash",
+        "observation",
+        "observed_at",
+        "ingest_batch_id",
+    }
+    legal_sources = schema.ALIAS_SOURCES_BY_ENTITY_TYPE[etype]
+    planned: list[tuple[str, Derivation]] = []
+    for index, entry in enumerate(source.alias):
+        where = f"source {name!r} [[source.alias]] #{index + 1}"
+        for column in entry:
+            if column in reserved and column in legal:
+                raise ManifestError(
+                    f"{where}: column {column!r} is filled by the sharder and "
+                    "must not be mapped in the manifest."
+                    + (
+                        " A bulk backfill always observes an alias PRESENT; "
+                        "a withdrawal is recorded deliberately through "
+                        "observe_alias, never declared by a preset."
+                        if column == "observation"
+                        else ""
+                    )
+                )
+            if column not in _ALIAS_ENTRY_KEYS:
+                raise ManifestError(
+                    f"{where}: unknown key {column!r}. Legal keys: "
+                    f"{', '.join(_ALIAS_ENTRY_KEYS)}."
+                )
+        alias_source = entry.get("alias_source")
+        if alias_source not in schema.ALIAS_SOURCES:
+            raise ManifestError(
+                f"{where}: unknown alias_source {alias_source!r}; expected "
+                f"one of {', '.join(schema.ALIAS_SOURCES)}."
+            )
+        if alias_source not in legal_sources:
+            raise ManifestError(
+                f"{where}: alias_source {alias_source!r} is not legal for "
+                f"entity_type {etype!r}; legal sources for it: "
+                f"{', '.join(legal_sources)}."
+            )
+        if "alias_id" not in entry:
+            raise ManifestError(f"{where}: 'alias_id' is required.")
+        planned.append(
+            (
+                alias_source,
+                parse_derivation(entry["alias_id"], where=f"{where}.alias_id"),
+            )
+        )
+    return tuple(planned)
 
 
 def _plan_hash(source: Source) -> tuple[str, str, str]:

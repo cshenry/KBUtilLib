@@ -106,6 +106,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -116,14 +117,17 @@ from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_parameters import result_parameter_set_identity
 from .clearinghouse_schema import (
     _KINDS,
+    ALIAS_OBSERVATIONS,
     ENTITY_TYPES,
     NAMESPACE,
     PARAMETER_SET_TABLE,
     TENANT,
+    column_names,
     encode_entity_hash,
     parameter_set_column_names,
     table_configs,
     table_name,
+    validate_alias,
 )
 
 __all__ = [
@@ -143,6 +147,45 @@ __all__ = [
 #: ``f"{_FQN_PREFIX}.{table_name(...)}"``; the derivation and schema modules
 #: quote each dot-separated segment of it themselves.
 _FQN_PREFIX = f"{TENANT}.{NAMESPACE}"
+
+#: The ONE tie order every latest-observation reduction over a ``<type>_alias``
+#: table uses. ``observation DESC`` makes ``"withdrawn"`` sort ahead of
+#: ``"present"``, so an exact ``(observed_at, ingest_batch_id)`` tie resolves to
+#: WITHDRAWN deterministically instead of by SQL row order.
+ALIAS_LATEST_ORDER_BY = "observed_at DESC, ingest_batch_id DESC, observation DESC"
+
+#: Columns a caller may never supply on an alias row: this module owns the clock.
+_ALIAS_SERVER_COLUMNS = ("observed_at", "ingest_batch_id")
+
+
+def latest_alias_observations(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    """Reduce alias observation rows to the LATEST one per four-tuple.
+
+    Pure statement of :data:`ALIAS_LATEST_ORDER_BY`: the winner for each
+    ``(entity_type, entity_hash, alias_source, alias_id)`` has the greatest
+    ``(observed_at, ingest_batch_id, observation)``, with ``"withdrawn"`` >
+    ``"present"``. Independent of input order.
+    """
+    best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row["entity_type"],
+            row["entity_hash"],
+            row["alias_source"],
+            row["alias_id"],
+        )
+        rank = (row["observed_at"], row["ingest_batch_id"], row["observation"])
+        current = best.get(key)
+        if current is None or rank > (
+            current["observed_at"],
+            current["ingest_batch_id"],
+            current["observation"],
+        ):
+            best[key] = dict(row)
+    return best
+
 
 #: The one cross-type content view :meth:`content_all_types` reads -- the
 #: explicitly-lossy ``all_content`` UNION-ALL (shared columns plus an
@@ -1740,6 +1783,261 @@ class ClearinghouseCapability:
                 "load_result": None,
             }
         return result
+
+    # -- alias writes ------------------------------------------------------
+
+    @staticmethod
+    def _alias_clock() -> tuple[str, str]:
+        """A fresh non-null UTC ``observed_at`` and a fresh ULID batch id."""
+        from .clearinghouse_shard import new_ulid  # noqa: PLC0415
+
+        observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        return observed_at, new_ulid()
+
+    @staticmethod
+    def _validate_alias_rows(
+        entity_type: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        force_observation: str | None,
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Validate EVERY row or raise, naming the row index. Writes nothing."""
+        canonical: list[tuple[str, str, str, str, str]] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise ValueError(
+                    f"alias row {index}: expected a mapping, got "
+                    f"{type(row).__name__}. Nothing has been written."
+                )
+            for column in _ALIAS_SERVER_COLUMNS:
+                if column in row:
+                    raise ValueError(
+                        f"alias row {index}: caller-supplied {column!r} is "
+                        "refused; it is generated per call by this writer "
+                        "(source event time is not implemented). Nothing has "
+                        "been written."
+                    )
+            row_type = row.get("entity_type", entity_type)
+            if row_type != entity_type:
+                raise ValueError(
+                    f"alias row {index}: entity_type {row_type!r} disagrees "
+                    f"with the call's entity_type {entity_type!r}; a row for "
+                    "another type is a caller bug and is not coerced. "
+                    "Nothing has been written."
+                )
+            observation = (
+                force_observation
+                if force_observation is not None
+                else row.get("observation", "present")
+            )
+            if force_observation is not None and row.get("observation", force_observation) != force_observation:
+                raise ValueError(
+                    f"alias row {index}: register_aliases always writes "
+                    f"observation={force_observation!r}; use observe_alias to "
+                    "record a withdrawal. Nothing has been written."
+                )
+            try:
+                canonical.append(
+                    validate_alias(
+                        entity_type,
+                        row.get("entity_hash"),
+                        row.get("alias_source"),
+                        row.get("alias_id"),
+                        observation,
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"alias row {index}: {exc} Nothing has been written."
+                ) from exc
+        return canonical
+
+    def _assert_alias_table_exists(self, entity_type: str) -> str:
+        """Refuse, naming OP-C5, unless the alias table exists with every column."""
+        name = table_name(entity_type, "alias")
+        live = self._live_columns(name)
+        missing = (
+            sorted(set(column_names(entity_type, "alias")) - live)
+            if live is not None
+            else None
+        )
+        if live is None or missing:
+            detail = (
+                "does not exist"
+                if live is None
+                else f"is missing column(s) {missing}"
+            )
+            raise ClearinghouseSchemaPreflightError(
+                f"ClearinghouseCapability refuses to write aliases: table "
+                f"{name!r} {detail} in {_FQN_PREFIX!r}. Creating the "
+                "<type>_alias tables is operator step OP-C5; bootstrap() "
+                "cannot add a column to an existing table. No load() has "
+                "been called."
+            )
+        return name
+
+    def _append_alias_rows(
+        self,
+        entity_type: str,
+        name: str,
+        tuples: Sequence[tuple[str, str, str, str, str]],
+        *,
+        tenant: str,
+        dataset: str,
+        write_ns: str,
+    ) -> dict[str, Any]:
+        observed_at, batch_id = self._alias_clock()
+        columns = column_names(entity_type, "alias")
+        rows = []
+        for et, eh, src, aid, obs in tuples:
+            full = {
+                "entity_type": et,
+                "entity_hash": eh,
+                "alias_source": src,
+                "alias_id": aid,
+                "observation": obs,
+                "observed_at": observed_at,
+                "ingest_batch_id": batch_id,
+            }
+            rows.append({column: full.get(column) for column in columns})
+        load_result = self._get_capability().load(
+            dataset=dataset,
+            tables=[{"name": name, "mode": "append"}],
+            tenant=tenant,
+            namespace=write_ns,
+            dataframes={name: rows},
+        )
+        return self._check_postflight(load_result)
+
+    def _existing_alias_tuples(
+        self, name: str, tuples: Sequence[tuple[str, str, str, str, str]]
+    ) -> set[tuple[str, str, str, str, str]]:
+        """Distinct five-tuples already stored for the slices this batch touches."""
+        sources = sorted({t[2] for t in tuples})  # validated against ALIAS_SOURCES
+        hashes = sorted({t[1] for t in tuples})  # validated canonical hex64
+        table = _quote_fqn(f"{_FQN_PREFIX}.{name}", "spark")
+        sql = (
+            "SELECT DISTINCT entity_type, entity_hash, alias_source, alias_id, "
+            f"observation FROM {table} WHERE alias_source IN ("
+            + ", ".join(f"'{s}'" for s in sources)
+            + f") AND entity_hash IN ({self._in_placeholders(len(hashes))})"
+        )
+        rows = self._run(sql, params=hashes, engine="spark")
+        return {
+            (
+                r["entity_type"],
+                r["entity_hash"],
+                r["alias_source"],
+                r["alias_id"],
+                r["observation"],
+            )
+            for r in rows
+        }
+
+    def register_aliases(
+        self,
+        entity_type: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Bulk, idempotent, FILL-ONLY write of ``observation='present'`` aliases.
+
+        Each row carries ``entity_hash``, ``alias_source``, ``alias_id`` (and
+        optionally ``entity_type``, which must equal the argument). Every row
+        is validated through :func:`validate_alias` before anything is
+        written; any failure refuses the whole call naming the row index.
+        ``observed_at`` / ``ingest_batch_id`` are generated per call and a
+        caller-supplied value for either is refused. Rows whose five-tuple is
+        already stored are reported ``already_present`` and not appended; if
+        that is every row, ``load()`` is not called at all.
+
+        Fill-only here is deliberate and is why :meth:`observe_alias` is a
+        separate verb: it never applies fill-only, so reinstatement works.
+
+        Returns ``{"written": [...], "already_present": [...],
+        "load_result": ...}`` (``load_result`` is ``None`` when nothing was
+        appended).
+
+        Raises:
+            ValueError: A row is invalid (or the entity_type is unknown).
+            BerdlLoadRefusedError: Off-pod.
+            ClearinghouseWriteTargetMismatchError: Dev 1206.
+            ClearinghouseSchemaPreflightError: Alias table absent (OP-C5).
+            ClearinghouseLoadPostflightError: Null postflight (dev 1194).
+        """
+        self._require_in_pod("register_aliases")
+        table_name(entity_type, "alias")  # raises on an unknown type
+        tuples = self._validate_alias_rows(
+            entity_type, rows, force_observation="present"
+        )
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        name = self._assert_alias_table_exists(entity_type)
+        existing = self._existing_alias_tuples(name, tuples) if tuples else set()
+        written: list[tuple[str, str, str, str, str]] = []
+        already: list[tuple[str, str, str, str, str]] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for t in tuples:
+            if t in existing or t in seen:
+                already.append(t)
+            else:
+                written.append(t)
+                seen.add(t)
+        report: dict[str, Any] = {
+            "written": written,
+            "already_present": already,
+            "load_result": None,
+        }
+        if written:
+            report["load_result"] = self._append_alias_rows(
+                entity_type,
+                name,
+                written,
+                tenant=tenant,
+                dataset=dataset,
+                write_ns=write_ns,
+            )
+        return report
+
+    def observe_alias(
+        self,
+        entity_type: str,
+        entity_hash: str,
+        alias_source: str,
+        alias_id: str,
+        observation: str,
+        *,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Record ONE observation (withdrawal or reinstatement). ALWAYS appends.
+
+        Never fill-only, by design: a reinstatement is a second ``present``
+        row after a ``withdrawn`` one, which fill-only on the five-tuple would
+        suppress as a duplicate. Same validation and guards as
+        :meth:`register_aliases`. Returns the same report shape.
+        """
+        self._require_in_pod("observe_alias")
+        table_name(entity_type, "alias")
+        (t,) = self._validate_alias_rows(
+            entity_type,
+            [
+                {
+                    "entity_hash": entity_hash,
+                    "alias_source": alias_source,
+                    "alias_id": alias_id,
+                    "observation": observation,
+                }
+            ],
+            force_observation=None,
+        )
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        name = self._assert_alias_table_exists(entity_type)
+        load_result = self._append_alias_rows(
+            entity_type, name, [t], tenant=tenant, dataset=dataset, write_ns=write_ns
+        )
+        return {"written": [t], "already_present": [], "load_result": load_result}
 
     def _prepare_result_rows(
         self, rows: Sequence[Mapping[str, Any]]

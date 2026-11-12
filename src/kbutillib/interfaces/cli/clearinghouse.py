@@ -1031,6 +1031,13 @@ def _build_health(cap: Any) -> dict[str, Any]:
     cannot be attributed to the parameters that produced it. ``health`` exits
     NON-ZERO when any finding is present (see
     :func:`_exit_on_integrity_failure`), so a monitor notices.
+
+    ``data.alias_integrity`` (``alias_orphans()``) is the DELIBERATE opposite.
+    An alias whose entity has no row yet is legal (the alias arrives before the
+    entity), so that report carries no ``failures`` key, is NOT read by
+    :func:`_exit_on_integrity_failure`, and is NOT put in ``warnings`` (a
+    warning marks a degraded answer; an orphan count is a complete answer about
+    a legitimate state). A non-zero orphan count leaves ``health`` exiting zero.
     """
     result = cap.stats(include_files=True)
     warnings = list(result.get("warnings", []))
@@ -1057,6 +1064,7 @@ def _build_health(cap: Any) -> dict[str, Any]:
             "available); run health in-pod for file metadata."
         )
     integrity = cap.parameter_set_orphans()
+    alias_integrity = cap.alias_orphans()
     return _envelope(
         "health",
         locus=_locus(cap),
@@ -1065,6 +1073,7 @@ def _build_health(cap: Any) -> dict[str, Any]:
             "tables_evaluated": evaluated,
             "tables": fragmented,
             "parameter_set_integrity": integrity,
+            "alias_integrity": alias_integrity,
         },
         warnings=warnings,
     )

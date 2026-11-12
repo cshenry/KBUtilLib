@@ -1609,6 +1609,92 @@ class ClearinghouseCapability:
             "failures": failures,
         }
 
+    def alias_orphans(
+        self,
+        *,
+        engine: str | None = None,
+    ) -> dict[str, Any]:
+        """Count alias rows whose entity has no row yet; report, never fail.
+
+        Reads each ``<type>_alias`` table joined to ITS OWN ``<type>_entity``
+        table (a straight five-pair join) and counts the CURRENT alias
+        observations whose ``entity_hash`` has no entity row, grouped by
+        ``(entity_type, alias_source)``. WRITES NOTHING and RAISES NOTHING.
+
+        THIS REPORT DELIBERATELY CARRIES NO ``'failures'`` KEY. Do not add
+        one, and do not "tidy" it into line with :meth:`parameter_set_orphans`.
+        The CLI ``health`` verb exits non-zero exactly when
+        ``parameter_set_integrity['failures']`` is non-empty
+        (``_exit_on_integrity_failure``), and an alias orphan is LEGAL: the
+        alias facility is how an identifier arrives BEFORE its entity does (a
+        backfill learns an accession from a manifest before it has hashed the
+        contigs). An unregistered parameter set is unrecoverable -- an opaque
+        result -- whereas an early alias is merely early. A ``'failures'`` key
+        here, or a rename of it that something reads, would make ``health``
+        exit non-zero during every normal bulk load and page whoever monitors
+        it about a correct system. For the same reason the count is never a
+        warning: a warning marks a degraded answer, and this is a complete
+        answer about a legitimate state.
+
+        CURRENT OBSERVATIONS ONLY. Each ``(entity_type, entity_hash,
+        alias_source, alias_id)`` is first reduced to its single latest
+        observation with :func:`latest_alias_observations` (the one statement
+        of :data:`ALIAS_LATEST_ORDER_BY`), and only those whose latest
+        observation is ``"present"`` can be orphans. A WITHDRAWN alias
+        pointing at a non-existent entity is an identifier the upstream
+        authority retracted -- the state the table exists to record, not a
+        finding about a producer -- and counting it would make the report grow
+        monotonically with normal upstream churn. The same alias re-observed
+        as present IS counted.
+
+        Args:
+            engine: Default is Trino.
+
+        Returns:
+            ``{'orphans_by_source': [{'entity_type', 'alias_source',
+            'orphan_count'}, ...], 'orphan_total': int,
+            'reduced_rows': int, 'reduced_rows_by_type': {type: int}}``.
+            ``reduced_rows`` counts the distinct four-tuples checked (present
+            and withdrawn alike), so an operator can see the population.
+            Orphan entries are sorted; sources with no orphans are absent.
+        """
+        resolved_engine = self._resolve_engine(engine, default="trino")
+        off_pod = self._locus() == "off_pod"
+        key = ", ".join(f"a.{c}" for c in self._ALIAS_KEY)
+        columns = ", ".join(f"a.{c}" for c in self._ALIAS_COLUMNS)
+        counts: dict[tuple[str, str], int] = {}
+        reduced_by_type: dict[str, int] = {}
+        for etype in ENTITY_TYPES:
+            alias = _quote_fqn(self._fqn(etype, "alias"), resolved_engine)
+            entity = _quote_fqn(self._fqn(etype, "entity"), resolved_engine)
+            sql = (
+                f"SELECT {columns}, (e.entity_hash IS NULL) AS entity_missing\n"
+                f"FROM {alias} AS a\n"
+                f"LEFT JOIN {entity} AS e ON a.entity_hash = e.entity_hash\n"
+                f"ORDER BY {key}, a.observed_at, a.ingest_batch_id, a.observation"
+            )
+            if off_pod:
+                rows = self._page_offpod(sql, params=None, engine=resolved_engine)
+            else:
+                rows = self._run(sql, params=None, engine=resolved_engine)
+            # entity_missing is a property of entity_hash, shared by every
+            # observation of one four-tuple, so it survives the reduction.
+            winners = latest_alias_observations(rows).values()
+            reduced_by_type[etype] = len(winners)
+            for winner in winners:
+                if winner["observation"] == "present" and winner["entity_missing"]:
+                    pair = (etype, winner["alias_source"])
+                    counts[pair] = counts.get(pair, 0) + 1
+        return {
+            "orphans_by_source": [
+                {"entity_type": t, "alias_source": s, "orphan_count": n}
+                for (t, s), n in sorted(counts.items())
+            ],
+            "orphan_total": sum(counts.values()),
+            "reduced_rows": sum(reduced_by_type.values()),
+            "reduced_rows_by_type": reduced_by_type,
+        }
+
     def stats(
         self,
         *,

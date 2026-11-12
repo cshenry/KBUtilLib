@@ -193,6 +193,15 @@ class _FakeCH:
             }
         ]
 
+    def alias_orphans(self, **_kw):
+        self.calls.append("alias_orphans")
+        return {
+            "orphans_by_source": [],
+            "orphan_total": 0,
+            "reduced_rows": 0,
+            "reduced_rows_by_type": {},
+        }
+
     def parameter_set_orphans(self, **_kw):
         self.calls.append("parameter_set_orphans")
         if self._orphan_report is not None:

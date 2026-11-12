@@ -118,6 +118,8 @@ from .clearinghouse_parameters import result_parameter_set_identity
 from .clearinghouse_schema import (
     _KINDS,
     ALIAS_OBSERVATIONS,
+    ALIAS_SOURCES,
+    INVERTIBLE_ALIAS_SOURCES,
     ENTITY_TYPES,
     NAMESPACE,
     PARAMETER_SET_TABLE,
@@ -131,6 +133,8 @@ from .clearinghouse_schema import (
 )
 
 __all__ = [
+    "AliasAmbiguousError",
+    "AliasNotInvertibleError",
     "ClearinghouseCapability",
     "ClearinghouseWriteTargetMismatchError",
     "ClearinghouseLoadPostflightError",
@@ -309,6 +313,28 @@ class ClearinghouseLoadPostflightError(RuntimeError):
     snapshot history rather than blindly re-running, since a blind re-run of a
     ``<type>_content`` shard leaves two rows for one ``entity_hash`` with no
     derivation rule to collapse them (see :meth:`ClearinghouseCapability.ingest_shards`).
+    """
+
+
+class AliasAmbiguousError(RuntimeError):
+    """One ``(alias_source, alias_id)`` maps to more than one live entity.
+
+    Deliberately NOT a ``ValueError``: a single ``except ValueError`` would
+    otherwise catch it together with the unknown-``alias_source`` error and
+    erase the difference between "you made a typo" and "the data is contested,
+    stop and escalate". The message names the pair and every
+    ``(entity_type, entity_hash)`` found.
+    """
+
+
+class AliasNotInvertibleError(RuntimeError):
+    """``resolve()`` was asked about a source that is not a scalar identifier.
+
+    Raised from the source's CONTRACT (``alias_source`` not in
+    ``INVERTIBLE_ALIAS_SOURCES``), never from a row count -- even a single
+    matching row does not make a taxon a scalar key. Not an ambiguity: the data
+    is not contested, the caller asked a set question with a scalar verb. Use
+    :meth:`ClearinghouseCapability.aliases` instead.
     """
 
 
@@ -866,6 +892,208 @@ class ClearinghouseCapability:
         return self._run_hash_lookup(
             sql_for=sql_for, encoded=encoded, engine=resolved_engine
         )
+
+    # -- alias read surface ----------------------------------------------
+
+    _ALIAS_VIEW = "all_alias"
+    _ALIAS_COLUMNS = (
+        "entity_type",
+        "entity_hash",
+        "alias_source",
+        "alias_id",
+        "observation",
+        "observed_at",
+        "ingest_batch_id",
+    )
+    _ALIAS_KEY = ("entity_type", "entity_hash", "alias_source", "alias_id")
+
+    def _alias_relation(self, entity_type: str | None, engine: str) -> str:
+        """Quoted FQN of the one ``<type>_alias`` table, or the ``all_alias`` view."""
+        if entity_type is None:
+            return _quote_fqn(f"{_FQN_PREFIX}.{self._ALIAS_VIEW}", engine)
+        return _quote_fqn(self._fqn(entity_type, "alias"), engine)
+
+    def _alias_rows(
+        self,
+        entity_type: str | None,
+        entity_hash: str | bytes | None,
+        *,
+        alias_sources: Sequence[str] | None,
+        alias_ids: Sequence[str] | None,
+        partition_by_observation: bool,
+        only_present: bool,
+        engine: str,
+    ) -> list[dict[str, Any]]:
+        """Build and run the alias SELECT. Never interpolates a hash itself.
+
+        ``entity_hash`` is canonicalised by :meth:`_encode_hashes` and emitted
+        as a ``?`` placeholder; :meth:`_run` decides how it is bound.
+        ``None`` for a filter applies none; ``[]`` emits ``1 = 0``
+        (:func:`_in_literal`), the same contract as :meth:`results`.
+        """
+        params: list[str] = []
+        predicates: list[str] = []
+        if entity_hash is not None:
+            params = self._encode_hashes([entity_hash])
+            predicates.append("entity_hash = ?")
+        if alias_sources is not None:
+            predicates.append(_in_literal("alias_source", list(alias_sources)))
+        if alias_ids is not None:
+            predicates.append(_in_literal("alias_id", list(alias_ids)))
+        where = f"WHERE {' AND '.join(predicates)}\n" if predicates else ""
+        key = ", ".join(self._ALIAS_KEY)
+        partition = key + (", observation" if partition_by_observation else "")
+        columns = ", ".join(self._ALIAS_COLUMNS)
+        outer = "rn = 1" + (" AND observation = 'present'" if only_present else "")
+        sql = (
+            f"SELECT {columns} FROM (\n"
+            f"SELECT {columns}, ROW_NUMBER() OVER (\n"
+            f"PARTITION BY {partition}\n"
+            f"ORDER BY {ALIAS_LATEST_ORDER_BY}\n"
+            f") AS rn\n"
+            f"FROM {self._alias_relation(entity_type, engine)}\n"
+            f"{where}"
+            f") AS ranked\nWHERE {outer}\n"
+            f"ORDER BY {key}, observation"
+        )
+        if self._locus() == "off_pod":
+            return self._page_offpod(sql, params=params or None, engine=engine)
+        return self._run(sql, params=params or None, engine=engine)
+
+    def aliases(
+        self,
+        entity_type: str | None = None,
+        entity_hash: str | bytes | None = None,
+        *,
+        alias_sources: list[str] | None = None,
+        alias_ids: list[str] | None = None,
+        current_only: bool = False,
+        engine: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Filter alias observations; four filters composed by AND.
+
+        ``entity_type`` given reads that one ``<type>_alias`` table; ``None``
+        reads the ``all_alias`` view. For the list filters ``None`` applies no
+        filter and ``[]`` matches nothing (``1 = 0``), as in :meth:`results`.
+
+        This is NOT an event-history accessor. By default it returns the MOST
+        RECENT OCCURRENCE OF EACH OBSERVATION STATE per
+        ``(entity_type, entity_hash, alias_source, alias_id)``: after
+        present(t1) -> withdrawn(t2) -> present(t3) it returns two rows
+        (withdrawn t2, present t3); repeated same-state events collapse, and
+        the t1 registration is not recoverable here. Duplicate rows from the
+        fill-only writer never reach the caller.
+
+        ``current_only=True`` first reduces each four-tuple to its single
+        latest observation (:data:`ALIAS_LATEST_ORDER_BY`) and then drops
+        those whose winner is ``"withdrawn"`` -- the live set; a finally-
+        withdrawn four-tuple yields nothing.
+
+        Default engine: Trino.
+        """
+        resolved = self._resolve_engine(engine, default="trino")
+        rows = self._alias_rows(
+            entity_type,
+            entity_hash,
+            alias_sources=alias_sources,
+            alias_ids=alias_ids,
+            partition_by_observation=not current_only,
+            only_present=current_only,
+            engine=resolved,
+        )
+        if current_only:
+            winners = latest_alias_observations(rows).values()
+            return sorted(
+                (dict(r) for r in winners if r["observation"] == "present"),
+                key=lambda r: tuple(str(r[c]) for c in self._ALIAS_KEY),
+            )
+        # Collapse to one row per five-tuple (latest occurrence of that state).
+        best: dict[tuple, dict[str, Any]] = {}
+        for row in rows:
+            k = tuple(row[c] for c in (*self._ALIAS_KEY, "observation"))
+            cur = best.get(k)
+            rank = (row["observed_at"], row["ingest_batch_id"])
+            if cur is None or rank > (cur["observed_at"], cur["ingest_batch_id"]):
+                best[k] = dict(row)
+        return sorted(
+            best.values(),
+            key=lambda r: tuple(
+                str(r[c]) for c in (*self._ALIAS_KEY, "observation")
+            ),
+        )
+
+    def resolve(
+        self,
+        alias_source: str,
+        alias_id: str,
+        *,
+        entity_type: str | None = None,
+        engine: str | None = None,
+    ) -> str | None:
+        """Reverse lookup: the ``entity_hash`` currently carrying an identifier.
+
+        Three-step reduction, in this order: (1) reduce independently per
+        ``(entity_type, entity_hash, alias_source, alias_id)`` to that
+        four-tuple's latest observation; (2) discard four-tuples whose winner
+        is ``"withdrawn"``; (3) count distinct ``(entity_type, entity_hash)``
+        PAIRS across the survivors -- zero returns ``None``, one returns that
+        hash, more raises :class:`AliasAmbiguousError`. Historical withdrawn
+        mappings therefore never cause ambiguity, and counting pairs (not bare
+        hashes) exposes a cross-type collision, which with ``entity_type=None``
+        spans the five tables via ``all_alias``.
+
+        ``None`` means "no current entity" (never known OR withdrawn); use
+        :meth:`aliases` for history.
+
+        Raises:
+            ValueError: ``alias_source`` is not a known source (a typo is not a
+                miss).
+            AliasNotInvertibleError: the source is not in
+                ``INVERTIBLE_ALIAS_SOURCES``; raised even for one matching row.
+            AliasAmbiguousError: more than one live ``(entity_type,
+                entity_hash)`` for the pair.
+        """
+        if alias_source not in ALIAS_SOURCES:
+            raise ValueError(
+                f"Unknown alias_source {alias_source!r}; "
+                f"expected one of {ALIAS_SOURCES!r}."
+            )
+        if alias_source not in INVERTIBLE_ALIAS_SOURCES:
+            raise AliasNotInvertibleError(
+                f"alias_source {alias_source!r} is not invertible: one "
+                f"identifier can legitimately match many entities, so resolve() "
+                f"(a scalar verb) refuses it. Use aliases() -- e.g. "
+                f"aliases(alias_sources=[{alias_source!r}], "
+                f"alias_ids=[{alias_id!r}]) -- for the set."
+            )
+        resolved = self._resolve_engine(engine, default="trino")
+        rows = self._alias_rows(
+            entity_type,
+            None,
+            alias_sources=[alias_source],
+            alias_ids=[alias_id],
+            partition_by_observation=False,
+            only_present=False,
+            engine=resolved,
+        )
+        winners = latest_alias_observations(rows).values()
+        live = sorted(
+            {
+                (r["entity_type"], r["entity_hash"])
+                for r in winners
+                if r["observation"] != "withdrawn"
+            }
+        )
+        if not live:
+            return None
+        if len(live) > 1:
+            found = ", ".join(f"{t}:{h}" for t, h in live)
+            raise AliasAmbiguousError(
+                f"alias ({alias_source!r}, {alias_id!r}) is contested: it maps "
+                f"to {len(live)} entities ({found}). Stop and escalate; do not "
+                f"pick one."
+            )
+        return live[0][1]
 
     def universe(
         self,

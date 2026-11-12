@@ -176,6 +176,20 @@ def _render(envelope: dict[str, Any]) -> None:
         rows = data.get("results")
     elif verb == "parameter-sets":
         rows = data.get("parameter_sets")
+    elif verb == "aliases":
+        rows = data.get("aliases")
+    elif verb == "resolve":
+        error = data.get("error")
+        if error:
+            click.echo(f"error ({error.get('kind')}): {error.get('message')}")
+        elif data.get("found"):
+            click.echo(data.get("hash"))
+        else:
+            click.echo(
+                f"not known: {data.get('alias_source')} {data.get('alias_id')} "
+                "has no current mapping"
+            )
+        return
     elif verb == "show":
         click.echo(f"type={data.get('entity_type')} hash={data.get('hash')}")
         click.echo(f"present: {data.get('present')}")
@@ -1005,6 +1019,210 @@ def parameter_sets_cmd(hashes: tuple[str, ...], as_json: bool) -> None:
         _build_parameter_sets(_capability(), hashes=list(hashes) or None),
         as_json=as_json,
     )
+
+
+# ---------------------------------------------------------------------------
+# aliases / resolve
+# ---------------------------------------------------------------------------
+
+
+def _build_aliases(
+    cap: Any,
+    *,
+    entity_type: Optional[str],
+    entity_hash: Optional[str],
+    alias_sources: Optional[list[str]],
+    alias_ids: Optional[list[str]],
+) -> dict[str, Any]:
+    """Build the ``aliases`` envelope: every identifier known for the entities.
+
+    ``entity_type=None`` reads the ``all_alias`` view (all five types); it is
+    NOT defaulted to one type. ``alias_sources`` / ``alias_ids`` keep the
+    capability's ``None`` (no filter) vs ``[]`` (match nothing) distinction;
+    the command layer passes ``None`` for an unpassed option.
+    """
+    rows = cap.aliases(
+        entity_type,
+        entity_hash,
+        alias_sources=alias_sources,
+        alias_ids=alias_ids,
+    )
+    return _envelope(
+        "aliases",
+        locus=_locus(cap),
+        data={
+            "entity_type": entity_type,
+            "hash": entity_hash,
+            "alias_sources": alias_sources,
+            "alias_ids": alias_ids,
+            "aliases": rows,
+        },
+        warnings=[],
+    )
+
+
+def _resolve_failure(
+    cap: Any,
+    *,
+    entity_type: Optional[str],
+    alias_source: str,
+    alias_id: str,
+    kind: str,
+    message: str,
+) -> dict[str, Any]:
+    """Build the ONE failure envelope ``resolve`` publishes before exiting 1."""
+    return _envelope(
+        "resolve",
+        locus=_locus(cap),
+        data={
+            "entity_type": entity_type,
+            "alias_source": alias_source,
+            "alias_id": alias_id,
+            "found": False,
+            "hash": None,
+            "error": {"kind": kind, "message": message},
+        },
+        warnings=[message],
+    )
+
+
+def _build_resolve(
+    cap: Any,
+    *,
+    entity_type: Optional[str],
+    alias_source: str,
+    alias_id: str,
+) -> tuple[dict[str, Any], bool]:
+    """Build the ``resolve`` envelope; return ``(envelope, ok)``.
+
+    "Not known" is a SUCCESSFUL answer (``found: false``, ``hash: null``, ok).
+    ``ok`` is False -- and the envelope is a failure envelope carrying
+    ``data.error`` -- for: a contested alias (``AliasAmbiguousError``), a
+    non-invertible source (``AliasNotInvertibleError``, pointing at the
+    ``aliases`` verb), and bad input (``ValueError``: unknown source or type).
+    The two alias errors are ``RuntimeError`` subclasses, so each is caught by
+    name. Anything else (transport/query errors) propagates: non-zero exit.
+    """
+    from ...domains.kbase.berdl.clearinghouse_capability import (
+        AliasAmbiguousError,
+        AliasNotInvertibleError,
+    )
+
+    def fail(kind: str, message: str) -> tuple[dict[str, Any], bool]:
+        return (
+            _resolve_failure(
+                cap,
+                entity_type=entity_type,
+                alias_source=alias_source,
+                alias_id=alias_id,
+                kind=kind,
+                message=message,
+            ),
+            False,
+        )
+
+    try:
+        found = cap.resolve(alias_source, alias_id, entity_type=entity_type)
+    except AliasAmbiguousError as exc:
+        return fail("ambiguous", str(exc))
+    except AliasNotInvertibleError as exc:
+        return fail(
+            "not_invertible",
+            f"{exc} (use `kbu clearinghouse aliases --alias-source "
+            f"{alias_source} --alias-id {alias_id}` for the set)",
+        )
+    except ValueError as exc:
+        return fail("invalid_input", str(exc))
+    return (
+        _envelope(
+            "resolve",
+            locus=_locus(cap),
+            data={
+                "entity_type": entity_type,
+                "alias_source": alias_source,
+                "alias_id": alias_id,
+                "found": found is not None,
+                "hash": found,
+            },
+            warnings=[],
+        ),
+        True,
+    )
+
+
+@clearinghouse_cmd.command(name="aliases")
+@click.option(
+    "--type",
+    "entity_type",
+    default=None,
+    help="Read one <type>_alias table (default: the all_alias view, all five).",
+)
+@click.option("--hash", "entity_hash", default=None, help="Restrict to one entity hash.")
+@click.option(
+    "--alias-source",
+    "alias_sources",
+    multiple=True,
+    metavar="SOURCE",
+    help="Restrict to this alias_source. Repeatable. Default: no filter.",
+)
+@click.option(
+    "--alias-id",
+    "alias_ids",
+    multiple=True,
+    metavar="ID",
+    help="Restrict to this alias_id. Repeatable. Default: no filter.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def aliases_cmd(
+    entity_type: Optional[str],
+    entity_hash: Optional[str],
+    alias_sources: tuple[str, ...],
+    alias_ids: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """List every identifier (alias) known for the selected entities."""
+    try:
+        envelope = _build_aliases(
+            _capability(),
+            entity_type=entity_type,
+            entity_hash=entity_hash,
+            # `() -> [] -> None`: an unpassed option is "no filter", never
+            # "match nothing" (same idiom as parameter-sets --hash).
+            alias_sources=list(alias_sources) or None,
+            alias_ids=list(alias_ids) or None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(envelope, as_json=as_json)
+
+
+@clearinghouse_cmd.command(name="resolve")
+@click.option("--alias-source", "alias_source", required=True, help="The alias_source.")
+@click.option("--alias-id", "alias_id", required=True, help="The alias_id.")
+@click.option(
+    "--type",
+    "entity_type",
+    default=None,
+    help="Read one <type>_alias table (default: the all_alias view, all five).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def resolve_cmd(
+    alias_source: str, alias_id: str, entity_type: Optional[str], as_json: bool
+) -> None:
+    """Print the entity hash currently carrying an identifier.
+
+    Exits 0 when the alias is not known. Exits 1 for a contested alias, a
+    non-invertible source, or an invalid source/type.
+    """
+    envelope, ok = _build_resolve(
+        _capability(),
+        entity_type=entity_type,
+        alias_source=alias_source,
+        alias_id=alias_id,
+    )
+    _emit(envelope, as_json=as_json)
+    if not ok:
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------

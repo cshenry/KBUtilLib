@@ -25,6 +25,8 @@ in-pod-only field is omitted and the omission is reported in `warnings`.
 | `results`  | ✅ works | Current-state results for `<type>_result`. Narrowable by parameter set. |
 | `sources`  | ✅ works | Distinct `source` values with row counts and a `parameter_set_count`. |
 | `parameter-sets` | ✅ works | The parameter-set registry: what each `parameter_set_hash` means. |
+| `aliases` | ✅ works | Every identifier (alias) known for the selected entities; `--type` omitted reads the `all_alias` view. |
+| `resolve` | ✅ works | The entity hash currently carrying one `(alias_source, alias_id)`. |
 | `health`   | ✅ works\* | Data-file fragmentation **and** parameter-set registry integrity. \*Fragmentation needs file metadata (in-pod); off-pod it reports it cannot evaluate, in `warnings`. An integrity finding is a **failure**: it is reported in `data.parameter_set_integrity` (never in `warnings`) and the verb exits non-zero. |
 | `stats --include-files` | ⚠️ degrades | File counts/sizes read Iceberg `.files` metadata via Spark — **in-pod only**. Off-pod the file fields are **omitted** and a non-empty `warnings` list says so. |
 
@@ -83,9 +85,13 @@ tables. The capability owns this discipline; the CLI just surfaces its numbers.
 - `results --type T [--hash H] [--source S] [--result-type R] [--parameter-set-hash HASH ...] [--default-parameters]` — current-state results (whole-table via `current_state`, or hash-filtered via `results`). `--parameter-set-hash` is repeatable and `--default-parameters` is shorthand for the default (empty) parameter set; given together they are **unioned**. The filter is pushed down as a pre-filter, so each parameter set wins its own current-state window. Every row carries the registry's text for its hash beside it.
 - `sources [--type T] [--by-parameter-set]` — distinct `source` values with row counts and a `parameter_set_count`. The default grain is **one row per source** and does not change; `--by-parameter-set` opts into one row per `(source, parameter_set_hash)`, with the registry's `canonical_json`.
 - `parameter-sets [--hash HASH ...]` — the parameter-set registry, one row per `parameter_set_hash` even when the append-only registry holds several rows for it.
+- `aliases [--type T] [--hash H] [--alias-source S ...] [--alias-id I ...]` — every identifier known for the selected entities (a genome's several names at once). `--type` selects the `<T>_alias` table; **omitting it reads the `all_alias` view across all five types** and does not default to one. `--alias-source` and `--alias-id` are repeatable; passing none means **no filter** on that axis (it is never turned into "match nothing"). Rows are the latest occurrence of each observation state, so a withdrawn mapping appears alongside a present one.
+- `resolve --alias-source S --alias-id I [--type T]` — the entity hash currently carrying the identifier. `data` carries `found` and `hash`. **An alias that is not known is a successful answer: exit `0`, `found: false`, `hash: null`** (human mode prints `not known: ...`). It exits `1`, publishing exactly one failure envelope whose `data.error` is `{kind, message}`, for: a contested alias (`kind: ambiguous`, one pair maps to several entities -- stop and escalate), a non-invertible source (`kind: not_invertible`, `ncbi_taxon` / `arc_analysis`: one identifier can match many entities, so use `aliases` for the set), or an unknown `--alias-source`/`--type` (`kind: invalid_input`). Transport and query errors also exit non-zero. No traceback escapes.
 - `health` — flags tables whose average data-file size is below ~8 MiB. It **reports** the fragmentation condition only; **compaction is owned elsewhere.** The pathology it catches is real on this platform (a table observed at 2.76M rows across 139 files averaging 288 KiB).
 
 ## Exit codes
+
+`resolve` is the other exception: it exits `1` on a contested alias, a non-invertible source, or invalid input (see its verb entry), and `0` on an unknown alias.
 
 A degraded read still emits a well-formed envelope and exits `0`; callers detect
 degradation from `warnings` (and stderr), not the exit code. Only a malformed

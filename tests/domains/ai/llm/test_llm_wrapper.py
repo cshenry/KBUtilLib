@@ -228,7 +228,7 @@ class TestBuiltins:
         test that wants them registers them itself.
         """
         assert llm.BUILTIN_API_TYPES == (
-            "anthropic", "argo", "claude_cli", "codex_cli", "openai"
+            "alcf", "anthropic", "argo", "claude_cli", "codex_cli", "openai"
         )
         names = llm.api_types()
         assert set(llm.BUILTIN_API_TYPES) <= set(names)
@@ -262,7 +262,7 @@ class TestBuiltins:
             import sys
             from kbutillib.domains.ai import llm
             assert sorted(llm.api_types()) == [
-                "anthropic", "argo", "claude_cli", "codex_cli", "openai"
+                "alcf", "anthropic", "argo", "claude_cli", "codex_cli", "openai"
             ], sorted(llm.api_types())
             leaked = [name for name in sys.modules if ".llm.apis." in name]
             assert not leaked, leaked

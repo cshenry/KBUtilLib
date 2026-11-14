@@ -133,7 +133,14 @@ ENTRY_POINT_GROUP = "kbutillib.llm_api_types"
 
 #: The API types this package ships.  ``fake``/``replay`` are not here on
 #: purpose -- see the module docstring.
-BUILTIN_API_TYPES = ("anthropic", "argo", "claude_cli", "codex_cli", "openai")
+BUILTIN_API_TYPES = (
+    "alcf",
+    "anthropic",
+    "argo",
+    "claude_cli",
+    "codex_cli",
+    "openai",
+)
 
 #: ``{name: factory}``.  A factory takes one endpoint mapping and returns an
 #: :class:`~.protocol.ApiType`.
@@ -659,6 +666,12 @@ def _jsonable(value: Any) -> Any:
 # ``test_llm_wrapper.py::TestBuiltins``.
 
 
+def _make_alcf(endpoint: Mapping[str, Any]) -> Any:
+    from .apis.alcf import AlcfBackend
+
+    return AlcfBackend(endpoint)
+
+
 def _make_anthropic(endpoint: Mapping[str, Any]) -> Any:
     # The SDK is an optional extra; AnthropicBackend imports it lazily and
     # raises an ImportError naming `kbutillib[anthropic]` and Python >= 3.10.
@@ -701,6 +714,7 @@ def _register_builtin(name: str, factory: Callable[[Mapping[str, Any]], Any]) ->
         _REGISTRY[name] = factory
 
 
+_register_builtin("alcf", _make_alcf)
 _register_builtin("anthropic", _make_anthropic)
 _register_builtin("argo", _make_argo)
 _register_builtin("openai", _make_openai)

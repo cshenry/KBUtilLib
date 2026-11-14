@@ -146,8 +146,10 @@ class TestCeiling:
             {
                 "a": model(served="openai/gpt-oss-120b", max_tokens=32000),
                 "b": model(served="openai/gpt-oss-20b", max_tokens=32000),
+                "c": model(served="gemma-4-31B-it", max_tokens=32000),
+                "d": model(served="beam-1.0-fp8", max_tokens=32000),
             },
-            {"p": {"proposers": ["a", "b"], "critic": "a", "meta": "b"}},
+            {"p": {"proposers": ["a", "b"], "critic": "c", "meta": "d"}},
         )
         seat = load_council_config(raw).roster("p").proposers[0]
         assert seat.max_output_tokens == 32000
@@ -175,10 +177,11 @@ def two_cluster(a: str = "g120a", b: str = "g120b") -> Dict[str, Any]:
             b: model("alcf-metis", "gpt-oss-120b", max_output_tokens=32000),
             "g20": model("alcf-tara", "openai/gpt-oss-20b", max_output_tokens=32000),
             "gem": model("alcf-tara", "gemma-4-31B-it", max_output_tokens=32000),
+            "beam": model("alcf-tara", "beam-1.0-fp8", max_output_tokens=32000),
         },
         {
             "dup": {"proposers": [a, b], "critic": "g20", "meta": "gem"},
-            "ok": {"proposers": [a, "g20"], "critic": "gem", "meta": "gem"},
+            "ok": {"proposers": [a, "g20"], "critic": "gem", "meta": "beam"},
         },
     )
 

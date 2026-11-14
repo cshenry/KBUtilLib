@@ -6,10 +6,9 @@ token values below are obvious fakes.
 
 PROVENANCE: the roster payload and usage object follow
 ``agent-io/work-records/alcf-live-smoke.md`` (reasoning tokens live at
-``usage.completion_tokens_details.reasoning_tokens``).  The go_mf@4 META schema
-is not packaged in this repository (the builtin is go_mf@1); it is built here
-as the builtin META schema with ``additionalProperties`` true, which is the one
-change the v4 spec makes.
+``usage.completion_tokens_details.reasoning_tokens``).  The proposer and META
+schemas are the real packaged go_mf@4 (the version the ALCF council runs); its
+META schema has ``additionalProperties`` true, the one change v4 makes over v3.
 """
 
 from __future__ import annotations
@@ -147,13 +146,11 @@ def recorder(body: Any = CHAT_OK, status: int = 200):
 
 
 def proposer_schema() -> Dict[str, Any]:
-    return load_builtin_spec("go_mf")["roles"]["proposer"]["schema"]
+    return load_builtin_spec("go_mf", "4")["roles"]["proposer"]["schema"]
 
 
 def meta_v4_schema() -> Dict[str, Any]:
-    schema = copy.deepcopy(load_builtin_spec("go_mf")["roles"]["meta"]["schema"])
-    schema["additionalProperties"] = True
-    return schema
+    return load_builtin_spec("go_mf", "4")["roles"]["meta"]["schema"]
 
 
 # -- registration -------------------------------------------------------------

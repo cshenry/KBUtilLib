@@ -30,6 +30,7 @@ plug-in api type or admit a dead endpoint.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import llm
@@ -43,6 +44,7 @@ __all__ = [
     "probe_endpoint",
     "probe_roster",
     "seat_state",
+    "served_name_matches",
     "unservable_message",
 ]
 
@@ -101,7 +103,30 @@ async def probe_endpoint(endpoint: str, kind: str, api: Any) -> Dict[str, Any]:
         # ``preflight`` is NOT also asked for: it would be a second probe
         # whose verdict nothing reads, and for an api type that opens a client
         # to answer it that is a cost with no buyer.
-        listing = await llm.models_api(api)
+        # ``models_report`` says WHY a listing is what it is.  Reached through
+        # getattr like ``preflight`` and ``version``: an api type that can only
+        # ``models()`` cannot say, so its listing counts as ``answered``, which
+        # is exactly how it was read before the report existed.
+        reporter = getattr(api, "models_report", None)
+        report: Optional[Mapping[str, Any]] = None
+        if callable(reporter):
+            try:
+                got = await reporter()
+                report = got if isinstance(got, Mapping) else None
+            except Exception as exc:  # noqa: BLE001 - a probe never raises
+                report = {
+                    "models": [],
+                    "outcome": "malformed",
+                    "detail": f"models_report raised {type(exc).__name__}",
+                }
+        if report is not None:
+            listing = [e for e in (report.get("models") or []) if isinstance(e, Mapping)]
+            probe["listing_outcome"] = str(report.get("outcome") or "malformed")
+            probe["listing_detail"] = str(report.get("detail") or "")
+        else:
+            listing = await llm.models_api(api)
+            probe["listing_outcome"] = "answered"
+            probe["listing_detail"] = ""
         # EVERY id a gateway advertises for an entry, not just the first one
         # that happens to be present.  A gateway may carry more than one
         # spelling per model and accept a DIFFERENT one than it displays:
@@ -132,6 +157,30 @@ async def probe_endpoint(endpoint: str, kind: str, api: Any) -> Dict[str, Any]:
         # backend has a preflight.
         probe["billing"] = await llm.preflight_api(api)
     return probe
+
+
+_DATE_STAMP = re.compile(r"-\d{8}$")
+
+
+def served_name_matches(configured: str, served: Sequence[str]) -> bool:
+    """Is *configured* one of the *served* ids, allowing a date-stamp alias?
+
+    Two ids match when they are equal, or when one is the other plus a
+    trailing ``-YYYYMMDD`` stamp, compared case-insensitively.  Anthropic
+    lists Haiku 4.5 only as ``claude-haiku-4-5-20251001`` while the bare
+    ``claude-haiku-4-5`` alias bills fine.  Never a prefix or fuzzy match:
+    that would let ``claude-opus-4-5`` seat ``claude-opus-4-5-1``.
+    """
+    want = str(configured).strip().lower()
+    for name in served:
+        have = str(name).strip().lower()
+        if have == want:
+            return True
+        if _DATE_STAMP.sub("", have, count=1) == want and have != want:
+            return True
+        if _DATE_STAMP.sub("", want, count=1) == have and have != want:
+            return True
+    return False
 
 
 def seat_state(
@@ -194,15 +243,36 @@ def seat_state(
         return report
 
     names = set(probe.get("models") or ())
+    outcome = str(probe.get("listing_outcome") or "answered")
+    cause = str(probe.get("listing_detail") or "")
+    where = getattr(backend, "base_url", seat.endpoint)
+    report["listing_outcome"] = outcome
+    if outcome != "answered":
+        # Only a refused connection or a timeout is a server that cannot serve
+        # (and, on a per-machine queue, a job that would wait for ever).  A
+        # rejected credential, a missing /models, a 5xx or an unreadable body
+        # says nothing about whether the model is served: that is ``unknown``.
+        report["state"] = "unavailable" if outcome == "unreachable" else "unknown"
+        report["detail"] = (
+            f"{where} listed no models ({outcome}"
+            + (f": {cause}" if cause else "")
+            + ")"
+            + (
+                ": the endpoint cannot be reached"
+                if outcome == "unreachable"
+                else "; the listing could not be read, so whether it serves "
+                f"{seat.model!r} is not known"
+            )
+        )
+        return report
     if not names:
         report["state"] = "unavailable"
         report["detail"] = (
-            f"{getattr(backend, 'base_url', seat.endpoint)} listed no models: it is "
-            "unreachable, refused the request, or does not implement /models"
+            f"{where} listed no models: the server answered with an empty roster"
         )
         return report
     report["models_listed"] = len(names)
-    if seat.model in names:
+    if served_name_matches(seat.model, names):
         report["state"] = "ready"
         report["detail"] = f"{seat.model} is served by {seat.endpoint}"
     else:

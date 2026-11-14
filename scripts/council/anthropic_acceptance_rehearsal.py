@@ -76,6 +76,7 @@ from kbutillib.domains.kbase.berdl.council_rehearsal import (  # noqa: E402
     Step,
     _fmt,
 )
+from kbutillib.domains.ai.council.servable import served_name_matches  # noqa: E402
 
 #: The served model ids this rehearsal may seat -- exactly the ones confirmed
 #: during design (council.config.DEFAULT_CANONICAL_BY_KIND["anthropic"]).
@@ -305,6 +306,36 @@ QUOTE_ITEMS = [
 # ---------------------------------------------------------------------------
 
 
+async def check_listing(step: Any, endpoint: str, api: Any, served: Sequence[str]) -> None:
+    """Check 4's model-listing half: free, and honest about what it could read.
+
+    A naming finding is emitted ONLY when the listing was actually read
+    (``outcome == "answered"``).  An unreadable listing -- a 401 produced five
+    false "not in the listing" findings on 2026-11-12 -- gets one finding that
+    names the outcome and says nothing about model naming.
+    """
+    listing_report = await api.models_report()
+    listing = listing_report.get("models") or []
+    ids = sorted(str(e.get("id")) for e in listing if isinstance(e, Mapping))
+    outcome = listing_report.get("outcome")
+    step.note(f"GET /v1/models via {endpoint}: {len(ids)} ids ({outcome})")
+    if outcome != "answered":
+        step.find(
+            f"{endpoint}: the model listing could not be read (outcome {outcome}: "
+            f"{listing_report.get('detail')}); no claim is made about model naming"
+        )
+        return
+    # Same rule `kbu council doctor` applies: equal, or one is the other plus a
+    # trailing -YYYYMMDD stamp.
+    missing = [m for m in served if not served_name_matches(m, ids)]
+    if missing:
+        step.find(
+            f"{endpoint}: served_name(s) {missing} are not in the model "
+            "listing, so `kbu council doctor`/submit would report these seats "
+            f"unavailable (listing sample: {ids[:8]})"
+        )
+
+
 async def _run(args: argparse.Namespace, plan: Mapping[str, Any], work_root: Path) -> Dict[str, Any]:
     from kbutillib.domains.ai import llm
     from kbutillib.domains.ai.council.engine.worker import CouncilWorker, _token_total
@@ -347,17 +378,8 @@ async def _run(args: argparse.Namespace, plan: Mapping[str, Any], work_root: Pat
             report = await llm.preflight_api(api)
             steps["4"].check(f"preflight({endpoint}) is ready", "ready", report.get("state"),
                              evidence=str(report.get("detail") or ""))
-            listing = await llm.models_api(api)
-            ids = sorted(str(e.get("id")) for e in listing if isinstance(e, Mapping))
             served = sorted({s.model for _r, s in budget_and_main if s.endpoint == endpoint})
-            missing = [m for m in served if m not in ids]
-            steps["4"].note(f"GET /v1/models via {endpoint}: {len(ids)} ids")
-            if missing:
-                steps["4"].find(
-                    f"{endpoint}: served_name(s) {missing} are not literally in the model "
-                    "listing, so `kbu council doctor`/submit would report these seats "
-                    f"unavailable (listing sample: {ids[:8]})"
-                )
+            await check_listing(steps["4"], endpoint, api, served)
         timings["4"] = time.monotonic() - started
 
         # -- the live run: one real call per seat that fires ----------------

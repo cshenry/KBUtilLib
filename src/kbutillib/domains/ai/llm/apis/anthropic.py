@@ -518,8 +518,47 @@ class AnthropicBackend:
         """List the provider's models (``GET /v1/models``, free).
 
         ``[]`` on any failure: enumeration is a diagnostic, never a
-        precondition for a call.
+        precondition for a call.  :meth:`models_report` says why.
         """
+        return (await self.models_report())["models"]
+
+    async def models_report(self) -> Dict[str, Any]:
+        """The listing plus the reason (see ``HttpBackend.models_report``).
+
+        ``{"models", "outcome", "detail"}``; never raises, and ``detail`` never
+        carries a credential.  Mapping: SDK HTTP 404/405 -> ``not_implemented``;
+        401/403 and a local credential rejection -> ``credential_rejected``;
+        other HTTP errors -> ``http_error``; connection errors and timeouts ->
+        ``unreachable``; an invalid payload or any other client failure ->
+        ``malformed``; a decoded EMPTY list -> ``answered``.
+        """
+        try:
+            return await self._models_report()
+        except Exception as exc:  # noqa: BLE001 - listing never fails a call
+            return self._listing("malformed", exc)
+
+    def _listing(
+        self,
+        outcome: str,
+        detail: Any,
+        models: Optional[List[Dict[str, Any]]] = None,
+        *,
+        log: bool = True,
+    ) -> Dict[str, Any]:
+        if isinstance(detail, BaseException):
+            detail = f"{type(detail).__name__}: {detail}"
+        text = redact(str(detail))
+        if log:
+            logger.warning(
+                "council %s backend %s: could not list models from %s: %s",
+                self.kind,
+                self.name,
+                self.base_url,
+                text,
+            )
+        return {"models": list(models or []), "outcome": outcome, "detail": text}
+
+    async def _models_report(self) -> Dict[str, Any]:
         client, error = self._ensure_client()
         if error is not None:
             logger.warning(
@@ -528,23 +567,44 @@ class AnthropicBackend:
                 self.name,
                 error.message,
             )
-            return []
+            return self._listing("credential_rejected", error.message, log=False)
+        sdk = self._sdk
         try:
             page = await client.models.list()
-            entries = list(getattr(page, "data", None) or [])
-            return [
-                entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
-                for entry in entries
-            ]
+        except sdk.APITimeoutError as exc:  # subclass of APIConnectionError: first
+            return self._listing("unreachable", exc)
+        except sdk.APIConnectionError as exc:
+            return self._listing("unreachable", exc)
+        except sdk.APIStatusError as exc:
+            status = int(getattr(exc, "status_code", 0) or 0)
+            if status in (404, 405):
+                outcome = "not_implemented"
+            elif status in (401, 403):
+                outcome = "credential_rejected"
+            else:
+                outcome = "http_error"
+            # The SDK message can quote the provider's body; keep it to the
+            # status, which is all the reader needs.
+            return self._listing(outcome, f"HTTP {status} from {self.base_url}/v1/models")
         except Exception as exc:  # noqa: BLE001 - listing never fails a call
-            logger.warning(
-                "council %s backend %s: could not list models from %s: %s",
-                self.kind,
-                self.name,
-                self.base_url,
-                redact(f"{type(exc).__name__}: {exc}"),
-            )
-            return []
+            return self._listing("malformed", exc)
+
+        entries = getattr(page, "data", None)
+        if not isinstance(entries, list):
+            return self._listing("malformed", "the model listing has no 'data' list")
+        models: List[Dict[str, Any]] = []
+        for entry in entries:
+            item = entry.model_dump() if hasattr(entry, "model_dump") else entry
+            if not isinstance(item, Mapping):
+                return self._listing("malformed", "a listing entry is not a mapping")
+            models.append(dict(item))
+        if any(
+            m.get(key) is not None and not isinstance(m.get(key), str)
+            for m in models
+            for key in ("id", "name", "internal_id")
+        ):
+            return self._listing("malformed", "a listing entry carries a non-string id", models)
+        return self._listing("answered", f"{len(models)} model(s) listed", models, log=False)
 
     async def aclose(self) -> None:
         """Release the SDK client (and its HTTP connection pool)."""

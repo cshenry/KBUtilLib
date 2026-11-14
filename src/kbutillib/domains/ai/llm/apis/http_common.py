@@ -74,6 +74,7 @@ __all__ = [
     "normalise_base_url",
     "read_chat_envelope",
     "redact",
+    "LISTING_OUTCOMES",
     "strip_fences",
     "strip_think",
 ]
@@ -346,6 +347,24 @@ def read_chat_envelope(payload: Any) -> ChatReply:
     return ChatReply(content, finish_reason, resolved, usage)
 
 
+#: Why a model listing is what it is; see :meth:`HttpBackend.models_report`.
+LISTING_OUTCOMES = (
+    "answered",
+    "not_implemented",
+    "credential_rejected",
+    "http_error",
+    "unreachable",
+    "malformed",
+)
+
+
+def _listing(
+    outcome: str, detail: str, models: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """One ``models_report()`` result; *detail* is always redacted."""
+    return {"models": list(models or []), "outcome": outcome, "detail": redact(detail)}
+
+
 class HttpBackend:
     """Common implementation of the ``Backend`` protocol over HTTP.
 
@@ -433,8 +452,26 @@ class HttpBackend:
 
         Listing is a diagnostic, never a precondition for a call, so an
         unreachable or unsupported ``/models`` is logged and reported as "I
-        cannot enumerate", not as an error.
+        cannot enumerate", not as an error.  Use :meth:`models_report` to learn
+        WHY a listing is empty.
         """
+        return (await self.models_report())["models"]
+
+    async def models_report(self) -> Dict[str, Any]:
+        """The listing plus the reason it is what it is.  Never raises.
+
+        Returns ``{"models": [...], "outcome": ..., "detail": ...}`` where
+        ``models`` is exactly what :meth:`models` returns and ``outcome`` is
+        one of :data:`LISTING_OUTCOMES`.  ``detail`` is a short human string,
+        passed through :func:`redact`; no credential and no response body is
+        ever put in it.
+        """
+        try:
+            return await self._models_report()
+        except Exception as exc:  # noqa: BLE001 - listing never fails a call
+            return _listing("malformed", f"unexpected {type(exc).__name__}: {exc}")
+
+    async def _models_report(self) -> Dict[str, Any]:
         bearer, auth_error = self._bearer()
         if auth_error is not None:
             logger.warning(
@@ -443,27 +480,67 @@ class HttpBackend:
                 self.name,
                 auth_error.message,
             )
-            return []
+            return _listing("credential_rejected", auth_error.message)
         try:
             response = await self.client.get(
                 f"{self.base_url}/models", headers=self._headers(bearer)
             )
-            response.raise_for_status()
-            payload = response.json()
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            return self._listing_failed("unreachable", exc)
         except Exception as exc:  # noqa: BLE001 - listing never fails a call
-            logger.warning(
-                "council %s backend %s: could not list models from %s: %s",
-                self.kind,
-                self.name,
-                self.base_url,
-                redact(f"{type(exc).__name__}: {exc}"),
-            )
-            return []
+            # Some other transport or protocol fault: the server did not give a
+            # usable answer, but "unreachable" is reserved for a refused
+            # connection and a timeout.
+            return self._listing_failed("malformed", exc)
+
+        status = response.status_code
+        if not 200 <= status < 300:
+            if status in (404, 405):
+                outcome = "not_implemented"
+            elif status in (401, 403):
+                outcome = "credential_rejected"
+            else:
+                outcome = "http_error"
+            return _listing(outcome, f"HTTP {status} from {self.base_url}/models")
+        try:
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001
+            return self._listing_failed("malformed", exc, "invalid JSON")
 
         entries = payload.get("data") if isinstance(payload, Mapping) else payload
         if not isinstance(entries, list):
-            return []
-        return [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+            return _listing(
+                "malformed",
+                f"{self.base_url}/models body is not a list or a 'data' list",
+            )
+        models = [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+        bad = len(entries) - len(models) + sum(
+            1
+            for entry in models
+            for key in ("id", "name", "internal_id")
+            if entry.get(key) is not None and not isinstance(entry.get(key), str)
+        )
+        if bad:
+            return _listing(
+                "malformed",
+                f"{bad} entr(ies)/field(s) in the listing from {self.base_url}/models "
+                "are not mappings or strings",
+                models,
+            )
+        return _listing("answered", f"{len(models)} model(s) listed", models)
+
+    def _listing_failed(
+        self, outcome: str, exc: BaseException, what: str = ""
+    ) -> Dict[str, Any]:
+        text = redact(f"{type(exc).__name__}: {exc}")
+        logger.warning(
+            "council %s backend %s: could not list models from %s: %s",
+            self.kind,
+            self.name,
+            self.base_url,
+            text,
+        )
+        return _listing(outcome, f"{what + ': ' if what else ''}{text}")
 
     def effective_params(self, request: Any) -> Dict[str, Any]:
         """The generation parameters this backend would really send.

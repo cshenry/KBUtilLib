@@ -7,7 +7,9 @@ alcf-packaged-config-and-docs (PRD kbu-alcf-api-type-v1, phase 7)
 maestro/developer/kbu-alcf-alcf-packaged-config-and-docs (base 64f997f7bc50538cb2d2bec59ff4003153a55c50)
 
 ## commit_shas
-
+- 6ffe7d539118181634811ba8350aba6b45580217
+- a2248e096e57ff2c0a5294a4942d6650e728c818
+- 26b43463330400d863efff575708a47c7b3ea516
 (plus the trailing work-record commit)
 
 ## summary

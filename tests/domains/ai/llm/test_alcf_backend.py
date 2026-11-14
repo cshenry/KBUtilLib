@@ -27,7 +27,7 @@ import httpx
 import pytest
 
 from kbutillib.domains.ai import llm
-from kbutillib.domains.ai.council.queries import load_builtin_spec
+from kbutillib.domains.ai.council.queries.builtin import load_builtin_spec
 from kbutillib.domains.ai.council.servable import probe_endpoint
 from kbutillib.domains.ai.council.types import (
     SeatSpec,

@@ -473,7 +473,7 @@ class AlcfBackend(OpenAICompatibleBackend):
         if schema is not None and _truthy(
             self._options().get("request_response_format"), True
         ):
-            from ..council.types import canonical_sha256  # lazy: avoid import cycle
+            from ...council.types import canonical_sha256  # lazy: avoid import cycle
 
             spec: Dict[str, Any] = {
                 "name": "kbu_" + canonical_sha256(schema)[:24],

@@ -334,8 +334,8 @@ endpoints:
   # must be on the worker's PATH (it lives in its own uv tool venv and is not
   # importable from the council venv). The token hook is SYNCHRONOUS, so a slow
   # token tool can freeze the worker's event loop for up to
-  # options.token_timeout_s (default 30). The Globus refresh token expires
-  # after 30 days without use and that is not readable without a login. A
+  # options.token_timeout_s (default 30). The Globus re-authentication lapses
+  # after 30 days, and that due date is not readable without a login. A
   # RUNNING WORKER MUST BE RESTARTED after this lands: CouncilWorker caches
   # each endpoint's servability for its life, so existing workers (frontier
   # ones included) keep the old readiness reading until restarted.

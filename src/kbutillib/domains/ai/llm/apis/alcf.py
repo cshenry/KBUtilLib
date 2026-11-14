@@ -57,6 +57,7 @@ __all__ = [
     "AlcfBackend",
     "DEFAULT_TOKEN_COMMAND",
     "is_strict_compatible",
+    "resolve_alcf_token",
 ]
 
 #: Root of ALCF's inference gateway.
@@ -176,6 +177,93 @@ def _truthy(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in ("", "0", "false", "no", "off")
     return bool(value)
+
+
+def _auth_error(name: str, identity: str, failure: str) -> LLMError:
+    # Built from fixed text and the source identity only; no child output.
+    return AuthError(
+        f"{name}: ALCF token source {identity!r} failed: {failure}. "
+        f"To fix: {_FIX}. No request was sent."
+    ).to_error()
+
+
+def resolve_alcf_token(
+    options: Mapping[str, Any], *, name: str = ""
+) -> Tuple[Optional[str], Optional[LLMError]]:
+    """Resolve an ALCF access token from an endpoint's ``options`` mapping.
+
+    This is the token-resolution logic of :meth:`AlcfBackend._bearer`, exposed
+    as a module-level function so that ``ontomap council-run``'s credential
+    preflight (``resolve_credentials``) runs EXACTLY the source the backend
+    will run per call, rather than re-implementing subprocess handling.
+    *name* is only the endpoint name used to prefix an error message.  Returns
+    ``(token, None)`` or ``(None, AuthError)``; the error never carries the
+    token or child output.  The full contract is on :meth:`AlcfBackend._bearer`.
+    """
+    opts = options if isinstance(options, Mapping) else {}
+    has_command = opts.get("token_command") is not None
+    has_import = opts.get("token_import") is not None
+    if has_command and has_import:
+        return None, _auth_error(
+            name,
+            "token source", "options.token_command and options.token_import are both set"
+        )
+    timeout_s = _as_float(opts.get("token_timeout_s"), DEFAULT_TOKEN_TIMEOUT_S)
+    ttl_s = _as_float(opts.get("token_ttl_s"), DEFAULT_TOKEN_TTL_S)
+
+    if has_import:
+        spec = opts.get("token_import")
+        module, sep, attr = str(spec).partition(":")
+        if not (isinstance(spec, str) and sep and module.strip() and attr.strip()):
+            return None, _auth_error(
+                name,
+                "token_import", "options.token_import is not 'module:callable'"
+            )
+        spec = f"{module.strip()}:{attr.strip()}"
+        identity = module.strip()
+        key: Tuple[str, Any] = ("import", spec)
+        argv = [sys.executable, "-c", _IMPORT_CHILD, spec, ALCF_TOKEN_SCOPE]
+    else:
+        command = opts.get("token_command", list(DEFAULT_TOKEN_COMMAND))
+        if not (
+            isinstance(command, (list, tuple))
+            and command
+            and all(isinstance(a, str) and a for a in command)
+        ):
+            return None, _auth_error(
+                name,
+                "token_command", "options.token_command is not a non-empty list of strings"
+            )
+        argv = [str(a) for a in command]
+        identity = os.path.basename(argv[0]) or argv[0]
+        key = ("command", tuple(argv))
+
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+        if hit is not None and _clock() < hit[1]:
+            return hit[0], None
+        status, out, timed_out = _run_child(argv, timeout_s)
+        if timed_out:
+            return None, _auth_error(name, identity, f"timed out after {timeout_s:g}s")
+        if status is None:
+            return None, _auth_error(name, identity, "could not be started")
+        if status != 0:
+            if key[0] == "import" and status in _IMPORT_FAILURES:
+                return None, _auth_error(
+                    name,
+                    identity, f"{_IMPORT_FAILURES[status]} (exit status {status})"
+                )
+            return None, _auth_error(name, identity, f"exited with status {status}")
+        token = out.strip()
+        if not token:
+            return None, _auth_error(name, identity, "printed no token (exit status 0)")
+        if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in token):
+            return None, _auth_error(
+                name,
+                identity, "printed output that is not a single-line token (exit status 0)"
+            )
+        _CACHE[key] = (token, _clock() + ttl_s)
+        return token, None
 
 
 # ---------------------------------------------------------------------------
@@ -389,72 +477,10 @@ class AlcfBackend(OpenAICompatibleBackend):
         ``token_import`` identifiers must carry no credentials -- options are
         fingerprinted and persisted.
         """
-        opts = self._options()
-        has_command = opts.get("token_command") is not None
-        has_import = opts.get("token_import") is not None
-        if has_command and has_import:
-            return None, self._auth_error(
-                "token source", "options.token_command and options.token_import are both set"
-            )
-        timeout_s = _as_float(opts.get("token_timeout_s"), DEFAULT_TOKEN_TIMEOUT_S)
-        ttl_s = _as_float(opts.get("token_ttl_s"), DEFAULT_TOKEN_TTL_S)
-
-        if has_import:
-            spec = opts.get("token_import")
-            module, sep, attr = str(spec).partition(":")
-            if not (isinstance(spec, str) and sep and module.strip() and attr.strip()):
-                return None, self._auth_error(
-                    "token_import", "options.token_import is not 'module:callable'"
-                )
-            spec = f"{module.strip()}:{attr.strip()}"
-            identity = module.strip()
-            key: Tuple[str, Any] = ("import", spec)
-            argv = [sys.executable, "-c", _IMPORT_CHILD, spec, ALCF_TOKEN_SCOPE]
-        else:
-            command = opts.get("token_command", list(DEFAULT_TOKEN_COMMAND))
-            if not (
-                isinstance(command, (list, tuple))
-                and command
-                and all(isinstance(a, str) and a for a in command)
-            ):
-                return None, self._auth_error(
-                    "token_command", "options.token_command is not a non-empty list of strings"
-                )
-            argv = [str(a) for a in command]
-            identity = os.path.basename(argv[0]) or argv[0]
-            key = ("command", tuple(argv))
-
-        with _CACHE_LOCK:
-            hit = _CACHE.get(key)
-            if hit is not None and _clock() < hit[1]:
-                return hit[0], None
-            status, out, timed_out = _run_child(argv, timeout_s)
-            if timed_out:
-                return None, self._auth_error(identity, f"timed out after {timeout_s:g}s")
-            if status is None:
-                return None, self._auth_error(identity, "could not be started")
-            if status != 0:
-                if key[0] == "import" and status in _IMPORT_FAILURES:
-                    return None, self._auth_error(
-                        identity, f"{_IMPORT_FAILURES[status]} (exit status {status})"
-                    )
-                return None, self._auth_error(identity, f"exited with status {status}")
-            token = out.strip()
-            if not token:
-                return None, self._auth_error(identity, "printed no token (exit status 0)")
-            if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in token):
-                return None, self._auth_error(
-                    identity, "printed output that is not a single-line token (exit status 0)"
-                )
-            _CACHE[key] = (token, _clock() + ttl_s)
-            return token, None
+        return resolve_alcf_token(self._options(), name=self.name)
 
     def _auth_error(self, identity: str, failure: str) -> LLMError:
-        # Built from fixed text and the source identity only; no child output.
-        return AuthError(
-            f"{self.name}: ALCF token source {identity!r} failed: {failure}. "
-            f"To fix: {_FIX}. No request was sent."
-        ).to_error()
+        return _auth_error(self.name, identity, failure)
 
     # -- request body -------------------------------------------------------
 

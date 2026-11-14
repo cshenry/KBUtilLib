@@ -177,7 +177,12 @@ AMSC_TOKEN_PATH = "~/.config/amsc/token"
 #: refusal always NAMES one of these, for the same reason an approval refusal
 #: names its check: "credentials are missing" leaves an operator to guess
 #: which of two unrelated things to export.
-CREDENTIAL_CHECKS: Tuple[str, ...] = ("argo_user", "amsc_token", "anthropic_api_key")
+CREDENTIAL_CHECKS: Tuple[str, ...] = (
+    "argo_user",
+    "amsc_token",
+    "anthropic_api_key",
+    "alcf_token",
+)
 
 #: The ``endpoint_state.halt_kind`` values THIS STAGE writes, as against the
 #: ones the worker writes for a provider failure.
@@ -305,6 +310,16 @@ def resolve_credentials(
       ``anthropic_api_key``, raised like ``argo_user`` -- never reported as
       ``requires: none``, because a seat that cannot authenticate does not
       fail loudly either.
+    * ``alcf`` -- ALCF Inference Endpoints authenticate with a Globus access
+      token obtained from the endpoint's configured token source
+      (``options.token_command`` or ``options.token_import``; neither means
+      the default ``alcf-tokens get-token inference``).  There is no
+      environment variable and no file fallback, because the backend
+      re-resolves the token PER CALL.  The source is RUN ONCE here, through
+      the backend's own :func:`resolve_alcf_token`, and the row reports the
+      NAME of the source, never the token.  Nothing is exported into
+      *environ*: unlike the AMSC token there is no variable the backend
+      reads.  Failure is ``alcf_token``.
     * ``claude_cli`` / ``codex_cli`` -- an interactive subscription login,
       which lives in the CLI's own state and is checked by that api type's
       billing preflight.  Nothing here to resolve.
@@ -414,6 +429,48 @@ def resolve_credentials(
                     "requires": "api_key",
                     "name": name,
                     "source": "environment",
+                }
+            )
+            continue
+
+        if kind == "alcf":
+            from kbutillib.domains.ai.llm.apis.alcf import (
+                DEFAULT_TOKEN_COMMAND,
+                resolve_alcf_token,
+            )
+
+            options = cfg.get("options")
+            options = options if isinstance(options, Mapping) else {}
+            if options.get("token_import") is not None:
+                source, source_name = "token_import", str(options["token_import"])
+            else:
+                command = options.get("token_command")
+                if not isinstance(command, (list, tuple)) or not command:
+                    command = DEFAULT_TOKEN_COMMAND
+                source, source_name = "token_command", " ".join(str(a) for a in command)
+            _token, failure = resolve_alcf_token(options, name=endpoint)
+            if failure is not None:
+                raise RunRefused(
+                    "alcf_token",
+                    f"endpoint {endpoint!r} is an ALCF Inference endpoint, which "
+                    "authenticates with a Globus access token, and its "
+                    f"configured token source ({source}: {source_name!r}) "
+                    f"failed: {failure.message} The realistic cause is the "
+                    "30-day Globus re-authentication lapsing; nothing on any "
+                    "machine watches it. A council started without it does not "
+                    "fail loudly -- the seats report unavailable and the calls "
+                    "park. Run `alcf-tokens login inference` and start the run "
+                    "again (the login works headless: globus-sdk's "
+                    "CommandLineLoginFlowManager prints a URL and reads a code "
+                    "from stdin).",
+                )
+            rows.append(
+                {
+                    "endpoint": endpoint,
+                    "kind": kind,
+                    "requires": "globus_token",
+                    "name": source_name,
+                    "source": source,
                 }
             )
             continue

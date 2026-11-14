@@ -30,6 +30,7 @@ backend is constructed from one plain endpoint-config mapping (the dict
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -65,7 +66,11 @@ __all__ = [
     "ChatReply",
     "HttpBackend",
     "client_kwargs",
+    "EMPTY_OBJECT_LABEL",
+    "JsonScan",
+    "describe_ambiguity",
     "extract_json_object",
+    "scan_json_objects",
     "normalise_base_url",
     "read_chat_envelope",
     "redact",
@@ -152,26 +157,109 @@ def strip_fences(text: str) -> str:
     return _FENCE_RE.sub("", str(text or "")).strip()
 
 
-def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
-    """Return the outermost JSON object in *text*, or ``None``.
+#: Most candidate key labels kept on a :class:`JsonScan` (and so in a message).
+MAX_CANDIDATE_LABELS = 5
 
-    Fences are stripped, then everything from the first ``{`` to the last
-    ``}`` is parsed.  Taking the OUTERMOST span (rather than the first
-    balanced one) is what lets a reply that trails a sentence after the
-    object, or prefixes one before it, still be read.  ``None`` means "no JSON
-    object here", which every caller turns into a typed failure -- never an
-    exception.
+#: Longest key excerpt put in a diagnostic.  A hostile reply can carry a
+#: megabyte-long key; the message must stay small whatever the reply holds.
+MAX_KEY_LABEL_CHARS = 40
+
+#: Label for a decoded object that has no keys at all.
+EMPTY_OBJECT_LABEL = "<empty object>"
+
+_NON_PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
+
+
+@dataclasses.dataclass(frozen=True)
+class JsonScan:
+    """Immutable result of scanning one reply for top-level JSON objects.
+
+    The count travels in this return value -- never in a module global or an
+    attribute on a backend -- because several calls are in flight at once on
+    one cached per-endpoint api type.
+
+    ``obj`` is the decoded object when ``count == 1`` and ``None`` otherwise:
+    two or more objects are AMBIGUOUS and nothing is guessed.  ``labels``
+    holds a bounded, sanitised first-key summary for up to
+    :data:`MAX_CANDIDATE_LABELS` objects.
+    """
+
+    obj: Optional[Dict[str, Any]]
+    count: int
+    labels: Tuple[str, ...] = ()
+
+    @property
+    def ambiguous(self) -> bool:
+        return self.count >= 2
+
+
+def _key_label(obj: Dict[str, Any]) -> str:
+    """Bounded, printable-ASCII label for *obj*'s first key."""
+    if not obj:
+        return EMPTY_OBJECT_LABEL
+    key = str(next(iter(obj)))
+    clean = _NON_PRINTABLE_RE.sub("?", key[: MAX_KEY_LABEL_CHARS + 1])
+    if len(clean) > MAX_KEY_LABEL_CHARS:
+        clean = clean[:MAX_KEY_LABEL_CHARS] + "..."
+    return repr(clean)
+
+
+def scan_json_objects(text: str) -> JsonScan:
+    """Enumerate the top-level JSON objects in *text*.
+
+    Fences are stripped, then ``raw_decode`` is tried at the FIRST ``{`` only.
+    If that fails the answer is zero objects -- later and inner braces are NOT
+    tried, because that would salvage a nested object out of a broken
+    enclosing answer (a truncated ballot silently becoming a vote).  If it
+    succeeds, scanning continues from where the decoder stopped: the next
+    ``{`` decoding successfully means another object; a failure after at
+    least one success is tolerated as trailing prose.  Jumping past each
+    decoded object makes braces inside its strings unreachable.
+
+    Known limitation: a malformed brace BETWEEN two objects stops the scan,
+    so the second, competing object is never seen.
     """
     candidate = strip_fences(text)
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        parsed = json.loads(candidate[start : end + 1])
-    except (ValueError, TypeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    decoder = json.JSONDecoder()
+    first: Optional[Dict[str, Any]] = None
+    labels: List[str] = []
+    count = 0
+    pos = candidate.find("{")
+    while pos >= 0:
+        try:
+            value, end = decoder.raw_decode(candidate, pos)
+        except (ValueError, TypeError, RecursionError):
+            break
+        if not isinstance(value, dict):  # cannot happen at a '{', kept defensive
+            break
+        count += 1
+        if count == 1:
+            first = value
+        if len(labels) < MAX_CANDIDATE_LABELS:
+            labels.append(_key_label(value))
+        pos = candidate.find("{", end)
+    return JsonScan(obj=first if count == 1 else None, count=count, labels=tuple(labels))
+
+
+def describe_ambiguity(scan: JsonScan) -> str:
+    """Message fragment naming the object count and each object's first key."""
+    shown = ", ".join(scan.labels)
+    more = "" if scan.count <= len(scan.labels) else ", ..."
+    return (
+        f"reply contained {scan.count} JSON objects (first keys: {shown}{more}); "
+        "the reply is ambiguous and nothing was guessed"
+    )
+
+
+def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Return the single JSON object in *text*, or ``None``.
+
+    Thin wrapper over :func:`scan_json_objects`.  ``None`` means "no JSON
+    object here" or "two or more, ambiguous"; callers that must tell those
+    apart use :func:`scan_json_objects`.  Every caller turns ``None`` into a
+    typed failure -- never an exception.
+    """
+    return scan_json_objects(text).obj
 
 
 def client_kwargs(
@@ -492,6 +580,20 @@ class HttpBackend:
             screened = self._screen_text(response.text)
             if screened is not None:
                 return self._failed(screened, started, reply=reply, text=response.text)
+            if reply.finish_reason == "length":
+                # A reasoning model that spent its whole ceiling on a separate
+                # reasoning field leaves content null: that is a truncation.
+                return self._failed(
+                    InvalidOutput(
+                        f"{self.name}: truncated at the token ceiling "
+                        f"({req.max_output_tokens}) with no content (reasoning "
+                        "budget exhausted); a cut-off answer is not a vote"
+                    ).to_error(),
+                    started,
+                    reply=reply,
+                    text=response.text,
+                    truncated=True,
+                )
             return self._failed(
                 InvalidOutput(
                     f"{self.name}: reply carried no choices[0].message.content: "
@@ -514,14 +616,19 @@ class HttpBackend:
                 truncated=True,
             )
 
-        parsed = extract_json_object(self._clean_content(reply.content))
+        scan = scan_json_objects(self._clean_content(reply.content))
+        parsed = scan.obj
         if parsed is None:
             screened = self._screen_text(reply.content)
             if screened is not None:
                 return self._failed(screened, started, reply=reply, text=reply.content)
+            if scan.ambiguous:
+                detail = describe_ambiguity(scan)
+            else:
+                detail = "reply contained no JSON object"
             return self._failed(
                 InvalidOutput(
-                    f"{self.name}: reply contained no JSON object: "
+                    f"{self.name}: {detail}: "
                     f"{reply.content[:BODY_EXCERPT_CHARS]!r}"
                 ).to_error(),
                 started,

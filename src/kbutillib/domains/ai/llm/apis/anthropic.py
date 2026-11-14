@@ -58,9 +58,10 @@ from ..types import (
 from .http_common import (
     BODY_EXCERPT_CHARS,
     DEFAULT_TIMEOUT_S,
-    extract_json_object,
+    describe_ambiguity,
     normalise_base_url,
     redact,
+    scan_json_objects,
 )
 
 logger = logging.getLogger(__name__)
@@ -739,11 +740,17 @@ class AnthropicBackend:
             return failed(
                 InvalidOutput(f"{self.name}: reply carried no text block").to_error()
             )
-        parsed = extract_json_object(strip_anthropic_thinking(text))
+        scan = scan_json_objects(strip_anthropic_thinking(text))
+        parsed = scan.obj
         if parsed is None:
+            detail = (
+                describe_ambiguity(scan)
+                if scan.ambiguous
+                else "reply contained no JSON object"
+            )
             return failed(
                 InvalidOutput(
-                    f"{self.name}: reply contained no JSON object: "
+                    f"{self.name}: {detail}: "
                     f"{text[:BODY_EXCERPT_CHARS]!r}"
                 ).to_error()
             )

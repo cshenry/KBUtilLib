@@ -47,6 +47,8 @@ from .types import (
 )
 
 __all__ = [
+    "ALCF_MIN_OUTPUT_TOKENS",
+    "ALCF_SERVICE_ROOT",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_RATE_LIMIT_BUCKETS",
     "BASE_URL_KINDS",
@@ -119,7 +121,34 @@ DEFAULT_CANONICAL_BY_KIND: Dict[str, Dict[str, str]] = {
         "claude-opus-5": "anthropic/claude-opus-5",
         "claude-opus-4-8": "anthropic/claude-opus-4.8",
     },
+    # ALCF's inference service: ONLY the five Bench A models.  Any further
+    # model is a configuration act (``canonical:`` on the model), never a code
+    # change.
+    #
+    # THE COLLISION BETWEEN THE TARA AND METIS SPELLINGS OF ONE MODEL IS
+    # DELIBERATE -- DO NOT "FIX" IT with a per-cluster suffix.  Seating one
+    # model on two clusters as two proposers is then refused by
+    # ``Roster._check_independence``, which stops one opinion being counted
+    # twice.
+    "alcf": {
+        "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+        "gpt-oss-120b": "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+        "gpt-oss-20b": "openai/gpt-oss-20b",
+        "google/gemma-4-31B-it-262k": "google/gemma-4-31b-it",
+        "gemma-4-31B-it": "google/gemma-4-31b-it",
+        "beam-1.0-fp8": "reflection/beam-1.0",
+        "inkling-bf16": "thinkingmachines/inkling",
+    },
 }
+
+#: Where an ``alcf`` endpoint's service root points when it declares no
+#: ``options.service_root``.
+ALCF_SERVICE_ROOT = "https://inference-api.alcf.anl.gov/resource_server"
+
+#: Least output-token ceiling an ``alcf`` seat may declare (see
+#: :meth:`CouncilConfig._validate_alcf_ceilings`).
+ALCF_MIN_OUTPUT_TOKENS = 32000
 
 #: Where an ``anthropic`` endpoint points when it declares no ``base_url``.
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -170,6 +199,12 @@ DEFAULT_MAX_CONCURRENCY: Dict[str, int] = {
     # gap is the sustained-429 halt -- detection after the fact, not
     # prevention. Do not document "the request rate binds first".
     "anthropic": 4,
+    # NOT the binding limit.  ALCF enforces 50 requests/second per IP and
+    # 20/second per CALLER account-wide, and a rate is expressed by
+    # ``max_requests_per_minute`` (1200), not by concurrency.  Measured on the
+    # 500-item Bench A run, concurrency 16 sustained only ~1 req/s, so
+    # concurrency is the throughput lever and the rate cap is a safety bound.
+    "alcf": 16,
 }
 
 DEFAULT_STORE_URL = "sqlite:///~/.kbutillib/council/council.sqlite"
@@ -765,6 +800,41 @@ class EndpointConfig(BaseModel):
                     "billing_wallet to a non-secret label for the wallet (the same "
                     "value on every endpoint paid from it)."
                 )
+        elif self.kind == "alcf":
+            # BEFORE the generic no-URL plug-in branch, like ``anthropic``:
+            # ``alcf`` is not in BASE_URL_KINDS, and filling the derived URL
+            # here is what gives ``types.default_reuse_namespace`` a real
+            # identity.
+            cluster = self.options.get("cluster")
+            framework = self.options.get("framework")
+            for key, value in (("cluster", cluster), ("framework", framework)):
+                if not value:
+                    raise ConfigError(
+                        f"endpoint {self.name!r} is alcf and declares no options.{key}. "
+                        "An alcf endpoint is addressed as "
+                        "{service_root}/{cluster}/{framework}/v1, so both "
+                        "options.cluster and options.framework are required."
+                    )
+            has_command = bool(self.options.get("token_command"))
+            has_import = bool(self.options.get("token_import"))
+            if has_command == has_import:
+                raise ConfigError(
+                    f"endpoint {self.name!r} is alcf and declares "
+                    + ("both" if has_command else "neither")
+                    + " of options.token_command and options.token_import; "
+                    "declare exactly one token source."
+                )
+            suffix = f"/{cluster}/{framework}/v1"
+            if not self.base_url:
+                root = str(self.options.get("service_root") or ALCF_SERVICE_ROOT)
+                self.base_url = root.rstrip("/") + suffix
+            elif not self.base_url.rstrip("/").endswith(suffix):
+                raise ConfigError(
+                    f"endpoint {self.name!r} is alcf with base_url {self.base_url!r}, "
+                    f"which does not end with {suffix!r} as options.cluster "
+                    f"({cluster!r}) and options.framework ({framework!r}) require. "
+                    "Drop base_url to have it derived, or make them agree."
+                )
         elif self.kind in BASE_URL_KINDS:
             if not self.base_url:
                 raise ConfigError(
@@ -1092,6 +1162,14 @@ class CouncilConfig(BaseModel):
             )
 
         params = dict(model.params)
+        if endpoint.kind == "alcf":
+            # Ceilings belong under ``params:``; _validate_alcf_ceilings has
+            # already refused a missing or too-low one, so assert, never
+            # default to 4000.
+            assert (
+                params.get("max_output_tokens") is not None
+                or params.get("max_tokens") is not None
+            ), f"alcf seat {seat_name!r} reached _seat with no explicit ceiling"
         # ``anthropic``: an OMITTED temperature becomes None ("send none") while
         # an explicit value -- INCLUDING an explicit 0 -- is kept verbatim.  The
         # current Claude models reject any sampling parameter with HTTP 400,
@@ -1218,6 +1296,56 @@ class CouncilConfig(BaseModel):
                     f"models resolve to rate-limit bucket {bucket!r}; set account: "
                     f"{bucket}. The account must EQUAL the bucket name so two aliases "
                     "on one bucket share one pacer instead of two."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_alcf_ceilings(self) -> "CouncilConfig":
+        """Refuse an ``alcf`` seat without an output-token ceiling >= 32000.
+
+        WHY: an ALCF reasoning model can spend its whole ceiling on hidden
+        reasoning and return ``content`` null with ``finish_reason`` length,
+        which is ``invalid_output`` -- the kind the ontomap run's retry pass is
+        over with a cap of 2 -- so a too-low ceiling costs three calls for
+        zero output per item.  The floor is measured: on the 500-item run at
+        a 16,000 ceiling, SUCCEEDED calls reached 14,095 tokens (critic
+        beam-1.0-fp8, 88% of the ceiling), 10,810 (gpt-oss-20b) and 8,087
+        (meta inkling-bf16), and 5 of 500 items were lost to null-at-length.
+        The rule is per KIND, not per reasoning model: at one ceiling the same
+        model succeeded on an easy item and returned null on a hard one.
+
+        The refusal is at CONFIG LOAD, so ``kbu council doctor`` cannot run
+        until it is fixed.
+        """
+        for alias, model in self.models.items():
+            endpoint = self.endpoints.get(model.endpoint)
+            if endpoint is None or endpoint.kind != "alcf":
+                continue
+            # Same order as _seat: max_output_tokens, then legacy max_tokens.
+            value = model.params.get("max_output_tokens")
+            if value is None:
+                value = model.params.get("max_tokens")
+            where = f"model {alias!r} (a seat on alcf endpoint {model.endpoint!r})"
+            why = (
+                "An ALCF reasoning model can spend its whole ceiling on hidden "
+                "reasoning and return content null with finish_reason length, which "
+                "is invalid_output -- the kind a retry pass is over with a cap of 2 "
+                "-- so a too-low ceiling costs three calls for zero output per item. "
+                "Measured: successful calls used up to 88% of a 16,000 ceiling and "
+                "5 of 500 items were lost to null-at-length."
+            )
+            keys = "params.max_output_tokens or the legacy params.max_tokens"
+            if value is None:
+                raise ConfigError(
+                    f"{where} declares no output-token ceiling. Declare {keys} of at "
+                    f"least {ALCF_MIN_OUTPUT_TOKENS} under `params:`; there is no "
+                    f"default for alcf. {why}"
+                )
+            if int(value) < ALCF_MIN_OUTPUT_TOKENS:
+                raise ConfigError(
+                    f"{where} declares an output-token ceiling of {int(value)}, below "
+                    f"the alcf floor of {ALCF_MIN_OUTPUT_TOKENS} (keys that count: "
+                    f"{keys}). {why}"
                 )
         return self
 

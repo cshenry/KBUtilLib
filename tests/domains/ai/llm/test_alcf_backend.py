@@ -519,7 +519,7 @@ def test_failures_are_not_cached(tmp_path: Path) -> None:
 
 
 def seat() -> SeatSpec:
-    return SeatSpec.model_construct(
+    return SeatSpec(
         seat_name="p1",
         endpoint="alcf-tara",
         endpoint_kind="alcf",

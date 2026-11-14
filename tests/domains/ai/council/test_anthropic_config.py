@@ -71,7 +71,7 @@ class TestTypes:
     def test_endpoint_kinds_but_not_http_kinds(self) -> None:
         assert "anthropic" in ENDPOINT_KINDS
         assert "anthropic" not in HTTP_KINDS
-        assert HTTP_KINDS == ("argo", "openai")
+        assert HTTP_KINDS == ("argo", "openai", "alcf")  # alcf joined later: OpenAI-shaped
 
 
 class TestEndpointBranch:

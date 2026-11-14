@@ -115,6 +115,7 @@ ENDPOINT_KINDS = (
     "argo",
     "openai",
     "anthropic",
+    "alcf",
     "claude_cli",
     "codex_cli",
     "fake",
@@ -125,7 +126,11 @@ ENDPOINT_KINDS = (
 # response shapes are the Messages API's, not OpenAI's, and listing it here
 # would tell every reader of this tuple otherwise.  (No reader inside this
 # repository at the time of writing -- it is exported for callers.)
-HTTP_KINDS = ("argo", "openai")
+#
+# Membership does NOT imply ``GET {base_url}/models``: ``alcf`` is
+# OpenAI-shaped for chat completions but serves its model roster elsewhere,
+# so a caller that probes every HTTP kind's ``/models`` would get it wrong.
+HTTP_KINDS = ("argo", "openai", "alcf")
 CLI_KINDS = ("claude_cli", "codex_cli")
 
 #: Every ``CouncilError.kind`` string the council may emit.  ``off_menu`` is a
@@ -495,7 +500,7 @@ class SeatSpec(BaseModel):
     seat_name: str
     endpoint: str
     endpoint_kind: Literal[
-        "argo", "openai", "anthropic", "claude_cli", "codex_cli", "fake", "replay"
+        "argo", "openai", "anthropic", "alcf", "claude_cli", "codex_cli", "fake", "replay"
     ]
     model: str
     canonical_model: str

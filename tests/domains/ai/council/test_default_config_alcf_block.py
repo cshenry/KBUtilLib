@@ -71,12 +71,12 @@ def test_block_when_uncommented_loads_and_resolves_the_alcf_profile():
     raw["endpoints"].update(endpoints)
     raw["models"].update(models)
     raw["profiles"].update(profiles)
-    raw["rates"] = rates
+    raw["rates"] = rates["rates"]
     config = load_council_config(raw)
-    assert config.endpoint("alcf-tara").base_url.endswith("/tara/api/v1")
-    assert config.endpoint("alcf-minerva").base_url.endswith("/minerva/api/v1")
-    assert {config.endpoint(n).account for n in endpoints} == {"alcf-inference"}
-    assert all(config.endpoint(n).timeout == 300 for n in endpoints)
+    assert config.endpoint("alcf-tara")["base_url"].endswith("/tara/api/v1")
+    assert config.endpoint("alcf-minerva")["base_url"].endswith("/minerva/api/v1")
+    assert {config.endpoint(n)["account"] for n in endpoints} == {"alcf-inference"}
+    assert all(config.endpoint(n)["timeout"] == 300 for n in endpoints)
     assert "alcf-open" in config.profiles
 
 
@@ -89,4 +89,4 @@ def test_block_names_three_clusters_and_required_facts():
     ):
         assert needle in block, needle
     assert block.count("max_output_tokens: 32000") == 7
-    assert block.count("kind: alcf") == 3
+    assert block.count("  #   kind: alcf") == 3

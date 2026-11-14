@@ -618,6 +618,13 @@ class _Supervisor:
                     "endpoint": endpoint,
                     "halt_kind": kind,
                     "halt_message": str(state.get("halt_message") or ""),
+                    # The closed cause code, or None.  ALWAYS present: the
+                    # campaign watchdog reads this record out of RUN.json to
+                    # decide whether a halted run may be resumed, and a
+                    # MISSING key and a null one would have to be told apart
+                    # by a reader that cannot tell "old record" from "no
+                    # cause".  Null means not resumable.
+                    "halt_cause": state.get("halt_cause") or None,
                 }
             )
         return out

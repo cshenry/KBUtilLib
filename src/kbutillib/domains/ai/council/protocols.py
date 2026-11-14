@@ -379,13 +379,21 @@ class CouncilStore(Protocol):
         kind: str,
         message: str = "",
         *,
+        cause: Optional[str] = None,
         user: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Halt an endpoint: no further calls are claimed for it."""
+        """Halt an endpoint: no further calls are claimed for it.
+
+        *cause* is the closed cause code from
+        :mod:`~kbutillib.domains.ai.council.halt_causes` saying WHY, for a
+        caller deciding whether the halt may be resumed automatically.
+        ``None`` means no recognised signal and must be read as not
+        resumable; a budget halt and a supervisor-written halt pass nothing.
+        """
         ...
 
     def reset_halt(self, endpoint: str, *, user: Optional[str] = None) -> Dict[str, Any]:
-        """Clear a halt.  Never changes the token counters."""
+        """Clear a halt, its message and its cause.  Never changes the counters."""
         ...
 
     def reset_budget(

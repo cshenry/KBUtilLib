@@ -240,7 +240,7 @@ class _FakeStore:
 
     def __init__(self) -> None:
         self.state: Dict[str, Dict[str, Any]] = {}
-        self.halts: List[Dict[str, str]] = []
+        self.halts: List[Dict[str, Optional[str]]] = []
         self.items: Dict[str, List[Dict[str, Any]]] = {}
         self.calls: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -254,6 +254,7 @@ class _FakeStore:
                 "lifetime_tokens": 0,
                 "halt_kind": None,
                 "halt_message": None,
+                "halt_cause": None,
             },
         )
 
@@ -266,17 +267,29 @@ class _FakeStore:
         row["lifetime_tokens"] += int(n)
         return dict(row)
 
-    def set_halt(self, endpoint: str, kind: str, message: str = "", **_kw: Any) -> Dict[str, Any]:
+    def set_halt(
+        self,
+        endpoint: str,
+        kind: str,
+        message: str = "",
+        *,
+        cause: Optional[str] = None,
+        **_kw: Any,
+    ) -> Dict[str, Any]:
         row = self._row(endpoint)
         row["halt_kind"] = kind
         row["halt_message"] = message
-        self.halts.append({"endpoint": endpoint, "kind": kind, "message": message})
+        row["halt_cause"] = cause
+        self.halts.append(
+            {"endpoint": endpoint, "kind": kind, "message": message, "cause": cause}
+        )
         return dict(row)
 
     def reset_halt(self, endpoint: str, **_kw: Any) -> Dict[str, Any]:
         row = self._row(endpoint)
         row["halt_kind"] = None
         row["halt_message"] = None
+        row["halt_cause"] = None
         return dict(row)
 
     def reset_budget(self, endpoint: str, **_kw: Any) -> Dict[str, Any]:
@@ -286,6 +299,7 @@ class _FakeStore:
         if row["halt_kind"] in ("budget_exhausted", "budget_usage_unknown"):
             row["halt_kind"] = None
             row["halt_message"] = None
+            row["halt_cause"] = None
         return dict(row)
 
     def get_items(self, job_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:

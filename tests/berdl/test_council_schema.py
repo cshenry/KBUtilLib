@@ -348,11 +348,15 @@ class TestDroppedColumns:
         assert "priority" in _store_column_names("jobs")
         assert "priority" not in column_names("jobs")
 
-    def test_endpoint_state_drops_exactly_the_two_halt_columns(self):
+    def test_endpoint_state_drops_exactly_the_three_halt_columns(self):
+        # halt_cause joined halt_kind and halt_message when the halt record
+        # gained a cause code. All three are live operational control, so the
+        # archive drops the cause for the same reason it drops the kind.
         archived = set(column_names("endpoint_state")) - set(IDENTITY_COLUMN_NAMES)
         assert archived == _store_column_names("endpoint_state") - {
             "halt_kind",
             "halt_message",
+            "halt_cause",
         }
 
     def test_workers_archives_only_the_four_provenance_columns(self):

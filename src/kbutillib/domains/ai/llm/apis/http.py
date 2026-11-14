@@ -43,6 +43,11 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import httpx
 
+from ..halt_causes import (
+    QUOTA_EXHAUSTED,
+    UNCLASSIFIED_AUTH_DENIAL,
+    with_halt_cause,
+)
 from ..types import (
     AuthError,
     LLMError,
@@ -190,16 +195,28 @@ def argo_refusal_error(text: str) -> Optional[LLMError]:
             continue
         excerpt = redact(body[:BODY_EXCERPT_CHARS])
         if kind == "auth":
-            return AuthError(
-                "ARGO replied HTTP 200 with an authentication notice instead of an "
-                f"answer (matched {signature!r}); the endpoint is halted until the "
-                f"credential is fixed. Body: {excerpt!r}"
-            ).to_error()
-        return QuotaExhausted(
-            "ARGO replied HTTP 200 with a usage notice instead of an answer "
-            f"(matched {signature!r}) -- this is the monthly spend breaker, not a "
-            f"model answer; the endpoint is halted. Body: {excerpt!r}"
-        ).to_error()
+            # The halt CAUSE comes from the table's own verdict, not from a
+            # second look at the prose: ARGO states no reason in any
+            # structured field (there is no status and no error object -- this
+            # is a 200), so an auth notice is an auth denial of unstated
+            # reason.  That is the resumable reading, and the measured one:
+            # the 2026-10-30 notice cleared itself in 4h10m untouched.
+            return with_halt_cause(
+                AuthError(
+                    "ARGO replied HTTP 200 with an authentication notice instead of "
+                    f"an answer (matched {signature!r}); the endpoint is halted until "
+                    f"the credential is fixed. Body: {excerpt!r}"
+                ).to_error(),
+                UNCLASSIFIED_AUTH_DENIAL,
+            )
+        return with_halt_cause(
+            QuotaExhausted(
+                "ARGO replied HTTP 200 with a usage notice instead of an answer "
+                f"(matched {signature!r}) -- this is the monthly spend breaker, not a "
+                f"model answer; the endpoint is halted. Body: {excerpt!r}"
+            ).to_error(),
+            QUOTA_EXHAUSTED,
+        )
     return None
 
 

@@ -816,8 +816,37 @@ class SqliteStore:
 
         if check_version:
             self._assert_schema_version()
+            self._backfill_additive_columns()
 
     # -- plumbing ---------------------------------------------------------
+
+    def _backfill_additive_columns(self) -> None:
+        """Add any missing :data:`.schema.ADDITIVE_COLUMNS` at OPEN time.
+
+        An additive column reaches a live store on open, not on an operator's
+        next ``kbu council db migrate``.  The reason is that the column's
+        reader is running code: ``endpoint_state.halt_cause`` is SELECTed by
+        every ``get_endpoint_state`` call, so a store that has not been
+        migrated does not degrade gracefully -- it raises ``no such column``
+        on the halt path, which is exactly the path that is already in
+        trouble.  The ALTER is cheap, idempotent and additive, and the
+        inspection that precedes it opens no write transaction when there is
+        nothing to add, so an up-to-date store pays only a schema read.
+
+        Failure is SWALLOWED, deliberately.  A read-only snapshot and a store
+        another process is mid-write on must both still open: refusing to
+        open is strictly worse than opening without a column whose absence
+        only the halt path notices.  ``migrate()`` remains the explicit,
+        reporting route for the same work (see :meth:`add_missing_columns`).
+        """
+        try:
+            self.add_missing_columns()
+        except sa.exc.SQLAlchemyError as exc:
+            logger.debug(
+                "council store %s: could not backfill additive columns on open: %s",
+                self.url,
+                exc,
+            )
 
     @property
     def engine(self) -> sa.Engine:
@@ -1451,14 +1480,28 @@ class SqliteStore:
         kind: str,
         message: str = "",
         *,
+        cause: Optional[str] = None,
         user: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Halt an endpoint: no further calls are claimed for it."""
+        """Halt an endpoint: no further calls are claimed for it.
+
+        *cause* is the closed cause code (a member of
+        ``council.halt_causes.HALT_CAUSES``) saying WHY, for a caller deciding
+        whether the halt may be resumed automatically.  ``None`` -- the
+        default, and what every budget halt and every supervisor-written halt
+        passes -- means no recognised signal, which such a caller must read as
+        not resumable.  Written unconditionally, so re-halting an endpoint
+        with no cause clears a stale cause rather than leaving the previous
+        halt's code attached to this one's kind.
+        """
         with self.transaction() as conn:
             self._endpoint_row(conn, endpoint)
             conn.execute(
                 self._endpoint_update(endpoint).values(
-                    halt_kind=kind, halt_message=message, updated_at=_utcnow()
+                    halt_kind=kind,
+                    halt_message=message,
+                    halt_cause=cause,
+                    updated_at=_utcnow(),
                 )
             )
         return self.get_endpoint_state(endpoint)
@@ -1476,7 +1519,10 @@ class SqliteStore:
             self._endpoint_row(conn, endpoint)
             conn.execute(
                 self._endpoint_update(endpoint).values(
-                    halt_kind=None, halt_message=None, updated_at=_utcnow()
+                    halt_kind=None,
+                    halt_message=None,
+                    halt_cause=None,
+                    updated_at=_utcnow(),
                 )
             )
         return self.get_endpoint_state(endpoint)
@@ -1500,6 +1546,7 @@ class SqliteStore:
             if row["halt_kind"] in ("budget_exhausted", "budget_usage_unknown"):
                 values["halt_kind"] = None
                 values["halt_message"] = None
+                values["halt_cause"] = None
             conn.execute(self._endpoint_update(endpoint).values(**values))
         return self.get_endpoint_state(endpoint)
 

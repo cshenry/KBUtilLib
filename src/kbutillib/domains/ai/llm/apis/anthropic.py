@@ -35,6 +35,12 @@ import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from ..halt_causes import (
+    NETWORK_ERROR,
+    QUOTA_EXHAUSTED,
+    classify_http_halt_cause,
+    with_halt_cause,
+)
 from ..types import (
     WEB_SEARCH_PARAM,
     AuthError,
@@ -244,36 +250,60 @@ def anthropic_status_error(
     """
     message, code = _error_parts(body)
     excerpt = redact((message or str(body or ""))[:BODY_EXCERPT_CHARS])
+    # The halt CAUSE for every branch below.  The two spend-limit branches
+    # pass ``quota_exhausted`` themselves rather than consulting it: their
+    # detection already exists (a 400 message prefix, and a 429 error code),
+    # and reusing an existing detector's own verdict is not the same as
+    # re-matching its prose here.
+    cause = classify_http_halt_cause(status, body)
     if status == 400 and message.lower().startswith(OPERATOR_SPEND_LIMIT_PREFIX.lower()):
         matched = redact(message[: len(OPERATOR_SPEND_LIMIT_PREFIX)])
-        return QuotaExhausted(
-            f"{name}: HTTP 400 operator-set API spend limit reached (matched "
-            f"{matched!r}); the endpoint is halted -- raise the limit in the "
-            f"console or stop. Provider said: {excerpt!r}"
-        ).to_error()
+        return with_halt_cause(
+            QuotaExhausted(
+                f"{name}: HTTP 400 operator-set API spend limit reached (matched "
+                f"{matched!r}); the endpoint is halted -- raise the limit in the "
+                f"console or stop. Provider said: {excerpt!r}"
+            ).to_error(),
+            QUOTA_EXHAUSTED,
+        )
     if status == 429 and code == ORG_SPEND_CAP_ERROR_CODE:
-        return QuotaExhausted(
-            f"{name}: HTTP 429 {ORG_SPEND_CAP_ERROR_CODE} -- the organisation's "
-            "monthly spend cap; retrying cannot succeed, so the endpoint is "
-            f"halted. Provider said: {excerpt!r}"
-        ).to_error()
+        return with_halt_cause(
+            QuotaExhausted(
+                f"{name}: HTTP 429 {ORG_SPEND_CAP_ERROR_CODE} -- the organisation's "
+                "monthly spend cap; retrying cannot succeed, so the endpoint is "
+                f"halted. Provider said: {excerpt!r}"
+            ).to_error(),
+            QUOTA_EXHAUSTED,
+        )
     if status in (401, 403):
-        return AuthError(
-            f"{name}: HTTP {status} from {base_url}; the credential was rejected "
-            f"or is missing: {excerpt!r}"
-        ).to_error()
+        return with_halt_cause(
+            AuthError(
+                f"{name}: HTTP {status} from {base_url}; the credential was rejected "
+                f"or is missing: {excerpt!r}"
+            ).to_error(),
+            cause,
+        )
     if status == 429:
-        return TransportError(
-            f"{name}: HTTP 429 (rate limited) from {base_url}: {excerpt!r}"
-        ).to_error().model_copy(update={"rate_limited": True})
+        return with_halt_cause(
+            TransportError(
+                f"{name}: HTTP 429 (rate limited) from {base_url}: {excerpt!r}"
+            ).to_error().model_copy(update={"rate_limited": True}),
+            cause,
+        )
     if status >= 500:
-        return TransportError(
-            f"{name}: HTTP {status} from {base_url}: {excerpt!r}"
-        ).to_error()
-    return InvalidOutput(
-        f"{name}: HTTP {status} from {base_url}; the request was rejected, not "
-        f"the credential: {excerpt!r}"
-    ).to_error()
+        return with_halt_cause(
+            TransportError(
+                f"{name}: HTTP {status} from {base_url}: {excerpt!r}"
+            ).to_error(),
+            cause,
+        )
+    return with_halt_cause(
+        InvalidOutput(
+            f"{name}: HTTP {status} from {base_url}; the request was rejected, not "
+            f"the credential: {excerpt!r}"
+        ).to_error(),
+        cause,
+    )
 
 
 def _import_sdk() -> Any:
@@ -628,17 +658,24 @@ class AnthropicBackend:
             raw = await client.messages.with_raw_response.create(**self._kwargs(req, extras))
         except sdk.APITimeoutError as exc:  # subclass of APIConnectionError: first
             return self._failed(
-                CallTimeout(
-                    f"{self.name}: no reply within {req.timeout_s}s ({type(exc).__name__})"
-                ).to_error(),
+                with_halt_cause(
+                    CallTimeout(
+                        f"{self.name}: no reply within {req.timeout_s}s "
+                        f"({type(exc).__name__})"
+                    ).to_error(),
+                    NETWORK_ERROR,
+                ),
                 started,
             )
         except sdk.APIConnectionError as exc:
             return self._failed(
-                TransportError(
-                    f"{self.name}: could not reach {self.base_url} "
-                    f"({type(exc).__name__}: {redact(str(exc))})"
-                ).to_error(),
+                with_halt_cause(
+                    TransportError(
+                        f"{self.name}: could not reach {self.base_url} "
+                        f"({type(exc).__name__}: {redact(str(exc))})"
+                    ).to_error(),
+                    NETWORK_ERROR,
+                ),
                 started,
             )
         except sdk.APIStatusError as exc:

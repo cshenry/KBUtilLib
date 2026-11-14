@@ -3070,8 +3070,17 @@ class CouncilWorker:
         try:
             with self.store.transaction():
                 if halt:
+                    # The CAUSE travels on the error from where the HTTP
+                    # response was in hand (see ``llm.halt_causes``); by here
+                    # the response is long gone.  ``getattr`` rather than
+                    # attribute access because a store or a test may hand in
+                    # any error-shaped record, and a halt with no cause is
+                    # correct and safe -- it reads as not resumable.
                     self.store.set_halt(
-                        str(call["endpoint"]), error.kind, error.message
+                        str(call["endpoint"]),
+                        error.kind,
+                        error.message,
+                        cause=getattr(error, "halt_cause", None),
                     )
                 self.store.note_call_error(call["call_id"], error.model_dump())
                 self.store.release_call(

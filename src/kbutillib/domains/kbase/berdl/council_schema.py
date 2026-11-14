@@ -440,12 +440,15 @@ _ATTEMPTS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("query_name", "STRING"),
 )
 
-#: ``endpoint_state`` -- all store columns EXCEPT ``halt_kind`` and
-#: ``halt_message``.
+#: ``endpoint_state`` -- all store columns EXCEPT ``halt_kind``,
+#: ``halt_message`` and ``halt_cause``.
 #:
-#: Those two are LIVE OPERATIONAL CONTROL: they stop a running daemon from
+#: Those three are LIVE OPERATIONAL CONTROL: they stop a running daemon from
 #: calling an endpoint, and are cleared by the operator. A halt observed in a
 #: snapshot says nothing about the deliberation the snapshot records.
+#: ``halt_cause`` joined them when the halt record gained a cause code; it is
+#: read by a watchdog deciding whether to resume a LIVE run, which is the
+#: definition of operational control and not of provenance.
 #:
 #: The counters that remain are MUTABLE and CUMULATIVE, keyed
 #: ``(user, endpoint)`` and shared by every job in the store, so these rows

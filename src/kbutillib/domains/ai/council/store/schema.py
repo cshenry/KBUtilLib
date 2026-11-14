@@ -71,7 +71,11 @@ REMOVED_IN_V2 = (
 #: the meaning of an existing row -- which is why it does not need a version
 #: bump.  ``SqliteStore.migrate()`` adds any that a store is missing; nothing
 #: else in the store layer may use this list to skip a real migration.
-ADDITIVE_COLUMNS = (("calls", "normalised"), ("attempts", "queued_at"))
+ADDITIVE_COLUMNS = (
+    ("calls", "normalised"),
+    ("attempts", "queued_at"),
+    ("endpoint_state", "halt_cause"),
+)
 
 
 class UtcDateTime(sa.types.TypeDecorator):
@@ -340,6 +344,20 @@ endpoint_state = sa.Table(
     sa.Column("lifetime_tokens", sa.Integer, nullable=False, default=0),
     sa.Column("halt_kind", _ENUM, nullable=True),
     sa.Column("halt_message", sa.Text, nullable=True),
+    # WHY the halt happened, as a closed cause code -- a member of
+    # ``llm.halt_causes.HALT_CAUSES``, re-exported by
+    # ``council.halt_causes``.  ``halt_kind`` cannot answer that question:
+    # both real council halts were kind 'auth', one of which cleared itself
+    # in four hours and one of which was a permanent administrative state,
+    # and the campaign watchdog that decides whether to resume will not parse
+    # the kind or the message.  NULL means "no recognised signal", which
+    # every reader must treat as NOT resumable -- so a budget halt and a
+    # supervisor-written halt correctly leave it NULL.
+    #
+    # Nullable with no default (see ADDITIVE_COLUMNS): absence means "nothing
+    # to say" rather than any particular cause, so adding it changes the
+    # meaning of no existing row and needs no SCHEMA_VERSION bump.
+    sa.Column("halt_cause", _ENUM, nullable=True),
     sa.Column("updated_at", UtcDateTime, nullable=True),
 )
 

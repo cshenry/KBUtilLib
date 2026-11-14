@@ -58,6 +58,9 @@ __all__ = [
     "InvalidOutput",
     "BudgetExhausted",
     "BudgetUsageUnknown",
+    # halt causes (why an endpoint halt happened; which halts may resume)
+    "HALT_CAUSES",
+    "RESUMABLE_HALT_CAUSES",
     "SeatUnavailable",
     "ERROR_KINDS",
     "as_council_error",
@@ -146,6 +149,8 @@ _MODULE_MAP: dict[str, str] = {
     "BudgetUsageUnknown": "types",
     "SeatUnavailable": "servable",
     "ERROR_KINDS": "types",
+    "HALT_CAUSES": "halt_causes",
+    "RESUMABLE_HALT_CAUSES": "halt_causes",
     "as_council_error": "types",
     "canonical_json": "types",
     "canonical_sha256": "types",

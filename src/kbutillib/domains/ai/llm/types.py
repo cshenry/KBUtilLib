@@ -108,6 +108,18 @@ class LLMError(BaseModel):
     #: ``council.engine.worker._note_rate_limit``), and counting "any
     #: transport failure" would halt on a flaky network instead.
     rate_limited: bool = False
+    #: WHY this failure halts the endpoint, as a closed cause code -- a member
+    #: of :data:`..halt_causes.HALT_CAUSES`, or ``None`` for "not classified".
+    #:
+    #: Additive for the same reason ``rate_limited`` is, and answering a
+    #: question ``kind`` structurally cannot: both real council halts were
+    #: ``kind='auth'``, one transient and one permanently terminal.  A caller
+    #: deciding whether to RESUME automatically needs that difference, and the
+    #: only place it is visible is the provider's structured error object at
+    #: the moment the failure is constructed.  ``None`` means no recognised
+    #: signal and is treated as not resumable; see
+    #: :mod:`..halt_causes` for the vocabulary and the classifier.
+    halt_cause: Optional[str] = None
 
 
 class LLMException(KBUtilLibError):

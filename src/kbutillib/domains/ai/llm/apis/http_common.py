@@ -38,6 +38,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 
+from ..halt_causes import (
+    NETWORK_ERROR,
+    classify_http_halt_cause,
+    with_halt_cause,
+)
 from ..types import (
     WEB_SEARCH_PARAM,
     AuthError,
@@ -93,6 +98,20 @@ _REDACT_RES = (
     re.compile(r"(?i)(bearer\s+)\S+"),
     re.compile(r"(?i)((?:api[_-]?key|x-api-key|token|password)\s*[:=]\s*)\S+"),
 )
+
+
+def _parsed_body(response: httpx.Response) -> Any:
+    """The response body as JSON, or ``None`` if it is not JSON at all.
+
+    Only used to read a provider's STRUCTURED error object for halt-cause
+    classification, so an unparseable body is simply no signal -- never an
+    error of its own.  The answer path parses the body separately and must
+    keep its own failure behaviour.
+    """
+    try:
+        return response.json()
+    except ValueError:
+        return None
 
 
 def redact(text: str) -> str:
@@ -420,19 +439,25 @@ class HttpBackend:
             )
         except httpx.TimeoutException as exc:
             return self._failed(
-                CallTimeout(
-                    f"{self.name}: no reply within {req.timeout_s}s "
-                    f"({type(exc).__name__})"
-                ).to_error(),
+                with_halt_cause(
+                    CallTimeout(
+                        f"{self.name}: no reply within {req.timeout_s}s "
+                        f"({type(exc).__name__})"
+                    ).to_error(),
+                    NETWORK_ERROR,
+                ),
                 started,
             )
         except httpx.ConnectError as exc:
             return self._failed(self._connect_error(exc), started)
         except httpx.HTTPError as exc:
             return self._failed(
-                TransportError(
-                    f"{self.name}: {type(exc).__name__}: {redact(str(exc))}"
-                ).to_error(),
+                with_halt_cause(
+                    TransportError(
+                        f"{self.name}: {type(exc).__name__}: {redact(str(exc))}"
+                    ).to_error(),
+                    NETWORK_ERROR,
+                ),
                 started,
             )
 
@@ -636,11 +661,19 @@ class HttpBackend:
         return None
 
     def _connect_error(self, exc: BaseException) -> LLMError:
-        """What a refused/failed connection means for this backend."""
-        return TransportError(
-            f"{self.name}: could not connect to {self.base_url} "
-            f"({type(exc).__name__}: {redact(str(exc))})"
-        ).to_error()
+        """What a refused/failed connection means for this backend.
+
+        The cause is ``network_error`` on the EXCEPTION CLASS, which is the
+        only structured signal a request that never arrived leaves behind --
+        there is no status and no error object to read.
+        """
+        return with_halt_cause(
+            TransportError(
+                f"{self.name}: could not connect to {self.base_url} "
+                f"({type(exc).__name__}: {redact(str(exc))})"
+            ).to_error(),
+            NETWORK_ERROR,
+        )
 
     def _status_error(
         self, response: httpx.Response, req: Optional[LLMRequest] = None
@@ -654,28 +687,46 @@ class HttpBackend:
         """
         status = response.status_code
         excerpt = redact(response.text[:BODY_EXCERPT_CHARS])
+        # The cause code rides on whichever error is built below.  Classified
+        # HERE and only here, because this is the one place holding both the
+        # status and the provider's structured error object -- by the time the
+        # worker halts the endpoint it has the LLMError and nothing else.
+        cause = classify_http_halt_cause(status, _parsed_body(response))
         if status in (401, 403):
-            return AuthError(
-                f"{self.name}: HTTP {status} from {self.base_url}; the credential was "
-                f"rejected or is missing: {excerpt!r}"
-            ).to_error()
+            return with_halt_cause(
+                AuthError(
+                    f"{self.name}: HTTP {status} from {self.base_url}; the credential "
+                    f"was rejected or is missing: {excerpt!r}"
+                ).to_error(),
+                cause,
+            )
         if status == 429:
             # Still a retryable ``transport`` failure -- one 429 against a
             # windowed limit is normal and is retried -- but FLAGGED, so a
             # caller pacing the account can apply its own SUSTAINED rule
             # without matching on this message (see ``LLMError.rate_limited``).
-            return TransportError(
-                f"{self.name}: HTTP 429 (rate limited) from {self.base_url}: {excerpt!r}"
-            ).to_error().model_copy(update={"rate_limited": True})
+            return with_halt_cause(
+                TransportError(
+                    f"{self.name}: HTTP 429 (rate limited) from {self.base_url}: "
+                    f"{excerpt!r}"
+                ).to_error().model_copy(update={"rate_limited": True}),
+                cause,
+            )
         if status >= 500:
-            return TransportError(
-                f"{self.name}: HTTP {status} from {self.base_url}: {excerpt!r}"
-            ).to_error()
+            return with_halt_cause(
+                TransportError(
+                    f"{self.name}: HTTP {status} from {self.base_url}: {excerpt!r}"
+                ).to_error(),
+                cause,
+            )
         # Any other 4xx is the request itself being wrong -- a bad model name,
         # an unsupported parameter.  Retrying cannot fix it and it must not
         # halt the endpoint, so it fails this call and surfaces the mistake.
-        return InvalidOutput(
-            f"{self.name}: HTTP {status} from {self.base_url}; the request was "
-            f"rejected, not the credential: {excerpt!r}"
-        ).to_error()
+        return with_halt_cause(
+            InvalidOutput(
+                f"{self.name}: HTTP {status} from {self.base_url}; the request was "
+                f"rejected, not the credential: {excerpt!r}"
+            ).to_error(),
+            cause,
+        )
 

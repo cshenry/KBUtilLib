@@ -1,0 +1,33 @@
+{
+  "_provenance": "The two real council endpoint halts, copied from the captured RUN.json fixtures in PersistentAI at agent-io/prds/campaign-watchdog-v1/research/fixtures/ (case1-clean-exit-over-unfinished-work.RUN.json and case3-transient-auth-halt.RUN.json).  Those files belong to PersistentAI and are read-only to this repository; what is copied here is only the provider response each halt was built from, which is what a classifier test needs.  Both halts were halt_kind='auth' -- that is the whole reason halt_cause exists.",
+  "mag_project_disabled": {
+    "when": "2026-10-31",
+    "endpoint": "mag",
+    "status": 403,
+    "expected_halt_kind": "auth",
+    "expected_halt_cause": "administratively_disabled",
+    "outcome": "TERMINAL.  An AmSC administrative state; no retry and no credential refresh affects it.",
+    "body": {
+      "error": {
+        "message": "Project genesis-mission-october-2026-hackathon is disabled in the AmSC VO. This is an administrative state, not a date or a funding problem -- contact the project's administrator to have it re-enabled.",
+        "type": "amsc_project_disabled",
+        "param": null,
+        "code": "403",
+        "provider_specific_fields": {
+          "amsc_reason": "project_disabled",
+          "amsc_project": "genesis-mission-october-2026-hackathon"
+        }
+      }
+    }
+  },
+  "argo_authentication_notice": {
+    "when": "2026-10-30",
+    "endpoint": "argo",
+    "status": 200,
+    "expected_halt_kind": "auth",
+    "expected_halt_cause": "unclassified_auth_denial",
+    "outcome": "TRANSIENT.  Cleared itself after 4h10m with no operator action.",
+    "note": "HTTP 200 with prose where the answer should be; detected by ARGO_REFUSAL_SIGNATURES, not by a new regex.",
+    "body_text": "\n\n⚠️ **IMPORTANT AUTHENTICATION NOTICE FROM ARGO** ⚠️\n\n🚫 **ACCESS DENIED** 🚫\n\nThe username 'chenry' could not be validated as an authorized Argo Gateway API user. Please ensure you are providing a valid ANL domain user name in your API configuration. For any questions, please refer to the API docs at:\n https://anl.box.com/s/ubtrsefonqeo9xppdzcurezy8rzsbs96 \n\n ** END NOTICE FROM ARGO **\n\n \n\n"
+  }
+}

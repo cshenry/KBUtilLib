@@ -302,7 +302,7 @@ class TestTheNormalisedRows:
         store.init_schema()
         registry = QueryRegistry(store)
         registry.seed_builtins()
-        query = registry.get("go_mf")
+        query = registry.get("go_mf", "1")
 
         by_id = {str(r["result"]["input_id"]): r for r in fixture_rows}
         for item_id in EXPECTED_NORMALISED:
@@ -341,7 +341,7 @@ class TestTheNormalisedRows:
         store.init_schema()
         registry = QueryRegistry(store)
         registry.seed_builtins()
-        query = registry.get("go_mf")
+        query = registry.get("go_mf", "1")
 
         disagreed = []
         for row in fixture_rows:

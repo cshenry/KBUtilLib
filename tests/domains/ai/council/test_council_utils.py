@@ -466,7 +466,12 @@ class TestStoreDiscipline:
         try:
             first = council.db_init()
             assert first["schema_version"] == SCHEMA_VERSION
-            assert sorted(first["query_types"]) == ["go_mf@1", "reaction_pickup@1"]
+            assert sorted(first["query_types"]) == [
+                "go_mf@1",
+                "go_mf@3",
+                "go_mf@4",
+                "reaction_pickup@1",
+            ]
             assert council.db_init()["query_types"] == first["query_types"]
             check = council.db_check()
             assert check["ok"] is True

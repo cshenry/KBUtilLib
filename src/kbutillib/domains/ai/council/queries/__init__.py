@@ -14,9 +14,10 @@ Three things live here:
 * :mod:`.template` -- the ``string.Template`` renderer a user-registered query
   type gets, with its closed list of bindings.
 * :class:`.registry.QueryRegistry` -- validation plus the store, including
-  :meth:`~.registry.QueryRegistry.seed_builtins`, which puts the two shipped
-  query types (``go_mf`` and ``reaction_pickup``, both verbatim ports of Jose
-  Faria's CONCORDIA councils) into a store idempotently.
+  :meth:`~.registry.QueryRegistry.seed_builtins`, which puts the shipped
+  query types (``go_mf`` at ``@1``, ``@3`` and ``@4``, and
+  ``reaction_pickup``, all verbatim ports of Jose Faria's CONCORDIA
+  councils) into a store idempotently.
 
 Example::
 
@@ -27,7 +28,7 @@ Example::
     store.init_schema()
     registry = QueryRegistry(store)
     registry.seed_builtins()
-    go = registry.get("go_mf")
+    go = registry.get("go_mf", "1")  # or "4", the version the GO corpus used
     system, user = go.render("proposer", task, {})
 """
 

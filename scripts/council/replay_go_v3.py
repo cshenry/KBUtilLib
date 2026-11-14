@@ -318,7 +318,7 @@ def run_replay(
     store.init_schema()
     registry = QueryRegistry(store)
     registry.seed_builtins()
-    query = registry.get("go_mf")
+    query = registry.get("go_mf", "1")
 
     backend = ReplayBackend(table)
     config = {"endpoints": {ENDPOINT: {"kind": "replay", "max_concurrency": 8}}}
@@ -550,7 +550,7 @@ def diagnose(
     store.init_schema()
     registry = QueryRegistry(store)
     registry.seed_builtins()
-    query = registry.get("go_mf")
+    query = registry.get("go_mf", "1")
 
     out: Dict[str, Dict[str, Any]] = {}
     for item_id in targets:
@@ -1055,7 +1055,7 @@ def _complaints_for(
     store.init_schema()
     registry = QueryRegistry(store)
     registry.seed_builtins()
-    query = registry.get("go_mf")
+    query = registry.get("go_mf", "1")
     out: Dict[str, List[str]] = {}
     for item_id in diagnosis:
         found = schema_complaint(inputs[item_id], results[item_id], query)

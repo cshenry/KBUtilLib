@@ -70,7 +70,7 @@ def expected(name: str, role: str) -> tuple:
 
 @pytest.fixture()
 def go_spec() -> QueryType:
-    return validate_spec(load_builtin_spec("go_mf"))
+    return validate_spec(load_builtin_spec("go_mf", "1"))
 
 
 @pytest.fixture()
@@ -358,7 +358,7 @@ class TestRendererResolution:
         the prompt, so a silent downgrade asks a different question and the
         verdict would be attributed to the wrong one.
         """
-        spec = load_builtin_spec("go_mf")
+        spec = load_builtin_spec("go_mf", "1")
         spec["renderer"] = "go_mf_v3@2"
         with pytest.raises(UnknownRenderer) as excinfo:
             validate_spec(spec)
@@ -373,14 +373,14 @@ class TestRendererResolution:
         assert "reaction_pickup_v4" in str(excinfo.value)
 
     def test_a_bare_renderer_name_means_whatever_is_installed(self):
-        spec = load_builtin_spec("go_mf")
+        spec = load_builtin_spec("go_mf", "1")
         spec["renderer"] = "go_mf_v3"
         spec["adapter"] = "go_mf_v3"
         assert validate_spec(spec).renderer == "go_mf_v3"
 
     def test_every_builtin_names_a_renderer_and_an_adapter_that_exist(self):
         for name, version in BUILTIN_QUERY_TYPES:
-            spec = validate_spec(load_builtin_spec(name))
+            spec = validate_spec(load_builtin_spec(name, version))
             assert spec.version == version
             assert spec.renderer and spec.adapter
             assert spec.renderer.split("@")[0] in BUILTIN_RENDERERS
@@ -580,8 +580,8 @@ class TestSchemas:
 
     def test_every_builtin_role_schema_is_valid_json_schema(self):
         jsonschema = pytest.importorskip("jsonschema")
-        for name, _version in BUILTIN_QUERY_TYPES:
-            spec = validate_spec(load_builtin_spec(name))
+        for name, version in BUILTIN_QUERY_TYPES:
+            spec = validate_spec(load_builtin_spec(name, version))
             for role in ROLES:
                 jsonschema.Draft202012Validator.check_schema(spec.answer_schema(role))
 
@@ -594,6 +594,8 @@ class TestSchemas:
         validator = jsonschema.Draft202012Validator(schema)
         for path in [
             PACKAGE_DIR / "builtin" / "go_mf.yaml",
+            PACKAGE_DIR / "builtin" / "go_mf_v3.yaml",
+            PACKAGE_DIR / "builtin" / "go_mf_v4.yaml",
             PACKAGE_DIR / "builtin" / "reaction_pickup.yaml",
             PACKAGE_DIR / "examples" / "custom_example.yaml",
         ]:
@@ -629,12 +631,19 @@ class TestRegistry:
     def test_seed_builtins_is_idempotent(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
         first = registry.seed_builtins()
-        assert sorted(s.name for s in first) == ["go_mf", "reaction_pickup"]
+        assert sorted((s.name, s.version) for s in first) == [
+            ("go_mf", "1"),
+            ("go_mf", "3"),
+            ("go_mf", "4"),
+            ("reaction_pickup", "1"),
+        ]
         registry.seed_builtins()
         registry.seed_builtins()
         rows = registry.list()
         assert sorted((r["name"], r["version"]) for r in rows) == [
             ("go_mf", "1"),
+            ("go_mf", "3"),
+            ("go_mf", "4"),
             ("reaction_pickup", "1"),
         ]
         assert {r["source"] for r in rows} == {"builtin"}
@@ -642,7 +651,7 @@ class TestRegistry:
     def test_a_query_type_is_immutable(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
         registry.seed_builtins()
-        spec = load_builtin_spec("go_mf")
+        spec = load_builtin_spec("go_mf", "1")
         spec["description"] = "a different question entirely"
         with pytest.raises(QueryTypeExists):
             registry.register(spec, created_by="someone")
@@ -652,26 +661,28 @@ class TestRegistry:
     def test_a_new_version_registers_beside_the_old_one(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
         registry.seed_builtins()
-        spec = load_builtin_spec("go_mf")
-        spec["version"] = "2"
+        spec = load_builtin_spec("go_mf", "1")
+        spec["version"] = "5"
         spec["description"] = "a different question entirely"
         registry.register(spec, created_by="chenry")
         assert registry.get("go_mf", "1").description != spec["description"]
-        assert registry.get("go_mf", "2").description == spec["description"]
+        assert registry.get("go_mf", "5").description == spec["description"]
         # No version argument resolves to the latest ACTIVE version.
-        assert registry.get("go_mf").version == "2"
+        assert registry.get("go_mf").version == "5"
 
     def test_retire_hides_a_version_from_the_default_lookup(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
         registry.seed_builtins()
-        spec = load_builtin_spec("go_mf")
-        spec["version"] = "2"
+        spec = load_builtin_spec("go_mf", "1")
+        spec["version"] = "5"
         spec["description"] = "newer"
         registry.register(spec)
-        assert registry.retire("go_mf", "2") is True
-        assert registry.get("go_mf").version == "1"
-        assert len(registry.list()) == 2
-        assert len(registry.list(include_retired=True)) == 3
+        assert registry.retire("go_mf", "5") is True
+        # Retiring the newest drops the default lookup back to the newest
+        # version still active -- the seeded go_mf@4, not @5.
+        assert registry.get("go_mf").version == "4"
+        assert len(registry.list()) == 4
+        assert len(registry.list(include_retired=True)) == 5
 
     def test_registering_a_user_yaml_by_path(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
@@ -689,7 +700,7 @@ class TestRegistry:
 
     def test_an_invalid_spec_never_reaches_the_store(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)
-        spec = load_builtin_spec("go_mf")
+        spec = load_builtin_spec("go_mf", "1")
         spec["renderer"] = "go_mf_v3@2"
         with pytest.raises(UnknownRenderer):
             registry.register(spec)
@@ -719,7 +730,7 @@ class TestSpecSurvivesTheDatabase:
         assert reader is not writer
         registry = QueryRegistry(reader)
 
-        go = registry.get("go_mf")
+        go = registry.get("go_mf", "1")
         case = load_case("go_mf_case")
         task = CouncilTask.model_validate(case["task"])
         contexts = go_contexts(case)
@@ -748,5 +759,5 @@ class TestSpecSurvivesTheDatabase:
         registry.seed_builtins()
         for name, version in BUILTIN_QUERY_TYPES:
             row = store.get_query_type(name, version)
-            shipped = validate_spec(load_builtin_spec(name)).to_spec()
+            shipped = validate_spec(load_builtin_spec(name, version)).to_spec()
             assert row["spec"] == shipped

@@ -271,7 +271,12 @@ class TestSchemaGuard:
     def test_db_init_seeds_the_builtins(self, runner: CliRunner, fake_council: List[str]) -> None:
         envelope = _envelope(runner.invoke(main, fake_council + ["db", "init", "--json"]))
         assert envelope["verb"] == "db init"
-        assert sorted(envelope["data"]["query_types"]) == ["go_mf@1", "reaction_pickup@1"]
+        assert sorted(envelope["data"]["query_types"]) == [
+            "go_mf@1",
+            "go_mf@3",
+            "go_mf@4",
+            "reaction_pickup@1",
+        ]
 
     def test_db_migrate_stamps_a_fresh_store(
         self, runner: CliRunner, tmp_path: Path
@@ -527,7 +532,8 @@ class TestRegistryAndState:
         )
         assert retired["data"]["result"] == "retired"
         remaining = _envelope(runner.invoke(main, fake_council + ["query", "list", "--json"]))
-        assert [row["name"] for row in remaining["data"]["query_types"]] == ["go_mf"]
+        # Only the reaction_pickup row went; every shipped go_mf version stays.
+        assert {row["name"] for row in remaining["data"]["query_types"]} == {"go_mf"}
 
     def test_query_retire_demands_an_exact_version(
         self, runner: CliRunner, fake_council: List[str]

@@ -1557,7 +1557,7 @@ class TestTheBuiltinGoCouncil:
 
         registry = QueryRegistry(store)
         registry.seed_builtins()
-        go = registry.get("go_mf")
+        go = registry.get("go_mf", "1")
         assert go.name == "go_mf"
         assert go.renderer == "go_mf_v3@1"
         assert go.id_field == "go_id"
@@ -1639,7 +1639,7 @@ class TestTheBuiltinGoCouncil:
 
         registry = QueryRegistry(store)
         registry.seed_builtins()
-        go = registry.get("go_mf")
+        go = registry.get("go_mf", "1")
 
         script = {
             ("proposer", "proposer_1"): go_proposer_answer(

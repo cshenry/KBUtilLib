@@ -299,9 +299,11 @@ kbutillib = [
     "data/ontology_mapping/*.json",
     "data/ontology_mapping/go_text/*",
     "data/ontology_mapping/go_text/*/*",
-    # The council's query types. The two builtin YAMLs ARE the prompts
-    # go_mf@1 and reaction_pickup@1 ask -- QueryRegistry.seed_builtins reads
-    # them through importlib.resources -- and generic_schemas.json is the
+    # The council's query types. The builtin YAMLs ARE the prompts go_mf@1,
+    # go_mf@3, go_mf@4 and reaction_pickup@1 ask -- QueryRegistry.seed_builtins
+    # reads them through importlib.resources, one file per (name, version), so
+    # the glob below is what makes a second version of a name shippable at all
+    # rather than silently absent -- and generic_schemas.json is the
     # authority a user-registered query type's answer schemas are compared
     # against, so a wheel without them can neither seed the builtins nor
     # validate a user spec. querytype.schema.json and the worked

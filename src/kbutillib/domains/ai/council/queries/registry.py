@@ -109,7 +109,17 @@ class QueryRegistry:
         return self.store.retire_query_type(name, version)
 
     def seed_builtins(self, created_by: str = "builtin") -> List[QueryType]:
-        """Register ``go_mf@1`` and ``reaction_pickup@1``.  Idempotent.
+        """Register every ``(name, version)`` in ``BUILTIN_QUERY_TYPES``.
+
+        Currently ``go_mf@1``, ``go_mf@3``, ``go_mf@4`` and
+        ``reaction_pickup@1``.  Idempotent.
+
+        The version is passed to ``load_builtin_spec`` and is load-bearing: a
+        name may ship several versions, so loading by name alone would read
+        ONE file for every entry sharing that name and register the first
+        version's prompts under the later version's number -- a spec saying
+        ``version: '4'`` that asks ``@1``'s question, which nothing
+        downstream could detect.
 
         Safe to call on every start and from two installations against one
         shared store: an identical re-put is a no-op in the store, and the
@@ -117,12 +127,19 @@ class QueryRegistry:
         equal.  If they ever do not, ``put_query_type`` raises
         ``QueryTypeExists`` -- which is the correct outcome, because it means
         two installations disagree about what ``go_mf@1`` asks.
+
+        Note that seeding several versions of one name moves what a
+        version-less lookup resolves to: :meth:`get` with no version returns
+        the latest ACTIVE version, so ``get("go_mf")`` is ``@4`` in a freshly
+        seeded store.  Pin the version when you mean a particular question.
         """
         out: List[QueryType] = []
-        for name, _version in BUILTIN_QUERY_TYPES:
+        for name, version in BUILTIN_QUERY_TYPES:
             out.append(
                 self.register(
-                    load_builtin_spec(name), created_by=created_by, source="builtin"
+                    load_builtin_spec(name, version),
+                    created_by=created_by,
+                    source="builtin",
                 )
             )
         return out

@@ -367,7 +367,7 @@ class TestNothingWasFaked:
         QueryRegistry(store).seed_builtins()
 
         reader = open_store(f"sqlite:///{tmp_path}/seeded.sqlite")
-        query = QueryRegistry(reader).get("go_mf")
+        query = QueryRegistry(reader).get("go_mf", "1")
         assert query.name == "go_mf"
         assert query.version == "1"
         assert query.renderer == "go_mf_v3@1"

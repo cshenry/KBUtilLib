@@ -19,7 +19,7 @@ All pass per tests in test_alcf_config.py; no-regression pin test passes (values
 
 ## tests_run
 - council + llm directories: 1631 passed, 75 skipped, 1 failed (known baseline failure test_importing_the_wrapper_does_not_import_a_provider_module).
-- Full suite: see final report.
+- Full suite (baseline command, 434 s): 4 failed, 7966 passed, 576 skipped; the 4 failures are exactly the 4 baseline node ids.
 
 ## caveats / judgment calls
 - test_anthropic_config.py asserted `HTTP_KINDS == ("argo", "openai")`; that necessarily breaks when alcf joins, so I updated it to `("argo","openai","alcf")`. Order: alcf appended.

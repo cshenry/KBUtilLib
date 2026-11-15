@@ -1311,8 +1311,14 @@ class MSReconstructionUtils(KBModelUtils):
         if reactions_to_add is None:
             reactions_to_add = {}
 
-        # Load core template if not provided
-        if core_template is None:
+        # Load the core template only if ATP correction is going to use it.
+        #
+        # ``self.templates["core"]`` is a KBase workspace reference, so this
+        # fetch needs a workspace connection; performing it for a build that
+        # will not run ATP correction turns an operation a KBase-free job can
+        # complete into one it cannot.  A caller that supplies ``core_template``
+        # never reaches here at all, which is the KBase-free path.
+        if core_template is None and atp_safe:
             core_template = self.get_template(self.templates["core"], None)
 
         # Use local variable for GS template

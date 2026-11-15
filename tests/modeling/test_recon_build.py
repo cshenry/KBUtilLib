@@ -1021,3 +1021,39 @@ def test_msgapfill_calls_use_keyword_arguments_only():
     calls = [call for call in _modelseedpy_calls() if call[1] == "MSGapfill"]
 
     assert not _offenders(calls), _offenders(calls)
+
+
+# ---------------------------------------------------------------------------
+# The core template is fetched only when ATP correction will use it
+# ---------------------------------------------------------------------------
+
+
+class TestCoreTemplateIsNotFetchedWhenUnused:
+    """``self.templates["core"]`` is a KBase workspace reference.
+
+    Fetching it for a build that will not run ATP correction turns an operation
+    a KBase-free job can complete into one it cannot.
+    """
+
+    class _NoFetchSelf(_FakeSelf):
+        def get_template(self, ref, _none):
+            if ref == "core_ref":
+                raise AssertionError(
+                    "the core template was fetched for a build that does not "
+                    "run ATP correction"
+                )
+            return _FakeTemplate(f"template_from_{ref}", f"Template from {ref}")
+
+    def test_not_fetched_when_atp_correction_is_off(self):
+        _out, mdlutl, result = _build(
+            self._NoFetchSelf(), atp_safe=False, core_template=None
+        )
+
+        assert mdlutl is not None
+        assert result.core_template_id is None
+
+    def test_still_fetched_when_atp_correction_is_on(self):
+        fake_self = _FakeSelf()
+        _out, _mdlutl, result = _build(fake_self, atp_safe=True, core_template=None)
+
+        assert result.core_template_id == "template_from_core_ref"

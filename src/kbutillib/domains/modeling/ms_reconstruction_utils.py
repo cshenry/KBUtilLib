@@ -5,10 +5,22 @@ translating the functionality from KB-ModelSEEDReconstruction/modelseedrecon.py
 into a KBUtilLib-compatible format with standard named arguments.
 """
 
+import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import pandas as pd
 
@@ -26,13 +38,18 @@ __all__ = [
     "DEFAULT_TEMPLATE_KEY",
     "RECONSTRUCTION_DEPENDENCIES",
     "DEFAULT_SOLVER_PREFERENCE",
+    "DEFAULT_ONTOLOGY_TERM",
+    "TEMPLATE_KEY_TO_GENOME_CLASS_LABEL",
+    "UNKNOWN_REVISION",
     "MissingBiochemistryError",
     "MissingSolverError",
     "ModelSEEDpyCapabilityError",
     "ReconstructionEnvironmentError",
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
+    "ReconstructionResult",
     "initialize_reconstruction_environment",
+    "resolve_distribution_provenance",
     "verify_role_alias_matching",
 ]
 
@@ -92,6 +109,26 @@ GENOME_CLASS_TO_TEMPLATE_KEY = {
     "A": "ar",
     "--": "gn",
 }
+
+#: Human-readable genome-class label per template key.  ``build_metabolic_model``
+#: reports one of these in ``current_output["Class"]``, which every legacy report
+#: consumer reads, while :meth:`MSReconstructionUtils.classify_genome` returns the
+#: key itself.
+TEMPLATE_KEY_TO_GENOME_CLASS_LABEL = {
+    "gp": "Gram Positive",
+    "gn": "Gram Negative",
+    "ar": "Archaea",
+}
+
+#: Ontology key the layer reads genome functions from by default.  KBDL folds the
+#: union of every annotation source's function strings under ONE key, which is
+#: what makes this a single value rather than a priority list.
+DEFAULT_ONTOLOGY_TERM = "RAST"
+
+#: Value reported for a provenance revision the installed distribution does not
+#: record.  Never replaced by a guess: see
+#: :func:`resolve_distribution_provenance`.
+UNKNOWN_REVISION = "unknown"
 
 #: Template key used for any class with no dedicated template.  ``KBModelUtils``
 #: ships templates for core/gp/gn/ar only -- there is no cyanobacterial entry in
@@ -311,7 +348,10 @@ def _genes_from_alias_probe(match_role_aliases: bool) -> set:
     """Run the probe build once and return the gene ids that reached the model."""
     from modelseedpy import MSBuilder
 
-    builder = MSBuilder(_build_alias_probe_genome(), _build_alias_probe_template())
+    builder = MSBuilder(
+        genome=_build_alias_probe_genome(),
+        template=_build_alias_probe_template(),
+    )
     model = builder.build_base_model(
         model_or_id="kbu_alias_probe_model",
         index="0",
@@ -550,6 +590,255 @@ def initialize_reconstruction_environment(
     return report
 
 
+def _draft_model_facts(*, model: Any) -> Dict[str, Any]:
+    """Measure the DRAFT model at the stage boundary, before anything ATP-specific.
+
+    Args:
+        model: The fully assembled, uncorrected ``cobra.Model``.
+
+    Returns:
+        A dict with one key per ``draft_*`` field of :class:`ReconstructionResult`.
+
+    Every value is read off the model directly rather than carried forward from
+    a builder's bookkeeping, because the builder's counts are of what it OFFERED
+    and the model is what it kept.
+    """
+    reaction_ids = [rxn.id for rxn in model.reactions]
+    return {
+        "reactions": len(reaction_ids),
+        "metabolites": len(model.metabolites),
+        "genes": len(model.genes),
+        "exchanges": len(model.exchanges),
+        "drains": sum(
+            1 for rid in reaction_ids if rid.startswith(("DM_", "SK_"))
+        ),
+        "biomass_ids": tuple(sorted(r for r in reaction_ids if r.startswith("bio"))),
+        "objective": str(model.objective.expression),
+        "atpm_present": "ATPM_c0" in reaction_ids,
+    }
+
+
+# ── Provenance and the structured reconstruction result ────────────────────
+
+
+def resolve_distribution_provenance(distribution_name: str) -> "tuple[str, str]":
+    """Read a distribution's declared version and resolved VCS revision.
+
+    Args:
+        distribution_name: Installed distribution name, e.g. ``"modelseedpy"``.
+
+    Returns:
+        ``(version, revision)``.  ``version`` is the distribution's declared
+        version, or :data:`UNKNOWN_REVISION` when the distribution is not
+        installed.  ``revision`` is the commit recorded in the install's
+        ``direct_url.json`` (``vcs_info.commit_id``, which pip writes for a
+        ``git+...`` install), or :data:`UNKNOWN_REVISION`.
+
+    A revision is reported ONLY when the installed distribution records one.
+    A PyPI wheel records none; an editable install records
+    ``dir_info.editable`` and no commit.  Both therefore report ``"unknown"``.
+    Nothing is inferred from a git checkout that happens to sit nearby -- the
+    working tree a source directory lives in is not evidence about the code
+    that was imported, and the version string is not evidence at all: the fork
+    and the pinned upstream differ in ``MSBuilder.build``'s arity and return
+    type while reporting 0.4.2 and 0.4.3 respectively.  Reporting ``"unknown"``
+    where the install is silent is what makes the populated cases worth
+    trusting.
+    """
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    try:
+        dist = distribution(distribution_name)
+    except PackageNotFoundError:
+        return UNKNOWN_REVISION, UNKNOWN_REVISION
+
+    version = dist.version or UNKNOWN_REVISION
+    revision = UNKNOWN_REVISION
+    raw = dist.read_text("direct_url.json")
+    if raw:
+        try:
+            commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
+        except ValueError:
+            commit = None
+        if commit:
+            revision = str(commit)
+    return version, revision
+
+
+@dataclass(frozen=True)
+class ReconstructionResult:
+    """Structured facts about one reconstruction, STAGE BY STAGE.
+
+    Every field is enumerated explicitly and every per-stage field names its
+    stage in its own name, because "957 reactions" means three different things
+    at the three stage boundaries and a report that does not say which is
+    unreadable.  The boundaries are fixed by PRD ``kbdl-recon-thin-layer-v1``:
+
+    * **DRAFT** -- the fully assembled, UNCORRECTED model: annotation-supported
+      reactions, spontaneous/universal reactions, biomass and its auxiliary
+      reactions, exchanges/drains and objective selection are all in place, but
+      nothing ATP-specific has been inserted and no ATP solve has run.
+    * **POST-ATP** -- after every ATP-correction mutation (the ATP hydrolysis
+      scaffold, core gap-filling, the noncore filter and the re-expansion to
+      genome scale), before any requested-medium gap-fill.
+    * **POST-GAP-FILL** -- after sequential integration for every requested
+      medium, before FVA or reporting.
+
+    Nothing in this object is filled by a ``getattr`` default: a field is
+    populated from something that was measured at its stage, or the
+    reconstruction raises.  A silently-defaulted provenance field is worse than
+    a missing one, because it reads as a measurement.
+    """
+
+    # ── DRAFT ─────────────────────────────────────────────────────────────
+    draft_reaction_count: int
+    """Reactions on the DRAFT model (every reaction, exchanges included)."""
+
+    draft_metabolite_count: int
+    """Metabolites on the DRAFT model."""
+
+    draft_gene_count: int
+    """Genes on the DRAFT model -- nonzero is what makes a build role-based."""
+
+    draft_exchange_count: int
+    """``cobra.Model.exchanges`` on the DRAFT model, i.e. the uptake capacity
+    ATP correction will be handed (KBDLJobRunningPrototype#28, cause 1)."""
+
+    draft_drain_count: int
+    """``DM_``/``SK_`` reactions on the DRAFT model."""
+
+    draft_biomass_ids: Tuple[str, ...]
+    """Biomass reaction ids on the DRAFT model, sorted."""
+
+    draft_objective_expression: str
+    """``str(model.objective.expression)`` at the DRAFT boundary -- objective
+    selection is part of the draft, not of correction."""
+
+    draft_atpm_present: bool
+    """Whether ``ATPM_c0`` is on the DRAFT model.  Expected ``False``:
+    ``build_base_model`` does not add it and this layer never calls
+    ``MSBuilder.build()``, which is where upstream adds it."""
+
+    # ── POST-ATP ──────────────────────────────────────────────────────────
+    post_atp_correction_ran: bool
+    """POST-ATP: whether ATP correction was performed at all (``atp_safe``).
+    False means the DRAFT facts are the final facts."""
+
+    post_atp_correction_invocations: int
+    """POST-ATP: how many times ``run_atp_correction`` was called.  Exactly ``1`` when it
+    ran: the call mutates the model (disables noncore reactions, gap-fills the
+    core, re-expands to genome scale while filtering ATP-breaking reactions),
+    so a second call re-filters an already-filtered model."""
+
+    post_atp_reaction_count: Optional[int]
+    """POST-ATP: reactions after every ATP-correction mutation; ``None`` when
+    correction did not run, so the DRAFT count is the live one."""
+
+    post_atp_removed_reaction_ids: Tuple[str, ...]
+    """Reaction ids present at DRAFT and absent POST-ATP, sorted.  Computed as
+    a set difference over ids rather than read out of
+    ``MSATPCorrection.filtered_noncore``: the filter zeroes bounds first and
+    removes a reaction only when both bounds end up zero, so the internal list
+    and the set actually removed are different things."""
+
+    post_atp_core_gapfilling_count: Optional[int]
+    """POST-ATP: ``len(MSATPCorrection.cumulative_core_gapfilling)``, i.e. how
+    many reactions core gap-filling added during correction."""
+
+    post_atp_selected_media_ids: Tuple[str, ...]
+    """POST-ATP: ids of the ATP media ATP correction accepted, in its own order.  Empty
+    with ``post_atp_correction_ran`` true means every medium failed."""
+
+    post_atp_test_count: Optional[int]
+    """Number of ATP tests ``run_atp_correction`` returned POST-ATP.  These are
+    published on the model util so downstream gap-fill can be ATP-safe without
+    recomputing them (#28, cause 3)."""
+
+    post_atp_analysis: Mapping[str, Any]
+    """The POST-ATP analysis, JSON-serialisable.  ``media_gapfill_stats`` is
+    re-keyed by media ID: ``MSATPCorrection`` keys it by the ``MSMedia``
+    OBJECT, which makes ``json.dumps`` raise."""
+
+    # ── POST-GAP-FILL ─────────────────────────────────────────────────────
+    post_gapfill_results: Tuple[Any, ...]
+    """Per-medium gap-fill outcomes POST-GAP-FILL, in the order the caller
+    requested the media.  ``build_metabolic_model`` always leaves this an empty
+    tuple -- it stops at POST-ATP by design, and per-medium gap-fill with
+    exclusions is :meth:`MSReconstructionUtils.gapfill_metabolic_model`'s
+    stage, which populates it."""
+
+    # ── Object identities ─────────────────────────────────────────────────
+    genome_id: str
+    """``MSGenome.id`` of the genome built from. Fixed at the DRAFT stage and
+    unchanged by every later stage."""
+
+    genome_class: Optional[str]
+    """DRAFT stage: genome class recorded for the build, or ``None`` when the
+    caller supplied the template and no classification was performed."""
+
+    template_id: str
+    """``id`` of the genome-scale ``MSTemplate`` the DRAFT was built from.
+    Also the template POST-GAP-FILL integration defaults to."""
+
+    template_name: str
+    """``name`` of the DRAFT-stage genome-scale template."""
+
+    core_template_id: Optional[str]
+    """POST-ATP: ``id`` of the core ``MSTemplate`` ATP correction used, or
+    ``None`` when correction did not run."""
+
+    core_template_name: Optional[str]
+    """POST-ATP: ``name`` of that core template."""
+
+    # ── Build settings actually used ──────────────────────────────────────
+    ontology_term: str
+    """Ontology key ``MSBuilder`` read functions from (DRAFT stage).  KBDL folds
+    every annotation source under one key, which is what makes this a single
+    value."""
+
+    match_role_aliases: bool
+    """Whether ``build_base_model`` was asked to match genome functions against
+    template role ALIASES as well as names (DRAFT stage)."""
+
+    allow_incomplete_complexes: bool
+    """Whether incomplete template complexes were admitted (DRAFT stage)."""
+
+    reactions_to_add_supplied: bool
+    """Whether the caller injected a reaction-to-gene mapping (DRAFT stage).
+    False is the native role-based path; True is the legacy roleless path, and
+    it is the condition under which the two roleless-path compensations run."""
+
+    # ── Software provenance ───────────────────────────────────────────────
+    modelseedpy_version: str
+    """``modelseedpy``'s declared version, read once and true of every stage.
+    Identifies the distribution, NOT the code: fork and upstream differ in
+    behaviour at 0.4.2/0.4.3."""
+
+    modelseedpy_revision: str
+    """``modelseedpy``'s installed commit from ``direct_url.json``, or
+    ``"unknown"``.  Never synthesised.  True of every stage: the same install
+    performed the DRAFT, POST-ATP and POST-GAP-FILL work."""
+
+    kbutillib_version: str
+    """``KBUtilLib``'s declared version, true of every stage."""
+
+    kbutillib_revision: str
+    """``KBUtilLib``'s installed commit from ``direct_url.json``, or
+    ``"unknown"`` -- which is what an editable install reports.  True of every
+    stage."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the result as a plain dict, one key per field.
+
+        Returns:
+            A dict suitable for ``json.dumps``: tuples become lists and
+            ``post_atp_analysis`` is already string-keyed.
+        """
+        from dataclasses import asdict
+
+        return asdict(self)
+
+
 class MSReconstructionUtils(KBModelUtils):
     """Utilities for metabolic model reconstruction and gapfilling.
 
@@ -758,6 +1047,157 @@ class MSReconstructionUtils(KBModelUtils):
 
         return reactions_added
 
+    def _apply_roleless_path_compensations(self, *, mdlutl: Any, builder: Any) -> None:
+        """Re-run the two template sweeps the ROLELESS injection path needs.
+
+        Args:
+            mdlutl: The ``MSModelUtil`` wrapping the model under construction.
+            builder: The initialised ``MSBuilder``, whose
+                ``template_species_to_model_species`` map the first sweep's
+                inclusion predicate reads.
+
+        Called ONLY when ``reactions_to_add`` was supplied.  On a role-based
+        draft both halves are strict no-ops (measured; see the call site), and
+        both are kept verbatim for the legacy path because on that path they are
+        the difference between a model that can respire and one that cannot.
+        """
+        #
+        # ``MSBuilder.build_non_metabolite_reactions`` admits a spontaneous or
+        # universal template reaction only when at least one of its metabolites
+        # is already a key of ``builder.template_species_to_model_species``
+        # (unless ``allow_all_non_grp_reactions=True``). ``build_base_model`` calls
+        # it once, but on the ROLELESS gene-mapping path it adds no
+        # metabolic reactions at all, so that map is still empty and almost
+        # nothing qualifies: models were getting 3-12 of the 42
+        # spontaneous/universal reactions in GramNeg V6. The ones lost include
+        # membrane diffusion of O2 (``rxn05468``), CO2 (``rxn05467``) and water
+        # (``rxn05319``), so the models could not respire -- they "grew" through
+        # workarounds such as running cytochrome oxidase ``rxn14415`` backwards
+        # to make O2 out of water. Measured effect of restoring just those three
+        # diffusion reactions: max ATP per glucose went 1.0 -> 31.5 (Phaeo),
+        # 0.5 -> 31.5 (Smeli), 10.1 -> 26.5 (Keio, vs 23.5 for iML1515)
+        # (KBDLJobRunningPrototype#29).
+        #
+        # AFTER ``_add_reactions_from_gene_mapping``, because that is what
+        # populates ``template_species_to_model_species`` (it writes every
+        # metabolite it introduces into the map), so the inclusion predicate can
+        # now admit reactions the first call could not.
+        #
+        # BEFORE ``add_exchanges_to_model``, so an extracellular species brought
+        # in by a newly added diffusion reaction gets its exchange from the
+        # single existing ``add_exchanges_to_model`` call below instead of
+        # becoming a flux dead-end.
+        #
+        # ``allow_all_non_grp_reactions`` stays False DELIBERATELY. Forcing all
+        # 42 in would guarantee the count but would add reactions whose
+        # metabolites are absent, creating dead-end species and destroying the
+        # coverage number as a diagnostic signal.
+        #
+        # Note this method RETURNS the reactions rather than adding them -- the
+        # caller is responsible for ``add_reactions``, exactly as
+        # ``build_base_model`` does internally. It already skips any reaction id present in the model
+        # passed to it, so this cannot duplicate what the first call added.
+        non_metabolic_reactions = builder.build_non_metabolite_reactions(
+            cobra_model=mdlutl.model, allow_all_non_grp_reactions=False
+        )
+        if non_metabolic_reactions:
+            mdlutl.model.add_reactions(non_metabolic_reactions)
+
+        # Add exchange reactions for every extracellular metabolite, BEFORE ATP
+        # correction. Load-bearing for ordering, not a convenience:
+        # ``MSBuilder.build_base_model`` already calls ``add_exchanges_to_model``
+        # once, but it does so from inside itself, before the caller has had a
+        # chance to inject ``reactions_to_add``. On the RAST-role path that is
+        # harmless (``build_metabolic_reactions`` runs earlier inside
+        # ``build_base_model``, so the extracellular species are present). On a
+        # ROLELESS build -- the path KBDL/GAA ``build_isolated_model`` uses --
+        # the builder contributes no
+        # metabolic reactions at all, every real reaction arrives above from
+        # ``_add_reactions_from_gene_mapping``, and that method registers the
+        # ``e0`` compartment but creates no exchanges. Without this call the
+        # model reaches ATP correction with reactions but ZERO exchanges, so it
+        # cannot take up any nutrient: ATP is 0 on all 54 ATP media, every
+        # medium is recorded ``{"score": 1000, "failed": true}``, and
+        # ``selected_media`` ends up empty. Nothing raises, and the model ships
+        # with energy-generating cycles intact
+        # (KBDLJobRunningPrototype#28, cause 1).
+        #
+        # ``add_exchanges_to_model`` is idempotent -- it skips any ``EX_`` id
+        # already present -- so this is a strict no-op for the RAST-role path.
+        self.MSBuilder.add_exchanges_to_model(model=mdlutl.model)
+
+    def _base_model_keywords(
+        self,
+        *,
+        base_model: Any,
+        match_role_aliases: bool,
+        allow_incomplete_complexes: bool,
+    ) -> Dict[str, Any]:
+        """Keyword arguments for the installed ``MSBuilder.build_base_model``.
+
+        Args:
+            base_model: The ``cobra.Model`` to build into.
+            match_role_aliases: Caller's alias-matching request.
+            allow_incomplete_complexes: Caller's incomplete-complex request.
+
+        Returns:
+            A kwargs dict carrying the four parameters every known ModelSEEDpy
+            accepts, plus ``match_role_aliases`` / ``allow_incomplete_complexes``
+            when the installed ``build_base_model`` accepts them.
+
+        Raises:
+            ModelSEEDpyCapabilityError: An unsupported keyword was requested at
+                a non-default value, so honouring the request is impossible.
+
+        The two alias/complex keywords are keyword-only and recent: the fork does
+        not have them, and neither did upstream before the alias-matching change
+        this layer pins.  Probing the signature is the only honest test --
+        ``modelseedpy.__version__`` reads 0.4.2 on the fork and 0.4.3 on the pin
+        while ``build()`` differs in arity and return type, so a version string
+        identifies nothing.  Silently dropping a requested
+        ``match_role_aliases=True`` would produce a model missing every
+        alias-matched gene with nothing in the output saying so, which is why
+        the mismatch raises instead.
+        """
+        import inspect
+
+        keywords: Dict[str, Any] = {
+            "model_or_id": base_model,
+            "index": "0",
+            "allow_all_non_grp_reactions": False,
+            "annotate_with_rast": False,
+        }
+
+        requested = {
+            "match_role_aliases": (match_role_aliases, False),
+            "allow_incomplete_complexes": (allow_incomplete_complexes, True),
+        }
+        try:
+            parameters = inspect.signature(
+                self.MSBuilder.build_base_model
+            ).parameters
+        except (TypeError, ValueError):
+            # Not introspectable (a Mock, a C wrapper). Forward both and let the
+            # call itself be the test.
+            keywords.update({name: value for name, (value, _) in requested.items()})
+            return keywords
+
+        accepts_anything = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        for name, (value, upstream_default) in requested.items():
+            if accepts_anything or name in parameters:
+                keywords[name] = value
+            elif value != upstream_default:
+                raise ModelSEEDpyCapabilityError(
+                    f"{name}={value!r} was requested, but the installed "
+                    f"MSBuilder.build_base_model does not accept it "
+                    f"(signature: {tuple(parameters)}). Install the pinned "
+                    f"ModelSEEDpy carrying the alias-matching change."
+                )
+        return keywords
+
     def build_metabolic_model(
         self,
         genome: Any,
@@ -777,12 +1217,30 @@ class MSReconstructionUtils(KBModelUtils):
         remove_noncore_genome_reactions: bool = False,
         reactions_to_add: Optional[Dict[str, Union[List[str], str]]] = None,
         template_reactions_only: bool = False,
+        ontology_term: str = DEFAULT_ONTOLOGY_TERM,
+        match_role_aliases: bool = False,
+        allow_incomplete_complexes: bool = True,
+        return_reconstruction_result: bool = False,
     ) -> tuple:
         """Build a single metabolic model from an MSGenome object.
 
         This is a generalized function that builds a metabolic model without
         KBase-specific dependencies. It accepts an MSGenome directly rather
         than workspace references.
+
+        The draft is built with ``MSBuilder.build_base_model``, which matches
+        genome functions to template roles, forms complexes/GPRs and adds
+        spontaneous/universal reactions, biomass, exchanges, drains and the
+        objective.  ``MSBuilder.build()`` is NEVER called: upstream's ``build()``
+        runs ``MSATPCorrection`` AND ``MSGapfill.run_gapfilling`` inside itself
+        and returns a 4-tuple, so calling it would collapse the three stage
+        boundaries this layer exists to separate and would gap-fill against
+        media the caller never asked for.  Its second positional parameter is
+        also ``gapfill_media`` upstream and ``index`` in the fork, which is why
+        every call into ModelSEEDpy from this module uses keyword arguments.
+
+        This method stops at POST-ATP.  Per-medium gap-fill is
+        :meth:`gapfill_metabolic_model`'s stage.
 
         Args:
             genome: MSGenome object to build model from
@@ -813,9 +1271,37 @@ class MSReconstructionUtils(KBModelUtils):
                 reactions missing from the template fall back to any mass-balanced
                 ModelSEED-DB reaction. Passed through to
                 :meth:`_add_reactions_from_gene_mapping`.
+            ontology_term: Ontology key ``MSBuilder`` reads genome functions
+                from, and the key ``classify_genome`` classifies on. Passed
+                explicitly rather than left to ModelSEEDpy's default so a
+                caller that folds several annotation sources under one key (as
+                KBDL does) does not have to rename it to ``"RAST"``.
+            match_role_aliases: Match genome functions against template role
+                ALIASES as well as role names. Opt-in because native ModelSEED
+                templates alias nearly every role with an identifier such as
+                ``msfr.1407``, so matching aliases on a native template is not
+                free. Required for a KBDL template, whose roles carry the
+                mapping cluster's member functions as aliases.
+            allow_incomplete_complexes: Admit a template complex when only some
+                of its subunits are present. Upstream's own default.
+            return_reconstruction_result: Return the structured
+                :class:`ReconstructionResult` in addition to the legacy pair.
+                Left False by default because every existing caller unpacks two
+                values.
 
         Returns:
-            Tuple of (current_output dict, MSModelUtil object) or (current_output dict, None) if skipped
+            ``(current_output dict, MSModelUtil)`` -- or
+            ``(current_output dict, None)`` when the genome was abandoned.  With
+            ``return_reconstruction_result=True`` a third element, a
+            :class:`ReconstructionResult`, is appended; its
+            ``post_gapfill_results`` is an empty tuple because this method stops
+            at POST-ATP.
+
+        Raises:
+            ModelSEEDpyCapabilityError: ``match_role_aliases=True`` or
+                ``allow_incomplete_complexes=False`` was requested and the
+                installed ``MSBuilder.build_base_model`` does not accept the
+                corresponding keyword.
         """
         # Set defaults for mutable arguments
         if forced_atp_list is None:
@@ -853,31 +1339,29 @@ class MSReconstructionUtils(KBModelUtils):
 
         template_type = gs_template
 
-        # Classify genome if template is auto
-        if template_type == "auto":
-            current_output["Class"] = genome_classifier.classify(genome)
-            print(current_output["Class"])
-            if current_output["Class"] == "P":
-                current_output["Class"] = "Gram Positive"
-                template_type = "gp"
-            elif current_output["Class"] == "N" or current_output["Class"] == "--":
-                current_output["Class"] = "Gram Negative"
-                template_type = "gn"
-            elif current_output["Class"] == "A":
-                current_output["Class"] = "Archaea"
-                template_type = "ar"
-            elif current_output["Class"] == "C":
-                current_output["Class"] = "Cyanobacteria"
-                template_type = "cyano"
-                current_output["Comments"].append(
-                    "Cyanobacteria not yet supported. Skipping genome."
-                )
-                return current_output, None
-            else:
-                current_output["Comments"].append(
-                    f"Unrecognized genome class {current_output['Class']}. Skipping genome."
-                )
-                return current_output, None
+        # Classify the genome ONLY when we have to pick a template ourselves.
+        #
+        # A caller that supplies ``gs_template_obj`` has already decided which
+        # template to build against -- KBDL, for one, builds its MSTemplate from
+        # a kbdl-template/1 plus a kbdl-mapping document, and no classifier
+        # verdict could select it. Classification costs a full feature sweep and
+        # loads a classifier artifact, so running it to produce a key that is
+        # then ignored is not merely redundant, it is a failure mode: the
+        # classifier can raise in an environment the supplied template needs
+        # nothing from.
+        if template_type == "auto" and active_gs_template is None:
+            template_type = self.classify_genome(
+                genome=genome,
+                ontology_term=ontology_term,
+                classifier=genome_classifier,
+            )
+            # ``classify_genome`` resolves every class to a buildable key --
+            # including the classifier's ``"--"`` no-call and class ``C``, which
+            # the legacy inline branch abandoned the genome over. A KBase CTS job
+            # has no operator standing by to choose a template for it.
+            current_output["Class"] = TEMPLATE_KEY_TO_GENOME_CLASS_LABEL.get(
+                template_type, template_type
+            )
 
         # Load GS template if not provided
         if active_gs_template is None:
@@ -891,9 +1375,32 @@ class MSReconstructionUtils(KBModelUtils):
                 name=model_name if model_name else genome.scientific_name
             )
 
-        # Build model
-        builder = self.MSBuilder(genome, active_gs_template)
-        mdl = builder.build(base_model, "0", False, False)
+        # Build the DRAFT model.
+        #
+        # ``build_base_model``, never ``build()``. See this method's docstring.
+        #
+        # ``annotate_with_rast=False`` because the genome arrives already
+        # annotated: with it left at ModelSEEDpy's default True, ``MSBuilder``
+        # constructs a ``RastClient`` and makes a live network call to re-annotate
+        # it, which is both wrong (it discards the caller's annotations) and
+        # unavailable to a KBase CTS job.
+        #
+        # ``add_reaction_from_rast_annotation`` is deliberately left at its
+        # default True despite the name: it gates
+        # ``MSBuilder.build_metabolic_reactions()``, i.e. the role-matched
+        # reactions themselves, and has nothing to do with calling RAST.
+        builder = self.MSBuilder(
+            genome=genome,
+            template=active_gs_template,
+            ontology_term=ontology_term,
+        )
+        mdl = builder.build_base_model(
+            **self._base_model_keywords(
+                base_model=base_model,
+                match_role_aliases=match_role_aliases,
+                allow_incomplete_complexes=allow_incomplete_complexes,
+            )
+        )
         mdl.genome = genome
         mdl.template = active_gs_template
         current_output["Core GF"] = "NA"
@@ -926,86 +1433,110 @@ class MSReconstructionUtils(KBModelUtils):
                 template_reactions_only=template_reactions_only,
             )
 
-        # Re-run the spontaneous/universal template reactions now that the model
-        # actually has metabolites. BOTH HALVES OF THIS POSITION ARE LOAD-BEARING.
+        # ── The two roleless-path compensations ───────────────────────────
         #
-        # ``MSBuilder.build_non_metabolite_reactions`` admits a spontaneous or
-        # universal template reaction only when at least one of its metabolites
-        # is already a key of ``builder.template_species_to_model_species``
-        # (unless ``allow_all_non_grp_reactions=True``). ``build()`` above calls
-        # it once, but on the ROLELESS gene-mapping path ``build()`` adds no
-        # metabolic reactions at all, so that map is still empty and almost
-        # nothing qualifies: models were getting 3-12 of the 42
-        # spontaneous/universal reactions in GramNeg V6. The ones lost include
-        # membrane diffusion of O2 (``rxn05468``), CO2 (``rxn05467``) and water
-        # (``rxn05319``), so the models could not respire -- they "grew" through
-        # workarounds such as running cytochrome oxidase ``rxn14415`` backwards
-        # to make O2 out of water. Measured effect of restoring just those three
-        # diffusion reactions: max ATP per glucose went 1.0 -> 31.5 (Phaeo),
-        # 0.5 -> 31.5 (Smeli), 10.1 -> 26.5 (Keio, vs 23.5 for iML1515)
-        # (KBDLJobRunningPrototype#29).
+        # BOTH run ONLY when ``reactions_to_add`` was supplied, i.e. only on the
+        # legacy roleless path they exist for.
         #
-        # AFTER ``_add_reactions_from_gene_mapping``, because that is what
-        # populates ``template_species_to_model_species`` (it writes every
-        # metabolite it introduces into the map), so the inclusion predicate can
-        # now admit reactions the first call could not.
+        # MEASURED (agent-io/work-records/task-d1302dc4.md section (f)): on a
+        # role-based draft of H. influenzae against the native gram-negative
+        # template, re-running ``build_non_metabolite_reactions`` returned 0
+        # reactions and ``add_exchanges_to_model`` added none -- the draft stayed
+        # at 957 reactions with the 73 exchanges and all 19 of the template's
+        # spontaneous/universal reactions that ``build_base_model`` had already
+        # put there. So on the native path they are strict no-ops that cost a
+        # full template sweep, and #28/#29 are artifacts of the roleless path
+        # rather than defects of the build.
         #
-        # BEFORE ``add_exchanges_to_model``, so an extracellular species brought
-        # in by a newly added diffusion reaction gets its exchange from the
-        # single existing ``add_exchanges_to_model`` call below instead of
-        # becoming a flux dead-end.
-        #
-        # ``allow_all_non_grp_reactions`` stays False DELIBERATELY. Forcing all
-        # 42 in would guarantee the count but would add reactions whose
-        # metabolites are absent, creating dead-end species and destroying the
-        # coverage number as a diagnostic signal.
-        #
-        # Note this method RETURNS the reactions rather than adding them -- the
-        # caller is responsible for ``add_reactions``, exactly as ``build()``
-        # does internally. It already skips any reaction id present in the model
-        # passed to it, so this cannot duplicate what the first call added.
-        non_metabolic_reactions = builder.build_non_metabolite_reactions(
-            mdlutl.model, allow_all_non_grp_reactions=False
-        )
-        if non_metabolic_reactions:
-            mdlutl.model.add_reactions(non_metabolic_reactions)
+        # Gating them is not merely an optimisation. ``build_base_model`` makes
+        # its own ``build_non_metabolite_reactions`` call and its own
+        # ``add_exchanges_to_model`` call; running them again unconditionally
+        # means every native build re-sweeps the template to confirm a no-op, and
+        # any future divergence in the inclusion predicate between the two calls
+        # would double-apply silently. Keeping them for ``reactions_to_add``
+        # preserves the existing callers exactly -- the injection genuinely does
+        # introduce metabolites and extracellular species that neither of
+        # ``build_base_model``'s internal calls could have seen.
+        if reactions_to_add:
+            self._apply_roleless_path_compensations(mdlutl=mdlutl, builder=builder)
 
-        # Add exchange reactions for every extracellular metabolite, BEFORE ATP
-        # correction. Load-bearing for ordering, not a convenience:
-        # ``MSBuilder.build()`` already calls ``add_exchanges_to_model`` once,
-        # but it does so from inside itself, before this method has had a chance
-        # to inject ``reactions_to_add``. On the RAST-role path that is harmless
-        # (``build_metabolic_reactions`` runs earlier inside ``build()``, so the
-        # extracellular species are present). On a ROLELESS build -- the path
-        # KBDL/GAA ``build_isolated_model`` uses -- ``build()`` contributes no
-        # metabolic reactions at all, every real reaction arrives above from
-        # ``_add_reactions_from_gene_mapping``, and that method registers the
-        # ``e0`` compartment but creates no exchanges. Without this call the
-        # model reaches ATP correction with reactions but ZERO exchanges, so it
-        # cannot take up any nutrient: ATP is 0 on all 54 ATP media, every
-        # medium is recorded ``{"score": 1000, "failed": true}``, and
-        # ``selected_media`` ends up empty. Nothing raises, and the model ships
-        # with energy-generating cycles intact
-        # (KBDLJobRunningPrototype#28, cause 1).
-        #
-        # ``add_exchanges_to_model`` is idempotent -- it skips any ``EX_`` id
-        # already present -- so this is a strict no-op for the RAST-role path.
-        self.MSBuilder.add_exchanges_to_model(mdlutl.model)
+        draft_facts = None
+        pre_atp_reaction_ids: set = set()
+        if return_reconstruction_result:
+            # DRAFT boundary: everything assembled, nothing ATP-specific yet.
+            draft_facts = _draft_model_facts(model=mdlutl.model)
+            pre_atp_reaction_ids = {rxn.id for rxn in mdlutl.model.reactions}
 
-        # Run ATP correction
+        # ── POST-ATP: ATP correction, with the SUPPLIED core template ─────
+        atp_invocations = 0
+        atp_test_count: Optional[int] = None
+        core_gapfilling_count: Optional[int] = None
+        selected_media_ids: tuple = ()
+        atp_analysis: Dict[str, Any] = {}
+        atp_removed_reaction_ids: tuple = ()
         if atp_safe:
+            # Where the default ATP media get loaded depends on which
+            # ModelSEEDpy is installed, and the difference is not cosmetic.
+            #
+            # UPSTREAM has BOTH a module-level function ``load_default_medias``
+            # and an ``__init__`` parameter of the same name. Inside
+            # ``MSATPCorrection.__init__`` the name resolves to the BOOL
+            # PARAMETER, so ``load_default_medias(default_media_path)`` raises
+            #     TypeError: 'bool' object is not callable
+            # for any truthy value. Upstream never trips over it because its own
+            # ``build()`` passes ``load_default_medias=False`` and pre-loads the
+            # media itself. This layer used to forward the flag straight through
+            # with default True, which made every ATP-safe build against upstream
+            # raise before solving.
+            #
+            # The FORK has no module-level function; its loader is the METHOD
+            # ``self.load_default_medias``, which ``__init__`` calls
+            # unambiguously and which works. There the flag is forwarded as the
+            # caller asked.
+            #
+            # Probing for the function rather than branching on a version string
+            # is the point: the two trees report 0.4.2 and 0.4.3.
+            effective_atp_medias = list(atp_medias)
+            forward_load_default_medias = False
+            if load_default_medias:
+                from modelseedpy.core import msatpcorrection as _msatpcorrection
+
+                default_media_loader = getattr(
+                    _msatpcorrection, "load_default_medias", None
+                )
+                if callable(default_media_loader):
+                    effective_atp_medias = (
+                        default_media_loader(
+                            default_media_path=self.modelseedpy_data_dir
+                            + "/atp_medias.tsv"
+                        )
+                        + effective_atp_medias
+                    )
+                else:
+                    forward_load_default_medias = True
+
             atpcorrection = self.MSATPCorrection(
-                mdlutl,
-                core_template,
-                atp_medias,
-                load_default_medias=load_default_medias,
+                model_or_mdlutl=mdlutl,
+                core_template=core_template,
+                atp_medias=effective_atp_medias,
+                load_default_medias=forward_load_default_medias,
                 max_gapfilling=max_gapfilling,
                 gapfilling_delta=gapfilling_delta,
                 forced_media=forced_atp_list,
                 default_media_path=self.modelseedpy_data_dir + "/atp_medias.tsv",
             )
+            # EXACTLY ONCE. ``run_atp_correction`` mutates the model -- it
+            # disables noncore reactions, gap-fills the core against the supplied
+            # core template, then re-expands to genome scale while filtering the
+            # reactions that break ATP -- so a second call re-filters an
+            # already-filtered model and the second verdict is not comparable to
+            # the first.
             tests = atpcorrection.run_atp_correction()
-            current_output["Core GF"] = len(atpcorrection.cumulative_core_gapfilling)
+            atp_invocations = 1
+            atp_test_count = len(tests) if tests is not None else None
+            core_gapfilling_count = len(atpcorrection.cumulative_core_gapfilling)
+            current_output["Core GF"] = core_gapfilling_count
+
             # Publish the ATP tests on the model util so downstream gap-fill can
             # be ATP-safe without recomputing them. ``MSModelUtil.atp_tests`` is
             # the attribute ``get_atp_tests`` caches into, so a caller may reach
@@ -1016,6 +1547,36 @@ class MSReconstructionUtils(KBModelUtils):
             # cause 3).
             mdlutl.atp_tests = tests
 
+        if atp_safe and return_reconstruction_result:
+            # POST-ATP boundary. Collected only for the structured result, so
+            # the legacy two-value path reads nothing off MSATPCorrection it did
+            # not read before.
+            selected_media_ids = tuple(
+                media.id for media in (atpcorrection.selected_media or [])
+            )
+            atp_removed_reaction_ids = tuple(
+                sorted(
+                    pre_atp_reaction_ids - {rxn.id for rxn in mdlutl.model.reactions}
+                )
+            )
+            atp_analysis = {
+                "stage": "post-atp",
+                "atp_hydrolysis_id": atpcorrection.atp_hydrolysis.id,
+                "test_count": atp_test_count,
+                "core_gapfilling_count": core_gapfilling_count,
+                "selected_media_ids": list(selected_media_ids),
+                "atp_media_count": len(effective_atp_medias),
+                "forced_media": list(forced_atp_list),
+                "removed_reaction_ids": list(atp_removed_reaction_ids),
+                # Keyed by media ID, not by the MSMedia OBJECT MSATPCorrection
+                # keys it by: ``ReconstructionResult.to_dict`` has to survive
+                # ``json.dumps``, and an object key makes it raise "keys must be
+                # str, int, float, bool or None".
+                "media_gapfill_stats": {
+                    (media.id if hasattr(media, "id") else str(media)): stats
+                    for media, stats in atpcorrection.media_gapfill_stats.items()
+                },
+            }
         # Set model attributes
         mdlutl.get_attributes()["class"] = current_output["Class"]
         mdlutl.wsid = gid
@@ -1023,7 +1584,53 @@ class MSReconstructionUtils(KBModelUtils):
         current_output["Reactions"] = mdlutl.nonexchange_reaction_count()
         current_output["Model genes"] = len(mdlutl.model.genes)
 
-        return current_output, mdlutl
+        if not return_reconstruction_result:
+            return current_output, mdlutl
+
+        modelseedpy_version, modelseedpy_revision = resolve_distribution_provenance(
+            "modelseedpy"
+        )
+        kbutillib_version, kbutillib_revision = resolve_distribution_provenance(
+            "KBUtilLib"
+        )
+        result = ReconstructionResult(
+            draft_reaction_count=draft_facts["reactions"],
+            draft_metabolite_count=draft_facts["metabolites"],
+            draft_gene_count=draft_facts["genes"],
+            draft_exchange_count=draft_facts["exchanges"],
+            draft_drain_count=draft_facts["drains"],
+            draft_biomass_ids=draft_facts["biomass_ids"],
+            draft_objective_expression=draft_facts["objective"],
+            draft_atpm_present=draft_facts["atpm_present"],
+            post_atp_correction_ran=bool(atp_safe),
+            post_atp_correction_invocations=atp_invocations,
+            post_atp_reaction_count=(
+                len(mdlutl.model.reactions) if atp_safe else None
+            ),
+            post_atp_removed_reaction_ids=atp_removed_reaction_ids,
+            post_atp_core_gapfilling_count=core_gapfilling_count,
+            post_atp_selected_media_ids=selected_media_ids,
+            post_atp_test_count=atp_test_count,
+            post_atp_analysis=atp_analysis,
+            # Empty by design: this method stops at POST-ATP. gapfill_metabolic_model
+            # is the stage that fills this.
+            post_gapfill_results=(),
+            genome_id=genome.id,
+            genome_class=current_output["Class"],
+            template_id=active_gs_template.id,
+            template_name=active_gs_template.name,
+            core_template_id=(core_template.id if atp_safe else None),
+            core_template_name=(core_template.name if atp_safe else None),
+            ontology_term=ontology_term,
+            match_role_aliases=match_role_aliases,
+            allow_incomplete_complexes=allow_incomplete_complexes,
+            reactions_to_add_supplied=bool(reactions_to_add),
+            modelseedpy_version=modelseedpy_version,
+            modelseedpy_revision=modelseedpy_revision,
+            kbutillib_version=kbutillib_version,
+            kbutillib_revision=kbutillib_revision,
+        )
+        return current_output, mdlutl, result
 
     def compute_ontology_model_changes(
         self,

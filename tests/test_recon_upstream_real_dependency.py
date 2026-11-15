@@ -5,8 +5,12 @@ the questions PRD ``kbdl-recon-thin-layer-v1`` needs answered before the light,
 KBase-free reconstruction layer can be designed:
 
 * does :meth:`MSReconstructionUtils.build_metabolic_model` work at all against
-  upstream ModelSEEDpy (it calls ``builder.build(base_model, "0", False, False)``
-  POSITIONALLY, and upstream's second positional parameter is ``gapfill_media``);
+  upstream ModelSEEDpy?  When this harness was written it did not, on two
+  counts: ``ModelSEEDBiochem.get(path=...)`` and a POSITIONAL
+  ``builder.build(base_model, "0", False, False)`` whose second argument
+  upstream binds to ``gapfill_media``.  Both are now fixed (kbu-recon-env and
+  kbu-recon-build), so ``test_a1`` asserts it RUNS and the binding table it
+  records is kept as the reason the layer must never call ``build()``;
 * what ``MSBuilder.build_base_model`` actually returns, and which of exchanges /
   biomass / objective / ATPM are on it;
 * which LP backend carries ATP correction to completion;
@@ -477,15 +481,26 @@ def test_a1_build_metabolic_model_against_upstream(
     assert outcome["upstream_build_param_binding"]["index"] == "False"
     assert outcome["upstream_build_param_binding"]["annotate_with_rast"] == "True"
 
-    # Blocker 1 or blocker 2 must bite. If neither does, the layer's premise changed.
-    blocked = (not outcome["construction"]["succeeded"]) or (
-        outcome["raised"] is not None
+    # BOTH blockers are now FIXED, so this records the repair rather than the
+    # defect. Blocker 1 went in kbu-recon-env (task-39488b88): ModelSEEDBiochem
+    # is loaded through a signature-dispatching helper instead of
+    # ``get(path=...)``. Blocker 2 went in kbu-recon-build (task-ec0feb19):
+    # ``build_metabolic_model`` calls ``MSBuilder.build_base_model`` with keyword
+    # arguments and never calls ``build()`` at all.
+    #
+    # The ``upstream_build_param_binding`` assertions above are unaffected and
+    # are the durable half of this measurement: they are facts about upstream's
+    # ``build()``, which is exactly why the layer must not call it.
+    assert outcome["construction"]["succeeded"], (
+        "MSReconstructionUtils no longer constructs against upstream "
+        "ModelSEEDpy; kbu-recon-env's biochemistry and msfba fixes have "
+        f"regressed. Raised: {outcome['construction']['raised']}"
     )
-    assert blocked, (
-        "build_metabolic_model ran to completion against upstream ModelSEEDpy -- "
-        "neither the ModelSEEDBiochem.get(path=...) incompatibility nor the "
-        "positional builder.build call bit. Re-read the measurement before "
-        "designing against it."
+    assert outcome["raised"] is None, (
+        "build_metabolic_model raised against upstream ModelSEEDpy. The "
+        "positional builder.build call was replaced by a keyword "
+        "build_base_model call in kbu-recon-build, so this is a regression "
+        f"rather than the original blocker. Raised: {outcome['raised']}"
     )
 
 

@@ -530,6 +530,10 @@ class _OrderRecorder:
         # Every ``allow_all_non_grp_reactions`` value the builder was asked for,
         # in call order (issue #29 -- the flag must stay False).
         self.non_grp_flags: list[bool] = []
+        # Keyword arguments each ``MSBuilder(...)`` construction received.
+        self.builder_kwargs: list[dict] = []
+        # Keyword arguments each ``build_base_model`` call received.
+        self.base_model_kwargs: list[dict] = []
 
 
 class _OrderedModel:
@@ -572,14 +576,35 @@ class _OrderedBuilder:
     def __init__(self, recorder):
         self._recorder = recorder
 
-    # class-level use: ``self.MSBuilder(genome, template)``
-    def __call__(self, genome, template):
+    # class-level use: ``self.MSBuilder(genome=..., template=..., ontology_term=...)``
+    def __call__(self, genome, template=None, **kwargs):
         self._recorder.calls.append("build_instance")
+        self._recorder.builder_kwargs.append(dict(kwargs, template=template))
         return self
 
-    # instance-level use: ``builder.build(base_model, "0", False, False)``
-    def build(self, *args, **kwargs):
-        self._recorder.calls.append("builder.build")
+    # instance-level use: ``builder.build_base_model(**keywords)``.  Declared
+    # with the real parameter names so ``_base_model_keywords``'s signature
+    # probe sees the same shape the pinned ModelSEEDpy presents.
+    def build_base_model(
+        self,
+        model_or_id,
+        index="0",
+        allow_all_non_grp_reactions=False,
+        annotate_with_rast=True,
+        *,
+        match_role_aliases=False,
+        allow_incomplete_complexes=True,
+    ):
+        self._recorder.calls.append("builder.build_base_model")
+        self._recorder.base_model_kwargs.append(
+            {
+                "index": index,
+                "allow_all_non_grp_reactions": allow_all_non_grp_reactions,
+                "annotate_with_rast": annotate_with_rast,
+                "match_role_aliases": match_role_aliases,
+                "allow_incomplete_complexes": allow_incomplete_complexes,
+            }
+        )
         return _OrderedModel(self._recorder)
 
     # instance-level use: ``builder.build_non_metabolite_reactions(model, ...)``
@@ -635,6 +660,15 @@ class _OrderedSelf:
         self._recorder.calls.append("_add_reactions_from_gene_mapping")
         return []
 
+    # Borrowed verbatim from the real class rather than re-implemented: the
+    # signature probe in ``_base_model_keywords`` and the gating in
+    # ``_apply_roleless_path_compensations`` are part of what these tests are
+    # about, so a stand-in would test the stand-in.
+    _base_model_keywords = MSReconstructionUtils._base_model_keywords
+    _apply_roleless_path_compensations = (
+        MSReconstructionUtils._apply_roleless_path_compensations
+    )
+
 
 class _OrderedGenome:
     id = "g1"
@@ -656,6 +690,11 @@ def _build_with_recorder(*, atp_safe=True, reactions_to_add=None):
         gs_template_obj=object(),
         core_template=object(),
         atp_safe=atp_safe,
+        # The default-ATP-media pre-load reads a real TSV out of
+        # ``self.modelseedpy_data_dir``, which the fake deliberately points at a
+        # path that does not exist.  These tests are about call ORDER; the
+        # pre-load has its own tests below.
+        load_default_medias=False,
         reactions_to_add=reactions_to_add
         if reactions_to_add is not None
         else {"rxn00001": ["g1"]},
@@ -701,16 +740,34 @@ def test_exchanges_are_added_even_when_atp_correction_is_skipped():
     assert "run_atp_correction" not in calls
 
 
-def test_exchanges_are_added_when_there_are_no_reactions_to_add():
-    """The call is unconditional, not gated on ``reactions_to_add``."""
+def test_the_compensations_are_skipped_when_there_are_no_reactions_to_add():
+    """The two roleless-path compensations are GATED on ``reactions_to_add``.
+
+    They existed to repair a draft that ``MSBuilder.build()`` had contributed
+    nothing to.  Now that the draft is built natively from roles with
+    ``build_base_model``, both were MEASURED to be strict no-ops on a role-based
+    draft -- 0 reactions from the ``build_non_metabolite_reactions`` re-run and
+    0 exchanges from ``add_exchanges_to_model``, on a 957-reaction
+    *H. influenzae* draft that already carried 73 exchanges and all 19 of the
+    template's spontaneous/universal reactions
+    (``agent-io/work-records/task-d1302dc4.md`` section (f)).
+
+    This test replaces an earlier one that asserted the exchange call was
+    unconditional.  That assertion encoded the roleless path's need, and the
+    native build retires it: re-sweeping the template to confirm a no-op costs a
+    full sweep per build, and leaving both calls in place unconditionally is how
+    a future divergence between the two inclusion predicates would double-apply
+    without anything saying so.
+    """
     pytest.importorskip("cobra")
     calls, _out, _mdlutl, _atp = _build_with_recorder(reactions_to_add={})
 
     assert "_add_reactions_from_gene_mapping" not in calls
-    assert "add_exchanges_to_model" in calls
-    assert calls.index("add_exchanges_to_model") < calls.index(
-        "run_atp_correction"
-    )
+    assert "add_exchanges_to_model" not in calls
+    assert "build_non_metabolite_reactions" not in calls
+    # The build still reaches ATP correction -- the gate drops the
+    # compensations, not the stage after them.
+    assert "run_atp_correction" in calls
 
 
 def test_atp_tests_are_published_on_the_model_util():
@@ -817,6 +874,7 @@ def _build_capturing_recorder(*, atp_safe=True, reactions_to_add=None):
         gs_template_obj=object(),
         core_template=object(),
         atp_safe=atp_safe,
+        load_default_medias=False,
         reactions_to_add=reactions_to_add
         if reactions_to_add is not None
         else {"rxn00001": ["g1"]},
@@ -886,9 +944,9 @@ class _SpontaneousBuilder:
 
     Reproduces three behaviours of modelseedpy 0.4.2 that the fix depends on:
 
-    * ``build()`` on a roleless genome adds NO metabolic reactions, so the
-      ``template_species_to_model_species`` map is still empty when ``build()``
-      makes its own internal ``build_non_metabolite_reactions`` call -- and the
+    * ``build_base_model`` on a roleless genome adds NO metabolic reactions, so
+      the ``template_species_to_model_species`` map is still empty when it makes
+      its own internal ``build_non_metabolite_reactions`` call -- and the
       predicate therefore admits nothing.
     * ``build_non_metabolite_reactions`` admits a reaction only when at least
       one of its template metabolites is already a key of that map (or
@@ -913,16 +971,26 @@ class _SpontaneousBuilder:
         #: nothing and a later one return the diffusion reactions.
         self.admitted_per_call = []
 
-    # ``self.MSBuilder(genome, template)``
-    def __call__(self, genome, template):
+    # ``self.MSBuilder(genome=..., template=..., ontology_term=...)``
+    def __call__(self, genome, template=None, **kwargs):
         return self
 
-    # ``builder.build(base_model, "0", False, False)``
-    def build(self, model_or_id, index="0", *args, **kwargs):
+    # ``builder.build_base_model(**keywords)``
+    def build_base_model(
+        self,
+        model_or_id,
+        index="0",
+        allow_all_non_grp_reactions=False,
+        annotate_with_rast=True,
+        *,
+        match_role_aliases=False,
+        allow_incomplete_complexes=True,
+    ):
         self.index = index
         self.base_model = model_or_id
         # The roleless path contributes no metabolic reactions at all; the only
-        # thing build() does that matters here is its own (futile) rebuild.
+        # thing build_base_model does that matters here is its own (futile)
+        # rebuild and its own exchange sweep.
         model_or_id.add_reactions(self.build_non_metabolite_reactions(model_or_id))
         self.add_exchanges_to_model(model_or_id)
         return model_or_id
@@ -1025,6 +1093,15 @@ class _SpontaneousSelf:
 
     def get_template(self, ref, _none):
         return object()
+
+    # Borrowed verbatim from the real class rather than re-implemented: the
+    # signature probe in ``_base_model_keywords`` and the gating in
+    # ``_apply_roleless_path_compensations`` are part of what these tests are
+    # about, so a stand-in would test the stand-in.
+    _base_model_keywords = MSReconstructionUtils._base_model_keywords
+    _apply_roleless_path_compensations = (
+        MSReconstructionUtils._apply_roleless_path_compensations
+    )
 
     def _add_reactions_from_gene_mapping(self, mdlutl, builder, hash_, template,
                                         **kwargs):
@@ -1198,8 +1275,15 @@ def test_a_mapping_with_no_relevant_species_is_a_no_op():
 
 
 def test_an_empty_gene_mapping_does_not_raise():
-    """``reactions_to_add={}`` skips gene mapping entirely; the rebuild still
-    runs, still admits nothing, and must not raise."""
+    """``reactions_to_add={}`` is the NATIVE path: no gene mapping, and no
+    compensating rebuild either.
+
+    Only ``build_base_model``'s own single rebuild runs, so there is exactly one
+    entry in ``admitted_per_call``.  Previously this asserted ``[0, 0]``, i.e.
+    that the compensating rebuild ran anyway; it is now gated on
+    ``reactions_to_add`` (see
+    ``test_the_compensations_are_skipped_when_there_are_no_reactions_to_add``).
+    """
     pytest.importorskip("cobra")
     import cobra
 
@@ -1218,7 +1302,7 @@ def test_an_empty_gene_mapping_does_not_raise():
     )
 
     assert len(mdlutl.model.reactions) == 0
-    assert builder.admitted_per_call == [0, 0]
+    assert builder.admitted_per_call == [0]
 
 
 def test_the_rebuild_does_not_duplicate_what_build_already_added():

@@ -5,6 +5,7 @@ Sub-modules:
     ms_fba_utils            — MSFBAUtils, MSFBAUtilsImpl
     ms_template_utils       — MSTemplateUtils, MSTemplateUtilsImpl
     ms_reconstruction_utils — MSReconstructionUtils, MSReconstructionUtilsImpl
+    fva_panel              — MediaPanel, run_fva_panel, compute_fva_essentiality
     model_helpers           — _parse_id, _check_and_convert_model (canonical helpers)
     model_directionality    — directionality_from_bounds, direction_conversion, etc.
     model_standardization_utils — ModelStandardizationUtils, ModelStandardizationUtilsImpl
@@ -33,6 +34,11 @@ def __getattr__(name: str):  # noqa: ANN001
         # ms_reconstruction_utils
         "MSReconstructionUtils": ("ms_reconstruction_utils", "MSReconstructionUtils"),
         "MSReconstructionUtilsImpl": ("ms_reconstruction_utils", "MSReconstructionUtilsImpl"),
+        # fva_panel
+        "MediaPanel": ("fva_panel", "MediaPanel"),
+        "run_fva_panel": ("fva_panel", "run_fva_panel"),
+        "compute_fva_essentiality": ("fva_panel", "compute_fva_essentiality"),
+        "classify_fva_essentiality": ("fva_panel", "classify_fva_essentiality"),
         # model_helpers
         "_parse_id": ("model_helpers", "_parse_id"),
         "_check_and_convert_model": ("model_helpers", "_check_and_convert_model"),
@@ -70,6 +76,11 @@ __all__ = [
     # ms_reconstruction_utils
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
+    # fva_panel
+    "MediaPanel",
+    "run_fva_panel",
+    "compute_fva_essentiality",
+    "classify_fva_essentiality",
     # model_helpers
     "_parse_id",
     "_check_and_convert_model",

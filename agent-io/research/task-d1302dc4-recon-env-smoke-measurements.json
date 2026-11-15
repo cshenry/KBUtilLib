@@ -1,0 +1,319 @@
+{
+  "environment": {
+    "modelseedpy_version_string": "0.4.3",
+    "modelseedpy_file": "/scratch/chenry/venvs/kbdl-recon-scratch-smoke/lib/python3.11/site-packages/modelseedpy/__init__.py",
+    "cobra_version": "0.32.1",
+    "solvers": {
+      "optlang_available": {
+        "GUROBI": true,
+        "GLPK": true,
+        "MOSEK": false,
+        "CPLEX": false,
+        "COINOR_CBC": false,
+        "SCIPY": true,
+        "OSQP": false,
+        "HIGHS": false
+      },
+      "cobra_default_interface": "optlang.gurobi_interface"
+    },
+    "backends_verified_by_real_solve": [
+      "gurobi",
+      "glpk"
+    ],
+    "dependency_provenance": {
+      "user_dependency_config": "/home/chenry/.kbutillib/dependencies.yaml",
+      "user_dependency_config_declares": [
+        "ModelSEEDDatabase",
+        "cb_annotation_ontology_api",
+        "cobrakbase",
+        "modelseedpy"
+      ],
+      "harness_dependency_config": "/scratch/chenry/tmp/kbu_recon_smoke_dependencies.yaml",
+      "harness_dependencies_resolved": {
+        "ModelSEEDDatabase": "/home/chenry/Dropbox/Projects/ModelSEEDDatabase",
+        "cb_annotation_ontology_api": "/home/chenry/Dropbox/Projects/cb_annotation_ontology_api"
+      },
+      "modelseedpy_entry_excluded_from_sys_path": true
+    }
+  },
+  "a1_build_metabolic_model": {
+    "construction": {
+      "succeeded": false,
+      "raised": {
+        "type": "TypeError",
+        "message": "ModelSEEDBiochem.get() got an unexpected keyword argument 'path'",
+        "origin": "File \"/mnt/homes/chenry/.maestro/worktrees/task-d1302dc4/src/kbutillib/domains/biochem/ms_biochem_utils.py\", line 394, in _ensure_database_available\n    self._biochem_db =  ModelSEEDBiochem.get(path=self.modelseed_db_path)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+      },
+      "modelseed_db_path_supplied": "/home/chenry/Dropbox/Projects/ModelSEEDDatabase"
+    },
+    "call_site": "src/kbutillib/domains/modeling/ms_reconstruction_utils.py:373",
+    "call_as_written": "builder.build(base_model, \"0\", False, False)",
+    "upstream_build_signature": "(self, model_or_id, gapfill_media, index='0', allow_all_non_grp_reactions=False, annotate_with_rast=True, biomass_classic=False, biomass_gc=0.5, add_reaction_from_rast_annotation=True, add_maintenance_atp_reaction=True)",
+    "upstream_build_param_binding": {
+      "model_or_id": "<Model x at 0x77aee43e61d0>",
+      "gapfill_media": "'0'",
+      "index": "False",
+      "allow_all_non_grp_reactions": "False",
+      "annotate_with_rast": "True",
+      "biomass_classic": "False",
+      "biomass_gc": "0.5",
+      "add_reaction_from_rast_annotation": "True",
+      "add_maintenance_atp_reaction": "True"
+    },
+    "upstream_build_returns": "4-tuple (model_gapfilled, atp_correction, tests, gap_sol); build_metabolic_model assigns it to a single `mdl` and then sets `mdl.genome`",
+    "build_metabolic_model_invoked": false,
+    "raised": null
+  },
+  "a2_build_base_model": {
+    "signature": "(self, model_or_id, index='0', allow_all_non_grp_reactions=False, annotate_with_rast=True, biomass_classic=False, biomass_gc=0.5, add_reaction_from_rast_annotation=True)",
+    "accepts_match_role_aliases": false,
+    "accepts_allow_incomplete_complexes": false,
+    "generate_reaction_complex_sets_signature": "(self, allow_incomplete_complexes=True)",
+    "return_type": "cobra.core.model.Model",
+    "returns_tuple": false,
+    "reactions": 957,
+    "metabolites": 967,
+    "genes": 588,
+    "groups": 533,
+    "n_exchanges": 73,
+    "biomass": [
+      "bio1"
+    ],
+    "drains_n": 4,
+    "atpm": [],
+    "objective": "1.0*bio1 - 1.0*bio1_reverse_b18f7"
+  },
+  "b_atp_correction": {
+    "glpk": {
+      "backend": "glpk",
+      "version": "5.0",
+      "completed": true,
+      "load_default_medias_true": "TypeError: 'bool' object is not callable",
+      "n_default_atp_medias": 54,
+      "seconds": 50.9,
+      "n_atp_tests": 4,
+      "atp_tests": [
+        {
+          "media": "empty",
+          "objective": "ATPM_c0",
+          "threshold": 1e-05
+        },
+        {
+          "media": "Glc",
+          "objective": "ATPM_c0",
+          "threshold": 2.0000000000000027
+        },
+        {
+          "media": "Glc.DMSO",
+          "objective": "ATPM_c0",
+          "threshold": 1.2000000000000015
+        },
+        {
+          "media": "Glc.TMAO",
+          "objective": "ATPM_c0",
+          "threshold": 1.2000000000000015
+        }
+      ],
+      "cumulative_core_gapfilling": 0,
+      "selected_media": [
+        "Glc",
+        "Glc.DMSO",
+        "Glc.TMAO"
+      ],
+      "reactions_after": 958
+    },
+    "gurobi": {
+      "backend": "gurobi",
+      "version": "13.0.0",
+      "completed": true,
+      "load_default_medias_true": "TypeError: 'bool' object is not callable",
+      "n_default_atp_medias": 54,
+      "seconds": 59.3,
+      "n_atp_tests": 4,
+      "atp_tests": [
+        {
+          "media": "empty",
+          "objective": "ATPM_c0",
+          "threshold": 1e-05
+        },
+        {
+          "media": "Glc",
+          "objective": "ATPM_c0",
+          "threshold": 2.0
+        },
+        {
+          "media": "Glc.DMSO",
+          "objective": "ATPM_c0",
+          "threshold": 1.2
+        },
+        {
+          "media": "Glc.TMAO",
+          "objective": "ATPM_c0",
+          "threshold": 1.2
+        }
+      ],
+      "cumulative_core_gapfilling": 0,
+      "selected_media": [
+        "Glc",
+        "Glc.DMSO",
+        "Glc.TMAO"
+      ],
+      "reactions_after": 958
+    }
+  },
+  "c_modelseedbiochem": {
+    "packaged_config_cfg_biochem_path": "data/ModelSEEDDatabase",
+    "packaged_default_is_absolute": false,
+    "packaged_default_exists_as_given": false,
+    "packaged_default_resolved_against_package": "/scratch/chenry/venvs/kbdl-recon-scratch-smoke/lib/python3.11/site-packages/modelseedpy/data/ModelSEEDDatabase",
+    "packaged_default_resolved_exists": false,
+    "dependency_manager_path": "/home/chenry/Dropbox/Projects/ModelSEEDDatabase",
+    "dependency_manager_path_exists": true,
+    "kbutillib_call": "ModelSEEDBiochem.get(path=self.modelseed_db_path)",
+    "kbutillib_call_site": "src/kbutillib/domains/biochem/ms_biochem_utils.py:394",
+    "upstream_get_signature": "(create_if_missing=True)",
+    "upstream_get_accepts_path": false,
+    "kbutillib_call_result": "TypeError: ModelSEEDBiochem.get() got an unexpected keyword argument 'path'",
+    "default_via_ModelSEEDBiochem_get": "FileNotFoundError: [Errno 2] No such file or directory: 'data/ModelSEEDDatabase/Biochemistry/'",
+    "from_local_seconds": 19.6,
+    "compounds": 45708,
+    "reactions": 56012,
+    "loaded_via_dependency_manager": true,
+    "construction_consequence": {
+      "msreconstructionutils_constructed": false,
+      "raised": {
+        "type": "TypeError",
+        "message": "ModelSEEDBiochem.get() got an unexpected keyword argument 'path'",
+        "origin": "File \"/mnt/homes/chenry/.maestro/worktrees/task-d1302dc4/src/kbutillib/domains/biochem/ms_biochem_utils.py\", line 394, in _ensure_database_available\n    self._biochem_db =  ModelSEEDBiochem.get(path=self.modelseed_db_path)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+      }
+    }
+  },
+  "d_gapfill": {
+    "prefilter=True": {
+      "prefilter": true,
+      "completed": true,
+      "backend": "gurobi",
+      "seconds": 41.1,
+      "result_is_none": false,
+      "result_keys": [
+        "binary_check",
+        "media",
+        "minobjective",
+        "new",
+        "reversed",
+        "target"
+      ],
+      "n_new": 163,
+      "n_reversed": 0,
+      "new_sample": [
+        "EX_cpd00013_e0",
+        "EX_cpd00063_e0",
+        "EX_cpd10515_e0",
+        "rxn00029_c0",
+        "rxn00060_c0",
+        "rxn00122_c0",
+        "rxn00141_c0",
+        "rxn00179_c0",
+        "rxn00190_c0",
+        "rxn00293_c0",
+        "rxn00309_c0",
+        "rxn00350_c0",
+        "rxn00359_c0",
+        "rxn00392_c0",
+        "rxn00430_c0",
+        "rxn00467_c0",
+        "rxn00502_c0",
+        "rxn00503_c0",
+        "rxn00505_c0",
+        "rxn00599_c0"
+      ]
+    },
+    "prefilter=False": {
+      "prefilter": false,
+      "completed": true,
+      "backend": "gurobi",
+      "seconds": 36.3,
+      "result_is_none": false,
+      "result_keys": [
+        "binary_check",
+        "media",
+        "minobjective",
+        "new",
+        "reversed",
+        "target"
+      ],
+      "n_new": 163,
+      "n_reversed": 0,
+      "new_sample": [
+        "EX_cpd00013_e0",
+        "EX_cpd00063_e0",
+        "EX_cpd10515_e0",
+        "rxn00029_c0",
+        "rxn00060_c0",
+        "rxn00122_c0",
+        "rxn00141_c0",
+        "rxn00179_c0",
+        "rxn00190_c0",
+        "rxn00293_c0",
+        "rxn00309_c0",
+        "rxn00350_c0",
+        "rxn00359_c0",
+        "rxn00392_c0",
+        "rxn00430_c0",
+        "rxn00467_c0",
+        "rxn00502_c0",
+        "rxn00503_c0",
+        "rxn00505_c0",
+        "rxn00599_c0"
+      ]
+    }
+  },
+  "e_genome_classifier": {
+    "classifier_dir": "/scratch/chenry/venvs/kbdl-recon-scratch-smoke/lib/python3.11/site-packages/modelseedpy/data/ml",
+    "artifacts": [
+      "linear_svc_ACNP_RAST_full_11_11_2026.npz"
+    ],
+    "npz_present": [
+      "linear_svc_ACNP_RAST_full_11_11_2026.npz"
+    ],
+    "pickle_present": [],
+    "get_classifier_signature": "(classifier_id)",
+    "classifier_id": "linear_svc_ACNP_RAST_full_11_11_2026",
+    "loaded": true,
+    "loader": "MSGenomeClassifier",
+    "model_type": "MSLinearModel",
+    "n_model_features": 33382,
+    "classes": [
+      "A",
+      "C",
+      "N",
+      "P"
+    ],
+    "prediction_needs_sklearn": false,
+    "classify_signature": "(genome_or_roles, ontology_term='RAST')",
+    "classify_call": "classifier.classify(genome, ontology_term='RAST')",
+    "verdict": "N",
+    "seconds": 0.003,
+    "genome_roles": 1530,
+    "genome_roles_matching_model_features": 1444
+  },
+  "f_roleless_compensations": {
+    "draft_reactions": 957,
+    "spontaneous_rerun_returned": 0,
+    "spontaneous_rerun_added": [],
+    "exchange_rerun_added": [],
+    "atp_safe_annotation_overlay_in_build_metabolic_model": false,
+    "note": "The task prompt names the 'ATP-safe annotation overlay' as one of two compensations inside build_metabolic_model. It is not there: the overlay lives in GAA's recon_driver (step 7 of its module docstring). The second compensation actually inside build_metabolic_model is the add_exchanges_to_model call before ATP correction (#28), measured here."
+  },
+  "g_draft_exchanges_and_spontaneous": {
+    "n_exchanges_before_atp_correction": 73,
+    "template_spontaneous_universal": 19,
+    "spontaneous_universal_in_draft": 19,
+    "membrane_diffusion_probes": {
+      "rxn05468_c0": true,
+      "rxn05467_c0": true,
+      "rxn05319_c0": true
+    },
+    "spontaneous_universal_coverage": 1.0
+  }
+}

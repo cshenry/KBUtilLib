@@ -379,6 +379,51 @@ def _compute_growth(*, fba: Any, mdlutl: Any, media_obj: Any) -> float:
         return 0.0
 
 
+def _ensure_objective_package(*, mdlutl: Any) -> None:
+    """Make ``ObjectivePkg`` resolvable on this model's package manager.
+
+    ``run_fva`` sets a per-reaction objective through
+    ``set_objective_from_string``, which calls
+    ``model.pkgmgr.getpkg("ObjectivePkg")``.  ``MSPackageManager`` builds its
+    ``available_packages`` registry from the names exported at the TOP LEVEL of
+    ``modelseedpy`` (``inspect.getmembers(sys.modules["modelseedpy"])``), and
+    the fork and upstream dev disagree about exactly that:
+
+    * fork 0.4.2 re-exports ``ObjectivePkg`` from ``modelseedpy/__init__.py``;
+    * upstream dev does NOT, although the class is present and importable at
+      ``modelseedpy.fbapkg.objectivepkg``.
+
+    So on upstream the registry lacks the entry and ``getpkg`` raises
+    ``PackageError("Package ObjectivePkg does not exist!")`` -- every reaction,
+    so an entire medium's FVA fails -- while the identical code works on the
+    fork.  MEASURED on both, not inferred: the fork's top-level namespace
+    contains ``ObjectivePkg`` and upstream's does not.
+
+    Registering the class on the manager's own per-model ``available_packages``
+    dict is deliberately the narrowest fix available.  It touches no global
+    state (``MSPackageManager`` keeps one manager per model), it does not patch
+    ``modelseedpy``, and it does not change ``ms_fba_utils.run_fva`` -- which
+    matters for more than tidiness: that file being byte-identical to the one
+    the GAA capture ran against is what lets the parity test attribute any
+    difference to this layer rather than to the solver path.
+
+    A no-op when the entry is already present, so on the fork this changes
+    nothing whatsoever.
+    """
+    pkgmgr = getattr(mdlutl, "pkgmgr", None)
+    if pkgmgr is None:
+        return
+    available = getattr(pkgmgr, "available_packages", None)
+    if available is None or "ObjectivePkg" in available:
+        return
+    try:
+        from modelseedpy.fbapkg.objectivepkg import ObjectivePkg
+    except ImportError:  # pragma: no cover - upstream moved it; let run_fva report
+        logger.debug("ObjectivePkg is not importable; leaving the registry alone")
+        return
+    available["ObjectivePkg"] = ObjectivePkg
+
+
 def _fva_one_medium(
     *,
     fba: Any,
@@ -405,6 +450,7 @@ def _fva_one_medium(
 
     model = cobra_json.model_from_dict(json.loads(model_json))
     local_mdlutl = MSModelUtil.get(model.copy())
+    _ensure_objective_package(mdlutl=local_mdlutl)
 
     raw = fba.run_fva(
         model=local_mdlutl,

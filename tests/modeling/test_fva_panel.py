@@ -576,3 +576,102 @@ class TestNoGaaImport:
         """Consumers already branch on it; the sequential path never emits it
         (see the module docstring), but the constant must stay importable."""
         assert fva_panel.TIMEOUT_SENTINEL == {"timeout": True}
+
+
+class TestEnsureObjectivePackage:
+    """The fork/upstream ``ObjectivePkg`` registry divergence.
+
+    ``run_fva`` sets a per-reaction objective via
+    ``pkgmgr.getpkg("ObjectivePkg")``, and ``MSPackageManager`` builds its
+    registry from the names exported at the TOP LEVEL of ``modelseedpy``.  The
+    fork re-exports ``ObjectivePkg`` there; upstream dev does not, though the
+    class is importable from ``modelseedpy.fbapkg.objectivepkg`` in both.
+    Without the shim, every reaction raises ``PackageError`` on upstream and a
+    whole medium's FVA comes back empty — measured, and the reason the real
+    parity run initially produced 0 rows for both media.
+    """
+
+    @pytest.fixture
+    def stub_objectivepkg(self, monkeypatch):
+        """Make the class importable regardless of which venv is running.
+
+        The task venv has no modelseedpy at all and the scratch venv has
+        upstream's; stubbing keeps this test about the shim's logic rather than
+        about which packages happen to be installed.
+        """
+        module = types.ModuleType("modelseedpy.fbapkg.objectivepkg")
+
+        class _ObjectivePkg:
+            pass
+
+        module.ObjectivePkg = _ObjectivePkg
+        fbapkg = types.ModuleType("modelseedpy.fbapkg")
+        fbapkg.objectivepkg = module
+        monkeypatch.setitem(sys.modules, "modelseedpy.fbapkg", fbapkg)
+        monkeypatch.setitem(sys.modules, "modelseedpy.fbapkg.objectivepkg", module)
+        return _ObjectivePkg
+
+    class _PkgMgr:
+        def __init__(self, available):
+            self.available_packages = available
+
+    class _Utl:
+        def __init__(self, pkgmgr):
+            self.pkgmgr = pkgmgr
+
+    def test_registers_the_class_when_the_registry_lacks_it(self, stub_objectivepkg):
+        """The upstream case."""
+        available = {"KBaseMediaPkg": object()}
+        utl = self._Utl(self._PkgMgr(available))
+        fva_panel._ensure_objective_package(mdlutl=utl)
+        assert available["ObjectivePkg"] is stub_objectivepkg
+
+    def test_is_a_noop_when_the_registry_already_has_it(self, stub_objectivepkg):
+        """The fork case — nothing is replaced, so behaviour there is unchanged."""
+        sentinel = object()
+        available = {"ObjectivePkg": sentinel}
+        utl = self._Utl(self._PkgMgr(available))
+        fva_panel._ensure_objective_package(mdlutl=utl)
+        assert available["ObjectivePkg"] is sentinel
+
+    def test_leaves_other_registry_entries_alone(self, stub_objectivepkg):
+        media_pkg = object()
+        available = {"KBaseMediaPkg": media_pkg}
+        utl = self._Utl(self._PkgMgr(available))
+        fva_panel._ensure_objective_package(mdlutl=utl)
+        assert available["KBaseMediaPkg"] is media_pkg
+        assert set(available) == {"KBaseMediaPkg", "ObjectivePkg"}
+
+    def test_touches_only_this_models_registry(self, stub_objectivepkg):
+        """``MSPackageManager`` keeps one manager per model, so the fix is local.
+
+        Patching a per-instance dict is what keeps this from being a global
+        monkeypatch of modelseedpy.
+        """
+        mine = {}
+        other = {}
+        fva_panel._ensure_objective_package(mdlutl=self._Utl(self._PkgMgr(mine)))
+        assert "ObjectivePkg" in mine
+        assert other == {}
+
+    def test_tolerates_a_model_with_no_package_manager(self, stub_objectivepkg):
+        """Test doubles need not implement ``pkgmgr``; run_fva will report any
+        real problem itself rather than this helper failing the panel first."""
+
+        class _Bare:
+            pass
+
+        fva_panel._ensure_objective_package(mdlutl=_Bare())  # must not raise
+
+    def test_tolerates_a_package_manager_with_no_registry(self, stub_objectivepkg):
+        class _OddMgr:
+            pass
+
+        fva_panel._ensure_objective_package(mdlutl=self._Utl(_OddMgr()))  # must not raise
+
+    def test_absent_objectivepkg_module_is_not_fatal(self, monkeypatch):
+        """If upstream moves the class, run_fva reports it — not this helper."""
+        monkeypatch.setitem(sys.modules, "modelseedpy.fbapkg.objectivepkg", None)
+        available: Dict[str, Any] = {}
+        fva_panel._ensure_objective_package(mdlutl=self._Utl(self._PkgMgr(available)))
+        assert available == {}

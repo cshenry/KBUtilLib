@@ -1009,14 +1009,16 @@ def test_non_gapfill_modelseedpy_calls_use_keyword_arguments_only():
     assert not _offenders(calls), _offenders(calls)
 
 
-@pytest.mark.xfail(strict=True, reason="part C")
 def test_msgapfill_calls_use_keyword_arguments_only():
-    """``MSGapfill(mdlutl, templates, source_models, all_tests, ...)`` is called
-    with four positional arguments in both ``gapfill_metabolic_model`` and
-    ``run_comprehensive_gapfill_on_model``, and ``run_multi_gapfill`` /
-    ``compute_reaction_weights_from_expression_data`` pass theirs positionally
-    too.  All of that is part C's (kbu-recon-gapfill) to fix; when it does, this
-    xfail will strict-fail and must be deleted.
+    """Every call into the MSGapfill API, in both gap-fill methods.
+
+    ``MSGapfill(mdlutl, templates, source_models, all_tests, ...)`` used to be
+    called with four positional arguments in both ``gapfill_metabolic_model``
+    and ``run_comprehensive_gapfill_on_model``, and ``run_multi_gapfill`` and
+    ``compute_reaction_weights_from_expression_data`` passed theirs
+    positionally too.  Part C (kbu-recon-gapfill) made all of them
+    keyword-only, so this was ``xfail(strict=True)`` and is now a plain
+    assertion.
     """
     calls = [call for call in _modelseedpy_calls() if call[1] == "MSGapfill"]
 

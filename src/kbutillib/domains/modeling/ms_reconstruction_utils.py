@@ -5,9 +5,11 @@ translating the functionality from KB-ModelSEEDReconstruction/modelseedrecon.py
 into a KBUtilLib-compatible format with standard named arguments.
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -47,6 +49,7 @@ __all__ = [
     "ReconstructionEnvironmentError",
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
+    "GapfillRecord",
     "ReconstructionResult",
     "initialize_reconstruction_environment",
     "resolve_distribution_provenance",
@@ -665,6 +668,255 @@ def resolve_distribution_provenance(distribution_name: str) -> "tuple[str, str]"
     return version, revision
 
 
+# ── Gap-fill records and their helpers ─────────────────────────────────────
+
+
+def _supported_keyword_arguments(
+    *,
+    target: Any,
+    requested: Mapping[str, Tuple[Any, Any]],
+    label: str,
+) -> Dict[str, Any]:
+    """Keep only the keywords ``target`` accepts; raise if a REQUESTED one is absent.
+
+    Args:
+        target: The callable about to be invoked.
+        requested: ``{keyword: (value, unrequested_default)}``.  A keyword whose
+            value equals its ``unrequested_default`` is treated as not asked
+            for, so dropping it changes nothing.
+        label: Human name of the callable, for the error message.
+
+    Returns:
+        The subset of ``{keyword: value}`` that ``target`` can actually take.
+
+    Raises:
+        ModelSEEDpyCapabilityError: A keyword carrying a NON-default value is
+            absent from ``target``'s signature, so the request cannot be
+            honoured.
+
+    The same discipline as :meth:`MSReconstructionUtils._base_model_keywords`,
+    generalised, because the ModelSEEDpy fork and the revision this layer pins
+    differ in their SIGNATURES while reporting versions 0.4.2 and 0.4.3 --
+    ``MSGapfill.__init__``'s ``base_media`` and ``base_media_target_element``
+    exist in the fork and not upstream (measured: upstream's signature is
+    ``(model_or_mdlutl, default_gapfill_templates, default_gapfill_models,
+    test_conditions, reaction_scores, blacklist, atp_gapfilling, minimum_obj,
+    default_excretion, default_uptake, default_target)``).  Dropping a keyword
+    nobody asked for is free; dropping one a caller explicitly set would
+    silently change the computation, so that raises.
+    """
+    import inspect
+
+    parameters = inspect.signature(target).parameters
+    accepts_var_keyword = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    supported: Dict[str, Any] = {}
+    unsupported: List[str] = []
+    for name, (value, unrequested_default) in requested.items():
+        if name in parameters or accepts_var_keyword:
+            supported[name] = value
+        elif value != unrequested_default:
+            unsupported.append(f"{name}={value!r}")
+    if unsupported:
+        raise ModelSEEDpyCapabilityError(
+            f"the installed modelseedpy's {label} does not accept "
+            f"{unsupported}, so those settings cannot be honoured "
+            f"(signature: {tuple(parameters)}). They exist in the ModelSEEDpy "
+            "fork but not at the revision this layer pins, and a version "
+            "string does not distinguish the two."
+        )
+    return supported
+
+
+#: Trailing compartment index on a model reaction id: ``_c0`` in ``rxn00029_c0``.
+_COMPARTMENT_SUFFIX = re.compile(r"_[a-z]\d+$")
+
+
+def _base_reaction_id(reaction_id: str) -> str:
+    """Strip a model reaction id's compartment suffix.
+
+    Args:
+        reaction_id: Either a model id (``"rxn00029_c0"``) or a base id
+            (``"rxn00029"``).
+
+    Returns:
+        The base id.
+
+    The two forms are NOT interchangeable where it matters.  ``GapfillingPkg``
+    compares the gap-fill blacklist against ``template_reaction.reference_id``
+    (``gapfillingpkg.py:402``) and against the base-id capture group of its own
+    compartment-suffix regex (``:272``) -- i.e. BASE ids both times -- so a
+    blacklist entry carrying a compartment suffix matches nothing at all and
+    the reaction is gap-filled in anyway.  Normalising here is what makes
+    ``reaction_exclusion_list`` mean the same thing whichever form a caller
+    supplies.
+    """
+    return _COMPARTMENT_SUFFIX.sub("", reaction_id)
+
+
+def _media_digest(media: Any) -> str:
+    """A stable digest of a medium's COMPOSITION, independent of its id.
+
+    Args:
+        media: ``MSMedia``-like object exposing ``mediacompounds``.
+
+    Returns:
+        A ``"sha256:"``-prefixed 16-hex-digit digest over the sorted
+        ``(compound id, lower bound, upper bound)`` triples, or
+        ``"sha256:unavailable"`` when the object exposes no compounds.
+
+    This is what makes a per-occurrence gap-fill record self-describing.  Media
+    ids are the CALLER's ids and this layer keeps them verbatim, so the same id
+    can legitimately be requested twice -- and two different compositions can
+    legitimately arrive under one id (``MSMedia.from_dict`` names every medium
+    it builds ``"media"``, measured).  The digest tells those cases apart
+    without the layer renaming anything.
+    """
+    compounds = getattr(media, "mediacompounds", None)
+    if compounds is None:
+        return "sha256:unavailable"
+    items = sorted(
+        (
+            str(getattr(cpd, "id", "")),
+            float(getattr(cpd, "lower_bound", 0.0)),
+            float(getattr(cpd, "upper_bound", 0.0)),
+        )
+        for cpd in compounds
+    )
+    payload = json.dumps(items, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _objective_value_on_media(
+    *, mdlutl: Any, media: Any, objective: str
+) -> Optional[float]:
+    """Optimise ``objective`` on ``media`` and return its value.
+
+    Args:
+        mdlutl: ``MSModelUtil`` whose model is solved.
+        media: Medium the exchanges are constrained to.
+        objective: Reaction id to maximise.
+
+    Returns:
+        The objective value, or ``None`` when the solve produced no number
+        (infeasible, or NaN -- which is not a measurement).
+
+    The objective is SET EXPLICITLY on every call, and that is the point.
+    ``MSATPCorrection.build_tests`` ends with
+    ``self.model.objective = self.atp_hydrolysis.id``
+    (``msatpcorrection.py:543``) and never restores it, so a POST-ATP model's
+    objective is ATP hydrolysis, not biomass.  A bare ``slim_optimize()`` there
+    measures ATP flux and would report it as growth -- which would read a model
+    with real gaps as already satisfied.  ``MSGapfill`` does not help: its
+    ``default_target`` sets the objective of its internal gap-fill CLONE, not
+    of the model being gap-filled.
+    """
+    mdlutl.pkgmgr.getpkg("KBaseMediaPkg").build_package(media)
+    mdlutl.model.objective = objective
+    value = mdlutl.model.slim_optimize()
+    if value is None or value != value:  # NaN is not a measurement
+        return None
+    return float(value)
+
+
+def _solution_adds_anything(*, mdlutl: Any, solution: Mapping[str, Any]) -> bool:
+    """Would integrating ``solution`` actually change the model?
+
+    Args:
+        mdlutl: ``MSModelUtil`` the solution would be integrated into.
+        solution: An ``MSGapfill.run_gapfilling`` result.
+
+    Returns:
+        ``True`` if the solution names a reaction the model lacks, or a bound
+        that ``integrate_gapfill_solution`` would re-open.
+
+    Integrating a solution that contributes nothing is not merely wasteful, it
+    is destructive: ``integrate_gapfill_solution`` finishes by calling
+    ``MSModelUtil.test_solution(solution, keep_changes=True)``, whose own
+    comment says it "undoes some of what is done above" -- it REMOVES reactions
+    it judges unneeded.  The conditions below mirror
+    ``integrate_gapfill_solution``'s own (``msgapfill.py``: ``>`` with
+    ``upper_bound <= 0``, ``<`` with ``lower_bound >= 0``) so this predicate
+    answers exactly the question "would that call do anything but prune?".
+    """
+    for reaction_id in solution["new"]:
+        if reaction_id not in mdlutl.model.reactions:
+            return True
+    for reaction_id, direction in solution["reversed"].items():
+        if reaction_id not in mdlutl.model.reactions:
+            return True
+        reaction = mdlutl.model.reactions.get_by_id(reaction_id)
+        if direction == ">" and reaction.upper_bound <= 0:
+            return True
+        if direction == "<" and reaction.lower_bound >= 0:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class GapfillRecord:
+    """One gap-fill attempt, for ONE REQUESTED MEDIUM OCCURRENCE.
+
+    One record per occurrence in request order -- not one per distinct medium
+    id.  Requesting the same id twice yields two records with different
+    ``request_index`` values, and the second honestly reports what the second
+    attempt did (typically ``"no_gaps"``: the first attempt already integrated
+    what that medium needed).  The upstream alternative,
+    ``MSGapfill.run_multi_gapfill``, returns a dict keyed by the media OBJECT
+    and so cannot represent a repeated request at all -- two occurrences of one
+    object collapse to a single key.  That is why these records exist.
+
+    This is the element type of :attr:`ReconstructionResult.post_gapfill_results`.
+    That field stays declared ``Tuple[Any, ...]``: it is populated by
+    :meth:`MSReconstructionUtils.gapfill_metabolic_model` through
+    :meth:`MSReconstructionUtils.with_gapfill_results`, and narrowing the
+    declaration would make the field a promise about every future producer
+    rather than a description of this one.
+    """
+
+    request_index: int
+    """0-based position of this occurrence in the ``media_objs`` the caller
+    passed.  The sort key of the record tuple."""
+
+    media_id: str
+    """The medium's id EXACTLY as the caller supplied it.  This layer never
+    renames, suffixes or de-duplicates a caller's id."""
+
+    media_digest: str
+    """:func:`_media_digest` of the medium's composition, so two occurrences
+    sharing an id can still be told apart."""
+
+    status: str
+    """One of:
+
+    * ``"integrated"`` -- a solution was returned and integrated.
+    * ``"no_gaps"`` -- the model already met ``minimum_objective`` on this
+      medium before the attempt, so there was nothing to gap-fill.  This is the
+      expected status of a REPEATED medium whose first occurrence succeeded.
+    * ``"no_solution"`` -- the model did not meet the objective and gap-filling
+      returned nothing that would change the model.
+    * ``"error:<ExceptionType>"`` -- the attempt raised.  The remaining
+      occurrences are still attempted; the exception is logged.
+    """
+
+    additions: Tuple[str, ...]
+    """Reaction ids this occurrence ADDED to the model, sorted.  Measured as a
+    set difference over the model's reaction ids across the occurrence, not
+    read off the solution -- integration prunes, so the solution is what was
+    proposed and this is what was kept."""
+
+    reversals: Tuple[str, ...]
+    """Reaction ids whose bounds this occurrence re-opened, sorted.  Distinct
+    from :attr:`additions`: a reversal changes a reaction the model already
+    had."""
+
+    objective_value: Optional[float]
+    """Objective value on this medium after the occurrence, or ``None`` when no
+    solve produced a number."""
+
+
 @dataclass(frozen=True)
 class ReconstructionResult:
     """Structured facts about one reconstruction, STAGE BY STAGE.
@@ -761,11 +1013,20 @@ class ReconstructionResult:
 
     # ── POST-GAP-FILL ─────────────────────────────────────────────────────
     post_gapfill_results: Tuple[Any, ...]
-    """Per-medium gap-fill outcomes POST-GAP-FILL, in the order the caller
-    requested the media.  ``build_metabolic_model`` always leaves this an empty
-    tuple -- it stops at POST-ATP by design, and per-medium gap-fill with
-    exclusions is :meth:`MSReconstructionUtils.gapfill_metabolic_model`'s
-    stage, which populates it."""
+    """Per-medium gap-fill outcomes POST-GAP-FILL, one per requested medium
+    OCCURRENCE, in the order the caller requested them.
+
+    Populated with :class:`GapfillRecord` instances by
+    :meth:`MSReconstructionUtils.with_gapfill_results`, from the records
+    :meth:`MSReconstructionUtils.gapfill_metabolic_model` returns.
+    ``build_metabolic_model`` always leaves it an empty tuple -- it stops at
+    POST-ATP by design.
+
+    The declared element type stays ``Any`` deliberately.  :class:`GapfillRecord`
+    is what this layer's own gap-fill stage puts here, and the docstring says
+    so; narrowing the annotation would turn that into a promise binding every
+    future producer of a ``ReconstructionResult``, which is more than has been
+    decided."""
 
     # ── Object identities ─────────────────────────────────────────────────
     genome_id: str
@@ -1966,7 +2227,7 @@ class MSReconstructionUtils(KBModelUtils):
         self,
         mdlutl: Any,
         genome: Any,
-        media_objs: List[Any],
+        media_objs: Sequence[Any],
         templates: List[Any],
         core_template: Optional[Any] = None,
         source_models: Optional[List[Any]] = None,
@@ -1979,33 +2240,127 @@ class MSReconstructionUtils(KBModelUtils):
         gapfilling_mode: str = "Sequential",
         base_media: Optional[Any] = None,
         base_media_target_element: str = "C",
-        reaction_scores: Optional[Dict[str, float]] = {},
+        reaction_scores: Optional[Dict[str, float]] = None,
+        prefilter: bool = False,
+        return_gapfill_records: bool = False,
     ) -> tuple:
-        """Gapfill a single metabolic model to enable growth on specified media.
+        """Gap-fill a model on each REQUESTED MEDIUM OCCURRENCE, in order.
 
-        This is a generalized function that gapfills a metabolic model without
-        KBase-specific dependencies. It accepts pre-loaded objects rather than
-        workspace references.
+        This is the POST-GAP-FILL stage: sequential integration across every
+        requested medium.  See :class:`ReconstructionResult` for the binding
+        definitions of DRAFT, POST-ATP and POST-GAP-FILL.
 
         Args:
-            mdlutl: MSModelUtil object to gapfill
-            genome: MSGenome object associated with the model
-            media_objs: List of media objects for gapfilling
-            templates: List of template objects for gapfilling
-            core_template: Core template object (for ATP tests)
-            source_models: Source models for reaction candidates
-            additional_tests: Additional constraint tests for gapfilling
-            expression_obj: Expression data object for this model
-            atp_safe: Whether to apply ATP-safe constraints
-            reaction_exclusion_list: Reactions to exclude from gapfilling
-            objective: Objective function to optimize
-            minimum_objective: Minimum objective value for gapfilling
-            gapfilling_mode: Gapfilling mode ("Sequential" or "Cumulative")
-            base_media: Base media object for gapfilling
-            base_media_target_element: Target element for base media
+            mdlutl: ``MSModelUtil`` to gap-fill, normally the POST-ATP model
+                :meth:`build_metabolic_model` returned.  Mutated in place.
+            genome: ``MSGenome`` the model was built from.  Read only when
+                ``expression_obj`` is supplied.
+            media_objs: The requested media IN REQUEST ORDER.  Their ids are
+                used EXACTLY as given -- nothing here renames, suffixes or
+                de-duplicates them -- and THE SAME ID MAY APPEAR MORE THAN
+                ONCE.  Each occurrence is attempted and reported separately.
+            templates: Templates supplying gap-fill candidate reactions.
+            core_template: Core template for ATP tests.  Fetched from
+                ``self.templates["core"]`` only if it is actually needed, which
+                is a KBase call; see ``atp_safe``.
+            source_models: Source models supplying candidate reactions.
+            additional_tests: Extra constraint tests, prepended to the ATP
+                tests.
+            expression_obj: Expression data for reaction weighting.
+            atp_safe: Pass ATP tests to gap-filling, so a solution cannot
+                re-add the energy-generating cycles ATP correction removed.
+                The tests are taken from ``mdlutl.atp_tests``, which
+                :meth:`build_metabolic_model` publishes at the POST-ATP
+                boundary.  Only if the model carries none does this fall back
+                to ``MSModelUtil.get_atp_tests`` -- a FORK-ONLY method, absent
+                from the pinned upstream revision (measured) -- and only that
+                fallback needs ``core_template``, so the ordinary KBase-free
+                path makes no KBase call.
+            reaction_exclusion_list: Reaction ids gap-filling must NOT add.
+                Either id form is accepted -- ``"rxn00029"`` or
+                ``"rxn00029_c0"`` -- and both are enforced as the BASE
+                reaction, i.e. in every compartment, because that is the only
+                semantics the underlying blacklist has (see
+                :func:`_base_reaction_id`).  The list is normalised to base ids
+                for ``MSGapfill`` AND re-checked against what each occurrence
+                actually ADDED, so a violation raises here rather than
+                shipping.  An excluded reaction already present before
+                gap-fill is not a violation -- it was not gap-filled in -- and
+                is recorded as a comment instead.
+            objective: Gap-fill target reaction id.
+            minimum_objective: Minimum objective value a solution must reach,
+                and the threshold at which an occurrence is judged to have no
+                gaps left.
+            gapfilling_mode: Only ``"Sequential"`` is supported, and it is what
+                this method does: each occurrence is solved and INTEGRATED
+                before the next is attempted, so later media see what earlier
+                media added.  Any other value raises rather than being silently
+                ignored.  The parameter is kept because
+                :meth:`kb_gapfill_metabolic_models` forwards it.
+            base_media: Base media object for gap-filling.  FORK-ONLY on
+                ``MSGapfill.__init__``; forwarded only where the installed
+                signature accepts it.
+            base_media_target_element: Target element for base media.  Likewise
+                fork-only.
+            reaction_scores: Reaction scores used to pick a gene for an added
+                reaction.
+            prefilter: Prefilter the gap-fill database with the test conditions
+                before solving, on the FIRST occurrence only.  Prefiltering
+                permanently narrows the shared gap-fill database, so repeating
+                it per medium would restrict later media to whatever an earlier
+                medium left behind -- upstream's own ``run_multi_gapfill``
+                prefilters only its first medium for the same reason.
+
+                DEFAULTS TO ``False``, and not because ``prefilter=True`` is
+                broken: it is not.  Both settings were measured completing and
+                returning the IDENTICAL solution (163 new reactions, 0
+                reversed, same id set); across repeated runs ``True`` took
+                41.1-50.8 s and ``False`` 35.0-47.4 s, so ``True`` was never
+                the faster of the two while producing the same answer
+                (``agent-io/work-records/task-d1302dc4.md`` section (d)).
+                ``False`` is therefore the default on cost alone.  That timing
+                ordering is a single-organism, single-medium observation and is
+                not a performance characterisation; a caller who wants
+                prefiltering should ask for it.
+            return_gapfill_records: Append the per-occurrence records as a
+                FIFTH return element.  Off by default because three call sites
+                unpack exactly four values.
 
         Returns:
-            Tuple of (current_output dict, solutions dict, output_solution, output_solution_media)
+            ``(current_output dict, solutions, output_solution,
+            output_solution_media)``, and with ``return_gapfill_records=True``
+            a fifth element: an ORDERED ``tuple`` of :class:`GapfillRecord`,
+            one per requested OCCURRENCE in request order.  Feed that tuple to
+            :meth:`with_gapfill_results` to stage it into a
+            :class:`ReconstructionResult`.
+
+            ``solutions`` remains the historical dict keyed by media OBJECT, for
+            the existing callers.  Note that it CANNOT represent a repeated
+            request -- two occurrences of one object collapse to one key --
+            which is exactly why the records exist.
+
+        Raises:
+            ValueError: ``gapfilling_mode`` is not ``"Sequential"``.
+            ModelSEEDpyCapabilityError: ``atp_safe=True`` but no ATP tests are
+                available and the installed modelseedpy cannot compute them; or
+                a fork-only ``MSGapfill`` keyword was explicitly requested on
+                an install that does not accept it.
+            RuntimeError: An occurrence ADDED a reaction the exclusion list
+                forbids.
+
+        ``MSGapfill.run_multi_gapfill`` is deliberately not used.  At the pinned
+        revision its signature is ``(media_list, target, minimum_objectives,
+        default_minimum_objective, binary_check, prefilter, check_for_growth,
+        simultaneous_gapfilling)`` -- it takes none of ``gapfilling_mode``,
+        ``run_sensitivity_analysis`` or ``integrate_solutions``, the keywords
+        this method used to pass it, so the call raised ``TypeError`` against
+        upstream.  It also integrates nothing and returns a dict keyed by media
+        object.  Driving ``run_gapfilling`` + ``integrate_gapfill_solution``
+        per occurrence is what makes sequential integration and
+        per-occurrence reporting possible at all.
+
+        GAA's ``gapfill_reaction_set`` is neither called nor ported: all
+        modelling lives in this layer now.
         """
         import cobra
 
@@ -2016,10 +2371,24 @@ class MSReconstructionUtils(KBModelUtils):
             additional_tests = []
         if reaction_exclusion_list is None:
             reaction_exclusion_list = []
+        if reaction_scores is None:
+            reaction_scores = {}
 
-        # Load core template if not provided
-        if core_template is None:
-            core_template = self.get_template(self.templates["core"], None)
+        if gapfilling_mode != "Sequential":
+            raise ValueError(
+                f"gapfilling_mode={gapfilling_mode!r} is not supported. This "
+                "method integrates each medium's solution before attempting "
+                "the next, which is what 'Sequential' means; the pinned "
+                "modelseedpy's run_multi_gapfill has no gapfilling_mode "
+                "parameter at all, so forwarding another value was never "
+                "honoured. Use run_comprehensive_gapfill_on_model for "
+                "comprehensive gap-filling."
+            )
+
+        # Normalise the exclusion list to BASE ids -- the only form the
+        # blacklist matches.
+        exclusion = tuple(reaction_exclusion_list)
+        excluded_base = frozenset(_base_reaction_id(rxn) for rxn in exclusion)
 
         # Initialize output
         current_output = {
@@ -2035,38 +2404,79 @@ class MSReconstructionUtils(KBModelUtils):
             "Comments": [],
         }
 
-        # Compute tests for ATP safe gapfilling
-        atp_tests = []
+        # Compute tests for ATP safe gapfilling.
+        #
+        # build_metabolic_model publishes the tests MSATPCorrection built on
+        # mdlutl.atp_tests at the POST-ATP boundary, so the ordinary path reads
+        # them rather than recomputing. MSModelUtil.get_atp_tests is FORK-ONLY
+        # (measured: absent from the pinned upstream revision, which has
+        # neither the method nor an atp_tests attribute), so calling it
+        # unconditionally -- as this method used to -- raises AttributeError
+        # against the pin. The core template is fetched only inside that
+        # fallback, because self.templates["core"] is a KBase workspace
+        # reference and a KBase-free job must not need one to gap-fill a model
+        # that already carries its tests.
+        atp_tests: List[Dict] = []
         if atp_safe:
-            atp_tests = mdlutl.get_atp_tests(
-                core_template=core_template,
-                atp_media_filename=self.modelseedpy_data_dir + "/atp_medias.tsv",
-                recompute=False,
-            )
-
+            published = getattr(mdlutl, "atp_tests", None)
+            if published is not None:
+                atp_tests = list(published)
+            elif hasattr(mdlutl, "get_atp_tests"):
+                if core_template is None:
+                    core_template = self.get_template(self.templates["core"], None)
+                atp_tests = mdlutl.get_atp_tests(
+                    core_template=core_template,
+                    atp_media_filename=self.modelseedpy_data_dir + "/atp_medias.tsv",
+                    recompute=False,
+                )
+            else:
+                raise ModelSEEDpyCapabilityError(
+                    "atp_safe=True but no ATP tests are available: this model "
+                    "util carries none (build it with "
+                    "build_metabolic_model(atp_safe=True), which publishes "
+                    "them on mdlutl.atp_tests) and the installed modelseedpy "
+                    "has no MSModelUtil.get_atp_tests to recompute them. They "
+                    "cannot be recomputed here: MSATPCorrection.build_tests "
+                    "needs the selected_media that only a full "
+                    "run_atp_correction produces. Pass atp_safe=False with "
+                    "explicit additional_tests to gap-fill without them, "
+                    "accepting that a solution may re-add the "
+                    "energy-generating cycles ATP correction filtered out."
+                )
 
         all_tests = additional_tests + atp_tests
 
-        # Create gapfilling object
+        # Create gapfilling object. The exclusion list goes in as the
+        # blacklist, which GapfillingPkg applies when it extends the gap-fill
+        # database, so excluded candidates never enter the LP. reaction_scores
+        # is passed AT CONSTRUCTION because __init__ hands it straight to
+        # GapfillingPkg.build_package; assigning the attribute afterwards (as
+        # this method used to, and still does below for the expression path)
+        # does not reach the package.
+        optional_gapfill_keywords = _supported_keyword_arguments(
+            target=self.MSGapfill.__init__,
+            requested={
+                "base_media": (base_media, None),
+                "base_media_target_element": (base_media_target_element, "C"),
+            },
+            label="MSGapfill.__init__",
+        )
         msgapfill = self.MSGapfill(
-            mdlutl,
-            templates,
-            source_models,
-            all_tests,
-            blacklist=reaction_exclusion_list,
+            model_or_mdlutl=mdlutl,
+            default_gapfill_templates=templates,
+            default_gapfill_models=source_models,
+            test_conditions=all_tests,
+            reaction_scores=reaction_scores,
+            blacklist=sorted(excluded_base),
             default_target=objective,
             minimum_obj=minimum_objective,
-            base_media=base_media,
-            base_media_target_element=base_media_target_element,
+            **optional_gapfill_keywords,
         )
-
-        # Set reaction scores from genome
-        msgapfill.reaction_scores = reaction_scores
 
         # Handle expression data
         if expression_obj:
             expression_scores = msgapfill.compute_reaction_weights_from_expression_data(
-                expression_obj, genome.annoont
+                omics_data=expression_obj, annoont=genome.annoont
             )
             for rxn_id in msgapfill.reaction_scores:
                 for gene in msgapfill.reaction_scores[rxn_id]:
@@ -2075,37 +2485,173 @@ class MSReconstructionUtils(KBModelUtils):
                             expression_scores[gene] + 0.5
                         )
 
-        # Run gapfilling in all conditions
+        # An excluded reaction already on the model was not gap-filled in, so
+        # it is not a violation of a gap-fill exclusion. Record it and carry
+        # on: deleting an annotation-supported reaction because a gap-fill
+        # exclusion happened to name it would be a much worse answer than
+        # saying so.
+        initial_ids = {rxn.id for rxn in mdlutl.model.reactions}
+        pre_existing = sorted(
+            rxn_id
+            for rxn_id in initial_ids
+            if _base_reaction_id(rxn_id) in excluded_base
+        )
+        if pre_existing:
+            current_output["Comments"].append(
+                "Excluded reactions already present before gap-fill (not added "
+                f"by it, so left in place): {pre_existing}"
+            )
+
+        # ---- Sequential integration, one OCCURRENCE at a time --------------
         mdlutl.gfutl.cumulative_gapfilling = []
         growth_array = []
-        solutions = msgapfill.run_multi_gapfill(
-            media_objs,
-            target=objective,
-            default_minimum_objective=minimum_objective,
-            binary_check=False,
-            prefilter=True,
-            check_for_growth=True,
-            gapfilling_mode=gapfilling_mode,
-            run_sensitivity_analysis=True,
-            integrate_solutions=True,
-        )
+        solutions: Dict[Any, Any] = {}
+        records: List[GapfillRecord] = []
+        for request_index, media in enumerate(media_objs):
+            media_id = media.id
+            digest = _media_digest(media)
+            before_ids = {rxn.id for rxn in mdlutl.model.reactions}
+            cumulative: List[List[str]] = []
 
+            # Sequential integration means gap-filling only what is STILL
+            # missing. If the model already meets the objective on this medium
+            # -- because an earlier occurrence of it, or of another medium,
+            # added what it needed -- there is nothing to gap-fill and this
+            # occurrence is recorded "no_gaps".
+            #
+            # That is not an optimisation, though it does save a solve.
+            # Gap-filling anyway is DESTRUCTIVE: MSGapfill clones its gap-fill
+            # model once, in __init__, from the pre-gap-fill model, so a later
+            # occurrence is solved against a model carrying none of the earlier
+            # additions and returns a solution the real model mostly already
+            # has. Integrating that runs test_solution(keep_changes=True),
+            # which judges a reaction unneeded by zeroing ONE bound and then
+            # removes the whole reaction.
+            pre_value = _objective_value_on_media(
+                mdlutl=mdlutl, media=media, objective=objective
+            )
+            if pre_value is not None and pre_value >= minimum_objective:
+                records.append(
+                    GapfillRecord(
+                        request_index=request_index,
+                        media_id=media_id,
+                        media_digest=digest,
+                        status="no_gaps",
+                        additions=(),
+                        reversals=(),
+                        objective_value=pre_value,
+                    )
+                )
+                growth_array.append(media_id + ":" + str(pre_value))
+                continue
+
+            try:
+                solution = msgapfill.run_gapfilling(
+                    media=media,
+                    target=objective,
+                    minimum_obj=minimum_objective,
+                    binary_check=False,
+                    # First occurrence only; see the prefilter parameter doc.
+                    prefilter=prefilter and request_index == 0,
+                    check_for_growth=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded per occurrence
+                logger.warning(
+                    "gap-fill occurrence %s (media %s) raised %s: %s",
+                    request_index,
+                    media_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                records.append(
+                    GapfillRecord(
+                        request_index=request_index,
+                        media_id=media_id,
+                        media_digest=digest,
+                        status=f"error:{type(exc).__name__}",
+                        additions=(),
+                        reversals=(),
+                        objective_value=pre_value,
+                    )
+                )
+                continue
+
+            if solution is not None and not _solution_adds_anything(
+                mdlutl=mdlutl, solution=solution
+            ):
+                # A solution that would add nothing. Integrating it can only
+                # prune -- see _solution_adds_anything -- so do not.
+                solution = None
+
+            if solution is None:
+                status = "no_solution"
+                objective_value = pre_value
+            else:
+                msgapfill.integrate_gapfill_solution(
+                    solution=solution, cumulative_solution=cumulative
+                )
+                solutions[media] = solution
+                status = "integrated"
+                objective_value = _objective_value_on_media(
+                    mdlutl=mdlutl, media=media, objective=objective
+                )
+                if objective_value is not None:
+                    growth_array.append(media_id + ":" + str(objective_value))
+
+            after_ids = {rxn.id for rxn in mdlutl.model.reactions}
+            additions = tuple(sorted(after_ids - before_ids))
+            reversals = tuple(
+                sorted(
+                    rxn_id
+                    for rxn_id, _direction in cumulative
+                    if rxn_id not in additions
+                )
+            )
+
+            # Re-check the exclusion list against what gap-filling ACTUALLY
+            # ADDED, comparing BASE ids. The blacklist is meant to keep these
+            # out of the LP; this confirms it on the object that ships, because
+            # an excluded reaction arriving by any other route is a correctness
+            # failure and must not be discoverable only downstream. Comparing
+            # against the reactions present BEFORE any occurrence ran is what
+            # keeps a pre-existing, annotation-supported reaction from being
+            # blamed on gap-fill.
+            violations = sorted(
+                rxn_id
+                for rxn_id in (after_ids - initial_ids)
+                if _base_reaction_id(rxn_id) in excluded_base
+            )
+            if violations:
+                raise RuntimeError(
+                    f"gap-fill occurrence {request_index} (media {media_id!r}) "
+                    f"ADDED excluded reactions {violations}; "
+                    f"reaction_exclusion_list was {list(exclusion)} "
+                    f"(normalised to base ids {sorted(excluded_base)})"
+                )
+
+            records.append(
+                GapfillRecord(
+                    request_index=request_index,
+                    media_id=media_id,
+                    media_digest=digest,
+                    status=status,
+                    additions=additions,
+                    reversals=reversals,
+                    objective_value=objective_value,
+                )
+            )
+
+        # Pick a representative flux distribution: the FIRST occurrence that
+        # grew, in request order.
         output_solution = None
         output_solution_media = None
-        # `run_multi_gapfill` returns None when no gapfill solution exists
-        # (e.g. solver infeasible, model+media combination cannot grow). Guard
-        # before treating `solutions` as a dict; otherwise `media in solutions`
-        # raises TypeError.
-        if solutions is None:
-            solutions = {}
-        for media in media_objs:
-            if media in solutions and "growth" in solutions[media]:
-                growth_array.append(media.id + ":" + str(solutions[media]["growth"]))
-                if solutions[media]["growth"] > 0 and output_solution is None:
-                    mdlutl.pkgmgr.getpkg("KBaseMediaPkg").build_package(media)
-                    mdlutl.pkgmgr.getpkg("ElementUptakePkg").build_package({"C": 60})
-                    output_solution = cobra.flux_analysis.pfba(mdlutl.model)
-                    output_solution_media = media
+        for record, media in zip(records, media_objs):
+            if record.objective_value and record.objective_value > 0:
+                mdlutl.pkgmgr.getpkg("KBaseMediaPkg").build_package(media)
+                mdlutl.pkgmgr.getpkg("ElementUptakePkg").build_package({"C": 60})
+                output_solution = cobra.flux_analysis.pfba(mdlutl.model)
+                output_solution_media = media
+                break
 
         solution_rxn_types = ["new", "reversed"]
         if output_solution and output_solution_media in solutions:
@@ -2122,7 +2668,44 @@ class MSReconstructionUtils(KBModelUtils):
         current_output["Reactions"] = mdlutl.nonexchange_reaction_count()
         current_output["Model genes"] = len(mdlutl.model.genes)
 
+        if return_gapfill_records:
+            return (
+                current_output,
+                solutions,
+                output_solution,
+                output_solution_media,
+                tuple(records),
+            )
         return current_output, solutions, output_solution, output_solution_media
+
+    @staticmethod
+    def with_gapfill_results(
+        *,
+        result: "ReconstructionResult",
+        gapfill_records: Sequence[GapfillRecord],
+    ) -> "ReconstructionResult":
+        """Stage per-occurrence gap-fill records into a reconstruction result.
+
+        Args:
+            result: The :class:`ReconstructionResult`
+                :meth:`build_metabolic_model` returned with
+                ``return_reconstruction_result=True``, carrying the DRAFT and
+                POST-ATP facts and an empty ``post_gapfill_results``.
+            gapfill_records: The records
+                :meth:`gapfill_metabolic_model` returned with
+                ``return_gapfill_records=True``, in request order.
+
+        Returns:
+            A NEW :class:`ReconstructionResult` whose ``post_gapfill_results``
+            is ``tuple(gapfill_records)``.  The input is unchanged:
+            ``ReconstructionResult`` is frozen precisely so a result cannot be
+            edited after the stage it describes has passed, so this returns a
+            copy rather than mutating.
+        """
+        from dataclasses import replace
+
+        return replace(result, post_gapfill_results=tuple(gapfill_records))
+
 
     def run_comprehensive_gapfill_on_model(
         self,
@@ -2224,12 +2807,15 @@ class MSReconstructionUtils(KBModelUtils):
 
         all_tests = additional_tests + atp_tests
 
-        # Construct MSGapfill (identical call signature to gapfill_metabolic_model)
+        # Construct MSGapfill. Keyword-only, like every other call into
+        # ModelSEEDpy from this module: the fork and the pinned upstream differ
+        # in signature while reporting near-identical versions, so a positional
+        # call binds silently and wrongly rather than raising.
         msgapfill = self.MSGapfill(
-            mdlutl,
-            templates,
-            source_models,
-            all_tests,
+            model_or_mdlutl=mdlutl,
+            default_gapfill_templates=templates,
+            default_gapfill_models=source_models,
+            test_conditions=all_tests,
             blacklist=reaction_exclusion_list,
             default_target=objective,
             minimum_obj=minimum_objective,
@@ -2245,7 +2831,7 @@ class MSReconstructionUtils(KBModelUtils):
         growth_array = []
         media_list = [complete_media]
         solutions = msgapfill.run_multi_gapfill(
-            media_list,
+            media_list=media_list,
             target=objective,
             default_minimum_objective=minimum_objective,
             gapfilling_mode="Comprehensive",

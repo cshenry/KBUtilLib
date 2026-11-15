@@ -69,6 +69,13 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
                 )
             # Ensure the env var is set so cobrakbase can pick it up.
             os.environ["KB_AUTH_TOKEN"] = token
+            if self.cobrakbase is None:
+                raise RuntimeError(
+                    "a KBase API client was requested but cobrakbase is not "
+                    "installed. Install cobrakbase, or use the KBase-free "
+                    "surface (build_metabolic_model / gapfill_metabolic_model "
+                    "with templates and media supplied as objects)."
+                )
             self._kbase_api = self.cobrakbase.KBaseAPI()
             self._kbase_api.ws_client = self.ws_client()
         return self._kbase_api
@@ -104,35 +111,80 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         return self._msrecon
 
     def _import_modules(self) -> None:
-        """Import required modules after dependencies are ensured."""
+        """Import required modules after dependencies are ensured.
+
+        ModelSEEDpy's SHARED modules are REQUIRED and a failure to import them
+        raises. Two things are OPTIONAL and leave their attributes ``None``:
+
+        * ``cobrakbase`` -- ``cobrakbase``, ``FBAModel``, ``CobraModelConverter``;
+        * ``modelseedpy.core.msfba`` -- ``MSFBA``. This module exists in the
+          ModelSEEDpy FORK only; upstream has no ``msfba.py``, so importing it
+          unconditionally made every modeling class unconstructable against
+          upstream. Its one consumer is the KBase ``save_fba`` path.
+
+        The two used to share one ``try`` block, so a venv without ``cobrakbase``
+        could not construct any modeling class at all -- the import raised from
+        ``__init__``, before any method could be called. That made
+        ``MSReconstructionUtils`` unusable in a KBase-free environment, which the
+        reconstruction layer exists to support: a KBase CTS job must be able to
+        build a model with KBUtilLib + ModelSEEDpy alone (PRD
+        kbdl-recon-thin-layer-v1). Nothing on the reconstruction path touches
+        cobrakbase; only the ``kb_*`` workspace wrappers and ``save_model`` do,
+        and those now fail at USE with a message naming the missing package
+        instead of taking the whole class down at construction. The pre-existing
+        ``if self.FBAModel is None`` guards in ms_reconstruction_utils.py already
+        assume this shape.
+        """
         try:
             import json
 
-            import cobrakbase
-            from cobrakbase.core.kbasefba import FBAModel
-            from cobrakbase.core.kbasefba.fbamodel_from_cobra import CobraModelConverter
             from modelseedpy.core.annotationontology import AnnotationOntology
-            from modelseedpy.core.msfba import MSFBA
             from modelseedpy.core.msgenomeclassifier import MSGenomeClassifier
             from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
             from modelseedpy.core.msmedia import MSMedia
             from modelseedpy.core.msmodelutl import MSModelUtil
 
             # Store modules as instance attributes for later use
-            self.cobrakbase = cobrakbase
             self.MSModelUtil = MSModelUtil
-            self.MSFBA = MSFBA
             self.MSMedia = MSMedia
             self.AnnotationOntology = AnnotationOntology
             self.MSGrowthPhenotypes = MSGrowthPhenotypes
             self.MSGenomeClassifier = MSGenomeClassifier
-            self.CobraModelConverter = CobraModelConverter
-            self.FBAModel = FBAModel
             self.json = json
 
         except ImportError as e:
             self.log_error(f"Failed to import required modules: {e}")
             raise
+
+        try:
+            from modelseedpy.core.msfba import MSFBA
+
+            self.MSFBA = MSFBA
+        except ImportError as e:
+            self.MSFBA = None
+            self.log_info(
+                f"modelseedpy.core.msfba is not available ({e}); save_fba is "
+                "unavailable. This module is fork-only -- upstream ModelSEEDpy "
+                "does not ship it."
+            )
+
+        try:
+            import cobrakbase
+            from cobrakbase.core.kbasefba import FBAModel
+            from cobrakbase.core.kbasefba.fbamodel_from_cobra import CobraModelConverter
+
+            self.cobrakbase = cobrakbase
+            self.FBAModel = FBAModel
+            self.CobraModelConverter = CobraModelConverter
+        except ImportError as e:
+            self.cobrakbase = None
+            self.FBAModel = None
+            self.CobraModelConverter = None
+            self.log_info(
+                f"cobrakbase is not installed ({e}); KBase workspace operations "
+                "(kb_* methods, save_model, kbase_api) are unavailable. "
+                "Local reconstruction, gap-fill and FBA do not need it."
+            )
 
         # Loading default templates
         self.templates = {
@@ -718,6 +770,11 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         objid = objid + suffix
         mdlutl.wsid = objid
         # Saving attributes and getting model data
+        if self.FBAModel is None:
+            raise RuntimeError(
+                "save_model writes a KBase FBAModel object but cobrakbase is "
+                "not installed, so the cobra model cannot be converted."
+            )
         if not isinstance(mdlutl.model, self.FBAModel):
             mdlutl.model = self.CobraModelConverter(mdlutl.model).build()
         mdlutl.save_attributes()
@@ -788,6 +845,11 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         fbamodel_ref=None,
         other_solutions=None,
     ):
+        if self.MSFBA is None:
+            raise RuntimeError(
+                "save_fba needs modelseedpy.core.msfba, which the installed "
+                "ModelSEEDpy does not ship (it is fork-only)."
+            )
         if not isinstance(fba_or_solution, self.MSFBA):
             fba_or_solution = self.MSFBA(
                 mdlutl, media, primary_solution=fba_or_solution

@@ -192,6 +192,46 @@ reaction_similarity = [
 reaction_similarity_extra = [
   "hdbscan >=0.8.33",
 ]
+# Metabolic-model reconstruction stack (the reconstruction layer in
+# src/kbutillib/domains/modeling/ms_reconstruction_utils.py).
+#
+# modelseedpy is pinned by GIT URL AT A COMMIT SHA, not at a branch. Two reasons,
+# both load-bearing:
+#
+#   1. A VERSION STRING DOES NOT IDENTIFY THIS CODE. The ModelSEEDpy fork and
+#      upstream dev both report 0.4.2/0.4.3 while their signatures differ --
+#      the fork's MSBuilder.build(model_or_id, index, ...) returns a bare cobra
+#      model, upstream's build(model_or_id, gapfill_media, ...) returns a
+#      4-tuple. `modelseedpy >= X` cannot express the requirement.
+#   2. THE BRANCH WILL MOVE. `kbdl-target` is fast-forwarded by the later
+#      fitness PRD, so pinning the branch name would silently retarget this
+#      extra. The SHA below is upstream dev c0b94e3 (the upstream/dev tip on
+#      2026-11-14) plus the single commit that adds the opt-in
+#      match_role_aliases / allow_incomplete_complexes parameters to
+#      MSBuilder.build_base_model, which the layer requires.
+#
+# The layer VERIFIES the alias-matching capability behaviourally at startup
+# rather than trusting this pin -- see
+# ms_reconstruction_utils.verify_alias_matching -- because an install can be
+# anything regardless of what the metadata says.
+#
+# gurobipy is capped BELOW 14 and is not a dependency of this extra; it is
+# listed here only to document the ceiling, because the poplar licence server
+# rejects Gurobi 14 outright ("license not valid for Gurobi version 14") and,
+# worse, with gurobipy 14 installed even a GLPK solve fails -- cobra chooses its
+# optlang interface when the Model is constructed, before model.solver is
+# assigned. GLPK (via optlang/swiglpk, which cobra already pulls in) needs no
+# licence and is the layer's default backend.
+model = [
+  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@e1155a41fa53b921185b20c6cfbd083e5e3739a4",
+  "cobra >=0.29",
+  "pandas >=1.3.0",
+]
+# Gurobi as an OPTIONAL backend for the model extra. Pinned <14; see the comment
+# on `model` above for why the ceiling exists and why it is not optional advice.
+model_gurobi = [
+  "gurobipy >=10,<14",
+]
 # Everything needed to run all transports + build docs.
 all = [
   "mcp >=1.27,<2 ; python_version >= '3.10'",
@@ -250,6 +290,15 @@ notebook = [
   "ipykernel",
   "pandas >=1.3.0",
   "tqdm >=4.64.0",
+]
+# Duplicated from [project.optional-dependencies].model above. BOTH are
+# required: PEP 735 dependency-groups are reachable by `uv sync --group model`
+# but NOT by pip extras, and pip installs with `pip install -e ".[model]"`.
+# If you edit one list, edit the other -- including the pinned SHA.
+model = [
+  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@e1155a41fa53b921185b20c6cfbd083e5e3739a4",
+  "cobra >=0.29",
+  "pandas >=1.3.0",
 ]
 lp_solver = [
   # Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).

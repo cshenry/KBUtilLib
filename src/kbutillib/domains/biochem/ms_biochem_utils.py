@@ -388,10 +388,44 @@ class MSBiochemUtils(SharedEnvUtils):
         return dict(counts)
 
     def _ensure_database_available(self) -> None:
-        # Load the database
+        # Load the database by SEEDING ``ModelSEEDBiochem.default_biochemistry``
+        # from the resolved path, then taking it back out through ``get()``.
+        #
+        # This used to be ``ModelSEEDBiochem.get(path=self.modelseed_db_path)``,
+        # which only ever worked against the ModelSEEDpy FORK. The fork's
+        # signature is ``get(create_if_missing=True, path=config.get("biochem",
+        # "path"))``; UPSTREAM's is ``get(create_if_missing=True)`` with no
+        # ``path`` parameter at all, so the keyword raised
+        #
+        #   TypeError: ModelSEEDBiochem.get() got an unexpected keyword
+        #              argument 'path'
+        #
+        # before any caller could do anything. Because ``__init__`` calls this
+        # eagerly, that made every subclass -- MSReconstructionUtils included --
+        # unconstructable against upstream (measured: agent-io/work-records/
+        # task-d1302dc4.md, section (a) "Blocker 1").
+        #
+        # Falling back to upstream's bare ``get()`` is not an option either: it
+        # resolves modelseedpy's own ``config.cfg`` ``[biochem] path``, which is
+        # ``data/ModelSEEDDatabase`` upstream and ``/deps/ModelSEEDDatabase`` in
+        # the fork. Neither exists on this fleet, so it raises FileNotFoundError
+        # (KBDL issue #41). The path must come from KBUtilLib's dependency
+        # manager, which is what ``self.modelseed_db_path`` already holds.
+        #
+        # ``from_local`` is a MODULE-level function in both trees and takes the
+        # same keyword name (``database_path``) in both, so one route covers
+        # fork and upstream with no version branching. Seeding the class
+        # attribute rather than keeping the object privately also fixes any
+        # UNCONDITIONAL ``ModelSEEDBiochem.get()`` deeper inside ModelSEEDpy,
+        # which would otherwise still hit the broken config default.
         try:
-            from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
-            self._biochem_db =  ModelSEEDBiochem.get(path=self.modelseed_db_path)
+            from modelseedpy.biochem import modelseed_biochem as _msbiochem
+
+            if _msbiochem.ModelSEEDBiochem.default_biochemistry is None:
+                _msbiochem.ModelSEEDBiochem.default_biochemistry = (
+                    _msbiochem.from_local(database_path=str(self.modelseed_db_path))
+                )
+            self._biochem_db = _msbiochem.ModelSEEDBiochem.get()
             self.log_info(f"ModelSEED database loaded from {self.modelseed_db_path}")
         except Exception as e:
             self.log_error(f"Failed to load ModelSEED database: {e}")

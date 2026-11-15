@@ -530,14 +530,25 @@ class _OrderRecorder:
         # Every ``allow_all_non_grp_reactions`` value the builder was asked for,
         # in call order (issue #29 -- the flag must stay False).
         self.non_grp_flags: list[bool] = []
+        # Every ``ontology_term`` the builder was constructed with, in order.
+        self.ontology_terms: list[str] = []
+
+
+class _OrderedObjective:
+    """Just enough of a cobra objective for the draft census to read it."""
+
+    expression = "1.0*bio1"
 
 
 class _OrderedModel:
     def __init__(self, recorder):
         self._recorder = recorder
         self.reactions = []
+        self.metabolites = []
         self.genes = []
-        self.objective = None
+        # ``_model_facts`` reads ``model.objective.expression`` when it takes
+        # the DRAFT census, so this cannot be a bare None any more.
+        self.objective = _OrderedObjective()
 
     def remove_reactions(self, ids):  # pragma: no cover - not exercised here
         pass
@@ -567,22 +578,38 @@ class _OrderedMdlUtl:
 
 
 class _OrderedBuilder:
-    """Stands in for ``MSBuilder``: both the class and its instances."""
+    """Stands in for ``MSBuilder``: both the class and its instances.
+
+    Tracks the real class's surface as the reconstruction layer calls it:
+    construction by KEYWORD (including ``ontology_term``), the draft via
+    ``build_base_model`` and never ``build``, and ``add_atpm`` as a static.
+    """
 
     def __init__(self, recorder):
         self._recorder = recorder
+        #: Keyword sets each ``build_base_model`` call supplied, in call order.
+        self.build_base_model_kwargs: list[dict] = []
 
-    # class-level use: ``self.MSBuilder(genome, template)``
-    def __call__(self, genome, template):
+    # class-level use: ``self.MSBuilder(genome=..., template=..., ontology_term=...)``
+    def __call__(self, *, genome, template, ontology_term="RAST"):
         self._recorder.calls.append("build_instance")
+        self._recorder.ontology_terms.append(ontology_term)
         return self
 
-    # instance-level use: ``builder.build(base_model, "0", False, False)``
-    def build(self, *args, **kwargs):
-        self._recorder.calls.append("builder.build")
-        return _OrderedModel(self._recorder)
+    # instance-level use: ``builder.build_base_model(model_or_id=..., ...)``
+    #
+    # There is deliberately NO ``build`` here. Upstream ``MSBuilder.build``
+    # adds ATPM, runs ATP correction and gap-fills, all inside itself; the layer
+    # must never call it, so a fake that offers it would let a regression pass.
+    def build_base_model(self, **kwargs):
+        self._recorder.calls.append("builder.build_base_model")
+        self.build_base_model_kwargs.append(kwargs)
+        model = kwargs["model_or_id"]
+        return model if hasattr(model, "add_reactions") else _OrderedModel(
+            self._recorder
+        )
 
-    # instance-level use: ``builder.build_non_metabolite_reactions(model, ...)``
+    # instance-level use: ``builder.build_non_metabolite_reactions(cobra_model=...)``
     def build_non_metabolite_reactions(
         self, cobra_model, allow_all_non_grp_reactions=False
     ):
@@ -590,10 +617,17 @@ class _OrderedBuilder:
         self._recorder.non_grp_flags.append(allow_all_non_grp_reactions)
         return []
 
-    # class-level static use: ``self.MSBuilder.add_exchanges_to_model(model)``
+    # class-level static use: ``self.MSBuilder.add_exchanges_to_model(model=...)``
     def add_exchanges_to_model(self, model, extra_cell="e0"):
         self._recorder.calls.append("add_exchanges_to_model")
         return []
+
+    # class-level static use: ``self.MSBuilder.add_atpm(model=...)``. The layer
+    # adds ATPM itself because build_base_model does not, and because ATPM is
+    # an ATP-specific scaffold that belongs on the POST-ATP side of the DRAFT
+    # boundary.
+    def add_atpm(self, model):
+        self._recorder.calls.append("add_atpm")
 
 
 class _OrderedATPCorrection:
@@ -601,9 +635,15 @@ class _OrderedATPCorrection:
         self._recorder = recorder
         self.cumulative_core_gapfilling = []
         self.sentinel_tests = [{"media": None, "objective": "rxn00062_c0"}]
+        # The layer reads both of these when it assembles the POST-ATP facts.
+        self.selected_media = []
+        self.media_gapfill_stats = {}
+        #: Keyword sets the corrector was constructed with, in call order.
+        self.init_kwargs: list[dict] = []
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, **kwargs):
         self._recorder.calls.append("MSATPCorrection.__init__")
+        self.init_kwargs.append(kwargs)
         return self
 
     def run_atp_correction(self):
@@ -623,8 +663,8 @@ class _OrderedSelf:
         self._recorder = recorder
         self._mdlutl = _OrderedMdlUtl(recorder)
 
-    # ``self.MSModelUtil.get(mdl)``
-    def get(self, mdl):
+    # ``self.MSModelUtil.get(model=mdl)``
+    def get(self, model):
         return self._mdlutl
 
     def get_template(self, ref, _none):
@@ -656,6 +696,12 @@ def _build_with_recorder(*, atp_safe=True, reactions_to_add=None):
         gs_template_obj=object(),
         core_template=object(),
         atp_safe=atp_safe,
+        # The layer loads the packaged ATP media itself and passes
+        # load_default_medias=False to MSATPCorrection, because upstream's
+        # True path is unconditionally broken (a module-level function shadowed
+        # by a same-named bool parameter). The fake self's modelseedpy_data_dir
+        # does not exist, so the harness opts out of that load.
+        load_default_medias=False,
         reactions_to_add=reactions_to_add
         if reactions_to_add is not None
         else {"rxn00001": ["g1"]},
@@ -701,16 +747,40 @@ def test_exchanges_are_added_even_when_atp_correction_is_skipped():
     assert "run_atp_correction" not in calls
 
 
-def test_exchanges_are_added_when_there_are_no_reactions_to_add():
-    """The call is unconditional, not gated on ``reactions_to_add``."""
+def test_the_compensations_are_gated_on_reactions_to_add():
+    """With no ``reactions_to_add``, neither compensation is re-run.
+
+    THIS TEST ASSERTS THE OPPOSITE OF WHAT IT USED TO, deliberately. It
+    previously read "the call is unconditional, not gated on
+    ``reactions_to_add``", which was correct while this method only ever built
+    ROLELESS drafts. The layer now builds NATIVELY from roles, and that design
+    was superseded by PRD kbdl-recon-thin-layer-v1 on two measured grounds:
+
+    1. On a ROLE-BASED draft both compensations are strict NO-OPS. Re-running
+       ``build_non_metabolite_reactions`` returned 0 reactions and added none;
+       ``add_exchanges_to_model`` added none; the draft stayed at 957 reactions
+       (agent-io/work-records/task-d1302dc4.md, measurement (f)). They cost a
+       full template sweep and change nothing.
+    2. ``MSBuilder.build_base_model`` ALREADY calls both internally. Running
+       them again on a role-based build is a double application. Both happen to
+       be idempotent today, but that is an implementation detail of someone
+       else's library and not something to depend on.
+
+    The roleless path is unchanged and still gets both, in the same order --
+    which is what every other test in this section checks, since they all supply
+    ``reactions_to_add``.
+    """
     pytest.importorskip("cobra")
     calls, _out, _mdlutl, _atp = _build_with_recorder(reactions_to_add={})
 
     assert "_add_reactions_from_gene_mapping" not in calls
-    assert "add_exchanges_to_model" in calls
-    assert calls.index("add_exchanges_to_model") < calls.index(
-        "run_atp_correction"
-    )
+    # build_base_model's OWN internal calls are inside the fake builder's
+    # build_base_model, which the ordered fake does not log, so the only entries
+    # that could appear here are the layer's own second applications.
+    assert "add_exchanges_to_model" not in calls
+    assert "build_non_metabolite_reactions" not in calls
+    # ATP correction still runs, and still gets the ATPM scaffold first.
+    assert calls.index("add_atpm") < calls.index("run_atp_correction")
 
 
 def test_atp_tests_are_published_on_the_model_util():
@@ -817,6 +887,7 @@ def _build_capturing_recorder(*, atp_safe=True, reactions_to_add=None):
         gs_template_obj=object(),
         core_template=object(),
         atp_safe=atp_safe,
+        load_default_medias=False,
         reactions_to_add=reactions_to_add
         if reactions_to_add is not None
         else {"rxn00001": ["g1"]},
@@ -913,18 +984,25 @@ class _SpontaneousBuilder:
         #: nothing and a later one return the diffusion reactions.
         self.admitted_per_call = []
 
-    # ``self.MSBuilder(genome, template)``
-    def __call__(self, genome, template):
+    # ``self.MSBuilder(genome=..., template=..., ontology_term=...)``
+    def __call__(self, *, genome, template, ontology_term="RAST"):
         return self
 
-    # ``builder.build(base_model, "0", False, False)``
-    def build(self, model_or_id, index="0", *args, **kwargs):
+    # ``builder.build_base_model(model_or_id=..., ...)``. The real
+    # build_base_model runs its own spontaneous/universal sweep and its own
+    # add_exchanges_to_model internally, which is reproduced here because the
+    # whole point of these tests is what the SECOND, conditional sweep adds on
+    # top of it.
+    def build_base_model(self, *, model_or_id, index="0", **kwargs):
         self.index = index
         self.base_model = model_or_id
         # The roleless path contributes no metabolic reactions at all; the only
-        # thing build() does that matters here is its own (futile) rebuild.
-        model_or_id.add_reactions(self.build_non_metabolite_reactions(model_or_id))
-        self.add_exchanges_to_model(model_or_id)
+        # thing build_base_model does that matters here is its own (futile)
+        # rebuild.
+        model_or_id.add_reactions(
+            self.build_non_metabolite_reactions(cobra_model=model_or_id)
+        )
+        self.add_exchanges_to_model(model=model_or_id)
         return model_or_id
 
     def build_non_metabolite_reactions(
@@ -959,8 +1037,8 @@ class _SpontaneousBuilder:
         self.admitted_per_call.append(len(reactions))
         return reactions
 
-    # ``self.MSBuilder.add_exchanges_to_model(mdlutl.model)`` -- a staticmethod
-    # on the real class, so the model arrives as the first positional argument.
+    # ``self.MSBuilder.add_exchanges_to_model(model=mdlutl.model)`` -- a
+    # staticmethod on the real class.
     def add_exchanges_to_model(self, model, extra_cell="e0"):
         import cobra
 
@@ -981,6 +1059,11 @@ class _SpontaneousBuilder:
             exchanges.append(exchange)
         model.add_reactions(exchanges)
         return exchanges
+
+    # ``self.MSBuilder.add_atpm(model=...)``; these builds pass atp_safe=False,
+    # so it is never reached, but the fake's surface should not lie.
+    def add_atpm(self, model):  # pragma: no cover - atp_safe=False here
+        pass
 
 
 class _SpontaneousMdlUtl:
@@ -1019,8 +1102,8 @@ class _SpontaneousSelf:
         self._mapped_species = mapped_species
         self._mdlutl = None
 
-    def get(self, mdl):
-        self._mdlutl = _SpontaneousMdlUtl(mdl)
+    def get(self, model):
+        self._mdlutl = _SpontaneousMdlUtl(model)
         return self._mdlutl
 
     def get_template(self, ref, _none):
@@ -1198,8 +1281,14 @@ def test_a_mapping_with_no_relevant_species_is_a_no_op():
 
 
 def test_an_empty_gene_mapping_does_not_raise():
-    """``reactions_to_add={}`` skips gene mapping entirely; the rebuild still
-    runs, still admits nothing, and must not raise."""
+    """``reactions_to_add={}`` skips gene mapping AND the second rebuild.
+
+    The expected ``admitted_per_call`` is ``[0]``, not ``[0, 0]``: only
+    ``build_base_model``'s own internal sweep runs. See
+    :func:`test_the_compensations_are_gated_on_reactions_to_add` for why the
+    second one is now conditional. What this test still pins is that the
+    skipping path does not raise and produces no reactions.
+    """
     pytest.importorskip("cobra")
     import cobra
 
@@ -1218,7 +1307,7 @@ def test_an_empty_gene_mapping_does_not_raise():
     )
 
     assert len(mdlutl.model.reactions) == 0
-    assert builder.admitted_per_call == [0, 0]
+    assert builder.admitted_per_call == [0]
 
 
 def test_the_rebuild_does_not_duplicate_what_build_already_added():

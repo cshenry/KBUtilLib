@@ -32,6 +32,7 @@ class SharedEnvUtils(BaseUtils):
         token_file: Optional[Union[str, Path]] = Path.home() / ".tokens",
         kbase_token_file: Optional[Union[str, Path]] = Path.home() / ".kbase" / "token",
         token: Optional[Union[str, Dict[str, str]]] = None,
+        dependency_manager: Optional[DependencyManager] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the shared environment which manages configurations and authentication tokens.
@@ -49,6 +50,21 @@ class SharedEnvUtils(BaseUtils):
             token: Optional token(s) to set directly without reading from files. Can be
                 a string (sets the "kbase" namespace) or a dict mapping namespace to token.
                 This value takes precedence over tokens read from files.
+            dependency_manager: Optional ALREADY-RESOLVED
+                :class:`~kbutillib.core.dependency_manager.DependencyManager` to adopt
+                instead of constructing a fresh one. The default
+                ``DependencyManager(auto_init=False)`` has an EMPTY
+                ``dependency_paths``, so ``self.get_data_path(...)`` returns ``None``
+                on every instance and each consumer falls through to its own
+                sibling-directory guess -- which is how
+                ``KBAnnotationUtils.__init__`` ended up reading
+                ``FilteredReactions.csv`` from a path that does not exist, stopping
+                construction outright. Pass a manager whose
+                ``initialize_dependencies()`` has already run to forward the resolved
+                paths EXPLICITLY. GAA's ``recon_driver.make_recon`` achieves the same
+                thing by monkeypatching this ``__init__``; this parameter is the
+                supported route and needs no patch. See
+                :func:`kbutillib.domains.modeling.ms_reconstruction_utils.initialize_reconstruction_environment`.
             **kwargs: Additional arguments passed to BaseUtils
         """
         super().__init__(**kwargs)
@@ -102,8 +118,13 @@ class SharedEnvUtils(BaseUtils):
             self._token_sources["kbase"] = f"env:{_src}"
             self.log_debug(f"{_src} found in environment; using as kbase token (not persisted)")
 
-        # Initialize dependency manager (auto_init=False so callers control when to resolve)
-        self.dependency_manager = DependencyManager(auto_init=False)
+        # Initialize dependency manager (auto_init=False so callers control when to
+        # resolve). An explicitly supplied manager is adopted as-is, so already
+        # resolved dependency_paths reach get_data_path on this instance.
+        if dependency_manager is not None:
+            self.dependency_manager = dependency_manager
+        else:
+            self.dependency_manager = DependencyManager(auto_init=False)
 
         # Setting KBase token from input argument if provided (without saving to file)
         if token is not None:

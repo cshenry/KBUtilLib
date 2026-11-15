@@ -355,7 +355,13 @@ class _FakeSelf:
     """Minimal stand-in for ``MSReconstructionUtils`` on the gap-fill path."""
 
     gapfill_metabolic_model = MSReconstructionUtils.gapfill_metabolic_model
-    with_gapfill_results = MSReconstructionUtils.with_gapfill_results
+    # Re-wrapped: ``MSReconstructionUtils.with_gapfill_results`` is a
+    # staticmethod, and attribute access unwraps it to the plain function, so
+    # assigning it directly would turn it into an instance method whose
+    # keyword-only signature then rejects the implicit ``self``.
+    with_gapfill_results = staticmethod(
+        MSReconstructionUtils.with_gapfill_results
+    )
 
     def __init__(self, *, gapfill_class=_FakeMSGapfill):
         self.MSGapfill = gapfill_class
@@ -635,6 +641,40 @@ class TestPrefilter:
     def test_prefilter_defaults_to_false(self):
         assert self._calls() == [False, False, False]
 
+    def test_link_gaps_to_objective_is_forwarded_to_integration(self):
+        """It is REPORTING, not a stage mutation, and it costs a few hundred
+        extra LP solves per integrated occurrence -- so it is explicit.  The
+        default preserves what this method used to request."""
+        glc = _FakeMedia("Glc")
+
+        class _Recording(_FakeMSGapfill):
+            PLAN = {}
+
+            def integrate_gapfill_solution(
+                self, solution, cumulative_solution=[], link_gaps_to_objective=True
+            ):
+                self.link_requests = getattr(self, "link_requests", [])
+                self.link_requests.append(link_gaps_to_objective)
+                super().integrate_gapfill_solution(
+                    solution,
+                    cumulative_solution=cumulative_solution,
+                    link_gaps_to_objective=link_gaps_to_objective,
+                )
+
+        plan = {"Glc": _solution(glc, new={"rxn_a_c0": ">"})}
+        for requested, expected in ((None, True), (True, True), (False, False)):
+            kwargs = {} if requested is None else {
+                "link_gaps_to_objective": requested
+            }
+            mdlutl = _FakeMdlUtl(_two_media_model())
+            _run(
+                _FakeSelf(gapfill_class=_planned(plan=plan, base=_Recording)),
+                mdlutl,
+                [glc],
+                **kwargs,
+            )
+            assert CONSTRUCTED[-1].link_requests == [expected], requested
+
     def test_prefilter_true_applies_to_the_first_occurrence_only(self):
         """Prefiltering permanently narrows the SHARED gap-fill database, so
         repeating it per medium would restrict later media to whatever an
@@ -657,6 +697,20 @@ class TestStatuses:
         assert records[0].status == "no_solution"
         assert records[0].additions == ()
         assert records[0].objective_value == 0.0
+
+    def test_a_measured_zero_is_still_reported_in_growth(self):
+        """"Could not grow on this medium" is a result.  The previous
+        implementation reported nothing for such an occurrence -- and against
+        upstream it reported nothing for ANY occurrence, because it read
+        ``solutions[media]["growth"]`` and upstream's ``run_gapfilling`` result
+        has no ``growth`` key."""
+        mdlutl = _FakeMdlUtl(_two_media_model())
+
+        current_output = _run(
+            _FakeSelf(), mdlutl, [_FakeMedia("Glc"), _FakeMedia("Succ")]
+        )[0]
+
+        assert current_output["Growth"] == "Glc:0.0<br>Succ:0.0"
 
     def test_an_exception_is_recorded_and_the_next_occurrence_still_runs(self):
         glc = _FakeMedia("Glc")

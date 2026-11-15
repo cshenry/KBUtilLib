@@ -2242,6 +2242,7 @@ class MSReconstructionUtils(KBModelUtils):
         base_media_target_element: str = "C",
         reaction_scores: Optional[Dict[str, float]] = None,
         prefilter: bool = False,
+        link_gaps_to_objective: bool = True,
         return_gapfill_records: bool = False,
     ) -> tuple:
         """Gap-fill a model on each REQUESTED MEDIUM OCCURRENCE, in order.
@@ -2322,6 +2323,19 @@ class MSReconstructionUtils(KBModelUtils):
                 ordering is a single-organism, single-medium observation and is
                 not a performance characterisation; a caller who wants
                 prefiltering should ask for it.
+            link_gaps_to_objective: Run ``integrate_gapfill_solution``'s
+                gap-fill sensitivity analysis, which records, per gap-filled
+                reaction, which biomass precursors stop being producible
+                without it.  Forwarded under the installed parameter's own
+                name.  Defaults to ``True``, which is both upstream's default
+                and what this method used to request (as the fork-only
+                ``run_sensitivity_analysis=True``), so the default preserves
+                the previous behaviour.  It is an explicit parameter because it
+                is REPORTING, not a stage mutation, and it is not free:
+                ``find_unproducible_biomass_compounds`` knocks out each
+                reaction of the cumulative solution in turn, so a solution of
+                163 reactions costs on the order of a few hundred extra LP
+                solves per integrated occurrence.
             return_gapfill_records: Append the per-occurrence records as a
                 FIFTH return element.  Off by default because three call sites
                 unpack exactly four values.
@@ -2588,15 +2602,25 @@ class MSReconstructionUtils(KBModelUtils):
                 objective_value = pre_value
             else:
                 msgapfill.integrate_gapfill_solution(
-                    solution=solution, cumulative_solution=cumulative
+                    solution=solution,
+                    cumulative_solution=cumulative,
+                    link_gaps_to_objective=link_gaps_to_objective,
                 )
                 solutions[media] = solution
                 status = "integrated"
                 objective_value = _objective_value_on_media(
                     mdlutl=mdlutl, media=media, objective=objective
                 )
-                if objective_value is not None:
-                    growth_array.append(media_id + ":" + str(objective_value))
+
+            # One entry per occurrence that produced a number, in request
+            # order, INCLUDING a measured zero: "could not grow on this
+            # medium" is a result and the previous implementation lost it.
+            # (Against upstream it lost every entry: it read
+            # ``solutions[media]["growth"]``, and upstream's run_gapfilling
+            # result has no "growth" key -- its keys are binary_check, media,
+            # minobjective, new, reversed, target.)
+            if objective_value is not None:
+                growth_array.append(media_id + ":" + str(objective_value))
 
             after_ids = {rxn.id for rxn in mdlutl.model.reactions}
             additions = tuple(sorted(after_ids - before_ids))

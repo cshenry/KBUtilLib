@@ -294,6 +294,61 @@ def configure_test_logging():
 
 
 # Marker for slow tests
+
+# ── kbu_model stack guard ─────────────────────────────────────────────────
+#
+# `kbu_model` tests need cobra + modelseedpy. By default they SKIP when the
+# stack is absent, which is right for CI. But a silent skip is also how an
+# unmeasured environment gets mistaken for a measured one, so setting
+# KBU_REQUIRE_MODEL_STACK=1 turns absence into a FAILURE:
+#
+#   * modules that guard themselves at import time call require_model_stack(),
+#     which RAISES instead of skipping -- pytest reports that as a collection
+#     ERROR, a non-passing outcome;
+#   * any kbu_model item that was collected anyway fails in
+#     pytest_runtest_setup below, so a module that forgets to guard itself is
+#     covered too.
+
+MODEL_STACK_REQUIRED_ENV = "KBU_REQUIRE_MODEL_STACK"
+
+
+def model_stack_available():
+    """Return (available, reason) for the cobra/modelseedpy modeling stack."""
+    try:
+        import cobra  # noqa: F401
+        import modelseedpy  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - a broken install is also "unavailable"
+        return False, f"kbu modeling stack (cobra/modelseedpy) unavailable: {exc}"
+    return True, ""
+
+
+def model_stack_required():
+    """True when the caller demanded the real modeling stack."""
+    return os.environ.get(MODEL_STACK_REQUIRED_ENV) == "1"
+
+
+def require_model_stack(reason=None):
+    """Skip the calling module, or raise when the stack was demanded.
+
+    Call at module scope in a ``kbu_model`` module::
+
+        from tests.conftest import require_model_stack
+        require_model_stack()
+
+    Raises:
+        RuntimeError: ``KBU_REQUIRE_MODEL_STACK=1`` and the stack is absent.
+    """
+    available, detected = model_stack_available()
+    if available:
+        return
+    message = reason or detected
+    if model_stack_required():
+        raise RuntimeError(
+            f"{MODEL_STACK_REQUIRED_ENV}=1 demands the real model stack, but: {message}"
+        )
+    pytest.skip(message, allow_module_level=True)
+
+
 def pytest_configure(config):
     """Configure custom pytest markers."""
     config.addinivalue_line("markers", "slow: mark test as slow running")
@@ -307,6 +362,33 @@ def pytest_configure(config):
         "prott5_model: mark test as loading the real ProtT5 model (slow, GPU-hungry; "
         "skipped unless PROTT5_LIVE_TESTS=1)",
     )
+    config.addinivalue_line(
+        "markers",
+        "kbu_model: mark test as requiring the kbu modeling stack (cobra/modelseedpy); "
+        "skipped when unavailable, FAILED when KBU_REQUIRE_MODEL_STACK=1",
+    )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Fail, rather than skip, a kbu_model test when the stack was demanded.
+
+    ``tryfirst`` is load-bearing: pytest's own skipping plugin registers its
+    ``pytest_runtest_setup`` as ``tryfirst`` too, and without this the builtin
+    evaluates a ``skipif`` on a ``kbu_model`` test and skips it before this
+    hook is ever reached.
+    """
+    if "kbu_model" not in item.keywords:
+        return
+    available, reason = model_stack_available()
+    if available:
+        return
+    if model_stack_required():
+        pytest.fail(
+            f"{MODEL_STACK_REQUIRED_ENV}=1 demands the real model stack, but: {reason}",
+            pytrace=False,
+        )
+    pytest.skip(reason)
 
 
 def pytest_collection_modifyitems(config, items):

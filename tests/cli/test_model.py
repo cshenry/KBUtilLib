@@ -20,20 +20,14 @@ from click.testing import CliRunner
 from kbutillib.cli import main
 from kbutillib.interfaces.cli.manifest import now_utc_iso, write_project_manifest
 
-try:
-    import cobra  # noqa: F401
-    import modelseedpy  # noqa: F401
-
-    _KBU_MODEL_AVAILABLE = True
-except ImportError:
-    _KBU_MODEL_AVAILABLE = False
+from tests.conftest import require_model_stack
 
 pytestmark = pytest.mark.kbu_model
 
-if not _KBU_MODEL_AVAILABLE:
-    pytest.skip(
-        "kbu modeling stack (cobra/modelseedpy) unavailable", allow_module_level=True
-    )
+# Skips when the stack is absent, RAISES (collection error) when
+# KBU_REQUIRE_MODEL_STACK=1 demands it -- a module-level skip happens during
+# collection, too early for conftest's pytest_runtest_setup guard to see it.
+require_model_stack()
 
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "model"

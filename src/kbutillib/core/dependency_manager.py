@@ -15,6 +15,40 @@ import yaml
 KBUTILLIB_DIR = Path.home() / ".kbutillib"
 DEFAULT_DEPENDENCIES_FILE = KBUTILLIB_DIR / "dependencies.yaml"
 
+#: Dependency paths registered for the whole process, seeded into every
+#: DependencyManager created afterwards.
+#:
+#: This exists because ``SharedEnvUtils.__init__`` constructs
+#: ``DependencyManager(auto_init=False)`` (core/shared_env_utils.py:105), so each
+#: utility instance starts with an EMPTY ``dependency_paths`` and every
+#: ``self.get_data_path(...)`` returns ``None`` -- which is why
+#: ``MSReconstructionUtils()`` could not be constructed without GAA's
+#: ``make_recon`` monkeypatching ``SharedEnvUtils.__init__`` to mirror paths in.
+#: Registering here is the same forwarding without the monkeypatch, and it is
+#: inert until something calls :func:`register_process_dependencies`.
+_process_dependency_paths: Dict[str, Path] = {}
+
+
+def register_process_dependencies(paths: Dict[str, Path]) -> None:
+    """Register dependency paths for every DependencyManager created from now on.
+
+    Args:
+        paths: Mapping of dependency name to an already-resolved directory.
+            Entries are stored verbatim; resolution and existence checking are
+            the caller's job.
+    """
+    _process_dependency_paths.update({name: Path(p) for name, p in paths.items()})
+
+
+def get_process_dependencies() -> Dict[str, Path]:
+    """Return a copy of the process-wide registered dependency paths."""
+    return dict(_process_dependency_paths)
+
+
+def clear_process_dependencies() -> None:
+    """Forget every process-wide registered dependency path (test hook)."""
+    _process_dependency_paths.clear()
+
 class DependencyManager:
     """Manages external dependency paths for KBUtilLib.
 
@@ -45,7 +79,10 @@ class DependencyManager:
 
         self.config_path = Path(config_path)
         self.config = self._load_config()
-        self.dependency_paths: Dict[str, Path] = {}
+        # Seeded from the process-wide registry so instances created after
+        # register_process_dependencies() can resolve paths without each one
+        # re-reading and re-initialising the config.
+        self.dependency_paths: Dict[str, Path] = dict(_process_dependency_paths)
 
         if auto_init:
             self.initialize_dependencies()

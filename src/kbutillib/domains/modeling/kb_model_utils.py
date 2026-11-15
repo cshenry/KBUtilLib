@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
+from ...core.errors import ModelSEEDpyCapabilityError
 from ..biochem.ms_biochem_utils import MSBiochemUtils
 from ..genome.kb_annotation_utils import KBAnnotationUtils
 from .model_standardization_utils import compartment_types, direction_conversion
@@ -112,11 +113,28 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
             from cobrakbase.core.kbasefba import FBAModel
             from cobrakbase.core.kbasefba.fbamodel_from_cobra import CobraModelConverter
             from modelseedpy.core.annotationontology import AnnotationOntology
-            from modelseedpy.core.msfba import MSFBA
             from modelseedpy.core.msgenomeclassifier import MSGenomeClassifier
             from modelseedpy.core.msgrowthphenotypes import MSGrowthPhenotypes
             from modelseedpy.core.msmedia import MSMedia
             from modelseedpy.core.msmodelutl import MSModelUtil
+
+            # MSFBA is FORK-ONLY: upstream ModelSEEDpy (the reconstruction
+            # layer's target, cshenry/ModelSEEDpy kbdl-target e1155a4 on
+            # upstream c0b94e3) ships no modelseedpy/core/msfba.py. Importing
+            # it unconditionally made EVERY KBModelUtils subclass --
+            # MSReconstructionUtils included -- unconstructable against
+            # upstream with "No module named 'modelseedpy.core.msfba'", which
+            # is a second construction blocker behind the ModelSEEDBiochem.get
+            # one. Only save_solution_as_fba uses it (a KBase save path), so it
+            # is optional and absence is reported there rather than here.
+            try:
+                from modelseedpy.core.msfba import MSFBA
+            except ImportError:
+                MSFBA = None
+                self.log_debug(
+                    "modelseedpy.core.msfba is absent (upstream ModelSEEDpy "
+                    "does not ship it); save_solution_as_fba is unavailable"
+                )
 
             # Store modules as instance attributes for later use
             self.cobrakbase = cobrakbase
@@ -788,6 +806,15 @@ class KBModelUtils(KBAnnotationUtils, MSBiochemUtils):
         fbamodel_ref=None,
         other_solutions=None,
     ):
+        if self.MSFBA is None:
+            # Guarded explicitly: isinstance(x, None) raises the opaque
+            # "isinstance() arg 2 must be a type", the same shape of failure
+            # that a None self.FBAModel once produced.
+            raise ModelSEEDpyCapabilityError(
+                "save_solution_as_fba needs modelseedpy.core.msfba (MSFBA), "
+                "which the installed ModelSEEDpy does not ship. It exists only "
+                "in the ModelSEEDpy fork."
+            )
         if not isinstance(fba_or_solution, self.MSFBA):
             fba_or_solution = self.MSFBA(
                 mdlutl, media, primary_solution=fba_or_solution

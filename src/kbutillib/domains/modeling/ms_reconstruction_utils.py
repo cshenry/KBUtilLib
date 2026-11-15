@@ -7,16 +7,33 @@ into a KBUtilLib-compatible format with standard named arguments.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import pandas as pd
 
+from ...core.errors import (
+    MissingBiochemistryError,
+    MissingSolverError,
+    ModelSEEDpyCapabilityError,
+    ReconstructionEnvironmentError,
+)
 from .kb_model_utils import KBModelUtils
 
 __all__ = [
     "GPR_STRING_SUPPORT",
+    "GENOME_CLASS_TO_TEMPLATE_KEY",
+    "DEFAULT_TEMPLATE_KEY",
+    "RECONSTRUCTION_DEPENDENCIES",
+    "DEFAULT_SOLVER_PREFERENCE",
+    "MissingBiochemistryError",
+    "MissingSolverError",
+    "ModelSEEDpyCapabilityError",
+    "ReconstructionEnvironmentError",
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
+    "initialize_reconstruction_environment",
+    "verify_role_alias_matching",
 ]
 
 logger = logging.getLogger(__name__)
@@ -26,6 +43,512 @@ logger = logging.getLogger(__name__)
 #: ``1`` = :meth:`MSReconstructionUtils._add_reactions_from_gene_mapping` accepts
 #: verbatim GPR strings as ``reaction_gene_hash`` values, not just lists of gene ids.
 GPR_STRING_SUPPORT = 1
+
+
+# ── Environment initialisation for the KBase-free reconstruction layer ──────
+#
+# Everything in this section is the ENVIRONMENT half of the light reconstruction
+# layer (PRD kbdl-recon-thin-layer-v1): it establishes, by measurement, that the
+# process can actually reconstruct a model before any reconstruction is
+# attempted.  Each check exists because its absence has already produced a
+# confusing failure:
+#
+#   * dependency forwarding -- every SharedEnvUtils instance builds its own
+#     DependencyManager with auto_init=False, so get_data_path() returns None and
+#     KBAnnotationUtils falls through to a sibling-directory path that does not
+#     exist.  GAA papered over this by monkeypatching SharedEnvUtils.__init__;
+#     here the paths are registered with the dependency manager instead.
+#   * solver selection -- KBDL issue #35: poplar's Gurobi licence is a token
+#     server that REJECTS gurobipy >= 14 ("license not valid for Gurobi version
+#     14"), and with gurobipy 14 installed even a GLPK solve fails, because
+#     cobra's default interface is optlang.gurobi_interface and the backend is
+#     bound when the Model is constructed.  So the backend is chosen by a real
+#     solve and cobra's default is set before anything builds a Model.
+#   * alias matching -- the fork and upstream both report modelseedpy 0.4.2
+#     while their MSBuilder.build() differs in arity and return type, so neither
+#     a version nor a signature identifies the code.  The capability is
+#     therefore established by building a two-role template and checking that a
+#     gene actually arrives through an ALIAS.
+
+#: Dependencies the reconstruction layer resolves through
+#: ``~/.kbutillib/dependencies.yaml``.  Deliberately NOT including
+#: ``modelseedpy``: ``DependencyManager.initialize_dependencies`` puts every
+#: configured path on ``sys.path``, and that entry points at the FORK checkout,
+#: which would shadow the installed upstream package.
+RECONSTRUCTION_DEPENDENCIES = ("ModelSEEDDatabase", "cb_annotation_ontology_api")
+
+#: LP backends to probe, in order.  GLPK first: it needs no licence and carried
+#: ATP correction to completion in 50.9 s against Gurobi's 59.3 s
+#: (agent-io/work-records/task-d1302dc4.md section (b)).
+DEFAULT_SOLVER_PREFERENCE = ("glpk", "gurobi")
+
+#: Genome class -> template key.  The same map ``build_metabolic_model`` applies
+#: inline (see the ``template_type == "auto"`` branch), lifted out so the layer
+#: and the legacy path cannot disagree.  ``"--"`` is the classifier's own
+#: no-call marker.
+GENOME_CLASS_TO_TEMPLATE_KEY = {
+    "P": "gp",
+    "N": "gn",
+    "A": "ar",
+    "--": "gn",
+}
+
+#: Template key used for any class with no dedicated template.  ``KBModelUtils``
+#: ships templates for core/gp/gn/ar only -- there is no cyanobacterial entry in
+#: ``self.templates`` -- so class ``C`` resolves here rather than to a key that
+#: would raise ``KeyError`` on lookup.
+DEFAULT_TEMPLATE_KEY = "gn"
+
+#: Role/function strings used by the behavioural alias check.  Chosen so that no
+#: real genome or template can contain them.
+_ALIAS_PROBE_FUNCTION = "KBUtilLib alias-only probe function 90001"
+_ALIAS_PROBE_ROLE_NAME = "KBUtilLib probe role whose name no genome carries 90001"
+_ALIAS_PROBE_NAMED_FUNCTION = "KBUtilLib name-matched probe function 90002"
+
+
+def _probe_solver(backend: str) -> bool:
+    """Return True only if ``backend`` completes a real LP solve.
+
+    A two-reaction model with a known optimum, so the answer is checked and not
+    merely the absence of an exception.  ``m.solver`` is assigned before
+    ``optimize()``; the Model itself is constructed after
+    ``cobra.Configuration().solver`` has been pointed at the candidate, because
+    an installed-but-unlicensed Gurobi otherwise fails a GLPK solve too.
+
+    Args:
+        backend: optlang/cobra backend name, e.g. ``"glpk"`` or ``"gurobi"``.
+
+    Returns:
+        True if the solve returned status ``optimal`` with the expected
+        objective value.
+    """
+    try:
+        import cobra
+
+        config = cobra.Configuration()
+        previous = config.solver
+        try:
+            config.solver = backend
+            model = cobra.Model("kbu_solver_probe")
+            met = cobra.Metabolite("probe_c")
+            src = cobra.Reaction("PROBE_SRC", lower_bound=0, upper_bound=10)
+            src.add_metabolites({met: 1})
+            snk = cobra.Reaction("PROBE_SNK", lower_bound=0, upper_bound=1000)
+            snk.add_metabolites({met: -1})
+            model.add_reactions([src, snk])
+            model.objective = "PROBE_SNK"
+            model.solver = backend
+            solution = model.optimize()
+        finally:
+            try:
+                config.solver = previous
+            except Exception:  # noqa: BLE001 - restoring a broken default is not fatal
+                pass
+        return solution.status == "optimal" and abs(solution.objective_value - 10.0) < 1e-6
+    except Exception:  # noqa: BLE001 - any failure means "this backend does not work here"
+        return False
+
+
+def _set_cobra_default_solver(backend: str) -> None:
+    """Point cobra's default interface at ``backend``.
+
+    Separate from :func:`_select_lp_solver` because it is the one step that
+    mutates process-wide state, and because the order matters: cobra binds the
+    solver interface when a ``Model`` is CONSTRUCTED, so this must happen
+    before any model is built, not after.
+
+    Args:
+        backend: A backend already confirmed by :func:`_probe_solver`.
+    """
+    import cobra
+
+    cobra.Configuration().solver = backend
+
+
+def _select_lp_solver(
+    solver: Optional[str] = None,
+    preference: Sequence[str] = DEFAULT_SOLVER_PREFERENCE,
+) -> Dict[str, Any]:
+    """Choose an LP backend by probing, and make it cobra's default.
+
+    Args:
+        solver: Demand this backend specifically.  It is still probed; a named
+            backend that does not solve is an error, never a silent fallback.
+        preference: Backends to try in order when ``solver`` is None.
+
+    Returns:
+        ``{"solver": <name>, "probes": {<name>: <bool>, ...}}``.
+
+    Raises:
+        MissingSolverError: No candidate completed a real solve.
+    """
+    candidates = [solver] if solver else list(preference)
+    probes: Dict[str, bool] = {}
+    chosen: Optional[str] = None
+    for backend in candidates:
+        probes[backend] = _probe_solver(backend)
+        if probes[backend] and chosen is None:
+            chosen = backend
+            break
+
+    if chosen is None:
+        raise MissingSolverError(
+            "no LP backend completed a real solve: "
+            + ", ".join(f"{k}={v}" for k, v in probes.items())
+            + ". On poplar the Gurobi licence server rejects gurobipy >= 14 "
+            "(KBDL issue #35); GLPK needs swiglpk and no licence."
+        )
+
+    _set_cobra_default_solver(chosen)
+    return {"solver": chosen, "probes": probes}
+
+
+def _build_alias_probe_template() -> Any:
+    """Build the smallest MSTemplate that can demonstrate alias matching.
+
+    Two roles, two single-role complexes, two reactions:
+
+    * ``probe.role.alias`` -- its NAME appears in no genome; the probe function
+      is only in its ``aliases``.  Reached only when alias matching is on.
+    * ``probe.role.named`` -- its name IS a genome function, so it is matched
+      either way and acts as the positive control that the probe template is
+      itself wired correctly.
+
+    Returns:
+        An in-memory ``MSTemplate``.  No biochemistry database, no network and
+        no solver are involved.
+    """
+    from modelseedpy.core.mstemplate import (
+        MSTemplate,
+        MSTemplateCompartment,
+        MSTemplateMetabolite,
+        MSTemplateReaction,
+        MSTemplateSpecies,
+        NewModelTemplateComplex,
+        NewModelTemplateRole,
+    )
+
+    template = MSTemplate(
+        "kbu.alias.probe",
+        name="KBUtilLibAliasProbeTemplate",
+        domain="Bacteria",
+        template_type="GenomeScale",
+    )
+    template.add_compartments(
+        [
+            MSTemplateCompartment("c", "Cytosol", 7.0, 0),
+            MSTemplateCompartment("e", "Extracellular", 7.0, 1),
+        ]
+    )
+    template.add_compounds(
+        [
+            MSTemplateMetabolite("cpd90001", "C", "probe compound A"),
+            MSTemplateMetabolite("cpd90002", "C", "probe compound B"),
+        ]
+    )
+    template.add_comp_compounds(
+        [
+            MSTemplateSpecies("cpd90001_c", 0, "c", "cpd90001"),
+            MSTemplateSpecies("cpd90002_c", 0, "c", "cpd90002"),
+        ]
+    )
+
+    alias_role = NewModelTemplateRole(
+        "probe.role.alias",
+        _ALIAS_PROBE_ROLE_NAME,
+        aliases=[_ALIAS_PROBE_FUNCTION],
+    )
+    named_role = NewModelTemplateRole("probe.role.named", _ALIAS_PROBE_NAMED_FUNCTION)
+    template.add_roles([alias_role, named_role])
+
+    alias_complex = NewModelTemplateComplex("probe.cpx.alias", "alias probe complex")
+    alias_complex.add_role(alias_role, triggering=True, optional=False)
+    named_complex = NewModelTemplateComplex("probe.cpx.named", "named probe complex")
+    named_complex.add_role(named_role, triggering=True, optional=False)
+    template.add_complexes([alias_complex, named_complex])
+
+    alias_reaction = MSTemplateReaction(
+        "rxn90001_c", "rxn90001", "alias probe reaction", "probe", 0.0, 1000.0
+    )
+    alias_reaction.add_metabolites(
+        {
+            template.compcompounds.get_by_id("cpd90001_c"): -1,
+            template.compcompounds.get_by_id("cpd90002_c"): 1,
+        }
+    )
+    alias_reaction.add_complexes([alias_complex])
+    named_reaction = MSTemplateReaction(
+        "rxn90002_c", "rxn90002", "named probe reaction", "probe", 0.0, 1000.0
+    )
+    named_reaction.add_metabolites(
+        {
+            template.compcompounds.get_by_id("cpd90002_c"): -1,
+            template.compcompounds.get_by_id("cpd90001_c"): 1,
+        }
+    )
+    named_reaction.add_complexes([named_complex])
+    template.add_reactions([alias_reaction, named_reaction])
+    return template
+
+
+def _build_alias_probe_genome() -> Any:
+    """Build the two-feature MSGenome the alias probe template is matched against."""
+    from modelseedpy import MSGenome
+    from modelseedpy.core.msgenome import MSFeature
+
+    genome = MSGenome()
+    alias_feature = MSFeature("probe_gene_alias", "", description=_ALIAS_PROBE_FUNCTION)
+    alias_feature.add_ontology_term("RAST", _ALIAS_PROBE_FUNCTION)
+    named_feature = MSFeature(
+        "probe_gene_named", "", description=_ALIAS_PROBE_NAMED_FUNCTION
+    )
+    named_feature.add_ontology_term("RAST", _ALIAS_PROBE_NAMED_FUNCTION)
+    genome.add_features([alias_feature, named_feature])
+    return genome
+
+
+def _genes_from_alias_probe(match_role_aliases: bool) -> set:
+    """Run the probe build once and return the gene ids that reached the model."""
+    from modelseedpy import MSBuilder
+
+    builder = MSBuilder(_build_alias_probe_genome(), _build_alias_probe_template())
+    model = builder.build_base_model(
+        model_or_id="kbu_alias_probe_model",
+        index="0",
+        annotate_with_rast=False,
+        match_role_aliases=match_role_aliases,
+    )
+    return {gene.id for gene in model.genes}
+
+
+def verify_role_alias_matching() -> Dict[str, Any]:
+    """Check BEHAVIOURALLY that MSBuilder can match a gene through a role alias.
+
+    ``MSBuilder.build_base_model`` is called twice on the probe template, with
+    ``match_role_aliases`` off and on, and the gene ids that reach the model are
+    compared.  The capability is confirmed only if the alias-only gene is absent
+    with the flag off and present with it on -- a signature check would pass
+    against a tree where the keyword exists but is not forwarded to
+    ``generate_reaction_complex_sets``, which is exactly the defect the upstream
+    change fixed.
+
+    ``annotate_with_rast=False`` is mandatory here: it defaults to True and
+    would make a live RAST network call.
+
+    Returns:
+        ``{"matched": True, "genes_with_aliases": [...],
+        "genes_without_aliases": [...]}``.
+
+    Raises:
+        ModelSEEDpyCapabilityError: ``build_base_model`` rejects the keyword, or
+            accepts it without matching the alias.
+    """
+    try:
+        without_aliases = _genes_from_alias_probe(match_role_aliases=False)
+        with_aliases = _genes_from_alias_probe(match_role_aliases=True)
+    except TypeError as exc:
+        raise ModelSEEDpyCapabilityError(
+            "installed modelseedpy MSBuilder.build_base_model does not accept "
+            f"match_role_aliases: {exc}. The layer needs upstream ModelSEEDpy "
+            "with the alias-matching change (cshenry/ModelSEEDpy kbdl-target "
+            "e1155a41fa53b921185b20c6cfbd083e5e3739a4)."
+        ) from exc
+
+    report = {
+        "genes_without_aliases": sorted(without_aliases),
+        "genes_with_aliases": sorted(with_aliases),
+    }
+    if "probe_gene_named" not in without_aliases:
+        raise ModelSEEDpyCapabilityError(
+            "alias probe is not usable against this modelseedpy: the "
+            "NAME-matched control gene did not reach the model either "
+            f"({report}), so role matching itself is not working."
+        )
+    if "probe_gene_alias" in without_aliases:
+        raise ModelSEEDpyCapabilityError(
+            "alias probe cannot discriminate: the alias-only gene was matched "
+            f"with match_role_aliases=False ({report})."
+        )
+    if "probe_gene_alias" not in with_aliases:
+        raise ModelSEEDpyCapabilityError(
+            "installed modelseedpy accepts match_role_aliases=True but does "
+            f"not match a gene through a role alias ({report}). The keyword is "
+            "probably not forwarded to generate_reaction_complex_sets."
+        )
+    report["matched"] = True
+    return report
+
+
+def _load_upstream_genome_classifier(classifier_id: Optional[str] = None) -> Any:
+    """Load the genome classifier shipped with the installed modelseedpy.
+
+    Prefers whatever ``.npz`` is present in ``modelseedpy/data/ml``: upstream
+    ships ``linear_svc_ACNP_RAST_full_11_11_2026.npz``, loaded by
+    ``load_classifier_from_npz`` with ``allow_pickle=False``, so the old
+    ``scikit-learn == 1.2.0`` pin that the legacy ``*.pickle`` classifiers
+    carried does not apply.
+
+    Args:
+        classifier_id: Explicit classifier id (file stem).  When None the
+            shipped ``.npz`` is discovered.
+
+    Returns:
+        An ``MSGenomeClassifier``.
+
+    Raises:
+        ModelSEEDpyCapabilityError: No classifier artifact is available.
+    """
+    import modelseedpy
+    from modelseedpy.helpers import get_classifier
+
+    if classifier_id is None:
+        ml_dir = Path(modelseedpy.__file__).parent / "data" / "ml"
+        candidates = sorted(p.stem for p in ml_dir.glob("*.npz")) if ml_dir.is_dir() else []
+        if not candidates:
+            raise ModelSEEDpyCapabilityError(
+                f"no genome classifier .npz shipped in {ml_dir}; "
+                "classify_genome needs one (pass classifier_id= to use a "
+                "downloadable legacy pickle instead)."
+            )
+        classifier_id = candidates[0]
+
+    return get_classifier(classifier_id)
+
+
+def _resolve_reconstruction_dependencies(
+    dependency_config: Optional[Union[str, Path]] = None,
+    dependencies: Iterable[str] = RECONSTRUCTION_DEPENDENCIES,
+) -> Dict[str, Path]:
+    """Resolve the layer's dependencies and forward them to the dependency manager.
+
+    Only the requested names are initialised, so no other configured checkout
+    (notably the forked ``modelseedpy``) reaches ``sys.path``.  The resolved
+    paths are registered process-wide, which is what makes
+    ``self.get_data_path("ModelSEEDDatabase")`` non-None inside instances
+    constructed afterwards.
+
+    Args:
+        dependency_config: Explicit ``dependencies.yaml``.  None uses
+            ``~/.kbutillib/dependencies.yaml`` and then the repo default.
+        dependencies: Dependency names to resolve.
+
+    Returns:
+        Mapping of dependency name to resolved directory.
+
+    Raises:
+        MissingBiochemistryError: ``ModelSEEDDatabase`` does not resolve.
+        ReconstructionEnvironmentError: Some other requested dependency does
+            not resolve.
+    """
+    from ...core.dependency_manager import (
+        DependencyManager,
+        register_process_dependencies,
+    )
+
+    wanted = list(dependencies)
+    manager = DependencyManager(
+        config_path=Path(dependency_config) if dependency_config else None,
+        auto_init=False,
+    )
+    declared = dict(manager.config)
+    # Restrict before initialising: initialize_dependencies() sys.path-inserts
+    # every entry it sees.
+    manager.config = {name: declared[name] for name in wanted if name in declared}
+    manager.initialize_dependencies()
+
+    resolved: Dict[str, Path] = {}
+    unresolved: List[str] = []
+    for name in wanted:
+        path = manager.get_data_path(name)
+        if path is None:
+            unresolved.append(name)
+        else:
+            resolved[name] = path
+
+    if "ModelSEEDDatabase" in unresolved:
+        raise MissingBiochemistryError(
+            "dependency manager could not resolve 'ModelSEEDDatabase' from "
+            f"{manager.config_path} (declares: {sorted(declared)}). The layer "
+            "never falls back to modelseedpy's config.cfg default, which does "
+            "not exist on poplar in either tree (KBDL issue #41)."
+        )
+    if unresolved:
+        raise ReconstructionEnvironmentError(
+            f"dependency manager could not resolve {unresolved} from "
+            f"{manager.config_path} (declares: {sorted(declared)})."
+        )
+
+    register_process_dependencies(resolved)
+    return resolved
+
+
+def initialize_reconstruction_environment(
+    *,
+    dependency_config: Optional[Union[str, Path]] = None,
+    dependencies: Iterable[str] = RECONSTRUCTION_DEPENDENCIES,
+    solver: Optional[str] = None,
+    solver_preference: Sequence[str] = DEFAULT_SOLVER_PREFERENCE,
+    check_alias_matching: bool = True,
+) -> Dict[str, Any]:
+    """Prepare and verify the environment the reconstruction layer needs.
+
+    Call this ONCE per process, BEFORE constructing ``MSReconstructionUtils``:
+    the dependency forwarding it performs is what lets the constructor resolve
+    ``ModelSEEDDatabase`` and ``cb_annotation_ontology_api``, and the solver
+    choice must be cobra's default before any ``cobra.Model`` is built.
+
+    Needs no KBase connection -- a KBase CTS job can run this with KBUtilLib and
+    ModelSEEDpy alone.
+
+    Args:
+        dependency_config: Explicit ``dependencies.yaml``; None uses
+            ``~/.kbutillib/dependencies.yaml``.
+        dependencies: Dependency names to resolve and forward.
+        solver: Demand a specific LP backend.  It is still probed by a real
+            solve.  Note that Gurobi is usable on poplar only with
+            ``gurobipy < 14``; the licence server rejects 14.
+        solver_preference: Backends to probe in order when ``solver`` is None.
+        check_alias_matching: Run the behavioural alias check.  Leave it on for
+            anything that will build a model from a KBDL template.
+
+    Returns:
+        A report: ``dependency_config``, ``dependencies`` (name -> path string),
+        ``solver``, ``solver_probes``, ``alias_matching``, and
+        ``modelseedpy_file`` (which install was verified -- a version string
+        does not identify this code).
+
+    Raises:
+        MissingBiochemistryError: ``ModelSEEDDatabase`` does not resolve.
+        ReconstructionEnvironmentError: Another dependency does not resolve.
+        MissingSolverError: No LP backend completed a real solve.
+        ModelSEEDpyCapabilityError: Alias matching does not work.
+    """
+    resolved = _resolve_reconstruction_dependencies(
+        dependency_config=dependency_config, dependencies=dependencies
+    )
+    solver_report = _select_lp_solver(solver=solver, preference=solver_preference)
+
+    alias_report: Optional[Dict[str, Any]] = None
+    if check_alias_matching:
+        alias_report = verify_role_alias_matching()
+
+    import modelseedpy
+
+    report = {
+        "dependency_config": str(dependency_config) if dependency_config else None,
+        "dependencies": {name: str(path) for name, path in resolved.items()},
+        "solver": solver_report["solver"],
+        "solver_probes": solver_report["probes"],
+        "alias_matching": alias_report,
+        "modelseedpy_file": modelseedpy.__file__,
+    }
+    logger.info(
+        "reconstruction environment ready: solver=%s dependencies=%s",
+        report["solver"],
+        sorted(resolved),
+    )
+    return report
+
 
 class MSReconstructionUtils(KBModelUtils):
     """Utilities for metabolic model reconstruction and gapfilling.
@@ -1487,6 +2010,65 @@ class MSReconstructionUtils(KBModelUtils):
         json_str = '{"data":' + table.to_json(orient="records") + "}"
         with open(self.working_dir + "/html/data.json", "w") as f:
             f.write(json_str)
+
+
+    def classify_genome(
+        self,
+        genome: Any,
+        *,
+        ontology_term: str = "RAST",
+        classifier: Optional[Any] = None,
+        classifier_id: Optional[str] = None,
+    ) -> str:
+        """Classify a genome and return the template key to build it against.
+
+        Uses the classifier the installed ModelSEEDpy ships (the ``.npz`` under
+        ``modelseedpy/data/ml``, loaded through ``modelseedpy.helpers``), and
+        applies the same class -> template-key map that
+        ``build_metabolic_model`` applies inline for ``gs_template="auto"``:
+        ``P`` -> ``gp``, ``N`` -> ``gn``, ``A`` -> ``ar``, the classifier's
+        ``"--"`` no-call -> ``gn``.
+
+        Any other class -- notably ``C`` (Cyanobacteria) -- has no dedicated
+        template in ``self.templates`` and resolves to
+        :data:`DEFAULT_TEMPLATE_KEY` (``gn``) with a warning.  Returning a
+        buildable key rather than None is deliberate: the legacy inline branch
+        abandoned the genome instead, and a KBase CTS job has no operator to
+        pick a template for it.
+
+        The classifier reads ``feature.ontology_terms[ontology_term]`` only; it
+        never touches sequences.
+
+        Args:
+            genome: ``MSGenome`` whose features carry functions under
+                ``ontology_term``.
+            ontology_term: Ontology key to classify from.  KBDL folds every
+                annotation source under one key, which is what makes this a
+                single argument.
+            classifier: Pre-loaded classifier, used as given.  Mainly for tests
+                and for reusing one classifier across many genomes.
+            classifier_id: Explicit classifier id, passed to
+                ``modelseedpy.helpers.get_classifier``.
+
+        Returns:
+            A key of ``self.templates`` (``"gp"``, ``"gn"`` or ``"ar"``).
+
+        Raises:
+            ModelSEEDpyCapabilityError: No classifier artifact is available.
+        """
+        if classifier is None:
+            classifier = _load_upstream_genome_classifier(classifier_id=classifier_id)
+
+        genome_class = str(classifier.classify(genome, ontology_term=ontology_term))
+        template_key = GENOME_CLASS_TO_TEMPLATE_KEY.get(genome_class)
+        if template_key is None:
+            self.log_warning(
+                f"genome class {genome_class!r} has no dedicated template; "
+                f"using {DEFAULT_TEMPLATE_KEY!r}"
+            )
+            template_key = DEFAULT_TEMPLATE_KEY
+        self.log_info(f"genome {getattr(genome, 'id', '?')} class {genome_class} -> template {template_key}")
+        return template_key
 
     # Backward compatibility aliases
     build_metabolic_models = kb_build_metabolic_models

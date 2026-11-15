@@ -1,15 +1,18 @@
 """ModelSEED Biochemistry Database utilities for compound and reaction searches."""
 
+import inspect
 import os
 import re
 import string
 import subprocess
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 import pandas as pd
 
 from ...core.capability import capability
+from ...core.errors import MissingBiochemistryError
 from ...core.shared_env_utils import SharedEnvUtils
 
 compartment_types = {
@@ -27,6 +30,82 @@ compartment_types = {
     "e":"e",
     "m":"m"
 }
+
+
+def load_modelseed_biochem(db_path: Optional[Union[str, Path]]) -> Any:
+    """Load a ModelSEED biochemistry database, dispatching on the installed signature.
+
+    ``ModelSEEDBiochem.get`` is NOT the same function in the two ModelSEEDpy
+    trees this library has to run against, and both report version ``0.4.2``:
+
+    * the **fork** (``/scratch/chenry/venvs/kbdl``) has
+      ``get(create_if_missing=True, path=config.get("biochem", "path"))`` --
+      a path can be injected directly;
+    * **upstream** (our target, ``cshenry/ModelSEEDpy`` ``kbdl-target``
+      ``e1155a4`` on upstream ``c0b94e3``) has ``get(create_if_missing=True)``
+      with **no** ``path`` parameter, so ``get(path=...)`` raises
+      ``TypeError: ModelSEEDBiochem.get() got an unexpected keyword argument
+      'path'``.  That TypeError is what made ``MSReconstructionUtils``
+      unconstructable against upstream, because ``MSBiochemUtils.__init__``
+      calls ``_ensure_database_available()`` eagerly.
+
+    The route is therefore chosen by INSPECTING the signature, never by a
+    version string.  On upstream the path is injected by assigning
+    ``ModelSEEDBiochem.default_biochemistry`` from ``from_local(db_path)``,
+    which ``get()`` then returns as-is -- the route measured working in
+    ``agent-io/work-records/task-d1302dc4.md`` section (c).
+
+    Args:
+        db_path: Directory holding the ModelSEED database (the checkout that
+            contains ``Biochemistry/``), normally resolved through KBUtilLib's
+            dependency manager.  Never modelseedpy's ``config.cfg`` default,
+            which does not exist on poplar in either tree (KBDL issue #41).
+
+    Returns:
+        The loaded ``ModelSEEDBiochem`` instance.
+
+    Raises:
+        MissingBiochemistryError: The database is absent, or loading it failed
+            for a path-related reason.  The message names the path actually
+            tried.
+    """
+    from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
+
+    accepts_path = "path" in inspect.signature(ModelSEEDBiochem.get).parameters
+    if accepts_path:
+        # Fork route: unchanged historical behaviour, including whatever
+        # create-if-missing handling the fork's own `get` performs.
+        try:
+            return ModelSEEDBiochem.get(path=db_path)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise MissingBiochemistryError(
+                f"ModelSEED biochemistry database not loadable from {db_path!r}: {exc}"
+            ) from exc
+
+    # Upstream route: `get()` takes no path, so the only injection points are
+    # `from_local(path)` and the `default_biochemistry` class attribute that
+    # `get()` populates from `config.cfg` when it is unset.  Assigning it first
+    # keeps `get()` off the config default entirely.
+    if db_path is None or not (Path(db_path) / "Biochemistry").is_dir():
+        raise MissingBiochemistryError(
+            "ModelSEED biochemistry database not found: "
+            f"{db_path!r} has no Biochemistry/ directory. This install of "
+            "modelseedpy has no ModelSEEDBiochem.get(path=...), so the "
+            "database must be resolved through KBUtilLib's dependency manager "
+            "(~/.kbutillib/dependencies.yaml, entry 'ModelSEEDDatabase')."
+        )
+
+    if not ModelSEEDBiochem.default_biochemistry:
+        from modelseedpy.biochem.modelseed_biochem import from_local
+
+        try:
+            ModelSEEDBiochem.default_biochemistry = from_local(str(db_path))
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise MissingBiochemistryError(
+                f"ModelSEED biochemistry database not loadable from {db_path!r}: {exc}"
+            ) from exc
+    return ModelSEEDBiochem.get()
+
 
 class MSBiochemUtils(SharedEnvUtils):
     """Utilities for searching the ModelSEED Biochemistry Database.
@@ -388,10 +467,11 @@ class MSBiochemUtils(SharedEnvUtils):
         return dict(counts)
 
     def _ensure_database_available(self) -> None:
-        # Load the database
+        # Load the database through the signature-dispatching helper: upstream
+        # ModelSEEDpy has no ModelSEEDBiochem.get(path=...). See
+        # load_modelseed_biochem above.
         try:
-            from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
-            self._biochem_db =  ModelSEEDBiochem.get(path=self.modelseed_db_path)
+            self._biochem_db = load_modelseed_biochem(self.modelseed_db_path)
             self.log_info(f"ModelSEED database loaded from {self.modelseed_db_path}")
         except Exception as e:
             self.log_error(f"Failed to load ModelSEED database: {e}")
@@ -1117,9 +1197,10 @@ class MSBiochemUtilsImpl:
         _biochem_logger.critical(msg)
 
     def _ensure_database_available(self):
+        # Same signature-dispatching helper as MSBiochemUtils -- one route, two
+        # call sites, so the fork/upstream decision cannot drift between them.
         try:
-            from modelseedpy.biochem.modelseed_biochem import ModelSEEDBiochem
-            self._biochem_db = ModelSEEDBiochem.get(path=self.modelseed_db_path)
+            self._biochem_db = load_modelseed_biochem(self.modelseed_db_path)
             self.log_info(f"ModelSEED database loaded from {self.modelseed_db_path}")
         except Exception as e:
             self.log_error(f"Failed to load ModelSEED database: {e}")

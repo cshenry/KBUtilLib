@@ -192,6 +192,34 @@ reaction_similarity = [
 reaction_similarity_extra = [
   "hdbscan >=0.8.33",
 ]
+# The metabolic-reconstruction stack: what the KBase-free reconstruction layer
+# (domains/modeling/ms_reconstruction_utils.py) needs in order to build a model
+# from a supplied MSTemplate + MSGenome, with no KBDL and no GAA import.
+#
+# modelseedpy is pinned by Git URL + COMMIT SHA, not by branch and not by
+# version, because a version string does not identify this code: the fork in
+# /scratch/chenry/venvs/kbdl and upstream dev both report 0.4.2 while their
+# MSBuilder.build() differs in arity AND return type (fork: build(model_or_id,
+# index, ...) -> cobra model; upstream: build(model_or_id, gapfill_media, ...)
+# -> 4-tuple). e1155a41 is upstream c0b94e3 plus the opt-in alias-matching
+# change (match_role_aliases / allow_incomplete_complexes on
+# build_base_model), which the layer verifies BEHAVIOURALLY at startup --
+# installing anything else makes initialize_reconstruction_environment raise
+# ModelSEEDpyCapabilityError rather than silently build a worse model.
+#
+# cobra and swiglpk are NOT listed: modelseedpy requires cobra, which requires
+# optlang, which requires swiglpk -- so the GLPK backend the layer defaults to
+# is already guaranteed. gurobipy is NOT declared either, so there is nothing
+# here to constrain; if it is ever added it must be `gurobipy <14`, because
+# poplar's floating licence rejects version 14 outright ("license not valid for
+# Gurobi version 14" -- KBDL issue #35, measured 2026-11-14).
+#
+# Extra only, with no matching [dependency-groups] entry: the dev/dev
+# duplication above exists because CI installs `.[dev]` AND `uv sync --group
+# dev`; nothing syncs a `model` group.
+model = [
+  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@e1155a41fa53b921185b20c6cfbd083e5e3739a4",
+]
 # Everything needed to run all transports + build docs.
 all = [
   "mcp >=1.27,<2 ; python_version >= '3.10'",

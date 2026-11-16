@@ -16,9 +16,20 @@ The two differ in exactly how a schema goes in and an answer comes out:
   has a ``structured_output`` object, which is the answer already parsed --
   so ``schema_enforced`` is a FACT there, not a hope.
 * **Codex** takes the schema as a **file** (``--output-schema <file>``) and
-  writes its final message to another file (``-o <file>``), so the answer is
-  read off disk after the child exits and there is no envelope, no usage and
-  no resolved-model metadata to read.
+  writes its final message to another file (``-o <file>``), so the ANSWER is
+  read off disk after the child exits rather than out of an envelope, and
+  there is no resolved-model metadata to read.  Usage is not in that file
+  either: it is on stdout, which ``--json`` turns into a stream of one JSON
+  event per line, of which exactly one -- ``turn.completed`` -- carries the
+  token counts.
+
+Both therefore report usage, which they did not when this module was first
+written (issue #79: a codex seat recorded 0 in / 0 out across all 18 calls of
+the 2026-10-19 run, and a claude seat recorded ``in=20`` for a prompt that
+billed ~62,000 input tokens).  Neither path ever reports a count it did not
+read: usage is ``None`` -- meaning UNMEASURABLE, which the engine's budget
+treats as a halt -- wherever the CLI did not say, because a zero there would
+make a budgeted endpoint look free for ever.
 
 Neither accepts a temperature or an output-token ceiling, which is why
 ``effective_params`` is just the model name for both.
@@ -60,6 +71,7 @@ from ..types import (
     SchemaIncompatible,
     wants_web_search,
 )
+from .anthropic import usage_from_anthropic
 from .cli_common import (
     OUTPUT_EXCERPT_CHARS,
     CliBackend,
@@ -354,15 +366,52 @@ class ClaudeCliBackend(CliBackend):
         ``None`` when the envelope reported no usage at all -- that is the
         distinction ``CouncilWorker._enforce_budget`` needs to tell a free
         call from an unmeasurable one, and inventing zeros here would make a
-        budgeted endpoint look free for ever.
+        budgeted endpoint look free for ever.  ``None`` ALSO when either
+        primary count is missing, null or not a number: a half-reported
+        usage block is unmeasurable too, and the one thing issue #79 forbids
+        is reporting unknown usage as zero.
+
+        The primary counts are checked BEFORE
+        :func:`~.anthropic.usage_from_anthropic` runs, because that function
+        reads an absent count as 0 (``usage_from_anthropic({})`` is
+        ``{"prompt_tokens": 0, "completion_tokens": 0}``) -- correct for the
+        HTTP API, where the SDK guarantees both fields, and exactly the zero
+        this backend must not invent.
+
+        ``prompt_tokens`` comes from ``usage_from_anthropic`` rather than a
+        second mapping written here, because the three-field sum is the
+        whole subtlety: ``usage.input_tokens`` counts only the input that was
+        neither cache-read nor cache-written, so it alone under-reports by
+        orders of magnitude.  Measured on the real envelope in
+        ``fixtures/cli_envelopes/claude_ok.json``: ``input_tokens`` 2 against
+        ``cache_creation_input_tokens`` 19962, which is the whole of issue
+        #79's implausible ``in=20``.
+
+        ``usage.modelUsage`` is deliberately NOT read: the same fixture shows
+        it attributing work to two models and disagreeing with ``usage``.
+        Only ``usage`` is authoritative.
+
+        The two ``cache_*_prompt_tokens`` keys are INFORMATIONAL -- a
+        breakdown of ``prompt_tokens``, already inside it.  Adding either
+        back to ``prompt_tokens`` double-counts.  They are 0 rather than
+        ``None`` when absent because a call that used no cache legitimately
+        read and wrote nothing.
         """
         raw = envelope.get("usage")
         if not isinstance(raw, Mapping):
             return None
-        return {
-            "prompt_tokens": _int_or_none(raw.get("input_tokens")),
-            "completion_tokens": _int_or_none(raw.get("output_tokens")),
-        }
+        if _int_or_none(raw.get("input_tokens")) is None:
+            return None
+        if _int_or_none(raw.get("output_tokens")) is None:
+            return None
+        mapped = dict(usage_from_anthropic(raw) or {})
+        mapped["cache_creation_prompt_tokens"] = (
+            _int_or_none(raw.get("cache_creation_input_tokens")) or 0
+        )
+        mapped["cache_read_prompt_tokens"] = (
+            _int_or_none(raw.get("cache_read_input_tokens")) or 0
+        )
+        return mapped
 
     @staticmethod
     def _resolved_model(envelope: Mapping[str, Any]) -> Optional[str]:
@@ -441,9 +490,12 @@ class CodexCliBackend(CliBackend):
         prompt from stdin", so neither the system nor the user prompt appears
         here.
 
-        Without ``params={"web_search": True}`` this is BYTE-IDENTICAL to the
-        command line before web search existed, and is asserted against a
-        literal golden list for the same reason as Claude's.
+        Without ``params={"web_search": True}`` this adds exactly ONE token
+        to the command line as it stood before web search existed --
+        ``--json``, for the usage stream -- and is asserted against a literal
+        golden list for the same reason as Claude's: the council is a live
+        consumer of this argv and an accidental extra flag is a security
+        change, not a feature.
         """
         leading = [self.executable]
         if wants_web_search(req):
@@ -452,6 +504,14 @@ class CodexCliBackend(CliBackend):
             leading.append(CODEX_WEB_SEARCH_FLAG)
         return leading + [
             "exec",
+            # The ONLY reason this is here: it turns stdout into the JSONL
+            # event stream that carries ``turn.completed.usage``, which is
+            # the only place a codex seat's token counts appear (issue #79).
+            # ``-o`` still writes the final message under it -- measured,
+            # ``fixtures/cli_envelopes/codex_ok_last_message.txt`` is the
+            # ``-o`` file of the run that produced ``codex_ok.jsonl`` -- so
+            # the ANSWER path is unchanged and still reads off disk.
+            "--json",
             "--model",
             req.model,
             "--output-schema",
@@ -465,6 +525,81 @@ class CodexCliBackend(CliBackend):
             "--skip-git-repo-check",
             "-",
         ]
+
+    @staticmethod
+    def _usage(stdout: Optional[str]) -> Optional[Dict[str, Optional[int]]]:
+        """Token counts from the ``--json`` event stream, or ``None``.
+
+        ``codex exec --json`` writes one JSON object per line on stdout and
+        usage appears on exactly ONE of them, emitted last: an event of type
+        ``turn.completed`` carrying a ``usage`` object (measured,
+        ``fixtures/cli_envelopes/codex_ok.jsonl``).  The LAST such event
+        wins, so a stream that somehow reported twice is read as its final
+        state rather than its first.
+
+        The mapping, each half settled by measurement rather than assumed
+        (see that fixture directory's README):
+
+        * ``prompt_tokens`` = ``input_tokens`` ALONE.  ``cached_input_tokens``
+          is a COMPONENT of it, not additional -- a 2026-11-12 run reported
+          ``input_tokens`` 14176 with ``cached_input_tokens`` 12288 against
+          14201 uncached for the same prompt shape, which only reads as
+          component.  ``cache_write_input_tokens`` is likewise not added: it
+          stayed 0 through fourteen captured calls so it could not be
+          exercised, and under-counting cache-write turns is a smaller error
+          than inflating every turn.
+        * ``completion_tokens`` = ``output_tokens`` ALONE.
+          ``reasoning_output_tokens`` is a component of it: between two runs
+          differing only in reasoning effort, ``output_tokens`` rose by 54
+          and ``reasoning_output_tokens`` rose by exactly 54.  Adding it
+          would double-count every reasoning turn.
+        * the two ``cache_*_prompt_tokens`` keys are INFORMATIONAL, a
+          breakdown already inside ``prompt_tokens``; adding either back
+          double-counts.
+
+        ``None`` -- never zero (issue #79) -- when there is no such event at
+        all (a FAILED turn emits ``turn.failed`` and no usage whatsoever),
+        when stdout is not JSONL, when either primary count is missing or
+        not a number, or when BOTH primary counts are 0.  That last case is
+        codex's processor emitting a zeroed total it never received: a real
+        call always has input, because the prompt itself is input.
+        """
+        latest: Optional[Mapping[str, Any]] = None
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                # Not every line is ours to read: a warning or a progress
+                # line on the same stream must not discard the usage event
+                # that follows it.
+                continue
+            if not isinstance(event, Mapping) or event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if isinstance(usage, Mapping):
+                latest = usage
+
+        if latest is None:
+            return None
+        prompt = _int_or_none(latest.get("input_tokens"))
+        completion = _int_or_none(latest.get("output_tokens"))
+        if prompt is None or completion is None:
+            return None
+        if prompt == 0 and completion == 0:
+            return None
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_creation_prompt_tokens": (
+                _int_or_none(latest.get("cache_write_input_tokens")) or 0
+            ),
+            "cache_read_prompt_tokens": (
+                _int_or_none(latest.get("cached_input_tokens")) or 0
+            ),
+        }
 
     async def _run(self, req: LLMRequest, started: float) -> LLMResult:
         """Run one ``codex exec`` invocation and read its output file.
@@ -573,12 +708,13 @@ class CodexCliBackend(CliBackend):
             text=last,
             parsed=parsed,
             resolved_model=req.model,
-            # Codex reports no token counts through ``codex exec``, so usage
-            # is genuinely unknown rather than zero.  An endpoint with a
-            # token budget will halt on this as ``budget_usage_unknown``,
+            # Read off the ``--json`` event stream, and ``None`` when that
+            # stream carried no ``turn.completed`` usage -- usage is then
+            # genuinely unknown rather than zero.  An endpoint with a token
+            # budget will halt on an unknown as ``budget_usage_unknown``,
             # which is the correct outcome: an unmeasurable budget is an
             # unenforceable one.
-            usage=None,
+            usage=self._usage(out),
             elapsed_s=time.monotonic() - started,
             # The schema went to the CLI as ``--output-schema``, which is
             # what constrains the final message.  Unlike Claude's

@@ -473,6 +473,7 @@ class TestCodexArgv:
             [
                 str(fake),
                 "exec",
+                "--json",
                 "--model",
                 MODEL,
                 "--output-schema",
@@ -688,6 +689,7 @@ class TestConfiguredTempRoot:
             [
                 str(fake),
                 "exec",
+                "--json",
                 "--model",
                 MODEL,
                 "--output-schema",
@@ -724,6 +726,7 @@ class TestConfiguredTempRoot:
             [
                 str(fake),
                 "exec",
+                "--json",
                 "--model",
                 MODEL,
                 "--output-schema",
@@ -1447,6 +1450,12 @@ class TestClaudeEnvelopeParsing:
     def test_usage_is_read_from_the_envelope(
         self, tmp_path: Path, ready_home: Path
     ) -> None:
+        """With no cache fields reported, the cache breakdown is a real zero.
+
+        A call that read and wrote no cache legitimately used 0 of each, so
+        unlike a MISSING primary count (which is unmeasurable and must be
+        ``None`` -- issue #79) these two are reported as 0.
+        """
         fake = make_fake(
             tmp_path,
             "claude",
@@ -1456,7 +1465,12 @@ class TestClaudeEnvelopeParsing:
 
         result = run(backend.complete(request()))
 
-        assert result.usage == {"prompt_tokens": 1234, "completion_tokens": 56}
+        assert result.usage == {
+            "prompt_tokens": 1234,
+            "completion_tokens": 56,
+            "cache_creation_prompt_tokens": 0,
+            "cache_read_prompt_tokens": 0,
+        }
 
     def test_no_usage_block_means_None_not_zero(
         self, tmp_path: Path, ready_home: Path
@@ -1547,7 +1561,10 @@ class TestCodexOutputFile:
 
         assert result.ok is True, result.error
         assert result.parsed == ANSWER
-        assert result.usage is None, "codex exec reports no token counts"
+        assert result.usage is None, (
+            "this fake wrote nothing on stdout, so there is no turn.completed "
+            "event and usage is unknown -- never zero (issue #79)"
+        )
         assert result.resolved_model == MODEL
 
     def test_a_fenced_answer_is_still_parsed(
@@ -1807,6 +1824,583 @@ class TestCodexSchemaPreflight:
         assert result.ok is True, result.error
         assert fake.record["schema_file"] == "{}"
 
+
+# ---------------------------------------------------------------------------
+# Honest token usage (issue #79, issue #92 item 3)
+# ---------------------------------------------------------------------------
+#
+# The whole point of these tests is that they are driven by the REAL captured
+# CLI output in ``fixtures/cli_envelopes/`` rather than by a hand-written
+# envelope.  Issue #79 was not an arithmetic bug: it was a mapping written
+# against what the output was assumed to look like.  A hand-rolled envelope
+# would reproduce the assumption rather than test it, so every positive case
+# below replays bytes the installed CLIs actually emitted, and the negative
+# cases are the shapes the README says a parser must survive.
+#
+# ``usage`` is ``None``, never zero, wherever the CLI did not say.  A zero
+# there is not a harmless approximation: the engine's budget sums
+# ``prompt_tokens`` + ``completion_tokens`` (``worker._token_total``), so a
+# zero makes a metered endpoint look free for ever and no ceiling ever trips,
+# while ``None`` halts the endpoint as ``budget_usage_unknown``.
+
+
+def claude_fixture_envelope() -> Dict[str, Any]:
+    """The real ``claude -p --output-format json`` envelope, as a dict."""
+    return json.loads((CLI_ENVELOPES / "claude_ok.json").read_text())
+
+
+def codex_fixture_stdout() -> str:
+    """The real ``codex exec --json`` stdout, one event per line."""
+    return (CLI_ENVELOPES / "codex_ok.jsonl").read_text()
+
+
+def claude_with_usage(usage: Any, *, drop: bool = False) -> str:
+    """The real envelope with its ``usage`` block replaced (or removed).
+
+    Built from the CAPTURE rather than from :func:`envelope`, so the shape
+    around the usage block -- and the ``structured_output``/``result`` pair
+    the backend must still parse -- is the shipped CLI's own.  Both answer
+    fields are swapped to :data:`ANSWER`, the capture's own trivial
+    ``{"ok": true}`` being too small for the council's schema to be
+    interesting.
+    """
+    payload = claude_fixture_envelope()
+    payload["structured_output"] = ANSWER
+    payload["result"] = json.dumps(ANSWER)
+    if drop:
+        payload.pop("usage", None)
+    else:
+        payload["usage"] = usage
+    return json.dumps(payload)
+
+
+class TestClaudeUsageFromTheRealEnvelope:
+    """Issue #92 item 3: the cache fields are the input, not a footnote.
+
+    ``usage.input_tokens`` counts only the input that was neither cache-read
+    nor cache-written.  In the captured envelope that is **2** against
+    ``cache_creation_input_tokens`` **19962** -- so reading ``input_tokens``
+    alone under-reports billable input by four orders of magnitude, which is
+    exactly the implausible ``in=20`` of issue #79.
+    """
+
+    def test_prompt_tokens_is_the_sum_of_the_three_input_fields(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        raw = claude_fixture_envelope()["usage"]
+        expected = (
+            raw["input_tokens"]
+            + raw["cache_creation_input_tokens"]
+            + raw["cache_read_input_tokens"]
+        )
+        # Guard the fixture itself: if a re-capture ever lands an envelope
+        # where the three fields happen to be equal to ``input_tokens``
+        # alone, this test would still pass while proving nothing.
+        assert expected > raw["input_tokens"], (
+            "the fixture must have a non-trivial cache breakdown for this "
+            "test to be evidence"
+        )
+
+        fake = make_fake(tmp_path, "claude", stdout=claude_with_usage(raw))
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        assert result.usage is not None
+        assert result.usage["prompt_tokens"] == expected
+        assert result.usage["completion_tokens"] == raw["output_tokens"]
+
+    def test_the_cache_keys_are_a_subset_of_prompt_tokens_and_not_added_again(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """They are informational: they are ALREADY inside ``prompt_tokens``.
+
+        Summing all four would double-count the cache, which for the
+        captured envelope means reporting ~40k input for a ~20k call.
+        """
+        raw = claude_fixture_envelope()["usage"]
+        fake = make_fake(tmp_path, "claude", stdout=claude_with_usage(raw))
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        usage = run(backend.complete(request())).usage
+
+        assert usage is not None
+        assert usage["cache_creation_prompt_tokens"] == raw[
+            "cache_creation_input_tokens"
+        ]
+        assert usage["cache_read_prompt_tokens"] == raw["cache_read_input_tokens"]
+        breakdown = (
+            usage["cache_creation_prompt_tokens"] + usage["cache_read_prompt_tokens"]
+        )
+        assert breakdown <= usage["prompt_tokens"]
+        assert usage["prompt_tokens"] == raw["input_tokens"] + breakdown
+
+    def test_model_usage_is_not_the_source(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``modelUsage`` disagrees with ``usage``, and ``usage`` wins.
+
+        The capture shows ``modelUsage`` attributing work to TWO models while
+        ``usage`` reports only the primary one, which is the evidence for not
+        switching.  Here ``modelUsage`` is given numbers nothing else could
+        produce, so a backend reading it would be caught.
+        """
+        payload = claude_fixture_envelope()
+        payload["result"] = json.dumps(ANSWER)
+        payload["usage"] = {"input_tokens": 7, "output_tokens": 9}
+        payload["modelUsage"] = {MODEL: {"inputTokens": 555, "outputTokens": 777}}
+        fake = make_fake(tmp_path, "claude", stdout=json.dumps(payload))
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        usage = run(backend.complete(request())).usage
+
+        assert usage == {
+            "prompt_tokens": 7,
+            "completion_tokens": 9,
+            "cache_creation_prompt_tokens": 0,
+            "cache_read_prompt_tokens": 0,
+        }
+
+    @pytest.mark.parametrize(
+        "usage, drop, why",
+        [
+            pytest.param(None, True, "no usage block at all", id="absent"),
+            pytest.param({}, False, "an empty usage block", id="empty"),
+            pytest.param(None, False, "a null usage block", id="null"),
+            pytest.param(
+                {"output_tokens": 52}, False, "no input_tokens", id="no-input"
+            ),
+            pytest.param(
+                {"input_tokens": 2}, False, "no output_tokens", id="no-output"
+            ),
+            pytest.param(
+                {"input_tokens": None, "output_tokens": 52},
+                False,
+                "a null input_tokens",
+                id="null-input",
+            ),
+            pytest.param(
+                {"input_tokens": 2, "output_tokens": None},
+                False,
+                "a null output_tokens",
+                id="null-output",
+            ),
+            pytest.param(
+                {"input_tokens": "lots", "output_tokens": 52},
+                False,
+                "a non-numeric input_tokens",
+                id="non-numeric-input",
+            ),
+            pytest.param(
+                {"input_tokens": 2, "output_tokens": [52]},
+                False,
+                "a non-numeric output_tokens",
+                id="non-numeric-output",
+            ),
+            pytest.param(
+                "unknown", False, "a usage block that is not a mapping", id="not-a-map"
+            ),
+        ],
+    )
+    def test_a_missing_primary_count_is_unknown_and_never_zero(
+        self,
+        tmp_path: Path,
+        ready_home: Path,
+        usage: Any,
+        drop: bool,
+        why: str,
+    ) -> None:
+        """Every one of these is UNMEASURABLE, so ``usage`` is ``None``.
+
+        The check has to happen before ``usage_from_anthropic``, which reads
+        an absent count as 0 -- correct for the HTTP API, where the SDK
+        guarantees both fields, and the exact zero issue #79 forbids here.
+        The answer still parses: a CLI that under-reported its usage still
+        gave a usable reply, and failing the call would throw that away.
+        """
+        fake = make_fake(
+            tmp_path, "claude", stdout=claude_with_usage(usage, drop=drop)
+        )
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request()))
+
+        assert result.ok is True, result.error
+        assert result.parsed == ANSWER
+        assert result.usage is None, f"{why} must read as unknown, not as zero"
+
+    @pytest.mark.parametrize(
+        "usage, prompt",
+        [
+            pytest.param({"input_tokens": 11, "output_tokens": 3}, 11, id="neither"),
+            pytest.param(
+                {"input_tokens": 11, "output_tokens": 3, "cache_read_input_tokens": 4},
+                15,
+                id="read-only",
+            ),
+            pytest.param(
+                {
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                    "cache_creation_input_tokens": 9,
+                },
+                20,
+                id="creation-only",
+            ),
+        ],
+    )
+    def test_absent_cache_counts_are_a_real_zero(
+        self, tmp_path: Path, ready_home: Path, usage: Dict[str, Any], prompt: int
+    ) -> None:
+        """Unlike a missing PRIMARY count, these are legitimately 0.
+
+        A call that engaged no cache read nothing and wrote nothing -- that
+        is a measured fact, not an unknown -- so reporting ``None`` here
+        would make a plain uncached call look unmeasurable and halt a
+        perfectly healthy endpoint.
+        """
+        fake = make_fake(tmp_path, "claude", stdout=claude_with_usage(usage))
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        got = run(backend.complete(request())).usage
+
+        assert got == {
+            "prompt_tokens": prompt,
+            "completion_tokens": 3,
+            "cache_creation_prompt_tokens": usage.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_prompt_tokens": usage.get("cache_read_input_tokens", 0),
+        }
+
+
+class TestCodexUsageFromTheRealEventStream:
+    """Issue #79: codex DOES report token counts -- on stdout, under ``--json``.
+
+    The counts live on exactly one event per run, ``turn.completed``, which
+    only exists in the stream ``--json`` turns on.  Without that flag there
+    is nothing to parse, which is why the previous code recorded 0 in / 0 out
+    across all 18 calls of the 2026-10-19 run.
+    """
+
+    def test_the_argv_carries_both_json_and_the_output_file(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``--json`` is additive: ``-o`` still names the final-message file.
+
+        Measured -- ``codex_ok_last_message.txt`` is the ``-o`` file of the
+        same run that produced ``codex_ok.jsonl``, so both were written.  The
+        ANSWER path is unchanged and still reads off disk; stdout is only the
+        usage source.
+        """
+        fake = make_fake(
+            tmp_path,
+            "codex",
+            stdout=codex_fixture_stdout(),
+            write_output=json.dumps(ANSWER),
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"})))
+
+        assert result.ok is True, result.error
+        argv = fake.record["argv"]
+        assert "--json" in argv
+        assert argv.index("--json") > argv.index("exec"), (
+            "a subcommand flag: it belongs after exec, unlike --search"
+        )
+        assert "-o" in argv
+        assert argv[argv.index("-o") + 1].endswith(CODEX_OUTPUT_NAME)
+        # The answer came from the FILE, not from the event stream, so the
+        # two sources stayed separate.
+        assert result.parsed == ANSWER
+
+    def test_the_real_jsonl_maps_onto_the_engine_s_vocabulary(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``prompt_tokens`` is ``input_tokens`` ALONE, and that is measured.
+
+        ``cached_input_tokens`` is a component of ``input_tokens`` (README:
+        14176 + 12288 cached against 14201 uncached for the same prompt
+        shape), and ``reasoning_output_tokens`` is a component of
+        ``output_tokens`` (a 54-token rise in each, in lockstep).  Adding
+        either would double-count.
+        """
+        fake = make_fake(
+            tmp_path,
+            "codex",
+            stdout=codex_fixture_stdout(),
+            write_output=json.dumps(ANSWER),
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"})))
+
+        assert result.ok is True, result.error
+        assert result.usage == {
+            "prompt_tokens": 14201,
+            "completion_tokens": 15,
+            "cache_creation_prompt_tokens": 0,
+            "cache_read_prompt_tokens": 0,
+        }
+
+    def test_the_expected_counts_are_the_fixture_s_own(self) -> None:
+        """The literals above are read back out of the capture.
+
+        A docstring or an expectation quoting a file nobody opens rots
+        silently; if a re-capture changes the counts, this fails next to the
+        test that asserted them instead of leaving a stale number in place.
+        """
+        events = [
+            json.loads(line)
+            for line in codex_fixture_stdout().splitlines()
+            if line.strip()
+        ]
+        completed = [e for e in events if e.get("type") == "turn.completed"]
+        assert len(completed) == 1, "usage is on exactly one event per run"
+        assert completed[0]["usage"] == {
+            "input_tokens": 14201,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 15,
+            "reasoning_output_tokens": 0,
+        }
+
+    def test_a_cache_hit_maps_onto_the_informational_keys(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Synthetic counts, because the capture never got a cache hit.
+
+        Fourteen real calls -- six with a byte-identical ~14.2k-token prefix
+        back to back -- reported ``cached_input_tokens`` 0 every time, so the
+        account simply was not being credited.  The MAPPING still has to be
+        asserted, so this builds the event in the recorded shape with
+        non-zero cache counts: ``prompt_tokens`` must stay ``input_tokens``
+        and the cache counts must land on the informational keys alone.
+        """
+        stdout = (
+            json.dumps({"type": "turn.started"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 14176,
+                        "cached_input_tokens": 12288,
+                        "cache_write_input_tokens": 64,
+                        "output_tokens": 47,
+                        "reasoning_output_tokens": 30,
+                    },
+                }
+            )
+            + "\n"
+        )
+        fake = make_fake(
+            tmp_path, "codex", stdout=stdout, write_output=json.dumps(ANSWER)
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        usage = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        ).usage
+
+        assert usage == {
+            "prompt_tokens": 14176,
+            "completion_tokens": 47,
+            "cache_creation_prompt_tokens": 64,
+            "cache_read_prompt_tokens": 12288,
+        }
+        assert usage["cache_read_prompt_tokens"] <= usage["prompt_tokens"]
+
+    def test_the_last_turn_completed_wins(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """A stream that reported twice is read as its FINAL state."""
+        stdout = "\n".join(
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": n, "output_tokens": 1,
+                "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+            }})
+            for n in (100, 200)
+        )
+        fake = make_fake(
+            tmp_path, "codex", stdout=stdout, write_output=json.dumps(ANSWER)
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        usage = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        ).usage
+
+        assert usage is not None
+        assert usage["prompt_tokens"] == 200
+
+    def test_a_non_json_line_does_not_discard_the_usage_event(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """A warning on the same stream must not cost the whole reading."""
+        stdout = (
+            "Warning: something the CLI felt like saying\n"
+            + json.dumps({"type": "turn.started"})
+            + "\n[\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 90, "output_tokens": 4},
+                }
+            )
+            + "\n"
+        )
+        fake = make_fake(
+            tmp_path, "codex", stdout=stdout, write_output=json.dumps(ANSWER)
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        usage = run(
+            backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"}))
+        ).usage
+
+        assert usage is not None
+        assert usage["prompt_tokens"] == 90
+        assert usage["completion_tokens"] == 4
+
+    @pytest.mark.parametrize(
+        "stdout, why",
+        [
+            pytest.param("", "no stdout at all", id="empty"),
+            pytest.param(
+                "Reading prompt...\nDone.\n", "stdout that is not JSONL", id="not-jsonl"
+            ),
+            pytest.param(
+                '{"type": "turn.started"}\n{"type": "item.completed"}\n',
+                "a stream with no turn.completed",
+                id="no-turn-completed",
+            ),
+            pytest.param(
+                '{"type": "turn.completed"}\n',
+                "a turn.completed carrying no usage object",
+                id="no-usage-object",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": "none"}\n',
+                "a usage that is not a mapping",
+                id="usage-not-a-map",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": {"output_tokens": 15}}\n',
+                "no input_tokens",
+                id="no-input",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": {"input_tokens": 14201}}\n',
+                "no output_tokens",
+                id="no-output",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": '
+                '{"input_tokens": "many", "output_tokens": 15}}\n',
+                "a non-numeric input_tokens",
+                id="non-numeric-input",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": '
+                '{"input_tokens": 14201, "output_tokens": {}}}\n',
+                "a non-numeric output_tokens",
+                id="non-numeric-output",
+            ),
+            pytest.param(
+                '{"type": "turn.completed", "usage": {"input_tokens": 0, '
+                '"output_tokens": 0, "cached_input_tokens": 0}}\n',
+                "an all-zero turn.completed",
+                id="all-zero",
+            ),
+            pytest.param("[1, 2, 3]\n", "a JSON array rather than objects", id="array"),
+        ],
+    )
+    def test_usage_is_unknown_and_never_zero(
+        self, tmp_path: Path, ready_home: Path, stdout: str, why: str
+    ) -> None:
+        """Each of these is UNMEASURABLE and must read as ``None``.
+
+        The all-zero case is the one worth spelling out: codex's processor
+        emits a zeroed total when it received none, and a real call ALWAYS
+        has input because the prompt itself is input.  Treating that as a
+        measured zero is precisely the #79 defect -- it is what made 18 live
+        calls look free.
+
+        The answer still parses in every case: unknown usage is not a failed
+        call, and failing it would throw away a usable reply.
+        """
+        fake = make_fake(
+            tmp_path, "codex", stdout=stdout, write_output=json.dumps(ANSWER)
+        )
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(seat_kw={"endpoint_kind": "codex_cli"})))
+
+        assert result.ok is True, result.error
+        assert result.parsed == ANSWER
+        assert result.usage is None, f"{why} must read as unknown, not as zero"
+
+    @pytest.mark.parametrize(
+        "fixture",
+        [
+            "codex_ok.jsonl",
+            "codex_reasoning.jsonl",
+            "codex_reasoning_high.jsonl",
+            "codex_schema_key_ok.jsonl",
+        ],
+    )
+    def test_reasoning_tokens_are_never_added_to_completion_tokens(
+        self, fixture: str
+    ) -> None:
+        """Every captured stream, including the two reasoning runs.
+
+        ``codex_reasoning_high.jsonl`` reports ``output_tokens`` 101 with
+        ``reasoning_output_tokens`` 84 for a 13-character final message.
+        Summing them would bill 185 output tokens for that call -- and the
+        README settles which reading is right by measurement: between the
+        two reasoning runs both counters rose by exactly 54, so the
+        reasoning tokens are already inside ``output_tokens``.
+
+        Read through the shipped parser, straight off the fixtures, so a
+        future re-capture or a "simplification" that re-adds the component
+        fails here rather than quietly inflating every reasoning seat's bill.
+        """
+        stdout = (CLI_ENVELOPES / fixture).read_text()
+        reported = next(
+            json.loads(line)["usage"]
+            for line in stdout.splitlines()
+            if line.strip() and json.loads(line).get("type") == "turn.completed"
+        )
+
+        usage = CodexCliBackend._usage(stdout)
+
+        assert usage is not None
+        assert usage["completion_tokens"] == reported["output_tokens"]
+        assert usage["prompt_tokens"] == reported["input_tokens"]
+        if reported["reasoning_output_tokens"]:
+            # Only the two reasoning fixtures reach this, and only they can
+            # tell the right mapping from the wrong one: the naive sum would
+            # be strictly larger, by 30 and 84 tokens respectively.
+            assert usage["completion_tokens"] < (
+                reported["output_tokens"] + reported["reasoning_output_tokens"]
+            )
+
+    def test_a_failed_turn_reports_no_usage(self) -> None:
+        """The captured failure stream has no ``turn.completed`` whatsoever.
+
+        ``codex_nonstrict_output.txt`` is a real rejected run: it ends in
+        ``turn.failed``.  Read straight through the shipped parser, because
+        the claim being tested is about this backend's reading of those
+        bytes, not about the bytes alone.
+        """
+        stdout = (CLI_ENVELOPES / "codex_nonstrict_output.txt").read_text()
+
+        assert "turn.failed" in stdout
+        assert "turn.completed" not in stdout
+        assert CodexCliBackend._usage(stdout) is None
 
 # ---------------------------------------------------------------------------
 # Failure mapping
@@ -2232,6 +2826,7 @@ CLAUDE_BASE_GOLDEN = [
 CODEX_BASE_GOLDEN = [
     "{exe}",
     "exec",
+    "--json",
     "--model",
     MODEL,
     "--output-schema",
@@ -2462,6 +3057,7 @@ class TestCodexWebSearchArgv:
                 str(fake),
                 CODEX_WEB_SEARCH_FLAG,
                 "exec",
+                "--json",
                 "--model",
                 MODEL,
                 "--output-schema",

@@ -37,6 +37,15 @@ Versions found (both exactly as the task expected):
 * ``claude --version`` -> ``2.1.269 (Claude Code)``
 * ``codex --version``  -> ``codex-cli 0.160.0``
 
+Re-verified 2026-11-16, same two versions, by a capture that DID send a
+trivial prompt through both real CLIs in order to record their output shapes:
+``claude 2.1.269 (Claude Code)`` and ``codex-cli 0.160.0`` again, both
+resolving to ``~/.local/bin``.  That capture is committed as
+``tests/domains/ai/council/fixtures/cli_envelopes/`` and its README is the
+evidence for where token usage lives in each CLI's output (issue #79) and for
+which schema keywords each one accepts (issue #77).  No ``--help`` or
+``auth.json`` finding below changed between the two dates.
+
 ``claude --help`` (every flag the Claude argv uses exists, with these
 meanings):
 
@@ -111,8 +120,17 @@ adds:
   (``claude -p --definitely-not-a-flag 'say OK'``) exits 1 the same way and
   makes no model call, which is what makes the sentinel probe free.
 
-``codex --help`` (``codex-cli 0.160.0``).  The switch is a **TOP-LEVEL**
-option and is NOT listed by ``codex exec --help``:
+``codex exec --help`` (``codex-cli 0.160.0``), for the usage flag:
+
+* ``--json`` -- emits the event stream on stdout as one JSON object per
+  line.  A SUBCOMMAND flag, unlike ``--search`` below, so it goes after
+  ``exec``.  It is additive: ``-o`` still writes the final message under it
+  (measured 2026-11-16 -- ``codex_ok_last_message.txt`` and
+  ``codex_ok.jsonl`` come from the same run), so the answer path does not
+  move and only usage is gained (issue #79).
+
+``codex --help`` (``codex-cli 0.160.0``).  The web-search switch is a
+**TOP-LEVEL** option and is NOT listed by ``codex exec --help``:
 
 * ``--search`` -- "Enable live web search.  When enabled, the native
   Responses ``web_search`` tool is available to the model (no per-call

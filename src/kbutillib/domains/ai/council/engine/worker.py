@@ -2025,6 +2025,17 @@ class CouncilWorker:
         the bookkeeping fields alone: duplicating the real numbers onto every
         member would invite a naive reader to sum them and multiply the
         invocation's true cost by ``len(members)``.
+
+        The anchor's record carries the CLI backends' two informational cache
+        keys as well, when the backend reported them.  They are a breakdown
+        of ``prompt_tokens`` and are already inside it, so nothing here sums
+        them -- they are copied so that a batched claude- or codex-CLI
+        invocation's attempt row can still answer "how much of this was
+        cache?", which is the question a subscription seat's cost is actually
+        made of.  Dropping them here would lose that for every batched call
+        while leaving single calls intact, i.e. an inconsistency in the audit
+        trail rather than an honest absence.  Spend apportionment is
+        untouched: it reads ``prompt_tokens``/``completion_tokens`` only.
         """
         payload: Dict[str, Any] = {
             "invocation_id": invocation_id,
@@ -2036,6 +2047,12 @@ class CouncilWorker:
         if is_anchor and usage is not None:
             payload["prompt_tokens"] = usage.get("prompt_tokens")
             payload["completion_tokens"] = usage.get("completion_tokens")
+            # Only when the backend actually reported them: an absent key
+            # must stay absent rather than become a 0 that reads as "this
+            # call used no cache".
+            for key in ("cache_creation_prompt_tokens", "cache_read_prompt_tokens"):
+                if key in usage:
+                    payload[key] = usage.get(key)
         if extra:
             payload.update(dict(extra))
         return payload

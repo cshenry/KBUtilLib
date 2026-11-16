@@ -626,6 +626,108 @@ class TestUsageAttribution:
             assert len(anchors) == 1
             assert anchors[0]["completion_tokens"] == 60
 
+    def test_the_anchor_keeps_the_cli_cache_breakdown(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """Issue #92 item 3: batching must not throw the cache split away.
+
+        A CLI seat's usage carries two extra INFORMATIONAL keys --
+        ``cache_creation_prompt_tokens`` and ``cache_read_prompt_tokens`` --
+        which are a breakdown of ``prompt_tokens`` and are already inside it.
+        For a subscription seat that breakdown IS the cost story: on a real
+        critic call ~62,000 billed input tokens were ~38,000 cache_creation
+        plus ~24,000 cache_read.
+
+        They go on the ANCHOR attempt only, like the real counts: a batch has
+        exactly one invocation and one bill, and copying the numbers onto
+        every member invites a reader to sum them and multiply the true cost
+        by ``len(members)``.
+        """
+        usage = {
+            "prompt_tokens": 62_000,
+            "completion_tokens": 4_752,
+            "cache_creation_prompt_tokens": 38_000,
+            "cache_read_prompt_tokens": 23_998,
+        }
+        script = BatchScript()
+        backend = InstrumentedBackend(script, usage=dict(usage))
+        worker = worker_for(
+            store, {"fake1": backend}, batch_size=20, max_output_tokens_per_item=50
+        )
+        roster = big_roster(3)
+        for _role, seat in roster.seats():
+            grant_cap(monkeypatch, seat, 10_000_000)
+        job_id = worker.submit(
+            make_query(), tasks_for("item-0", "item-1", "item-2", "item-3"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        rows = calls_of(store, job_id, role="proposer", seat_name="proposer_1")
+        call_ids = {r["call_id"] for r in rows}
+        members = [
+            a["usage"]
+            for a in attempts_of(store)
+            if a["call_id"] in call_ids
+            and isinstance(a["usage"], dict)
+            and "invocation_id" in a["usage"]
+        ]
+        assert len(members) == 4, "every member's attempt references the invocation"
+
+        anchors = [u for u in members if u.get("completion_tokens") is not None]
+        assert len(anchors) == 1, "exactly one anchor attempt carries real usage"
+        anchor = anchors[0]
+        assert anchor["prompt_tokens"] == 62_000
+        assert anchor["cache_creation_prompt_tokens"] == 38_000
+        assert anchor["cache_read_prompt_tokens"] == 23_998
+        # Still a SUBSET of prompt_tokens, not an addition to it: nothing in
+        # the audit trail licenses summing all three.
+        assert (
+            anchor["cache_creation_prompt_tokens"] + anchor["cache_read_prompt_tokens"]
+            <= anchor["prompt_tokens"]
+        )
+
+        for member in members:
+            if member is anchor:
+                continue
+            assert "cache_creation_prompt_tokens" not in member
+            assert "cache_read_prompt_tokens" not in member
+            assert "prompt_tokens" not in member
+
+    def test_a_usage_without_cache_keys_adds_neither(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """An HTTP seat reports no cache keys, and none are invented.
+
+        A 0 here would read as "this call used no cache", which is a claim
+        about a provider that never made it.  Absent must stay absent.
+        """
+        backend = InstrumentedBackend(
+            BatchScript(), usage={"prompt_tokens": 40, "completion_tokens": 120}
+        )
+        worker = worker_for(
+            store, {"fake1": backend}, batch_size=20, max_output_tokens_per_item=50
+        )
+        roster = big_roster(3)
+        for _role, seat in roster.seats():
+            grant_cap(monkeypatch, seat, 1_000_000)
+        job_id = worker.submit(
+            make_query(), tasks_for("item-0", "item-1", "item-2"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        anchors = [
+            a["usage"]
+            for a in attempts_of(store)
+            if isinstance(a["usage"], dict)
+            and "invocation_id" in a["usage"]
+            and a["usage"].get("completion_tokens") is not None
+        ]
+        assert anchors, "no anchor attempt was recorded"
+        for anchor in anchors:
+            assert anchor["prompt_tokens"] == 40
+            assert "cache_creation_prompt_tokens" not in anchor
+            assert "cache_read_prompt_tokens" not in anchor
+
     def test_assigned_moves_by_one_per_batch_not_n(self, store: Any, monkeypatch: Any) -> None:
         backend = fake(BatchScript())
         config = endpoint_config(fake1={"account": "acct", "max_concurrency": 1})

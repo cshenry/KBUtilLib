@@ -37,6 +37,7 @@ from click.testing import CliRunner
 from kbutillib.cli import main
 from kbutillib.domains.ai.council.backends.testing import FakeBackend
 from kbutillib.domains.ai.council.store.schema import SCHEMA_VERSION
+from kbutillib.domains.ai.council.types import InvalidOutput, QuotaExhausted
 from kbutillib.domains.ai.council_utils import CouncilUtils
 
 #: The envelope keys every verb emits.  Pinned as a set so an additive field
@@ -172,6 +173,48 @@ def fake_council(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[str]:
     argv = ["council", "--config", str(config_path), "--store", store]
     CliRunner().invoke(main, argv + ["db", "init", "--json"], catch_exceptions=False)
     return argv
+
+
+def _council_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: Any,
+    name: str,
+) -> List[str]:
+    """``fake_council``, but over *script* and in its own directory.
+
+    Its own directory because the execution lock lives beside the store file:
+    a test that wants two councils (a failing one and a working one) would
+    otherwise have them exclude each other.
+    """
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = _write_config(root, _fake_council_config(root))
+    store = f"sqlite:///{root}/council.sqlite"
+    backend = _ServingFake(script)
+    monkeypatch.setattr(
+        CouncilUtils,
+        "build_backends",
+        lambda self, roster, allow_unverified=None: {"local": backend},
+    )
+    argv = ["council", "--config", str(config_path), "--store", store]
+    CliRunner().invoke(main, argv + ["db", "init", "--json"], catch_exceptions=False)
+    return argv
+
+
+@pytest.fixture()
+def failing_council(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[str]:
+    """A council whose every call fails terminally.
+
+    ``InvalidOutput`` rather than a transport error: it is terminal on the
+    first attempt, so the job settles without waiting out the retry backoff
+    -- and it is the kind the first live run actually hit.
+    """
+
+    def _failing(req: Any) -> Any:
+        return InvalidOutput("the model answered with nonsense")
+
+    return _council_argv(tmp_path, monkeypatch, _failing, "failing")
 
 
 @pytest.fixture()
@@ -376,6 +419,100 @@ class TestJobLifecycle:
         assert result.exit_code == 1
         assert envelope["data"]["blockers"]
         assert any("blocked" in warning for warning in envelope["warnings"])
+
+    def test_run_exits_two_when_the_job_settled_with_errored_items(
+        self, runner: CliRunner, failing_council: List[str], items_file: Path
+    ) -> None:
+        """Issue #78: `done` with every item errored is not a success.
+
+        Through the real `run` command against a real store, because the
+        thing being pinned is the exit code a shell script sees -- not what
+        ``job_status`` would have returned had it been asked.
+        """
+        result = runner.invoke(
+            main,
+            failing_council + ["run", "--query", "go_mf", "--input", str(items_file), "--json"],
+        )
+        envelope = _envelope(result)
+        assert result.exit_code == 2
+        assert envelope["data"]["status"] == "done"
+        assert envelope["data"]["blockers"] == []
+        assert envelope["data"]["errored_items"] == 2
+        assert envelope["data"]["outcome"] == "all_errored"
+
+    def test_run_still_exits_zero_on_a_clean_job(
+        self, runner: CliRunner, fake_council: List[str], items_file: Path
+    ) -> None:
+        result = runner.invoke(
+            main,
+            fake_council + ["run", "--query", "go_mf", "--input", str(items_file), "--json"],
+        )
+        envelope = _envelope(result)
+        assert result.exit_code == 0
+        assert envelope["data"]["errored_items"] == 0
+        assert envelope["data"]["outcome"] == "clean"
+
+    def test_a_job_both_blocked_and_errored_exits_one(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        items_file: Path,
+    ) -> None:
+        """Blocked wins: the job has outstanding work, so it is not over yet.
+
+        One item's seats fail terminally (so the item errors) while the other
+        item's first answer is a quota refusal, which halts the endpoint and
+        leaves its calls PENDING -- the only state in which a job carries
+        both an errored item and a blocker.
+        """
+
+        def _script(req: Any) -> Any:
+            if "beta transferase" in req.user:
+                return QuotaExhausted("no quota left")
+            return InvalidOutput("the model answered with nonsense")
+
+        argv = _council_argv(tmp_path, monkeypatch, _script, "mixed")
+        result = runner.invoke(
+            main, argv + ["run", "--query", "go_mf", "--input", str(items_file), "--json"]
+        )
+        envelope = _envelope(result)
+        assert envelope["data"]["errored_items"] == 1, envelope["data"]
+        assert [b["kind"] for b in envelope["data"]["blockers"]] == ["halted"]
+        assert envelope["data"]["status"] != "done"
+        assert envelope["data"]["outcome"] is None
+        assert result.exit_code == 1
+
+    def test_jobs_status_warns_about_errored_items(
+        self, runner: CliRunner, failing_council: List[str], items_file: Path
+    ) -> None:
+        """The operator-facing half of #78: a line they cannot read past."""
+        errored = runner.invoke(
+            main,
+            failing_council + ["run", "--query", "go_mf", "--input", str(items_file), "--json"],
+        )
+        job_id = _envelope(errored)["data"]["job_id"]
+        status = runner.invoke(main, failing_council + ["jobs", "status", job_id])
+        assert status.exit_code == 0, status.output
+        assert "outcome: all_errored (2 errored)" in status.output
+        warning = next(
+            line for line in status.output.splitlines() if line.startswith("WARNING:")
+        )
+        assert "2 item(s) errored" in warning
+        assert f"kbu council jobs results {job_id}" in warning
+
+    def test_jobs_status_does_not_warn_about_a_clean_job(
+        self, runner: CliRunner, fake_council: List[str], items_file: Path
+    ) -> None:
+        clean = runner.invoke(
+            main,
+            fake_council + ["run", "--query", "go_mf", "--input", str(items_file), "--json"],
+        )
+        clean_job = _envelope(clean)["data"]["job_id"]
+        clean_status = runner.invoke(main, fake_council + ["jobs", "status", clean_job])
+        assert clean_status.exit_code == 0, clean_status.output
+        assert "outcome: clean (0 errored)" in clean_status.output
+        assert "WARNING:" not in clean_status.output
 
     def test_run_refuses_both_forms_at_once(
         self, runner: CliRunner, fake_council: List[str], items_file: Path

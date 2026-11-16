@@ -405,7 +405,13 @@ class CouncilStore(Protocol):
     # -- job control ------------------------------------------------------
 
     def job_status(self, job_id: str) -> Dict[str, Any]:
-        """Progress, pending work by role and endpoint, blockers, throughput."""
+        """Progress, pending work by role and endpoint, blockers, throughput.
+
+        Also ``errored_items`` and ``outcome`` (``None`` unless the job is
+        ``done``, else ``clean``/``with_errors``/``all_errored``): ``status``
+        says whether the work is over, not whether it worked.  See
+        :meth:`.SqliteStore.job_status` for the full key list.
+        """
         ...
 
     def results(self, job_id: str, include_pending: bool = False) -> List[Dict[str, Any]]:

@@ -907,7 +907,8 @@ class CouncilUtils(SharedEnvUtils):
         Returns:
             ``job_status(job_id)`` with the worker's own summary added under
             ``"worker"``.  A job that ended with a non-empty ``blockers`` list
-            did not finish, which is what ``kbu council run`` exits 1 on.
+            did not finish, which is what ``kbu council run`` exits 1 on; a
+            finished job with ``errored_items`` is what it exits 2 on.
         """
         from .council.types import Roster, SeatSpec
 
@@ -1021,7 +1022,14 @@ class CouncilUtils(SharedEnvUtils):
     # -- job control ------------------------------------------------------
 
     def job_status(self, job_id: str) -> Dict[str, Any]:
-        """Progress, outstanding work by role and endpoint, and blockers."""
+        """Progress, outstanding work by role and endpoint, and blockers.
+
+        The store's dict, unchanged -- which is how ``errored_items`` and
+        ``outcome`` reach a caller through this facade as well.  Read them:
+        a job whose every item errored is still ``status == "done"`` with
+        empty ``blockers`` (issue #78), so ``status`` alone cannot tell a
+        caller whether the verdicts it is about to use exist.
+        """
         return self.require_schema().job_status(job_id)
 
     def results(

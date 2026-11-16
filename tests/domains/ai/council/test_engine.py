@@ -1198,6 +1198,70 @@ class TestFailuresAndRetries:
         assert verdict.votes == {"A:1": 2}
 
 
+class TestJobOutcomeThroughTheEngine:
+    """What a job whose work failed reports once the worker is done (#78).
+
+    Driven through the real worker rather than through ``settle_item``,
+    because the thing being pinned is the state the ENGINE leaves behind: two
+    live runs on poplar ended ``done``, 100%, ``by_status {'error': 9}`` and
+    ``blockers []``, and were read as successes.  ``status`` is deliberately
+    unchanged, so the signal is ``outcome``/``errored_items``.
+    """
+
+    def test_a_job_whose_every_call_failed_is_done_and_all_errored(
+        self, store: Any
+    ) -> None:
+        # InvalidOutput, not a transport error: it is terminal on the first
+        # attempt, so the job settles without waiting out three retries.
+        script = {role: InvalidOutput("nonsense") for role in ("proposer", "critic")}
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        tasks = [make_task("item-1"), make_task("item-2", text="beta transferase")]
+        job_id = worker.submit(make_query(), tasks, make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        status = store.job_status(job_id)
+        assert status["status"] == "done"
+        assert status["percent_complete"] == 100.0
+        assert status["blockers"] == []
+        assert status["by_status"] == {"error": 2}
+        assert status["errored_items"] == status["n_items"] == 2
+        assert status["outcome"] == "all_errored"
+        # And the verdicts it "finished" with are empty, which is what makes
+        # the silent-success reading a data-corruption risk.
+        for task in tasks:
+            assert verdict_of(store, job_id, task.item_id).selected_ids == []
+
+    def test_a_job_with_one_failing_item_is_with_errors(self, store: Any) -> None:
+        """One bad item among good ones: still done, but not clean."""
+
+        def script(req: Any) -> Any:
+            if "beta transferase" in req.user:
+                return InvalidOutput("nonsense")
+            return agreeing_script("A:1")[req.role]
+
+        worker = worker_for(store, {"fake1": InstrumentedBackend(script)})
+        tasks = [make_task("item-1"), make_task("item-2", text="beta transferase")]
+        job_id = worker.submit(make_query(), tasks, make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        status = store.job_status(job_id)
+        assert status["status"] == "done"
+        assert status["by_status"] == {"ok": 1, "error": 1}
+        assert status["errored_items"] == 1
+        assert status["outcome"] == "with_errors"
+
+    def test_a_job_the_council_answered_is_clean(self, store: Any) -> None:
+        worker = worker_for(store, {"fake1": fake(agreeing_script("A:1"))})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        status = store.job_status(job_id)
+        assert status["status"] == "done"
+        assert status["errored_items"] == 0
+        assert status["outcome"] == "clean"
+
+
 class TestBackoff:
     """The shipped backoff values, independent of the fast test timings."""
 

@@ -2155,6 +2155,99 @@ class TestJobStatus:
             store.job_status("ghost")
 
 
+class TestJobOutcome:
+    """``errored_items`` and ``outcome``: HOW a finished job finished (#78).
+
+    The status vocabulary is untouched on purpose -- the daemon, the worker's
+    job scoping, the store and the BERDL archive all branch on
+    ``done``/``cancelled`` -- so "every item errored" has to be readable
+    without a new status.  ``blockers`` is no help: a done job has no
+    outstanding calls, so it is empty by construction, which is exactly how
+    two live runs were read as successes.
+    """
+
+    def _job(self, store, *settlements, status="done", n=None):
+        """A job of *settlements* ``(item_id, status)``, left in *status*."""
+        items = [item_row(item_id) for item_id, _ in settlements]
+        job_id = store.create_job(job_row(), items, [])
+        for item_id, item_status in settlements:
+            store.settle_item(job_id, item_id, item_status, {})
+        if status != "queued":
+            store.set_job_status(job_id, status)
+        return job_id
+
+    def test_an_unfinished_job_counts_its_errors_but_has_no_outcome_yet(self, store):
+        """A running job's errors are real; its outcome is not decided."""
+        job_id = store.create_job(
+            job_row(),
+            [item_row("item-1"), item_row("item-2")],
+            [call_row("item-2", "proposer_1")],
+        )
+        store.settle_item(job_id, "item-1", "error", None)
+        status = store.job_status(job_id)
+        assert status["status"] == "queued"
+        assert status["errored_items"] == 1
+        assert status["outcome"] is None
+
+    def test_a_done_job_with_no_errors_is_clean(self, store):
+        status = store.job_status(self._job(store, ("item-1", "ok"), ("item-2", "ok")))
+        assert status["status"] == "done"
+        assert status["errored_items"] == 0
+        assert status["outcome"] == "clean"
+
+    def test_a_done_job_with_some_errors_is_with_errors(self, store):
+        status = store.job_status(
+            self._job(store, ("item-1", "ok"), ("item-2", "error"))
+        )
+        assert status["errored_items"] == 1
+        assert status["outcome"] == "with_errors"
+
+    def test_a_done_job_whose_every_item_errored_is_all_errored(self, store):
+        """The shape issue #78 was filed about: done, 100%, nothing blocked."""
+        status = store.job_status(
+            self._job(store, ("item-1", "error"), ("item-2", "error"))
+        )
+        assert status["status"] == "done"
+        assert status["percent_complete"] == 100.0
+        assert status["blockers"] == []
+        assert status["errored_items"] == status["n_items"] == 2
+        assert status["outcome"] == "all_errored"
+
+    def test_cancelled_items_do_not_dilute_all_errored(self, store):
+        """A job cancelled mid-flight still all_errored about what it worked."""
+        status = store.job_status(
+            self._job(store, ("item-1", "error"), ("item-2", "cancelled"))
+        )
+        assert status["errored_items"] == 1
+        assert status["outcome"] == "all_errored"
+
+    def test_a_done_job_with_no_items_at_all_is_clean(self, store):
+        job_id = store.create_job(job_row(), [], [])
+        store.set_job_status(job_id, "done")
+        status = store.job_status(job_id)
+        assert status["n_items"] == 0
+        assert status["errored_items"] == 0
+        assert status["outcome"] == "clean"
+
+    def test_a_done_job_whose_every_item_was_cancelled_is_clean(self, store):
+        """Nothing errored, so nothing to warn about -- whatever else happened."""
+        status = store.job_status(
+            self._job(store, ("item-1", "cancelled"), ("item-2", "cancelled"))
+        )
+        assert status["errored_items"] == 0
+        assert status["outcome"] == "clean"
+
+    def test_a_cancelled_job_has_no_outcome_even_with_errored_items(self, store):
+        """``outcome`` answers "how did it finish", and cancelled did not."""
+        job_id = store.create_job(job_row(), [item_row("item-1")], [])
+        store.settle_item(job_id, "item-1", "error", None)
+        store.cancel_job(job_id)
+        status = store.job_status(job_id)
+        assert status["status"] == "cancelled"
+        assert status["errored_items"] == 1
+        assert status["outcome"] is None
+
+
 # ---------------------------------------------------------------------------
 # Job control: results
 # ---------------------------------------------------------------------------

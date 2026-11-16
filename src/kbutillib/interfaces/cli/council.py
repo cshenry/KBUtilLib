@@ -42,7 +42,10 @@ TWO RULES SPECIFIC TO THE COUNCIL:
 EXIT CODES.  ``doctor`` exits 1 when a seat is unavailable and 2 when none is
 but some are unknown -- "I could not tell" is a different answer from "it is
 broken", and a CI gate wants to distinguish them.  ``run`` exits 1 when the
-job it worked ended blocked.  Everything else exits 0 or raises.
+job it worked ended blocked and 2 when it settled with errored items -- a job
+whose every item errored still reads ``done`` with no blockers, and exit 0
+there is how two live runs were mistaken for successes (issue #78).
+Everything else exits 0 or raises.
 """
 
 from __future__ import annotations
@@ -167,6 +170,18 @@ def _render(envelope: Dict[str, Any]) -> None:
             f"{data.get('percent_complete')}% of {data.get('n_items')} item(s)"
         )
         click.echo(f"items: {data.get('by_status')}")
+        errored = int(data.get("errored_items") or 0)
+        click.echo(f"outcome: {data.get('outcome')} ({errored} errored)")
+        if errored:
+            # The warning the first live run needed and did not get (#78):
+            # "done" with every item errored read as a success, so the next
+            # step has to be named here rather than inferred from a count.
+            click.echo(
+                f"WARNING: {errored} item(s) errored and were settled with an "
+                "empty verdict; inspect them with "
+                f"`kbu council jobs results {data.get('job_id')}` before "
+                "using this job's output"
+            )
         pending = data.get("pending_calls_by_role_endpoint") or {}
         if pending:
             click.echo(f"pending calls: {pending}")
@@ -754,7 +769,8 @@ def run_cmd(
     """Work a job in the foreground until it is idle.
 
     Either `--job ID`, or `--query ... --input ...` to submit and immediately
-    work the result. Exits 1 if the job ended blocked.
+    work the result. Exits 1 if the job ended blocked, 2 if it settled with
+    errored items.
     """
     if bool(job_id) == bool(query or input_file):
         raise click.UsageError("give either --job ID, or --query with --input, but not both")
@@ -777,6 +793,13 @@ def run_cmd(
     _emit(envelope, as_json=as_json)
     if envelope["data"].get("blockers"):
         raise SystemExit(1)
+    # Errored items are reported SECOND because blocked is the more urgent of
+    # the two: a blocked job still has work to do, so its errors are not yet
+    # the final story.  Exit 2 is what a shell script needs in order to stop
+    # treating "done" as success (#78) -- the job finished, but some of its
+    # items settled with an empty verdict.
+    if envelope["data"].get("errored_items"):
+        raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -925,7 +948,7 @@ def jobs_cmd(
 @_json_option
 @click.pass_context
 def jobs_status_cmd(ctx: click.Context, job_id: str, as_json: bool) -> None:
-    """Progress, outstanding work by role and endpoint, and blockers."""
+    """Progress, outcome, outstanding work by role and endpoint, and blockers."""
     try:
         status = _ready(ctx).job_status(job_id)
     except click.ClickException:

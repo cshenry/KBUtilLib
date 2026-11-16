@@ -2546,6 +2546,19 @@ class SqliteStore:
                 caller does not need a second ``get_job``.
             ``n_items``: the job's stored item count.
             ``by_status``: item counts keyed by item status.
+            ``errored_items``: how many items settled as ``error``, lifted out
+                of ``by_status`` because a caller that only glanced at
+                ``status`` would otherwise never see them.
+            ``outcome``: HOW a finished job finished -- ``None`` while it is
+                unfinished, else ``clean``, ``with_errors`` or
+                ``all_errored``.  ``status`` says only WHETHER the work is
+                over: a job whose every item errored still reads ``done``
+                with empty ``blockers`` (nothing is outstanding, so nothing
+                is blocked), and two live runs were read as successes that
+                way (issue #78).  The status vocabulary is deliberately
+                unchanged -- daemon, worker scoping, the store and the BERDL
+                archive all branch on ``done``/``cancelled`` -- so the
+                distinction lands here instead.
             ``percent_complete``: settled items / ``n_items`` * 100, to one
                 decimal.  A job with no items reads 100.0 -- there is nothing
                 outstanding, and 0.0 would make it look stuck forever.
@@ -2581,6 +2594,21 @@ class SqliteStore:
 
         n_items = int(job["n_items"] or 0)
         settled = sum(n for s, n in by_status.items() if s in q.SETTLED_ITEM_STATUSES)
+        errored_items = int(by_status.get("error", 0))
+        # A cancelled item never had a chance to error, so it is discounted
+        # from "all of them errored": a job cancelled halfway with its worked
+        # items all failed is still all_errored about the work it did.  A job
+        # with nothing errored is clean whatever else happened to it,
+        # including a job with no items at all.
+        cancelled_items = int(by_status.get("cancelled", 0))
+        outcome: Optional[str] = None
+        if job["status"] == "done":
+            if errored_items == 0:
+                outcome = "clean"
+            elif errored_items == n_items - cancelled_items:
+                outcome = "all_errored"
+            else:
+                outcome = "with_errors"
         by_role_endpoint: Dict[str, Dict[str, int]] = {}
         for call in pending:
             per_endpoint = by_role_endpoint.setdefault(str(call["role"]), {})
@@ -2592,6 +2620,8 @@ class SqliteStore:
             "status": job["status"],
             "n_items": n_items,
             "by_status": by_status,
+            "errored_items": errored_items,
+            "outcome": outcome,
             "percent_complete": round(settled / n_items * 100, 1) if n_items else 100.0,
             "pending_calls_by_role_endpoint": by_role_endpoint,
             "blockers": self._blockers(job, pending, now),

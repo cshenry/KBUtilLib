@@ -25,7 +25,12 @@ import sqlalchemy as sa
 from kbutillib.domains.ai.council.engine import worker as worker_module
 from kbutillib.domains.ai.council.engine.worker import CouncilWorker
 from kbutillib.domains.ai.council.store import schema as sch
-from kbutillib.domains.ai.council.types import Roster, SeatSpec, TransportError
+from kbutillib.domains.ai.council.types import (
+    Roster,
+    SchemaIncompatible,
+    SeatSpec,
+    TransportError,
+)
 
 from .engine_support import (
     InstrumentedBackend,
@@ -827,3 +832,155 @@ class TestBatchSizeOneUnchanged:
         assert len(proposer_1_reqs) == 3
         assert all("item_key" not in (r.user or "") for r in proposer_1_reqs)
         assert store.get_job(job_id)["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# A schema refusal is settled, not bisected (t2b)
+# ---------------------------------------------------------------------------
+
+
+class SchemaRefusingScript(BatchScript):
+    """A :class:`BatchScript` whose *refuse_roles* refuse the ROLE SCHEMA.
+
+    Mirrors what ``CodexCliBackend._run`` does when ``strict_problems``
+    reports a non-empty lint (t2): the whole invocation comes back
+    ``schema_incompatible`` WITHOUT the CLI being spawned, and it does so for
+    every invocation of that role whatever items it carries and however many
+    members it has -- because the refusal is a property of the role's answer
+    schema, which a half and a singleton carry unchanged.
+    """
+
+    def __init__(self, *, refuse_roles: Sequence[str] = ("proposer",), **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.refuse_roles = set(refuse_roles)
+
+    def __call__(self, req: Any) -> Any:
+        if req.role in self.refuse_roles:
+            raise SchemaIncompatible(
+                "$: required must list every key in properties (missing: notes)"
+            )
+        return super().__call__(req)
+
+
+def member_counts(backend: Any, seat_name: str) -> List[int]:
+    """Members per invocation this backend saw for *seat_name*, in order.
+
+    ``0`` means an UNWRAPPED single call -- the shape bisection bottoms out
+    to -- so a list containing a zero is direct evidence of a singleton
+    fallback, and one containing a number between 1 and the original batch
+    size is evidence of a half.
+    """
+    return [
+        len(_batched_pairs(req.user or ""))
+        for req in backend.calls
+        if req.seat.seat_name == seat_name
+    ]
+
+
+class TestSchemaRefusedBatch:
+    """A refused batch settles its members; it is NOT bisected.
+
+    The defect this pins (confront round 1, stall 3): the batch runner used
+    to bisect EVERY ``batch_failed`` outcome without consulting whether the
+    error could survive a retry, so one configuration error cost ``2n - 1``
+    invocations -- every one of them refused identically -- before the rows
+    reached the terminal state the FIRST refusal already justified.
+    """
+
+    def _worker(self, store: Any, script: BatchScript, monkeypatch: Any, **kwargs: Any) -> Any:
+        backend = fake(script)
+        worker = worker_for(
+            store, {"fake1": backend}, batch_size=10, max_output_tokens_per_item=50, **kwargs
+        )
+        roster = big_roster(3)
+        for _role, seat in roster.seats():
+            grant_cap(monkeypatch, seat, 1_000_000)
+        return worker, roster, backend
+
+    def test_every_member_is_settled_and_the_backend_is_never_asked_again(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        worker, roster, backend = self._worker(
+            store,
+            SchemaRefusingScript(refuse_roles=("proposer",)),
+            monkeypatch,
+            # A max_attempts above 1 is what makes the assertion mean
+            # something: the rows settle terminally because the ERROR is
+            # terminal, not because their attempt budget ran out.
+            max_attempts=3,
+            retry_backoff_s=(1000.0, 1000.0),
+        )
+        items = ["item-1", "item-2", "item-3", "item-4"]
+        job_id = worker.submit(make_query(), tasks_for(*items), roster)
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        rows = calls_of(store, job_id, role="proposer")
+        assert len(rows) == 12  # 3 proposer seats x 4 items
+        for row in rows:
+            assert row["status"] == "error", row["item_id"]
+            assert row["error"]["kind"] == "schema_incompatible"
+            assert row["error"]["retryable"] is False
+
+        # EXACTLY ONE failed attempt per member, and a CHARGED (positive)
+        # one -- not the negative uncharged ancestor-failure row a bisected
+        # invocation files, because there is no later solo attempt to
+        # reserve the budget for.
+        by_call: Dict[str, List[Dict[str, Any]]] = {}
+        for attempt in attempts_of(store):
+            by_call.setdefault(attempt["call_id"], []).append(attempt)
+        for row in rows:
+            mine = by_call.get(row["call_id"], [])
+            assert len(mine) == 1, f"{row['item_id']}: {len(mine)} attempts"
+            assert mine[0]["attempt_no"] == 1
+            assert mine[0]["outcome_kind"] == "schema_incompatible"
+            # The invocation stays reconstructible from any member, exactly
+            # as it is for a settled or a bisected one.
+            assert mine[0]["usage"]["batch_size"] == 4
+
+        # ONE invocation per seat, each carrying all four members: no half
+        # was ever asked and no singleton fallback was ever made.
+        for seat_name in ("proposer_1", "proposer_2", "proposer_3"):
+            assert member_counts(backend, seat_name) == [4], seat_name
+        assert len(backend.calls) == 3, "something else was asked a model"
+
+        # Every item was ADVANCED, so the job finished rather than waiting
+        # on rows nothing will ever answer.  "error" (not "ok"): no proposer
+        # seat voted, so there is nothing for a critic or meta to audit.
+        item_rows = store.get_items(job_id)
+        assert len(item_rows) == 4
+        assert all(row["status"] == "error" for row in item_rows)
+        assert store.get_job(job_id)["status"] == "done"
+
+    def test_a_non_schema_whole_invocation_failure_still_bisects(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """The other half of the branch: everything else behaves as before.
+
+        Same four items and the same batch size as the refusal test above,
+        failing the whole invocation for a reason a retry COULD survive --
+        so the halves and then the singletons are asked, which is the
+        behaviour the base commit has and this task must not change.
+        """
+        worker, roster, backend = self._worker(
+            store,
+            BatchScript(poison_item_ids={"poison"}, poison_seat="proposer_1"),
+            monkeypatch,
+            # The DEFAULT fast backoff, so the isolated poison row's own
+            # retry happens inside this run and it reaches its terminal
+            # state -- the shape ``TestBisection`` already pins.
+            max_attempts=2,
+        )
+        items = ["item-1", "item-2", "poison", "item-4"]
+        job_id = worker.submit(make_query(), tasks_for(*items), roster)
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        counts = member_counts(backend, "proposer_1")
+        assert counts[0] == 4, "the whole batch was asked first"
+        assert 2 in counts, "the halves were asked -- bisection still happens"
+        assert 0 in counts, "bisection still bottoms out in single calls"
+
+        rows = {r["item_id"]: r for r in calls_of(store, job_id, role="proposer", seat_name="proposer_1")}
+        assert rows["poison"]["status"] == "error"
+        assert rows["poison"]["error"]["kind"] == "transport"
+        for item_id in ("item-1", "item-2", "item-4"):
+            assert rows[item_id]["status"] == "ok"

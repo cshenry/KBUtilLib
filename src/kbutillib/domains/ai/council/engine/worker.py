@@ -98,6 +98,7 @@ from ..types import (
     MenuEntry,
     Roster,
     RosterError,
+    SchemaIncompatible,
     SeatSpec,
     canonical_sha256,
     data_hash,
@@ -1727,6 +1728,10 @@ class CouncilWorker:
         including its own ``max_attempts`` gate -- so a poison item is
         isolated in ``log2(n)`` rounds and costs only its OWN attempts, never
         its batch-mates'.
+
+        The ONE whole-invocation failure that is not bisected is a schema
+        refusal, which :meth:`_invoke_batch` settles itself and reports as
+        ``"batch_refused"`` -- see :meth:`_settle_batch_refused`.
         """
         if len(rows) <= 1:
             for row in rows:
@@ -1838,7 +1843,10 @@ class CouncilWorker:
         :meth:`_settle_batch_answers`), or ``"batch_failed"`` when the
         invocation itself did not individually judge any item (transport,
         timeout, truncation, or a wrapper-schema-invalid reply), which the
-        caller retries by bisection.
+        caller retries by bisection.  ``"batch_refused"`` is the third
+        outcome: the invocation failed as a whole, but with an error no
+        retry of any shape could survive, so every member was settled here
+        (:meth:`_settle_batch_refused`) and the caller must NOT bisect.
 
         Usage is recorded exactly once per invocation, by ``invocation_id``
         -- never anchored on "the first call row", which may itself be
@@ -1933,6 +1941,22 @@ class CouncilWorker:
             self._enforce_budget(endpoint, usage)
 
         if batch_error is not None:
+            if batch_error.kind == SchemaIncompatible.kind:
+                # A SCHEMA REFUSAL IS NOT A POISON ITEM -- do not bisect.
+                # See :meth:`_settle_batch_refused` for why splitting (or
+                # falling back to singletons) can only multiply it.
+                self._settle_batch_refused(
+                    members,
+                    invocation_id,
+                    anchor,
+                    anchor_attempt_no,
+                    usage,
+                    batch_error,
+                    started,
+                    finished,
+                    queued_at,
+                )
+                return "batch_refused"
             if getattr(batch_error, "rate_limited", False):
                 # The same SUSTAINED test the single-call path makes (see
                 # :meth:`_note_rate_limit`).  The halt is set directly rather
@@ -2113,6 +2137,81 @@ class CouncilWorker:
                 usage=dict(usage),
                 worker_id=self.worker_id,
             )
+
+    def _settle_batch_refused(
+        self,
+        members: List[_BatchMember],
+        invocation_id: str,
+        anchor: _BatchMember,
+        anchor_attempt_no: int,
+        usage: Optional[Mapping[str, Any]],
+        error: CouncilError,
+        started: datetime,
+        finished: datetime,
+        queued_at: datetime,
+    ) -> None:
+        """Settle EVERY member terminally, at once, on a SCHEMA REFUSAL.
+
+        ``schema_incompatible`` means the backend refused the ROLE's answer
+        schema -- before anything ran, and without reading a single item (see
+        ``llm.types.SchemaIncompatible`` and ``llm.apis.schema_compat``).
+        That is a CONFIGURATION error, and it is identical for every member
+        of this invocation: bisecting it would re-ask the same refusal for
+        each half and then for each half of that, costing ``n - 1`` extra
+        invocations to learn nothing the first refusal did not already say.
+        Nor is a singleton fallback an escape -- bisection bottoms out in
+        calls carrying the SAME role schema, which is the thing being
+        refused, so each of those is refused too (``execute`` falls through
+        to :meth:`_fail_call`, and it would arrive there ``n`` times).
+
+        So each member is failed here exactly as :meth:`_fail_call` would:
+        the call settled ``error`` carrying this error, ONE charged attempt
+        (``attempt_count + 1``, not the negative uncharged number
+        :meth:`_record_failed_invocation` files -- there is no later solo
+        attempt to reserve the budget for, because the refusal is terminal),
+        and the item advanced so the job can finish instead of waiting on a
+        row nothing will ever answer.  The claims are consumed rather than
+        released, for the same reason.
+
+        The audit payload is the ordinary per-invocation one, so a refused
+        invocation is reconstructible from any one of its members exactly as
+        a successful or a bisected one is.
+        """
+        member_call_ids = [str(m.call["call_id"]) for m in members]
+        anchor_call_id = str(anchor.call["call_id"])
+        for member in members:
+            call, token = member.call, member.token
+            call_id = str(call["call_id"])
+            payload = self._invocation_usage(
+                invocation_id,
+                member_call_ids,
+                anchor_call_id,
+                anchor_attempt_no,
+                usage,
+                is_anchor=call_id == anchor_call_id,
+            )
+            attempt_no = int(call.get("attempt_count") or 0) + 1
+            try:
+                with self.store.transaction():
+                    self.store.complete_call(
+                        call_id,
+                        token,
+                        "error",
+                        reply_text=None,
+                        error=error.model_dump(),
+                    )
+                    self._write_attempt(
+                        call_id,
+                        attempt_no,
+                        started,
+                        finished,
+                        error.kind,
+                        payload,
+                        queued_at,
+                    )
+                    self.advance(call["job_id"], call["item_id"])
+            except StaleClaim:  # pragma: no cover - another worker already has it
+                continue
 
     def _settle_batch_answers(
         self,

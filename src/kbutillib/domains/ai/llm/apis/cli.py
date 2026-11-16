@@ -23,6 +23,23 @@ The two differ in exactly how a schema goes in and an answer comes out:
 Neither accepts a temperature or an output-token ceiling, which is why
 ``effective_params`` is just the model name for both.
 
+They also disagree about what a SCHEMA may contain, and both disagreements
+are repaired here rather than in a stored spec, because the stored schema is
+part of what a call was asked under and rewriting it would re-identify every
+historical call (see :mod:`.schema_compat` for the measurements):
+
+* claude's ``--json-schema`` validator rejects a schema that declares its own
+  dialect, so every schema is passed through
+  :func:`~.schema_compat.strip_meta_keywords` on the way into argv.
+* codex's strictness is enforced by the API at 400 AFTER the CLI has opened a
+  thread, so :func:`~.schema_compat.strict_problems` runs as a local
+  preflight and refuses before spawning -- a refusal that costs nothing
+  instead of one paid round trip per item.
+
+Neither backend EDITS a schema's meaning: ``$schema`` is dropped for claude
+because claude cannot read it, and codex is handed exactly what it would have
+been handed before, minus the same key.
+
 Prompt text is never logged at INFO or above, and never appears in ``argv``:
 it goes in on stdin, so it cannot leak through ``ps`` to another user on a
 shared host.
@@ -40,6 +57,7 @@ from ..types import (
     InvalidOutput,
     LLMRequest,
     LLMResult,
+    SchemaIncompatible,
     wants_web_search,
 )
 from .cli_common import (
@@ -49,6 +67,7 @@ from .cli_common import (
     run_cli,
     strip_fences,
 )
+from .schema_compat import strict_problems, strip_meta_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +181,14 @@ class ClaudeCliBackend(CliBackend):
         property and is asserted against a literal golden list: the council
         is a live consumer of this argv and an accidental extra flag is a
         security change, not a feature.
+
+        The schema goes in WITHOUT its ``$schema`` keyword
+        (:func:`~.schema_compat.strip_meta_keywords`).  This CLI's validator
+        cannot resolve the 2020-12 meta-schema ref and exits 1 on a schema
+        that merely DECLARES the dialect -- issue #77, which failed every
+        claude-CLI critic and meta call of the 2026-10-19 run.  Nothing else
+        about the schema moves, and the golden argv above is unaffected: a
+        schema without the keyword serialises byte-identically.
         """
         argv = [
             self.executable,
@@ -169,7 +196,7 @@ class ClaudeCliBackend(CliBackend):
             "--output-format",
             "json",
             "--json-schema",
-            json.dumps(req.json_schema or {}),
+            json.dumps(strip_meta_keywords(req.json_schema or {})),
             "--model",
             req.model,
             "--system-prompt",
@@ -440,7 +467,17 @@ class CodexCliBackend(CliBackend):
         ]
 
     async def _run(self, req: LLMRequest, started: float) -> LLMResult:
-        """Run one ``codex exec`` invocation and read its output file."""
+        """Run one ``codex exec`` invocation and read its output file.
+
+        The schema is preflighted BEFORE the child is spawned, and a schema
+        that trips :func:`~.schema_compat.strict_problems` is refused here
+        rather than sent.  The provider is still the authority on strictness,
+        but it exercises that authority at 400 **after** the CLI has opened a
+        thread and started a turn (measured;
+        ``fixtures/cli_envelopes/codex_nonstrict_output.txt``), so a schema
+        defect that affects one item affects every item and bills for each.
+        One local check turns that into a free, named refusal.
+        """
         logger.debug(
             "council %s backend %s: asking %s (%d chars of prompt)",
             self.kind,
@@ -449,6 +486,28 @@ class CodexCliBackend(CliBackend):
             len(req.user or ""),
         )
 
+        # Stripped FIRST and preflighted on that same copy, so what was
+        # checked is exactly what gets written: ``$schema`` alone must never
+        # cause a refusal (codex ignores it -- ``codex_schema_key_ok.jsonl``),
+        # and checking the unstripped schema while writing the stripped one
+        # would be a lint of a document that was never sent.
+        stripped = strip_meta_keywords(req.json_schema or {})
+        if req.json_schema:
+            problems = strict_problems(stripped)
+            if problems:
+                # No CLI, no thread, no tokens.  Not retryable and it does not
+                # halt the endpoint: the endpoint is healthy, the QUERY TYPE is
+                # not (issue #76), so every call of this role will fail
+                # identically until the schema is fixed.
+                return self._failed(
+                    SchemaIncompatible(
+                        f"{self.name}: the answer schema is not valid for "
+                        f"OpenAI strict structured outputs, so {self.executable} "
+                        f"was not run: " + "; ".join(problems)
+                    ).to_error(),
+                    started,
+                )
+
         # Codex names two paths that do not exist until run_cli has made the
         # working directory, so both the schema file and the argv are built
         # inside these hooks rather than up front.
@@ -456,7 +515,7 @@ class CodexCliBackend(CliBackend):
 
         def prepare(cwd: Path) -> Sequence[str]:
             (cwd / CODEX_SCHEMA_NAME).write_text(
-                json.dumps(req.json_schema or {}), encoding="utf-8"
+                json.dumps(stripped), encoding="utf-8"
             )
             return self.argv(req, cwd)
 

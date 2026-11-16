@@ -56,6 +56,7 @@ __all__ = [
     "BillingGuardRefused",
     "ModelUnavailable",
     "InvalidOutput",
+    "SchemaIncompatible",
     "BudgetExhausted",
     "BudgetUsageUnknown",
     # halt causes (why an endpoint halt happened; which halts may resume)
@@ -145,6 +146,7 @@ _MODULE_MAP: dict[str, str] = {
     "BillingGuardRefused": "types",
     "ModelUnavailable": "types",
     "InvalidOutput": "types",
+    "SchemaIncompatible": "types",
     "BudgetExhausted": "types",
     "BudgetUsageUnknown": "types",
     "SeatUnavailable": "servable",

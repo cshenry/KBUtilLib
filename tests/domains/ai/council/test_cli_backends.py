@@ -86,8 +86,19 @@ SYSTEM = "You pick GO terms from a closed menu."
 USER = 'Annotation string: "beta-galactosidase (EC 3.2.1.23)"'
 MODEL = "claude-sonnet-5"
 
+#: The answer schema every request here carries.
+#:
+#: STRICT on purpose -- ``additionalProperties: false`` and a ``required``
+#: that lists every property -- because that is the only shape a codex seat
+#: can actually be served: OpenAI strict structured outputs refuse anything
+#: else with a 400, so ``CodexCliBackend`` now refuses it locally before
+#: spawning (``llm.apis.schema_compat.strict_problems``).  A non-strict schema
+#: here would mean every codex test in this file asserting the refusal path by
+#: accident.  ``TestCodexSchemaPreflight`` asserts that refusal deliberately,
+#: against a schema it makes non-strict itself.
 SCHEMA: Dict[str, Any] = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {"picked": {"type": "array"}},
     "required": ["picked"],
 }
@@ -1586,6 +1597,215 @@ class TestCodexOutputFile:
         assert result.ok is False
         assert result.error is not None
         assert result.error.kind == "invalid_output"
+
+
+# ---------------------------------------------------------------------------
+# The schema boundary (issues #76 / #77)
+# ---------------------------------------------------------------------------
+#
+# Both halves are asserted HERE, through ``complete()``, rather than against
+# ``argv()`` or the compat helpers alone: the helpers have their own unit
+# tests (``tests/domains/ai/llm/test_schema_compat.py``), and what those
+# cannot show is that the shipped call path actually uses them.  The codex
+# refusal in particular is a claim about a process that must NOT exist, which
+# only a real fake binary can witness -- ``fake.invoked`` is false exactly
+# when the fake wrote no record file, i.e. when it never ran.
+
+#: The real CLI captures from task-7e647702, on this machine's installed CLIs
+#: (claude 2.1.269, codex-cli 0.160.0).  See their README.
+CLI_ENVELOPES = Path(__file__).parent / "fixtures" / "cli_envelopes"
+
+#: The dialect URL whose mere presence made the claude CLI exit 1.
+DIALECT = "https://json-schema.org/draft/2020-12/schema"
+
+#: :data:`SCHEMA` as ``go_mf@1`` actually stores it -- strict, but declaring
+#: its dialect at the root and again inside ``$defs``.  The nested one is here
+#: because the claude validator's complaint is about resolving the ref and
+#: does not care how deep it was.
+SCHEMA_WITH_DIALECT: Dict[str, Any] = {
+    "$schema": DIALECT,
+    "$id": "https://example.invalid/proposer",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["picked"],
+    "properties": {"picked": {"$ref": "#/$defs/Picked"}},
+    "$defs": {
+        "Picked": {"$schema": DIALECT, "type": "array", "items": {"type": "string"}}
+    },
+}
+
+#: A schema whose ``required`` omits a property -- the ``go_mf@1`` proposer
+#: defect that issue #76 is about, reduced to its smallest form.
+NON_STRICT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["picked"],
+    "properties": {"picked": {"type": "array"}, "notes": {"type": "string"}},
+}
+
+
+class TestClaudeIsNeverHandedADialectDeclaration:
+    """Issue #77: ``$schema`` must not reach ``--json-schema``.
+
+    The motivating evidence is the captured stderr of the real CLI in
+    ``fixtures/cli_envelopes/claude_schema_key_stderr.txt``::
+
+        Error: --json-schema is not a valid JSON Schema: no schema with key
+        or ref "https://json-schema.org/draft/2020-12/schema"
+
+    Eight of eight critic and meta calls failed that way in the first live
+    council run (poplar, 2026-10-19), because all three ``go_mf@1`` role
+    schemas declare the dialect.
+    """
+
+    def test_the_captured_stderr_still_says_what_this_class_claims(self) -> None:
+        """The fixture is the reason for the stripping, so it is read, not cited.
+
+        A docstring quoting a file nobody opens rots silently; if a later
+        capture replaces that stderr with a different complaint, this fails
+        and the fix gets re-justified rather than inherited.
+        """
+        stderr = (CLI_ENVELOPES / "claude_schema_key_stderr.txt").read_text()
+
+        assert "--json-schema is not a valid JSON Schema" in stderr
+        assert DIALECT in stderr
+
+    def test_no_dollar_schema_substring_reaches_the_flag(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(json_schema=SCHEMA_WITH_DIALECT)))
+
+        assert result.ok is True, result.error
+        argv = fake.record["argv"]
+        handed = argv[argv.index("--json-schema") + 1]
+        # A SUBSTRING check, not a key check: the whole failure was the CLI
+        # reading this argument, so nothing in it may carry the keyword.
+        assert "$schema" not in handed
+        assert DIALECT not in " ".join(argv)
+
+    def test_everything_else_about_the_schema_survives(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """``$id``, ``$ref`` and ``$defs`` are accepted by this CLI; only the
+        dialect URL is not (external scan, 2026-11-12).  Stripping more would
+        throw away working structure."""
+        fake = make_fake(tmp_path, "claude", stdout=envelope())
+        backend = ClaudeCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        run(backend.complete(request(json_schema=SCHEMA_WITH_DIALECT)))
+
+        argv = fake.record["argv"]
+        handed = json.loads(argv[argv.index("--json-schema") + 1])
+        assert handed == {
+            "$id": "https://example.invalid/proposer",
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["picked"],
+            "properties": {"picked": {"$ref": "#/$defs/Picked"}},
+            "$defs": {"Picked": {"type": "array", "items": {"type": "string"}}},
+        }
+
+
+class TestCodexSchemaPreflight:
+    """Issue #76: a schema a strict provider refuses is refused locally first.
+
+    Codex enforces strictness SERVER-SIDE at 400, after the CLI has opened a
+    thread and started a turn (``fixtures/cli_envelopes/codex_nonstrict_output.txt``
+    ends in ``turn.failed`` with no usage at all), so every item of a run
+    under such a schema pays for a round trip to learn the same thing.
+    """
+
+    def test_a_dialect_is_not_a_reason_to_refuse_and_is_stripped_anyway(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """Codex ACCEPTS ``$schema`` (``codex_schema_key_ok.jsonl``, exit 0).
+
+        So a schema whose only deviation is the dialect must still run -- the
+        two checks must not be conflated -- and the file it is handed is the
+        stripped copy, because those keys are billed as part of the model
+        input (14221 vs 14201 input tokens for the same prompt).
+        """
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(json_schema=SCHEMA_WITH_DIALECT)))
+
+        assert result.ok is True, result.error
+        assert fake.invoked is True
+        written = fake.record["schema_file"]
+        assert "$schema" not in written
+        assert json.loads(written)["$id"] == "https://example.invalid/proposer"
+
+    def test_a_non_strict_schema_is_refused_without_running_the_cli(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """No child, no thread, no tokens -- and the property is named.
+
+        ``fake.invoked`` reads the record file the fake writes as its FIRST
+        act, so it is false only if the process never started.  That is the
+        whole point of the preflight: the 400 would have cost a paid round
+        trip to say the same thing.
+        """
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(json_schema=NON_STRICT_SCHEMA)))
+
+        assert fake.invoked is False, "the CLI must not have been executed"
+        assert result.ok is False
+        assert result.parsed is None
+        assert result.error is not None
+        assert result.error.kind == "schema_incompatible"
+        assert result.error.retryable is False
+        # The endpoint is healthy; it is the query type that is not.
+        assert result.error.halts_endpoint is False
+        assert "$: " in result.error.message
+        assert "notes" in result.error.message
+
+    def test_the_refusal_lists_every_problem_not_just_the_first(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """An operator fixing a query type wants the whole list in one pass."""
+        schema = {
+            "type": "object",
+            "required": ["picked"],
+            "properties": {
+                "picked": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"go_id": {}}},
+                }
+            },
+        }
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(request(json_schema=schema)))
+
+        assert fake.invoked is False
+        assert result.error is not None
+        message = result.error.message
+        assert "$: an object node must set additionalProperties" in message
+        assert "$.properties.picked.items" in message
+
+    def test_a_request_with_no_schema_at_all_still_runs(
+        self, tmp_path: Path, ready_home: Path
+    ) -> None:
+        """The preflight lints a schema; it does not invent a requirement.
+
+        A seat asked without a schema has nothing to be incompatible with,
+        and refusing it would break every schema-free caller of the wrapper.
+        """
+        fake = make_fake(tmp_path, "codex", write_output=json.dumps(ANSWER))
+        backend = CodexCliBackend(str(fake), _home=ready_home, _parent_env={})
+
+        result = run(backend.complete(llm_request(json_schema=None)))
+
+        assert fake.invoked is True
+        assert result.ok is True, result.error
+        assert fake.record["schema_file"] == "{}"
 
 
 # ---------------------------------------------------------------------------

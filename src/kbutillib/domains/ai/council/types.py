@@ -47,6 +47,7 @@ from ..llm.types import (
     LLMResult,
     ModelUnavailable,
     QuotaExhausted,
+    SchemaIncompatible,
     TransportError,
     as_llm_error,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "BillingGuardRefused",
     "ModelUnavailable",
     "InvalidOutput",
+    "SchemaIncompatible",
     "BudgetExhausted",
     "BudgetUsageUnknown",
     "as_council_error",
@@ -144,6 +146,7 @@ ERROR_KINDS = (
     "billing_guard",
     "model_unavailable",
     "invalid_output",
+    "schema_incompatible",
     "budget_exhausted",
     "budget_usage_unknown",
     "off_menu",
@@ -433,10 +436,11 @@ class RosterError(CouncilException):
     """
 
 
-# ``CallError`` and the seven provider-call failures it heads
+# ``CallError`` and the eight provider-call failures it heads
 # (``TransportError``, ``CallTimeout``, ``QuotaExhausted``, ``AuthError``,
-# ``BillingGuardRefused``, ``ModelUnavailable``, ``InvalidOutput``) are
-# imported from ``..llm.types`` at the top of this module: a provider failure
+# ``BillingGuardRefused``, ``ModelUnavailable``, ``InvalidOutput``,
+# ``SchemaIncompatible``) are imported from ``..llm.types`` at the top of
+# this module: a provider failure
 # is not a council concept, and the wrapper every call now goes through has to
 # be able to report one without importing the council.  The two BUDGET
 # failures below stay here, because a token budget is the council's own

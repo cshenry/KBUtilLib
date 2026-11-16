@@ -46,6 +46,7 @@ from kbutillib.domains.ai.council.types import (
     QuotaExhausted,
     Roster,
     RosterError,
+    SchemaIncompatible,
     SeatSpec,
     TransportError,
 )
@@ -1097,6 +1098,46 @@ class TestFailuresAndRetries:
         )
         assert row["status"] == "error"
         assert "answer schema" in row["error"]["message"]
+
+    def test_a_schema_incompatible_failure_is_final_and_not_retried(
+        self, store: Any
+    ) -> None:
+        """The kind a backend's own schema preflight reports (issues #76/#77).
+
+        It is in neither ``HALTING_KINDS`` nor ``RETRYABLE_KINDS``, so it
+        falls through to ``_fail_call`` -- which is the right outcome and
+        needs no branch of its own: the endpoint is healthy, the QUERY TYPE
+        is not, so retrying would fail identically and halting the endpoint
+        would take out the roles whose schemas ARE servable.  Asserted here
+        because that behaviour is load-bearing for the preflight and would be
+        silently lost if the classification ever grew a default.
+        """
+        script = {
+            ("proposer", "proposer_1"): SchemaIncompatible(
+                "$: required must list every key in properties (missing: notes)"
+            ),
+            "proposer": proposer_answer("A:1"),
+            "critic": critic_answer(),
+        }
+        backend = fake(script)
+        worker = worker_for(store, {"fake1": backend})
+        job_id = worker.submit(make_query(), [make_task()], make_roster(3))
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        verdict = verdict_of(store, job_id)
+        assert verdict.status == "error"
+        assert [e["kind"] for e in verdict.errors] == ["schema_incompatible"]
+        row = next(
+            r for r in calls_of(store, job_id) if r["seat_name"] == "proposer_1"
+        )
+        assert row["status"] == "error"
+        assert row["error"]["kind"] == "schema_incompatible"
+        assert row["error"]["retryable"] is False
+        # Asked ONCE: a schema defect is not a flaky socket.
+        asked = [req for req in backend.calls if req.seat.seat_name == "proposer_1"]
+        assert len(asked) == 1
+        # And the endpoint kept serving: the other two seats answered.
+        assert len([req for req in backend.calls if req.role == "proposer"]) == 3
 
     def test_a_truncated_answer_fails_its_seat(self, store: Any) -> None:
         class Truncating(InstrumentedBackend):

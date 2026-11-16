@@ -41,10 +41,15 @@ from kbutillib.domains.ai.council.queries.builtin.adapters import (
     pickup_critic_approved,
 )
 from kbutillib.domains.ai.council.queries.registry import validate_spec
-from kbutillib.domains.ai.council.queries.spec import PACKAGE_DIR
+from kbutillib.domains.ai.council.queries.spec import (
+    BATCH_ITEM_KEY_FIELD,
+    PACKAGE_DIR,
+    wrap_batch_answer_schema,
+)
 from kbutillib.domains.ai.council.store import open_store
 from kbutillib.domains.ai.council.store.errors import QueryTypeExists
 from kbutillib.domains.ai.council.types import CouncilTask, InvalidOutput
+from kbutillib.domains.ai.llm.apis.schema_compat import strict_problems
 
 FIXTURES = Path(__file__).parent / "fixtures" / "queries"
 ROLES = ("proposer", "critic", "meta")
@@ -613,6 +618,68 @@ class TestSchemas:
         first = go_spec.answer_schema("proposer")
         first["properties"].clear()
         assert go_spec.answer_schema("proposer")["properties"]
+
+
+class TestTheBatchWrapperStrictness:
+    """Batching must not invent a strictness the role did not have.
+
+    The wrapper object is this repo's own invention, so it is always closed:
+    an OPEN object anywhere in the document makes the whole schema
+    unservable on a strict provider, and a wrapper with exactly one known
+    property has nothing to gain from being open.  The ITEM object is the
+    role's schema, and that one is left exactly as the role wrote it --
+    ``go_mf@4`` relaxed its meta role to ``additionalProperties: true`` on
+    purpose, after 25 of 184 meta calls were rejected for an extra key, and
+    closing it here would reinstate that failure from a direction nobody
+    would look in.
+    """
+
+    def test_the_wrapper_is_always_closed(self):
+        wrapped = wrap_batch_answer_schema(
+            {"type": "object", "properties": {"verdict": {"type": "string"}}}
+        )
+
+        assert wrapped["additionalProperties"] is False
+        assert wrapped["required"] == ["answers"]
+
+    def test_a_strict_role_batches_strict(self, go_spec):
+        """``go_mf@1``'s critic is strict, so its batched form is servable.
+
+        Asserted through the backend boundary's own lint rather than by
+        re-listing the rules here: if the two ever disagree, a batched codex
+        call fails and this test is where that shows up.
+        """
+        wrapped = wrap_batch_answer_schema(go_spec.answer_schema("critic"))
+
+        assert strict_problems(wrapped) == []
+
+    def test_a_non_strict_role_stays_non_strict(self):
+        """Open stays open: closing it here would change the ROLE's question."""
+        wrapped = wrap_batch_answer_schema(
+            {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["final"],
+                "properties": {"final": {"type": "array"}},
+            }
+        )
+
+        item = wrapped["properties"]["answers"]["items"]
+        assert item["additionalProperties"] is True
+        # ... and the wrapper around it is still closed, so the only reported
+        # problem is the role's own.
+        assert strict_problems(wrapped) == [
+            "$.properties.answers.items: an object node must set "
+            "additionalProperties to exactly false (True)"
+        ]
+
+    def test_an_absent_additional_properties_is_not_invented(self):
+        item = wrap_batch_answer_schema(
+            {"type": "object", "properties": {"x": {"type": "string"}}}
+        )["properties"]["answers"]["items"]
+
+        assert "additionalProperties" not in item
+        assert BATCH_ITEM_KEY_FIELD in item["required"]
 
 
 # ---------------------------------------------------------------------------

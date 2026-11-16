@@ -447,6 +447,22 @@ def wrap_batch_answer_schema(role_schema: Mapping[str, Any]) -> Dict[str, Any]:
     malformed element never fails every other answer in the same reply (see
     ``engine.worker._settle_batch_answers``).  This function only builds the
     schema; it does not validate anything itself.
+
+    **The WRAPPER always sets ``additionalProperties: false``; the per-item
+    object keeps whatever the role schema said.**  The wrapper is this
+    function's own invention and its shape is fully known -- it has exactly
+    one property, ``answers`` -- so declaring it closed costs nothing and is
+    what OpenAI strict structured outputs require of every object in the
+    document (an open wrapper made the whole batched schema unservable on a
+    codex seat, while the un-batched role schema was fine).  The ITEM object
+    is the role's schema and not ours to tighten: ``go_mf@4`` deliberately
+    relaxed its meta role to ``additionalProperties: true`` after 25 of 184
+    meta calls were rejected for an extra key, and closing it here would
+    reinstate exactly the failure that change was made to stop.  So a strict
+    role batches strict and a non-strict role batches non-strict -- the
+    backend boundary reports the consequence
+    (``llm.apis.schema_compat.strict_problems``) rather than this function
+    hiding it.
     """
     item_schema = copy.deepcopy(dict(role_schema or {}))
     properties = dict(item_schema.get("properties") or {})
@@ -458,6 +474,7 @@ def wrap_batch_answer_schema(role_schema: Mapping[str, Any]) -> Dict[str, Any]:
     item_schema.setdefault("type", "object")
     return {
         "type": "object",
+        "additionalProperties": False,
         "properties": {"answers": {"type": "array", "items": item_schema}},
         "required": ["answers"],
     }

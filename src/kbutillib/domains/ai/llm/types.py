@@ -45,6 +45,7 @@ __all__ = [
     "LLMResult",
     "ModelUnavailable",
     "QuotaExhausted",
+    "SchemaIncompatible",
     "TransportError",
     "as_llm_error",
     "as_llm_request",
@@ -54,7 +55,7 @@ __all__ = [
 
 #: Every ``LLMError.kind`` an API type may report.  A caller may define more
 #: kinds of its own (the council adds ``budget_exhausted``,
-#: ``budget_usage_unknown`` and ``off_menu``), but these seven are the ones a
+#: ``budget_usage_unknown`` and ``off_menu``), but these eight are the ones a
 #: provider call itself can produce, and they are what the wrapper promises.
 LLM_ERROR_KINDS = (
     "transport",
@@ -64,6 +65,7 @@ LLM_ERROR_KINDS = (
     "billing_guard",
     "model_unavailable",
     "invalid_output",
+    "schema_incompatible",
 )
 
 #: The :attr:`LLMRequest.params` key a caller sets to opt ONE call into live
@@ -209,6 +211,26 @@ class InvalidOutput(CallError):
     """The model answered, but not in the shape the schema requires."""
 
     kind: ClassVar[str] = "invalid_output"
+
+
+class SchemaIncompatible(CallError):
+    """The ANSWER SCHEMA cannot be served by this API type; the call never ran.
+
+    Distinct from :class:`InvalidOutput` at the other end of the call: nothing
+    was asked and no model answered, so there is no output to be invalid.
+    Raised by a preflight that recognises a schema the provider is documented
+    to refuse (see :mod:`.apis.schema_compat`), which is worth a kind of its
+    own because the operator action is to FIX THE QUERY TYPE -- every call of
+    that role on every item will fail identically until someone does.
+
+    ``retryable`` is false for the same reason, and it does NOT halt the
+    endpoint: the endpoint is fine, and a different role's schema on the same
+    endpoint may well be served.  The council's worker needs no new branch for
+    it -- a kind that is in neither ``HALTING_KINDS`` nor ``RETRYABLE_KINDS``
+    falls through to ``_fail_call``, which is exactly the right outcome.
+    """
+
+    kind: ClassVar[str] = "schema_incompatible"
 
 
 def as_llm_error(exc: BaseException) -> LLMError:

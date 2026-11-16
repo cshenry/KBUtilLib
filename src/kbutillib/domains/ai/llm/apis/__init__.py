@@ -5,7 +5,10 @@ Each module here implements :class:`~..protocol.ApiType` -- ``http`` for ARGO
 and any OpenAI-compatible server, ``anthropic`` for Anthropic's native
 ``/v1/messages`` (through the optional ``anthropic`` SDK), ``cli`` for the
 headless Claude and Codex CLIs -- over the shared machinery in
-``http_common`` and ``cli_common``.
+``http_common`` and ``cli_common``.  ``schema_compat`` is shared machinery
+too, and provider-neutral: it holds the two pure functions that make ONE
+stored answer schema acceptable to backends which disagree about what a
+schema may contain.
 
 **Do not import from this package directly.**  Go through
 :func:`kbutillib.domains.ai.llm.get_api` (or :func:`~.acomplete`), which

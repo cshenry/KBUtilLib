@@ -122,6 +122,27 @@ ai = [
 council = [
   "SQLAlchemy >=2.0",
 ]
+# The council's human-in-the-loop tuning sheet: an .xlsx a reviewer marks up in
+# Excel (frozen header row, wrapped rationale cells, an R/W/? dropdown on the
+# mark column) and hands back. openpyxl is the only entry and nothing else in
+# KBUtilLib uses it, which is why it is an extra rather than a core dependency
+# -- `import kbutillib`, the council engine and the store all work without it,
+# and the one test that exercises it skips with an install hint when it is
+# absent (tests/domains/ai/council/test_openpyxl_roundtrip.py).
+#
+# The >=3.1.5 floor is the current 3.1.x release and the version the round-trip
+# smoke was actually run against (see agent-io/work-records/
+# openpyxl-tuning-sheet-smoke.md), not an invented bound: 3.1 is the series
+# that carries the DataValidation + freeze_panes behaviour the sheet depends
+# on. Upper bound deliberately left open; openpyxl has held this API stable
+# across 3.1.x.
+#
+# Deliberately NOT in `all`, on the same rationale as `backfill` and `council`:
+# `all` is "every transport plus the docs build", and a spreadsheet writer is
+# neither.
+council-tuning = [
+  "openpyxl >=3.1.5",
+]
 # Remote LP-Solver service runtime deps (kbutillib/services/lp_solver/app.py).
 # Deployed into a dedicated venv (~/venvs/lp-solver) per
 # agent-io/prds/remote-lp-solver/fullprompt.md "Deployment on H100", not

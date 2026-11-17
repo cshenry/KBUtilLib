@@ -396,3 +396,238 @@ _MINIMAL_ARGS = {
     "sample": ["--conflicts", "c", "--seed", "1", "--out", "o"],
     "adjudicate": ["--manifest", "m", "--matched", "x", "--store", "s", "--run-dir", "r"],
 }
+
+
+# ---------------------------------------------------------------------------
+# pilot-table / spot-check / read-marks / calibrate
+# ---------------------------------------------------------------------------
+#
+# The four human-facing subcommands, end to end through ``main`` but with
+# ``read_results`` RECORDED rather than run: reading real results needs a
+# council store with a settled adjudication job in it, which is
+# ``test_go_tuning_adjudicate``'s subject.  What is this file's subject is
+# the plumbing -- that ``--run-dir`` supplies the job ids, the spot-check ids
+# and the spec/roster bindings, that the two files land where they were
+# asked for, and that a marked workbook comes back through the same manifest.
+
+_HAS_OPENPYXL = importlib.util.find_spec("openpyxl") is not None
+_SPEC_HASH = "a" * 64
+_ROSTER = "b" * 64
+
+
+@pytest.mark.skipif(not _HAS_OPENPYXL, reason="openpyxl is the council-tuning extra")
+class TestTableSubcommands:
+    @pytest.fixture()
+    def material(self, tmp_path, monkeypatch):
+        """A manifest, its conflicts JSONL, a ledger with one tranche, results."""
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        from .go_tuning_table_support import material as build
+        from .go_tuning_table_support import results_for, row_ids
+
+        manifest, items = build()
+        manifest.write(tmp_path / "manifest.json")
+        (tmp_path / "conflicts.jsonl").write_text(
+            "\n".join(json.dumps(i.as_dict(), sort_keys=True) for i in items) + "\n",
+            encoding="utf-8",
+        )
+        results = results_for(manifest, items)
+        monkeypatch.setattr(S, "read_results", lambda *a, **k: results)
+
+        ids = row_ids(manifest)
+        ledger = Ledger(tmp_path / "run")
+        ledger.append(
+            "tranche",
+            phase="submitted",
+            manifest_id=manifest.manifest_id,
+            tranche_index=0,
+            submission_token="tok-0",
+            job_id="job-1",
+            adjudicate_spec_hash=_SPEC_HASH,
+            roster_fingerprint=_ROSTER,
+            spot_check_ids=ids[:2],
+        )
+        return {
+            "manifest": manifest,
+            "ids": ids,
+            "root": tmp_path,
+            "common": [
+                "--manifest", str(tmp_path / "manifest.json"),
+                "--matched", str(tmp_path / "conflicts.jsonl"),
+                "--store", "sqlite:///unused",
+                "--run-dir", str(tmp_path / "run"),
+            ],
+        }
+
+    def test_pilot_table_writes_both_files(self, material, capsys) -> None:
+        root = material["root"]
+        assert S.main([
+            "pilot-table", *material["common"],
+            "--xlsx", str(root / "pilot.xlsx"), "--md", str(root / "pilot.md"),
+        ]) == 0
+        out = capsys.readouterr().out
+        assert (root / "pilot.xlsx").exists()
+        assert (root / "pilot.md").exists()
+        assert f"{len(material['ids'])} pilot row(s)" in out
+        assert "answer sha256" in out
+
+    def test_spot_check_uses_the_tranche_s_persisted_ids(self, material, capsys) -> None:
+        root = material["root"]
+        assert S.main([
+            "spot-check", *material["common"],
+            "--xlsx", str(root / "spot.xlsx"), "--md", str(root / "spot.md"),
+        ]) == 0
+        assert "2 spot-check row(s)" in capsys.readouterr().out
+
+    def test_a_tranche_the_ledger_does_not_know_is_refused(self, material, capsys) -> None:
+        root = material["root"]
+        assert S.main([
+            "spot-check", *material["common"], "--tranche", "7",
+            "--xlsx", str(root / "s.xlsx"), "--md", str(root / "s.md"),
+        ]) == 2
+        assert "records no spot-check ids" in capsys.readouterr().err
+
+    def test_read_marks_then_calibrate_through_the_ledger(
+        self, material, capsys
+    ) -> None:
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        from .go_tuning_table_support import mark
+
+        root = material["root"]
+        xlsx = root / "pilot.xlsx"
+        S.main([
+            "pilot-table", *material["common"],
+            "--xlsx", str(xlsx), "--md", str(root / "pilot.md"),
+        ])
+        capsys.readouterr()
+
+        # Unmarked: read-marks says so and does not claim success.
+        assert S.main([
+            "read-marks", "--manifest", str(root / "manifest.json"), "--xlsx", str(xlsx),
+            "--out", str(root / "gold.json"),
+        ]) == 3
+        assert "still unmarked" in capsys.readouterr().err
+        assert json.loads((root / "gold.json").read_text())["counts"]["blank"] == len(
+            material["ids"]
+        )
+
+        mark(xlsx, {item_id: "R" for item_id in material["ids"]})
+
+        assert S.main([
+            "read-marks", "--manifest", str(root / "manifest.json"), "--xlsx", str(xlsx),
+            "--run-dir", str(root / "run"), "--record",
+        ]) == 0
+        assert "recorded calibration" in capsys.readouterr().out
+
+        assert S.main([
+            "calibrate", *material["common"], "--xlsx", str(xlsx),
+            "--out", str(root / "calibration.md"), "--record",
+        ]) == 0
+        out = capsys.readouterr().out
+        assert "# go_mf adjudication calibration" in out
+        assert (root / "calibration.md").exists()
+
+        records = Ledger(root / "run").records("calibration")
+        assert [r["source"] for r in records] == ["read-marks", "calibrate"]
+        for record in records:
+            assert record["manifest_id"] == material["manifest"].manifest_id
+            assert record["adjudicate_spec_hash"] == _SPEC_HASH
+            assert record["roster_fingerprint"] == _ROSTER
+            assert record["band"] == "conditional"
+
+    def test_a_disturbed_workbook_exits_2(self, material, capsys) -> None:
+        import openpyxl
+
+        from kbutillib.domains.ai.council.go_tuning import table as T
+
+        root = material["root"]
+        xlsx = root / "pilot.xlsx"
+        S.main([
+            "pilot-table", *material["common"],
+            "--xlsx", str(xlsx), "--md", str(root / "pilot.md"),
+        ])
+        workbook = openpyxl.load_workbook(xlsx)
+        workbook[T.TABLE_SHEET].delete_rows(3)
+        workbook.save(xlsx)
+        capsys.readouterr()
+        assert S.main([
+            "read-marks", "--manifest", str(root / "manifest.json"), "--xlsx", str(xlsx),
+        ]) == 2
+        assert "REFUSED" in capsys.readouterr().err
+
+    def test_record_without_a_run_dir_is_a_parser_error(self) -> None:
+        with pytest.raises(SystemExit):
+            S.parse_args(["read-marks", "--manifest", "m", "--xlsx", "x", "--record"])
+
+    def test_a_record_with_no_bindings_to_read_is_refused(
+        self, material, capsys
+    ) -> None:
+        """An empty ledger cannot supply the spec/roster, so nothing is written."""
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        from .go_tuning_table_support import mark
+
+        root = material["root"]
+        xlsx = root / "pilot.xlsx"
+        S.main([
+            "pilot-table", *material["common"],
+            "--xlsx", str(xlsx), "--md", str(root / "pilot.md"),
+        ])
+        mark(xlsx, {item_id: "R" for item_id in material["ids"]})
+        capsys.readouterr()
+
+        assert S.main([
+            "read-marks", "--manifest", str(root / "manifest.json"), "--xlsx", str(xlsx),
+            "--run-dir", str(root / "empty-run"), "--record",
+        ]) == 2
+        assert "bound to the adjudicate spec hash" in capsys.readouterr().err
+        assert Ledger(root / "empty-run").records("calibration") == []
+
+    def test_explicit_bindings_stand_in_for_the_ledger(self, material, capsys) -> None:
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        from .go_tuning_table_support import mark
+
+        root = material["root"]
+        xlsx = root / "pilot.xlsx"
+        S.main([
+            "pilot-table", *material["common"],
+            "--xlsx", str(xlsx), "--md", str(root / "pilot.md"),
+        ])
+        mark(xlsx, {item_id: "R" for item_id in material["ids"]})
+        capsys.readouterr()
+
+        assert S.main([
+            "read-marks", "--manifest", str(root / "manifest.json"), "--xlsx", str(xlsx),
+            "--run-dir", str(root / "other-run"), "--record",
+            "--spec-hash", "d" * 64, "--roster-fingerprint", "e" * 64,
+        ]) == 0
+        record = Ledger(root / "other-run").records("calibration")[0]
+        assert record["adjudicate_spec_hash"] == "d" * 64
+        assert record["roster_fingerprint"] == "e" * 64
+
+
+def test_the_table_and_calibration_subcommands_exist() -> None:
+    for command in ("pilot-table", "spot-check", "read-marks", "calibrate"):
+        args = S.parse_args([command, *_MINIMAL_ARGS[command]])
+        assert args.command == command
+        assert callable(args.func)
+
+
+_MINIMAL_ARGS.update(
+    {
+        "pilot-table": [
+            "--manifest", "m", "--matched", "x", "--store", "s",
+            "--xlsx", "t.xlsx", "--md", "t.md",
+        ],
+        "spot-check": [
+            "--manifest", "m", "--matched", "x", "--store", "s",
+            "--xlsx", "t.xlsx", "--md", "t.md",
+        ],
+        "read-marks": ["--manifest", "m", "--xlsx", "t.xlsx"],
+        "calibrate": [
+            "--manifest", "m", "--matched", "x", "--store", "s", "--xlsx", "t.xlsx",
+        ],
+    }
+)

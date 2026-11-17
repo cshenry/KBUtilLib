@@ -14,12 +14,18 @@ MATERIAL it is asked to apply it to, as opposed to the prompts that ask it
   ceiling and a spot-check gate.
 * :mod:`.ledger` -- the run's append-only record, which is what a restart
   reads to find out what the previous invocation had already set in motion.
+* :mod:`.table` -- the pilot table a human marks (``.xlsx`` plus an ``.md``
+  copy) and the reader that turns those marks back into gold.
+* :mod:`.calibrate` -- agreement, its Wilson interval, the class/source/side
+  slices, the position-swap flip rates and the trust BAND the tranche gate
+  reads.
 
 Importing this package pulls in nothing but :mod:`.policy`, which is a single
 string constant: no store, no backend, no optional dependency.  The other
 modules are NOT re-exported here for exactly that reason -- :mod:`.conflicts`
-reaches a SQLAlchemy store and :mod:`.adjudicate` reaches the council facade,
-and importing this package must stay free.  Import them by name.
+reaches a SQLAlchemy store, :mod:`.adjudicate` reaches the council facade and
+:mod:`.table` reaches ``openpyxl`` (the ``council-tuning`` extra), and
+importing this package must stay free.  Import them by name.
 """
 
 from __future__ import annotations

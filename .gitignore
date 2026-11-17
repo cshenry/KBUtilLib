@@ -92,3 +92,11 @@ ec_description_map*.tsv
 go_description_map*.tsv
 cog_description_map*.tsv
 agent-io/verdict.json
+
+# modelseedpy's own infeasible-condition LP dump. MSModelUtil.test_single_condition
+# (msmodelutl.py:740 at kbdl-target d55034c) calls printlp("<media id>-Testing-
+# Infeasible.lp") into the CWD whenever a gap-fill test condition is infeasible,
+# which the ATP filter's empty-medium test routinely is -- so running
+# tests/modeling/test_ms_fitness_utils.py (atp_safe=True) leaves one in the repo
+# root. A library artifact, not ours to suppress at the source.
+*-Testing-Infeasible.lp

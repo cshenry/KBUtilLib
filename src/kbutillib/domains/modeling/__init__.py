@@ -5,6 +5,7 @@ Sub-modules:
     ms_fba_utils            — MSFBAUtils, MSFBAUtilsImpl
     ms_template_utils       — MSTemplateUtils, MSTemplateUtilsImpl
     ms_reconstruction_utils — MSReconstructionUtils, MSReconstructionUtilsImpl
+    ms_fitness_utils        — run_fitness_weighted_analysis, normalize_gene_reactions
     fva_panel              — MediaPanel, run_fva_panel, compute_fva_essentiality
     model_helpers           — _parse_id, _check_and_convert_model (canonical helpers)
     model_directionality    — directionality_from_bounds, direction_conversion, etc.
@@ -34,6 +35,12 @@ def __getattr__(name: str):  # noqa: ANN001
         # ms_reconstruction_utils
         "MSReconstructionUtils": ("ms_reconstruction_utils", "MSReconstructionUtils"),
         "MSReconstructionUtilsImpl": ("ms_reconstruction_utils", "MSReconstructionUtilsImpl"),
+        # ms_fitness_utils
+        "run_fitness_weighted_analysis": (
+            "ms_fitness_utils",
+            "run_fitness_weighted_analysis",
+        ),
+        "normalize_gene_reactions": ("ms_fitness_utils", "normalize_gene_reactions"),
         # fva_panel
         "MediaPanel": ("fva_panel", "MediaPanel"),
         "run_fva_panel": ("fva_panel", "run_fva_panel"),
@@ -76,6 +83,9 @@ __all__ = [
     # ms_reconstruction_utils
     "MSReconstructionUtils",
     "MSReconstructionUtilsImpl",
+    # ms_fitness_utils
+    "run_fitness_weighted_analysis",
+    "normalize_gene_reactions",
     # fva_panel
     "MediaPanel",
     "run_fva_panel",

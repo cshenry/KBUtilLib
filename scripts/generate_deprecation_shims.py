@@ -91,6 +91,7 @@ LEGACY_MODULE_MAP: dict[str, str] = {
     "model_helpers": "domains.modeling.model_helpers",
     "model_standardization_utils": "domains.modeling.model_standardization_utils",
     "ms_fba_utils": "domains.modeling.ms_fba_utils",
+    "ms_fitness_utils": "domains.modeling.ms_fitness_utils",
     "ms_reconstruction_utils": "domains.modeling.ms_reconstruction_utils",
     "ms_template_utils": "domains.modeling.ms_template_utils",
     # domains.notebook.escher_utils

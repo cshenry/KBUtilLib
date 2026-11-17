@@ -228,6 +228,15 @@ reaction_similarity_extra = [
 # installing anything else makes initialize_reconstruction_environment raise
 # ModelSEEDpyCapabilityError rather than silently build a worse model.
 #
+# d55034c (KBDL_TARGET_FITNESS_SHA, branch kbdl-target on the cshenry fork) is
+# that same e1155a41 plus Jose Faria's six-commit fitness-weighted analysis
+# port (modelseedpy/core/msfitnessweighted.py,
+# modelseedpy/fbapkg/fitnessweightedfluxpkg.py), the ObjectivePkg top-level
+# export, and one fix holding biomass at the weighted solve's value during the
+# restricted FVA.  domains/modeling/ms_fitness_utils.py needs it:
+# MSFitnessWeightedAnalysis does not exist at e1155a41, so with the old pin
+# run_fitness_weighted_analysis raises ImportError at call time.
+#
 # cobra and swiglpk are NOT listed: modelseedpy requires cobra, which requires
 # optlang, which requires swiglpk -- so the GLPK backend the layer defaults to
 # is already guaranteed. gurobipy is NOT declared either, so there is nothing
@@ -239,7 +248,7 @@ reaction_similarity_extra = [
 # duplication above exists because CI installs `.[dev]` AND `uv sync --group
 # dev`; nothing syncs a `model` group.
 model = [
-  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@e1155a41fa53b921185b20c6cfbd083e5e3739a4",
+  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@d55034cfb1eac8c6bd0f86720f7e8076ff9be2f7",
 ]
 # Everything needed to run all transports + build docs.
 all = [

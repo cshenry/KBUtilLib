@@ -429,12 +429,28 @@ profiles:
   #   critic:     sonnet-cli     claude_cli, served_name sonnet -> anthropic/claude-sonnet-5
   #   meta:       argo-opus5     ARGO, served_name claudeopus5  -> anthropic/claude-opus-5
   #
-  # MODELS (go under `models:`). THE TWO claude_cli SEATS ARE WHAT AN OPERATOR
-  # MUST ADD to ~/.kbutillib/config.yaml on h100: they are packaged here but are
-  # not in that file today, and a user `models:` section is what h100 actually
-  # seats from. The codex and ARGO seats are already in it -- leave those alone
-  # and do not re-derive their served_name or canonical from this block; h100's
-  # own file is the authority on them. The entries, exactly:
+  # MODELS (go under `models:`). CORRECTED 2026-11-17 against h100's real
+  # ~/.kbutillib/config.yaml (live smoke, task-c2ad0f0f). Two claims that were
+  # here before are wrong and the corrections matter:
+  #
+  #   * The two claude_cli seats do NOT have to be added to
+  #     ~/.kbutillib/config.yaml. `_merge` overlays the user's `ai_council`
+  #     section PER ENTRY inside `models:`, not whole-section, so the packaged
+  #     opus-cli / sonnet-cli below survive h100's own `models:` untouched and
+  #     `load_council_config()` already seats them. They only have to be
+  #     written out when a STANDALONE config file is passed (`kbu council
+  #     --config FILE` / KBU_COUNCIL_CONFIG), which bypasses the packaged
+  #     default altogether.
+  #   * There is NO alias `gpt-5.6-sol` in h100's user config. That file calls
+  #     the codex GPT-5.6 Sol chair `codex-gpt56sol` (and the dead MAG one
+  #     `mag-gpt56sol`); its served_name and canonical are exactly as written
+  #     below, so the ENTRY is right and only the alias NAME differs. Seat
+  #     `codex-gpt56sol` on h100 -- adding the `gpt-5.6-sol` entry verbatim
+  #     works too, and is what a machine without that alias needs.
+  #
+  # The ARGO seats are in h100's file -- leave those alone and do not re-derive
+  # their served_name or canonical from this block; h100's own file is the
+  # authority on them. The entries, exactly:
   #
   #   opus-cli:
   #     endpoint: claude
@@ -442,7 +458,7 @@ profiles:
   #   sonnet-cli:
   #     endpoint: claude
   #     served_name: sonnet
-  #   gpt-5.6-sol:                       # already present on h100
+  #   gpt-5.6-sol:                       # h100 calls this one `codex-gpt56sol`
   #     endpoint: codex
   #     served_name: gpt-5.6-sol
   #     canonical: openai/gpt-5.6-sol
@@ -464,12 +480,21 @@ profiles:
   #     meta: argo-opus5
   #     allow_meta_overlap: true
   #
+  # ON H100 the codex proposer is spelled `codex-gpt56sol`, as corrected above,
+  # so the bench reads [opus-cli, codex-gpt56sol, gemini35flash]. Ran live
+  # 2026-11-17 (task-c2ad0f0f): doctor reported all five seats `ready` and a
+  # five-item batch finished 21/21 calls with no seat failure.
+  #
   # WHY allow_meta_overlap IS SET, AND WHEN TO MOVE THE META SEAT. With the
   # spellings above, argo-opus5 (ARGO `claudeopus5`) and the opus-cli proposer
   # (claude CLI `opus`) BOTH resolve to anthropic/claude-opus-5 through the
   # built-in identity tables, so Roster._check_independence refuses the seating
   # outright without the flag -- correctly, because one model would be both an
-  # adjudicator and the arbiter of its own vote. If argo-opus5 and opus-cli do
+  # adjudicator and the arbiter of its own vote. CONFIRMED ON H100 2026-11-17
+  # (task-c2ad0f0f): with h100's real config, argo-opus5 declares
+  # `canonical: anthropic/claude-opus-5` outright and opus-cli derives the same
+  # string from the claude_cli identity table, so they ARE one canonical model
+  # there. If argo-opus5 and opus-cli do
   # resolve to the same canonical model on your machine, THE META SEAT MOVES TO
   # argo-sonnet5:
   #

@@ -199,3 +199,200 @@ def test_plan_sizes_are_overridable_from_the_cli(capsys) -> None:
                          "--regression-size", "7", "--decline-guard-size", "9"])
     assert (args.pilot_size, args.swap_slice) == (40, 5)
     assert (args.regression_size, args.decline_guard_size) == (7, 9)
+
+
+# ---------------------------------------------------------------------------
+# adjudicate
+# ---------------------------------------------------------------------------
+#
+# The library behaviour is tested in ``test_go_tuning_adjudicate.py`` against
+# the fake backend.  What is tested here is the SUBCOMMAND: that its options
+# land on the library call unchanged, that the two files it reads are the two
+# the previous steps wrote, and that a run which stopped at a gate does not
+# exit 0.  ``run_tranches`` is recorded rather than run, because the CLI's own
+# path builds a real ``CouncilUtils`` from ``--store`` -- the one thing in
+# this pipeline that needs a configured endpoint.
+
+
+def _manifest_and_conflicts(tmp_path, stores, capsys):
+    """Run extract + sample, and return the two paths they wrote."""
+    curl, cjobs, burl, bjobs = stores
+    conflicts = tmp_path / "conflicts.jsonl"
+    manifest = tmp_path / "manifest.json"
+    assert (
+        S.main(
+            [
+                "extract",
+                "--candidate-store", curl,
+                "--candidate-jobs", ",".join(cjobs),
+                "--baseline-store", burl,
+                "--out", str(conflicts),
+            ]
+        )
+        == 0
+    )
+    assert (
+        S.main(
+            ["sample", "--conflicts", str(conflicts), "--seed", "7", "--out", str(manifest)]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    return manifest, conflicts
+
+
+def test_adjudicate_passes_every_option_through_to_run_tranches(
+    tmp_path, stores, capsys, monkeypatch
+) -> None:
+    manifest, conflicts = _manifest_and_conflicts(tmp_path, stores, capsys)
+    seen: Dict[str, Any] = {}
+
+    def recorder(store, profile, items, **kwargs):
+        seen["store"] = store
+        seen["profile"] = profile
+        seen["items"] = [t.item_id for t in items]
+        seen.update(kwargs)
+        return {
+            "manifest_id": kwargs["manifest_id"],
+            "invocation_id": "inv-1",
+            "query": "go_mf_adjudicate@1",
+            "profile": profile,
+            "roster_fingerprint": "f" * 64,
+            "planned_tranches": 1,
+            "token_ceiling": kwargs["token_ceiling"],
+            "tranches": [
+                {"index": 0, "outcome": "submitted", "job_id": "J1", "detail": "",
+                 "usage": {"argo_tokens": 10, "unmetered_tokens": 99}}
+            ],
+            "job_ids": ["J1"],
+            "stopped": None,
+            "usage": {"argo_tokens": 10, "unmetered_tokens": 99},
+            "overshoot": False,
+        }
+
+    monkeypatch.setattr(S, "run_tranches", recorder)
+    code = S.main(
+        [
+            "adjudicate",
+            "--manifest", str(manifest),
+            "--matched", str(conflicts),
+            "--pools", "pilot",
+            "--store", "sqlite:///unused.sqlite",
+            "--profile", "go_adjudicate",
+            "--tranche-size", "25",
+            "--token-ceiling", "123456",
+            "--run-dir", str(tmp_path / "run"),
+        ]
+    )
+    assert code == 0
+
+    payload = json.loads(manifest.read_text())
+    assert seen["store"] == "sqlite:///unused.sqlite"
+    assert seen["profile"] == "go_adjudicate"
+    assert seen["tranche_size"] == 25
+    assert seen["token_ceiling"] == 123456
+    assert seen["manifest_id"] == payload["manifest_id"]
+    assert seen["work"] is True
+    assert seen["retry_failed"] is False
+    # The items are the PILOT's, in the manifest's own execution order.
+    assert seen["items"] == list(payload["execution_order"]["pilot"])
+    # And the ledger landed in --run-dir, which is where a resume looks.
+    assert seen["ledger"].path == tmp_path / "run" / "ledger.jsonl"
+
+    out = capsys.readouterr().out
+    assert payload["manifest_id"] in out
+    assert "NOT metered: 99" in out
+
+
+def test_adjudicate_exits_3_when_the_run_stopped_at_a_gate(
+    tmp_path, stores, capsys, monkeypatch
+) -> None:
+    """A partial corpus reported as success is how a hole gets carried forward."""
+    manifest, conflicts = _manifest_and_conflicts(tmp_path, stores, capsys)
+
+    monkeypatch.setattr(
+        S,
+        "run_tranches",
+        lambda store, profile, items, **kwargs: {
+            "manifest_id": "m1",
+            "invocation_id": "inv-1",
+            "query": "go_mf_adjudicate@1",
+            "profile": profile,
+            "roster_fingerprint": "f" * 64,
+            "planned_tranches": 2,
+            "token_ceiling": kwargs["token_ceiling"],
+            "tranches": [],
+            "job_ids": [],
+            "stopped": {
+                "tranche": 1,
+                "reason": "refused_spot_check",
+                "detail": "no calibration record matches",
+            },
+            "usage": {"argo_tokens": 0, "unmetered_tokens": 0},
+            "overshoot": False,
+        },
+    )
+    code = S.main(
+        [
+            "adjudicate",
+            "--manifest", str(manifest),
+            "--matched", str(conflicts),
+            "--store", "sqlite:///unused.sqlite",
+            "--run-dir", str(tmp_path / "run"),
+        ]
+    )
+    assert code == 3
+    assert "STOPPED at tranche 1: refused_spot_check" in capsys.readouterr().err
+
+
+def test_adjudicate_defaults_to_every_pool_and_refuses_an_empty_pools_option(
+    tmp_path, stores, capsys, monkeypatch
+) -> None:
+    manifest, conflicts = _manifest_and_conflicts(tmp_path, stores, capsys)
+    seen: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        S,
+        "run_tranches",
+        lambda store, profile, items, **kwargs: seen.update(
+            items=[t.item_id for t in items]
+        )
+        or {
+            "manifest_id": "m1", "invocation_id": "i", "query": "q", "profile": profile,
+            "roster_fingerprint": "f", "planned_tranches": 1,
+            "token_ceiling": kwargs["token_ceiling"], "tranches": [], "job_ids": [],
+            "stopped": None, "usage": {"argo_tokens": 0, "unmetered_tokens": 0},
+            "overshoot": False,
+        },
+    )
+    base = [
+        "adjudicate",
+        "--manifest", str(manifest),
+        "--matched", str(conflicts),
+        "--store", "sqlite:///unused.sqlite",
+        "--run-dir", str(tmp_path / "run"),
+    ]
+    assert S.main(base) == 0
+    payload = json.loads(manifest.read_text())
+    assert len(seen["items"]) == len(payload["entries"]), "not every pool was built"
+
+    assert S.main([*base, "--pools", " , "]) == 2
+    assert "named no pool" in capsys.readouterr().err
+
+
+def test_the_three_subcommands_exist() -> None:
+    for command in ("extract", "sample", "adjudicate"):
+        args = S.parse_args([command, *_MINIMAL_ARGS[command]])
+        assert args.command == command
+        assert callable(args.func)
+
+
+#: The required options of each subcommand, so the check above exercises the
+#: parser rather than its defaults.
+_MINIMAL_ARGS = {
+    "extract": [
+        "--candidate-store", "c", "--candidate-jobs", "j", "--baseline-store", "b",
+        "--out", "o",
+    ],
+    "sample": ["--conflicts", "c", "--seed", "1", "--out", "o"],
+    "adjudicate": ["--manifest", "m", "--matched", "x", "--store", "s", "--run-dir", "r"],
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract go_mf conflicts from two stores, and sample a tuning manifest.
+"""Extract go_mf conflicts, sample a tuning manifest, adjudicate it in tranches.
 
     python scripts/council/go_tuning.py extract \
         --candidate-store sqlite:////path/bench_a.sqlite --candidate-jobs J1,J2 \
@@ -8,6 +8,11 @@
 
     python scripts/council/go_tuning.py sample \
         --conflicts conflicts.jsonl --seed 20261117 --out manifest.json
+
+    python scripts/council/go_tuning.py adjudicate \
+        --manifest manifest.json --matched conflicts.jsonl --pools pilot \
+        --store sqlite:////path/council.sqlite --profile go_adjudicate \
+        --run-dir /path/to/run
 
 ``extract`` joins the candidate (ALCF bench) jobs against the ``go_mf@4``
 baseline on ``(entity_hash, data_hash)`` and classifies each matched key; with
@@ -23,10 +28,23 @@ re-run: a baseline job finishing between two runs would otherwise silently
 change the sample a seed produces.  Extract once, commit the JSONL, sample
 from it as often as you like.
 
-Later tasks add subcommands here, so each one is a subparser with its own
-``--out``; nothing is shared but the store-opening helper.
+``adjudicate`` builds the blinded ``go_mf_adjudicate@1`` items the manifest
+calls for and submits them one tranche per council job, resumably: re-running
+the same command after an interruption adopts the jobs it already created
+instead of paying for them twice (see
+``kbutillib.domains.ai.council.go_tuning.adjudicate``).  It is MEANT to be
+re-run -- a tranche after the first will not start until the previous
+tranche's spot-check marks have been imported into the run's ledger, so the
+normal shape of a tuning pass is one invocation per tranche with a human step
+in between.
 
-EXIT CODES. 0 done; 2 refused (bad, ambiguous or too-small input).
+Later tasks add subcommands here, so each one is a subparser with its own
+output; nothing is shared but the store-opening helper.
+
+EXIT CODES. 0 done; 2 refused (bad, ambiguous or too-small input); 3 the
+adjudication run stopped at a gate with work still planned (the token ceiling
+or the spot-check gate) -- not a failure, but not finished either, and a
+caller that treated it as success would report a partial corpus as complete.
 """
 
 from __future__ import annotations
@@ -41,6 +59,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "src") not in sys.path:  # run from a checkout without install
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from kbutillib.domains.ai.council.go_tuning.adjudicate import (  # noqa: E402
+    DEFAULT_TOKEN_CEILING,
+    DEFAULT_TRANCHE_SIZE,
+    build_items,
+    run_tranches,
+)
 from kbutillib.domains.ai.council.go_tuning.conflicts import (  # noqa: E402
     CLASSES,
     UNSTABLE_CLASSES,
@@ -48,6 +72,7 @@ from kbutillib.domains.ai.council.go_tuning.conflicts import (  # noqa: E402
     Refused,
     match,
 )
+from kbutillib.domains.ai.council.go_tuning.ledger import Ledger  # noqa: E402
 from kbutillib.domains.ai.council.go_tuning.sample import (  # noqa: E402
     Plan,
     build_manifest,
@@ -164,6 +189,75 @@ def cmd_sample(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# adjudicate
+# ---------------------------------------------------------------------------
+
+
+def _pools(value: Optional[str]) -> Optional[List[str]]:
+    """``None`` means every pool the manifest holds; an empty list is an error."""
+    if value is None:
+        return None
+    pools = [p.strip() for p in value.split(",") if p.strip()]
+    if not pools:
+        raise Refused("--pools was given but named no pool")
+    return pools
+
+
+def cmd_adjudicate(args: argparse.Namespace) -> int:
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    matched = _read_conflicts(Path(args.matched))
+    items = build_items(manifest, matched, _pools(args.pools))
+    ledger = Ledger(args.run_dir)
+    report = run_tranches(
+        args.store,
+        args.profile,
+        items,
+        tranche_size=args.tranche_size,
+        token_ceiling=args.token_ceiling,
+        ledger=ledger,
+        manifest_id=str(manifest.get("manifest_id") or ""),
+        work=not args.no_work,
+        retry_failed=args.retry_failed,
+    )
+
+    print(f"manifest {report['manifest_id'] or '(unidentified)'} -> {report['query']}")
+    print(f"  invocation  {report['invocation_id']}")
+    print(f"  ledger      {ledger.path}")
+    print(f"  items       {len(items)} in {report['planned_tranches']} tranche(s)")
+    print(f"  roster      {report['profile']} ({report['roster_fingerprint'][:12]}...)")
+    print(f"\n  {'#':>3} {'outcome':<24} {'job':<34} {'argo':>9} {'cli':>9}")
+    for entry in report["tranches"]:
+        usage = entry.get("usage") or {}
+        print(
+            f"  {entry['index']:>3} {entry['outcome']:<24} "
+            f"{str(entry['job_id'] or '-'):<34} "
+            f"{usage.get('argo_tokens', 0):>9} {usage.get('unmetered_tokens', 0):>9}"
+        )
+        if entry.get("detail"):
+            print(f"      {entry['detail']}")
+    usage = report["usage"]
+    print(
+        f"\nARGO-billed tokens this invocation: {usage['argo_tokens']} "
+        f"(ceiling {report['token_ceiling']}"
+        + (", OVERSHOT" if report.get("overshoot") else "")
+        + ")"
+    )
+    print(
+        f"CLI (subscription) tokens, reported and NOT metered: "
+        f"{usage['unmetered_tokens']}"
+    )
+    if report["stopped"] is not None:
+        stop = report["stopped"]
+        print(
+            f"\nSTOPPED at tranche {stop['tranche']}: {stop['reason']}\n"
+            f"  {stop['detail']}",
+            file=sys.stderr,
+        )
+        return 3
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # cli
 # ---------------------------------------------------------------------------
 
@@ -195,6 +289,43 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     sample.add_argument("--regression-size", type=int, default=Plan.regression_size)
     sample.add_argument("--decline-guard-size", type=int, default=Plan.decline_guard_size)
     sample.set_defaults(func=cmd_sample)
+
+    adjudicate = subparsers.add_parser(
+        "adjudicate", help="build the blinded items and run them in tranches"
+    )
+    adjudicate.add_argument("--manifest", required=True, help="the manifest sample wrote")
+    adjudicate.add_argument(
+        "--matched", required=True, help="the JSONL extract the manifest was sampled from"
+    )
+    adjudicate.add_argument(
+        "--pools",
+        default=None,
+        help="comma-separated pool names; omit for every pool in the manifest",
+    )
+    adjudicate.add_argument("--store", required=True, help="the council store to submit into")
+    adjudicate.add_argument("--profile", default=None, help="seating profile (the operator's)")
+    adjudicate.add_argument("--tranche-size", type=int, default=DEFAULT_TRANCHE_SIZE)
+    adjudicate.add_argument(
+        "--token-ceiling",
+        type=int,
+        default=DEFAULT_TOKEN_CEILING,
+        help="soft ARGO-billed admission threshold for THIS invocation",
+    )
+    adjudicate.add_argument(
+        "--run-dir", required=True, help="where the run's ledger.jsonl lives"
+    )
+    adjudicate.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="resubmit the error/cancelled items of a halted tranche (operator's act)",
+    )
+    adjudicate.add_argument(
+        "--no-work",
+        action="store_true",
+        help="submit only and leave the calls for a daemon; the caller then owns the "
+        "rule that tranches must not overlap",
+    )
+    adjudicate.set_defaults(func=cmd_adjudicate)
 
     return parser.parse_args(argv)
 

@@ -42,6 +42,11 @@ What the steps write today, for a reader looking for a field:
                 ``spot_check_ids`` and their band, ``job_id`` and ``usage``
 ``calibration`` ``manifest_id``, ``adjudicate_spec_hash``,
                 ``roster_fingerprint``, ``band`` and the imported ``marks``
+``run``         one ISOLATED ``go_mf`` run's identities (C14): ``phase``
+                (``submitted`` -> ``complete``/``not_fresh``), ``run_label``,
+                the ``store`` that run alone was made in, ``job_id``,
+                ``query``, and on completion the ``reused`` count and
+                ``reused_call_ids`` that decide whether it was fresh
 ``candidate``   a candidate prompt's own ``name@version`` and the PARENT
                 version it was derived from
 ``score``       the ``metrics`` a candidate scored, and over which pool
@@ -113,6 +118,7 @@ LEDGER_KINDS = (
     "manifest",
     "tranche",
     "calibration",
+    "run",
     "candidate",
     "score",
     "stop",

@@ -19,6 +19,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+from . import go_tuning_score_support as _S  # noqa: E402
 from .go_tuning_support import row, two_stores  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[4] / "scripts/council/go_tuning.py"
@@ -631,3 +632,355 @@ _MINIMAL_ARGS.update(
         ],
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# fresh-run / score / audit
+# ---------------------------------------------------------------------------
+#
+# The scoring subcommands, end to end through ``main`` against the SAME
+# synthetic ``go_mf`` stores the scorer's own tests use.  What this file adds
+# over ``test_go_tuning_score`` is the plumbing the library never sees: that
+# ``--gold`` merges later-wins, that ``--band`` is read off the run's ledger
+# when it is not typed, that ``--noise-run`` measures the floor here, and that
+# the pilot refusal survives being asked for on a command line.
+
+
+class TestScoringSubcommands:
+    @pytest.fixture()
+    def material(self, tmp_path):
+        """A manifest file, a gold file, and the candidate/baseline stores."""
+        manifest = _S.manifest_of(_S.corpus_entries())
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        gold_path = tmp_path / "gold.json"
+        gold_path.write_text(
+            json.dumps(
+                {
+                    "manifest_id": "m-test",
+                    "scope": "heldout",
+                    "marks": {},
+                    "records": [
+                        {"item_id": item_id, **record}
+                        for item_id, record in _S.corpus_gold().items()
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        runs = {}
+        for name, right in (
+            ("cand", _S.CANDIDATE_RIGHT),
+            ("base", _S.BASELINE_RIGHT),
+            ("base2", _S.BASELINE_RIGHT),
+        ):
+            runs[name] = (
+                _S.run_store(
+                    tmp_path / f"{name}.sqlite",
+                    f"job-{name}",
+                    _S.answers(right, pilot_right=_S.PILOT[:3] if name == "cand" else ()),
+                ),
+                f"job-{name}",
+            )
+        return {
+            "root": tmp_path,
+            "manifest": str(manifest_path),
+            "gold": str(gold_path),
+            "runs": runs,
+            "run_dir": str(tmp_path / "run"),
+        }
+
+    def _score_args(self, material, *extra):
+        cand_store, cand_job = material["runs"]["cand"]
+        base_store, base_job = material["runs"]["base"]
+        return [
+            "score",
+            "--candidate-store", cand_store, "--candidate-job", cand_job,
+            "--baseline-store", base_store, "--baseline-job", base_job,
+            "--gold", material["gold"],
+            "--manifest", material["manifest"],
+            "--run-dir", material["run_dir"],
+            "--band", "trusted",
+            "--noise-floor", "0.0",
+            *extra,
+        ]
+
+    def test_score_prints_the_metrics_and_records_them(self, material, capsys) -> None:
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        out = material["root"] / "score.json"
+        assert S.main(self._score_args(material, "--out", str(out))) == 0
+        printed = capsys.readouterr().out
+        assert "primary     candidate 80.0%  baseline 40.0%" in printed
+        assert "GAIN: yes" in printed
+        assert "REPLACED" in printed
+        payload = json.loads(out.read_text())
+        assert payload["primary"]["gain"] == 0.4
+        records = Ledger(material["run_dir"]).records("score")
+        assert len(records) == 1 and records[0]["replaces_incumbent"] is True
+
+    def test_score_refuses_the_pilot_from_the_command_line(self, material, capsys) -> None:
+        assert S.main(self._score_args(material, "--pools", "heldout,pilot")) == 2
+        assert "LOCKED TEST SET" in capsys.readouterr().err
+
+    def test_the_band_is_read_off_the_run_s_ledger_when_not_given(
+        self, material, capsys
+    ) -> None:
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        ledger = Ledger(material["run_dir"])
+        ledger.append(
+            "calibration",
+            manifest_id="m-test",
+            adjudicate_spec_hash="a" * 64,
+            roster_fingerprint="b" * 64,
+            band="not_trusted",
+            marks={},
+        )
+        args = [a for a in self._score_args(material) if a not in ("--band", "trusted")]
+        assert S.main(args) == 2
+        assert "not_trusted" in capsys.readouterr().err
+
+    def test_no_band_anywhere_is_refused_rather_than_assumed(self, material, capsys) -> None:
+        args = [a for a in self._score_args(material) if a not in ("--band", "trusted")]
+        assert S.main(args) == 2
+        assert "carries a band" in capsys.readouterr().err
+
+    def test_two_noise_runs_measure_the_floor_here(self, material, capsys) -> None:
+        base_store, base_job = material["runs"]["base"]
+        other_store, other_job = material["runs"]["base2"]
+        args = [a for a in self._score_args(material) if a not in ("--noise-floor", "0.0")]
+        assert S.main(
+            [
+                *args,
+                "--noise-run", f"{base_store}#{base_job}",
+                "--noise-run", f"{other_store}#{other_job}",
+            ]
+        ) == 0
+        printed = capsys.readouterr().out
+        assert "noise floor 0.0000" in printed
+        assert "guard key(s) flipped" in printed
+
+    def test_one_noise_run_is_refused(self, material, capsys) -> None:
+        base_store, base_job = material["runs"]["base"]
+        args = [a for a in self._score_args(material) if a not in ("--noise-floor", "0.0")]
+        assert S.main([*args, "--noise-run", f"{base_store}#{base_job}"]) == 2
+        assert "between TWO iteration-0 baselines" in capsys.readouterr().err
+
+    def test_both_noise_options_at_once_are_refused(self, material, capsys) -> None:
+        base_store, base_job = material["runs"]["base"]
+        assert S.main(
+            self._score_args(material, "--noise-run", f"{base_store}#{base_job}")
+        ) == 2
+        assert "not both" in capsys.readouterr().err
+
+    def test_a_run_spec_without_a_job_is_refused(self, material, capsys) -> None:
+        args = [a for a in self._score_args(material) if a not in ("--noise-floor", "0.0")]
+        assert S.main([
+            *args,
+            "--noise-run", "sqlite:////tmp/x.sqlite",
+            "--noise-run", "sqlite:////tmp/y.sqlite",
+        ]) == 2
+        assert "does not name a run" in capsys.readouterr().err
+
+    def test_gold_merges_later_wins(self, material, capsys) -> None:
+        """A second --gold file overrides the first for the items it covers.
+
+        Which is the merge the PRD asks for: the adjudicated gold first,
+        Chris's marks second.
+        """
+        override = material["root"] / "chris.json"
+        override.write_text(
+            json.dumps(
+                {
+                    "records": [
+                        {"item_id": item_id, **_S.human(["GO:0016887"])}
+                        for item_id in _S.HELDOUT
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert S.main(self._score_args(material, "--gold", str(override))) == 0
+        printed = capsys.readouterr().out
+        # Every item is now gold-wrong for the candidate and gold-right for
+        # the baseline's wrong answer, so the gain inverts.
+        assert "primary     candidate 20.0%  baseline 60.0%" in printed
+        assert "GAIN: no" in printed
+
+    def test_audit_reads_the_pilot_and_says_so(self, material, capsys) -> None:
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        pilot_gold = material["root"] / "pilot-gold.json"
+        pilot_gold.write_text(
+            json.dumps(
+                {
+                    "records": [
+                        {"item_id": item_id, **_S.human(_S.TRUTH[item_id])}
+                        for item_id in _S.PILOT
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        cand_store, cand_job = material["runs"]["cand"]
+        base_store, base_job = material["runs"]["base"]
+        assert S.main([
+            "audit",
+            "--candidate-store", cand_store, "--candidate-job", cand_job,
+            "--baseline-store", base_store, "--baseline-job", base_job,
+            "--gold", str(pilot_gold),
+            "--manifest", material["manifest"],
+            "--run-dir", material["run_dir"],
+            "--noise-floor", "0.0",
+        ]) == 0
+        printed = capsys.readouterr().out
+        assert "on pool pilot" in printed
+        assert "LOCKED test set" in printed
+        records = Ledger(material["run_dir"]).records("score")
+        assert [r["audit"] for r in records] == [True]
+
+    def test_score_reports_the_stop_rule_after_recording(self, material, capsys) -> None:
+        """Three non-gaining candidates in one ledger, and the loop stops."""
+        from kbutillib.domains.ai.council.go_tuning.ledger import Ledger
+
+        base_store, base_job = material["runs"]["base"]
+        other_store, other_job = material["runs"]["base2"]
+        args = [
+            "score",
+            "--candidate-store", other_store, "--candidate-job", other_job,
+            "--baseline-store", base_store, "--baseline-job", base_job,
+            "--gold", material["gold"],
+            "--manifest", material["manifest"],
+            "--run-dir", material["run_dir"],
+            "--band", "trusted",
+            "--noise-floor", "0.0",
+        ]
+        for _ in range(2):
+            assert S.main(args) == 0
+            assert "continue:" in capsys.readouterr().out
+        assert S.main(args) == 0
+        captured = capsys.readouterr()
+        assert "STOP (no_improvement_streak)" in captured.err
+        assert Ledger(material["run_dir"]).records("stop")[0]["reason"] == (
+            "no_improvement_streak"
+        )
+
+
+def test_the_scoring_subcommands_exist() -> None:
+    for command in ("fresh-run", "score", "audit"):
+        args = S.parse_args([command, *_MINIMAL_ARGS[command]])
+        assert args.command == command
+        assert callable(args.func)
+
+
+_MINIMAL_ARGS.update(
+    {
+        "fresh-run": [
+            "--spec-store", "s", "--query", "go_mf", "--version", "4",
+            "--manifest", "m", "--matched", "x", "--run-dir", "r",
+        ],
+        "score": [
+            "--candidate-store", "c", "--candidate-job", "jc",
+            "--baseline-store", "b", "--baseline-job", "jb",
+            "--gold", "g", "--manifest", "m", "--run-dir", "r",
+        ],
+        "audit": [
+            "--candidate-store", "c", "--candidate-job", "jc",
+            "--baseline-store", "b", "--baseline-job", "jb",
+            "--gold", "g", "--manifest", "m", "--run-dir", "r",
+        ],
+    }
+)
+
+
+def test_fresh_run_passes_every_option_through(tmp_path, stores, capsys, monkeypatch) -> None:
+    """``fresh-run``'s own plumbing, with the run itself RECORDED.
+
+    Actually running it needs a ``CouncilConfig`` and a seated roster, which
+    is ``test_go_tuning_run``'s subject; what belongs here is that the
+    manifest and the extract become the right items, that ``--run-dir`` and
+    ``--label`` reach the function unchanged, and that the ledger lands where
+    a reader will look for it.
+    """
+    manifest, conflicts = _manifest_and_conflicts(tmp_path, stores, capsys)
+    seen: Dict[str, Any] = {}
+
+    def recorder(spec_store, query, version, items, profile, run_dir, **kwargs):
+        seen.update(
+            spec_store=spec_store,
+            query=query,
+            version=version,
+            items=[t.item_id for t in items],
+            evidence=[dict(t.evidence) for t in items],
+            profile=profile,
+            run_dir=run_dir,
+            **kwargs,
+        )
+        return {
+            "label": kwargs.get("label") or "generated",
+            "store": "sqlite:///run/stores/iter0.sqlite",
+            "job_id": "J1",
+            "query": f"{query}@{version}",
+            "n_items": len(items),
+            "fresh": True,
+            "reused": 0,
+        }
+
+    monkeypatch.setattr(S, "fresh_run", recorder)
+    assert S.main([
+        "fresh-run",
+        "--spec-store", "sqlite:///loop.sqlite",
+        "--query", "go_mf",
+        "--version", "4",
+        "--manifest", str(manifest),
+        "--matched", str(conflicts),
+        "--profile", "go_mf",
+        "--run-dir", str(tmp_path / "run"),
+        "--label", "iter0-baseline",
+    ]) == 0
+
+    payload = json.loads(manifest.read_text())
+    assert seen["spec_store"] == "sqlite:///loop.sqlite"
+    assert seen["query"] == "go_mf" and seen["version"] == "4"
+    assert seen["profile"] == "go_mf"
+    assert str(seen["run_dir"]) == str(tmp_path / "run")
+    assert seen["label"] == "iter0-baseline"
+    assert seen["work"] is True
+    # Omitting --pools runs EVERY pool as one job over one frozen item set,
+    # with each item once: the manifest's swapped pilot twins are a second
+    # orientation of one question, and go_mf has no orientation to swap.
+    unique = {e["item_id"] for e in payload["entries"]}
+    assert len(payload["entries"]) > len(unique)
+    assert sorted(seen["items"]) == sorted(unique)
+    # A go_mf question is the annotation string and its source, not a
+    # blinded A/B pair -- an adjudication item smuggled in here would score
+    # against the wrong prompt entirely.
+    assert set(seen["evidence"][0]) == {"text", "source"}
+    assert seen["ledger"].path == tmp_path / "run" / "ledger.jsonl"
+    assert "iter0-baseline" in capsys.readouterr().out
+
+
+def test_fresh_run_with_no_work_exits_3(tmp_path, stores, capsys, monkeypatch) -> None:
+    """Nothing was worked, so nothing was proven fresh: not a failure, not done."""
+    manifest, conflicts = _manifest_and_conflicts(tmp_path, stores, capsys)
+
+    monkeypatch.setattr(
+        S,
+        "fresh_run",
+        lambda *a, **k: {
+            "label": "iter0", "store": "sqlite:///x", "job_id": "J1",
+            "query": "go_mf@4", "n_items": 1, "fresh": None, "reused": None,
+        },
+    )
+    assert S.main([
+        "fresh-run",
+        "--spec-store", "sqlite:///loop.sqlite",
+        "--query", "go_mf", "--version", "4",
+        "--manifest", str(manifest), "--matched", str(conflicts),
+        "--run-dir", str(tmp_path / "run"),
+        "--no-work",
+    ]) == 3
+    assert "not checked" in capsys.readouterr().out

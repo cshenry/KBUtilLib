@@ -57,6 +57,39 @@ ids, and ``read-marks --record`` imports its marks into the ledger, which is
 what the next tranche's gate reads.  ``read-marks`` without ``--record`` is
 the dry run: it reports what the sheet says and writes the gold as JSON.
 
+THEN THE TUNING LOOP ITSELF: ``fresh-run`` -> ``score`` -> ``audit``::
+
+    #  one isolated store per run, because the engine's reuse key ignores
+    #  the job id and a second run in one store reports the first's answers
+    python scripts/council/go_tuning.py fresh-run \
+        --spec-store sqlite:////path/loop.sqlite --query go_mf --version 4 \
+        --manifest manifest.json --matched conflicts.jsonl \
+        --profile go_mf --run-dir /scratch/you/run --label iter1-baseline
+
+    python scripts/council/go_tuning.py score \
+        --candidate-store sqlite:////scratch/you/run/stores/iter1-cand.sqlite \
+        --candidate-job J_CAND \
+        --baseline-store sqlite:////scratch/you/run/stores/iter1-baseline.sqlite \
+        --baseline-job J_BASE \
+        --gold gold.json --manifest manifest.json --matched conflicts.jsonl \
+        --noise-floor 0.03 --run-dir /scratch/you/run
+
+    #  ONCE, for the one candidate proposed for promotion
+    python scripts/council/go_tuning.py audit \
+        --candidate-store ... --candidate-job ... \
+        --baseline-store ... --baseline-job ... \
+        --gold pilot-gold.json --manifest manifest.json --run-dir /scratch/you/run
+
+``--run-dir`` must be on LOCAL DISK.  The council store refuses a path with a
+Dropbox component and a path on a network filesystem, and ``fresh-run``
+reports that refusal rather than quietly putting the store somewhere else --
+on h100 that means ``/scratch``, not ``$HOME`` and not the Dropbox tree.
+
+``score`` reads ``heldout`` plus the two guard slices and REFUSES the pilot;
+``audit`` reads the pilot and nothing else.  Every ``score``/``audit`` run is
+appended to the ledger, and ``score`` evaluates the stop rule afterwards and
+records the stop when it fires.
+
 Later tasks add subcommands here, so each one is a subparser with its own
 output; nothing is shared but the store-opening helper.
 
@@ -97,9 +130,23 @@ from kbutillib.domains.ai.council.go_tuning.conflicts import (  # noqa: E402
     match,
 )
 from kbutillib.domains.ai.council.go_tuning.ledger import Ledger  # noqa: E402
+from kbutillib.domains.ai.council.go_tuning.run import (  # noqa: E402
+    fresh_run,
+    go_mf_tasks,
+)
 from kbutillib.domains.ai.council.go_tuning.sample import (  # noqa: E402
     Plan,
     build_manifest,
+)
+from kbutillib.domains.ai.council.go_tuning.score import (  # noqa: E402
+    BOOTSTRAP_RESAMPLES,
+    BOOTSTRAP_SEED,
+    SCORE_POOLS,
+    RunRef,
+    audit,
+    measure_noise,
+    score,
+    stop_rule,
 )
 
 
@@ -472,6 +519,279 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# fresh-run / score / audit
+# ---------------------------------------------------------------------------
+
+
+def _gold_from(paths: Sequence[str]) -> Dict[str, Any]:
+    """Merge one or more gold files into ``item_id -> record``, later wins.
+
+    Each file is what ``read-marks --out`` wrote (a ``Gold.as_dict()``), or a
+    bare ``item_id ->`` mapping.  THE MERGE ORDER IS THE CALLER'S POLICY and
+    it is the one the PRD states: Chris's gold where he marked, the
+    adjudicated answer elsewhere -- so pass the adjudicated file first and
+    Chris's second, and the per-record ``provenance`` the reader kept says
+    which one each set came from.
+    """
+    merged: Dict[str, Any] = {}
+    for path in paths:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        records = payload.get("records") if isinstance(payload, dict) else None
+        if records is None and isinstance(payload, dict):
+            merged.update({str(k): v for k, v in payload.items()})
+            continue
+        for record in records or ():
+            merged[str(record["item_id"])] = record
+    if not merged:
+        raise Refused("the gold file(s) named carry no gold records")
+    return merged
+
+
+def _agreed_from(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``item_id -> the agreed id set`` for the regression slice.
+
+    Read off the extract: a ``regression`` row is an ``agree_assigned`` key,
+    so both sides' selected sets are the same set and either one is "the
+    agreed set".  Supplies the BASELINE's own regression drift only; the
+    candidate's gated flip rate is against the same iteration's fresh
+    baseline (C15) and needs none of this.
+    """
+    if path is None:
+        return None
+    out: Dict[str, Any] = {}
+    for row in _read_conflicts(Path(path)):
+        if row.kind == "agree_assigned":
+            out[row.item_id] = sorted(row.baseline_selected)
+    return out
+
+
+def _run_ref(spec: str) -> RunRef:
+    """``<store-url>#<job-id>`` -- one run, for the options that take a pair.
+
+    ``#`` and not ``:``: a sqlite store URL is full of colons.
+    """
+    url, sep, job = str(spec).rpartition("#")
+    if not sep or not url.strip() or not job.strip():
+        raise Refused(
+            f"{spec!r} does not name a run; use '<store-url>#<job-id>', e.g. "
+            "'sqlite:////scratch/you/run/stores/iter0-a.sqlite#JOBID'"
+        )
+    return RunRef(url.strip(), job.strip())
+
+
+def _band_of(args: argparse.Namespace) -> str:
+    """``--band``, else the newest calibration band in the run's ledger.
+
+    Read rather than typed wherever possible: the band gates whether
+    judge-derived gold may be scored against at all, and a band typed by
+    hand is a band that can be typed wrong in the permissive direction.
+    """
+    if args.band:
+        return str(args.band)
+    for record in reversed(Ledger(args.run_dir).records("calibration")):
+        band = str(record.get("band") or "")
+        if band:
+            return band
+    raise Refused(
+        "no calibration record in the run's ledger carries a band; run "
+        "`calibrate --record` (or `read-marks --record`) first, or pass --band"
+    )
+
+
+def _noise_floor(args: argparse.Namespace, manifest: Dict[str, Any]) -> Optional[float]:
+    """``--noise-floor``, else measured from the two iteration-0 baselines."""
+    runs = [spec for spec in (args.noise_run or ())]
+    if args.noise_floor is not None and runs:
+        raise Refused("pass either --noise-floor or two --noise-run, not both")
+    if args.noise_floor is not None:
+        return float(args.noise_floor)
+    if not runs:
+        return None
+    if len(runs) != 2:
+        raise Refused(
+            f"a noise floor is measured between TWO iteration-0 baselines; "
+            f"{len(runs)} --noise-run were given"
+        )
+    report = measure_noise(_run_ref(runs[0]), _run_ref(runs[1]), manifest)
+    print(
+        f"noise floor {report['noise_floor']:.4f} "
+        f"({report['flipped']}/{report['n']} guard key(s) flipped between the two "
+        f"{report['query']} baselines)"
+    )
+    for name, slice_ in report["per_slice"].items():
+        print(f"  {name:<14} {slice_['flipped']:>5}/{slice_['n']:<5}")
+    return float(report["noise_floor"])
+
+
+def cmd_fresh_run(args: argparse.Namespace) -> int:
+    manifest = _manifest_of(args.manifest)
+    matched = _read_conflicts(Path(args.matched))
+    items = go_mf_tasks(manifest, matched, _pools(args.pools))
+    report = fresh_run(
+        args.spec_store,
+        args.query,
+        args.version,
+        items,
+        args.profile,
+        args.run_dir,
+        ledger=Ledger(args.run_dir),
+        label=args.label,
+        work=not args.no_work,
+    )
+    print(f"{report['query']} run {report['label']}")
+    print(f"  store   {report['store']}")
+    print(f"  job     {report['job_id']}")
+    print(f"  items   {report['n_items']}")
+    if report["fresh"] is None:
+        print("  fresh   not checked (--no-work: nothing has been worked yet)")
+        return 3
+    print(f"  fresh   yes ({report['reused']} reused call(s))")
+    return 0
+
+
+def _score_options(args: argparse.Namespace, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "gold": _gold_from(args.gold),
+        "manifest": manifest,
+        "noise_floor": _noise_floor(args, manifest),
+        "ledger": Ledger(args.run_dir),
+        "seed": args.seed,
+        "resamples": args.resamples,
+    }
+
+
+def _print_score(result: Any) -> None:
+    payload = result.as_dict()
+    primary = payload["primary"]
+    boot = payload["bootstrap"]
+    print(
+        f"{payload['candidate']['query']} vs {payload['baseline']['query']} "
+        f"on pool {payload['pool']} (band {payload['band'] or '-'})"
+    )
+    print(f"  scored      {primary['n']} item(s), subset {payload['scored']['digest'][:12]}...")
+    print(f"  primary     candidate {_pct(primary['candidate'])}  baseline {_pct(primary['baseline'])}")
+    print(
+        f"  gain        {_pct(primary['gain'])}   bootstrap {int(100 * boot['level'])}% "
+        f"[{_pct(boot['lower'])}, {_pct(boot['upper'])}] "
+        f"({boot['resamples']} resamples of {boot['groups']} entity group(s), seed {boot['seed']})"
+    )
+    print(f"  noise floor {_pct(payload['noise_floor'])}")
+    decline, regression = payload["decline"], payload["regression"]
+    print(
+        f"  decline     candidate {_pct(decline['candidate'])}  baseline "
+        f"{_pct(decline['baseline'])}  (n={decline['n']})"
+    )
+    print(
+        f"  regression  candidate {_pct(regression['candidate'])} vs this iteration's "
+        f"fresh baseline  (n={regression['n']})"
+    )
+    conflict = payload["secondary"]["conflict_rate"]
+    print(f"  conflicts   {_pct(conflict['overall'])} of {conflict['n']} required item(s)")
+    for side in ("candidate", "baseline"):
+        tokens = payload["secondary"]["tokens"][side]
+        print(
+            f"  tokens      {side:<9} argo {tokens.get('argo_tokens', '-')}  "
+            f"cli {tokens.get('unmetered_tokens', '-')}"
+        )
+    gain = payload["gain"]
+    print(f"\n  GAIN: {'yes' if gain['is_gain'] else 'no'}")
+    for name, passed in sorted((gain.get("checks") or {}).items()):
+        print(f"    {'pass' if passed else 'FAIL':<5} {name}")
+    for reason in gain.get("reasons") or ():
+        print(f"    - {reason}")
+    incumbent = payload["incumbent"]
+    print(
+        f"\n  incumbent {incumbent.get('label')} at {_pct(incumbent.get('primary'))}: "
+        f"{'REPLACED' if incumbent.get('replaced') else 'kept'}"
+    )
+    print(f"    {incumbent.get('detail')}")
+    heldout = payload["heldout"]
+    print(
+        f"\n  off-menu  {heldout['off_menu_gold_rows']} of "
+        f"{heldout['remaining_failures']} remaining failure(s) = "
+        f"{_pct(heldout['off_menu_share'])} (ceiling {_pct(heldout['ceiling'])})"
+    )
+
+
+def _pct(value: Any) -> str:
+    return "-" if value is None else f"{100.0 * float(value):.1f}%"
+
+
+def _write_json(path: Optional[str], payload: Any) -> None:
+    if not path:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"\nwrote {out}")
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    manifest = _manifest_of(args.manifest)
+    options = _score_options(args, manifest)
+    incumbent = _run_ref(args.incumbent) if args.incumbent else None
+    result = score(
+        args.candidate_store,
+        args.candidate_job,
+        args.baseline_store,
+        args.baseline_job,
+        options["gold"],
+        manifest,
+        options["noise_floor"],
+        band=_band_of(args),
+        pools=_pools(args.pools) or list(SCORE_POOLS),
+        agreed=_agreed_from(args.matched),
+        incumbent=incumbent,
+        incumbent_label=args.incumbent_label,
+        ledger=options["ledger"],
+        seed=options["seed"],
+        resamples=options["resamples"],
+    )
+    _print_score(result)
+    _write_json(args.out, result.as_dict())
+
+    decision = stop_rule(options["ledger"])
+    if decision["stop"]:
+        print(
+            f"\nSTOP ({decision['reason']}): {decision['detail']}\n"
+            f"  {decision['candidates']} candidate(s), "
+            f"{decision['consecutive_without_improvement']} without improvement, "
+            f"incumbent {decision['incumbent']}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"\ncontinue: {decision['candidates']} candidate(s), "
+            f"{decision['consecutive_without_improvement']} without improvement, "
+            f"incumbent {decision['incumbent']}"
+        )
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    manifest = _manifest_of(args.manifest)
+    options = _score_options(args, manifest)
+    result = audit(
+        RunRef(args.candidate_store, args.candidate_job),
+        RunRef(args.baseline_store, args.baseline_job),
+        options["gold"],
+        manifest,
+        noise_floor=options["noise_floor"],
+        band=args.band or "",
+        ledger=options["ledger"],
+        seed=options["seed"],
+        resamples=options["resamples"],
+    )
+    _print_score(result)
+    _write_json(args.out, result.as_dict())
+    print(
+        "\nThe pilot is a LOCKED test set. This audit is the one read of it for "
+        "this candidate; do not tune against what it says."
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # cli
 # ---------------------------------------------------------------------------
 
@@ -615,6 +935,124 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="append the report to the run's ledger as a calibration record; needs --run-dir",
     )
     calibrate.set_defaults(func=cmd_calibrate)
+
+    fresh = subparsers.add_parser(
+        "fresh-run",
+        help="run a query over the manifest in an ISOLATED store, and prove it was fresh",
+    )
+    fresh.add_argument(
+        "--spec-store",
+        required=True,
+        help="the loop store holding the spec to run; it is COPIED into the new store",
+    )
+    fresh.add_argument("--query", required=True, help="query type name, e.g. go_mf")
+    fresh.add_argument("--version", required=True, help="its version, e.g. 4 for the baseline")
+    fresh.add_argument("--manifest", required=True, help="the manifest sample wrote")
+    fresh.add_argument("--matched", required=True, help="the JSONL extract the manifest came from")
+    fresh.add_argument(
+        "--pools",
+        default=None,
+        help="comma-separated pool names; omit for every pool, which is what a "
+        "scored iteration needs (one job over one frozen item set)",
+    )
+    fresh.add_argument("--profile", default=None, help="seating profile (the operator's)")
+    fresh.add_argument(
+        "--run-dir",
+        required=True,
+        help="the run directory, ON LOCAL DISK. The store is created at "
+        "<run-dir>/stores/<label>.sqlite and is never relocated for you",
+    )
+    fresh.add_argument(
+        "--label",
+        default=None,
+        help="names the run and its store file (e.g. iter1-baseline); a random "
+        "one is used when omitted, which is unique but unrepeatable",
+    )
+    fresh.add_argument(
+        "--no-work",
+        action="store_true",
+        help="submit only; nothing is worked, so freshness is NOT checked (exit 3)",
+    )
+    fresh.set_defaults(func=cmd_fresh_run)
+
+    for name, handler, help_text in (
+        (
+            "score",
+            cmd_score,
+            "score a candidate against a fresh go_mf@4 on the HELDOUT pool",
+        ),
+        (
+            "audit",
+            cmd_audit,
+            "the one read of the LOCKED pilot, for the candidate proposed for promotion",
+        ),
+    ):
+        sub = subparsers.add_parser(name, help=help_text)
+        sub.add_argument("--candidate-store", required=True)
+        sub.add_argument("--candidate-job", required=True)
+        sub.add_argument("--baseline-store", required=True, help="the FRESH go_mf@4 run's store")
+        sub.add_argument("--baseline-job", required=True)
+        sub.add_argument(
+            "--gold",
+            action="append",
+            required=True,
+            metavar="JSON",
+            help="gold written by `read-marks --out`; repeatable and LATER WINS, so "
+            "pass the adjudicated file first and Chris's second",
+        )
+        sub.add_argument("--manifest", required=True, help="the manifest sample wrote")
+        sub.add_argument(
+            "--run-dir", required=True, help="the run's ledger directory; the score is recorded"
+        )
+        sub.add_argument(
+            "--noise-floor",
+            type=float,
+            default=None,
+            help="the floor measure_noise reported; mutually exclusive with --noise-run",
+        )
+        sub.add_argument(
+            "--noise-run",
+            action="append",
+            default=None,
+            metavar="STORE#JOB",
+            help="give TWICE to measure the floor here from the two iteration-0 "
+            "baselines, e.g. 'sqlite:////scratch/run/stores/iter0-a.sqlite#JOB'",
+        )
+        sub.add_argument(
+            "--band",
+            default=None,
+            help="the calibration band; read off the run's newest calibration record "
+            "when omitted. `not_trusted` refuses judge-derived gold",
+        )
+        sub.add_argument("--out", default=None, help="write the score as JSON here")
+        sub.add_argument("--seed", default=BOOTSTRAP_SEED, help="paired-bootstrap seed")
+        sub.add_argument("--resamples", type=int, default=BOOTSTRAP_RESAMPLES)
+        if name == "score":
+            sub.add_argument(
+                "--pools",
+                default=None,
+                help=f"comma-separated pools; defaults to {', '.join(SCORE_POOLS)}. "
+                "'pilot' is REFUSED -- it is a locked test set",
+            )
+            sub.add_argument(
+                "--matched",
+                default=None,
+                help="the JSONL extract; supplies the agreed sets, which is the only "
+                "way the fresh baseline's OWN regression drift can be reported",
+            )
+            sub.add_argument(
+                "--incumbent",
+                default=None,
+                metavar="STORE#JOB",
+                help="the incumbent's run when it is no longer go_mf@4; re-measured "
+                "over this score's own labelled subset (C19)",
+            )
+            sub.add_argument(
+                "--incumbent-label",
+                default=None,
+                help="how to name the incumbent in the record; its query type by default",
+            )
+        sub.set_defaults(func=handler)
 
     args = parser.parse_args(argv)
     if getattr(args, "record", False) and not args.run_dir:

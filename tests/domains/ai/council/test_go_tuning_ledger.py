@@ -187,12 +187,19 @@ def test_two_ledger_objects_appending_interleaved_keep_every_record(
 
 
 def test_the_kind_vocabulary_is_the_run_s_steps() -> None:
-    """Pinned: step N+1 looks for step N by kind, so a rename is a break."""
+    """Pinned: step N+1 looks for step N by kind, so a rename is a break.
+
+    ``run`` was added for C14's isolated per-run stores: the store and job
+    identities of every independent ``go_mf`` run have to be durable, and the
+    scorer names those files.  Growing this tuple is a deliberate act and
+    this assertion is what makes it one; renaming an existing entry is not.
+    """
     assert LEDGER_KINDS == (
         "extract",
         "manifest",
         "tranche",
         "calibration",
+        "run",
         "candidate",
         "score",
         "stop",

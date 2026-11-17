@@ -19,11 +19,19 @@ MATERIAL it is asked to apply it to, as opposed to the prompts that ask it
 * :mod:`.calibrate` -- agreement, its Wilson interval, the class/source/side
   slices, the position-swap flip rates and the trust BAND the tranche gate
   reads.
+* :mod:`.run` -- ``fresh_run``, which gives every logically independent
+  ``go_mf`` run its OWN sqlite store and then PROVES it was fresh, because
+  the engine's reuse key ignores the job id and a second run in one store
+  reports the first run's answers as its own.
+* :mod:`.score` -- the held-out scorer: exact-set primary, the paired
+  bootstrap, the decline and regression guards, the incumbent rule and the
+  stop rule.  ``audit`` is the one reader of the locked pilot.
 
 Importing this package pulls in nothing but :mod:`.policy`, which is a single
 string constant: no store, no backend, no optional dependency.  The other
 modules are NOT re-exported here for exactly that reason -- :mod:`.conflicts`
-reaches a SQLAlchemy store, :mod:`.adjudicate` reaches the council facade and
+reaches a SQLAlchemy store, :mod:`.adjudicate` and :mod:`.run` reach the
+council facade, :mod:`.score` reaches the store's ``attempts`` table and
 :mod:`.table` reaches ``openpyxl`` (the ``council-tuning`` extra), and
 importing this package must stay free.  Import them by name.
 """

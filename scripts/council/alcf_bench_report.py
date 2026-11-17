@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -41,7 +41,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "src") not in sys.path:  # run from a checkout without install
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-BASELINE_QUERY = ("go_mf", "4")
+# Matching lives in the library now, so this report and the go_tuning conflict
+# extractor cannot drift apart on what counts as an eligible baseline row.
+# This script keeps the item_id matcher it has always used (``match_items``);
+# the key-based one, ``conflicts.match``, is deliberately NOT used here -- a
+# bench report compares NAMED jobs and must refuse ambiguity rather than
+# coalesce it.
+from kbutillib.domains.ai.council.go_tuning.conflicts import (  # noqa: E402
+    Refused,
+    match_items,
+    selected_set,
+)
+from kbutillib.domains.ai.council.go_tuning.conflicts import (  # noqa: E402
+    verdict_ok as _verdict_ok,
+)
 
 #: Historical population figures: CONTEXT ONLY, never the comparison.
 POPULATION_CONTEXT = {
@@ -95,21 +108,9 @@ NO_VERDICT_STATEMENT = (
 )
 
 
-class Refused(Exception):
-    """The inputs are missing, mismatched or ambiguous; ``ids`` lists them."""
-
-    def __init__(self, message: str, ids: Sequence[str] = ()) -> None:
-        super().__init__(message)
-        self.ids = list(ids)
-
-
 # ---------------------------------------------------------------------------
 # verdict helpers
 # ---------------------------------------------------------------------------
-
-
-def selected_set(verdict: Optional[Mapping[str, Any]]) -> frozenset:
-    return frozenset((verdict or {}).get("selected_ids") or [])
 
 
 def jaccard(a: Iterable[str], b: Iterable[str]) -> float:
@@ -126,78 +127,6 @@ def _pct(num: float, den: float) -> Optional[float]:
 
 def _fmt_pct(value: Optional[float]) -> str:
     return "N/A" if value is None else f"{value:.1f}%"
-
-
-def _verdict_ok(item: Mapping[str, Any]) -> bool:
-    verdict = item.get("verdict") or {}
-    return item.get("status") == "ok" and verdict.get("status", "ok") == "ok"
-
-
-# ---------------------------------------------------------------------------
-# matching
-# ---------------------------------------------------------------------------
-
-
-def match_items(
-    candidate_items: Sequence[Mapping[str, Any]],
-    baseline_jobs: Sequence[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    """Pair candidate items with baseline rows; REFUSE rather than choose.
-
-    ``baseline_jobs`` are ``{"job_id", "query_name", "query_version",
-    "items": [...]}`` dicts, one per explicitly named job.
-
-    Returns ``{"pairs": {item_id: (cand_item, base_item)}, "unmatched":
-    {item_id: reason}}``. Raises :class:`Refused` on a baseline job that is
-    not go_mf@4, a duplicate eligible match, or an item id present in the
-    baseline whose entity_hash/data_hash differ from the candidate's.
-    """
-    wrong = [
-        j["job_id"] for j in baseline_jobs
-        if (j.get("query_name"), str(j.get("query_version"))) != BASELINE_QUERY
-    ]
-    if wrong:
-        raise Refused("baseline job(s) are not go_mf@4", wrong)
-
-    by_id: Dict[str, List[Tuple[str, Mapping[str, Any]]]] = defaultdict(list)
-    for job in baseline_jobs:
-        for row in job.get("items", []):
-            by_id[row["item_id"]].append((job["job_id"], row))
-
-    pairs: Dict[str, Tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
-    unmatched: Dict[str, str] = {}
-    duplicates: List[str] = []
-    mismatched: List[str] = []
-    for cand in candidate_items:
-        item_id = cand["item_id"]
-        rows = by_id.get(item_id, [])
-        same_hash = [
-            (jid, r) for jid, r in rows
-            if r.get("entity_hash") == cand.get("entity_hash")
-            and r.get("data_hash") == cand.get("data_hash")
-        ]
-        if rows and not same_hash:
-            mismatched.append(item_id)
-            continue
-        eligible = [(jid, r) for jid, r in same_hash if _verdict_ok(r)]
-        if len(eligible) > 1:
-            duplicates.append(item_id)
-        elif len(eligible) == 1:
-            pairs[item_id] = (cand, eligible[0][1])
-        elif same_hash:
-            unmatched[item_id] = "baseline row has no ok verdict"
-        else:
-            unmatched[item_id] = "no baseline row in the named jobs"
-    if duplicates:
-        raise Refused(
-            "duplicate eligible baseline match (refusing to pick a winner)", duplicates
-        )
-    if mismatched:
-        raise Refused(
-            "baseline row exists but entity_hash/data_hash differ from the candidate",
-            mismatched,
-        )
-    return {"pairs": pairs, "unmatched": unmatched}
 
 
 # ---------------------------------------------------------------------------

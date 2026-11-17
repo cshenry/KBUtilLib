@@ -1695,6 +1695,56 @@ class TestRecordAttempt:
         assert len(rows) == 1
         assert rows[0]["queued_at"] is None
 
+    def test_a_reply_text_is_stored_verbatim_up_to_the_cap(self, store):
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(
+            claim["call_id"],
+            1,
+            T0,
+            T0,
+            "invalid_output",
+            reply_text='{"picked": "not-a-list"',
+        )
+        rows = self._attempts(store)
+        assert len(rows) == 1
+        assert rows[0]["reply_text"] == '{"picked": "not-a-list"'
+
+    def test_an_over_long_reply_is_truncated_to_the_cap(self, store):
+        """A model that answers with a megabyte must not set the row width.
+
+        Truncation is the STORE's, not the caller's, so one rule covers
+        every writer -- including a caller that has never heard of the cap.
+        """
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        oversized = "x" * 100_000
+        store.record_attempt(
+            claim["call_id"], 1, T0, T0, "invalid_output", reply_text=oversized
+        )
+        stored = self._attempts(store)[0]["reply_text"]
+        assert len(stored) == sch.ATTEMPT_REPLY_TEXT_MAX_CHARS == 65_536
+        # The FIRST characters, not the last: a reply's defect is usually at
+        # the start (a prose preamble, a wrong top-level shape), and a
+        # head-truncated string cannot be read as JSON at all.
+        assert stored == oversized[:65_536]
+
+    def test_an_empty_reply_is_stored_as_null(self, store):
+        """A transport failure with no body has nothing to say, which is the
+        same thing as not passing the argument."""
+        store.create_job(
+            job_row(), [item_row("item-1")], [call_row("item-1", "proposer_1")]
+        )
+        (claim,) = store.claim_calls("w1", {"argo"}, 10, now=T0)
+        store.record_attempt(claim["call_id"], 1, T0, T0, "transport", reply_text="")
+        store.record_attempt(claim["call_id"], 2, T0, T0, "transport")
+        rows = sorted(self._attempts(store), key=lambda r: r["attempt_no"])
+        assert [row["reply_text"] for row in rows] == [None, None]
+
     def test_guard_coverage_is_structural_not_a_hand_maintained_list(self, store):
         """The property this task actually buys: a parameter is covered by
         construction, not because someone remembered to list it.
@@ -1726,7 +1776,12 @@ class TestRecordAttempt:
         ]
         # Fails loudly rather than vacuously passing if record_attempt's
         # signature ever loses its optional parameters.
-        assert set(optional_params) >= {"usage", "worker_id", "queued_at"}
+        assert set(optional_params) >= {
+            "usage",
+            "worker_id",
+            "queued_at",
+            "reply_text",
+        }
         for name in optional_params:
             kwargs = dict(base_args)
             kwargs[name] = {"system": "leaked prompt"}

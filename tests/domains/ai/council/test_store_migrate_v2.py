@@ -417,5 +417,120 @@ class TestMigrateUnderTheLock:
                 migrate(path)
 
 
+class TestCaptureColumnsOnAV1Store:
+    """The four capture columns of KBUtilLib#92 on a REAL v1 store file.
+
+    Same shape as the ``attempts.queued_at`` additive-column test in
+    ``test_store_contract.py``, but starting from the checked-in v1 DDL
+    rather than from a current store with a column dropped out of it: these
+    four were added long after stores existed in the field, and the store the
+    published run produced is a v1 file, so the case that actually matters is
+    a file that never had the columns at all.
+
+    What must hold: ``kbu council db migrate`` adds all four, no
+    ``SCHEMA_VERSION`` bump is involved (the stamp never said anything about
+    them), and the rows the fixture already carried read NULL -- "nothing to
+    say" about a job, call or attempt recorded before the columns existed,
+    which is not the same claim as any particular value.
+    """
+
+    #: ``(table, column)`` for each of the four, in ADDITIVE_COLUMNS order.
+    CAPTURE_COLUMNS = (
+        ("attempts", "reply_text"),
+        ("calls", "effective_params"),
+        ("calls", "reuse_namespace"),
+        ("jobs", "code_version"),
+    )
+
+    @pytest.fixture
+    def v1_path(self, tmp_path: Path) -> Path:
+        path = tmp_path / "council" / "council.sqlite"
+        build_v1_store(path)
+        return path
+
+    def _columns(self, path: Path, table: str) -> set:
+        conn = sqlite3.connect(path)
+        try:
+            return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        finally:
+            conn.close()
+
+    def test_the_v1_fixture_has_none_of_the_four(self, v1_path: Path) -> None:
+        """Guard on the premise: without this the next test proves nothing."""
+        for table, column in self.CAPTURE_COLUMNS:
+            assert column not in self._columns(v1_path, table), (table, column)
+
+    def test_all_four_are_declared_additive(self) -> None:
+        for pair in self.CAPTURE_COLUMNS:
+            assert pair in sch.ADDITIVE_COLUMNS, pair
+
+    def test_migrate_adds_all_four_without_a_version_bump(self, v1_path: Path) -> None:
+        report = migrate(v1_path)
+        assert report["schema_version"] == sch.SCHEMA_VERSION == 2
+        # The report NAMES them rather than saying "migrated" about a file it
+        # silently altered.
+        for table, column in self.CAPTURE_COLUMNS:
+            assert f"{table}.{column}" in report["columns_added"], (table, column)
+        for table, column in self.CAPTURE_COLUMNS:
+            assert column in self._columns(v1_path, table), (table, column)
+
+        store = open_store(f"sqlite:///{v1_path}")
+        try:
+            # Idempotent, and the second run needs no bump either.
+            assert store.add_missing_columns() == []
+            assert store.schema_version() == sch.SCHEMA_VERSION
+        finally:
+            store.close()
+
+    def test_the_v1_rows_read_null_on_all_four(self, v1_path: Path) -> None:
+        migrate(v1_path)
+        store = open_store(f"sqlite:///{v1_path}")
+        try:
+            job = store.get_job("job-1")
+            assert job["code_version"] is None
+            calls = store.get_calls("job-1")
+            assert len(calls) == 3
+            for call in calls:
+                assert call["effective_params"] is None
+                assert call["reuse_namespace"] is None
+            with store.engine.connect() as conn:
+                attempts = [
+                    dict(row._mapping) for row in conn.execute(sa.select(sch.attempts))
+                ]
+            assert len(attempts) == 1
+            assert attempts[0]["outcome_kind"] == "transport"
+            assert attempts[0]["reply_text"] is None
+        finally:
+            store.close()
+
+    def test_the_migrated_store_accepts_a_reply_text_on_a_new_attempt(
+        self, v1_path: Path
+    ) -> None:
+        """A migrated store is a WRITABLE store for the new column, not just
+        one that reports it in its catalogue."""
+        migrate(v1_path)
+        store = open_store(f"sqlite:///{v1_path}")
+        try:
+            store.record_attempt(
+                "call-0",
+                2,
+                started_at=_T0(),
+                finished_at=_T0(),
+                outcome_kind="invalid_output",
+                reply_text="{not json",
+            )
+            with store.engine.connect() as conn:
+                rows = {
+                    row._mapping["attempt_no"]: dict(row._mapping)
+                    for row in conn.execute(
+                        sa.select(sch.attempts).where(sch.attempts.c.call_id == "call-0")
+                    )
+                }
+            assert rows[1]["reply_text"] is None
+            assert rows[2]["reply_text"] == "{not json"
+        finally:
+            store.close()
+
+
 def _T0() -> datetime:
     return datetime(2026, 10, 15, 12, 0, 0, tzinfo=timezone.utc)

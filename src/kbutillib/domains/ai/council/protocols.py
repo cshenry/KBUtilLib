@@ -331,6 +331,7 @@ class CouncilStore(Protocol):
         usage: Optional[Dict[str, Any]] = None,
         worker_id: Optional[str] = None,
         queued_at: Optional[datetime] = None,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Record one try at a call.
 
@@ -339,6 +340,15 @@ class CouncilStore(Protocol):
         this call is a service and has a queue-wait to report, else absent
         -- "nothing to say", not zero.  Defaults to ``None`` so every caller
         from before this parameter existed is unaffected.
+
+        ``reply_text`` is the additive, nullable ``attempts.reply_text``
+        column (likewise no version bump): the model's UNREPAIRED output on
+        an attempt that produced no usable answer, which a retry would
+        otherwise erase.  An implementation truncates it to
+        ``ATTEMPT_REPLY_TEXT_MAX_CHARS``; a caller passes the reply it got.
+        Defaults to ``None``, which is what every caller that has no reply to
+        report -- and every caller written before this parameter existed --
+        says by saying nothing.
 
         Raises ``ValueError`` if any argument is a dict containing a
         ``system`` or ``user`` key: prompt text never enters this table.

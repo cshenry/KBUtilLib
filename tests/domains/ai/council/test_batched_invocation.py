@@ -16,6 +16,7 @@ the test knowing which one a given row will take.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -1086,3 +1087,295 @@ class TestSchemaRefusedBatch:
         assert rows["poison"]["error"]["kind"] == "transport"
         for item_id in ("item-1", "item-2", "item-4"):
             assert rows[item_id]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# The raw reply lands on the ANCHOR attempt only (KBUtilLib#92 item 1)
+# ---------------------------------------------------------------------------
+
+
+class WrapperInvalidScript(BatchScript):
+    """A script whose BATCHED replies ignore the wrapper schema.
+
+    One batched invocation carries one reply, so a reply that is not the
+    ``{"answers": [...]}`` shape fails the invocation as a whole without
+    judging any item -- the ``batch_failed`` outcome the caller bisects.  It
+    is the whole-invocation failure that HAS a body: a transport failure or a
+    timeout usually has none, and a schema refusal never gets as far as the
+    model.
+
+    Solo calls fall through to :class:`BatchScript`, so bisection still
+    bottoms out in rows that answer.
+    """
+
+    #: What a batched invocation of this script comes back with.
+    PROSE = {"notes": "I will answer in prose instead, thank you"}
+
+    @property
+    def wrapper_invalid_text(self) -> str:
+        """The exact ``LLMResult.text`` a batched invocation produced."""
+        return json.dumps(self.PROSE, sort_keys=True)
+
+    def __call__(self, req: Any) -> Any:
+        if _batched_pairs(req.user or ""):
+            return dict(self.PROSE)
+        return super().__call__(req)
+
+
+class RecordingBatchScript(BatchScript):
+    """A :class:`BatchScript` that remembers the TEXT of every batched reply.
+
+    ``FakeBackend`` serialises a script's answer with
+    ``json.dumps(answer, sort_keys=True)``, so what this records is
+    byte-identical to the ``LLMResult.text`` the engine received -- which is
+    what lets a test assert that ``attempts.reply_text`` holds the model's
+    reply VERBATIM rather than something re-serialised from the parsed
+    elements.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.batched_replies: List[str] = []
+
+    def __call__(self, req: Any) -> Any:
+        answer = super().__call__(req)
+        if _batched_pairs(req.user or ""):
+            self.batched_replies.append(json.dumps(answer, sort_keys=True))
+        return answer
+
+
+def batched_attempts_by_invocation(store: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """``{invocation_id: [attempt rows]}`` for every BATCHED attempt.
+
+    Keyed off the ``invocation_id`` every member's usage payload carries, so
+    solo attempts (bisection's leaves, which have no invocation) are excluded
+    without the test having to guess which rows those are.
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for row in attempts_of(store):
+        usage = row.get("usage") or {}
+        if isinstance(usage, Mapping) and "invocation_id" in usage:
+            out.setdefault(str(usage["invocation_id"]), []).append(row)
+    return out
+
+
+def _anchor_reply(rows: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    """The reply_text the anchor of this invocation actually stored.
+
+    Read out of the rows so :func:`check_reply_on_anchor_only` can be reused
+    for "whatever the anchor holds, no other member holds anything" without
+    the test having to rebuild the reply string; the tests that care about
+    WHAT it holds assert that separately against the script's own record.
+    """
+    anchor_id = str((rows[0]["usage"] or {})["anchor_call_id"])
+    for row in rows:
+        if str(row["call_id"]) == anchor_id:
+            return row["reply_text"]
+    raise AssertionError("the anchor's own attempt is missing")
+
+
+def check_reply_on_anchor_only(
+    rows: Sequence[Mapping[str, Any]], expected: Optional[str]
+) -> Dict[str, Any]:
+    """Assert ONE invocation wrote *expected* on its anchor attempt and NULL
+    on every other member, and return the anchor row.
+
+    The anchor is read from the usage payload rather than from member order:
+    ``anchor_call_id`` is what the audit trail actually points the other
+    members at, so this checks the column against the same answer a reader of
+    the store would get.
+    """
+    assert rows, "no attempts were recorded for this invocation"
+    anchor_ids = {str((row["usage"] or {})["anchor_call_id"]) for row in rows}
+    assert len(anchor_ids) == 1, f"members disagree about the anchor: {anchor_ids}"
+    (anchor_id,) = anchor_ids
+    anchors = [row for row in rows if str(row["call_id"]) == anchor_id]
+    assert len(anchors) == 1, "the anchor's own attempt is missing"
+    assert anchors[0]["reply_text"] == expected
+    for row in rows:
+        if str(row["call_id"]) == anchor_id:
+            continue
+        assert row["reply_text"] is None, (
+            f"member {row['call_id']} duplicated the invocation's reply; it must "
+            "refer to the anchor through usage['anchor_call_id'] instead"
+        )
+    return dict(anchors[0])
+
+
+class TestRawReplyOnTheAnchor:
+    """One invocation, one reply, recorded ONCE.
+
+    A batched invocation's reply produced N members' outcomes, so when
+    anything about it fails the whole reply is the evidence and it belongs to
+    the invocation rather than to any one member.  It is written on the
+    ANCHOR attempt -- even when the anchor's own outcome is ``ok`` -- and
+    every other member's ``reply_text`` stays NULL and points at the anchor
+    through the ``anchor_call_id`` its usage payload already carried.
+
+    What is stored is always what the MODEL SENT.  Parsed or repaired
+    elements are never serialised back into the column: the point of it is to
+    show what arrived.
+    """
+
+    def _worker(self, store: Any, script: Any, monkeypatch: Any, **kwargs: Any) -> Any:
+        backend = fake(script)
+        worker = worker_for(
+            store, {"fake1": backend}, batch_size=10, max_output_tokens_per_item=50, **kwargs
+        )
+        roster = big_roster(3)
+        for _role, seat in roster.seats():
+            grant_cap(monkeypatch, seat, 1_000_000)
+        return worker, roster, backend
+
+    def test_a_whole_wrapper_failure_stores_the_reply_on_its_anchor(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """The reply that failed the WHOLE invocation is kept.
+
+        No member row is completed by this path -- the claims are held for
+        the bisection -- so no ``calls.reply_text`` is written for any of
+        them and the anchor's attempt is the only record of what came back.
+        """
+        script = WrapperInvalidScript()
+        worker, roster, backend = self._worker(store, script, monkeypatch)
+        job_id = worker.submit(
+            make_query(), tasks_for("item-1", "item-2", "item-3"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        invocations = batched_attempts_by_invocation(store)
+        assert invocations, "no batched invocation was recorded"
+        for rows in invocations.values():
+            anchor = check_reply_on_anchor_only(rows, script.wrapper_invalid_text)
+            # The uncharged negative attempt_no of a whole-invocation
+            # failure: the reply is captured without spending any row's
+            # single-item attempt budget.
+            assert anchor["attempt_no"] < 0
+            assert anchor["outcome_kind"] == "invalid_output"
+        # Bisection still bottomed out in solo calls that answered, and those
+        # attempts record no reply of their own.
+        solo = [
+            row
+            for row in attempts_of(store)
+            if not isinstance(row.get("usage"), Mapping)
+            or "invocation_id" not in (row.get("usage") or {})
+        ]
+        assert solo, "bisection must still reach single calls"
+        assert all(row["reply_text"] is None for row in solo if row["outcome_kind"] == "ok")
+
+    def test_a_partly_invalid_batch_stores_it_on_an_anchor_that_is_ok(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """THE EXCEPTION, stated: an 'ok' attempt carries the reply.
+
+        The wrapper was valid and every member was judged individually, so
+        the anchor's own element was fine and its call settled ``ok``.  The
+        reply is still the only evidence for the member that did NOT settle,
+        and it is one reply -- so it goes on the anchor.
+
+        Claims are handed out in ``item_order`` (see
+        ``queries.select_claimable``), so the anchor is item-1's call and the
+        invalid item is deliberately the last one.
+        """
+        script = RecordingBatchScript(invalid_item_ids=["item-3"])
+        worker, roster, backend = self._worker(
+            store, script, monkeypatch, max_attempts=1
+        )
+        job_id = worker.submit(
+            make_query(), tasks_for("item-1", "item-2", "item-3"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        three = [
+            rows
+            for rows in batched_attempts_by_invocation(store).values()
+            if len(rows) == 3
+        ]
+        assert three, "no three-member invocation was recorded"
+        for rows in three:
+            anchor = check_reply_on_anchor_only(rows, _anchor_reply(rows))
+            assert anchor["outcome_kind"] == "ok", (
+                "the anchor's own element was valid -- that is exactly the case "
+                "this test exists for"
+            )
+            # VERBATIM: byte-identical to a reply the backend really sent,
+            # and it still carries the invalid element rather than anything
+            # normalise() made of it.
+            assert anchor["reply_text"] in script.batched_replies
+            assert "not-a-list" in anchor["reply_text"]
+            invalid = [r for r in rows if r["outcome_kind"] == "invalid_output"]
+            assert len(invalid) == 1
+            assert invalid[0]["reply_text"] is None
+
+    def test_a_missing_member_stores_it_on_the_anchor_too(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """An omitted answer is judged like an invalid one, and the reply --
+        the thing that shows the answer really is absent rather than
+        mislaid -- is kept once, on the anchor."""
+        script = RecordingBatchScript(missing_item_ids=["item-3"])
+        worker, roster, backend = self._worker(
+            store, script, monkeypatch, max_attempts=1
+        )
+        job_id = worker.submit(
+            make_query(), tasks_for("item-1", "item-2", "item-3"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        three = [
+            rows
+            for rows in batched_attempts_by_invocation(store).values()
+            if len(rows) == 3
+        ]
+        assert three, "no three-member invocation was recorded"
+        for rows in three:
+            anchor = check_reply_on_anchor_only(rows, _anchor_reply(rows))
+            assert anchor["outcome_kind"] == "ok"
+            assert anchor["reply_text"] in script.batched_replies
+            missing = [r for r in rows if r["outcome_kind"] == "missing"]
+            assert len(missing) == 1
+            assert missing[0]["reply_text"] is None
+            # The stored reply really is the one with the gap in it: the
+            # absent member's item_key appears nowhere in it.
+            assert str(missing[0]["call_id"]) not in anchor["reply_text"]
+
+    def test_a_fully_valid_batch_records_no_reply_text_at_all(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """Nothing failed, so there is nothing the call rows do not already
+        say: each member's own ``calls.reply_text`` holds its element."""
+        worker, roster, backend = self._worker(store, BatchScript(), monkeypatch)
+        job_id = worker.submit(
+            make_query(), tasks_for("item-1", "item-2", "item-3"), roster
+        )
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        rows = attempts_of(store)
+        assert rows
+        assert all(row["reply_text"] is None for row in rows)
+
+    def test_a_schema_refused_batch_has_no_reply_to_record(
+        self, store: Any, monkeypatch: Any
+    ) -> None:
+        """A schema refusal carries NO text, and none is invented.
+
+        ``schema_incompatible`` is raised before the backend runs anything --
+        a ``CodexCliBackend`` that cannot serve a role's answer schema never
+        spawns the CLI (t2) -- so the result has no body at all.  The anchor
+        rule is applied to this path like the other two, and on this path it
+        correctly writes nothing: ``reply_text`` is NULL for every member,
+        including the anchor.
+        """
+        worker, roster, backend = self._worker(
+            store,
+            SchemaRefusingScript(refuse_roles=("proposer",)),
+            monkeypatch,
+            max_attempts=3,
+        )
+        job_id = worker.submit(make_query(), tasks_for("item-1", "item-2"), roster)
+        run(worker.work(job_id=job_id, until_idle=True))
+
+        rows = attempts_of(store)
+        assert rows, "the refusal must still be audited"
+        assert all(row["outcome_kind"] == "schema_incompatible" for row in rows)
+        assert all(row["reply_text"] is None for row in rows)

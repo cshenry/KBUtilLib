@@ -1990,6 +1990,7 @@ class SqliteStore:
         usage: Optional[Mapping[str, Any]] = None,
         worker_id: Optional[str] = None,
         queued_at: Optional[datetime] = None,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Record one try at a call.
 
@@ -1998,6 +1999,19 @@ class SqliteStore:
         ``None`` (its default, and the column's own default) by any caller
         that never measured a queue wait, which is "nothing to say" and not
         the same claim as zero.
+
+        ``reply_text`` writes the additive ``attempts.reply_text`` column:
+        WHAT THE MODEL SENT on an attempt that produced no usable answer,
+        truncated to the first :data:`.schema.ATTEMPT_REPLY_TEXT_MAX_CHARS`
+        characters.  Truncation happens HERE rather than at each call site so
+        one rule covers every writer, including a caller that never heard of
+        the cap.  An empty string is stored as NULL: a reply with no body is
+        "nothing to say", the same as not passing the argument at all.
+
+        It is the model's untouched output.  A caller must never hand this a
+        repaired or re-serialised answer -- the column exists to show what
+        arrived, and the repaired shape is in ``calls.reply_parsed`` /
+        ``calls.normalised`` already.
 
         Raises:
             ValueError: any argument carries prompt text -- a dict, at any
@@ -2015,6 +2029,10 @@ class SqliteStore:
         # dict instead makes a future parameter covered automatically, with
         # no second place to remember.
         q.refuse_prompt_text(**{k: v for k, v in locals().items() if k != "self"})
+        # AFTER the refusal, never before: the guard is meant to see the
+        # argument the caller actually passed, and capping first would hand
+        # it a value no caller chose.
+        capped = (reply_text or "")[: sch.ATTEMPT_REPLY_TEXT_MAX_CHARS] or None
         with self.transaction() as conn:
             conn.execute(
                 sch.attempts.insert(),
@@ -2029,6 +2047,7 @@ class SqliteStore:
                         "usage": usage,
                         "worker_id": worker_id,
                         "queued_at": queued_at,
+                        "reply_text": capped,
                     },
                 ),
             )

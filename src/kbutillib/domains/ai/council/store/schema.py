@@ -35,6 +35,7 @@ import sqlalchemy as sa
 __all__ = [
     "SCHEMA_VERSION",
     "ADDITIVE_COLUMNS",
+    "ATTEMPT_REPLY_TEXT_MAX_CHARS",
     "UtcDateTime",
     "metadata",
     "schema_version",
@@ -75,7 +76,25 @@ ADDITIVE_COLUMNS = (
     ("calls", "normalised"),
     ("attempts", "queued_at"),
     ("endpoint_state", "halt_cause"),
+    # The four capture columns of KBUtilLib#92 items 1 and 2.  All four are
+    # PROVENANCE: they record what a call was actually made with and what a
+    # failing model actually said, so a failure can be read after the fact.
+    ("attempts", "reply_text"),
+    ("calls", "effective_params"),
+    ("calls", "reuse_namespace"),
+    ("jobs", "code_version"),
 )
+
+#: How much of a failed attempt's reply is kept in ``attempts.reply_text``.
+#:
+#: 65,536 characters is far above every reply length measured on the
+#: published run and still bounds one row's width, so a model that answers
+#: with a megabyte of repeated text cannot make the store's row width a
+#: function of the worst reply it ever received.  There is deliberately NO
+#: truncation flag: a reader comparing ``len(reply_text)`` against this
+#: constant learns the same thing a flag would say, and a flag is one more
+#: column every writer has to remember to set correctly.
+ATTEMPT_REPLY_TEXT_MAX_CHARS = 65_536
 
 
 class UtcDateTime(sa.types.TypeDecorator):
@@ -191,6 +210,21 @@ jobs = sa.Table(
     sa.Column("options", sa.JSON, nullable=True),
     sa.Column("parent_job_id", _ID, nullable=True),
     sa.Column("n_items", sa.Integer, nullable=False, default=0),
+    # SUBMISSION provenance: which build of this package the process that
+    # SUBMITTED this job was running --
+    # ``{"package_version", "git_commit", "git_dirty"}``, any of which may be
+    # null (see ``council.code_version``).  It is NOT a claim about the
+    # worker that later ran this job's critic and meta calls: a job can be
+    # submitted by one process and worked by another, on another day, from
+    # another checkout, and nothing here records that second build.
+    #
+    # Why it is worth a column at all: the renderer, the normaliser and the
+    # decision rule are CODE in this repo, so "which build produced this
+    # row" is a question the store otherwise cannot answer at all.  Nullable
+    # with no default (see ADDITIVE_COLUMNS): a row written before this
+    # column existed says nothing about its build, which is not the same
+    # claim as "no version".
+    sa.Column("code_version", sa.JSON, nullable=True),
     sa.Index("ix_jobs_user_status", "submitted_by", "status"),
     sa.Index("ix_jobs_priority", "priority", "submitted_at"),
 )
@@ -238,6 +272,24 @@ calls = sa.Table(
     # not the endpoint alias, so two jobs asking the same deployment the same
     # question share one answer.
     sa.Column("prompt_hash", _HASH, nullable=True),
+    # Two of ``prompt_hash``'s own inputs, recorded as PROVENANCE: the
+    # generation parameters the api type said it would really send for this
+    # seat (ARGO forces temperature on some models whatever was asked for,
+    # so this is not the seat's requested params), and the "same deployment"
+    # label the hash was namespaced under.
+    #
+    # They answer "what was this call actually made with", which the row
+    # could not answer before: the route fingerprint is a digest and the
+    # roster records what was REQUESTED.  Neither is secret -- they are
+    # token ceilings, a temperature and a namespace label -- which is why
+    # they may sit in a store a user hands to somebody else.
+    #
+    # They are NOT, and must not be read as, a way to re-derive or check a
+    # prompt: prompt text is never stored, the renderer is code in this
+    # repo, and nothing in the store pins which build rendered a given row.
+    # Nullable with no default (see ADDITIVE_COLUMNS).
+    sa.Column("effective_params", sa.JSON, nullable=True),
+    sa.Column("reuse_namespace", _NAME, nullable=True),
     sa.Column("upstream_digest", sa.String(64), nullable=False, default=""),
     sa.Column("status", _ENUM, nullable=False, default="pending"),
     sa.Column("not_before", UtcDateTime, nullable=True),
@@ -304,8 +356,9 @@ calls = sa.Table(
 attempts = sa.Table(
     "attempts",
     metadata,
-    # One row per try at a call.  Deliberately narrow: prompt text never
-    # enters this table (see SqliteStore.record_attempt, which refuses it).
+    # One row per try at a call.  Prompt text never enters this table (see
+    # SqliteStore.record_attempt, which refuses it); the model's own reply
+    # on an attempt that failed does, in ``reply_text`` below.
     sa.Column("call_id", _ID, sa.ForeignKey("calls.call_id"), primary_key=True),
     sa.Column("attempt_no", sa.Integer, primary_key=True),
     sa.Column("started_at", UtcDateTime, nullable=True),
@@ -321,6 +374,27 @@ attempts = sa.Table(
     # is ``finished_at - started_at``; queue wait is ``started_at -
     # queued_at``.
     sa.Column("queued_at", UtcDateTime, nullable=True),
+    # WHAT THE MODEL SENT on an attempt that did not produce a usable
+    # answer, capped at ATTEMPT_REPLY_TEXT_MAX_CHARS characters.  Only the
+    # FINAL ``calls.error`` survives a retry, so before this column a
+    # retried call's earlier bad reply was gone -- and those are exactly the
+    # rows a failure analysis wants (KBUtilLib#92 item 1: 105 of 113 first
+    # pass item failures came back fine on a plain retry, so the failure was
+    # in the REPLY and not in the question).
+    #
+    # Written for a FAILED attempt only, with ONE exception: a batched
+    # invocation records the raw reply once, on the invocation's anchor
+    # attempt, even when the anchor's own outcome is 'ok' -- there is one
+    # reply for N member rows, and it belongs to the invocation rather than
+    # to any one of them (see ``CouncilWorker._write_attempt``).
+    #
+    # It holds the model's UNREPAIRED output and nothing else.  Parsed or
+    # normalised elements are never serialised back into it: the point of
+    # the column is to show what arrived, so writing a repaired shape here
+    # would destroy the only record of the defect.  Prompt text still never
+    # enters this table (``queries.refuse_prompt_text``, which runs on every
+    # record_attempt call including this argument).
+    sa.Column("reply_text", sa.Text, nullable=True),
 )
 
 

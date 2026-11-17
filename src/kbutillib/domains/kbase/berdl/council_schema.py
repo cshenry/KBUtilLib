@@ -158,6 +158,7 @@ __all__ = [
     "COUNCIL_NAMESPACE",
     "ARCHIVED_TABLES",
     "NOT_ARCHIVED",
+    "NOT_ARCHIVED_STORE_COLUMNS",
     "JOB_DISPOSITION_TABLE",
     "ROLE_BRIEF_TABLE",
     "JOB_DISPOSITIONS",
@@ -241,6 +242,48 @@ PARTITION_COLUMN = "query_name"
 #: namespace carries its own version, and once rows from several stores and
 #: several snapshots share one table, a column holding "2" says nothing.
 NOT_ARCHIVED = ("schema_version",)
+
+#: Per-table store COLUMNS that deliberately do not publish, for the three
+#: tables the capture work of KBUtilLib#92 touches. Together with each
+#: table's own column tuple above, this makes "is every store column
+#: accounted for?" a question a test can answer instead of a thing a reader
+#: has to notice -- see the parity test in
+#: ``tests/berdl/test_council_schema.py``.
+#:
+#: THE LAKEHOUSE SCHEMA IS ``council-record-lakehouse-v1``'S TO CHANGE. The
+#: four capture columns below are listed here precisely so that adding them
+#: to the store changes nothing about what the archiver publishes; whether
+#: this namespace ever carries them is that project's decision and not this
+#: one's.
+#:
+#: Why each entry is here:
+#:
+#: * ``attempts.reply_text`` -- what a model sent on an attempt that failed.
+#: * ``calls.effective_params`` / ``calls.reuse_namespace`` -- two inputs of
+#:   the row's own ``prompt_hash``, recorded as provenance.
+#: * ``jobs.code_version`` -- the submitting process's build.
+#: * ``jobs.priority`` and the five ``calls`` lease/queue columns -- the
+#:   pre-existing omissions, dropped as scheduler and lease state rather
+#:   than record; the reasoning is at each column tuple's declaration.
+#:
+#: The other archived tables' omissions (``items.item_order``, the three
+#: ``endpoint_state`` halt columns, everything ``workers`` drops) are pinned
+#: by their own tests and are deliberately NOT restated here: this constant
+#: covers the three tables this capture work added columns to, so a reader
+#: must not take it as a complete per-table omission registry.
+NOT_ARCHIVED_STORE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "attempts": ("reply_text",),
+    "calls": (
+        "effective_params",
+        "reuse_namespace",
+        "not_before",
+        "claim_token",
+        "claimed_by",
+        "claimed_at",
+        "lease_generation",
+    ),
+    "jobs": ("code_version", "priority"),
+}
 
 
 # --------------------------------------------------------------------------

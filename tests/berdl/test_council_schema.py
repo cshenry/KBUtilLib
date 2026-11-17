@@ -44,6 +44,7 @@ from kbutillib.domains.kbase.berdl.council_schema import (
     JOB_DISPOSITIONS,
     NAMESPACE,
     NOT_ARCHIVED,
+    NOT_ARCHIVED_STORE_COLUMNS,
     PARTITION_COLUMN,
     ROLE_BRIEF_TABLE,
     ROLE_BRIEF_UNEXTRACTABLE,
@@ -378,17 +379,62 @@ class TestDroppedColumns:
         archived = set(column_names("query_types")) - set(IDENTITY_COLUMN_NAMES)
         assert archived == _store_column_names("query_types")
 
-    def test_jobs_archives_every_store_column_but_priority(self):
+    def test_jobs_archives_every_store_column_it_does_not_declare_dropped(self):
         archived = set(column_names("jobs")) - set(IDENTITY_COLUMN_NAMES)
-        assert archived == _store_column_names("jobs") - {"priority"}
+        assert archived == _store_column_names("jobs") - set(
+            NOT_ARCHIVED_STORE_COLUMNS["jobs"]
+        )
+        # The two dropped ones, named: a scheduler knob and a capture column
+        # whose publication is council-record-lakehouse-v1's call.
+        assert set(NOT_ARCHIVED_STORE_COLUMNS["jobs"]) == {"priority", "code_version"}
 
-    def test_calls_archives_every_store_column_but_the_five_lease_columns(self):
+    def test_calls_archives_every_store_column_it_does_not_declare_dropped(self):
         archived = set(column_names("calls")) - set(IDENTITY_COLUMN_NAMES)
-        assert archived == _store_column_names("calls") - set(_LEASE_COLUMNS)
+        assert archived == _store_column_names("calls") - set(
+            NOT_ARCHIVED_STORE_COLUMNS["calls"]
+        )
+        # The five lease columns are still among them, which is what keeps
+        # the class's first two tests meaningful.
+        assert set(_LEASE_COLUMNS) <= set(NOT_ARCHIVED_STORE_COLUMNS["calls"])
 
-    def test_attempts_archives_every_store_column_plus_query_name(self):
+    def test_attempts_archives_every_store_column_but_reply_text_plus_query_name(self):
         archived = set(column_names("attempts")) - set(IDENTITY_COLUMN_NAMES)
-        assert archived == _store_column_names("attempts") | {"query_name"}
+        assert archived == (
+            _store_column_names("attempts")
+            - set(NOT_ARCHIVED_STORE_COLUMNS["attempts"])
+        ) | {"query_name"}
+        assert set(NOT_ARCHIVED_STORE_COLUMNS["attempts"]) == {"reply_text"}
+
+    def test_every_store_column_of_these_three_is_archived_or_declared_dropped(self):
+        """PARITY. No store column may be silently unarchived.
+
+        The archive is the only durable copy of a store (a store lives on
+        scratch and is thrown away), so a column added to ``store/schema.py``
+        and then quietly missing from this namespace is data loss that
+        nothing announces. This test is what turns "we meant not to archive
+        that" into a statement in the code: every ``calls``, ``attempts`` and
+        ``jobs`` column must be either in the archived tuple or named in
+        :data:`NOT_ARCHIVED_STORE_COLUMNS`, so the next column added to
+        either side fails here until somebody decides which it is.
+        """
+        for table, dropped in NOT_ARCHIVED_STORE_COLUMNS.items():
+            archived = set(column_names(table))
+            unaccounted = _store_column_names(table) - archived - set(dropped)
+            assert unaccounted == set(), (table, unaccounted)
+
+    def test_nothing_is_declared_dropped_that_the_store_does_not_have(self):
+        """The other direction: a stale entry would hide a real gap.
+
+        A name left in :data:`NOT_ARCHIVED_STORE_COLUMNS` after the store
+        column was renamed or removed would go on excusing a column that no
+        longer exists, and the parity test above would keep passing while
+        the real successor column went unarchived.
+        """
+        for table, dropped in NOT_ARCHIVED_STORE_COLUMNS.items():
+            store_columns = _store_column_names(table)
+            for name in dropped:
+                assert name in store_columns, (table, name)
+                assert name not in set(column_names(table)), (table, name)
 
     def test_no_mirrored_table_invents_a_column_the_store_does_not_have(self):
         # Every archived source column must either exist in the store table,

@@ -81,6 +81,7 @@ from ...llm import acomplete as llm_acomplete
 from ...llm import get_api as llm_get_api
 from ...llm import preflight_api as llm_preflight_api
 from ...llm.types import LLMRequest
+from ..code_version import code_version
 from ..config import DEFAULT_MAX_CONCURRENCY
 # Re-exported (see ``__all__``): the definition moved to the query-spec
 # module so the quote stage can reproduce a prompt hash without
@@ -963,6 +964,14 @@ class CouncilWorker:
             # matters when a store file is copied off that machine to be read
             # somewhere else, which is the only time the question is asked.
             "submitted_host": socket.gethostname(),
+            # SUBMISSION provenance, like submitted_by and submitted_host:
+            # which build of this package THIS process is running.  It says
+            # nothing about the worker that later runs this job's critic and
+            # meta calls, which can be another process from another checkout
+            # -- see ``council.code_version``, which also explains why the
+            # git fields are null unless this checkout really owns the
+            # installed package.
+            "code_version": code_version(),
             "submitted_at": now,
             "priority": int(priority),
             "status": "queued" if unsettled else "done",
@@ -1114,9 +1123,20 @@ class CouncilWorker:
         never stored (the evidence a job was built from is in the item row,
         once), and the worker re-renders it from the item and the settled
         upstream calls when it actually runs.
+
+        ``effective_params`` and ``reuse_namespace`` are recorded on the row
+        as PROVENANCE -- what this call was actually made with.  Both are
+        bound to locals here and used twice, once for the hash and once for
+        the row, so the two cannot drift: a row that recorded a SECOND
+        evaluation of either would be describing a call that was never made.
+        Recording them is not a claim that the prompt can be re-derived or
+        checked from the store; it cannot be (the prompt is not stored, and
+        the renderer is code in this repo that no row pins).
         """
         system, user = query.render(role, task, dict(context))
         schema = query.answer_schema(role)
+        reuse_namespace = self._reuse_namespace(seat)
+        effective_params = self._effective_params(seat)
         return {
             "item_id": task.item_id,
             "role": role,
@@ -1128,10 +1148,12 @@ class CouncilWorker:
             "route_fingerprint": self._route_fingerprint(seat),
             "entity_hash": item_row.get("entity_hash"),
             "data_hash": item_row.get("data_hash"),
+            "effective_params": effective_params,
+            "reuse_namespace": reuse_namespace,
             "prompt_hash": prompt_hash(
                 seat,
-                self._reuse_namespace(seat),
-                self._effective_params(seat),
+                reuse_namespace,
+                effective_params,
                 schema,
                 str(query.name),
                 str(query.version),
@@ -1955,6 +1977,7 @@ class CouncilWorker:
                     started,
                     finished,
                     queued_at,
+                    reply_text=result.text,
                 )
                 return "batch_refused"
             if getattr(batch_error, "rate_limited", False):
@@ -1979,6 +2002,7 @@ class CouncilWorker:
                 started,
                 finished,
                 queued_at,
+                reply_text=result.text,
             )
             return "batch_failed"
 
@@ -2002,6 +2026,7 @@ class CouncilWorker:
             started=started,
             finished=finished,
             queued_at=queued_at,
+            reply_text=result.text,
         )
         return "ok"
 
@@ -2068,6 +2093,7 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         queued_at: datetime,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Audit a whole-invocation failure WITHOUT charging any row.
 
@@ -2079,19 +2105,28 @@ class CouncilWorker:
         until a row is invoked ALONE (confront round 1, point h).  Claims are
         left exactly as they were -- this never releases or completes a
         call -- so the caller can bisect and retry under the same tokens.
+
+        ``reply_text`` is the invocation's raw reply, written ONCE on the
+        anchor attempt (see :meth:`_write_attempt`).  A truncated or
+        wrapper-invalid reply has a body and this is the only place it is
+        ever recorded -- the member rows are not completed here, so no
+        ``calls.reply_text`` is written for any of them; a transport failure
+        or a timeout with no body simply passes ``None`` and the column
+        stays NULL.
         """
         member_call_ids = [str(m.call["call_id"]) for m in members]
         anchor_call_id = str(anchor.call["call_id"])
         with self.store.transaction():
             for member in members:
                 call_id = str(member.call["call_id"])
+                is_anchor = call_id == anchor_call_id
                 payload = self._invocation_usage(
                     invocation_id,
                     member_call_ids,
                     anchor_call_id,
                     anchor_attempt_no,
                     usage,
-                    is_anchor=call_id == anchor_call_id,
+                    is_anchor=is_anchor,
                     extra={"ancestor_failure": True},
                 )
                 attempt_no = self._uncharged_attempt_no(call_id)
@@ -2103,6 +2138,7 @@ class CouncilWorker:
                     error.kind,
                     payload,
                     queued_at,
+                    reply_text=reply_text if is_anchor else None,
                 )
 
     def _uncharged_attempt_no(self, call_id: str) -> int:
@@ -2128,10 +2164,29 @@ class CouncilWorker:
         outcome_kind: str,
         usage: Mapping[str, Any],
         queued_at: Optional[datetime],
+        reply_text: Optional[str] = None,
     ) -> None:
         """``store.record_attempt``, tolerating a store built before
-        ``queued_at`` existed -- the same fallback :meth:`_record_attempt`
-        already uses for the single-call path.
+        ``queued_at`` or ``reply_text`` existed -- the same fallback
+        :meth:`_record_attempt` already uses for the single-call path.
+
+        THE ANCHOR EXCEPTION TO "FAILED ATTEMPTS ONLY".  A batched
+        invocation has ONE reply for N member rows, so when anything about
+        it fails -- the whole invocation, or any single member's answer --
+        the raw reply is written once, on the invocation's ANCHOR attempt,
+        and the other members' attempts keep ``reply_text`` NULL and point at
+        the anchor through the ``anchor_call_id`` already in their usage
+        payload.  That is true EVEN WHEN THE ANCHOR'S OWN OUTCOME IS 'ok':
+        the text is the invocation's, not the anchor row's, and attaching it
+        to a failed member instead would attribute a whole batch's reply to
+        one item of it.  Deciding WHICH member is the anchor is the caller's
+        (see the three settlement paths); this method only writes what it is
+        given.
+
+        What is written is always the model's untouched reply.  Parsed
+        elements are never serialised back into it -- a repaired element
+        would look exactly like something the model sent and would hide the
+        defect the column exists to show.
         """
         try:
             self.store.record_attempt(
@@ -2143,6 +2198,7 @@ class CouncilWorker:
                 usage=dict(usage),
                 worker_id=self.worker_id,
                 queued_at=queued_at,
+                **({"reply_text": reply_text} if reply_text else {}),
             )
         except TypeError:
             self.store.record_attempt(
@@ -2166,6 +2222,7 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         queued_at: datetime,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Settle EVERY member terminally, at once, on a SCHEMA REFUSAL.
 
@@ -2193,19 +2250,29 @@ class CouncilWorker:
         The audit payload is the ordinary per-invocation one, so a refused
         invocation is reconstructible from any one of its members exactly as
         a successful or a bisected one is.
+
+        ``reply_text`` follows the same anchor rule as the other two
+        settlement paths, and in practice there is nothing to write: a
+        schema refusal is raised BEFORE the backend is invoked (a
+        ``CodexCliBackend`` that cannot serve a role's schema never spawns
+        the CLI), so the result carries no text.  The parameter is passed
+        through anyway rather than hard-coded to ``None``, so that an api
+        type which some day refuses a schema with a body attached records
+        that body instead of silently dropping it.
         """
         member_call_ids = [str(m.call["call_id"]) for m in members]
         anchor_call_id = str(anchor.call["call_id"])
         for member in members:
             call, token = member.call, member.token
             call_id = str(call["call_id"])
+            is_anchor = call_id == anchor_call_id
             payload = self._invocation_usage(
                 invocation_id,
                 member_call_ids,
                 anchor_call_id,
                 anchor_attempt_no,
                 usage,
-                is_anchor=call_id == anchor_call_id,
+                is_anchor=is_anchor,
             )
             attempt_no = int(call.get("attempt_count") or 0) + 1
             try:
@@ -2225,6 +2292,7 @@ class CouncilWorker:
                         error.kind,
                         payload,
                         queued_at,
+                        reply_text=reply_text if is_anchor else None,
                     )
                     self.advance(call["job_id"], call["item_id"])
             except StaleClaim:  # pragma: no cover - another worker already has it
@@ -2243,6 +2311,7 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         queued_at: datetime,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Settle every member of a WRAPPER-VALID batched reply, 1:N.
 
@@ -2254,6 +2323,14 @@ class CouncilWorker:
         element, and one malformed element never fails its batch-mates
         (confront round 1, point c).  An unknown ``item_key`` is dropped with
         a warning; a repeated one keeps the first and drops the rest.
+
+        ``reply_text`` is the invocation's raw reply.  It is written to the
+        store only if at least one member is missing or invalid, and then
+        only on the ANCHOR attempt (see :meth:`_write_attempt`): one reply
+        produced N members' outcomes, so when any of them is wrong the whole
+        reply is the evidence and it belongs to the invocation.  A batch
+        every member of which answered well records nothing here -- each
+        member's own ``calls.reply_text`` already holds its element.
         """
         known_keys = {str(m.call["call_id"]) for m in members}
         answers = (
@@ -2284,49 +2361,72 @@ class CouncilWorker:
                 continue
             by_key[key] = element
 
-        member_call_ids = [str(m.call["call_id"]) for m in members]
-        anchor_call_id = str(anchor.call["call_id"])
+        # JUDGED FIRST, SETTLED SECOND, because the anchor's attempt row
+        # carries the raw reply whenever ANY member of the invocation failed
+        # -- including when the anchor's own answer is the one that was fine.
+        # The anchor is settled inside the loop below, so whether to give it
+        # the reply has to be known before that loop starts; resolving every
+        # element up front is the only way to know it.  Nothing here writes
+        # to the store, so the two passes see the same facts.
+        judged: List[Tuple[_BatchMember, str, Any, Any]] = []
         for member in members:
             call_id = str(member.call["call_id"])
-            base_usage = self._invocation_usage(
-                invocation_id,
-                member_call_ids,
-                anchor_call_id,
-                anchor_attempt_no,
-                usage,
-                is_anchor=call_id == anchor_call_id,
-            )
             element = by_key.get(call_id)
             if element is None:
-                self._settle_batch_released(
-                    member,
-                    base_usage,
-                    started,
-                    finished,
-                    queued_at,
-                    outcome_kind="missing",
-                    message=(
+                judged.append(
+                    (
+                        member,
+                        "missing",
+                        None,
                         f"the batched reply did not include an answer for item "
-                        f"{member.call['item_id']!r} (item_key {call_id!r})"
-                    ),
+                        f"{member.call['item_id']!r} (item_key {call_id!r})",
+                    )
                 )
                 continue
             payload = {k: v for k, v in element.items() if k != BATCH_ITEM_KEY_FIELD}
             parsed, repairs = normalise(member.role, payload, role_schema, member.context)
             complaint = _validate_answer(parsed, role_schema)
             if complaint is not None:
-                self._settle_batch_released(
+                judged.append((member, "invalid_output", None, complaint))
+                continue
+            judged.append((member, "ok", parsed, repairs))
+
+        anything_failed = any(outcome != "ok" for _m, outcome, _p, _x in judged)
+        member_call_ids = [str(m.call["call_id"]) for m in members]
+        anchor_call_id = str(anchor.call["call_id"])
+        for member, outcome, parsed, extra in judged:
+            call_id = str(member.call["call_id"])
+            is_anchor = call_id == anchor_call_id
+            base_usage = self._invocation_usage(
+                invocation_id,
+                member_call_ids,
+                anchor_call_id,
+                anchor_attempt_no,
+                usage,
+                is_anchor=is_anchor,
+            )
+            anchor_reply = reply_text if (is_anchor and anything_failed) else None
+            if outcome == "ok":
+                self._settle_batch_ok(
                     member,
                     base_usage,
+                    parsed,
+                    extra,
                     started,
                     finished,
                     queued_at,
-                    outcome_kind="invalid_output",
-                    message=complaint,
+                    reply_text=anchor_reply,
                 )
                 continue
-            self._settle_batch_ok(
-                member, base_usage, parsed, repairs, started, finished, queued_at
+            self._settle_batch_released(
+                member,
+                base_usage,
+                started,
+                finished,
+                queued_at,
+                outcome_kind=outcome,
+                message=str(extra),
+                reply_text=anchor_reply,
             )
 
     def _settle_batch_ok(
@@ -2338,8 +2438,16 @@ class CouncilWorker:
         started: datetime,
         finished: datetime,
         queued_at: datetime,
+        reply_text: Optional[str] = None,
     ) -> None:
-        """Bank one member's valid, known answer."""
+        """Bank one member's valid, known answer.
+
+        ``reply_text`` is NOT this member's answer -- a settled call's own
+        reply goes on the call row below.  It is the whole invocation's raw
+        reply, non-``None`` only when this member is the anchor of a batch
+        some OTHER member of which failed, which is the one case where an
+        'ok' attempt records one (see :meth:`_write_attempt`).
+        """
         call, token = member.call, member.token
         attempt_no = int(call.get("attempt_count") or 0) + 1
         try:
@@ -2357,7 +2465,14 @@ class CouncilWorker:
                     normalised=list(repairs or ()) or None,
                 )
                 self._write_attempt(
-                    call["call_id"], attempt_no, started, finished, "ok", base_usage, queued_at
+                    call["call_id"],
+                    attempt_no,
+                    started,
+                    finished,
+                    "ok",
+                    base_usage,
+                    queued_at,
+                    reply_text=reply_text,
                 )
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:  # pragma: no cover - another worker already has it
@@ -2373,6 +2488,7 @@ class CouncilWorker:
         *,
         outcome_kind: str,
         message: str,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Release a MISSING or INVALID member for retry, or exhaust it.
 
@@ -2382,6 +2498,14 @@ class CouncilWorker:
         advanced on exhaustion (confront round 1, points d and e) -- a
         finite budget, because an always-omitted or always-invalid item must
         not consume calls indefinitely.
+
+        ``reply_text`` is the invocation's raw reply, and this member gets it
+        only if it is the ANCHOR -- not merely because it is the member that
+        failed.  There is one reply for the whole invocation; writing it onto
+        each failed member would store the same text several times and
+        attribute a batch's reply to one of its items.  A failed non-anchor
+        member records ``NULL`` and points at the anchor through the
+        ``anchor_call_id`` in its usage payload.
         """
         call, token = member.call, member.token
         failures = int(call.get("attempt_count") or 0) + 1
@@ -2392,7 +2516,7 @@ class CouncilWorker:
                     self.store.note_call_error(call["call_id"], error.model_dump())
                     self._write_attempt(
                         call["call_id"], failures, started, finished, outcome_kind,
-                        base_usage, queued_at,
+                        base_usage, queued_at, reply_text=reply_text,
                     )
                     self.store.release_call(
                         call["call_id"],
@@ -2410,7 +2534,7 @@ class CouncilWorker:
                 )
                 self._write_attempt(
                     call["call_id"], failures, started, finished, outcome_kind,
-                    base_usage, queued_at,
+                    base_usage, queued_at, reply_text=reply_text,
                 )
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:  # pragma: no cover - another worker already has it
@@ -3099,7 +3223,15 @@ class CouncilWorker:
         *,
         queued_at: Optional[datetime] = None,
     ) -> str:
-        """Settle a call as failed: the seat errors and the item will too."""
+        """Settle a call as failed: the seat errors and the item will too.
+
+        The failed reply goes on the ATTEMPT as well as on the call row.  On
+        this path the two happen to agree, but they are not the same fact:
+        ``calls.reply_text`` is overwritten by whatever finally settles the
+        call, so only ``attempts.reply_text`` survives a later retry (see
+        :meth:`_retry_later`, where the call row's copy is not written at
+        all).
+        """
         try:
             with self.store.transaction():
                 self.store.complete_call(
@@ -3110,7 +3242,13 @@ class CouncilWorker:
                     error=error.model_dump(),
                 )
                 self._record_attempt(
-                    call, started, finished, error.kind, None, queued_at=queued_at
+                    call,
+                    started,
+                    finished,
+                    error.kind,
+                    None,
+                    queued_at=queued_at,
+                    reply_text=getattr(result, "text", None),
                 )
                 self.advance(call["job_id"], call["item_id"])
         except StaleClaim:
@@ -3129,13 +3267,26 @@ class CouncilWorker:
         *,
         queued_at: Optional[datetime] = None,
     ) -> str:
-        """Put a transiently-failed call back with a jittered backoff."""
+        """Put a transiently-failed call back with a jittered backoff.
+
+        This is the path KBUtilLib#92 item 1 was written about: the released
+        row keeps no reply of its own, so without ``attempts.reply_text`` the
+        bad reply that caused the retry is gone the moment the retry answers
+        -- and on the published run 105 of 113 retried items came back fine,
+        which means the defect was in that lost reply.
+        """
         delay = self._backoff(failures)
         try:
             with self.store.transaction():
                 self.store.note_call_error(call["call_id"], error.model_dump())
                 self._record_attempt(
-                    call, started, finished, error.kind, None, queued_at=queued_at
+                    call,
+                    started,
+                    finished,
+                    error.kind,
+                    None,
+                    queued_at=queued_at,
+                    reply_text=getattr(result, "text", None),
                 )
                 self.store.release_call(
                     call["call_id"],
@@ -3244,6 +3395,7 @@ class CouncilWorker:
         usage: Optional[Mapping[str, Any]],
         *,
         queued_at: Optional[datetime] = None,
+        reply_text: Optional[str] = None,
     ) -> None:
         """Record one try, plus -- when this attempt actually waited for a
         slot -- WHEN it started waiting.
@@ -3252,7 +3404,20 @@ class CouncilWorker:
         :meth:`_slot` at all (a reused or single-flight-followed answer: see
         :meth:`_settle_reused`, which never calls this with one), which is
         exactly "nothing to say" for the ``attempts.queued_at`` column.
+
+        ``reply_text`` is what the model sent on an attempt that produced no
+        usable answer -- passed by :meth:`_fail_call` and
+        :meth:`_retry_later`, the two outcomes that HAVE a failed result, and
+        by nothing else: a successful or reused attempt's reply is already on
+        the call row, so copying it here would store the same text twice.  An
+        empty reply (a transport failure with no body) passes ``None``
+        through and the column stays NULL.
         """
+        extra: Dict[str, Any] = {}
+        if queued_at is not None:
+            extra["queued_at"] = queued_at
+        if reply_text:
+            extra["reply_text"] = reply_text
         try:
             self.store.record_attempt(
                 call["call_id"],
@@ -3262,12 +3427,13 @@ class CouncilWorker:
                 outcome_kind,
                 usage=dict(usage) if usage else None,
                 worker_id=self.worker_id,
-                queued_at=queued_at,
+                **extra,
             )
         except TypeError:
-            # A store built before `record_attempt` grew `queued_at` (or a
-            # test double standing in for one): fall back rather than lose
-            # the attempt record over an instrumentation-only column.
+            # A store built before `record_attempt` grew `queued_at` or
+            # `reply_text` (or a test double standing in for one): fall back
+            # rather than lose the attempt record over a column that is
+            # instrumentation and provenance only.
             self.store.record_attempt(
                 call["call_id"],
                 int(call.get("attempt_count") or 0) + 1,

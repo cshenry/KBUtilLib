@@ -68,6 +68,15 @@ Reaction pickup -- renderer ``reaction_pickup_v4``
     * 93-151   ``council_pick_v2()``: the vote table (every candidate id, zeros
                included), ``n_council_valid``, and the ``council_picks``
                payload the rationale block is rendered from
+
+NOT A PORT: ``go_mf_adjudicate``.  The third renderer here asks a question
+CONCORDIA never asked -- judge two finished ``go_mf`` mappings of one
+annotation against a written mapping policy -- and its prompts were written
+for ``go-mf-council-autoresearch-v1`` (Jane, 2026-11-16) rather than read out
+of any reference file.  It reuses this module's assembly helpers because the
+item it renders is the same item ``go_mf`` renders, which is the whole point:
+same annotation, same menu, so the two councils are talking about one thing.
+See ``go_mf_adjudicate_v1.yaml``'s ``attribution`` for the full record.
 """
 
 from __future__ import annotations
@@ -85,8 +94,10 @@ from ..template import (
 
 __all__ = [
     "go_mf_v3",
+    "go_mf_adjudicate",
     "reaction_pickup_v4",
     "go_candidate_block",
+    "NO_TERMS",
     "pickup_candidate_block",
     "PICKUP_TOP_K",
     "PICKUP_PROMISCUITY_THRESHOLD",
@@ -128,13 +139,24 @@ def _n_valid(context: Mapping[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def go_candidate_block(menu: Sequence[MenuEntry], with_def: bool = True) -> str:
+def go_candidate_block(
+    menu: Sequence[MenuEntry], with_def: bool = True, with_score: bool = True
+) -> str:
     """``go_council.render_candidates`` (lines 152-159).
 
     ``  {rank:>2} | {go_id} | {score:.3f} | {name}``, with ``| {def}``
     appended when the entry has a definition and *with_def* is set.  The short
     block the critic sees drops the score AND the definition
     (``go_council.run_one`` line 300).
+
+    *with_score* is NOT in the reference and both reference callers leave it at
+    its default, so ``go_mf``'s three versions render byte for byte as they
+    did.  It exists for :func:`go_mf_adjudicate`, whose menu is
+    ``rank | GO id | name | definition``: the adjudicators judge two finished
+    mappings against a written policy, and a retrieval score is evidence about
+    RETRIEVAL rather than about the policy -- showing it would nudge an
+    adjudicator toward a high-scoring generic term in exactly the case
+    (P3/P4) where the prompt asks them to report a menu gap instead.
     """
     lines = []
     for position, entry in enumerate(menu or (), start=1):
@@ -142,8 +164,12 @@ def go_candidate_block(menu: Sequence[MenuEntry], with_def: bool = True) -> str:
         if not with_def:
             lines.append(f"  {rank:>2} | {entry.id} | {entry.label}")
             continue
-        score = 0.0 if entry.score is None else float(entry.score)
-        line = f"  {rank:>2} | {entry.id} | {score:.3f} | {entry.label}"
+        columns = [f"{rank:>2}", str(entry.id)]
+        if with_score:
+            score = 0.0 if entry.score is None else float(entry.score)
+            columns.append(f"{score:.3f}")
+        columns.append(str(entry.label))
+        line = "  " + " | ".join(columns)
         if entry.description:
             line += f" | {entry.description}"
         lines.append(line)
@@ -194,6 +220,76 @@ def go_mf_v3(
         )
 
     raise QuerySpecError(f"go_mf_v3 cannot render role {role!r}")
+
+
+# ---------------------------------------------------------------------------
+# GO molecular function -- adjudicating two rival mappings
+# ---------------------------------------------------------------------------
+
+#: What an absent or empty ``answer_a`` / ``answer_b`` is shown as.
+#:
+#: The CALLER renders both answers -- one ``GO:xxxxxxx | name`` per line, or
+#: this string when a side picked nothing -- and this renderer inserts what it
+#: is given without reformatting it.  The constant is the fallback for a
+#: MISSING field only, spelled the same way the caller spells it, so an item
+#: assembled without one does not reach a model as a blank delimited block
+#: that reads as "the menu is empty" rather than "this side picked nothing".
+NO_TERMS = "(no terms)"
+
+
+def go_mf_adjudicate(
+    spec: Any, role: str, task: CouncilTask, context: Mapping[str, Any]
+) -> Tuple[str, str]:
+    """Render one GO adjudication prompt: two rival mappings, one policy.
+
+    Modelled on :func:`go_mf_v3` -- same evidence fields, same
+    :func:`go_candidate_block` menu, same vote/ballot/critic blocks from
+    :mod:`..template` -- and different from it in three ways:
+
+    * the SYSTEM prompt is formatted too, because
+      :data:`...go_tuning.policy.MAPPING_POLICY` is spliced into all three of
+      them.  Every role therefore judges against one wording of the standard.
+    * ``answer_a`` and ``answer_b`` come out of ``task.evidence`` already
+      rendered, and go in as given (see :data:`NO_TERMS`).  Neither side's
+      REASONING is rendered anywhere: the adjudicators are asked to judge the
+      terms against the policy, not to be argued into one side's framing.
+    * the menu drops the retrieval score (see :func:`go_candidate_block`).
+
+    All three roles are given one field map, so a template may name any of
+    ``{text}``, ``{source}``, ``{candidates}``, ``{answer_a}``, ``{answer_b}``
+    and ``{policy}``, plus ``{n}``/``{votes}``/``{reasoning}`` for the critic
+    and meta and ``{critic}`` for meta.  A template naming something else
+    raises ``KeyError`` on the first render rather than silently emptying a
+    block.
+    """
+    from ...go_tuning.policy import MAPPING_POLICY
+
+    evidence = task.evidence or {}
+    fields: Dict[str, Any] = {
+        "text": str(evidence.get("text", "") or ""),
+        "source": str(evidence.get("source", "") or ""),
+        "answer_a": str(evidence.get("answer_a", "") or "") or NO_TERMS,
+        "answer_b": str(evidence.get("answer_b", "") or "") or NO_TERMS,
+        "candidates": go_candidate_block(task.menu, with_score=False),
+        "policy": MAPPING_POLICY,
+    }
+
+    if role == "proposer":
+        role_spec = spec.roles["proposer"]
+        return role_spec.system.format(**fields), role_spec.user.format(**fields)
+
+    if role in ("critic", "meta"):
+        fields["votes"] = render_votes(context.get("votes"))
+        fields["reasoning"] = render_ballots(context.get("ballots"))
+        fields["n"] = _n_valid(context)
+        if role == "meta":
+            fields["critic"] = render_critic_json(
+                context.get("critic"), spec.critic_truncate_chars
+            )
+        role_spec = spec.roles[role]
+        return role_spec.system.format(**fields), role_spec.user.format(**fields)
+
+    raise QuerySpecError(f"go_mf_adjudicate cannot render role {role!r}")
 
 
 # ---------------------------------------------------------------------------

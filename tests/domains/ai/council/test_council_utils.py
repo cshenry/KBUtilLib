@@ -470,6 +470,7 @@ class TestStoreDiscipline:
                 "go_mf@1",
                 "go_mf@3",
                 "go_mf@4",
+                "go_mf_adjudicate@1",
                 "reaction_pickup@1",
             ]
             assert council.db_init()["query_types"] == first["query_types"]

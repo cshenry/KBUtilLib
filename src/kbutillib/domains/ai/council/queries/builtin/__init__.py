@@ -1,8 +1,8 @@
 """The query types, renderers and adapters this installation ships.
 
-Two query types are built in -- ``go_mf``, at three versions (``@1``, ``@3``
-and ``@4``), and ``reaction_pickup`` -- and each names a renderer and an
-adapter as ``"<name>@<version>"``.  The version is
+Three query types are built in -- ``go_mf``, at three versions (``@1``, ``@3``
+and ``@4``), ``go_mf_adjudicate`` and ``reaction_pickup`` -- and each names a
+renderer and an adapter as ``"<name>@<version>"``.  The version is
 load-bearing: a spec read out of a shared PostgreSQL store was written by some
 other installation, and an installation that does not have the version it
 names REFUSES the query (:class:`..errors.UnknownRenderer` /
@@ -61,10 +61,16 @@ class Builtin(NamedTuple):
 #: both makes that provable (see ``tests/.../test_go_mf_v4_builtin.py``).
 #: ``@2`` is deliberately absent -- it was an intermediate that nothing was
 #: decided under.
+#:
+#: ``go_mf_adjudicate@1`` is a SEPARATE NAME rather than a fourth ``go_mf``
+#: version: it does not map an annotation, it judges two finished ``go_mf``
+#: mappings of one against a written policy, so a caller asking for
+#: "the newest go_mf" must never be handed it.
 BUILTIN_QUERY_TYPES: Tuple[Tuple[str, str], ...] = (
     ("go_mf", "1"),
     ("go_mf", "3"),
     ("go_mf", "4"),
+    ("go_mf_adjudicate", "1"),
     ("reaction_pickup", "1"),
 )
 
@@ -82,11 +88,15 @@ BUILTIN_SPEC_FILES: Dict[Tuple[str, str], str] = {
     ("go_mf", "1"): "go_mf.yaml",
     ("go_mf", "3"): "go_mf_v3.yaml",
     ("go_mf", "4"): "go_mf_v4.yaml",
+    ("go_mf_adjudicate", "1"): "go_mf_adjudicate_v1.yaml",
     ("reaction_pickup", "1"): "reaction_pickup.yaml",
 }
 
 BUILTIN_RENDERERS: Dict[str, Builtin] = {
     "go_mf_v3": Builtin("go_mf_v3", "1", _renderers.go_mf_v3),
+    "go_mf_adjudicate": Builtin(
+        "go_mf_adjudicate", "1", _renderers.go_mf_adjudicate
+    ),
     "reaction_pickup_v4": Builtin(
         "reaction_pickup_v4", "1", _renderers.reaction_pickup_v4
     ),
@@ -94,6 +104,9 @@ BUILTIN_RENDERERS: Dict[str, Builtin] = {
 
 BUILTIN_ADAPTERS: Dict[str, Builtin] = {
     "go_mf_v3": Builtin("go_mf_v3", "1", _adapters.go_mf_v3),
+    "go_mf_adjudicate": Builtin(
+        "go_mf_adjudicate", "1", _adapters.go_mf_adjudicate
+    ),
     "reaction_pickup_v4": Builtin(
         "reaction_pickup_v4", "1", _adapters.reaction_pickup_v4
     ),

@@ -111,8 +111,8 @@ class QueryRegistry:
     def seed_builtins(self, created_by: str = "builtin") -> List[QueryType]:
         """Register every ``(name, version)`` in ``BUILTIN_QUERY_TYPES``.
 
-        Currently ``go_mf@1``, ``go_mf@3``, ``go_mf@4`` and
-        ``reaction_pickup@1``.  Idempotent.
+        Currently ``go_mf@1``, ``go_mf@3``, ``go_mf@4``,
+        ``go_mf_adjudicate@1`` and ``reaction_pickup@1``.  Idempotent.
 
         The version is passed to ``load_builtin_spec`` and is load-bearing: a
         name may ship several versions, so loading by name alone would read

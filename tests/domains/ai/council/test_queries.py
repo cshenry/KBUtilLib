@@ -601,6 +601,7 @@ class TestSchemas:
             PACKAGE_DIR / "builtin" / "go_mf.yaml",
             PACKAGE_DIR / "builtin" / "go_mf_v3.yaml",
             PACKAGE_DIR / "builtin" / "go_mf_v4.yaml",
+            PACKAGE_DIR / "builtin" / "go_mf_adjudicate_v1.yaml",
             PACKAGE_DIR / "builtin" / "reaction_pickup.yaml",
             PACKAGE_DIR / "examples" / "custom_example.yaml",
         ]:
@@ -702,6 +703,7 @@ class TestRegistry:
             ("go_mf", "1"),
             ("go_mf", "3"),
             ("go_mf", "4"),
+            ("go_mf_adjudicate", "1"),
             ("reaction_pickup", "1"),
         ]
         registry.seed_builtins()
@@ -711,6 +713,7 @@ class TestRegistry:
             ("go_mf", "1"),
             ("go_mf", "3"),
             ("go_mf", "4"),
+            ("go_mf_adjudicate", "1"),
             ("reaction_pickup", "1"),
         ]
         assert {r["source"] for r in rows} == {"builtin"}
@@ -748,8 +751,12 @@ class TestRegistry:
         # Retiring the newest drops the default lookup back to the newest
         # version still active -- the seeded go_mf@4, not @5.
         assert registry.get("go_mf").version == "4"
-        assert len(registry.list()) == 4
-        assert len(registry.list(include_retired=True)) == 5
+        # Counted off BUILTIN_QUERY_TYPES rather than written out: the retired
+        # @5 is hidden and every seeded builtin is still active, which is the
+        # claim -- a literal would have to be edited every time a builtin
+        # lands, and the test would then be about the count, not the hiding.
+        assert len(registry.list()) == len(BUILTIN_QUERY_TYPES)
+        assert len(registry.list(include_retired=True)) == len(BUILTIN_QUERY_TYPES) + 1
 
     def test_registering_a_user_yaml_by_path(self, tmp_path):
         store, registry = sqlite_registry(tmp_path)

@@ -1,11 +1,22 @@
 """The packaged default config carries a COMMENTED ALCF block and is otherwise
 byte-identical to the base commit (64f997f), so adding the block cannot have
-moved any live entry."""
+moved any live entry.
+
+A SECOND commented block has since landed beside it -- ADJUDICATE, the
+`go_mf_adjudicate@1` seating -- so the byte-identity check below now cuts BOTH
+marker-delimited blocks out before hashing. That keeps the claim the same one
+it always made (every LIVE entry is still the base commit's) rather than
+weakening it: anything outside the two blocks is still compared byte for byte,
+and a commented block that grew live YAML would be caught by its own
+"declares nothing live" test. The ADJUDICATE block's own content is asserted
+in ``test_go_mf_adjudicate_builtin.py``, beside the query type it seats.
+"""
 
 from __future__ import annotations
 
 import hashlib
 from importlib.resources import files
+from typing import Tuple
 
 import yaml
 
@@ -13,6 +24,8 @@ from kbutillib.domains.ai.council.config import _packaged_default, load_council_
 
 BEGIN = "  # >>> BEGIN ALCF BLOCK"
 END = "# <<< END ALCF BLOCK <<<\n\n"
+ADJUDICATE_BEGIN = "  # >>> BEGIN ADJUDICATE BLOCK"
+ADJUDICATE_END = "# <<< END ADJUDICATE BLOCK <<<\n\n"
 #: sha256 of default_config.yaml at base commit 64f997f7bc50538cb2d2bec59ff4003153a55c50.
 BASE_SHA256 = "97bbf3aa3f130b1c84f3fb19a06d0e1f25bd6431b5840fd7701bf88bbf12c330"
 
@@ -21,11 +34,15 @@ def _text() -> str:
     return files("kbutillib.domains.ai.council").joinpath("default_config.yaml").read_text()
 
 
-def _split():
-    text = _text()
-    i = text.index(BEGIN)
-    j = text.index(END) + len(END)
+def _cut(text: str, begin: str, end: str) -> Tuple[str, str]:
+    """*text* with the ``begin``..``end`` block removed, and that block."""
+    i = text.index(begin)
+    j = text.index(end) + len(end)
     return text[:i] + text[j:], text[i:j]
+
+
+def _split():
+    return _cut(_text(), BEGIN, END)
 
 
 def test_packaged_default_still_loads():
@@ -34,8 +51,9 @@ def test_packaged_default_still_loads():
     assert {"argo", "mixed-subscription"} <= set(config.profiles)
 
 
-def test_file_is_byte_identical_to_base_outside_the_alcf_block():
+def test_file_is_byte_identical_to_base_outside_the_commented_blocks():
     outside, _ = _split()
+    outside, _ = _cut(outside, ADJUDICATE_BEGIN, ADJUDICATE_END)
     assert hashlib.sha256(outside.encode()).hexdigest() == BASE_SHA256
 
 

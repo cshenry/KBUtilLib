@@ -6,11 +6,18 @@ shapes the engine counts votes on, so the engine never learns a domain's field
 names.  A query type with neither gets the plain rename in
 :func:`..spec.generic_postprocess`.
 
-The two shipped adapters are very different in weight, and that is the point:
+The three shipped adapters are very different in weight, and that is the
+point:
 
 * ``go_mf_v3`` is the rename and nothing else.  CONCORDIA's GO council already
   answers in the generic shape with ``go_id`` for ``id`` and ``final_go_ids``
   for ``final_ids``, which is why the generic shapes look the way they do.
+* ``go_mf_adjudicate`` is the same rename over a flatter proposer answer, plus
+  one derivation: the adjudicate proposer has no content flag of its own, so
+  the engine's is read off ``failure_type``
+  (:data:`CONTENTLESS_FAILURE_TYPE`).  It also DROPS the adjudication's own
+  research fields rather than smuggling them into the generic shape; they are
+  read back later from ``calls.reply_parsed``.
 * ``reaction_pickup_v4`` is a real translation.  The pickup council answers in
   three shapes that share no field name with the generic ones, and its critic
   does not emit a verdict at all -- it emits a per-reaction table that a
@@ -30,10 +37,12 @@ from ..spec import generic_postprocess
 
 __all__ = [
     "go_mf_v3",
+    "go_mf_adjudicate",
     "reaction_pickup_v4",
     "pickup_critic_approved",
     "PICKUP_MAX_PICKS",
     "CONSISTENT_VERDICTS",
+    "CONTENTLESS_FAILURE_TYPE",
 ]
 
 #: ``PickupOutput.picked_reactions`` is capped at 15 in pickup_schema.py.  The
@@ -56,6 +65,98 @@ def go_mf_v3(spec: Any, role: str, parsed: Mapping[str, Any]) -> Dict[str, Any]:
     quietly applying whatever the default has become.
     """
     return generic_postprocess(spec, role, parsed)
+
+
+# ---------------------------------------------------------------------------
+# GO molecular function -- adjudicating two rival mappings
+# ---------------------------------------------------------------------------
+
+#: The one ``failure_type`` that says the ANNOTATION states no function.
+#:
+#: The adjudicate proposer has no ``no_functional_content`` field of its own --
+#: it is not asked whether the string is contentless, it is asked what the
+#: policy calls for -- so the engine's content flag has to be read off the
+#: fields it does have.  ``contentless_assigned`` is the failure a losing
+#: answer commits by assigning terms to a string that states no function
+#: (policy rule P5), so an adjudicator naming it has said the input is
+#: contentless.
+CONTENTLESS_FAILURE_TYPE = "contentless_assigned"
+
+
+def _adjudicate_ids(values: Any) -> List[str]:
+    """A GO id list, de-duplicated, first occurrence winning."""
+    out: List[str] = []
+    for value in values or ():
+        text = str(value or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def go_mf_adjudicate(spec: Any, role: str, parsed: Mapping[str, Any]) -> Dict[str, Any]:
+    """Map one adjudication reply onto the generic shape for *role*.
+
+    The same rename ``go_mf_v3`` performs (``go_id`` -> ``id``,
+    ``final_go_ids`` -> ``final_ids``) over a DIFFERENT proposer shape: an
+    adjudicator answers with a flat ``correct_go_ids`` array rather than a
+    ``picked`` list of objects, because its per-term rationale is one
+    policy-level ``why`` for the whole call and not one sentence per term.
+    Each id becomes a generic pick so the engine tallies votes on exactly the
+    terms the adjudicators said the policy calls for.
+
+    EVERY OTHER FIELD IS DROPPED ON PURPOSE, not lost: ``prefers``,
+    ``failure_type``, ``rules_cited``, ``correct_term_off_menu``,
+    ``off_menu_description`` and ``misapplied_rules`` are the research
+    payload, they are what the tuning pass reads, and the engine has no use
+    for them -- a generic shape carrying extra keys would invite the engine to
+    start interpreting them.  They survive in full in the store, in
+    ``calls.reply_parsed``, which holds the reply in this query type's OWN
+    vocabulary (see ``tests/.../test_go_mf_adjudicate_council.py``).
+    """
+    parsed = dict(parsed or {})
+
+    if role == "proposer":
+        correct = _adjudicate_ids(parsed.get("correct_go_ids"))
+        confidence = str(parsed.get("confidence", "") or "medium")
+        why = str(parsed.get("why", "") or "")
+        return {
+            "picked": [
+                {"id": go_id, "confidence": confidence, "why": why}
+                for go_id in correct
+            ],
+            "overall_confidence": parsed.get("confidence"),
+            # Both clauses, deliberately. An adjudicator that named
+            # `contentless_assigned` AND still listed correct ids has
+            # contradicted itself, and the conservative read of a
+            # contradiction is "not contentless": the engine's content flag
+            # skips the whole council, so inferring it from half an answer
+            # costs an item its verdict.
+            "no_functional_content": (
+                not correct
+                and str(parsed.get("failure_type", "") or "")
+                == CONTENTLESS_FAILURE_TYPE
+            ),
+            "notes": str(parsed.get("notes", "") or ""),
+        }
+
+    if role == "critic":
+        return {
+            "verdict": parsed.get("verdict"),
+            "reason": str(parsed.get("reason", "") or ""),
+            "overpicked": _adjudicate_ids(parsed.get("overpicked")),
+            "missed": _adjudicate_ids(parsed.get("missed")),
+            "contentless_input": bool(parsed.get("contentless_input")),
+        }
+
+    if role == "meta":
+        return {
+            "final_ids": _adjudicate_ids(parsed.get("final_go_ids")),
+            "final_confidence": parsed.get("final_confidence"),
+            "no_functional_content": bool(parsed.get("no_functional_content")),
+            "reasoning": str(parsed.get("reasoning", "") or ""),
+        }
+
+    raise QuerySpecError(f"go_mf_adjudicate cannot postprocess role {role!r}")
 
 
 # ---------------------------------------------------------------------------

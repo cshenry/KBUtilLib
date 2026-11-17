@@ -318,6 +318,7 @@ class TestSchemaGuard:
             "go_mf@1",
             "go_mf@3",
             "go_mf@4",
+            "go_mf_adjudicate@1",
             "reaction_pickup@1",
         ]
 
@@ -669,8 +670,12 @@ class TestRegistryAndState:
         )
         assert retired["data"]["result"] == "retired"
         remaining = _envelope(runner.invoke(main, fake_council + ["query", "list", "--json"]))
-        # Only the reaction_pickup row went; every shipped go_mf version stays.
-        assert {row["name"] for row in remaining["data"]["query_types"]} == {"go_mf"}
+        # Only the reaction_pickup row went; every shipped go_mf version and
+        # the adjudication query type stay.
+        assert {row["name"] for row in remaining["data"]["query_types"]} == {
+            "go_mf",
+            "go_mf_adjudicate",
+        }
 
     def test_query_retire_demands_an_exact_version(
         self, runner: CliRunner, fake_council: List[str]

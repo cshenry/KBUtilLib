@@ -399,6 +399,95 @@ profiles:
     critic: sonnet-cli
     meta: opus-cli
 
+  # >>> BEGIN ADJUDICATE BLOCK (commented; the packaged config declares no adjudicate profile) >>>
+  #
+  # THE ADJUDICATION SEATING for query type `go_mf_adjudicate@1`. Nothing below
+  # is live. It spans two top-level keys (models, profiles): uncomment each part
+  # under the matching key in this file or in the `ai_council` section of
+  # ~/.kbutillib/config.yaml.
+  #
+  # WHAT IT IS FOR. `go_mf_adjudicate@1` does not map annotations -- it JUDGES
+  # go_mf CONFLICTS. Each item is one protein annotation string on which two
+  # go_mf mappings disagreed, and the council decides which terms the written
+  # mapping policy (go_tuning.policy.MAPPING_POLICY, rules P1-P6) calls for and
+  # which of the two answers is closer to it. It is therefore a measuring
+  # instrument pointed at go_mf's output, not a second mapper.
+  #
+  # A CHANGED ROSTER INVALIDATES CALIBRATION. The adjudicators' agreement rate,
+  # their failure_type distribution and the critic's disapproval rate are
+  # properties of THIS five-seat roster, not of the query type. Swap a seat and
+  # the numbers are not comparable to anything measured before the swap: a run
+  # under a different roster is a new baseline, not more data for the old one.
+  # Record the roster with every batch and do not mix batches across rosters.
+  #
+  # SEATS (h100's real alias names). Three adjudicators spread across three
+  # vendors, so no two of them share a canonical model:
+  #
+  #   proposers:  opus-cli       claude_cli, served_name opus   -> anthropic/claude-opus-5
+  #               gpt-5.6-sol    codex_cli                      -> openai/gpt-5.6-sol
+  #               gemini35flash  ARGO                           -> google/gemini-3.5-flash
+  #   critic:     sonnet-cli     claude_cli, served_name sonnet -> anthropic/claude-sonnet-5
+  #   meta:       argo-opus5     ARGO, served_name claudeopus5  -> anthropic/claude-opus-5
+  #
+  # MODELS (go under `models:`). THE TWO claude_cli SEATS ARE WHAT AN OPERATOR
+  # MUST ADD to ~/.kbutillib/config.yaml on h100: they are packaged here but are
+  # not in that file today, and a user `models:` section is what h100 actually
+  # seats from. The codex and ARGO seats are already in it -- leave those alone
+  # and do not re-derive their served_name or canonical from this block; h100's
+  # own file is the authority on them. The entries, exactly:
+  #
+  #   opus-cli:
+  #     endpoint: claude
+  #     served_name: opus
+  #   sonnet-cli:
+  #     endpoint: claude
+  #     served_name: sonnet
+  #   gpt-5.6-sol:                       # already present on h100
+  #     endpoint: codex
+  #     served_name: gpt-5.6-sol
+  #     canonical: openai/gpt-5.6-sol
+  #   argo-opus5:                        # already present on h100
+  #     endpoint: argo
+  #     served_name: claudeopus5
+  #   gemini35flash:                     # already present on h100, and packaged above
+  #     endpoint: argo
+  #
+  # Do NOT reuse the packaged gpt54-cli / gpt55-cli entries for the codex seat.
+  # Their served names are an open operator item (OP-2) and they are marked
+  # `verified: false`; gpt-5.6-sol is a separate chair that h100 already has.
+  #
+  # PROFILE (goes under `profiles:`).
+  #
+  #   adjudicate:
+  #     proposers: [opus-cli, gpt-5.6-sol, gemini35flash]
+  #     critic: sonnet-cli
+  #     meta: argo-opus5
+  #     allow_meta_overlap: true
+  #
+  # WHY allow_meta_overlap IS SET, AND WHEN TO MOVE THE META SEAT. With the
+  # spellings above, argo-opus5 (ARGO `claudeopus5`) and the opus-cli proposer
+  # (claude CLI `opus`) BOTH resolve to anthropic/claude-opus-5 through the
+  # built-in identity tables, so Roster._check_independence refuses the seating
+  # outright without the flag -- correctly, because one model would be both an
+  # adjudicator and the arbiter of its own vote. If argo-opus5 and opus-cli do
+  # resolve to the same canonical model on your machine, THE META SEAT MOVES TO
+  # argo-sonnet5:
+  #
+  #   argo-sonnet5:
+  #     endpoint: argo
+  #     served_name: claudesonnet5
+  #
+  # MEASURED CAVEAT on that fallback, so it is not discovered at run time:
+  # argo-sonnet5 resolves to anthropic/claude-sonnet-5, which is the sonnet-cli
+  # CRITIC's canonical, so meta and critic then collide instead and the flag is
+  # still required. Getting a roster with no overlap at all means moving the
+  # critic off sonnet-cli as well (or confirming that h100's ARGO aliases are
+  # distinct models and declaring their `canonical:` explicitly). The three
+  # PROPOSERS are independent either way, which is the invariant the vote tally
+  # rests on; meta overlap is a weaker concern and is why the flag exists.
+  #
+  # <<< END ADJUDICATE BLOCK <<<
+
 default_profile: mixed-subscription
 
 # The store is a single SQLite file on LOCAL disk, one per machine -- there is

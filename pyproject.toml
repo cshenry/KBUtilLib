@@ -248,7 +248,7 @@ reaction_similarity_extra = [
 # duplication above exists because CI installs `.[dev]` AND `uv sync --group
 # dev`; nothing syncs a `model` group.
 model = [
-  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@d55034cfb1eac8c6bd0f86720f7e8076ff9be2f7",
+  "modelseedpy @ git+https://github.com/cshenry/ModelSEEDpy.git@edafdb1b6ff0b4d694528cd417af32f0581cf607",
 ]
 # Everything needed to run all transports + build docs.
 all = [

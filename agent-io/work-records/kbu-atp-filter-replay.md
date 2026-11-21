@@ -408,3 +408,19 @@ and replayed, so neither is a property of the replay:
 The existing `tests/modeling/test_ms_fitness_utils.py` (18 tests) passes
 unchanged, including `TestAtpSafe`, which is the assertion that the leak
 diagnostic still leaves the superset untouched.
+
+---
+
+## Reviewer fix-up
+
+The table above claimed `pyproject.toml:220-250` (the comment block above the
+pin) was updated to name `edafdb1` and what it adds. The diff did not do this
+— only line 251 (the SHA itself) changed; the prose above it still only
+described `d55034c`. The reviewer (task-58dd3ece) added the missing paragraph
+naming `edafdb1`, fix commit `452d601`, and the None-objective guard it adds,
+so the table's claim is now true. No other change was made on review; the
+reviewer independently verified the installed modelseedpy commit (`edafdb1`,
+from `direct_url.json`), re-ran the new 26-test suite and the existing
+18-test suite together (44 passed), and ran `tests/modeling/` in full (6
+failed, 539 passed, 31 skipped — the same six pre-existing failures this
+record already names, confirming no new regression).

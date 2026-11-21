@@ -237,6 +237,14 @@ reaction_similarity_extra = [
 # MSFitnessWeightedAnalysis does not exist at e1155a41, so with the old pin
 # run_fitness_weighted_analysis raises ImportError at call time.
 #
+# edafdb1 is a fast-forward of d55034c (fix commit 452d601) that adds exactly
+# one behaviour: a None-objective guard in msatpcorrection.py:326 and
+# gapfillingpkg.py:651, so that an infeasible ATP-filter solve (whose
+# `objective_value` is None) makes `test_gapfill_database` return False
+# instead of raising `TypeError: '<' not supported between 'NoneType' and
+# 'float'` from inside the filter. modelseedpy/core/msfitnessweighted.py is
+# byte-identical to d55034c; nothing else changes.
+#
 # cobra and swiglpk are NOT listed: modelseedpy requires cobra, which requires
 # optlang, which requires swiglpk -- so the GLPK backend the layer defaults to
 # is already guaranteed. gurobipy is NOT declared either, so there is nothing

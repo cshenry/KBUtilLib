@@ -1,0 +1,885 @@
+{
+ "annotation_gap": false,
+ "biomass_fixed": 0.8739215069684314,
+ "condition": "glc",
+ "distance_to_growth": 0,
+ "edge_evidence": [
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b0720",
+   "ko_ratio": 0.0,
+   "reaction": "CS_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b1136",
+   "ko_ratio": 5.4593208455847546e-15,
+   "reaction": "ICDHyr_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b1779",
+   "ko_ratio": 1.657138454204419e-16,
+   "reaction": "GAPD_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2276",
+   "ko_ratio": 0.24219903967068443,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2277",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2278",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2279",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2280",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2281",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2282",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2283",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2284",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2285",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2286",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2287",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2288",
+   "ko_ratio": 0.24219903967068357,
+   "reaction": "NADH16_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2415",
+   "ko_ratio": 0.0,
+   "reaction": "GLCpts_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2416",
+   "ko_ratio": 0.0,
+   "reaction": "GLCpts_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2779",
+   "ko_ratio": 1.7611584818950199e-15,
+   "reaction": "ENO_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b2926",
+   "ko_ratio": 4.944128908578756e-15,
+   "reaction": "PGK_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3731",
+   "ko_ratio": 0.4282190928465485,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3732",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3733",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3734",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3735",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3736",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3737",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "b3738",
+   "ko_ratio": 0.4282190928465479,
+   "reaction": "ATPS4r_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "active",
+   "fitness": -3.0,
+   "gene": "b4025",
+   "ko_ratio": 1.0,
+   "reaction": "PGI_c0",
+   "score": 0.5,
+   "significance": "t",
+   "t_score": -10.0,
+   "tier": "tier1",
+   "verdict": "pos"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "s0001",
+   "ko_ratio": 0.24160139198833488,
+   "reaction": "CO2t_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "s0001",
+   "ko_ratio": 0.24160139198833488,
+   "reaction": "H2Ot_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "s0001",
+   "ko_ratio": 0.24160139198833488,
+   "reaction": "NH4t_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  },
+  {
+   "commitment": "essential",
+   "fitness": null,
+   "gene": "s0001",
+   "ko_ratio": 0.24160139198833488,
+   "reaction": "O2t_c0",
+   "score": -1.0,
+   "significance": null,
+   "t_score": null,
+   "tier": null,
+   "verdict": "strong_neg"
+  }
+ ],
+ "fluxes": {
+  "ACONTa_c0": 6.00724957535036,
+  "ACONTb_c0": 6.00724957535036,
+  "AKGDH_c0": 5.064375661482122,
+  "ATPM_c0": 8.39,
+  "ATPS4r_c0": 45.51400977451752,
+  "BIOMASS_Ecoli_core_w_GAM_c0": 0.8739215069684314,
+  "CO2t_c0": -22.809833310205015,
+  "CS_c0": 6.007249575350359,
+  "CYTBD_c0": 43.598985311997616,
+  "ENO_c0": 14.716139568742836,
+  "EX_co2_e0": 22.809833310205015,
+  "EX_glc__D_e0": -10.0,
+  "EX_h2o_e0": 29.17582713556585,
+  "EX_h_e0": 17.530865429786775,
+  "EX_nh4_e0": -4.76531919319746,
+  "EX_o2_e0": -21.799492655998804,
+  "EX_pi_e0": -3.2148950476847737,
+  "FBA_c0": 7.477381962160286,
+  "FUM_c0": 5.06437566148212,
+  "G6PDH2r_c0": 4.959984944574651,
+  "GAPD_c0": 16.023526143167608,
+  "GLCpts_c0": 10.000000000000002,
+  "GLNS_c0": 0.22346172933182787,
+  "GLUDy_c0": -4.541857463865632,
+  "GND_c0": 4.95998494457465,
+  "H2Ot_c0": -29.17582713556585,
+  "ICDHyr_c0": 6.00724957535036,
+  "MDH_c0": 5.064375661482122,
+  "NADH16_c0": 38.534609650515485,
+  "NH4t_c0": 4.765319193197461,
+  "O2t_c0": 21.799492655998804,
+  "PDH_c0": 9.282532599166615,
+  "PFK_c0": 7.477381962160286,
+  "PGI_c0": 4.8608611464968225,
+  "PGK_c0": -16.02352614316761,
+  "PGL_c0": 4.959984944574651,
+  "PGM_c0": -14.716139568742836,
+  "PIt2r_c0": 3.2148950476847737,
+  "PPC_c0": 2.5043094703687347,
+  "PYK_c0": 1.7581774441067857,
+  "RPE_c0": 2.678481850507525,
+  "RPI_c0": -2.281503094067125,
+  "SUCDi_c0": 5.064375661482121,
+  "SUCOAS_c0": -5.064375661482121,
+  "TALA_c0": 1.4969837572615643,
+  "TKT1_c0": 1.4969837572615643,
+  "TKT2_c0": 1.1814980932459607,
+  "TPI_c0": 7.477381962160286
+ },
+ "gapfilled": {},
+ "growth_model": 0.8739215069684314,
+ "growth_network": 0.8739215069684314,
+ "growth_superset": 0.8739215069684295,
+ "loopless": false,
+ "n_reactions_discounted": 1,
+ "objective": 404.2921112580349,
+ "reaction_calls": {
+  "ACALD_c0": [
+   "unused",
+   0.0,
+   -2.5423044352391884e-08,
+   0.0
+  ],
+  "ACALDt_c0": [
+   "unused",
+   0.0,
+   -2.5423016040483997e-08,
+   0.0
+  ],
+  "ACKr_c0": [
+   "unused",
+   4.138875795500867e-14,
+   -3.813455678624151e-08,
+   0.0
+  ],
+  "ACONTa_c0": [
+   "essential",
+   6.00724957535036,
+   6.007249456058091,
+   6.007249730626891
+  ],
+  "ACONTb_c0": [
+   "essential",
+   6.00724957535036,
+   6.007249456058091,
+   6.007249730626964
+  ],
+  "ADK1_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160550404829613e-07
+  ],
+  "AKGDH_c0": [
+   "essential",
+   5.064375661482122,
+   5.064374856710532,
+   5.064375817701564
+  ],
+  "AKGt2r_c0": [
+   "unused",
+   0.0,
+   -1.4300458794840578e-08,
+   0.0
+  ],
+  "ALCD2x_c0": [
+   "unused",
+   0.0,
+   -2.214265159615623e-08,
+   0.0
+  ],
+  "ATPS4r_c0": [
+   "essential",
+   45.51400977451752,
+   45.514009414826106,
+   45.51400996396359
+  ],
+  "CO2t_c0": [
+   "essential",
+   -22.809833310205015,
+   -22.809833347393756,
+   -22.80983323299007
+  ],
+  "CS_c0": [
+   "essential",
+   6.007249575350359,
+   6.007249456058091,
+   6.00724973062697
+  ],
+  "CYTBD_c0": [
+   "essential",
+   43.598985311997616,
+   43.59898523585754,
+   43.598985388395754
+  ],
+  "D_LACt2_c0": [
+   "unused",
+   0.0,
+   -2.1450690852622784e-08,
+   0.0
+  ],
+  "ENO_c0": [
+   "essential",
+   14.716139568742836,
+   14.71613944074171,
+   14.716139715310542
+  ],
+  "FBA_c0": [
+   "essential",
+   7.477381962160286,
+   7.477381831398145,
+   7.4773821059670125
+  ],
+  "FBP_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160554131521835e-07
+  ],
+  "FORt2_c0": [
+   "unused",
+   0.0,
+   0.0,
+   6.864220161931843e-07
+  ],
+  "FORt_c0": [
+   "unused",
+   0.0,
+   -6.864220161931843e-07,
+   0.0
+  ],
+  "FRD7_c0": [
+   "unused",
+   0.0,
+   0.0,
+   994.935624456867
+  ],
+  "FRUpts2_c0": [
+   "blocked",
+   0.0,
+   0.0,
+   0.0
+  ],
+  "FUM_c0": [
+   "essential",
+   5.06437566148212,
+   5.064375543132726,
+   5.064375817701595
+  ],
+  "FUMt2_2_c0": [
+   "unused",
+   0.0,
+   -1.906728236835762e-08,
+   0.0
+  ],
+  "G6PDH2r_c0": [
+   "essential",
+   4.959984944574651,
+   4.959984515761661,
+   4.95998533946816
+  ],
+  "GAPD_c0": [
+   "essential",
+   16.023526143167608,
+   16.023526013859094,
+   16.023526288427973
+  ],
+  "GLCpts_c0": [
+   "essential",
+   10.000000000000002,
+   9.99999999046636,
+   10.000000000000002
+  ],
+  "GLNS_c0": [
+   "essential",
+   0.22346172933182787,
+   0.22346172910836612,
+   0.223461900717425
+  ],
+  "GLNabc_c0": [
+   "blocked",
+   0.0,
+   0.0,
+   0.0
+  ],
+  "GLUDy_c0": [
+   "essential",
+   -4.541857463865632,
+   -4.5418574720353,
+   -4.541857287718223
+  ],
+  "GLUN_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160547947968757e-07
+  ],
+  "GLUSy_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160550404829574e-07
+  ],
+  "GLUt2r_c0": [
+   "unused",
+   0.0,
+   -1.2711518818392293e-08,
+   0.0
+  ],
+  "GND_c0": [
+   "essential",
+   4.95998494457465,
+   4.95998451576166,
+   4.959985339468111
+  ],
+  "H2Ot_c0": [
+   "essential",
+   -29.17582713556585,
+   -29.17582716638884,
+   -29.17582705198511
+  ],
+  "ICDHyr_c0": [
+   "essential",
+   6.00724957535036,
+   6.007248769635897,
+   6.007249730626962
+  ],
+  "ICL_c0": [
+   "unused",
+   0.0,
+   0.0,
+   6.864218545246034e-07
+  ],
+  "LDH_D_c0": [
+   "unused",
+   0.0,
+   -2.1450688006037e-08,
+   0.0
+  ],
+  "MALS_c0": [
+   "unused",
+   0.0,
+   -3.987053314654254e-16,
+   6.864221095162955e-07
+  ],
+  "MALt2_2_c0": [
+   "blocked",
+   0.0,
+   0.0,
+   0.0
+  ],
+  "MDH_c0": [
+   "essential",
+   5.064375661482122,
+   5.064375497371324,
+   5.064376229554773
+  ],
+  "ME1_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160551115000944e-07
+  ],
+  "ME2_c0": [
+   "unused",
+   0.0,
+   0.0,
+   2.2880733873106096e-07
+  ],
+  "NADH16_c0": [
+   "essential",
+   38.534609650515485,
+   38.53460957069417,
+   38.534609845263
+  ],
+  "NADTRHD_c0": [
+   "unused",
+   0.0,
+   0.0,
+   6.864222136414371e-07
+  ],
+  "NH4t_c0": [
+   "essential",
+   4.765319193197461,
+   4.7653191884321435,
+   4.765319201143662
+  ],
+  "O2t_c0": [
+   "essential",
+   21.799492655998804,
+   21.799492617928767,
+   21.799492694197898
+  ],
+  "PDH_c0": [
+   "essential",
+   9.282532599166615,
+   9.282532476599153,
+   9.282533163021219
+  ],
+  "PFK_c0": [
+   "essential",
+   7.477381962160286,
+   7.4773818313949985,
+   7.477382140292775
+  ],
+  "PFL_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.1440658091678036e-07
+  ],
+  "PGI2_c0": [
+   "unused",
+   0.0,
+   -995.1391392482177,
+   1000.0
+  ],
+  "PGI_c0": [
+   "active",
+   4.8608611464968225,
+   -995.1391392482177,
+   1000.0
+  ],
+  "PGK_c0": [
+   "essential",
+   -16.02352614316761,
+   -16.023526288427966,
+   -16.023526013859097
+  ],
+  "PGL_c0": [
+   "essential",
+   4.959984944574651,
+   4.959984515761661,
+   4.959985339468268
+  ],
+  "PGM_c0": [
+   "essential",
+   -14.716139568742836,
+   -14.716139715310577,
+   -14.716139440741717
+  ],
+  "PIt2r_c0": [
+   "essential",
+   3.2148950476847737,
+   3.214895044470059,
+   3.214895047684899
+  ],
+  "PPCK_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.716055413152185e-07
+  ],
+  "PPC_c0": [
+   "essential",
+   2.5043094703687347,
+   2.504308781442381,
+   2.5043096966717986
+  ],
+  "PPS_c0": [
+   "unused",
+   0.0,
+   0.0,
+   1.7160550404829616e-07
+  ],
+  "PTAr_c0": [
+   "unused",
+   -3.117780704421899e-14,
+   -5.139324187479079e-15,
+   3.813456652858779e-08
+  ],
+  "PYK_c0": [
+   "essential",
+   1.7581774441067857,
+   1.7581772733022234,
+   1.7581780054855851
+  ],
+  "RPE_c0": [
+   "essential",
+   2.678481850507525,
+   2.6784815652603737,
+   2.6784821143981006
+  ],
+  "RPI_c0": [
+   "essential",
+   -2.281503094067125,
+   -2.2815032250701566,
+   -2.281502950501288
+  ],
+  "SUCCt2_2_c0": [
+   "unused",
+   0.0,
+   0.0,
+   2.2880738842029118e-07
+  ],
+  "SUCDi_c0": [
+   "essential",
+   5.064375661482121,
+   5.0643755431327335,
+   1000.0
+  ],
+  "SUCOAS_c0": [
+   "essential",
+   -5.064375661482121,
+   -5.064375817701523,
+   -5.064374856710568
+  ],
+  "TALA_c0": [
+   "essential",
+   1.4969837572615643,
+   1.4969836144802462,
+   1.496983889049115
+  ],
+  "THD2_c0": [
+   "unused",
+   0.0,
+   0.0,
+   6.864221975145806e-07
+  ],
+  "TKT1_c0": [
+   "essential",
+   1.4969837572615643,
+   1.4969836144802462,
+   1.496983889049082
+  ],
+  "TKT2_c0": [
+   "essential",
+   1.1814980932459607,
+   1.1814979507801282,
+   1.181498225348997
+  ],
+  "TPI_c0": [
+   "essential",
+   7.477381962160286,
+   7.477381831398145,
+   7.477382105967023
+  ]
+ },
+ "reversals_used": {},
+ "status": "done"
+}

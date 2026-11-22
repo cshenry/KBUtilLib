@@ -51,6 +51,20 @@ The KBDL-specific behaviour lives HERE, in full:
    (:func:`atp_filter_key`) -- and handing that object back as ``atp_filter``
    REPLAYS it instead of recomputing, or raises if the key does not match.
    Where it is stored and when it is looked up is KBDL's, not this layer's.
+7. **No silent superset fallback** (``biomass_reference="model"`` only).  Chris,
+   2026-11-21, answering "should I fix the KBUtilLib wrapper so a model that
+   can't grow returns no_growth, and the row reports which growth target was
+   actually used?": "Yes".  ``analyze_condition`` sets
+   ``target = frac * opt_superset`` and only switches to ``frac * opt_model``
+   when the model grows at ``min_growth`` or better, so a model that CANNOT
+   grow is priced against the superset's optimum under a row that still reads
+   ``model`` — observed on real Keio, condition ``no-carbon-control``:
+   ``growth_model`` 0.0, ``biomass_fixed`` 10.709949424823044, a 24-reaction
+   gap-fill, reported as ``model``.  Such a condition becomes ``no_growth``
+   here and every key describing that solve is DROPPED, so no consumer can
+   read it; ``biomass_reference="superset"`` is the explicit way to ask for the
+   gap-fill answer instead.  Every condition also gains
+   ``biomass_reference_used``, naming where its target actually came from.
 
 Two reaction-id vocabularies, and why normalisation is not optional
 -------------------------------------------------------------------
@@ -75,6 +89,12 @@ whatever status the class reported (``solver_failed``, ``no_growth``) and the
 run moves on to the next condition; ``time_s`` per condition comes from the
 class.  A solver that RAISES propagates and ends the run — deliberately, since
 the alternative is reporting a partial panel as a complete one.
+
+There is now ONE case where the status is not the class's (item 7 below): with
+``biomass_reference="model"`` and a model that cannot grow, the class falls
+back to the superset's optimum and the row still says ``model``, so this layer
+relabels the condition ``no_growth`` rather than report a gap-fill priced
+against a target the model cannot reach.
 """
 
 from __future__ import annotations
@@ -97,6 +117,8 @@ __all__ = [
     "ATP_FILTER_METHOD_PARAMS",
     "COMPARTMENT_SUFFIX",
     "MISSING_T_POLICIES",
+    "NO_GROWTH_SURVIVING_KEYS",
+    "TIMING_KEY_PREFIX",
     "DEFAULT_FIT_ONLY_THRESHOLD",
     "atp_filter_key",
     "normalize_gene_reactions",
@@ -127,6 +149,27 @@ DEFAULT_FIT_ONLY_THRESHOLD: float = -2.0
 #: count.  A sample, not the list: a mapping built against the wrong
 #: vocabulary produces thousands and the count is the number that matters.
 UNMAPPED_SAMPLE_SIZE: int = 20
+
+#: The per-condition keys that survive the no-growth relabel in
+#: :func:`run_fitness_weighted_analysis`, plus every key whose name starts with
+#: :data:`TIMING_KEY_PREFIX`.  An ALLOW-list on purpose, and not the obvious
+#: deny-list: every key NOT named here describes the solve that was priced
+#: against the superset's optimum, and a deny-list would silently pass through
+#: any key a future modelseedpy adds to ``analyze_condition``'s result.
+#: ``growth_superset`` and ``growth_model`` stay because they are the evidence
+#: FOR the relabel -- the reader has to be able to see that the superset grew
+#: and the model did not.
+NO_GROWTH_SURVIVING_KEYS: Tuple[str, ...] = (
+    "condition",
+    "status",
+    "growth_superset",
+    "growth_model",
+)
+
+#: Prefix of the class's per-condition wall-clock keys (``time_s``,
+#: ``time_solve_s``, ``time_fva_s``).  They survive the relabel: the work was
+#: really done and really took that long, and KBDL's timing rollup reads them.
+TIMING_KEY_PREFIX: str = "time_"
 
 #: ``format`` of the stored ATP filter :func:`run_fitness_weighted_analysis`
 #: returns as ``result["atp_filter"]``.  A stored object carrying any other
@@ -427,6 +470,82 @@ def _count_discounted(
         if any(gene in best for gene in genes):
             discounted += 1
     return discounted
+
+
+# ---------------------------------------------------------------------------
+# (2g) biomass_reference="model" on a model that cannot grow
+# ---------------------------------------------------------------------------
+
+
+def _target_was_the_superset(
+    *, condition: Mapping[str, Any], min_growth: float
+) -> bool:
+    """Did this condition's biomass target come from the superset's optimum?
+
+    Args:
+        condition: One of ``run``'s per-condition results, as the class
+            returned it.
+        min_growth: ``analysis.params["min_growth"]`` — the class's own bar.
+
+    Returns:
+        True when the condition was solved against ``frac * growth_superset``
+        despite ``biomass_reference="model"`` having been asked for.
+
+    This mirrors ``analyze_condition``'s own branch rather than guessing at it::
+
+        target = P["frac"] * opt_superset
+        if (P["biomass_reference"] == "model"
+                and opt_model is not None
+                and opt_model >= P["min_growth"]):
+            target = P["frac"] * opt_model
+
+    so the test is the NEGATION of that condition's second and third clauses:
+    no ``growth_model`` at all (the condition returned before the model solve,
+    which is ``no_growth`` or ``no_fitness`` and never had a target), a
+    ``growth_model`` of ``None`` (the model solve was infeasible), or a
+    ``growth_model`` strictly below ``min_growth``.  The comparison is
+    ``<``, matching the class's ``>=``: a model growing at EXACTLY
+    ``min_growth`` clears the bar and its target is its own.
+    """
+    if "growth_model" not in condition:
+        return False
+    growth_model = condition["growth_model"]
+    return growth_model is None or growth_model < min_growth
+
+
+def _relabel_no_growth(condition: Dict[str, Any]) -> None:
+    """Make a condition report ``no_growth`` and drop the superset-priced solve.
+
+    Args:
+        condition: The per-condition result, modified in place.
+
+    Nothing is re-solved and nothing is recomputed: the class has ALREADY
+    solved this leg against the superset target by the time ``run`` returned,
+    so this discards work that was paid for.  Avoiding the solve entirely would
+    need a change in ``modelseedpy.core.msfitnessweighted``, which this layer
+    does not make (Chris, 2026-11-16: conform to Jose's port rather than fork
+    it).  Discarding it is still right: a gap-fill solution priced against a
+    biomass target the model cannot reach is not an answer to the question
+    ``biomass_reference="model"`` asked.
+
+    The surviving keys are :data:`NO_GROWTH_SURVIVING_KEYS` plus every
+    ``time_*``; see that constant for why this is an allow-list.
+    """
+    for key in [key for key in condition if not _survives_no_growth(key)]:
+        del condition[key]
+    condition["status"] = "no_growth"
+
+
+def _survives_no_growth(key: str) -> bool:
+    """Is ``key`` one a relabelled condition keeps?
+
+    Args:
+        key: A per-condition result key.
+
+    Returns:
+        True for :data:`NO_GROWTH_SURVIVING_KEYS` and any ``time_*`` key.
+    """
+    return key in NO_GROWTH_SURVIVING_KEYS or key.startswith(TIMING_KEY_PREFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -1306,7 +1425,18 @@ def run_fitness_weighted_analysis(
             reused.** An unknown ``format`` or a malformed body also raises.
             Ignored when ``atp_safe=False``.
         blacklist: Template reaction ids never offered as candidates.
-        biomass_reference: ``model`` (KBDL) or ``superset``.
+        biomass_reference: ``model`` (KBDL) or ``superset`` — what biomass is
+            fixed at a fraction of.  ``model``: the model's OWN optimum, and a
+            model that cannot reach ``min_growth`` in a condition reports that
+            condition ``no_growth`` with every key describing a solve removed.
+            The class itself would instead fall back to the superset's optimum
+            and leave the row saying ``model``, so a caller who wants the
+            gap-fill answer for a non-growing model must ask for it:
+            ``superset`` fixes biomass at a fraction of the SUPERSET's optimum
+            for every condition, which is always a reachable target because the
+            superset's own growth is what gates the condition.  Either way,
+            ``biomass_reference_used`` on each condition names the reference
+            that was actually used.
         missing_t_policy: One of :data:`MISSING_T_POLICIES`.
         fit_only_threshold: Strict fitness bound for ``fitness_only``.
         nonpositive_penalty: ``one`` (KBDL) or ``floor``.
@@ -1324,6 +1454,11 @@ def run_fitness_weighted_analysis(
         ``superset`` — plus:
 
         * per condition, ``n_reactions_discounted``;
+        * per condition, ``biomass_reference_used``: ``"model"`` or
+          ``"superset"`` when a biomass target really was fixed (so
+          ``biomass_fixed`` is present), and ``None`` when none was —
+          ``no_growth`` and ``no_fitness`` conditions, including a condition
+          relabelled ``no_growth`` by the rule below;
         * per edge-evidence row, ``significance`` (``"t"``, ``"fitness_only"``
           or ``None``);
         * ``edges``: the normalised, merged gene mapping actually in force;
@@ -1354,7 +1489,21 @@ def run_fitness_weighted_analysis(
         for exactly which inputs the key covers and which it does not.
 
         ``annotation_evidence`` is recomputed from the post-processed conditions,
-        so the rollup and the per-condition rows can never disagree.
+        so the rollup and the per-condition rows can never disagree — and a
+        condition relabelled ``no_growth`` contributes nothing to it.
+
+        With ``biomass_reference="model"``, a condition whose ``growth_model``
+        is ``None`` or below ``min_growth`` is reported ``no_growth`` whatever
+        status the class gave it (``done`` or ``solver_failed``), and keeps only
+        ``condition``, ``status``, ``growth_superset``, ``growth_model`` and its
+        ``time_*`` keys (:data:`NO_GROWTH_SURVIVING_KEYS`).  ``biomass_fixed``,
+        ``fluxes``, ``gapfilled``, ``objective``, ``distance_to_growth``,
+        ``edge_evidence`` and everything else describing that solve are REMOVED,
+        because they describe a gap-fill priced against a biomass target the
+        model cannot reach; ``n_reactions_discounted`` is 0.  A model growing at
+        exactly ``min_growth`` is NOT relabelled, matching the class's ``>=``.
+        With ``biomass_reference="superset"`` nothing is relabelled and the only
+        change is the new ``biomass_reference_used`` key.
 
     Raises:
         ValueError: ``missing_t_policy`` is not one of
@@ -1542,13 +1691,37 @@ def run_fitness_weighted_analysis(
     result = analysis.run(specs)
 
     # Post-processing: counts and labels only. Nothing here re-solves anything.
+    min_growth = analysis.params["min_growth"]
     for condition_id, condition in result["conditions"].items():
+        # (2g) biomass_reference="model" on a model that cannot grow.  FIRST in
+        # the loop, and for every condition including a Complete leg, because
+        # the Complete-leg branch below `continue`s and would otherwise skip it.
+        # The class falls back to the superset's optimum here and the row still
+        # says "model", so the gap-fill was priced against a target the model
+        # cannot reach (Chris, 2026-11-21: "a model that can't grow returns
+        # no_growth, and the row reports which growth target was actually
+        # used").  Whatever status the class reported -- `done` or
+        # `solver_failed` -- the answer is not one, so it becomes `no_growth`.
+        if biomass_reference == "model" and _target_was_the_superset(
+            condition=condition, min_growth=min_growth
+        ):
+            _relabel_no_growth(condition)
+        # What a reader needs to interpret `biomass_fixed`, on EVERY condition.
+        # After the relabel above, `biomass_fixed` is present exactly when a
+        # target really was fixed, and `biomass_reference` then names where it
+        # came from: the class uses the superset for any value but "model".
+        condition["biomass_reference_used"] = (
+            ("model" if biomass_reference == "model" else "superset")
+            if "biomass_fixed" in condition
+            else None
+        )
         if condition_id in complete_legs:
             condition["n_reactions_discounted"] = 0
             condition["edge_evidence"] = []
             continue
         if condition.get("status") in ("no_growth", "no_fitness"):
-            # Skipped before pricing: no reaction was ever re-priced.
+            # Skipped before pricing, or relabelled above -- either way there
+            # is no reported solve for a re-priced reaction to have fed.
             condition["n_reactions_discounted"] = 0
         else:
             condition["n_reactions_discounted"] = _count_discounted(

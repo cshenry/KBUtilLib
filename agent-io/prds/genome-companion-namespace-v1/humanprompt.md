@@ -89,10 +89,14 @@ support building it the first time a real mutant/parent pair needs to load.**
 
 ## Status, honestly
 
-**19 judgement calls plus a terminal: 6 IRREVERSIBLE, 13 MEDIUM.** Taskplan re-derived and validated
-at 11 tasks across 8 phases. Read Q1–Q9 first; those are the irreversible ones plus the two above.
+**21 judgement calls plus a terminal: 6 IRREVERSIBLE, 15 MEDIUM.** Taskplan validated at 13 tasks
+across 9 phases. Read Q1–Q9 first; those are the irreversible ones plus the two above.
 
-**This revision has NOT been re-attacked.** Confront round 1's eighteen stalls were folded into the
-*previous* design, and several are now obsolete rather than fixed — the Revision Log says which. One
-confront round of the three-round budget remains, and running it against this scheme is the obvious
-next step before anyone builds.
+**This revision HAS now been attacked** (round 3, 2026-11-22, Jane). Confront round 2 ran against it
+with the taskplan embedded and returned 19 stall points; all are folded. The largest changes: SQL
+views are a hard prerequisite (Q22); the delivery gained a producer, a consumer and a versioned
+contract (Q21); request membership replaces "a re-request is a no-op"; `load_request.status` and
+`protein_content.is_fragment` are gone; and no production load runs until you have recorded Q3 after
+the rehearsal's measurement. That spends the last confront round, so **your edits will be the only
+text in this PRD no adversary has read.** Production loading is also blocked until the alias tables
+are bootstrapped into the live lake, which is another PRD's work.

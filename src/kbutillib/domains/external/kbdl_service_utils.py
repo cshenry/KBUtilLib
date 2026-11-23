@@ -58,6 +58,33 @@ at KBDLJobRunningPrototype commit ``a024b55``)::
                                      object is not an archive type)
     DELETE /objects/{object_id}     delete (owner-only) -> 204
 
+The DATASET MIRROR routes (PRD ``kbdl-dataset-mirror-v1``), which serve
+versioned full-snapshot parquet copies of BERDL lakehouse tables to external
+partners. All need a valid token; the four POSTs additionally need the caller
+on the service's ``KBDL_DATASET_PUBLISHERS`` list and answer 403 otherwise::
+
+    GET    /datasets                      every dataset + its latest version
+    GET    /datasets/{name}/latest        {"version", "manifest"}; 410 with
+                                           the SAME body when retired
+    GET    /datasets/{name}/versions      every version, newest first,
+                                           retired included, no manifests
+    GET    /datasets/{name}/versions/{v}  as /latest, for one version
+    POST   /datasets/{name}/versions      REGISTER a version (201 new, 200
+                                           idempotent repeat, 409+tombstone
+                                           when the manifest is retired's)
+    POST   /datasets/{name}/versions/{v}/retire   withdraw (metadata only)
+    POST   /datasets/{name}/versions/{v}/hold     {"reason": text} holds,
+                                           {"reason": null} releases
+    POST   /datasets/{name}/reclaim       delete retired versions' objects
+
+Registration is the ONLY step that makes a dataset version's files and
+manifest public, which is why the publisher uploads everything ``private``
+first; see
+:mod:`kbutillib.domains.kbase.berdl.dataset_publish`. The files themselves
+download through the ordinary ``GET /objects/{id}/content`` path, i.e.
+:meth:`KBDLServiceUtils.download_object`, whose content-addressing check
+applies to them unchanged.
+
 Deliberately NOT implemented:
 
 - Any ACL/grant call. The service exposes no grant endpoint (see
@@ -108,7 +135,14 @@ Errors -- distinguishable, typed, and raised from :meth:`_raise_for_status`:
   outage are different failure modes and must not be conflated.
 - 404 (no such job/object visible to the caller) -> :class:`KBDLNotFoundError`.
 - 409 (state conflict, e.g. result requested before completion, or a
-  non-archive object queried for its file listing) -> :class:`KBDLConflictError`.
+  non-archive object queried for its file listing) -> :class:`KBDLConflictError`,
+  which carries the parsed ``body`` and any ``tombstone`` in it. A 409 WITH A
+  TOMBSTONE on a dataset-version POST means the posted manifest belongs to a
+  RETIRED version -- an error, never a successful idempotent repeat.
+- 410 (a dataset version that exists but has been RETIRED) ->
+  :class:`KBDLGoneError`, carrying the whole 410 body (which is the same
+  shape as the 200's). Deliberately distinct from 404: "withdrawn" and
+  "never existed" are different answers, and only the first has a tombstone.
 - 413 (upload exceeded the service's max object size) ->
   :class:`KBDLPayloadTooLargeError`.
 
@@ -143,7 +177,7 @@ import os
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -304,8 +338,70 @@ class KBDLNotFoundError(KBDLServiceError):
     """HTTP 404: no job/object with that id is visible to the caller."""
 
 
+def _tombstone_in(value: Any) -> Optional[Any]:
+    """The ``tombstone`` an error body carries, at any nesting depth, or None.
+
+    A tombstone means A RETIRED DATASET VERSION, and on
+    ``POST /datasets/{name}/versions`` it means the posted manifest object id
+    is PERMANENTLY SPENT: it belonged to a version that has since been
+    retired, so the retry that is normally correct against a 409 ("somebody
+    else already published this; carry on") can never succeed here. It must
+    therefore reach the caller as an error with the tombstone attached --
+    read as "already published", a withdrawn snapshot would be reported live.
+
+    Written here rather than imported from
+    :mod:`kbutillib.domains.kbase.berdl.dataset_publish` (which has its own
+    ``_tombstone_of``): this module is wire-contract-only and does not import
+    the pod-side publisher, and the publisher deliberately does not import
+    this client (see its :class:`KBDLPort`).
+    """
+    if isinstance(value, Mapping):
+        if value.get("tombstone"):
+            return value["tombstone"]
+        for nested in ("detail", "error", "body", "version"):
+            found = _tombstone_in(value.get(nested))
+            if found is not None:
+                return found
+    return None
+
+
 class KBDLConflictError(KBDLServiceError):
-    """HTTP 409: a state conflict (e.g. result requested before completion)."""
+    """HTTP 409: a state conflict (e.g. result requested before completion).
+
+    ``body`` is the parsed error body when there was one and ``tombstone``
+    the tombstone it carried, if any (see :func:`_tombstone_in`): a 409 on
+    ``POST /datasets/{name}/versions`` whose body carries a tombstone is a
+    retired version and never a successful idempotent repeat.
+    """
+
+    def __init__(self, message: str, body: Any = None) -> None:
+        self.status_code = 409
+        self.body = body
+        self.tombstone = _tombstone_in(body)
+        super().__init__(message)
+
+
+class KBDLGoneError(KBDLServiceError):
+    """HTTP 410: the dataset version exists but has been RETIRED.
+
+    Deliberately NOT a :class:`KBDLNotFoundError`: a 404 means "there is no
+    such version" and a 410 means "there was, and it has been withdrawn" --
+    the second is a fact about a version that WAS public, and a puller that
+    conflated the two would report a withdrawn snapshot as never-existing and
+    lose the tombstone that says who withdrew it and why.
+
+    The 410 body is the SAME shape as the 200 (``{"version": ...,
+    "manifest": ...}``), so it is kept whole in ``body`` rather than
+    stringified; ``tombstone`` is the tombstone within it, if any.
+    """
+
+    def __init__(self, body: Any = None) -> None:
+        self.status_code = 410
+        self.body = body
+        self.tombstone = _tombstone_in(body)
+        super().__init__(
+            f"the dataset version has been retired (HTTP 410): {body!r}"
+        )
 
 
 class KBDLPayloadTooLargeError(KBDLServiceError):
@@ -519,6 +615,20 @@ class KBDLServiceUtils(SharedEnvUtils):
             return response
 
     @staticmethod
+    def _gone_body(response: requests.Response) -> Any:
+        """The WHOLE parsed body of a 410, or its text if it is not JSON.
+
+        Unlike :meth:`_error_detail` this does not project ``detail`` out: a
+        retired dataset version's 410 carries the same ``{"version": ...,
+        "manifest": ...}`` object a 200 would, and that object IS the answer
+        the caller needs (who retired it, when, and why).
+        """
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    @staticmethod
     def _error_detail(response: requests.Response) -> Any:
         try:
             body = response.json()
@@ -552,7 +662,17 @@ class KBDLServiceUtils(SharedEnvUtils):
         if status == 404:
             raise KBDLNotFoundError(str(detail) if detail else "not found")
         if status == 409:
-            raise KBDLConflictError(str(detail) if detail else "conflict")
+            # The BODY is carried through, not just its str(): a 409 on a
+            # dataset-version POST may hold a tombstone, and the caller has
+            # to be able to read it rather than regex a message.
+            raise KBDLConflictError(
+                str(detail) if detail else "conflict", body=detail
+            )
+        if status == 410:
+            # The 410 body is the SAME shape as the 200, so the WHOLE parsed
+            # body is kept (not ``_error_detail``'s ``detail`` projection) --
+            # a puller needs the retired version's record and tombstone.
+            raise KBDLGoneError(self._gone_body(response))
         if status == 413:
             raise KBDLPayloadTooLargeError(
                 str(detail) if detail else "payload too large"
@@ -1347,6 +1467,209 @@ class KBDLServiceUtils(SharedEnvUtils):
     def delete_object(self, object_id: str) -> None:
         """Delete an object (owner-only; idempotent if already absent)."""
         self._request("DELETE", f"/objects/{object_id}")
+
+    # ── The dataset mirror (PRD kbdl-dataset-mirror-v1) ─────────────────
+    #
+    # Seven methods over the ``/datasets`` routes KBDL serves versioned,
+    # full-snapshot parquet copies of BERDL lakehouse tables from. Every one
+    # of them needs a valid KBase token; the four POSTs additionally need the
+    # caller on the service's ``KBDL_DATASET_PUBLISHERS`` list and answer 403
+    # (:class:`KBDLNotAuthorizedError`) otherwise -- which is a MISSING
+    # PERMISSION and not a stale token, hence the separate type.
+    #
+    # REGISTRATION (:meth:`publish_dataset_version`) IS THE ONLY STEP THAT
+    # MAKES ANYTHING PUBLIC. The files and the manifest are uploaded as
+    # private objects first (see
+    # :class:`kbutillib.domains.kbase.berdl.dataset_publish.DatasetPublisher`),
+    # so an aborted publish discloses nothing.
+    #
+    # Together these four -- ``upload_object``, ``poll_jobs_until_terminal``,
+    # ``get_dataset_version``, ``publish_dataset_version`` -- are exactly the
+    # ``KBDLPort`` protocol that publisher is written against, so a real
+    # client satisfies it structurally with no import either way.
+
+    def list_datasets(self) -> List[Dict[str, Any]]:
+        """``GET /datasets`` -- every dataset with its latest version.
+
+        Returns:
+            One record per dataset: ``{name, source, latest_version,
+            latest_published_at, version_count}``. A dataset with no
+            registered version still appears, with nulls.
+        """
+        return self._request("GET", "/datasets").json()
+
+    def get_dataset_version(
+        self, name: str, version: str = "latest"
+    ) -> Dict[str, Any]:
+        """One registered version AND its manifest.
+
+        ``GET /datasets/{name}/latest`` for ``version="latest"`` (the
+        default), otherwise ``GET /datasets/{name}/versions/{version}``.
+
+        Args:
+            name: The dataset name, ``"<namespace>.<table>"``.
+            version: A version number, or ``"latest"``.
+
+        Returns:
+            ``{"version": <record>, "manifest": <manifest>}``.
+
+        Raises:
+            KBDLGoneError: The version EXISTS BUT IS RETIRED (410). The body
+                is the same shape as a 200's and is carried on the exception,
+                so a caller can report the tombstone rather than guess.
+            KBDLNotFoundError: No such dataset, or no such version (404) --
+                including a dataset that has never had one.
+        """
+        target = "latest" if version is None else str(version)
+        path = (
+            f"/datasets/{name}/latest"
+            if target == "latest"
+            else f"/datasets/{name}/versions/{target}"
+        )
+        return self._request("GET", path).json()
+
+    def list_dataset_versions(self, name: str) -> List[Dict[str, Any]]:
+        """``GET /datasets/{name}/versions`` -- every version, NEWEST FIRST.
+
+        RETIRED VERSIONS ARE INCLUDED (that is the point: retirement is a
+        metadata state and the history must stay visible), and no manifests
+        are returned -- fetch one with :meth:`get_dataset_version`.
+        """
+        return self._request("GET", f"/datasets/{name}/versions").json()
+
+    def publish_dataset_version(
+        self, name: str, manifest_object_id: str
+    ) -> Dict[str, Any]:
+        """``POST /datasets/{name}/versions`` -- REGISTER a new version.
+
+        This is the step that makes the already-uploaded private files and
+        manifest public; nothing before it discloses anything.
+
+        A 201 registers a new version and a 200 is the IDEMPOTENT REPEAT of
+        an already-PUBLISHED one -- both return the record and both are
+        success, which is what makes a re-run of an interrupted publish safe.
+
+        Args:
+            name: The dataset name.
+            manifest_object_id: The sha256 of the manifest object's bytes,
+                which is also its KBDL object id.
+
+        Returns:
+            The version record.
+
+        Raises:
+            KBDLConflictError: A 409. **When its ``tombstone`` is set the
+                manifest belongs to a RETIRED version**, i.e. this manifest
+                object id is permanently spent and no retry can ever
+                succeed. That case is DELIBERATELY an error and never a
+                success: read as an idempotent repeat, a withdrawn snapshot
+                would be reported to the operator as live.
+            KBDLNotAuthorizedError: The caller is not a dataset publisher.
+        """
+        return self._request(
+            "POST",
+            f"/datasets/{name}/versions",
+            json={"manifest_object_id": manifest_object_id},
+        ).json()
+
+    def retire_dataset_version(
+        self, name: str, version: str, reason: str
+    ) -> Dict[str, Any]:
+        """``POST /datasets/{name}/versions/{version}/retire`` -- withdraw it.
+
+        METADATA ONLY: this deletes NOTHING. The version stops being served
+        (its reads answer 410) and its objects become reclaimable, but the
+        bytes go only when :meth:`reclaim_dataset` is run without
+        ``dry_run``. Separating the two is what makes a mistaken retirement
+        recoverable.
+
+        Args:
+            name: The dataset name.
+            version: The version to retire.
+            reason: Why -- recorded on the record as ``retire_reason``.
+
+        Returns:
+            The updated version record. Retiring an ALREADY-RETIRED version
+            is a 200 no-op, not an error.
+
+        Raises:
+            KBDLConflictError: A 409 -- the version is the LATEST (retiring
+                it would leave partners with nothing current) or it is HELD
+                (a hold exists precisely to block this).
+        """
+        return self._request(
+            "POST",
+            f"/datasets/{name}/versions/{version}/retire",
+            json={"reason": reason},
+        ).json()
+
+    def hold_dataset_version(
+        self, name: str, version: str, reason: Optional[str]
+    ) -> Dict[str, Any]:
+        """``POST /datasets/{name}/versions/{version}/hold`` -- hold/release.
+
+        ONE ROUTE, TWO DIRECTIONS, DISTINGUISHED BY THE BODY:
+
+        * ``reason="<text>"`` sends ``{"reason": "<text>"}`` and HOLDS the
+          version -- retirement and reclamation then refuse it.
+        * ``reason=None`` sends ``{"reason": null}`` and RELEASES the hold.
+
+        ``reason=None`` is therefore NOT "no reason supplied, leave the body
+        out": the explicit JSON null IS the release instruction, so the key
+        is always sent.
+
+        Returns:
+            The updated version record (``hold_reason`` set, or null).
+        """
+        return self._request(
+            "POST",
+            f"/datasets/{name}/versions/{version}/hold",
+            json={"reason": reason},
+        ).json()
+
+    def reclaim_dataset(
+        self,
+        name: str,
+        dry_run: bool = True,
+        assume_retired: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """``POST /datasets/{name}/reclaim`` -- delete retired versions' objects.
+
+        ``dry_run`` DEFAULTS TO TRUE because the alternative is an
+        irreversible delete of partner-facing bytes on a bare call.
+
+        Args:
+            name: The dataset name.
+            dry_run: When true nothing is deleted and the report is an
+                ESTIMATE of what would be -- the service does not take the
+                locks a real run takes, so a version that becomes busy in
+                between still ends up in ``kept_busy`` on the real run.
+            assume_retired: Versions to COUNT AS RETIRED for the estimate,
+                for previewing a retire-then-reclaim before retiring
+                anything. **Only valid with ``dry_run``** -- the service
+                answers 400 otherwise, and this method refuses it locally
+                (:class:`KBDLBadRequestError`, no request made) rather than
+                spend a round trip to be told so.
+
+        Returns:
+            ``{deleted: [object_id], kept_foreign: [object_id], kept_busy:
+            [{object_id, reason}], bytes_freed: int}``. ``kept_foreign`` is
+            objects a version references but does not own -- never deleted.
+        """
+        payload: Dict[str, Any] = {"dry_run": bool(dry_run)}
+        if assume_retired is not None:
+            if not dry_run:
+                raise KBDLBadRequestError(
+                    "assume_retired is only valid with dry_run=True: it asks "
+                    "for an ESTIMATE that treats those versions as retired, "
+                    "which is meaningless for a run that actually deletes. "
+                    "No request was made. Retire them first, then call "
+                    "reclaim_dataset(dry_run=False) with no assume_retired."
+                )
+            payload["assume_retired"] = [str(v) for v in assume_retired]
+        return self._request(
+            "POST", f"/datasets/{name}/reclaim", json=payload
+        ).json()
 
 
 # ── Composition-based implementation ─────────────────────────────────────

@@ -338,7 +338,12 @@ class KBDLPort(Protocol):
         ...
 
     def get_dataset_version(self, name: str, version: str) -> Dict[str, Any]:
-        """A registered version (``"latest"`` for the newest). 404 if none."""
+        """A registered version (``"latest"`` for the newest). 404 if none.
+
+        The real client returns the route's own envelope, ``{"version":
+        <record>, "manifest": <manifest>}``; :func:`_published_snapshot_of`
+        accepts that as well as a bare record.
+        """
         ...
 
     def publish_dataset_version(
@@ -1150,7 +1155,26 @@ def _job_object_id(status: Mapping[str, Any]) -> Optional[str]:
 
 
 def _published_snapshot_of(record: Mapping[str, Any]) -> str:
-    """The ``source_snapshot_id`` of a registered version record."""
+    """The ``source_snapshot_id`` of a registered version record.
+
+    Accepts either the record itself or the ``{"version": <record>,
+    "manifest": <manifest>}`` ENVELOPE the service's
+    ``GET /datasets/{name}/latest`` actually answers with, which is what the
+    real :class:`KBDLPort` implementation
+    (:meth:`kbutillib.domains.external.kbdl_service_utils.KBDLServiceUtils.get_dataset_version`)
+    returns verbatim. This module was written against "the record" before
+    that client half existed; unwrapping here rather than making the client
+    project the field out is deliberate -- the manifest in that envelope is
+    the other thing a caller of the route wants, and a client that threw it
+    away to fit this function would make every puller fetch the version
+    twice.
+    """
+    if (
+        "source_snapshot_id" not in record
+        and "source" not in record
+        and isinstance(record.get("version"), Mapping)
+    ):
+        record = record["version"]
     value = record.get("source_snapshot_id")
     if value is None:
         source = record.get("source")

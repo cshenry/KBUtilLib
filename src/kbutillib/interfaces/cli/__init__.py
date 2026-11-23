@@ -25,6 +25,7 @@ from .arc import arc_cmd
 from .capabilities import cap_cmd
 from .clearinghouse import clearinghouse_cmd
 from .council import council_cmd
+from .dataset import dataset_cmd
 from .harness import harness_cmd
 from .init import doctor_command, init_command
 from .init_notebook import init_notebook_cmd
@@ -76,6 +77,7 @@ main.add_command(bootstrap_command, name="bootstrap")
 main.add_command(buildplan_cmd, name="buildplan")
 main.add_command(clearinghouse_cmd, name="clearinghouse")
 main.add_command(council_cmd, name="council")
+main.add_command(dataset_cmd, name="dataset")
 main.add_command(doctor_command, name="doctor")
 main.add_command(init_command, name="init")
 main.add_command(init_notebook_cmd, name="init-notebook")

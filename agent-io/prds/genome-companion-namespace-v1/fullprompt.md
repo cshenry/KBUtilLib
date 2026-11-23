@@ -77,10 +77,23 @@ as a soft low-confidence flag). Of those, `gc_content`, `contig_n50`, `max_conti
 `completeness_model_used` and `additional_notes` are a *model's assessment* and are meaningless
 without the tool, its version and its model. That is the split Q3 acts on.
 
-**7. `clearinghouse.entity_alias` LANDED on `main` while this PRD sat, so the companion's own alias
-table is deleted rather than redesigned.** The sibling PRD `clearinghouse-entity-alias-v1` is on
-`main` with `(entity_type, entity_hash, alias_source, alias_id, observed_at, ingest_batch_id)`,
-partitioned on `alias_source`, plus a declared `INVERTIBLE_ALIAS_SOURCES` tuple. Its author also sent
+**7. ALIASES ARE A CLEARINGHOUSE CONCERN AND THE TABLE IS `genome_alias` -- one of FIVE per-type
+alias tables. Corrected 2026-11-22; an earlier revision of this section was wrong twice.**
+It said `entity_alias` (a single generic table) and that it had "landed on main". Both were wrong.
+Chris REVERSED that PRD's central decision: there is no generic `entity_alias`. There are five
+per-type tables -- `genome_alias`, `protein_alias`, `gene_alias`, `function_alias`,
+`ontology_term_alias` -- plus an `all_alias` union view, with **`alias` as the FOURTH KIND** beside
+entity/content/result. His reasoning is the same argument this namespace is built on: there are far
+more proteins than genomes, so a shared alias table makes genome-alias reads pay protein scale.
+**Verified on `main` 2026-11-22**: `clearinghouse_schema.py` now declares
+`_KINDS = ("entity", "content", "result", "alias")`, twenty-one configs,
+`_ALIAS_PARTITION_BY = "alias_source"`, a closed `alias_source` vocabulary with legal values
+**per entity type**, and an invertible-source set. So the companion writes
+**`clearinghouse.genome_alias`**, and its own alias table is deleted rather than redesigned.
+**BUT THE TABLE DOES NOT EXIST IN THE LIVE LAKE YET** -- measured 2026-11-22, the namespace holds
+19 tables and **no alias table of any name**. The code landed; the bootstrap has not run. So the
+loader's alias write has no target until someone bootstraps the alias kind, and that is a
+precondition this PRD does not own. Its author also sent
 a defect report that applies to the earlier draft's `genome_alias`: **`ncbi_taxid` is a MEMBERSHIP
 relation, not an invertible alias** — a taxon names many assemblies, so a scalar reverse lookup on it
 legitimately matches every genome in the taxon and would raise a spurious ambiguity error. Deleting
@@ -101,7 +114,7 @@ unpartitioned** and its file layout is pathological at 48 genomes (`genome` 48 r
 brief said otherwise. All 4,865 live KBDL ids are `unk1` … `unk4865`: one prefix plus a contiguous
 decimal ordinal. This mattered enormously to the previous design, whose sharder routed on it. **Under
 this revision it matters much less**, because the companion is keyed on `genome_entity_hash` — a real
-64-hex content hash — and the G-number becomes an *alias* in `entity_alias`, not a routing key.
+64-hex content hash — and the G-number becomes an *alias* in `genome_alias`, not a routing key.
 Recording it because it is the reason a whole section of the previous draft was wrong.
 
 **10. KBDL's local policy says `GENOME: stores_content=False`, and that stays true and compatible.**
@@ -168,6 +181,17 @@ three-round budget remains — see the Revision Log.
 
 ## Revision Log
 
+**Round 2b — 2026-11-22 (factual correction, no decision moved).** Two statements in round 2 were
+wrong and are fixed: the clearinghouse alias table is **`genome_alias`**, one of five per-type
+tables (Chris reversed that PRD's generic-table decision), not a single `entity_alias`; and it had
+**not** "landed on main" at the time -- what had landed was that PRD's document bundle. As of
+2026-11-22 the CODE is on `main` (21 configs, `alias` as a fourth kind) but the tables are **not in
+the live lake** (19 tables, no alias table), which is now recorded as a hard precondition on the
+loader task. The design conclusion is unchanged and in fact strengthened: per-type is the shape this
+namespace would have wanted anyway. Also re-measured: `function_content` has grown 47,341 -> 79,972,
+and the genome/gene/protein content heads are **still unextended on `main`**, so Q2's window is
+still open.
+
 **Round 2 — 2026-10-27 (REDESIGN, at Chris's direction).** Chris: *"I want to change the plan in this
 PRD dramatically to better reflect that this is meant to be a companion to the clearinghouse… we
 should not replicate data that is in the clearinghouse."* The namespace is now an **annotation and
@@ -175,7 +199,7 @@ occurrence companion**, not a parallel genome store.
 
 - **Deleted outright**, because the clearinghouse holds them: `assembly`, `genome`, `genome_alias`,
   `function`, `ontology_term`. Genome and assembly metadata move into
-  `clearinghouse.genome_content`; aliases move to the now-landed `clearinghouse.entity_alias`;
+  `clearinghouse.genome_content`; aliases move to `clearinghouse.genome_alias`;
   function and ontology-term identity are already `function_entity`/`ontology_term_entity`.
 - **Clearinghouse content heads EXTENDED per entity type** (Q2), which is the mechanism Chris
   described and which already existed. The window is open: genome, gene and protein tables are all
@@ -347,7 +371,7 @@ table list:
 | this genome is 98.7% complete per CheckM2 1.0.2 | `clearinghouse.genome_result` | a tool's assessment, needs version + parameters |
 | this protein's sequence and length | `clearinghouse.protein_content` | intrinsic to the bytes |
 | BAKTA 1.9 calls this protein a LysR-family regulator | `clearinghouse.protein_result` | a fact about the sequence; one row however many genomes carry it |
-| this genome's several identifiers | `clearinghouse.entity_alias` | identity |
+| this genome's several identifiers | `clearinghouse.genome_alias` | identity |
 | this function's definition | `clearinghouse.function_content` | identity + content |
 | gene `unk12_84` sits on contig NC_007626 at 11..1336, `+` strand | **companion** `genome_feature` | an occurrence |
 | this genome's gene set was called by Bakta 1.9 against DB 6.0-full | **companion** `genome_build_provenance` | genome-scoped provenance |
@@ -775,7 +799,7 @@ with which file and expected-versus-observed size and digest.
 
 **Supersession resolves two independent chains from the delivered snapshot only** — never a live
 lookup, so a snapshot determines its rows. The FASTA chain resolves into
-`genome_content.fasta_reference`; the genome-JSON chain resolves into `entity_alias` under the
+`genome_content.fasta_reference`; the genome-JSON chain resolves into `genome_alias` under the
 `kbdl_object` source, recording observed and resolved. A cycle, a missing target or a type mismatch
 **raises**. Measured caveat: **0 of 4,865 genomes** have either id appearing as an `old_object_id`,
 and **0 chains exceed depth 1**, so this path has no live coverage and its fixtures are its only
@@ -905,7 +929,7 @@ with `stores_content=True`, so the same sequence in a thousand genomes is **one*
 location is therefore a property the clearinghouse structurally cannot hold. The companion exists to
 hold exactly that, and the earlier drafts' `assembly`, `genome`, `genome_alias`, `function` and
 `ontology_term` tables were re-declaring columns that already exist in
-`clearinghouse._CONTENT_TYPE_HEAD`, `entity_alias`, `function_content` and
+`clearinghouse._CONTENT_TYPE_HEAD`, `genome_alias`, `function_content` and
 `ontology_term_content`.
 **If you disagree:** a self-contained companion that duplicates genome metadata is loadable without
 the clearinghouse — the one real argument for it — and immediately needs a reconciliation rule for
@@ -1336,7 +1360,9 @@ hits against the genome registry on either id, 0 chains of depth > 1.
   requires `taxonomy_id` and rejects an unidentifiable default (:184).
 - `agent-io/docs/clearinghouse-schema-operator-runbook.md` — dotted vs bare namespace strings.
 - `agent-io/prds/clearinghouse-entity-alias-v1/fullprompt.md` (**landed on `main`**) — the
-  `entity_alias` table shape, its `alias_source` partitioning, and `INVERTIBLE_ALIAS_SOURCES`.
+  per-type `<type>_alias` table shape, `alias_source` partitioning, the per-entity-type legal
+  alias_source values, and the invertible-source set. NOTE its central decision was REVERSED by Chris
+  from one generic table to five per-type tables; the landed code on `main` is the per-type shape.
 - `agent-io/prds/council-record-lakehouse-v1/fullprompt.md` — the store-identity rule, the ledger and
   ambiguous-commit pattern, the delivery rail and its four corrections (`council_archive.py:10`,
   `:29`, `:748`, `:942`, `:1356`).
@@ -1375,9 +1401,15 @@ hits against the genome registry on either id, 0 chains of depth > 1.
 
 - **Per-user companion instances.** Chris deferred them explicitly. Q5 parameterises the namespace so
   they need no schema change; no ACL model, quota, or cross-instance query is designed.
-- **`clearinghouse.entity_alias` itself** — landed on `main` as `clearinghouse-entity-alias-v1`. This
-  PRD *uses* it and deletes its own `genome_alias`; it does not redesign it. Its author's finding that
-  `ncbi_taxid` is a membership relation rather than an invertible alias is resolved here by removal.
+- **`clearinghouse.genome_alias` itself** — designed and code-landed as
+  `clearinghouse-entity-alias-v1` (whose central decision Chris reversed from one generic table to
+  five per-type tables). This PRD *uses* `genome_alias` and deletes its own alias table; it does not
+  redesign it. Its author's finding that `ncbi_taxid` is a membership relation rather than an
+  invertible alias is resolved here by removal.
+- **Bootstrapping the alias tables into the live lake.** The code is on `main`; the tables are not in
+  the namespace (19 tables, no alias table, measured 2026-11-22). The companion loader's alias write
+  has no target until that bootstrap runs, and this PRD does not own it. **This is a hard
+  precondition on the loader task, not a nice-to-have.**
 - **A surrogate genome key for distinct genomes sharing an assembly.** Q9 takes the regression
   deliberately and specifies the escape hatch (`genome_instance`); building it now would be
   speculative, since nothing can currently produce such a pair.

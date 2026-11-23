@@ -1,0 +1,37 @@
+# The KBDL DATASET MIRROR CATALOG: which lakehouse tables are published to
+# external partners as versioned, full-snapshot parquet copies, and under
+# whose approval. Read by
+# ``kbutillib.domains.kbase.berdl.dataset_publish.load_catalog``; shipped as
+# package data (pyproject's [tool.setuptools.package-data]) together with the
+# README files beside it, because a non-editable install that shipped neither
+# could publish nothing at all.
+#
+# A dataset is keyed by its NAME, which must match ^[a-z0-9_]+\.[a-z0-9_]+$ and
+# must equal "<namespace>.<table>". The tenant is the Spark catalog, so the
+# lakehouse fully-qualified name is "<tenant>.<namespace>.<table>".
+#
+# BOTH APPROVAL FIELDS SHIP EMPTY AND ARE NEVER FILLED IN BY AN AGENT.
+# ``readme_approved_by``/``readme_approved_on`` are the ONLY publication gate
+# here: there is deliberately no release-authorization or steward field, since
+# publication rests on the PI's authority over the tables he manages. An empty
+# field refuses a real publish (and only a real publish -- a dry run always
+# reports). Filling one is a human act, recorded in git by the human who did
+# it.
+
+[datasets."genome_clearhouse.genome_quality"]
+tenant = "kbaseincubator"
+namespace = "genome_clearhouse"
+table = "genome_quality"
+target_file_bytes = 268435456
+readme_file = "genome_quality.md"
+readme_approved_by = ""
+readme_approved_on = ""
+
+[datasets."genome_clearhouse.skani_distances"]
+tenant = "kbaseincubator"
+namespace = "genome_clearhouse"
+table = "skani_distances"
+target_file_bytes = 268435456
+readme_file = "skani_distances.md"
+readme_approved_by = ""
+readme_approved_on = ""

@@ -352,6 +352,16 @@ kbutillib = [
     # travels inside the wheel beside the manifest.
     "domains/kbase/berdl/backfills/*.toml",
     "domains/kbase/berdl/backfills/*.parquet",
+    # The KBDL DATASET MIRROR catalog and the two partner-facing READMEs
+    # beside it. datasets.toml is OPERATIONAL INPUT, not documentation:
+    # dataset_publish.load_catalog reads it to learn which lakehouse table a
+    # dataset name means and whether its README has been approved, and
+    # read_readme reads the .md file next to it because the manifest embeds
+    # that exact text. A non-editable install that shipped neither could
+    # publish nothing at all and could not even answer `status`.
+    "domains/kbase/berdl/datasets.toml",
+    "domains/kbase/berdl/genome_quality.md",
+    "domains/kbase/berdl/skani_distances.md",
     # The packaged default council configuration
     # (domains/ai/council/default_config.yaml). load_council_config() with no
     # argument reads it through importlib.resources, so a non-editable install

@@ -65,6 +65,18 @@ The KBDL-specific behaviour lives HERE, in full:
    read it; ``biomass_reference="superset"`` is the explicit way to ask for the
    gap-fill answer instead.  Every condition also gains
    ``biomass_reference_used``, naming where its target actually came from.
+8. **An added exchange is not a gap-fill.**  Chris, 2026-11-23 11:57 CST,
+   answering "Exclude exchange reactions from distance_to_growth on Complete?":
+   **"Yes, exclude them"**.  ``_classify_superset`` puts every superset reaction
+   the draft model lacks in ``candidates``, boundary reactions INCLUDED, while
+   ``priced`` excludes them (``not r.boundary``) -- so an exchange the superset
+   added is free, is never priced in any condition, and was still counted as a
+   gap-fill by ``analyze_condition``.  Measured on real Keio (KBDL job
+   2576dc35, Complete medium): 18 gap-fill entries, several of them ``EX_``
+   reactions none of which the model has.  Such entries move to
+   ``exchanges_added`` here and ``distance_to_growth`` and ``annotation_gap``
+   are recomputed without them, in EVERY condition -- the class leaves
+   exchanges unpriced everywhere, so an added exchange is a gap-fill nowhere.
 
 Two reaction-id vocabularies, and why normalisation is not optional
 -------------------------------------------------------------------
@@ -546,6 +558,96 @@ def _survives_no_growth(key: str) -> bool:
         True for :data:`NO_GROWTH_SURVIVING_KEYS` and any ``time_*`` key.
     """
     return key in NO_GROWTH_SURVIVING_KEYS or key.startswith(TIMING_KEY_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# (2h) An added exchange is not a gap-fill
+# ---------------------------------------------------------------------------
+
+
+def _boundary_reaction_ids(analysis: Any) -> Set[str]:
+    """Every superset reaction cobra calls a boundary reaction.
+
+    Args:
+        analysis: The constructed ``MSFitnessWeightedAnalysis``, after its
+            superset is built.
+
+    Returns:
+        The ids, as a set.
+
+    ``cobra.Reaction.boundary`` is the SAME test ``_classify_superset`` uses to
+    decide what to price::
+
+        self.priced = [r.id for r in sup.reactions
+                       if not r.boundary and r.id != self.biomass]
+
+    so this set is exactly the superset reactions the class refuses to price.
+    The id PREFIX is deliberately not the test: ``EX_``, ``DM_`` and ``SK_`` are
+    naming conventions of whatever built the model, the class never looks at
+    them, and a model whose exchanges are named differently would slip straight
+    through a prefix check.  Note that this therefore catches the ``DM_``
+    demand/sink drains ``GapfillingPkg`` adds alongside the ``EX_`` exchanges —
+    which is right: they are unpriced for the same reason.
+    """
+    return {
+        reaction.id for reaction in analysis.superset.reactions if reaction.boundary
+    }
+
+
+def _split_exchanges_added(
+    *, condition: Dict[str, Any], boundary: Set[str], price_reversals: bool
+) -> None:
+    """Move boundary reactions out of ``gapfilled`` and re-count the distance.
+
+    Args:
+        condition: One of ``run``'s per-condition results, modified in place.
+            Left completely alone when it carries no ``gapfilled`` key — the
+            class's own ``no_growth``/``no_fitness``/``solver_failed`` legs and
+            anything :func:`_relabel_no_growth` has already stripped.
+        boundary: :func:`_boundary_reaction_ids` for the analysis that ran.
+        price_reversals: ``analysis.params["price_reversals"]`` — read from the
+            object rather than from this module's argument, so the recount
+            follows whatever the class was actually constructed with.
+
+    ``_classify_superset`` puts every superset reaction the draft model lacks in
+    ``candidates``, boundary reactions INCLUDED, while ``priced`` excludes them;
+    ``analyze_condition`` then counts every candidate carrying flux as a
+    gap-fill.  An exchange the superset added therefore lands in ``gapfilled``
+    and in ``distance_to_growth`` despite never having been priced.  That is not
+    missing biology: on Complete every exchange allows uptake (Chris,
+    2026-11-21: "Complete generally means ALL exchange fluxes allow uptake.
+    ALWAYS"), and the class itself never prices one in ANY condition — so an
+    added exchange is not a gap-fill anywhere, which is why this runs on every
+    condition and not only the Complete leg (Chris, 2026-11-23 11:57 CST,
+    answering "Exclude exchange reactions from distance_to_growth on
+    Complete?": "Yes, exclude them").
+
+    ``distance_to_growth`` and ``annotation_gap`` are recomputed exactly as
+    ``analyze_condition`` derives them, from the narrowed ``gapfilled``::
+
+        res["distance_to_growth"] = len(gapfilled) + (
+            len(reversed_used) if P["price_reversals"] else 0)
+        res["annotation_gap"] = res["distance_to_growth"] > 0
+
+    Reversals are untouched: a reversal is a direction of a reaction the model
+    ALREADY has, so it is never a boundary candidate and never moves here.
+
+    Nothing is re-solved.  The solution the class found is the solution reported
+    — the exchange really did carry that flux and is still reported, under
+    ``exchanges_added``, with the direction ``gapfilled`` gave it.
+    """
+    gapfilled = condition.get("gapfilled")
+    if gapfilled is None:
+        return
+    exchanges = {rid: d for rid, d in gapfilled.items() if rid in boundary}
+    remaining = {rid: d for rid, d in gapfilled.items() if rid not in boundary}
+    condition["gapfilled"] = remaining
+    condition["exchanges_added"] = exchanges
+    condition["n_exchanges_added"] = len(exchanges)
+    condition["distance_to_growth"] = len(remaining) + (
+        len(condition.get("reversals_used", {})) if price_reversals else 0
+    )
+    condition["annotation_gap"] = condition["distance_to_growth"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1454,6 +1556,18 @@ def run_fitness_weighted_analysis(
         ``superset`` — plus:
 
         * per condition, ``n_reactions_discounted``;
+        * per condition that was solved (one carrying a ``gapfilled`` key),
+          ``exchanges_added`` -- ``{reaction_id: ">" | "<"}``, the same shape as
+          ``gapfilled`` -- and ``n_exchanges_added``.  Every BOUNDARY superset
+          reaction (``cobra.Reaction.boundary``, the class's own ``priced``
+          test, not an id prefix) that carried flux is reported there INSTEAD of
+          in ``gapfilled``, and ``distance_to_growth`` and ``annotation_gap``
+          are recomputed from the narrowed ``gapfilled`` exactly as
+          ``analyze_condition`` derives them.  Both keys are present on every
+          solved condition, empty and ``0`` when no exchange was added, so a
+          caller never has to ask whether this run produced them; a
+          ``no_growth``/``no_fitness`` condition has neither, because it has no
+          ``gapfilled`` either;
         * per condition, ``biomass_reference_used``: ``"model"`` or
           ``"superset"`` when a biomass target really was fixed (so
           ``biomass_fixed`` is present), and ``None`` when none was —
@@ -1692,6 +1806,11 @@ def run_fitness_weighted_analysis(
 
     # Post-processing: counts and labels only. Nothing here re-solves anything.
     min_growth = analysis.params["min_growth"]
+    # (2h) Read off the superset ONCE: the boundary test walks every superset
+    # reaction, and `price_reversals` comes from the object rather than this
+    # call's argument so the recount follows what the class was built with.
+    boundary_reactions = _boundary_reaction_ids(analysis)
+    priced_reversals = analysis.params["price_reversals"]
     for condition_id, condition in result["conditions"].items():
         # (2g) biomass_reference="model" on a model that cannot grow.  FIRST in
         # the loop, and for every condition including a Complete leg, because
@@ -1714,6 +1833,15 @@ def run_fitness_weighted_analysis(
             ("model" if biomass_reference == "model" else "superset")
             if "biomass_fixed" in condition
             else None
+        )
+        # (2h) An exchange the superset added is not a gap-fill, in EVERY
+        # condition.  Before the Complete-leg branch below, which `continue`s;
+        # after the relabel above, which leaves a no_growth condition with no
+        # `gapfilled` key for this to touch.
+        _split_exchanges_added(
+            condition=condition,
+            boundary=boundary_reactions,
+            price_reversals=priced_reversals,
         )
         if condition_id in complete_legs:
             condition["n_reactions_discounted"] = 0

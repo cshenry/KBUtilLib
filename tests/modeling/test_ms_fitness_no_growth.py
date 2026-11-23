@@ -273,11 +273,22 @@ class TestGrowingModelIsUntouched:
     def test_every_other_field_matches_the_base_commit(
         self, growing_result: Dict[str, Any]
     ) -> None:
-        """Byte-for-byte against ``65db6ea``, bar timing and the new key.
+        """Byte-for-byte against ``65db6ea``, bar timing and the new keys.
 
         The golden is the base commit's own output for this exact call, so this
         is the assertion that the fix changed NOTHING for a model that grows --
-        which no amount of checking the new key can establish.
+        which no amount of checking the new keys can establish.
+
+        Three keys are popped rather than compared, because three later changes
+        add one each and the golden predates all of them:
+        ``biomass_reference_used`` (this module's own change) plus
+        ``exchanges_added`` and ``n_exchanges_added``.  The latter two are
+        asserted EMPTY: this toy's superset adds no boundary reaction at all
+        (the core BiGG template fixture has no extracellular compcompounds, so
+        ``GapfillingPkg`` creates no exchange), so a non-empty value here would
+        mean the split had invented one.  See
+        ``tests/modeling/test_ms_fitness_exchanges.py`` for the toy that does
+        add one.
         """
         with GOLDEN.open() as handle:
             expected = json.load(handle)
@@ -286,6 +297,8 @@ class TestGrowingModelIsUntouched:
         )
         actual = _without_timing(growing_result["conditions"]["glc"])
         assert actual.pop("biomass_reference_used") == "model"
+        assert actual.pop("exchanges_added") == {}
+        assert actual.pop("n_exchanges_added") == 0
         _assert_close(actual, expected, path="condition")
 
 

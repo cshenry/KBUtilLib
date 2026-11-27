@@ -1,0 +1,9 @@
+{
+ "ncbi_contig": {
+  "accession": "NZ_CP010888.1",
+  "cdm_contig_id": "CDM:cntg-96f59e30-94c6-44d9-8aa2-cd4e7bc6f63f",
+  "length": 4167076,
+  "sha256": "b71e1139484b0147833bdbdbd114855188dbf9ae4d2ec2165d179cadde42bbb5",
+  "note": "Sequence not stored; re-derive with scripts/identity/check_ncbi_contig_hash.py"
+ }
+}

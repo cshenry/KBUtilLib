@@ -6,8 +6,24 @@ description, a protein or DNA sequence, a genome assembly, or an ontology
 term identifier), it produces a *canonical form* and a stable sha256 hash
 of that canonical form. GAA and KBDL delegate to this module rather than
 each re-implementing their own standardization rules, so its behavior must
-reproduce GAA's existing, already-in-production rules exactly — this
-module transcribes those rules; it does not "improve" on them.
+reproduce the shared rules exactly.
+
+Standardizer v2.0 (2026-11-26) aligns the sequence-entity hashes EXACTLY with
+the KBase CDM / GTDB databases, i.e. with the rules in Filipe Liu's
+``KBDatalakeApps/berdl/berdl/hash_seq.py`` (verified against
+``kbase.genomes`` ``contig_collection.hash``; see
+``tests/domains/fixtures/cdm_genome_hash_fixture.json``):
+
+    contig, gene : sha256 hex of the UPPERCASED sequence after removing FASTA
+                   header lines, all whitespace and ONE trailing ``*``.
+    protein      : the same rule (ONE trailing ``*`` is stripped; new in v2.0).
+    genome       : sha256 hex of ``"_".join(sorted(contig_hashes))`` where each
+                   contig hash is the contig rule above; empty contigs are
+                   dropped. This REPLACES the v1.1 rule (sorted contig
+                   SEQUENCES joined with ``|``), which survives only as the
+                   legacy function :func:`genome_hash_v1_1` so stored v1.1
+                   values can be recognized. Nothing new may call it.
+    function, ontology_term : unchanged from v1.1 (GAA-equivalent rules).
 
 Public interface (kept intentionally small and stable):
     STANDARDIZER_VERSION   — version tag for the rules encoded here.
@@ -35,6 +51,7 @@ __all__ = [
     "entity_hash",
     "parse_fasta_contigs",
     "genome_hash_from_fasta",
+    "genome_hash_v1_1",
     "canonical_payload",
     "content_hash",
 ]
@@ -45,7 +62,7 @@ import re
 import unicodedata
 from typing import Any, Iterable
 
-STANDARDIZER_VERSION = "1.1"
+STANDARDIZER_VERSION = "2.0"
 
 _SUPPORTED_ENTITY_TYPES = (
     "function",
@@ -92,7 +109,7 @@ def _clean_sequence_letters(raw: str) -> str:
     letters. Neither rule filters or rejects characters based on an
     expected alphabet — ambiguity codes, unexpected letters, and (for
     protein) a trailing ``*`` all survive untouched other than the case
-    fold.
+    fold. The trailing-``*`` strip is applied by :func:`_strip_trailing_star`.
     """
     kept_lines = (
         line for line in raw.splitlines() if not line.startswith(">")
@@ -102,15 +119,20 @@ def _clean_sequence_letters(raw: str) -> str:
     return letters_only.upper()
 
 
-def _standardize_protein(raw: str) -> str:
-    """Standardize a protein sequence.
+def _strip_trailing_star(seq: str) -> str:
+    """Remove exactly ONE trailing ``*`` (stop-codon marker), if present."""
+    return seq[:-1] if seq.endswith("*") else seq
 
-    Strips FASTA header lines and all whitespace/newlines, then uppercases.
-    IUPAC ambiguity codes (B, Z, J, X, U, O) are PRESERVED after
-    uppercasing. A trailing ``*`` (stop codon marker) is NOT stripped. I and
-    L are never normalized into one another.
+
+def _standardize_protein(raw: str) -> str:
+    """Standardize a protein sequence (v2.0, CDM ``hash_seq`` rule).
+
+    Strips FASTA header lines and all whitespace/newlines, uppercases, then
+    strips ONE trailing ``*`` (stop codon marker). IUPAC ambiguity codes
+    (B, Z, J, X, U, O) are PRESERVED. I and L are never normalized into one
+    another.
     """
-    return _clean_sequence_letters(raw)
+    return _strip_trailing_star(_clean_sequence_letters(raw))
 
 
 def _standardize_gene(raw: str) -> str:
@@ -118,26 +140,43 @@ def _standardize_gene(raw: str) -> str:
 
     Strips FASTA header lines and all whitespace/newlines, then uppercases.
     Characters outside ACGTN are PRESERVED (this module does not reject or
-    filter them). No reverse-complement normalization is applied.
+    filter them). One trailing ``*`` is stripped (CDM rule). No
+    reverse-complement normalization is applied.
     """
-    return _clean_sequence_letters(raw)
+    return _strip_trailing_star(_clean_sequence_letters(raw))
 
 
 def _standardize_genome(raw: Iterable[str]) -> str:
     """Standardize a genome assembly given as an iterable of contig strings.
 
-    Each contig is canonicalized with the DNA rule; contigs that are EMPTY
-    after cleaning are DROPPED (a zero-length record cannot contribute to a
-    genome's identity, and dropping it makes an assembly's hash independent
-    of stray empty records); the remaining canonical contigs are then
-    SORTED, and joined with the ASCII pipe character ``|``. The canonical
-    form for a genome may be large; callers are not required to store it —
-    only ``entity_hash`` of it need be kept.
+    v2.0 (CDM ``contig_collection.hash`` rule): each contig is canonicalized
+    with the contig rule and hashed with sha256; contigs EMPTY after
+    cleaning are DROPPED; the contig hashes are SORTED and joined with an
+    underscore. The genome hash is the sha256 of that string (taken by
+    ``entity_hash``).
     """
-    canonical_contigs = [_standardize_gene(contig) for contig in raw]
-    canonical_contigs = [contig for contig in canonical_contigs if contig]
-    canonical_contigs.sort()
-    return "|".join(canonical_contigs)
+    contig_hashes = []
+    for contig in raw:
+        canonical = _standardize_gene(contig)
+        if canonical:
+            contig_hashes.append(
+                hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            )
+    contig_hashes.sort()
+    return "_".join(contig_hashes)
+
+
+def genome_hash_v1_1(contigs: Iterable[str]) -> str:
+    """LEGACY (standardizer v1.1) genome hash. Do NOT use for new values.
+
+    v1.1 rule: canonicalize each contig (header/whitespace stripped,
+    uppercased, NO ``*`` strip), drop empties, sort the contig SEQUENCES,
+    join with ``|``, sha256. Kept only so already-stored v1.1 values can be
+    recognized; ``entity_hash("genome", ...)`` returns the v2.0 value.
+    """
+    cleaned = [_clean_sequence_letters(c) for c in contigs]
+    canonical = "|".join(sorted(c for c in cleaned if c))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def parse_fasta_contigs(source: Any) -> list[str]:

@@ -4,7 +4,7 @@ canonical entity standardization and hashing module.
 These are fixed-vector tests: every rule transcribed from GAA's production
 behavior is pinned to a concrete input/output pair, plus the awkward edge
 cases called out in the task's success criteria (non-ASCII casing, single
-trailing period, protein '*' preservation, I/L non-normalization, DNA
+trailing period, protein trailing-'*' strip (v2.0), I/L non-normalization, DNA
 non-reverse-complement, IUPAC ambiguity codes, contig sort-before-join, and
 canonical_payload key-order independence).
 """
@@ -29,7 +29,7 @@ def test_public_names_importable_from_canonical_path() -> None:
         standardize,
     )
 
-    assert STANDARDIZER_VERSION == "1.1"
+    assert STANDARDIZER_VERSION == "2.0"
     assert callable(standardize)
     assert callable(entity_hash)
     assert callable(canonical_payload)
@@ -116,11 +116,13 @@ def test_protein_strips_fasta_header_and_whitespace_then_uppercases() -> None:
     assert standardize("protein", raw) == "MKVLGKLVAAKL"
 
 
-def test_protein_preserves_trailing_stop_marker() -> None:
-    """A trailing '*' on a protein is NOT stripped."""
+def test_protein_strips_one_trailing_stop_marker() -> None:
+    """v2.0: ONE trailing '*' on a protein is stripped (CDM hash_seq rule)."""
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
-    assert standardize("protein", "MKVL*") == "MKVL*"
+    assert standardize("protein", "MKVL*") == "MKVL"
+    assert standardize("protein", "MKVL**") == "MKVL*"
+    assert standardize("protein", "MK*VL") == "MK*VL"
 
 
 def test_protein_does_not_normalize_i_and_l() -> None:
@@ -180,12 +182,17 @@ def test_gene_is_not_reverse_complement_folded() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_genome_sorts_canonical_contigs_before_joining_with_pipe() -> None:
+def test_genome_sorts_contig_hashes_before_joining_with_underscore() -> None:
+    import hashlib  # noqa: PLC0415
+
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
-    # Contigs given out of sorted order; canonical form must sort them first.
+    # v2.0: canonical form is the sorted contig sha256s joined with '_'.
     contigs = ["ttt", "aaaa", "gg"]
-    assert standardize("genome", contigs) == "AAAA|GG|TTT"
+    hashes = sorted(
+        hashlib.sha256(c.upper().encode()).hexdigest() for c in contigs
+    )
+    assert standardize("genome", contigs) == "_".join(hashes)
 
 
 def test_genome_join_order_independent_of_input_order() -> None:
@@ -200,8 +207,11 @@ def test_genome_join_order_independent_of_input_order() -> None:
 def test_genome_contigs_canonicalized_with_dna_rule_before_sorting() -> None:
     from kbutillib.domains.identity import standardize  # noqa: PLC0415
 
+    import hashlib  # noqa: PLC0415
+
     contigs = [">c2\nttt\n", ">c1\naaaa\n"]
-    assert standardize("genome", contigs) == "AAAA|TTT"
+    hashes = sorted(hashlib.sha256(c.encode()).hexdigest() for c in ("AAAA", "TTT"))
+    assert standardize("genome", contigs) == "_".join(hashes)
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +307,9 @@ def test_genome_single_record_with_own_header_does_not_raise() -> None:
     from kbutillib.domains.identity import entity_hash, standardize  # noqa: PLC0415
 
     # Must not raise.
-    assert standardize("genome", [">contig1\nACGT\n"]) == "ACGT"
+    assert standardize("genome", [">contig1\nACGT\n"]) == standardize(
+        "genome", ["ACGT"]
+    )
     # And hashes identically to the headerless contig.
     assert entity_hash("genome", [">contig1\nACGT\n"]) == entity_hash(
         "genome", ["ACGT"]
@@ -419,3 +431,90 @@ def test_content_hash_identical_for_dicts_differing_only_in_key_order() -> None:
     a = {"one": 1, "two": 2}
     b = {"two": 2, "one": 1}
     assert content_hash(a) == content_hash(b)
+
+
+# ---------------------------------------------------------------------------
+# v2.0 real-data alignment with the KBase CDM (kbase.genomes)
+# ---------------------------------------------------------------------------
+
+import hashlib as _hashlib  # noqa: E402
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_FIXTURES = _Path(__file__).parent / "fixtures"
+
+
+def _sha(text: str) -> str:
+    return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_v2_genome_rule_reproduces_cdm_contig_collection_hash_for_15_genomes() -> None:
+    """The v2.0 genome rule over CDM contig hashes == contig_collection.hash."""
+    genomes = _json.loads(
+        (_FIXTURES / "cdm_genome_hash_fixture.json").read_text()
+    )["genomes"]
+    assert len(genomes) == 15
+    for g in genomes:
+        assert g["contig_hashes"]
+        assert (
+            _sha("_".join(sorted(g["contig_hashes"])))
+            == g["contig_collection_hash"]
+        ), g["contig_collection_id"]
+
+
+def test_v2_genome_rule_is_what_entity_hash_computes_from_sequences() -> None:
+    """Toy multi-contig genome: entity_hash == sha256('_'.join(sorted(sha256(c.upper()))))."""
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    contigs = ["acgtacgt", "ttgca", ">c3\nGGG\nCCC\n", "NNNN"]
+    expected = _sha(
+        "_".join(
+            sorted(
+                _sha(c.upper())
+                for c in ["acgtacgt", "ttgca", "GGGCCC", "NNNN"]
+            )
+        )
+    )
+    assert entity_hash("genome", contigs) == expected
+    assert entity_hash("genome", reversed(contigs)) == expected
+
+
+def test_v2_genome_hash_from_fasta_uses_v2_rule() -> None:
+    from kbutillib.domains.identity import genome_hash_from_fasta  # noqa: PLC0415
+
+    fasta = ">a\nacgt\nacgt\n>b\nTTGCA\n"
+    expected = _sha("_".join(sorted([_sha("ACGTACGT"), _sha("TTGCA")])))
+    assert genome_hash_from_fasta(fasta) == expected
+
+
+def test_v2_contig_rule_on_synthetic_contig() -> None:
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    raw = ">ctg1 desc\nacgtn\n ACGT \r\nnnaa\n"
+    assert entity_hash("gene", raw) == _sha("ACGTNACGTNNAA")
+    assert entity_hash("gene", "ACGT*") == _sha("ACGT")
+    assert entity_hash("gene", "ACGT**") == _sha("ACGT*")
+
+
+def test_v2_ncbi_contig_fixture_records_sha_and_length_only() -> None:
+    fx = _json.loads((_FIXTURES / "cdm_contig_ncbi_fixture.json").read_text())
+    c = fx["ncbi_contig"]
+    assert c["accession"] == "NZ_CP010888.1"
+    assert c["length"] == 4167076
+    assert len(c["sha256"]) == 64 and "sequence" not in c
+
+
+def test_v2_protein_trailing_star_hashes_equal_to_starless() -> None:
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+
+    assert entity_hash("protein", "MKVLAAG*") == entity_hash("protein", "MKVLAAG")
+    assert entity_hash("protein", "mkvl\naag*\n") == entity_hash("protein", "MKVLAAG")
+
+
+def test_v1_1_genome_rule_survives_only_as_named_legacy_function() -> None:
+    from kbutillib.domains.identity import entity_hash  # noqa: PLC0415
+    from kbutillib.domains.identity.standardizers import genome_hash_v1_1  # noqa: PLC0415
+
+    contigs = ["ttt", "aaaa", "gg"]
+    assert genome_hash_v1_1(contigs) == _sha("AAAA|GG|TTT")
+    assert genome_hash_v1_1(contigs) != entity_hash("genome", contigs)

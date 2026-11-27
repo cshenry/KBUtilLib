@@ -12,8 +12,8 @@
   coordinates/sequences of the first five CDS of the KBase ADP1 genome
   (`ADP1Notebooks/notebooks/datacache/ADP1Genome.json`). KBDL feature `_N` is
   taken to be the N-th CDS; that mapping was checked against the annotation
-  (BAKTA FUNCTION text equals the NCBI product for CDS 1-5 except where noted in
-  the work record). Each `dna_sequence` was verified equal to the contig slice its
+  (BAKTA FUNCTION text equals the NCBI product for CDS 1-5; see
+  the work record for the later CDS where it differs). Each `dna_sequence` was verified equal to the contig slice its
   location names (reverse-complemented on `-`). `source_id` is the NCBI locus tag.
   The contig is a 7,000 bp window, so the genome hash differs from the real one.
 - `term_function_map.tsv` -- written by W1's `build_ontology_wave` +

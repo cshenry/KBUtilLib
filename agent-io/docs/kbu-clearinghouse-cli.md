@@ -560,3 +560,40 @@ constants (`clearinghouse_shard`), and they fall into three kinds:
   comes back for it.
 
 A skip reason you cannot account for is a **stop**, not a rounding error.
+
+## `load-kbdl-genomes` — load KBDL genome objects as they are built (lw-9)
+
+```
+kbu clearinghouse load-kbdl-genomes --object-id ID [--object-id ...] [--from-file ids.txt]
+    [--external-ids file.json] [--term-map term_function_map.tsv] [--namespace NS] [--dry-run]
+```
+
+Python: `from kbutillib.domains.kbase.berdl import load_kbdl_genomes` ->
+`load_kbdl_genomes(genome_object_ids, *, namespace=..., external_ids=None, dry_run=False, term_function_map=...) -> LoadReport`.
+
+What it does. Each KBDL `Genome` object (CanonicalGenome JSON, read from `--object-dir`, default
+`~/.kbdl/genome-objects/<id>.json`; `--fetch-missing` downloads it, digest-verified, where KBDL answers) becomes a
+`genome` (v2.0 hash over the contig sequences), its `gene` and `protein` entities, genome aliases (`kbdl_object`,
+and `ncbi_assembly` / `fitness_org` / `img_taxon` from `--external-ids`), and links:
+`gene_x_genome` (occurs_in; 1-based inclusive coordinates) and `gene_x_protein` (encodes) under the gene-call method,
+`protein_x_function` (annotated_as) under one method per annotation tool. Gene ids are
+`KBDL:<genome_hash[:16]>.<contig ordinal>.<cds ordinal>`. Each gene's `dna_sequence` is checked against the contig
+slice its location names (reverse-complemented on `-`); mismatches and multi-location features are reported and
+skipped.
+
+Annotation results are found in the KBDL result-sweeper archive by gene-id prefix (`~/.kbdl/job-results/KBDLGenomeAnnotation`
+and its Dropbox mirror; `--archive-dir`, `--annotation-file`, `--index-cache`; `--live-fallback` asks KBDL for jobs the
+sweep ledger names). EVERY result found is loaded; identical assertions collapse. Term ids (BAKTA GO/EC/KO/COG, KofamScan KO,
+and the term-id entries of the mixed PROKKA/DRAM2 FUNCTION lists) link to the function text in W1's persisted term map
+(`--term-map` or `$KBU_CLEARINGHOUSE_TERM_FUNCTION_MAP`, required) with the term CURIE as `link_key`. KofamScan FUNCTION and
+TRANSYT are ignored, VOG ids and gene symbols are not loaded, stop-listed texts are not loaded; all are counted in the report.
+
+Methods are cited ONLY from `KBDL_ANNOTATOR_METHODS` (the lw-12 measurement). Names are `<tool lower-case>@<version>/kbdl-default`
+(TRANSYT: `transyt@sha256-<digest>/kbdl-default`); the raw measured version and parameters are kept in the method row.
+
+Safety. A real run is IN-POD ONLY (refused off-pod before anything is written); `--dry-run` builds and validates every row and
+reports counts anywhere. Each genome is one batch under the namespace writer lock, everything is fill-only, so a re-run writes
+zero rows and the verb is safe beside other waves. Exits 1 if any genome could not be loaded.
+
+The first production run's `external_ids` come from `clearinghouse_genome_inputs.build_external_ids()` (ADP1 `job_record.json`,
+the Fitness `build_ledger.json` and the PMI `pmi_ledger.json`).

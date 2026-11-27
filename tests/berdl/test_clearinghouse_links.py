@@ -315,11 +315,18 @@ def _m_refused(cap, lake, rows, pattern):
 
 @pytest.mark.parametrize(
     "name",
-    ["Bakta@1/x", "bakta/x", "bakta@1", "bakta@/x", "bakta@1/", "-bakta@1/x", "bakta@1/-x", "bakta@1/X", "bakta@1/a b", ""],
+    ["Bakta@1/x", "bakta/x", "bakta@1", "bakta@/x", "bakta@1/", "-bakta@1/x", "bakta@1/-x", "bakta@1/X", "bakta@1/a b", "", "a@1/b\n"],
 )
 def test_register_methods_refuses_a_name_outside_the_pattern(name):
     lake = _lake()
     _m_refused(_cap(lake), lake, [_method(method_name=name)], "method_name|identity")
+
+
+def test_method_name_pattern_is_a_full_match_not_a_prefix_match_with_dollar():
+    # '$' matches before a trailing newline; the check must use fullmatch.
+    assert not schema.METHOD_NAME_PATTERN.fullmatch("a@1/b\n")
+    with pytest.raises(cl.LinkRefusedError, match="method_name"):
+        cl.validate_method_rows([_method(method_name="a@1/b\n")])
 
 
 def test_register_methods_refuses_a_name_over_128_characters():

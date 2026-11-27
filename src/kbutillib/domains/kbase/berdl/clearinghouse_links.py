@@ -187,7 +187,7 @@ def validate_method_rows(
         if not isinstance(description, str):
             raise _fail("method", index, "description must be a string (static text; never run counts)", row)
         name = row["method_name"]
-        if len(name) > schema.METHOD_NAME_MAX_LENGTH or not schema.METHOD_NAME_PATTERN.match(name):
+        if len(name) > schema.METHOD_NAME_MAX_LENGTH or not schema.METHOD_NAME_PATTERN.fullmatch(name):
             raise _fail(
                 "method", index,
                 f"method_name {name!r} must match {schema.METHOD_NAME_PATTERN.pattern} "

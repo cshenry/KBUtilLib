@@ -4657,7 +4657,7 @@ def schema_method_ok(name: str) -> bool:
     )
 
     return len(name) <= METHOD_NAME_MAX_LENGTH and bool(
-        METHOD_NAME_PATTERN.match(name)
+        METHOD_NAME_PATTERN.fullmatch(name)
     )
 
 

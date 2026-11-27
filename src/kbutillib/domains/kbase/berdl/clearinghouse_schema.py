@@ -160,6 +160,7 @@ at runtime. Never emit one here.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Mapping, Sequence
 
 #: The BERDL tenant this namespace lives under.
@@ -307,6 +308,16 @@ ALIAS_SOURCES = (
     "arc_record",
     "arc_analysis",
     "kbase_ws_ref",
+    # lw-1 (link waves): sources needed by later waves.
+    "cdm_protein",
+    "uniref90",
+    "uniref50",
+    "uniparc",
+    "protein_md5",
+    "cdm_genome",
+    "bvbrc_genome",
+    "fitness_org",
+    "img_taxon",
 )
 
 #: Sources whose alias_id resolves to AT MOST ONE entity. NOT invertible:
@@ -325,6 +336,15 @@ INVERTIBLE_ALIAS_SOURCES = (
     "bvbrc_genome_md5",
     "arc_record",
     "kbase_ws_ref",
+    "cdm_protein",
+    "uniref90",
+    "uniref50",
+    "uniparc",
+    "protein_md5",
+    "cdm_genome",
+    "bvbrc_genome",
+    "fitness_org",
+    "img_taxon",
 )
 
 #: Shape regexes for the four sources whose identifiers have a known shape.
@@ -356,15 +376,46 @@ _GENOME_ONLY_ALIAS_SOURCES = (
     "gtdb_accession",
     "kbase_assembly_md5",
     "bvbrc_genome_md5",
+    "cdm_genome",
+    "bvbrc_genome",
+    "fitness_org",
+    "img_taxon",
+)
+
+#: Sources that only make sense for a protein (lw-1).
+_PROTEIN_ONLY_ALIAS_SOURCES = (
+    "cdm_protein",
+    "uniref90",
+    "uniref50",
+    "uniparc",
+    "protein_md5",
 )
 
 #: Legal ``alias_source`` values per entity type.
 ALIAS_SOURCES_BY_ENTITY_TYPE: dict[str, tuple[str, ...]] = {
     "genome": _TYPE_AGNOSTIC_ALIAS_SOURCES + _GENOME_ONLY_ALIAS_SOURCES,
-    "protein": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+    "protein": _TYPE_AGNOSTIC_ALIAS_SOURCES + _PROTEIN_ONLY_ALIAS_SOURCES,
     "gene": _TYPE_AGNOSTIC_ALIAS_SOURCES,
     "function": _TYPE_AGNOSTIC_ALIAS_SOURCES,
     "ontology_term": _TYPE_AGNOSTIC_ALIAS_SOURCES,
+}
+
+#: Display prefix per ``alias_source`` for :func:`entity_ids` readers
+#: (``'PREFIX:id'``). Sources absent from the map (ncbi_taxon, arc_*,
+#: kbase_*) are not display identifiers and are never listed.
+ALIAS_DISPLAY_PREFIXES: dict[str, str] = {
+    "cdm_protein": "CDM",
+    "cdm_genome": "CDM",
+    "gtdb_accession": "GTDB",
+    "ncbi_assembly": "NCBI",
+    "bvbrc_genome": "PATRIC",
+    "uniref90": "UniRef90",
+    "uniref50": "UniRef50",
+    "uniparc": "UniParc",
+    "protein_md5": "MD5",
+    "kbdl_object": "KBDL",
+    "fitness_org": "FB",
+    "img_taxon": "IMG",
 }
 
 #: The tail every ``<type>_content`` table shares, declared ONCE and composed
@@ -411,6 +462,8 @@ _CONTENT_TYPE_HEAD: dict[str, tuple[tuple[str, str], ...]] = {
     "gene": (
         ("sequence", "STRING"),
         ("seq_length", "INT"),
+        # DEPRECATED for new writers (lw-1): leave NULL. The ``gene_x_protein``
+        # join table is authoritative for the gene -> protein relationship.
         ("protein_entity_hash", "STRING"),
     ),
     "function": (
@@ -572,6 +625,197 @@ def parameter_set_column_names() -> tuple[str, ...]:
     return tuple(name for name, _sql_type in parameter_set_columns())
 
 
+# ---------------------------------------------------------------------------
+# lw-1: the ``method`` table and the seven joining tables.
+# ---------------------------------------------------------------------------
+
+#: Untyped registry of the methods that produced links. Declared as a module
+#: constant exactly like :data:`PARAMETER_SET_TABLE`: NOT in
+#: :data:`ENTITY_TYPES` or :data:`_KINDS`, NOT in any ``all_<kind>`` view.
+METHOD_TABLE = "method"
+
+#: Columns of :data:`METHOD_TABLE`, in DDL order. Key: ``method_name``.
+_METHOD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("method_name", "STRING"),
+    ("algorithm", "STRING"),
+    ("algorithm_version", "STRING"),
+    ("parameters_json", "STRING"),
+    ("parameter_set_hash", "STRING"),
+    ("source_dataset", "STRING"),
+    ("description", "STRING"),
+    ("observed_at", "TIMESTAMP"),
+    ("ingest_batch_id", "STRING"),
+)
+
+#: ``<algorithm>@<version>/<label>``; at most 128 characters.
+METHOD_NAME_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9._-]*@[A-Za-z0-9._+-]+/[a-z0-9][a-z0-9._-]*$"
+)
+METHOD_NAME_MAX_LENGTH = 128
+
+#: Method identity columns: a second row with the same ``method_name`` and any
+#: of the others different is refused; NULL in any of them is refused.
+METHOD_IDENTITY_COLUMNS = (
+    "method_name",
+    "algorithm",
+    "algorithm_version",
+    "parameter_set_hash",
+    "source_dataset",
+)
+
+#: The seven joining tables, in a documented order.
+FUNCTION_X_ONTOLOGY_TERM = "function_x_ontology_term"
+ONTOLOGY_TERM_X_ONTOLOGY_TERM = "ontology_term_x_ontology_term"
+FUNCTION_X_FUNCTION = "function_x_function"
+PROTEIN_X_FUNCTION = "protein_x_function"
+GENE_X_PROTEIN = "gene_x_protein"
+GENE_X_GENOME = "gene_x_genome"
+GENOME_X_GENOME = "genome_x_genome"
+
+JOIN_TABLES = (
+    FUNCTION_X_ONTOLOGY_TERM,
+    ONTOLOGY_TERM_X_ONTOLOGY_TERM,
+    FUNCTION_X_FUNCTION,
+    PROTEIN_X_FUNCTION,
+    GENE_X_PROTEIN,
+    GENE_X_GENOME,
+    GENOME_X_GENOME,
+)
+
+#: ``(subject entity type, object entity type)`` per joining table.
+JOIN_TABLE_ENDPOINTS: dict[str, tuple[str, str]] = {
+    FUNCTION_X_ONTOLOGY_TERM: ("function", "ontology_term"),
+    ONTOLOGY_TERM_X_ONTOLOGY_TERM: ("ontology_term", "ontology_term"),
+    FUNCTION_X_FUNCTION: ("function", "function"),
+    PROTEIN_X_FUNCTION: ("protein", "function"),
+    GENE_X_PROTEIN: ("gene", "protein"),
+    GENE_X_GENOME: ("gene", "genome"),
+    GENOME_X_GENOME: ("genome", "genome"),
+}
+
+#: Generic columns, identical in all seven joining tables.
+_JOIN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("subject_hash", "STRING"),
+    ("object_hash", "STRING"),
+    ("relation", "STRING"),
+    ("method_name", "STRING"),
+    ("link_key", "STRING"),
+    ("metadata", "STRING"),
+    ("observed_at", "TIMESTAMP"),
+    ("ingest_batch_id", "STRING"),
+)
+
+#: Fill-only key of every joining table. No key field is ever NULL.
+JOIN_KEY_COLUMNS = (
+    "subject_hash",
+    "object_hash",
+    "relation",
+    "method_name",
+    "link_key",
+)
+
+_JOIN_PARTITION_BY = "method_name"
+
+#: Closed relation vocabulary per joining table.
+JOIN_RELATIONS: dict[str, tuple[str, ...]] = {
+    FUNCTION_X_ONTOLOGY_TERM: ("label", "exact_synonym", "definition", "maps_to"),
+    ONTOLOGY_TERM_X_ONTOLOGY_TERM: (
+        "exact_match",
+        "close_match",
+        "broad_match",
+        "narrow_match",
+        "related_match",
+        "xref",
+    ),
+    FUNCTION_X_FUNCTION: ("alias",),
+    PROTEIN_X_FUNCTION: ("annotated_as",),
+    GENE_X_PROTEIN: ("encodes",),
+    GENE_X_GENOME: ("occurs_in",),
+    GENOME_X_GENOME: ("ani",),
+}
+
+#: Symmetric relations: stored once with ``subject_hash < object_hash``.
+#: ``xref`` is deliberately absent (directional as asserted).
+SYMMETRIC_RELATIONS = (
+    "alias",
+    "ani",
+    "exact_match",
+    "close_match",
+    "related_match",
+)
+
+#: function_x_ontology_term relation -> required ``metadata.basis``.
+FUNCTION_ONTOLOGY_BASIS: dict[str, str] = {
+    "label": "definition",
+    "exact_synonym": "definition",
+    "definition": "definition",
+    "maps_to": "inferred",
+}
+
+#: STOP-LIST v1: function texts (post standardization) that are NOT loaded and
+#: never linked. Family names such as 'DUF1234 domain-containing protein' are
+#: loaded. Other tasks import this constant.
+STOPLIST_VERSION = 1
+FUNCTION_STOPLIST = frozenset(
+    {
+        "hypothetical protein",
+        "conserved hypothetical protein",
+        "uncharacterized protein",
+        "uncharacterised protein",
+        "putative uncharacterized protein",
+        "putative protein",
+        "predicted protein",
+        "protein of unknown function",
+        "unknown function",
+        "unknown protein",
+        "unknown",
+        "hypothetical",
+        "domain of unknown function",
+    }
+)
+
+
+def standardize_function_text(text: str) -> str:
+    """Function standardization: NFC, strip, collapse whitespace, ASCII-lowercase,
+    strip ONE trailing period (the 1.1 function rules)."""
+    t = unicodedata.normalize("NFC", text).strip()
+    t = " ".join(t.split())
+    t = "".join(c.lower() if c < "\x80" else c for c in t)
+    if t.endswith("."):
+        t = t[:-1]
+    return t
+
+
+def is_stoplisted_function(text: str) -> bool:
+    """True when ``text`` standardizes to a member of :data:`FUNCTION_STOPLIST`."""
+    return standardize_function_text(text) in FUNCTION_STOPLIST
+
+
+def method_columns() -> tuple[tuple[str, str], ...]:
+    """Ordered ``(name, sql_type)`` pairs of :data:`METHOD_TABLE`."""
+    return _METHOD_COLUMNS
+
+
+def method_column_names() -> tuple[str, ...]:
+    return tuple(n for n, _t in _METHOD_COLUMNS)
+
+
+def join_table_columns(table: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Ordered ``(name, sql_type)`` pairs of a joining table (all identical).
+
+    Raises:
+        ValueError: ``table`` is given and is not in :data:`JOIN_TABLES`.
+    """
+    if table is not None and table not in JOIN_TABLES:
+        raise ValueError(f"unknown join table {table!r}; expected one of {JOIN_TABLES}")
+    return _JOIN_COLUMNS
+
+
+def join_table_column_names(table: str | None = None) -> tuple[str, ...]:
+    return tuple(n for n, _t in join_table_columns(table))
+
+
+
 def table_configs() -> list[dict[str, Any]]:
     """Return the twenty-one clearinghouse table configs for ``BerdlCapability.load``.
 
@@ -645,6 +889,19 @@ def table_configs() -> list[dict[str, Any]]:
                 "name": table_name(entity_type, "alias"),
                 "schema_sql": _schema_sql(_ALIAS_COLUMNS),
                 "partition_by": _ALIAS_PARTITION_BY,
+            }
+        )
+
+    # lw-1: appended AFTER the original 21 so those never change.
+    configs.append(
+        {"name": METHOD_TABLE, "schema_sql": _schema_sql(_METHOD_COLUMNS)}
+    )
+    for join_table in JOIN_TABLES:
+        configs.append(
+            {
+                "name": join_table,
+                "schema_sql": _schema_sql(_JOIN_COLUMNS),
+                "partition_by": _JOIN_PARTITION_BY,
             }
         )
 

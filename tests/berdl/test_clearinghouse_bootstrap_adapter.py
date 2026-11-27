@@ -693,7 +693,9 @@ class TestSchemaOnlyCreatePath:
                 assert "entity_hash STRING" in sql, config["name"]
                 checked_entity_hash += 1
         # Not vacuous: every table but the registry declares one.
-        assert checked_entity_hash == len(table_configs()) - 1
+        # lw-1: the method table and seven join tables carry no entity_hash
+        # either (subject_hash/object_hash), so exclude them as well.
+        assert checked_entity_hash == len(table_configs()) - 1 - 8
 
     def test_a_config_without_schema_sql_raises_before_anything_runs(self):
         session = _FakeSpark()

@@ -204,7 +204,9 @@ class _OldNamespace(_FakeWriteCapability):
 
 def test_lake5_preflight_passes_without_any_alias_table():
     fake = _OldNamespace()
-    assert len(fake.tables) == 16
+    # lw-1: the fake mirrors the lake5 schema, which now also holds the
+    # method table and seven join tables (16 + 8).
+    assert len(fake.tables) == 24
     assert not any(n.endswith("_alias") for n in fake.tables)
     assert PARAMETER_SET_TABLE in fake.tables
     ClearinghouseCapability(capability=fake)._assert_lake5_schema("tenant.ns")

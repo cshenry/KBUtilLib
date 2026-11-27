@@ -1010,7 +1010,8 @@ def test_status_emits_one_envelope_merging_all_three_records(
     assert data["units"][0]["rows_ingested"] == data["units"][0]["rows_sharded"]
     # ALL TWENTY-ONE tables, the parameter-set registry and the five alias
     # tables included.
-    assert len(data["tables"]) == 21
+    # (lw-1: 21 original + method + seven join tables)
+    assert len(data["tables"]) == 29
     by_name = {row["name"]: row for row in data["tables"]}
     assert set(by_name) == {c["name"] for c in schema.table_configs()}
     assert by_name[schema.PARAMETER_SET_TABLE]["rows_ingested"] >= 1

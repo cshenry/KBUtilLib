@@ -30,6 +30,8 @@ from kbutillib.domains.kbase.berdl.clearinghouse_schema import (
     INVERTIBLE_ALIAS_SOURCES,
     NAMESPACE,
     PARAMETER_SET_TABLE,
+    METHOD_TABLE,
+    JOIN_TABLES,
     TENANT,
     column_names,
     decode_entity_hash,
@@ -167,10 +169,12 @@ class TestTableConfigs:
         )
         # Documented order: all five entity, then all five content, then all
         # five result, each in ENTITY_TYPES order, then the parameter-set
-        # registry, then all five alias tables last.
-        assert names == expected
-        assert len(configs) == 21
-        assert len(set(names)) == 21
+        # registry, then all five alias tables; lw-1 appends `method` and the
+        # seven join tables AFTER those original 21, which never change.
+        assert names[:21] == expected
+        assert names[21:] == ["method", *JOIN_TABLES]
+        assert len(configs) == 29
+        assert len(set(names)) == 29
 
     def test_every_per_type_name_equals_table_name_resolver(self):
         # Generator and resolver must not drift: each per-entity-type
@@ -185,7 +189,7 @@ class TestTableConfigs:
         actual = {
             table["name"]
             for table in table_configs()
-            if table["name"] != PARAMETER_SET_TABLE
+            if table["name"] not in (PARAMETER_SET_TABLE, METHOD_TABLE, *JOIN_TABLES)
         }
         assert actual == expected
 
@@ -306,7 +310,7 @@ class TestTableConfigs:
 
     def test_alias_tables_are_last_and_partitioned_on_alias_source(self):
         configs = table_configs()
-        for config, entity_type in zip(configs[-5:], ENTITY_TYPES):
+        for config, entity_type in zip(configs[16:21], ENTITY_TYPES):
             assert config["name"] == f"{entity_type}_alias"
             assert config["partition_by"] == "alias_source"
         partitioned = {
@@ -374,6 +378,7 @@ class TestTableConfigs:
             # The parameter-set registry: one row per DISTINCT parameter set
             # ever used, so a partition key buys nothing.
             PARAMETER_SET_TABLE,
+            METHOD_TABLE,
         }
         # Exhaustive: these are ALL of them, so a table silently losing its
         # partition key fails here too.
@@ -429,7 +434,7 @@ class TestParameterSetRegistry:
 
     def test_registry_is_the_only_non_entity_typed_table(self):
         for config in table_configs():
-            if config["name"] == PARAMETER_SET_TABLE:
+            if config["name"] in (PARAMETER_SET_TABLE, METHOD_TABLE, *JOIN_TABLES):
                 continue
             etype, _, kind = config["name"].partition("_")
             # type-first names: every other table resolves through table_name().
@@ -884,7 +889,8 @@ class TestAliasKind:
 
 class TestAliasVocabularies:
     def test_alias_sources_is_the_ten_in_order(self):
-        assert ALIAS_SOURCES == (
+        # lw-1 appended nine later-wave sources after the original ten.
+        assert ALIAS_SOURCES[:10] == (
             "kbdl_object",
             "kbdl_fasta_object",
             "ncbi_assembly",
@@ -895,6 +901,10 @@ class TestAliasVocabularies:
             "arc_record",
             "arc_analysis",
             "kbase_ws_ref",
+        )
+        assert ALIAS_SOURCES[10:] == (
+            "cdm_protein", "uniref90", "uniref50", "uniparc", "protein_md5",
+            "cdm_genome", "bvbrc_genome", "fitness_org", "img_taxon",
         )
 
     def test_no_kbdl_genome_id_source(self):
@@ -924,10 +934,12 @@ class TestAliasVocabularies:
 
     def test_sources_by_entity_type(self):
         assert set(ALIAS_SOURCES_BY_ENTITY_TYPE) == set(ENTITY_TYPES)
-        assert set(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == set(ALIAS_SOURCES)
-        assert len(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == 10
+        protein_only = {"cdm_protein", "uniref90", "uniref50", "uniparc", "protein_md5"}
+        assert set(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == set(ALIAS_SOURCES) - protein_only
+        assert len(ALIAS_SOURCES_BY_ENTITY_TYPE["genome"]) == 14
         agnostic = {"arc_record", "arc_analysis", "kbase_ws_ref", "ncbi_taxon"}
-        for t in ("protein", "gene", "function", "ontology_term"):
+        assert set(ALIAS_SOURCES_BY_ENTITY_TYPE["protein"]) == agnostic | protein_only
+        for t in ("gene", "function", "ontology_term"):
             assert set(ALIAS_SOURCES_BY_ENTITY_TYPE[t]) == agnostic
 
 

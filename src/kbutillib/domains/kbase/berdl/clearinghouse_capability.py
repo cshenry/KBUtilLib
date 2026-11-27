@@ -115,17 +115,25 @@ from .capability import BerdlCapability, BerdlLoadRefusedError
 from . import clearinghouse_ingest as ci
 from .clearinghouse_derivation import current_state_sql
 from .clearinghouse_parameters import result_parameter_set_identity
+from . import clearinghouse_links as cl
 from .clearinghouse_schema import (
     _KINDS,
+    ALIAS_DISPLAY_PREFIXES,
     ALIAS_OBSERVATIONS,
     ALIAS_SOURCES,
     INVERTIBLE_ALIAS_SOURCES,
     ENTITY_TYPES,
+    JOIN_KEY_COLUMNS,
+    JOIN_TABLE_ENDPOINTS,
+    JOIN_TABLES,
+    METHOD_TABLE,
     NAMESPACE,
     PARAMETER_SET_TABLE,
     TENANT,
     column_names,
     encode_entity_hash,
+    join_table_column_names,
+    method_column_names,
     parameter_set_column_names,
     table_configs,
     table_name,
@@ -1095,6 +1103,68 @@ class ClearinghouseCapability:
             )
         return live[0][1]
 
+    def entity_ids(
+        self,
+        entity_type: str,
+        entity_hash: str | bytes,
+        *,
+        engine: str | None = None,
+    ) -> list[str]:
+        """The display identifiers (``'PREFIX:id'``) an entity currently carries.
+
+        Reads ``<type>_alias`` ONLY (no view is created or read) with the
+        existing alias semantics: the latest observation per
+        ``(alias_source, alias_id)`` -- across ALL entities, so an id that was
+        reassigned to another entity stops listing here -- then drop the
+        withdrawn winners, then keep the ones that name ``entity_hash``.
+        Sources without a display prefix (:data:`ALIAS_DISPLAY_PREFIXES`) are
+        not listed. Sorted, de-duplicated. Default engine: Trino.
+        """
+        table_name(entity_type, "alias")  # raises on an unknown type
+        resolved = self._resolve_engine(engine, default="trino")
+        sources = sorted(ALIAS_DISPLAY_PREFIXES)
+        mine = self._alias_rows(
+            entity_type,
+            entity_hash,
+            alias_sources=sources,
+            alias_ids=None,
+            partition_by_observation=False,
+            only_present=False,
+            engine=resolved,
+        )
+        candidates = {(r["alias_source"], r["alias_id"]) for r in mine}
+        if not candidates:
+            return []
+        wanted_hash = self._encode_hashes([entity_hash])[0]
+        everyone = self._alias_rows(
+            entity_type,
+            None,
+            alias_sources=sorted({c[0] for c in candidates}),
+            alias_ids=sorted({c[1] for c in candidates}),
+            partition_by_observation=False,
+            only_present=False,
+            engine=resolved,
+        )
+        best: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in everyone:
+            pair = (row["alias_source"], row["alias_id"])
+            if pair not in candidates:
+                continue
+            rank = (row["observed_at"], row["ingest_batch_id"], row["observation"])
+            cur = best.get(pair)
+            if cur is None or rank > (
+                cur["observed_at"], cur["ingest_batch_id"], cur["observation"]
+            ):
+                best[pair] = row
+        return sorted(
+            {
+                f"{ALIAS_DISPLAY_PREFIXES[src]}:{aid}"
+                for (src, aid), row in best.items()
+                if row["observation"] == "present"
+                and row["entity_hash"] == wanted_hash
+            }
+        )
+
     def universe(
         self,
         entity_type: str,
@@ -1517,6 +1587,25 @@ class ClearinghouseCapability:
                 key = digest if isinstance(digest, str) else None
                 result_hash_types.setdefault(key, set()).add(etype)
 
+        # lw-1: method.parameter_set_hash is a use of the registry too -- a
+        # method whose hash has no registry row cannot say what its parameters
+        # were. A namespace from before the method table has no such table;
+        # that is reported (``method_table_readable``), not treated as sound
+        # evidence either way.
+        method_table_readable = True
+        try:
+            method_rows = read(
+                "SELECT DISTINCT parameter_set_hash FROM "
+                + _quote_fqn(f"{_FQN_PREFIX}.{METHOD_TABLE}", resolved_engine)
+            )
+        except Exception:
+            method_table_readable = False
+            method_rows = []
+        for row in method_rows:
+            digest = row.get("parameter_set_hash")
+            key = digest if isinstance(digest, str) else None
+            result_hash_types.setdefault(key, set()).add(METHOD_TABLE)
+
         # (3)/(4): DISTINCT over BOTH registry columns, deliberately -- it
         # collapses a retry's byte-identical duplicate rows (which are
         # harmless) while KEEPING two rows when the text differs, which is
@@ -1600,6 +1689,7 @@ class ClearinghouseCapability:
 
         return {
             "ok": not failures,
+            "method_table_readable": method_table_readable,
             "result_hashes": len(result_hash_types),
             "registry_hashes": len(registry_texts),
             "missing_from_registry": missing,
@@ -2353,6 +2443,282 @@ class ClearinghouseCapability:
         )
         return {"written": [t], "already_present": [], "load_result": load_result}
 
+    # -- method and link writes (lw-1) -------------------------------------
+
+    def _assert_tables_exist(self, names: Sequence[str], what: str) -> None:
+        """Refuse, before any load(), unless each table exists with every column."""
+        findings: list[str] = []
+        for name in names:
+            if name == METHOD_TABLE:
+                expected = method_column_names()
+            elif name == PARAMETER_SET_TABLE:
+                expected = parameter_set_column_names()
+            else:
+                expected = join_table_column_names(name)
+            live = self._live_columns(name)
+            if live is None:
+                findings.append(f"{name}: table does not exist in {_FQN_PREFIX}")
+            else:
+                missing = [c for c in expected if c not in live]
+                if missing:
+                    findings.append(f"{name}: is missing column(s) {missing}")
+        if findings:
+            raise ClearinghouseSchemaPreflightError(
+                f"ClearinghouseCapability refuses to write {what}: "
+                + "; ".join(findings)
+                + ". bootstrap() creates absent tables. No load() has been called."
+            )
+
+    def _existing_methods(self, names: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Committed method identity rows for ``names`` (one per name; the
+        first seen, plus a ``_conflicting`` marker if the lake itself holds two)."""
+        found: dict[str, dict[str, Any]] = {}
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{METHOD_TABLE}", "spark")
+        ordered = sorted(set(names))
+        columns = "method_name, algorithm, algorithm_version, parameter_set_hash, source_dataset"
+        for start in range(0, len(ordered), self._IN_CHUNK):
+            chunk = ordered[start : start + self._IN_CHUNK]
+            rows = self._run(
+                f"SELECT DISTINCT {columns} FROM {fqn} WHERE "
+                + _in_literal("method_name", chunk),
+                params=None,
+                engine="spark",
+            )
+            for row in rows:
+                found.setdefault(str(row["method_name"]), dict(row))
+        return found
+
+    def register_methods(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Validate and append ``method`` rows, FILL-ONLY on ``method_name``.
+
+        Runs under the write-target guard exactly as :meth:`register_aliases`
+        does (the ingest path's namespace writer lock is the lock the batch
+        loader holds; this verb is a single append). Every row is validated
+        BEFORE anything is written (:func:`clearinghouse_links.validate_method_rows`):
+        the name pattern, no NULL identity column, ``parameters_json``
+        canonical under the parameter-set rules, ``parameter_set_hash``
+        recomputed and compared. A row whose ``method_name`` is already
+        committed is ``already_present`` if its identity
+        ``(method_name, algorithm, algorithm_version, parameter_set_hash,
+        source_dataset)`` is identical and REFUSED otherwise. A
+        ``parameter_set`` registry row is written first when a hash is new.
+
+        Returns ``{"written": [names], "already_present": [names],
+        "registry": {...}, "load_result": ...}``.
+
+        Raises:
+            clearinghouse_links.LinkRefusedError: A rule was broken; nothing
+                was written.
+        """
+        self._require_in_pod("register_methods")
+        methods, registry_rows = cl.validate_method_rows(rows)
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        self._assert_tables_exist([METHOD_TABLE, PARAMETER_SET_TABLE], "methods")
+        existing = self._existing_methods([m["method_name"] for m in methods])
+        new: list[dict[str, Any]] = []
+        already: list[str] = []
+        for index, method in enumerate(methods):
+            held = existing.get(method["method_name"])
+            if held is None:
+                new.append(method)
+                continue
+            differing = sorted(
+                c
+                for c in schema_identity_columns()
+                if held.get(c) != method[c]
+            )
+            if differing:
+                raise cl.LinkRefusedError(
+                    f"method row {index}: conflicting redefinition of the "
+                    f"committed method {method['method_name']!r}: {differing} "
+                    "differ (a new source snapshot gets a new name). Nothing "
+                    "has been written."
+                )
+            already.append(method["method_name"])
+        report: dict[str, Any] = {
+            "written": [],
+            "already_present": already,
+            "registry": None,
+            "load_result": None,
+        }
+        if not new:
+            return report
+        observed_at, batch_id = self._alias_clock()
+        needed = {m["parameter_set_hash"] for m in new}
+        report["registry"] = self._write_parameter_set_registry(
+            [
+                {**r, "observed_at": observed_at, "ingest_batch_id": batch_id}
+                for r in registry_rows
+                if r["parameter_set_hash"] in needed
+            ],
+            tenant=tenant,
+            dataset=dataset,
+            write_ns=write_ns,
+        )
+        columns = method_column_names()
+        payload = [
+            {
+                c: {**m, "observed_at": observed_at, "ingest_batch_id": batch_id}.get(c)
+                for c in columns
+            }
+            for m in new
+        ]
+        load_result = self._get_capability().load(
+            dataset=dataset,
+            tables=[{"name": METHOD_TABLE, "mode": "append"}],
+            tenant=tenant,
+            namespace=write_ns,
+            dataframes={METHOD_TABLE: payload},
+        )
+        report["load_result"] = self._check_postflight(load_result)
+        report["written"] = [m["method_name"] for m in new]
+        return report
+
+    def register_links(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        methods: Sequence[Mapping[str, Any]] | None = None,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Validate and append rows of one joining table, FILL-ONLY on the key.
+
+        Refuses, naming the row and the rule and writing nothing: an unknown
+        ``table``; a ``method_name`` with no method row (committed, or in
+        ``methods`` passed alongside, which are registered first); a relation
+        outside the table's vocabulary; a NULL key field or link_key; missing
+        required metadata keys; non-canonical metadata JSON; a symmetric row
+        not in byte order; gene_x_genome coordinate violations; an endpoint
+        that names no entity (orphan); and two rows with the same key but
+        different metadata, within the call or against committed rows.
+        Byte-identical rows collapse; a symmetric self-pair is skipped and
+        counted; a committed key with identical metadata is ``already_present``.
+
+        Returns ``{"table", "written": n, "already_present": n,
+        "collapsed_identical": n, "skipped_self_pairs": n, "methods": ...,
+        "load_result": ...}``.
+        """
+        self._require_in_pod("register_links")
+        checked = cl.validate_link_rows(table, rows)  # unknown table raises here
+        method_rows: list[dict[str, Any]] = []
+        if methods:
+            method_rows, _registry = cl.validate_method_rows(methods)
+        in_call = {m["method_name"] for m in method_rows}
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        self._assert_tables_exist([table, METHOD_TABLE], "links")
+        link_rows = checked["rows"]
+        # method existence: in the call, or already committed
+        wanted = {r["method_name"] for r in link_rows}
+        committed = self._held_values(METHOD_TABLE, "method_name", sorted(wanted - in_call))
+        for index, row in enumerate(rows):
+            name = row.get("method_name")
+            if name not in in_call and name not in committed:
+                raise cl.LinkRefusedError(
+                    f"link row {index}: method_name {name!r} has no method row "
+                    "(neither in this call nor already committed); register "
+                    f"the method first (row: subject_hash={row.get('subject_hash')!r}, "
+                    f"relation={row.get('relation')!r}). Nothing has been written."
+                )
+        # orphans: both endpoints must be entities the lake holds
+        subject_type, object_type = JOIN_TABLE_ENDPOINTS[table]
+        for column, etype in (("subject_hash", subject_type), ("object_hash", object_type)):
+            values = sorted({r[column] for r in link_rows})
+            held = self._held_values(f"{etype}_entity", "entity_hash", values)
+            missing = [v for v in values if v not in held]
+            if missing:
+                index = next(
+                    i for i, r in enumerate(rows) if r.get(column) == missing[0]
+                )
+                raise cl.LinkRefusedError(
+                    f"link row {index}: {column} {missing[0]} names no entity "
+                    f"in {etype}_entity ({len(missing)} unresolved endpoint(s)); "
+                    "a link to an entity nothing holds is an orphan. Nothing "
+                    "has been written."
+                )
+        # committed conflicts and fill-only
+        committed_rows = self._existing_links(table, link_rows)
+        fresh: list[dict[str, Any]] = []
+        already = 0
+        for index, row in enumerate(link_rows):
+            held_meta = committed_rows.get(cl.metadata_conflict_key(row))
+            if held_meta is None:
+                fresh.append(row)
+            elif held_meta != row["metadata"]:
+                raise cl.LinkRefusedError(
+                    f"link row {index}: same key (subject_hash, object_hash, "
+                    "relation, method_name, link_key) as a committed row but "
+                    "different metadata "
+                    f"(subject_hash={row['subject_hash']!r}, "
+                    f"relation={row['relation']!r}, "
+                    f"method_name={row['method_name']!r}). Nothing has been written."
+                )
+            else:
+                already += 1
+        report: dict[str, Any] = {
+            "table": table,
+            "written": 0,
+            "already_present": already,
+            "collapsed_identical": checked["collapsed_identical"],
+            "skipped_self_pairs": checked["skipped_self_pairs"],
+            "methods": None,
+            "load_result": None,
+        }
+        if method_rows:
+            report["methods"] = self.register_methods(
+                method_rows, tenant=tenant, dataset=dataset
+            )
+        if not fresh:
+            return report
+        observed_at, batch_id = self._alias_clock()
+        columns = join_table_column_names(table)
+        payload = [
+            {c: {**r, "observed_at": observed_at, "ingest_batch_id": batch_id}.get(c) for c in columns}
+            for r in fresh
+        ]
+        load_result = self._get_capability().load(
+            dataset=dataset,
+            tables=[{"name": table, "mode": "append"}],
+            tenant=tenant,
+            namespace=write_ns,
+            dataframes={table: payload},
+        )
+        report["load_result"] = self._check_postflight(load_result)
+        report["written"] = len(fresh)
+        return report
+
+    def _existing_links(
+        self, table: str, link_rows: Sequence[Mapping[str, Any]]
+    ) -> dict[tuple[str, ...], str]:
+        """``{key tuple: metadata}`` of committed rows for the slices touched."""
+        found: dict[tuple[str, ...], str] = {}
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "spark")
+        methods = sorted({r["method_name"] for r in link_rows})
+        subjects = sorted({r["subject_hash"] for r in link_rows})
+        columns = ", ".join((*JOIN_KEY_COLUMNS, "metadata"))
+        for start in range(0, len(subjects), self._IN_CHUNK):
+            chunk = subjects[start : start + self._IN_CHUNK]
+            rows = self._run(
+                f"SELECT DISTINCT {columns} FROM {fqn} WHERE "
+                + _in_literal("method_name", methods)
+                + " AND "
+                + _in_literal("subject_hash", chunk),
+                params=None,
+                engine="spark",
+            )
+            for row in rows:
+                found.setdefault(
+                    tuple(row[c] for c in JOIN_KEY_COLUMNS), row.get("metadata")
+                )
+        return found
+
     def _prepare_result_rows(
         self, rows: Sequence[Mapping[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2809,7 +3175,10 @@ class ClearinghouseCapability:
         # so either refusal leaves load() called exactly zero times -- in
         # dry_run as well as a real run.
         write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
-        self._assert_lake5_schema(write_ns)
+        self._assert_lake5_schema(
+            write_ns,
+            tables=[str(b.get("table")) for b in run.get("batches", [])],
+        )
 
         execution_id = run_id or (
             str(run.get("run_id"))
@@ -3366,12 +3735,20 @@ class ClearinghouseCapability:
         table = str(entry["table"])
         batch_id = str(entry.get("batch_id"))
         try:
+            extra: dict[str, set[str]] | None = None
+            if table in JOIN_TABLES:
+                resolvable, extra = self._resolvable_link_keys(
+                    entry, batch=batch, write_ns=write_ns
+                )
+            else:
+                resolvable = self._resolvable_join_keys(entry, write_ns=write_ns)
             return ci.join_assertions(
                 batch,
                 table=table,
                 batch_id=batch_id,
-                resolvable=self._resolvable_join_keys(entry, write_ns=write_ns),
+                resolvable=resolvable,
                 coverage_floor=coverage_floor,
+                resolvable_extra=extra,
             )
         except ValueError as exc:
             # A batch with no join-key column, or a table with no known key
@@ -3399,6 +3776,81 @@ class ClearinghouseCapability:
                 "ok": False,
                 "failures": [f"{table} batch {batch_id}: {exc}"],
             }
+
+    _IN_CHUNK = 500
+
+    def _resolvable_link_keys(
+        self, entry: Mapping[str, Any], *, batch: Any, write_ns: str
+    ) -> tuple[set[str], dict[str, set[str]]]:
+        """The key spaces a joining-table batch's endpoints and method resolve in.
+
+        Returns ``(subject_keys, {"object_hash": ..., "method_name": ...})``.
+        ``subject_hash`` is read by the batch's own ``[hash_min, hash_max]``
+        window (it is the range column); ``object_hash`` and ``method_name``
+        are NOT in that window, so each is read by an IN-list of exactly the
+        distinct values the batch carries, validated before being inlined
+        (hex64 / the method-name pattern -- a value failing validation is
+        simply left unresolved rather than interpolated).
+        """
+        table = str(entry["table"])
+        subject_type, object_type = JOIN_TABLE_ENDPOINTS[table]
+        hash_min = ci.validate_hex64(
+            str(entry.get("hash_min")),
+            where=f"batch {entry.get('batch_id')!r} hash_min",
+        )
+        hash_max = ci.validate_hex64(
+            str(entry.get("hash_max")),
+            where=f"batch {entry.get('batch_id')!r} hash_max",
+        )
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{subject_type}_entity", "spark")
+        rows = self._run(
+            f"SELECT entity_hash FROM {fqn} "
+            f"WHERE entity_hash BETWEEN '{hash_min}' AND '{hash_max}'",
+            params=None,
+            engine="spark",
+        )
+        subjects = {
+            str(r["entity_hash"]) for r in rows if r.get("entity_hash") is not None
+        }
+        objects = self._held_values(
+            f"{object_type}_entity",
+            "entity_hash",
+            [
+                v
+                for v in set(batch.column("object_hash").to_pylist())
+                if isinstance(v, str) and _HEX64_RE.fullmatch(v)
+            ],
+        )
+        methods = self._held_values(
+            METHOD_TABLE,
+            "method_name",
+            [
+                v
+                for v in set(batch.column("method_name").to_pylist())
+                if isinstance(v, str) and schema_method_ok(v)
+            ],
+        )
+        return subjects, {"object_hash": objects, "method_name": methods}
+
+    def _held_values(
+        self, table: str, column: str, values: Sequence[str]
+    ) -> set[str]:
+        """Which of ``values`` the lake holds in ``table.column`` (chunked IN)."""
+        held: set[str] = set()
+        fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "spark")
+        ordered = sorted(values)
+        for start in range(0, len(ordered), self._IN_CHUNK):
+            chunk = ordered[start : start + self._IN_CHUNK]
+            rows = self._run(
+                f"SELECT DISTINCT {column} FROM {fqn} WHERE "
+                + _in_literal(column, chunk),
+                params=None,
+                engine="spark",
+            )
+            held.update(
+                str(r[column]) for r in rows if r.get(column) is not None
+            )
+        return held
 
     def _resolvable_join_keys(
         self, entry: Mapping[str, Any], *, write_ns: str
@@ -3465,12 +3917,26 @@ class ClearinghouseCapability:
         table = str(entry["table"])
         key_columns = ci.key_columns_for_table(table)
         range_column = ci.range_column_for_table(table)
-        hash_min = ci.validate_hex64(
-            str(entry.get("hash_min")), where=f"batch {entry.get('batch_id')!r} hash_min"
-        )
-        hash_max = ci.validate_hex64(
-            str(entry.get("hash_max")), where=f"batch {entry.get('batch_id')!r} hash_max"
-        )
+        if table == METHOD_TABLE:
+            # The method table's range column is method_name, not a hash; its
+            # bounds are validated against the method-name pattern instead.
+            hash_min = str(entry.get("hash_min"))
+            hash_max = str(entry.get("hash_max"))
+            for bound in (hash_min, hash_max):
+                if not schema_method_ok(bound):
+                    raise ci.ClearinghouseBatchIntegrityError(
+                        f"batch {entry.get('batch_id')!r}: method range bound "
+                        f"{bound!r} is not a valid method_name. Refusing."
+                    )
+        else:
+            hash_min = ci.validate_hex64(
+                str(entry.get("hash_min")),
+                where=f"batch {entry.get('batch_id')!r} hash_min",
+            )
+            hash_max = ci.validate_hex64(
+                str(entry.get("hash_max")),
+                where=f"batch {entry.get('batch_id')!r} hash_max",
+            )
         fqn = _quote_fqn(f"{_FQN_PREFIX}.{table}", "spark")
         columns = ", ".join(key_columns)
         rows = self._run(
@@ -3549,7 +4015,9 @@ class ClearinghouseCapability:
 
     # -- the lake-5 schema preflight -------------------------------------
 
-    def _assert_lake5_schema(self, write_ns: str) -> None:
+    def _assert_lake5_schema(
+        self, write_ns: str, tables: Sequence[str] | None = None
+    ) -> None:
         """Refuse a target that is not the lake-5 schema, before any write.
 
         Reads the live columns of every ``<type>_result`` table and of the
@@ -3561,12 +4029,35 @@ class ClearinghouseCapability:
         a four-tuple table is unrecoverable. This check is the only mechanical
         guard that the operator's rebuild (lake-5 OP-C1) actually happened.
 
+        ``tables`` (lw-1) is the set of tables the run's batches TARGET. When it
+        names a joining table or ``method`` the preflight additionally requires
+        ``method`` and each targeted joining table to exist with every column
+        of its declaration; a namespace with no link batches is not asked for
+        them (an old namespace still passes).
+
         Raises:
             ClearinghouseSchemaPreflightError: Naming every table that is
                 missing the column or missing entirely. ``load()`` has been
                 called zero times.
         """
         findings: list[str] = []
+        targeted = set(tables or ())
+        needed: dict[str, tuple[str, ...]] = {}
+        if targeted & ({METHOD_TABLE} | set(JOIN_TABLES)):
+            needed[METHOD_TABLE] = method_column_names()
+            for join_table in JOIN_TABLES:
+                if join_table in targeted:
+                    needed[join_table] = join_table_column_names(join_table)
+        for name, expected in needed.items():
+            live = self._live_columns(name)
+            if live is None:
+                findings.append(f"{name}: table does not exist in {write_ns}")
+            else:
+                missing = [c for c in expected if c not in live]
+                if missing:
+                    findings.append(
+                        f"{name}: exists but is missing column(s) {missing}"
+                    )
         for config in table_configs():
             name = config["name"]
             if name != PARAMETER_SET_TABLE and not name.endswith("_result"):
@@ -4096,6 +4587,25 @@ def _quote_fqn(fqn: str, engine: str = "spark") -> str:
     existing_quotes = '`"'
     return ".".join(
         f"{quote}{segment.strip(existing_quotes)}{quote}" for segment in fqn.split(".")
+    )
+
+
+def schema_identity_columns() -> tuple[str, ...]:
+    """The method identity columns (re-exported for the committed-row compare)."""
+    from .clearinghouse_schema import METHOD_IDENTITY_COLUMNS  # noqa: PLC0415
+
+    return METHOD_IDENTITY_COLUMNS
+
+
+def schema_method_ok(name: str) -> bool:
+    """True when ``name`` is a legal ``method_name`` (pattern and length)."""
+    from .clearinghouse_schema import (  # noqa: PLC0415
+        METHOD_NAME_MAX_LENGTH,
+        METHOD_NAME_PATTERN,
+    )
+
+    return len(name) <= METHOD_NAME_MAX_LENGTH and bool(
+        METHOD_NAME_PATTERN.match(name)
     )
 
 

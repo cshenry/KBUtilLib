@@ -62,7 +62,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .clearinghouse_derivation import SLOT_KEY_COLUMNS
-from .clearinghouse_schema import PARAMETER_SET_TABLE
+from .clearinghouse_schema import (
+    JOIN_KEY_COLUMNS,
+    JOIN_TABLE_ENDPOINTS,
+    JOIN_TABLES,
+    METHOD_TABLE,
+    PARAMETER_SET_TABLE,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pyarrow as pa
@@ -240,6 +246,9 @@ def key_columns_for_table(table: str) -> tuple[str, ...]:
       ``observed_at``/``ingest_batch_id``, so "already present" means the
       whole slot tuple already exists -- a re-run of the same tool over the
       same entity with the same parameters.
+    - ``method`` -- ``("method_name",)``; the seven join tables -- the
+      five-column key ``(subject_hash, object_hash, relation, method_name,
+      link_key)`` (:data:`JOIN_KEY_COLUMNS`).
     - :data:`~kbutillib.domains.kbase.berdl.clearinghouse_schema.PARAMETER_SET_TABLE`
       -- ``("parameter_set_hash",)``. The registry is a hash-keyed dictionary;
       a hash always maps to the same canonical text, so a second row is
@@ -252,6 +261,10 @@ def key_columns_for_table(table: str) -> tuple[str, ...]:
     """
     if table == PARAMETER_SET_TABLE:
         return ("parameter_set_hash",)
+    if table == METHOD_TABLE:
+        return ("method_name",)
+    if table in JOIN_TABLES:
+        return tuple(JOIN_KEY_COLUMNS)
     if table.endswith("_result"):
         return tuple(SLOT_KEY_COLUMNS)
     if table.endswith("_entity") or table.endswith("_content"):
@@ -273,7 +286,13 @@ def range_column_for_table(table: str) -> str:
     content / result tables that column is ``entity_hash``; for the registry
     it is ``parameter_set_hash``.
     """
-    return "parameter_set_hash" if table == PARAMETER_SET_TABLE else "entity_hash"
+    if table == PARAMETER_SET_TABLE:
+        return "parameter_set_hash"
+    if table == METHOD_TABLE:
+        return "method_name"
+    if table in JOIN_TABLES:
+        return "subject_hash"
+    return "entity_hash"
 
 
 def fill_only_survivors(
@@ -434,6 +453,28 @@ def resolvable_source_table(table: str) -> str | None:
     return None
 
 
+def resolvable_targets(table: str) -> list[tuple[str, str, str]]:
+    """Every ``(batch_column, target_table, target_column)`` a batch must resolve.
+
+    For ``<type>_result`` this is the single ``entity_hash`` -> ``<type>_entity``
+    pair (:func:`resolvable_source_table`). For a joining table it is BOTH
+    ``subject_hash`` and ``object_hash`` against their ``<type>_entity`` tables
+    and ``method_name`` against ``method``, all at the coverage floor.
+    Empty for the tables that mint identity.
+    """
+    if table in JOIN_TABLES:
+        subject_type, object_type = JOIN_TABLE_ENDPOINTS[table]
+        return [
+            ("subject_hash", f"{subject_type}_entity", "entity_hash"),
+            ("object_hash", f"{object_type}_entity", "entity_hash"),
+            ("method_name", METHOD_TABLE, "method_name"),
+        ]
+    source = resolvable_source_table(table)
+    if source is None:
+        return []
+    return [(range_column_for_table(table), source, range_column_for_table(source))]
+
+
 def _unresolved_clause(sample: Sequence[Any], total: int) -> str:
     """The "which ones" clause appended to the coverage refusal.
 
@@ -462,6 +503,7 @@ def join_assertions(
     batch_id: str,
     resolvable: Sequence[str] | set[str] | None = None,
     coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
+    resolvable_extra: Mapping[str, Sequence[str] | set[str]] | None = None,
 ) -> dict[str, Any]:
     """The four pre-commit assertions over ONE batch, with a count for each.
 
@@ -496,6 +538,13 @@ def join_assertions(
     whose keys resolve is the 0-of-19,268 case, and ``--coverage-floor 0``
     must not be a way to wave it through -- a floor expresses tolerance for a
     PARTIAL mismatch, and total non-resolution is not partial.
+
+    JOIN TABLES (lw-1) resolve MORE than one column. ``resolvable`` is the
+    ``subject_hash`` key space; ``resolvable_extra`` maps the other columns
+    (``object_hash`` against the object type's entity table, ``method_name``
+    against ``method``; see :func:`resolvable_targets`) to theirs. Each is held
+    to the same floor, zero resolution of any is fatal, and every key field of
+    a join row must be non-NULL.
 
     Args:
         batch: The batch's rows, as :func:`read_batch_table` read them.
@@ -578,6 +627,58 @@ def join_assertions(
         )
 
     failures: list[str] = []
+    extra_reports: dict[str, dict[str, Any]] = {}
+    if table in JOIN_TABLES:
+        for column in JOIN_KEY_COLUMNS:
+            if column == join_key:
+                continue
+            if column not in batch.column_names:
+                raise ValueError(
+                    f"join_assertions: batch {batch_id!r} for {table!r} has no "
+                    f"key column {column!r} (columns: {batch.column_names})."
+                )
+            nulls = sum(1 for v in batch.column(column).to_pylist() if v is None)
+            if nulls:
+                failures.append(
+                    f"{table} batch {batch_id}: {nulls} of {batch.num_rows} "
+                    f"source row(s) have a NULL {column}; every key field of a "
+                    "join row is never NULL."
+                )
+        targets = {col: tgt for col, tgt, _tc in resolvable_targets(table)}
+        for column, held_values in (resolvable_extra or {}).items():
+            values = {
+                v for v in batch.column(column).to_pylist() if v is not None
+            }
+            held = set(held_values)
+            resolved = len(values & held)
+            cov = 1.0 if not values else resolved / len(values)
+            unresolved = sorted(values - held, key=str)
+            extra_reports[column] = {
+                "target_table": targets.get(column),
+                "source_keys": len(values),
+                "resolved_keys": resolved,
+                "unresolved_keys": len(values) - resolved,
+                "unresolved_sample": unresolved[:UNRESOLVED_SAMPLE_LIMIT],
+                "coverage": cov,
+            }
+            if values and resolved == 0:
+                failures.append(
+                    f"{table} batch {batch_id}: ZERO of {len(values)} distinct "
+                    f"{column} value(s) resolve against {targets.get(column)}. "
+                    "A non-empty source that resolves nothing is a WRONG KEY, "
+                    "and no coverage floor waives it."
+                )
+            elif cov < floor:
+                failures.append(
+                    f"{table} batch {batch_id}: {resolved} of {len(values)} "
+                    f"distinct {column} value(s) resolve against "
+                    f"{targets.get(column)} -- coverage {cov:.6f}, below the "
+                    f"declared floor {floor:.6f}. "
+                    + _unresolved_clause(
+                        unresolved[:UNRESOLVED_SAMPLE_LIMIT], len(unresolved)
+                    )
+                    + " A link whose endpoint nothing holds is an orphan."
+                )
     if batch.num_rows == 0:
         failures.append(
             f"{table} batch {batch_id}: the expected input is EMPTY (0 source "
@@ -606,8 +707,8 @@ def join_assertions(
         failures.append(
             f"{table} batch {batch_id}: ZERO of {len(distinct_keys)} distinct "
             f"{join_key} value(s) resolve against "
-            f"{resolvable_source_table(table)} (which holds "
-            f"{resolvable_keys} key(s) in this batch's hash range). A "
+            f"{(resolvable_targets(table) or [(None, None, None)])[0][1]} "
+            f"(which holds {resolvable_keys} key(s) in this batch's hash range). A "
             "non-empty source that resolves nothing is a WRONG JOIN KEY, not "
             "an idempotent no-op, and no coverage floor waives it."
         )
@@ -615,7 +716,7 @@ def join_assertions(
         failures.append(
             f"{table} batch {batch_id}: {resolved_keys} of "
             f"{len(distinct_keys)} distinct {join_key} value(s) resolve "
-            f"against {resolvable_source_table(table)} -- coverage "
+            f"against {(resolvable_targets(table) or [(None, None, None)])[0][1]} -- coverage "
             f"{coverage:.6f}, below the declared floor {floor:.6f}. "
             f"{unresolved_keys} key(s) name no entity the clearinghouse "
             "holds, and a result row whose entity nothing can find is an "
@@ -640,6 +741,7 @@ def join_assertions(
         "coverage": coverage,
         "coverage_floor": floor,
         "coverage_checked": coverage_checked,
+        "extra_coverage": extra_reports,
         "ok": not failures,
         "failures": failures,
     }
@@ -951,9 +1053,28 @@ def _registry_first(batches: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     the sharder's batches are append-only.
     """
     return sorted(
-        (dict(batch) for batch in batches),
-        key=lambda batch: 0 if batch.get("table") == PARAMETER_SET_TABLE else 1,
+        (dict(batch) for batch in batches), key=lambda b: load_rank(b.get("table"))
     )
+
+
+def load_rank(table: Any) -> int:
+    """Dependency rank of a table in a unit's load order (lower loads first).
+
+    ``parameter_set`` 0, ``method`` 1, entity/content/result tables 2,
+    ``<type>_alias`` 3, joining tables 4 -- the delivery contract's order
+    (methods -> entities -> aliases -> links, the registry ahead of all of it
+    because a method row's ``parameter_set_hash`` must resolve). Stable within
+    a rank, so publication order is otherwise preserved.
+    """
+    if table == PARAMETER_SET_TABLE:
+        return 0
+    if table == METHOD_TABLE:
+        return 1
+    if isinstance(table, str) and table in JOIN_TABLES:
+        return 4
+    if isinstance(table, str) and table.endswith("_alias"):
+        return 3
+    return 2
 
 
 def derive_execution_inventory(
@@ -1009,6 +1130,8 @@ def derive_execution_inventory(
                     # sharder recorded it.
                     "bytes": source.get("bytes"),
                     "key_column": source.get("key_column"),
+                    # Link entries (lw-1) name the methods their rows cite.
+                    "method_names": source.get("method_names"),
                     "hash_min": source.get("hash_min"),
                     "hash_max": source.get("hash_max"),
                     "unit_id": unit_id,

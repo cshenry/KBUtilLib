@@ -1316,7 +1316,8 @@ def test_status_merges_the_state_file_run_json_and_the_ledger(
     assert unit["rows_ingested"] == unit["rows_sharded"]
 
     # ALL TWENTY-ONE TABLES are reported, the registry and alias tables included.
-    assert len(report["tables"]) == 21
+    # (lw-1: 21 original + method + seven join tables)
+    assert len(report["tables"]) == 29
     by_name = {row["name"]: row for row in report["tables"]}
     assert set(by_name) == {c["name"] for c in schema.table_configs()}
     assert by_name[schema.PARAMETER_SET_TABLE]["is_registry"] is True

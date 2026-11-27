@@ -1,0 +1,682 @@
+{
+  "batches": [
+    {
+      "batch_id": "5JBCXAHT1Z62XXPCSRF8SBTBT2",
+      "bytes": 1955,
+      "content_sha256": "f7c0dbb7d0e56c49d00441a6e2d6711561c8180f26aea6462a3868f615bf8c0e",
+      "file": "parameter_set/5JBCXAHT1Z62XXPCSRF8SBTBT2.parquet",
+      "hash_max": "a61ffc70fe7ce318bbb0d4e9dd9ac67faf8dcd9f1a1d29db8db5f8dbae03fd81",
+      "hash_min": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "key_column": "parameter_set_hash",
+      "order": 0,
+      "rows": 3,
+      "sha256": "dcca20e490317dfa260a340bcb4382ab8785ea36bf91bd3e07e051263d7b79a4",
+      "stage": "methods",
+      "table": "parameter_set"
+    },
+    {
+      "batch_id": "4QG59MNBFKRY16T1FJMDJTCYQA",
+      "bytes": 3933,
+      "content_sha256": "83c08f272141439b7c44912ece5829c3231fb280da38abed1e1821a9f368d51c",
+      "file": "method/4QG59MNBFKRY16T1FJMDJTCYQA.parquet",
+      "hash_max": "ontology-source@2026-11/definitions",
+      "hash_min": "bakta@1.11.4/kbdl-default",
+      "key_column": "method_name",
+      "order": 1,
+      "rows": 3,
+      "sha256": "e2c1095aa9f3c36d7e8f9c1f63912b56522e79507dafb7013b7b3331a19d5701",
+      "stage": "methods",
+      "table": "method"
+    },
+    {
+      "batch_id": "1DHGV3SWWCP63HEMM0P85C8EMG",
+      "bytes": 2058,
+      "content_sha256": "1d067c6da9919d242e8e00da91ec5860bd10bec8d81e2f270e8d9c289ff2f185",
+      "file": "genome_entity/1DHGV3SWWCP63HEMM0P85C8EMG.parquet",
+      "hash_max": "9936052c569c3cc0559fb64c43b67e74be6c5afdedfd535c4f821b7e628995c0",
+      "hash_min": "7b84703768914fa9f57f7564a22342aa8d156899e85d61c7dcc7b0969148f6b3",
+      "key_column": "entity_hash",
+      "order": 2,
+      "rows": 2,
+      "sha256": "899a0e8b022d89f36eb46300e1e5d052638878c9ecbfc723583c6b321e50e664",
+      "stage": "entities",
+      "table": "genome_entity"
+    },
+    {
+      "batch_id": "1Q24WAASBQNKTPDN4E4BYRF5P0",
+      "bytes": 1994,
+      "content_sha256": "3061ec9432af98e8cefdc4538e55619b18efb572f28c0ba5d9f95d2f4d1b7888",
+      "file": "protein_entity/1Q24WAASBQNKTPDN4E4BYRF5P0.parquet",
+      "hash_max": "2ca65ee24e7f6cc873c6cfd494c558fdf6d45056cff4516ea8f4983ee9aa2f15",
+      "hash_min": "2ca65ee24e7f6cc873c6cfd494c558fdf6d45056cff4516ea8f4983ee9aa2f15",
+      "key_column": "entity_hash",
+      "order": 3,
+      "rows": 1,
+      "sha256": "6265327679aaae3f9361e99eacd0bbe9a7d2ee3c95dec91e898ac99d153421c9",
+      "stage": "entities",
+      "table": "protein_entity"
+    },
+    {
+      "batch_id": "439RYR1D2PDCVNG0Q00A0R6NYM",
+      "bytes": 1979,
+      "content_sha256": "91689c2785e4e90f1b12546ce4e31d8731ed02dd901b99d19a2109977857c36f",
+      "file": "gene_entity/439RYR1D2PDCVNG0Q00A0R6NYM.parquet",
+      "hash_max": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "hash_min": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "key_column": "entity_hash",
+      "order": 4,
+      "rows": 1,
+      "sha256": "a333b8b91fef04beccf935d8d6b28791d1e9b436f6c89c323a574c5bb76c8e48",
+      "stage": "entities",
+      "table": "gene_entity"
+    },
+    {
+      "batch_id": "000Q6RNA0405ZS8G2GPK0AE4QY",
+      "bytes": 2068,
+      "content_sha256": "7fb203eba330cdf1acd1479f4a7d2f8db2e15828ae8e5a8c1719a1114ece0155",
+      "file": "function_entity/000Q6RNA0405ZS8G2GPK0AE4QY.parquet",
+      "hash_max": "f0cb5bdc739c52a84f2771a89ba8eae5d17fb4c802ebb634d019f40569fd1a49",
+      "hash_min": "06e57d456c9e86e77c1b3d9c5f6992e603b0af26639ffb6a63a0001f144c6973",
+      "key_column": "entity_hash",
+      "order": 5,
+      "rows": 2,
+      "sha256": "b30b3ed6b9e85743da4d65617efcf63dc4d34d23d66ee269a31613a429cc2d81",
+      "stage": "entities",
+      "table": "function_entity"
+    },
+    {
+      "batch_id": "3E0KQGE0346KPKP1ZCKBDGGFCW",
+      "bytes": 2093,
+      "content_sha256": "f209dafac6f1db72894c55488341197003468c09feaf313b32d1a0a387983cf2",
+      "file": "ontology_term_entity/3E0KQGE0346KPKP1ZCKBDGGFCW.parquet",
+      "hash_max": "6b79e9d3d6b2cfb0c065d83384c1028947fb5f89af7938f4e176122bdd26db72",
+      "hash_min": "13023b7618e56ed2955cfe4929b29dce8df343a9096784613721493d95e1663c",
+      "key_column": "entity_hash",
+      "order": 6,
+      "rows": 2,
+      "sha256": "e2f046e7616f613d6a78b07cb896e5ec4bde3c7186a50d47255659c92d9c74e0",
+      "stage": "entities",
+      "table": "ontology_term_entity"
+    },
+    {
+      "batch_id": "55YCWYWZW24DC881ZD0V5Z2D22",
+      "bytes": 2574,
+      "content_sha256": "bce94166fd3710c335a14a1a2632d343565d96c975b53d8e1d27e81479601b79",
+      "file": "genome_alias/55YCWYWZW24DC881ZD0V5Z2D22.parquet",
+      "hash_max": "7b84703768914fa9f57f7564a22342aa8d156899e85d61c7dcc7b0969148f6b3",
+      "hash_min": "7b84703768914fa9f57f7564a22342aa8d156899e85d61c7dcc7b0969148f6b3",
+      "key_column": "entity_hash",
+      "order": 7,
+      "rows": 1,
+      "sha256": "eaf07b30e6b9357498021ceb579fcbbe6ffab8a06da96ac242e61e0fb6c28f33",
+      "stage": "aliases",
+      "table": "genome_alias"
+    },
+    {
+      "batch_id": "4J13J0KMVC5AHP63TZFCMRC4ND",
+      "bytes": 3768,
+      "content_sha256": "2d118182a77f08f14dc558ca8c4974ea4cfe4813c3d4c455cb9c43d21ffbd35e",
+      "file": "function_x_ontology_term/4J13J0KMVC5AHP63TZFCMRC4ND.parquet",
+      "hash_max": "f0cb5bdc739c52a84f2771a89ba8eae5d17fb4c802ebb634d019f40569fd1a49",
+      "hash_min": "06e57d456c9e86e77c1b3d9c5f6992e603b0af26639ffb6a63a0001f144c6973",
+      "key_column": "subject_hash",
+      "method_names": [
+        "ontology-source@2026-11/definitions"
+      ],
+      "order": 8,
+      "rows": 2,
+      "sha256": "92593c90accba369f0f3f7c3bd39f531f6d8fa9a12a480c08434de3fc244bfd4",
+      "stage": "links",
+      "table": "function_x_ontology_term"
+    },
+    {
+      "batch_id": "4SP3HC76DTN3J4TH934WHX2EZ4",
+      "bytes": 3884,
+      "content_sha256": "271f1cddcdc7d119c174e70eab611b3d0b22b8463a24ab7bedbbcb4c1c27a1f0",
+      "file": "ontology_term_x_ontology_term/4SP3HC76DTN3J4TH934WHX2EZ4.parquet",
+      "hash_max": "13023b7618e56ed2955cfe4929b29dce8df343a9096784613721493d95e1663c",
+      "hash_min": "13023b7618e56ed2955cfe4929b29dce8df343a9096784613721493d95e1663c",
+      "key_column": "subject_hash",
+      "method_names": [
+        "ontology-source@2026-11/definitions"
+      ],
+      "order": 9,
+      "rows": 1,
+      "sha256": "110a75767da4d519806025b79177225e22901c9373050ec927f21a7625b6032a",
+      "stage": "links",
+      "table": "ontology_term_x_ontology_term"
+    },
+    {
+      "batch_id": "2D37DPK8K9QV4FYWV26PH0D3YX",
+      "bytes": 3283,
+      "content_sha256": "e7044c2ad9e5b9f26b8ce90a78e94b8f7d62d0537877a361466a6002db48e5c7",
+      "file": "function_x_function/2D37DPK8K9QV4FYWV26PH0D3YX.parquet",
+      "hash_max": "06e57d456c9e86e77c1b3d9c5f6992e603b0af26639ffb6a63a0001f144c6973",
+      "hash_min": "06e57d456c9e86e77c1b3d9c5f6992e603b0af26639ffb6a63a0001f144c6973",
+      "key_column": "subject_hash",
+      "method_names": [
+        "ontology-source@2026-11/definitions"
+      ],
+      "order": 10,
+      "rows": 1,
+      "sha256": "76e66dae10fa8340cf136a452f84143c62f268f68e942293c7e38d32e424e5e3",
+      "stage": "links",
+      "table": "function_x_function"
+    },
+    {
+      "batch_id": "1B49YMNZ60TJGN48N54054V2YJ",
+      "bytes": 3263,
+      "content_sha256": "38fb7abdf60f3a2a7d15b75f129381e6c83b82de58265a20ec50ea55421f611f",
+      "file": "protein_x_function/1B49YMNZ60TJGN48N54054V2YJ.parquet",
+      "hash_max": "2ca65ee24e7f6cc873c6cfd494c558fdf6d45056cff4516ea8f4983ee9aa2f15",
+      "hash_min": "2ca65ee24e7f6cc873c6cfd494c558fdf6d45056cff4516ea8f4983ee9aa2f15",
+      "key_column": "subject_hash",
+      "method_names": [
+        "kofamscan@2024-01/ko-profiles"
+      ],
+      "order": 11,
+      "rows": 1,
+      "sha256": "d4d96c44bf2b929aab1ac81ab60d4151a3729c77ea3bed2ba1d666774a99d42d",
+      "stage": "links",
+      "table": "protein_x_function"
+    },
+    {
+      "batch_id": "1PC8HJ2PFCHK4P610DA6B1YSZM",
+      "bytes": 3506,
+      "content_sha256": "c9aae497cfe4dc1df2f5f2e83921d7e6ec22dd9035573a618208649e9961d87e",
+      "file": "gene_x_protein/1PC8HJ2PFCHK4P610DA6B1YSZM.parquet",
+      "hash_max": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "hash_min": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "key_column": "subject_hash",
+      "method_names": [
+        "bakta@1.11.4/kbdl-default"
+      ],
+      "order": 12,
+      "rows": 1,
+      "sha256": "b7c41d2743f282be494696415de38696c14e96c903b7e112a14f19df53550e40",
+      "stage": "links",
+      "table": "gene_x_protein"
+    },
+    {
+      "batch_id": "7A09FPA0TQBPW6RSD8FEGV0767",
+      "bytes": 4164,
+      "content_sha256": "ad69d5d73b16a5fc5e53efc3a9a3117d33dc611ea438e8253dfcb7adc5a2f156",
+      "file": "gene_x_genome/7A09FPA0TQBPW6RSD8FEGV0767.parquet",
+      "hash_max": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "hash_min": "a2ed7b99ec675d8a03ceaad89848fc30966a87f916597f8f7f320e65b85649be",
+      "key_column": "subject_hash",
+      "method_names": [
+        "bakta@1.11.4/kbdl-default"
+      ],
+      "order": 13,
+      "rows": 1,
+      "sha256": "d46034a63e3320a8bca78a87d80e5aa66414e542355933d18f694c1e3ce2cd56",
+      "stage": "links",
+      "table": "gene_x_genome"
+    },
+    {
+      "batch_id": "3RQH6J1W1XBG29HKFDFPZR6VXE",
+      "bytes": 3484,
+      "content_sha256": "5a2a1124e70a72e678159ef16647cdcb7fb69168f6914bfe0151ed5cb8360e05",
+      "file": "genome_x_genome/3RQH6J1W1XBG29HKFDFPZR6VXE.parquet",
+      "hash_max": "7b84703768914fa9f57f7564a22342aa8d156899e85d61c7dcc7b0969148f6b3",
+      "hash_min": "7b84703768914fa9f57f7564a22342aa8d156899e85d61c7dcc7b0969148f6b3",
+      "key_column": "subject_hash",
+      "method_names": [
+        "bakta@1.11.4/kbdl-default"
+      ],
+      "order": 14,
+      "rows": 1,
+      "sha256": "348a066fb05162e520606b546dc517bbcea3f962fc063c30bd437f288b73f6c5",
+      "stage": "links",
+      "table": "genome_x_genome"
+    }
+  ],
+  "delivery_id": "3GAXMAKVVE3Y0W9D5K83YRSA8W",
+  "delivery_schema_version": 1,
+  "observed_at": "2026-11-27T00:00:00Z",
+  "producer": "kbutillib-golden-fixture",
+  "schemas": {
+    "function_entity": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "standardizer_version",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "function_x_function": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "function_x_ontology_term": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "gene_entity": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "standardizer_version",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "gene_x_genome": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "gene_x_protein": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "genome_alias": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "alias_source",
+        "STRING"
+      ],
+      [
+        "alias_id",
+        "STRING"
+      ],
+      [
+        "observation",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "genome_entity": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "standardizer_version",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "genome_x_genome": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "method": [
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "algorithm",
+        "STRING"
+      ],
+      [
+        "algorithm_version",
+        "STRING"
+      ],
+      [
+        "parameters_json",
+        "STRING"
+      ],
+      [
+        "parameter_set_hash",
+        "STRING"
+      ],
+      [
+        "source_dataset",
+        "STRING"
+      ],
+      [
+        "description",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "ontology_term_entity": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "standardizer_version",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "ontology_term_x_ontology_term": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "parameter_set": [
+      [
+        "parameter_set_hash",
+        "STRING"
+      ],
+      [
+        "canonical_json",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "protein_entity": [
+      [
+        "entity_hash",
+        "STRING"
+      ],
+      [
+        "entity_type",
+        "STRING"
+      ],
+      [
+        "standardizer_version",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ],
+    "protein_x_function": [
+      [
+        "subject_hash",
+        "STRING"
+      ],
+      [
+        "object_hash",
+        "STRING"
+      ],
+      [
+        "relation",
+        "STRING"
+      ],
+      [
+        "method_name",
+        "STRING"
+      ],
+      [
+        "link_key",
+        "STRING"
+      ],
+      [
+        "metadata",
+        "STRING"
+      ],
+      [
+        "observed_at",
+        "TIMESTAMP"
+      ],
+      [
+        "ingest_batch_id",
+        "STRING"
+      ]
+    ]
+  },
+  "stage_order": [
+    "methods",
+    "entities",
+    "aliases",
+    "links"
+  ],
+  "standardizer_version": "2.0"
+}

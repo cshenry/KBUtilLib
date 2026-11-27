@@ -2488,7 +2488,40 @@ class ClearinghouseCapability:
                 found.setdefault(str(row["method_name"]), dict(row))
         return found
 
+    def _writer_lock(self, *, tenant: str, dataset: str) -> Any:
+        """Acquire the namespace writer lock ``ingest_shards`` holds.
+
+        Returns the held :class:`clearinghouse_ingest.NamespaceLock`; the
+        caller releases it in a ``finally``. A live ingest (or another
+        register call) holding it refuses this one rather than interleaving.
+        """
+        write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
+        lock = ci.NamespaceLock(write_ns)
+        lock.acquire(execution_id=ci.new_execution_id())
+        return lock
+
     def register_methods(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        tenant: str = TENANT,
+        dataset: str = NAMESPACE,
+    ) -> dict[str, Any]:
+        """Validate and append ``method`` rows; see :meth:`_register_methods`.
+
+        Takes the namespace writer lock around the whole validate-read-append
+        sequence. Validation runs first, so a refused call never touches the
+        lock or the lake.
+        """
+        self._require_in_pod("register_methods")
+        cl.validate_method_rows(rows)  # refuse before locking anything
+        lock = self._writer_lock(tenant=tenant, dataset=dataset)
+        try:
+            return self._register_methods(rows, tenant=tenant, dataset=dataset)
+        finally:
+            lock.release()
+
+    def _register_methods(
         self,
         rows: Sequence[Mapping[str, Any]],
         *,
@@ -2516,7 +2549,6 @@ class ClearinghouseCapability:
             clearinghouse_links.LinkRefusedError: A rule was broken; nothing
                 was written.
         """
-        self._require_in_pod("register_methods")
         methods, registry_rows = cl.validate_method_rows(rows)
         write_ns = self._assert_write_target(dataset=dataset, tenant=tenant)
         self._assert_tables_exist([METHOD_TABLE, PARAMETER_SET_TABLE], "methods")
@@ -2607,7 +2639,27 @@ class ClearinghouseCapability:
         "load_result": ...}``.
         """
         self._require_in_pod("register_links")
-        checked = cl.validate_link_rows(table, rows)  # unknown table raises here
+        cl.validate_link_rows(table, rows)  # refuse before locking anything
+        if methods:
+            cl.validate_method_rows(methods)
+        lock = self._writer_lock(tenant=tenant, dataset=dataset)
+        try:
+            return self._register_links(
+                table, rows, methods=methods, tenant=tenant, dataset=dataset
+            )
+        finally:
+            lock.release()
+
+    def _register_links(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        methods: Sequence[Mapping[str, Any]] | None,
+        tenant: str,
+        dataset: str,
+    ) -> dict[str, Any]:
+        checked = cl.validate_link_rows(table, rows)
         method_rows: list[dict[str, Any]] = []
         if methods:
             method_rows, _registry = cl.validate_method_rows(methods)
@@ -2672,7 +2724,7 @@ class ClearinghouseCapability:
             "load_result": None,
         }
         if method_rows:
-            report["methods"] = self.register_methods(
+            report["methods"] = self._register_methods(
                 method_rows, tenant=tenant, dataset=dataset
             )
         if not fresh:

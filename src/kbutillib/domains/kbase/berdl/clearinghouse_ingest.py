@@ -267,6 +267,10 @@ def key_columns_for_table(table: str) -> tuple[str, ...]:
         return tuple(JOIN_KEY_COLUMNS)
     if table.endswith("_result"):
         return tuple(SLOT_KEY_COLUMNS)
+    if table.endswith("_alias"):
+        # The five-tuple register_aliases is fill-only on. (A delivery's alias
+        # stage is ingested through the same inventory as everything else.)
+        return ("entity_type", "entity_hash", "alias_source", "alias_id", "observation")
     if table.endswith("_entity") or table.endswith("_content"):
         return ("entity_hash",)
     raise ValueError(

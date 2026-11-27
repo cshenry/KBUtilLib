@@ -1,0 +1,115 @@
+{
+ "82eef07a1eadf57a_1": {
+  "PROKKA": {
+   "FUNCTION": [
+    "Chromosomal replication initiator protein DnaA",
+    "dnaA",
+    "COG0593"
+   ]
+  },
+  "DRAM2": {
+   "FUNCTION": [
+    "VOG02491",
+    "K02313",
+    "chromosomal replication initiator protein"
+   ]
+  },
+  "RAST": {
+   "role": [
+    "Chromosomal replication initiator protein DnaA"
+   ]
+  },
+  "BAKTA": {
+   "FUNCTION": [
+    "chromosomal replication initiator protein DnaA"
+   ],
+   "COG": [
+    "COG0593"
+   ],
+   "GO": [
+    "GO:0003677",
+    "GO:0003688",
+    "GO:0005524",
+    "GO:0005737",
+    "GO:0005886",
+    "GO:0006270",
+    "GO:0006275",
+    "GO:0016887"
+   ]
+  },
+  "KOFAMSCAN": {
+   "KO": [
+    "K02313"
+   ],
+   "FUNCTION": [
+    "dnaa; chromosomal replication initiator protein"
+   ]
+  }
+ },
+ "82eef07a1eadf57a_4": {
+  "PROKKA": {
+   "FUNCTION": [
+    "DNA gyrase subunit B",
+    "5.6.2.2",
+    "gyrB",
+    "COG0187"
+   ]
+  },
+  "DRAM2": {
+   "FUNCTION": [
+    "VOG00077",
+    "K02470",
+    "5.6.2.2",
+    "DNA gyrase subunit B [EC:5.6.2.2]"
+   ]
+  },
+  "RAST": {
+   "role": [
+    "DNA gyrase subunit B (EC 5.99.1.3)"
+   ]
+  },
+  "BAKTA": {
+   "FUNCTION": [
+    "DNA topoisomerase (ATP-hydrolyzing) subunit B"
+   ],
+   "EC": [
+    "5.6.2.2"
+   ],
+   "KO": [
+    "K02470"
+   ],
+   "GO": [
+    "GO:0003677",
+    "GO:0003918",
+    "GO:0005524",
+    "GO:0005694",
+    "GO:0006265"
+   ]
+  },
+  "KOFAMSCAN": {
+   "KO": [
+    "K02470"
+   ],
+   "FUNCTION": [
+    "gyrb; dna gyrase subunit b"
+   ]
+  }
+ },
+ "82eef07a1eadf57a_5": {
+  "PROKKA": {
+   "FUNCTION": [
+    "hypothetical protein"
+   ]
+  },
+  "RAST": {
+   "role": [
+    "hypothetical protein"
+   ]
+  },
+  "BAKTA": {
+   "FUNCTION": [
+    "DUF2171 domain-containing protein"
+   ]
+  }
+ }
+}

@@ -68,6 +68,12 @@ described in ``agent-io/prds/berdl-lakehouse-skills/fullprompt.md``:
   single-typed table, the ``entity_types`` filter is redundant-but-harmless
   and is not passed. Pure: no session, no I/O, no pod-only imports.
 
+- :mod:`kbutillib.domains.kbase.berdl.clearinghouse_genome_loader` --
+  :func:`load_kbdl_genomes`, the public KBDL genome loader (genome objects +
+  ``KBDLGenomeAnnotation`` results -> clearinghouse rows), and
+  :data:`KBDL_ANNOTATOR_METHODS`, the measured annotator method registry it
+  cites. Inputs live in ``clearinghouse_genome_inputs``.
+
 ``naming``, ``membership``, and ``tokens`` are pure logic: no network
 calls, no BERDL pod dependency, and no imports of ``berdl_notebook_utils``.
 They are safe to run in ordinary CI. ``transports`` and ``capability`` import
@@ -106,6 +112,7 @@ from .clearinghouse_ingest import (
     key_columns_for_table,
 )
 from .clearinghouse_derivation import current_state_sql
+from .clearinghouse_genome_loader import KBDL_ANNOTATOR_METHODS, load_kbdl_genomes
 from .clearinghouse_schema import NAMESPACE as CLEARINGHOUSE_NAMESPACE
 from .clearinghouse_schema import TENANT as CLEARINGHOUSE_TENANT
 from .clearinghouse_schema import (
@@ -171,4 +178,6 @@ __all__ = [
     "fill_only_survivors",
     "key_columns_for_table",
     "order_shards_for_load",
+    "load_kbdl_genomes",
+    "KBDL_ANNOTATOR_METHODS",
 ]

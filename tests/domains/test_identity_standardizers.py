@@ -476,7 +476,7 @@ def test_v2_genome_rule_is_what_entity_hash_computes_from_sequences() -> None:
         )
     )
     assert entity_hash("genome", contigs) == expected
-    assert entity_hash("genome", reversed(contigs)) == expected
+    assert entity_hash("genome", list(reversed(contigs))) == expected
 
 
 def test_v2_genome_hash_from_fasta_uses_v2_rule() -> None:

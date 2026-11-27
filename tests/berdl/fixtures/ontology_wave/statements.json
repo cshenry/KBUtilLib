@@ -1,0 +1,298 @@
+[
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasExactSynonym",
+  "subject": "EC:1.1.1.1",
+  "value": "aldehyde reductase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "EC:1.1.1.1",
+  "value": "alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "IAO:0000115",
+  "subject": "GO:0004022",
+  "value": "Catalysis of the reaction: an alcohol + NAD+ = an aldehyde or ketone + NADH + H+."
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasBroadSynonym",
+  "subject": "GO:0004022",
+  "value": "alcohol dehydrogenase activity"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasBroadSynonym",
+  "subject": "GO:0004022",
+  "value": "primary alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "GO:0004022",
+  "value": "EC:1.1.1.1"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "GO:0004022",
+  "value": "Reactome:R-HSA-2162078"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "GO:0004022",
+  "value": "Reactome:R-HSA-71707"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasExactSynonym",
+  "subject": "GO:0004022",
+  "value": "aldo-keto reductase (NAD) activity"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasNarrowSynonym",
+  "subject": "GO:0004022",
+  "value": "aldehyde dehydrogenase (NAD) activity"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasNarrowSynonym",
+  "subject": "GO:0004022",
+  "value": "aliphatic alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasNarrowSynonym",
+  "subject": "GO:0004022",
+  "value": "ethanol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasNarrowSynonym",
+  "subject": "GO:0004022",
+  "value": "yeast alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasOBONamespace",
+  "subject": "GO:0004022",
+  "value": "molecular_function"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "ADH"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "NAD-dependent alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "NAD-specific aromatic alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "NADH-alcohol dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "NADH-aldehyde dehydrogenase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasRelatedSynonym",
+  "subject": "GO:0004022",
+  "value": "alcohol:NAD+ oxidoreductase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "GO:0004022",
+  "value": "alcohol dehydrogenase (NAD+) activity"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "IPR:IPR000001",
+  "value": "Kringle"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "dcterms:description",
+  "subject": "PFAM:PF00001",
+  "value": "7 transmembrane receptor (rhodopsin family)"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "PFAM:PF00001",
+  "value": "7tm_1"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "RHEA:19363",
+  "value": "(2E,6E)-farnesyl diphosphate + diphosphate => isopentenyl diphosphate + (2E)-geranyl diphosphate"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": "kegg.reaction:R02003",
+  "predicate": "oio:hasDbXref",
+  "subject": "RHEA:19364",
+  "value": null
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": "metacyc.reaction:FPPSYN-RXN",
+  "predicate": "oio:hasDbXref",
+  "subject": "RHEA:19364",
+  "value": null
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "RHEA:19364",
+  "value": "isopentenyl diphosphate + (2E)-geranyl diphosphate <=> (2E,6E)-farnesyl diphosphate + diphosphate"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "kegg.reaction:R02003"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "metacyc.reaction:FPPSYN-RXN"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "rhea:19361;"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "rhea:19362;"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "rhea:19363;"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "oio:hasDbXref",
+  "subject": "seed.reaction:rxn01466",
+  "value": "rhea:19364"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "seed.reaction:rxn01466",
+  "value": "Geranyl-diphosphate:isopentenyl-diphosphate geranyltrans-transferase"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "seed.role:0000000000001",
+  "value": "(+)-caryolan-1-ol synthase (EC 4.2.1.138)"
+ },
+ {
+  "datatype": null,
+  "language": null,
+  "object": null,
+  "predicate": "rdfs:label",
+  "subject": "seed.role:0000000000001",
+  "value": "(+)-caryolan-1-ol synthase (EC 4.2.1.138)"
+ }
+]

@@ -261,6 +261,27 @@ def _render(envelope: dict[str, Any]) -> None:
             if data.get("receipt_file"):
                 click.echo(f"  receipt written to {data['receipt_file']}")
         rows = data.get("tables")
+    elif verb == "load-kbdl-genomes":
+        click.echo(
+            f"namespace={data.get('namespace')} dry_run={data.get('dry_run')} "
+            f"genomes_loaded={data.get('genomes_loaded')} failed={len(data.get('genomes_failed') or {})}"
+        )
+        for table, count in sorted((data.get("rows_per_table") or {}).items()):
+            click.echo(f"rows {table}: {count}")
+        for table, count in sorted((data.get("written") or {}).items()):
+            click.echo(f"written {table}: {count}")
+        for reason, count in sorted((data.get("skips") or {}).items()):
+            click.echo(f"skip {reason}: {count}")
+        rows = [
+            {
+                "genome_object_id": g["genome_object_id"][:12],
+                "genes": g["genes_loaded"],
+                "results": len(g["annotation_results_used"]),
+                "source": g["annotation_source"],
+                "gene_calls": g["gene_call_tool"],
+            }
+            for g in data.get("genomes") or []
+        ]
     elif verb == "backfill-list":
         rows = data.get("presets")
     elif verb in ("backfill-run", "backfill-shard"):
@@ -1921,6 +1942,138 @@ def verify_cmd(
         envelope["data"]["receipt_file"] = str(written)
     _emit(envelope, as_json=as_json)
     _exit_on_integrity_failure(envelope)
+
+
+# ---------------------------------------------------------------------------
+# load-kbdl-genomes
+# ---------------------------------------------------------------------------
+
+
+def _read_object_ids(object_ids: tuple[str, ...], from_file: Optional[str]) -> list[str]:
+    """``--object-id`` values plus one id per non-blank, non-``#`` line of ``--from-file``."""
+    ids = [value.strip() for value in object_ids if value.strip()]
+    if from_file:
+        with open(from_file, encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.split("#", 1)[0].strip()
+                if stripped:
+                    ids.append(stripped)
+    return ids
+
+
+@clearinghouse_cmd.command(name="load-kbdl-genomes")
+@click.option("--object-id", "object_ids", multiple=True, help="A KBDL Genome object id (repeatable).")
+@click.option(
+    "--from-file", "from_file", type=click.Path(exists=True, dir_okay=False), default=None,
+    help="A text file with one genome object id per line ('#' starts a comment).",
+)
+@click.option(
+    "--external-ids", "external_ids_file", type=click.Path(exists=True, dir_okay=False), default=None,
+    help="JSON {genome_object_id: {ncbi_assembly, fitness_org, img_taxon, fasta_object_id, "
+    "taxon_id, gene_call_tool}}; the first production run's map comes from "
+    "kbutillib.domains.kbase.berdl.clearinghouse_genome_inputs.build_external_ids.",
+)
+@click.option(
+    "--term-map", "term_map", type=click.Path(exists=True, dir_okay=False), default=None,
+    help="W1's persisted term -> function-text TSV (default: $KBU_CLEARINGHOUSE_TERM_FUNCTION_MAP).",
+)
+@click.option("--namespace", default=f"{TENANT}.{NAMESPACE}", show_default=True, help="Write target '<tenant>.<dataset>'.")
+@click.option(
+    "--object-dir", "object_dir", type=click.Path(file_okay=False), default=None,
+    help="Directory of <object_id>.json genome objects (default ~/.kbdl/genome-objects).",
+)
+@click.option(
+    "--fetch-missing", "fetch_missing", is_flag=True, default=False,
+    help="Download a missing genome object from KBDL (read-only; works only where KBDL answers).",
+)
+@click.option(
+    "--archive-dir", "archive_dirs", multiple=True, type=click.Path(file_okay=False),
+    help="Annotation-result archive directory (repeatable; default: ~/.kbdl/job-results/KBDLGenomeAnnotation "
+    "and its Dropbox mirror).",
+)
+@click.option(
+    "--annotation-file", "annotation_files", multiple=True, type=click.Path(),
+    help="An extra annotation result file or directory (repeatable).",
+)
+@click.option(
+    "--index-cache", "index_cache", type=click.Path(dir_okay=False), default=None,
+    help="Cache the prefix -> result-file index here.",
+)
+@click.option("--live-fallback", "live_fallback", is_flag=True, default=False,
+              help="For a genome with nothing archived, fetch the ledger-named jobs live from KBDL.")
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, default=False,
+    help="Build and validate every row and report the counts; touch no lake (works off-pod).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def load_kbdl_genomes_cmd(
+    object_ids: tuple[str, ...],
+    from_file: Optional[str],
+    external_ids_file: Optional[str],
+    term_map: Optional[str],
+    namespace: str,
+    object_dir: Optional[str],
+    fetch_missing: bool,
+    archive_dirs: tuple[str, ...],
+    annotation_files: tuple[str, ...],
+    index_cache: Optional[str],
+    live_fallback: bool,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Load KBDL Genome objects and their annotation results (IN-POD, fill-only).
+
+    Turns each genome object (CanonicalGenome JSON) and its KBDLGenomeAnnotation
+    results into genome / gene / protein / function entities, genome aliases and
+    gene_x_genome / gene_x_protein / protein_x_function links under the
+    measured KBDL annotator methods. Annotation results are found in the sweeper
+    archive by gene-id prefix. Idempotent: a re-run writes zero rows. Safe to run
+    beside other waves (one batch per genome under the namespace writer lock).
+
+    A real run is IN-POD ONLY and is refused off-pod before anything is read
+    for writing; --dry-run builds every row and reports the counts anywhere.
+    Exits non-zero when any genome could not be loaded.
+    """
+    from ...domains.kbase.berdl.clearinghouse_genome_loader import load_kbdl_genomes
+
+    ids = _read_object_ids(object_ids, from_file)
+    if not ids:
+        raise click.UsageError("give at least one --object-id or a --from-file")
+    external_ids = None
+    if external_ids_file:
+        with open(external_ids_file, encoding="utf-8") as fh:
+            external_ids = json.load(fh)
+    cap = None
+    locus = "n/a (dry run)"
+    if not dry_run:
+        cap = _capability()
+        _require_in_pod_or_refuse(cap, "load-kbdl-genomes")
+        locus = _locus(cap)
+    try:
+        report = load_kbdl_genomes(
+            ids,
+            namespace=namespace,
+            external_ids=external_ids,
+            dry_run=dry_run,
+            term_function_map=term_map,
+            object_dir=object_dir,
+            fetch_missing=fetch_missing,
+            archive_dirs=list(archive_dirs) or None,
+            extra_annotation_files=list(annotation_files),
+            index_cache_path=index_cache,
+            live_fallback=live_fallback,
+            capability=cap,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    data = report.to_dict()
+    warnings = [f"{oid}: {why}" for oid, why in sorted(report.failed.items())]
+    for genome in report.genomes:
+        warnings.extend(f"{genome.genome_object_id[:12]}: {note}" for note in genome.notes)
+    envelope = _envelope("load-kbdl-genomes", locus=locus, data=data, warnings=warnings)
+    _emit(envelope, as_json=as_json)
+    if report.failed:
+        raise SystemExit(1)
 
 
 # ===========================================================================

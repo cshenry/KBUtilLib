@@ -970,3 +970,37 @@ def test_entity_ids_unknown_entity_type_raises():
     cap, _ = _ids_cap([])
     with pytest.raises(ValueError):
         cap.entity_ids("bogus", HA)
+
+
+# ---------------------------------------------------------------------------
+# lw-9: protein_x_function term-id rows (link_key = the term CURIE)
+# ---------------------------------------------------------------------------
+
+
+def _pxf(link_key, meta):
+    row = _link("protein_x_function", link_key=link_key, metadata=cl.canonical_metadata(meta))
+    return row
+
+
+def test_protein_x_function_term_id_row_needs_link_key_equal_to_the_curie():
+    ok = cl.validate_link_rows("protein_x_function", [_pxf("GO:0003677", {"term_id": "GO:0003677"})])
+    assert len(ok["rows"]) == 1
+    for bad_key, meta in (
+        ("", {"term_id": "GO:0003677"}),
+        ("GO:0003688", {"term_id": "GO:0003677"}),
+        ("notacurie", {"term_id": "notacurie"}),
+    ):
+        with pytest.raises(cl.LinkRefusedError, match="term CURIE"):
+            cl.validate_link_rows("protein_x_function", [_pxf(bad_key, meta)])
+
+
+def test_protein_x_function_non_empty_link_key_without_ko_or_term_id_is_still_refused():
+    with pytest.raises(cl.LinkRefusedError, match="link_key must be ''"):
+        cl.validate_link_rows("protein_x_function", [_pxf("GO:0003677", {})])
+
+
+def test_protein_x_function_kofamscan_row_may_carry_a_matching_term_id_only():
+    meta = {"ko_id": "KO:K02313", "term_id": "KO:K02313"}
+    assert cl.validate_link_rows("protein_x_function", [_pxf("KO:K02313", meta)])["rows"]
+    with pytest.raises(cl.LinkRefusedError, match="term_id must equal"):
+        cl.validate_link_rows("protein_x_function", [_pxf("KO:K02313", {"ko_id": "KO:K02313", "term_id": "KO:K99999"})])

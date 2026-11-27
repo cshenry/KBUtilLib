@@ -298,8 +298,15 @@ def _check_metadata(table: str, index: int, row: Mapping[str, Any], meta: dict[s
         if "ko_id" in meta:
             if meta["ko_id"] != link_key or not link_key.startswith("KO:"):
                 raise _fail(kind, index, "for a KofamScan row link_key must be the KO CURIE and equal metadata.ko_id", row)
+        elif "term_id" in meta:
+            # lw-9: a term-id annotation (GO/EC/KO/COG) separates independent
+            # assertions of one protein/function pair by the term CURIE.
+            if meta["term_id"] != link_key or not (isinstance(link_key, str) and _CURIE.match(link_key)):
+                raise _fail(kind, index, "for a term-id row link_key must be the term CURIE and equal metadata.term_id", row)
         elif link_key != "":
-            raise _fail(kind, index, "link_key must be '' when metadata has no ko_id", row)
+            raise _fail(kind, index, "link_key must be '' when metadata has no ko_id or term_id", row)
+        if "term_id" in meta and "ko_id" in meta and meta["term_id"] != meta["ko_id"]:
+            raise _fail(kind, index, "metadata.term_id must equal metadata.ko_id when both are present", row)
     elif table == schema.GENE_X_PROTEIN:
         _require_keys(kind, index, meta, ["gene_id", "translation_table"], row)
         if meta["gene_id"] != link_key:

@@ -37,12 +37,11 @@ code -- produces a byte-identical ``entity_hash`` whether submitted as a
 protein or as gene DNA; identity is the pair ``(entity_hash,
 entity_type)``, never ``entity_hash`` alone, and a slot key that omitted
 ``entity_type`` would let a protein row and a gene row silently
-shadow each other. The same collision reaches genomes: a SINGLE-contig
-genome hashes identically to that one sequence submitted as a gene or a
-protein, because ``"|".join(["X"]) == "X"`` -- so ``entity_hash("genome",
-["ACGTACGT"]) == entity_hash("gene", "ACGTACGT") == entity_hash("protein",
-"ACGTACGT")`` -- a third reason the slot key must carry ``entity_type`` and
-a lookup must never key on ``entity_hash`` alone. This module implements
+shadow each other. (Under standardizer v1.1 the collision also reached
+genomes; since v2.0 a genome hash is the sha256 of the joined contig
+hashes, so a single-contig genome no longer equals the gene/protein hash,
+but the slot key still carries ``entity_type`` and a lookup must never
+key on ``entity_hash`` alone.) This module implements
 the derivation with a window
 function: ``ROW_NUMBER() OVER (PARTITION BY entity_hash, entity_type,
 result_type, source, parameter_set_hash ORDER BY observed_at DESC,

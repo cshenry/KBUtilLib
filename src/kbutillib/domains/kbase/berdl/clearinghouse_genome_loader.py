@@ -241,10 +241,24 @@ KBDL_ANNOTATOR_METHODS: dict[str, dict[str, Any]] = {
         'image_digest': None,
         'parameters_json': '{"ab_initio_gene_calling":false,"input":"FASTA plus GFF","source_calls":true,"translation_table":11}',
     },
+    # NOT a poplar measurement (it is not in the lw-12 registry file): the
+    # operator's 2026-11-27 decision for a genome with no recorded gene caller --
+    # the gene calls are taken as they arrived in the genome object, caller unknown.
+    'LOADED_FROM_INPUT': {
+        'method_name': 'loaded_from_input@unknown/kbdl-default',
+        'registry_method_name': None,
+        'algorithm': 'loaded_from_input',
+        'algorithm_version': 'unknown',
+        'version_kind': None,
+        'db_version': None,
+        'image': None,
+        'image_digest': None,
+        'parameters_json': '{"parameter_status":"unknown"}',
+    },
 }
 
 #: Registry tools that may be a genome's gene-call method.
-GENE_CALL_TOOLS = ("SOURCE_GFF", "PYRODIGAL", "BAKTA_CALL")
+GENE_CALL_TOOLS = ("SOURCE_GFF", "PYRODIGAL", "BAKTA_CALL", "LOADED_FROM_INPUT")
 #: A result's tool key -> the registry tool. RAST's results say ``RAST``.
 RESULT_TOOL_ALIASES = {"RAST": "RAST_API"}
 #: Registry tools whose result links this loader writes.
@@ -313,6 +327,17 @@ def annotator_method_row(tool: str) -> dict[str, Any]:
     """
     entry = KBDL_ANNOTATOR_METHODS[tool]
     params = json.loads(entry["parameters_json"])
+    if tool == "LOADED_FROM_INPUT":
+        return {
+            "method_name": entry["method_name"],
+            "algorithm": entry["algorithm"],
+            "algorithm_version": entry["algorithm_version"],
+            "parameters_json": canonical_parameter_set(params),
+            "parameter_set_hash": parameter_set_hash(params),
+            "source_dataset": KBDL_ANNOTATOR_METHODS_SHA256,
+            "description": "Gene calls taken as they arrived in the genome object; the caller is unknown "
+            "(operator decision 2026-11-27, not a poplar measurement).",
+        }
     bits = [
         f"{entry['algorithm']} {entry['algorithm_version']} as run by the KBDL service with its default parameters",
         f"version_kind {entry['version_kind']}",
@@ -556,11 +581,12 @@ def build_genome_rows(
     # -- the gene-call method
     call_tool = external.get("gene_call_tool")
     if call_tool is None:
-        call_tool = "PYRODIGAL"
+        call_tool = "LOADED_FROM_INPUT"
         report.gene_call_tool_defaulted = True
+        report.skips["gene_caller_unknown_loaded_from_input"] += 1
         report.notes.append(
-            "no gene_call_tool in external_ids: defaulted to PYRODIGAL (the 'else' of the contract); "
-            "pass gene_call_tool='SOURCE_GFF' for a genome built from the source's own calls"
+            "gene_caller_unknown_loaded_from_input: no gene_call_tool in external_ids, so the gene calls are "
+            "cited as loaded_from_input (taken as they arrived in the genome object, caller unknown)"
         )
     if call_tool not in GENE_CALL_TOOLS:
         raise GenomeObjectError(f"gene_call_tool {call_tool!r} must be one of {list(GENE_CALL_TOOLS)}")
@@ -949,7 +975,7 @@ def load_kbdl_genomes(
             img_taxon, fasta_object_id, taxon_id, gene_call_tool}}`` (see
             :func:`~...clearinghouse_genome_inputs.build_external_ids`). A genome
             absent from it loads with only its ``kbdl_object`` alias and the
-            ``PYRODIGAL`` gene-call method (reported as a default).
+            ``loaded_from_input`` gene-call method (reported as gene_caller_unknown_loaded_from_input).
         dry_run: build and validate every row, report counts, touch no lake.
         term_function_map: W1's persisted TERM -> function-text TSV (path) or
             the parsed mapping; default ``$KBU_CLEARINGHOUSE_TERM_FUNCTION_MAP``.

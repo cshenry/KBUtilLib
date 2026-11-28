@@ -100,10 +100,12 @@ EXPECTED_NAMES = {
     "PYARAGORN": "pyaragorn@0.3.0/kbdl-default",
     "PYBARRNAP": "pybarrnap@0.5.2/kbdl-default",
     "SOURCE_GFF": "source_gff@unknown/kbdl-default",
+    # not a poplar measurement: the operator's 2026-11-27 decision for a genome with no gene caller
+    "LOADED_FROM_INPUT": "loaded_from_input@unknown/kbdl-default",
 }
 
 
-def test_registry_has_the_eleven_measured_tools_and_names_match_the_mapping():
+def test_registry_has_the_twelve_tools_eleven_measured_plus_loaded_from_input_and_names_match_the_mapping():
     assert {t: e["method_name"] for t, e in gl.KBDL_ANNOTATOR_METHODS.items()} == EXPECTED_NAMES
 
 
@@ -114,7 +116,8 @@ def test_every_registry_name_fullmatches_the_lw1_pattern_and_the_raw_one_is_kept
     assert LW1_PATTERN.fullmatch(name) and len(name) <= 128
     assert schema.METHOD_NAME_PATTERN.fullmatch(name)
     # the registry's own string is upper-case (and TRANSYT's has '/' ':' '@'): it could not be loaded
-    assert not LW1_PATTERN.fullmatch(entry["registry_method_name"])
+    if entry["registry_method_name"] is not None:
+        assert not LW1_PATTERN.fullmatch(entry["registry_method_name"])
 
 
 def test_method_rows_keep_the_measured_raw_values_and_validate():
@@ -472,10 +475,24 @@ def test_two_results_for_one_genome_are_unioned_and_identical_assertions_collaps
     assert len(both) == len(single) + 1
 
 
-def test_gene_call_tool_defaults_to_pyrodigal_and_is_reported_and_unknown_tools_refused():
+def test_a_genome_with_no_gene_call_tool_cites_loaded_from_input_not_pyrodigal():
     rows = build(external={})
-    assert rows.report.gene_call_tool == "PYRODIGAL" and rows.report.gene_call_tool_defaulted
-    assert {r["method_name"] for r in rows.links["gene_x_genome"]} == {EXPECTED_NAMES["PYRODIGAL"]}
+    name = "loaded_from_input@unknown/kbdl-default"
+    assert re.fullmatch(LW1_PATTERN.pattern, name)
+    assert rows.report.gene_call_tool == "LOADED_FROM_INPUT" and rows.report.gene_call_tool_defaulted
+    assert rows.report.skips["gene_caller_unknown_loaded_from_input"] == 1
+    assert any(n.startswith("gene_caller_unknown_loaded_from_input") for n in rows.report.notes)
+    for table in ("gene_x_genome", "gene_x_protein"):
+        assert {r["method_name"] for r in rows.links[table]} == {name}
+    assert not any("pyrodigal" in m["method_name"] for m in rows.methods)
+    method = next(m for m in rows.methods if m["method_name"] == name)
+    assert (method["algorithm"], method["algorithm_version"], method["parameters_json"]) == (
+        "loaded_from_input", "unknown", '{"parameter_status":"unknown"}')
+    assert method["source_dataset"] == gl.KBDL_ANNOTATOR_METHODS_SHA256
+    assert {g["translation_table"] for g in map(lambda r: json.loads(r["metadata"]), rows.links["gene_x_protein"])} == {11}
+    # PYRODIGAL is cited only when the ledger says so
+    py = build(external={"gene_call_tool": "PYRODIGAL"})
+    assert {r["method_name"] for r in py.links["gene_x_genome"]} == {EXPECTED_NAMES["PYRODIGAL"]}
     assert any("fasta_reference unknown" in n for n in rows.report.notes)
     with pytest.raises(gl.GenomeObjectError, match="gene_call_tool"):
         build(external={"gene_call_tool": "PROKKA"})
